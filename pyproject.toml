@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "uth-elearning-alert"
+version = "0.1.0"
+description = "UTH Elearning Alert Tool"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.3",
+    "pydantic>=2.6.4",
+    "pydantic-settings>=2.2.1",
+    "customtkinter>=5.2.2",
+    "pystray>=0.19.5",
+    "pillow>=10.2.0",
+    "python-dotenv>=1.0.1"
+]
+
+[project.scripts]
+uth-alert = "main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
