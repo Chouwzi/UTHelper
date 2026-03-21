@@ -1,0 +1,134 @@
+import logging
+import smtplib
+from email.message import EmailMessage
+from typing import List
+from models import Assignment, UrgencyLevel
+from config import settings
+from .base import BaseNotifier
+
+logger = logging.getLogger(__name__)
+
+class EmailNotifier(BaseNotifier):
+    """
+    Trình quản lý thông báo Email/Gmail với giao diện Pro Max.
+    """
+    def notify(self, assignments: List[Assignment]) -> bool:
+        if not getattr(settings, 'ENABLE_GMAIL', False) or not getattr(settings, 'GMAIL_ADDRESS', ''):
+            return False
+
+        email_address = settings.GMAIL_ADDRESS
+        app_password = getattr(settings, 'GMAIL_APP_PASSWORD', '')
+
+        if not app_password:
+            logger.warning("[Email] Chưa cấu hình mật khẩu ứng dụng Gmail (GMAIL_APP_PASSWORD).")
+            return False
+
+        tasks = assignments
+        if not tasks: return True
+
+        msg = EmailMessage()
+        msg['Subject'] = f"[UTHelper] Bạn có {len(tasks)} bài tập cần chú ý!"
+        msg['From'] = email_address
+        msg['To'] = email_address
+
+        html_content = """
+        <html>
+        <head>
+            <style>
+                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
+                .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); overflow: hidden; }
+                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; text-align: center; }
+                .header h2 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.5px; }
+                .content { padding: 30px; }
+                .task-card { background: #ffffff; border-left: 5px solid #4f46e5; margin-bottom: 20px; padding: 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); transition: transform 0.2s; }
+                .task-card:hover { transform: translateY(-2px); }
+                .task-card.critical { border-left-color: #ef4444; background: #fff5f5; }
+                .task-card.warning { border-left-color: #f59e0b; background: #fffbeb; }\n                .task-card.safe { border-left-color: #10b981; background: #f0fdf4; }
+                .title { font-size: 18px; font-weight: bold; margin: 0 0 10px 0; color: #1f2937; }
+                .meta { font-size: 14px; color: #4b5563; margin-bottom: 8px; display: flex; align-items: center; }
+                .meta strong { min-width: 90px; display: inline-block; color: #374151; }
+                .button { display: inline-block; padding: 10px 18px; background: #4f46e5; color: #ffffff !important; text-decoration: none; border-radius: 6px; font-size: 13px; margin-top: 15px; font-weight: 600; text-align: center; }
+                .button:hover { background: #4338ca; }
+                .footer { text-align: center; padding: 20px; color: #9ca3af; font-size: 13px; background: #f9fafb; border-top: 1px solid #f3f4f6; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🚨 Thông báo Bài tập UTH</h2>
+                    <p style="margin: 8px 0 0 0; opacity: 0.9; font-size: 15px;">Đừng để miss deadline bạn nhé!</p>
+                </div>
+                <div class="content">
+            """
+
+        for task in tasks:
+            is_critical = task.urgency == UrgencyLevel.CRITICAL
+            css_class = 'critical' if task.urgency == UrgencyLevel.CRITICAL else ('warning' if task.urgency == UrgencyLevel.WARNING else 'safe')
+            status_text = 'Khẩn cấp 🔴' if task.urgency == UrgencyLevel.CRITICAL else ('Sắp tới hạn 🟠' if task.urgency == UrgencyLevel.WARNING else 'An toàn 🟢')
+            
+            title = getattr(task, 'title', 'Không rõ tiêu đề')
+            course = getattr(task, 'course_name', getattr(task, 'course', 'Không rõ môn'))
+            
+            deadline = getattr(task, 'deadline_str', '')
+            if not deadline and getattr(task, 'deadline', None):
+                deadline = task.deadline.strftime('%H:%M %d/%m/%Y')
+            elif not deadline:
+                deadline = 'Không rõ hạn'
+                
+            url = getattr(task, 'link', getattr(task, 'url', ''))
+
+            html_content += f"""
+                      <div class="task-card {css_class}">
+                          <p class="title">{title}</p>
+                          <div class="meta"><strong>📚 Môn học:</strong> {course}</div>
+            """
+            if hasattr(task, 'details') and task.details and getattr(task.details, 'open_time', None):
+                open_time_str = task.details.open_time.strftime('%H:%M %d/%m/%Y')
+                html_content += f'<div class="meta"><strong>🗓️ Ngày mở:</strong> {open_time_str}</div>'
+
+            # Calculate remaining time (again for email)
+            remaining = "Không rõ"
+            if hasattr(task, 'deadline') and task.deadline:
+                import datetime
+                delta = task.deadline - datetime.datetime.now()
+                days, seconds = delta.days, delta.seconds
+                hours = seconds // 3600
+                if days < 0:
+                    remaining = "Quá hạn rồi!"
+                elif days > 0:
+                    remaining = f"Còn {days} ngày {hours} giờ"
+                else:
+                    remaining = f"Còn {hours} giờ {seconds % 3600 // 60} phút"
+
+            html_content += f"""
+                        <div class="meta"><strong>⏰ Hạn chót:</strong> <span style="font-weight: bold;">{deadline}</span></div>
+                        <div class="meta"><strong>⏳ Còn lại:</strong> {remaining}</div>
+                        <div class="meta"><strong>🚨 Trạng thái:</strong> {status_text}</div>
+            """
+            if url:
+                html_content += f'<a href="{url}" class="button">Đến Trang Nộp Bài</a>'
+            html_content += "</div>"
+
+        html_content += """
+                </div>
+                <div class="footer">
+                    Hệ thống cảnh báo tự động UTHelper. Không cần phản hồi email này.<br>
+                    <i>Stay productive & Keep learning!</i>
+                </div>
+            </div>
+        </body>
+        </html>
+            """
+
+        msg.set_content(f"Bạn có {len(tasks)} thông báo bài tập mới. Vui lòng kiểm tra email và E-Learning để không bỏ lỡ hạn chót.")
+        msg.add_alternative(html_content, subtype='html')
+
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(email_address, app_password)
+                server.send_message(msg)
+            logger.info(f"[Email] Đã gửi {len(tasks)} bài tập tới {email_address}")
+            return True
+        except Exception as e:
+            logger.error(f"[Email] Lỗi gửi email: {e}")
+            return False

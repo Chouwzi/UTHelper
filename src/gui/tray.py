@@ -1,40 +1,75 @@
-import pystray
-from PIL import Image, ImageDraw
+"""System tray icon with balloon notification support using pystray."""
+import logging
+import os
+from config import BASE_DIR
 import threading
-from gui.app import show_dashboard
-from typing import List
-from models import Assignment
+
+logger = logging.getLogger(__name__)
 
 class TrayApp:
-    def __init__(self):
-        self.assignments: List[Assignment] = []
-        self.icon = None
+    """Minimal system-tray wrapper that exposes a .notify() method and context menu."""
 
-    def _create_image(self) -> Image.Image:
-        # Generate a simple blank/colored icon
-        image = Image.new('RGB', (64, 64), color='white')
-        d = ImageDraw.Draw(image)
-        d.rectangle((16, 16, 48, 48), fill="blue")
-        return image
+    def __init__(self, page=None):
+        self._icon = None
+        self._page = page
 
-    def update_data(self, assignments: List[Assignment]):
-        self.assignments = assignments
+    def setup(self):
+        try:
+            import pystray
+            from pystray import MenuItem as item
+            from PIL import Image
+            
+            if self._icon is None:
+                # Thử tìm icon.ico trước (tốt nhất cho Windows Tray), sau đó mới tới icon.png
+                icon_path = os.path.join(BASE_DIR, "src", "assets", "icon.ico")
+                if not os.path.exists(icon_path):
+                    icon_path = os.path.join(BASE_DIR, "src", "assets", "icon.png")
+                
+                try:
+                    img = Image.open(icon_path).convert("RGBA")
+                except Exception as e:
+                    logger.warning("Không nạp được icon (%s), dùng icon mặc định: %s", icon_path, e)
+                    img = Image.new("RGBA", (64, 64), color=(59, 130, 246, 255))
+                
+                menu = pystray.Menu(
+                    item('Mở UTHelper', self.show_app, default=True),
+                    item('Thoát', self.exit_app)
+                )
 
-    def on_show_clicked(self, icon, item):
-        # We start the Dashboard in a new thread because CustomTkinter requires its own mainloop
-        # Note: running tkinter in a sub-thread can be tricky on Windows, we'll keep it simple for now
-        t = threading.Thread(target=show_dashboard, args=(self.assignments,))
-        t.daemon = True
-        t.start()
+                self._icon = pystray.Icon("uth_alert", img, title="UTHelper", menu=menu)
+                threading.Thread(target=self._icon.run, daemon=True).start()
+        except Exception as exc:
+            logger.warning("Tray icon setup failed: %s", exc)
 
-    def on_exit_clicked(self, icon, item):
-        icon.stop()
+    def show_app(self, icon, item):
+        if self._page:
+            try:
+                # Phải gán qua thread an toàn hoặc update page
+                self._page.window.visible = True
+                self._page.window.minimized = False
+                self._page.update()
+            except Exception as e:
+                logger.error(f"Lỗi khi phục hồi app: {e}")
 
-    def run(self):
-        menu = pystray.Menu(
-            pystray.MenuItem("Show Deadlines", self.on_show_clicked, default=True),
-            pystray.MenuItem("Exit", self.on_exit_clicked)
-        )
-        self.icon = pystray.Icon("uth_alert", self._create_image(), "UTH Elearning Alert", menu)
-        # Blocks until exit
-        self.icon.run()
+    def exit_app(self, icon, item):
+        if self._page:
+            try:
+                self._page.run_task(self._page.window.destroy)
+            except Exception as e:
+                logger.error(f"Error destroying window: {e}")
+        if self._icon:
+            self._icon.stop()
+        import os
+        os._exit(0)
+
+    def notify(self, title: str, message: str):
+        """Send a Windows balloon notification via pystray, with fallback."""   
+        if not self._icon:
+            self.setup()
+        
+        try:
+            if self._icon:
+                self._icon.notify(message, title)
+        except Exception as exc:
+            logger.warning("Tray notification failed, falling back to log: %s", exc)
+            logger.info("NOTIFICATION: %s — %s", title, message)

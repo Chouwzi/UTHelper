@@ -8,6 +8,7 @@ node_modules/
 vendor/
 .venv/
 __pycache__/
+.pytest_cache/
 
 .DS_Store
 Thumbs.db
@@ -21,3 +22,5 @@ npm-debug.log*
 tmp/
 dist/
 build/
+
+parsepage
