@@ -5,9 +5,9 @@ from enum import Enum
 from config import settings
 
 class UrgencyLevel(str, Enum):
-    CRITICAL = "critical" # Cực kỳ gấp (< 24 giờ)
-    WARNING = "warning"   # Sắp tới hạn (< 3 ngày)
-    SAFE = "safe"         # An toàn (> 3 ngày)
+    CRITICAL = "critical" # Gấp lắm rồi (dưới 24h)
+    WARNING = "warning"   # Sắp đến hạn (dưới 3 ngày)
+    SAFE = "safe"         # Vẫn còn thong dong (trên 3 ngày)
 
 class ActivityDetail(BaseModel):
     description_html: str = ""
@@ -31,10 +31,10 @@ class Assignment(BaseModel):
     course_id: str
     course_name: str
     title: str
-    event_type: str = "other"  # ví dụ: 'deadline' (hạn chót), 'open' (mở), 'close' (đóng), 'attendance' (điểm danh)
+    event_type: str = "other"  # phân loại: hạn chót, mở bài, điểm danh...
     deadline: datetime
     url: str
-    submission_status: str = "unknown" # ví dụ: 'submitted' (đã nộp), 'not_submitted' (chưa nộp), 'graded' (đã chấm)
+    submission_status: str = "unknown" # tình trạng: đã nộp, chưa nộp, đã chấm điểm...
     details: Optional[ActivityDetail] = None
     
     @property

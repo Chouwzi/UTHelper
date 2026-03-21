@@ -60,107 +60,8 @@ class AppController:
             self.page.run_task(self._load_data_async)
 
     async def _show_login_dialog(self):
-        username_field = ft.TextField(
-            label="Mã số sinh viên", prefix_icon=ft.Icons.PERSON, 
-            border_radius=8, border_color=C.BORDER, focused_border_color=C.ACCENT, 
-            bgcolor=C.SURFACE, text_size=13, height=50, autofocus=True
-        )
-        password_field = ft.TextField(
-            label="Mật khẩu", prefix_icon=ft.Icons.PASSWORD, password=True, can_reveal_password=True, 
-            border_radius=8, border_color=C.BORDER, focused_border_color=C.ACCENT, 
-            bgcolor=C.SURFACE, text_size=13, height=50
-        )
-        error_text = ft.Text("", color=C.CRITICAL, size=12, visible=False)
-        loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)
-
-        btn_login = ft.ElevatedButton(
-            "Lưu và Đăng nhập",
-            icon=ft.Icons.LOGIN_ROUNDED,
-            style=ft.ButtonStyle(
-                color=ft.Colors.WHITE,
-                bgcolor=C.ACCENT,
-                shape=ft.RoundedRectangleBorder(radius=8),
-                padding=12,
-                animation_duration=300
-            ),
-            width=400,
-            height=44
-        )
-
-        async def on_login_click(e):
-            if not username_field.value or not password_field.value:
-                error_text.value = "Vui lòng nhập đầy đủ thông tin"
-                error_text.visible = True
-                self.page.update()
-                return
-
-            btn_login.disabled = True
-            btn_login.text = "Đang đăng nhập..."
-            username_field.disabled = True
-            password_field.disabled = True
-            error_text.visible = False
-            loading_bar.visible = True
-            self.page.update()
-
-            success = await asyncio.to_thread(self.orchestrator.client.login, username_field.value, password_field.value, True)
-
-            if success:
-                settings.UTH_USERNAME = username_field.value
-                settings.UTH_PASSWORD = password_field.value
-                self.orchestrator.is_logged_in = True  # Đồng bộ trạng thái orchestrator
-                from config import save_settings
-                save_settings()
-
-                dlg.open = False
-                self.page.update()
-                self.page.run_task(self._load_data_async)
-            else:
-                btn_login.disabled = False
-                btn_login.text = "Đăng nhập"
-                username_field.disabled = False
-                password_field.disabled = False
-                loading_bar.visible = False
-                error_text.value = "Sai tài khoản, mật khẩu hoặc lỗi kết nối!"
-                error_text.visible = True
-                self.page.update()
-
-        async def on_user_submit(e):
-            await password_field.focus()
-
-        username_field.on_submit = on_user_submit
-        password_field.on_submit = on_login_click
-        btn_login.on_click = on_login_click
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            shape=ft.RoundedRectangleBorder(radius=16),
-            content=ft.Container(
-                width=340,
-                content=ft.Column([
-                    ft.Image(src="icon.png", width=48, height=48, fit=ft.BoxFit.CONTAIN),
-                    ft.Text("Đăng nhập UTH", size=20, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                    ft.Text("Vui lòng nhập tài khoản của bạn để sử dụng.", size=13, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER),
-                    ft.Container(height=10),
-                    username_field,
-                    password_field,
-                    loading_bar,
-                    error_text,
-                    ft.Container(height=10),
-                    btn_login,
-                    ft.Text("Dữ liệu tài khoản được mã hóa và chỉ lưu trữ cục bộ.", size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
-                ], tight=True, spacing=6, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                padding=ft.Padding.only(top=10, bottom=5)
-            ),
-            content_padding=20,
-        )
-
-        try:
-            self.page.overlay.append(dlg)
-            dlg.open = True
-            self.page.update()
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        from gui.components.login_dialog import show_login_dialog
+        await show_login_dialog(self.page, self.orchestrator, self._load_data_async)
 
     def _init_window(self):
         self.page.window.width        = 420
@@ -169,7 +70,7 @@ class AppController:
         self.page.window.min_width    = 420
         self.page.window.always_on_top = settings.ALWAYS_ON_TOP
         self.page.window.resizable    = False
-        self.page.window.icon         = "icon.ico"  # Sử dụng icon.png trong thư mục assets
+        self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
         self.page.title               = "UTHelper"
         self.page.bgcolor             = C.BG
         self.page.padding             = 0
@@ -182,22 +83,21 @@ class AppController:
         self.tray.setup()
         self.notifier = NotificationManager(self.tray)
         
-        # Chỉ ẩn nếu có cờ --autostart được bật lên (phân biệt app khởi động cùng Win với ng dùng tự mở)
+        # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
         import sys
         if settings.START_MINIMIZED and "--autostart" in sys.argv:
             self.page.window.visible = False
-            # self.page.window.minimized = True  # Thay vì minimized, ẩn đi tốt hơn
         else:
             self.page.window.visible = True
             
         self.page.update()
 
     async def _on_window_event(self, e):
-        # Từ các phiên bản mới của Flet, event close nằm trong e.type
+        # Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
         if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
             if settings.MINIMIZE_TO_TRAY:
                 self.page.window.visible = False
-                # Prevent default close behavior explicitly handled by prevent_close=True
+                # Ẩn đi chứ không đóng hẳn, nhờ có prevent_close=True ở trên
                 self.page.update()
             else:
                 await self.page.window.destroy()
@@ -410,79 +310,27 @@ class AppController:
 
         return popup, update_counts
 
-    def _update_footer(self):
-        from datetime import datetime as _dt
-        now = _dt.now()
-        
-        # Base filter like in _render_cards
+    def _refresh_ui(self):
+        # Lọc sơ bộ dữ liệu theo cài đặt chung
         base = self._apply_settings_filter(self.all_data)
         
-        def match_urgency(d, u_target):
-            dl_str = d.get("deadline", "")
-            try: dl = _dt.fromisoformat(dl_str) if dl_str else None
-            except: dl = None
-            if u_target == "overdue": return dl and dl < now
-            if u_target == "all": return True
-            if dl and dl < now: return False
-            return urgency_str(d.get("urgency")) == u_target
+        from core.filter_service import FilterService
+        filtered_items, counts = FilterService.filter_and_count(
+            base,
+            self.active_urgency,
+            self.active_type,
+            self.active_course,
+            self.active_search,
+            settings.INCLUDE_PAST_DUE
+        )
 
-        def match_type(d, t_target):
-            # Tính toán lại is_open override nếu có thông tin thời gian mở từ detail
-            is_open_override = d.get("is_open", False)
-            open_time_str = d.get("details", {}).get("open_time", "")
-            if open_time_str:
-                try:
-                    if _dt.now() < _dt.fromisoformat(open_time_str):
-                        is_open_override = True
-                except Exception:
-                    pass
-                    
-            if t_target == "all": return True
-            if t_target == "open": return is_open_override
-            allowed = _TYPE_FILTER_MAP.get(t_target, {t_target})
-            return d.get("type") in allowed and not is_open_override
+        n_critical = counts["urgency"].get("critical", 0)
+        n_warning = counts["urgency"].get("warning", 0)
+        n_safe = counts["urgency"].get("safe", 0)
+        n_overdue = counts["urgency"].get("overdue", 0)
 
-        def match_course(d, c_target):
-            if c_target == "all": return True
-            return clean_course_name(d.get("course", "")) == c_target
-
-        n_critical = n_warning = n_safe = n_overdue = 0
-        type_counts = {}
-        course_names = set()
-        course_counts = {}
-
-        # 1. Compute course names & counts (filtered by Urgency and Type)
-        for d in base:
-            if match_urgency(d, self.active_urgency) and match_type(d, self.active_type):
-                c_name = clean_course_name(d.get("course", "")) or "Sự kiện chung"
-                course_names.add(c_name)
-                course_counts[c_name] = course_counts.get(c_name, 0) + 1
-
-        # 2. Compute urgency counts (filtered by Course and Type)
-        for d in base:
-            if match_course(d, self.active_course) and match_type(d, self.active_type):
-                dl_str = d.get("deadline", "")
-                try: dl = _dt.fromisoformat(dl_str) if dl_str else None
-                except: dl = None
-                if dl and dl < now: n_overdue += 1
-                else:
-                    u = urgency_str(d.get("urgency"))
-                    if u == "critical": n_critical += 1
-                    elif u == "warning": n_warning += 1
-                    else: n_safe += 1
-
-        # 3. Compute type counts (filtered by Course and Urgency)
-        for d in base:
-            if match_course(d, self.active_course) and match_urgency(d, self.active_urgency):
-                # Is open
-                if d.get("is_open", False):
-                    type_counts["open"] = type_counts.get("open", 0) + 1
-                else:
-                    raw_t = d.get("type", "other")
-                    # For reverse mapping, maybe just check all types
-                    for tk, allowed in _TYPE_FILTER_MAP.items():
-                        if raw_t in allowed:
-                            type_counts[tk] = type_counts.get(tk, 0) + 1
+        course_counts = counts["course"]
+        type_counts = counts["type"]
 
         def _on_course_select(e, c_name):
             self.page.run_task(self._set_course, c_name)
@@ -491,7 +339,8 @@ class AppController:
             content=ft.Row([ft.Text("Tất cả môn học", size=12, color=C.TEXT_SECONDARY, expand=True), ft.Icon(ft.Icons.CHECK, size=12, color=C.TEXT_PRIMARY, visible=(self.active_course == "all"))], spacing=6, tight=True),
             on_click=lambda e: _on_course_select(e, "all")
         )]
-        for c in sorted(list(course_names)):
+        
+        for c in sorted([k for k in course_counts.keys() if k != "all"]):
             is_active = (self.active_course == c)
             cnt = course_counts.get(c, 0)
             c_items.append(ft.PopupMenuItem(
@@ -504,37 +353,67 @@ class AppController:
             ))
         self.course_popup.items = c_items
 
-        self.footer_critical.value = f"Cấp bách · {n_critical}" if n_critical else ""
-        self.footer_warning.value  = f"Sắp tới · {n_warning}" if n_warning else ""
+        self.footer_critical.value = f"Khẩn cấp · {n_critical}" if n_critical else ""
+        self.footer_warning.value  = f"Sắp đến hạn · {n_warning}" if n_warning else ""
         self.footer_safe.value     = f"An toàn · {n_safe}" if n_safe else ""
         self.footer_overdue.value  = f"Quá hạn · {n_overdue}" if n_overdue else ""
 
-        self._update_urgency_counts({"critical": n_critical, "warning": n_warning, "safe": n_safe, "overdue": n_overdue})
+        self._update_urgency_counts(counts["urgency"])
         self._update_type_counts(type_counts)
+
+        # Render cards
+        self.empty_state.visible = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        self.error_state.visible = False
+
+        if not hasattr(self, '_reusable_cards'):
+            self._reusable_cards = []
+
+        current_cards = self._reusable_cards
+        
+        # Tận dụng lại mấy cái thẻ cũ (Recycling) để app không bị lag
+        for i, item in enumerate(filtered_items):
+            if i < len(current_cards):
+                # Tái sử dụng thẻ
+                current_cards[i].update_data(item, on_tap=self._show_detail)
+                current_cards[i].visible = True
+            else:
+                # Tạo thẻ mới
+                new_card = ActivityCard(item, on_tap=self._show_detail, animate=False)
+                new_card.visible = True
+                current_cards.append(new_card)
+        
+        # Ẩn các thẻ thừa
+        for i in range(len(filtered_items), len(current_cards)):
+            current_cards[i].visible = False
+            
+        render_cards = current_cards[:len(filtered_items)]
+        self._reusable_cards = current_cards
+            
+        with self._cards_lock:
+            self.active_cards = render_cards
+        
+        self.cards_column.controls = render_cards
+        self.page.update()
+
+    def _update_footer(self):
+        self._refresh_ui()
+
+    def _render_cards(self):
+        pass
 
     async def _set_urgency(self, key: str):
         self.active_urgency = key
-        
-        self._update_footer()
-        self._render_cards()
-        self.page.update()
+        self._refresh_ui()
 
     async def _set_type(self, key: str):
         self.active_type = key
-        
-        self._update_footer()
-        self._render_cards()
-        self.page.update()
+        self._refresh_ui()
 
     async def _set_course(self, course_name: str):
         self.active_course = course_name
         self.course_btn_label.value = "Môn học" if course_name == "all" else course_name
         self.course_btn_label.update()
-        
-        self._update_footer()
-        self._render_cards()
-        self.page.update()
-
+        self._refresh_ui()
 
     def _apply_settings_filter(self, data: list) -> list:
         result = []
@@ -548,80 +427,10 @@ class AppController:
 
             if is_graded and not settings.INCLUDE_GRADED: continue
             if is_submitted and not is_graded and not settings.INCLUDE_SUBMITTED: continue
-
-            deadline = d.get("deadline", "")
-            if deadline:
-                try:
-                    from datetime import datetime as _dt
-                    if _dt.fromisoformat(deadline) < _dt.now() and not settings.INCLUDE_PAST_DUE:
-                        continue
-                except Exception:
-                    pass
+            
+            # _refresh_ui handles INCLUDE_PAST_DUE now
             result.append(d)
         return result
-
-    def _render_cards(self):
-        base = self._apply_settings_filter(self.all_data)
-
-        if self.active_urgency == "overdue":
-            base = [d for d in base if d.get("deadline") and datetime.fromisoformat(d["deadline"]) < datetime.now()]
-        elif self.active_urgency != "all":
-            base = [d for d in base if urgency_str(d.get("urgency")) == self.active_urgency]
-
-        if self.active_type != "all":
-            if self.active_type == "open":
-                base = [d for d in base if d.get("is_open", False)]
-            else:
-                allowed = _TYPE_FILTER_MAP.get(self.active_type, {self.active_type})
-                base = [d for d in base if d.get("type") in allowed and not d.get("is_open", False)]
-
-
-        if self.active_course != "all":
-            base = [d for d in base if clean_course_name(d.get("course", "")) == self.active_course]
-
-        if self.active_search:
-
-            q = self.active_search.lower()
-            def _matches(d):
-                title  = d.get("title", "").lower()
-                course = clean_course_name(d.get("details", {}).get("course_full_name", "") or d.get("course", "")).lower()
-                return q in title or q in course
-            base = [d for d in base if _matches(d)]
-
-        self.empty_state.visible = (len(base) == 0 and not self.loading_bar.visible)
-        self.error_state.visible = False
-
-        if not hasattr(self, '_reusable_cards'):
-            self._reusable_cards = []
-
-        current_cards = self._reusable_cards
-        
-        # DOM Recycling
-        for i, item in enumerate(base):
-            if i < len(current_cards):
-                # Tái sử dụng thẻ
-                current_cards[i].update_data(item, on_tap=self._show_detail)
-                current_cards[i].visible = True
-            else:
-                # Tạo thẻ mới
-                new_card = ActivityCard(item, on_tap=self._show_detail, animate=False)
-                new_card.visible = True
-                current_cards.append(new_card)
-        
-        # Ẩn các thẻ thừa
-        for i in range(len(base), len(current_cards)):
-            current_cards[i].visible = False
-            
-        render_cards = current_cards[:len(base)]
-
-        self._reusable_cards = current_cards
-            
-        with self._cards_lock:
-            self.active_cards = render_cards # Chỉ lưu những thẻ đang hiển thị để update
-        
-        # Vẫn gán len(base) phần tử đầu tiên vào giao diện (Flet tối ưu List hơn khi không chứa phần tử ẩn)
-        self.cards_column.controls = render_cards
-        self.page.update()
 
     async def _toggle_overdue(self, e):
         settings.INCLUDE_PAST_DUE = self._overdue_cb.value
@@ -718,7 +527,7 @@ class AppController:
                 x.get("deadline", "")
             ))
             
-            # Kích hoạt hệ thống Smart Alert (Phase 2)
+            # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
                 try:
                     self.notifier.dispatch(self.all_data)
@@ -758,7 +567,7 @@ class AppController:
         from gui.core.theme import load_theme_from_settings
         load_theme_from_settings()
 
-        # Save states
+        # Lưu lại trạng thái hiện tại để tí phục hồi
         old_data = self.all_data
         old_urgency = getattr(self, "active_urgency", "all")
         old_type = getattr(self, "active_type", "all")

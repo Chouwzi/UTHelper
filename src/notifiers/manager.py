@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 class NotificationManager:
     """
-    Quản lý thông báo Smart Alert, bao gồm DND (Do Not Disturb),
-    lọc mốc thời gian (Milestones), khóa môn học (Muted Courses).
+    Bộ não quản lý thông báo: Xử lý vụ ngủ (DND), 
+    các mốc quan trọng (Milestones) và ẩn mấy môn học không quan tâm.
     """
     def __init__(self, tray_app=None, cache_file="notifications_cache.json"):
         self.notifiers: List[BaseNotifier] = []
@@ -54,7 +54,7 @@ class NotificationManager:
         
         current_hour = now.hour
         
-        if start > end: # DND over midnight
+        if start > end: # Trường hợp DND xuyên màn đêm (qua 12h sáng)
             if current_hour >= start or current_hour < end:
                 return True
         else:
@@ -130,11 +130,12 @@ class NotificationManager:
         self._save_cache(cache)
 
     def dispatch(self, assignments: List[Any]):
+        # Đang trong giờ nghỉ thì thôi, đừng làm phiền người ta
         if self._is_in_dnd():
             logger.info("Do Not Disturb is on. Skipping notifications.")
             return
 
-        # Handle Dict vs Object
+        # Chuẩn hóa dữ liệu: chấp nhận cả dict lẫn Object cho linh hoạt
         tasks = []
         for a in assignments:
             if isinstance(a, dict):
@@ -142,6 +143,7 @@ class NotificationManager:
             elif hasattr(a, '__dict__'):
                 tasks.append(a.__dict__)
 
+        # Lọc lại xem cái nào thực sự cần bắn thông báo
         to_notify_items = self._filter_tasks(tasks)
 
         if not to_notify_items:

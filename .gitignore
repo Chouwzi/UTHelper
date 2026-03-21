@@ -4,6 +4,7 @@
 *.pem
 credentials.json
 
+tests/
 node_modules/
 vendor/
 .venv/

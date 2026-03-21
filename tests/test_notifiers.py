@@ -5,8 +5,8 @@ import json
 import os
 import pytest
 from datetime import datetime, timedelta
-from src.notifiers.manager import NotificationManager
-from src.config import settings as config
+from notifiers.manager import NotificationManager
+from config import settings as config
 
 @pytest.fixture
 def mock_config(monkeypatch):
@@ -26,7 +26,7 @@ def manager(tmp_path):
 
 def test_dnd_logic(manager, mock_config, monkeypatch):
     mock_now = datetime(2025, 1, 1, 1, 30, 0)
-    import src.notifiers.manager
+    import notifiers.manager
     
     # Simple monkeypatch
     class MockDatetime:
@@ -34,7 +34,7 @@ def test_dnd_logic(manager, mock_config, monkeypatch):
         def now(cls):
             return mock_now
             
-    monkeypatch.setattr(src.notifiers.manager, "datetime", MockDatetime)
+    monkeypatch.setattr(notifiers.manager, "datetime", MockDatetime)
     assert manager._is_in_dnd() == True
 
     mock_now = datetime(2025, 1, 1, 10, 30, 0)

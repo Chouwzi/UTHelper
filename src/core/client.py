@@ -13,8 +13,6 @@ from core.network_utils import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
-_PORTAL_API  = "https://portal.ut.edu.vn/api/v1"
-_MOODLE_BASE = "https://courses.ut.edu.vn"
 
 class MoodleClient:
     def __init__(self):
@@ -66,7 +64,7 @@ class MoodleClient:
         pwd  = password or settings.UTH_PASSWORD
         try:
             r = requests.post(
-                f"{_PORTAL_API}/user/login",
+                f"{settings.PORTAL_API_BASE}/user/login",
                 json={"username": user, "password": pwd},
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 timeout=10,
@@ -92,12 +90,12 @@ class MoodleClient:
             return activity_url
         if activity_url:
             autologin = (
-                f"{_MOODLE_BASE}/login/index.php"
+                f"{settings.MOODLE_BASE_URL}/login/index.php"
                 f"?token={token}"
                 f"&wantsurl={urllib.parse.quote(activity_url, safe='')}"
             )
             return autologin
-        return f"{_MOODLE_BASE}/login/index.php?token={token}"
+        return f"{settings.MOODLE_BASE_URL}/login/index.php?token={token}"
 
     @retry_with_backoff(retries=3, backoff_in_seconds=2)
     def login(self, username: str = None, password: str = None, force: bool = False) -> bool:
