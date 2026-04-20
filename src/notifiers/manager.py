@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import List, Any, Dict
 
@@ -21,6 +22,7 @@ class NotificationManager:
     def __init__(self, tray_app=None, cache_file="notifications_cache.json"):
         self.notifiers: List[BaseNotifier] = []
         self._cache_path = cache_file
+        self._cache_lock = threading.Lock()
 
         if tray_app:
             self.register(WindowsNotifier(tray_app=tray_app))
@@ -32,15 +34,22 @@ class NotificationManager:
         if not os.path.exists(self._cache_path):
             return {}
         try:
-            with open(self._cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
+            with self._cache_lock:
+                with open(self._cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"Cannot load notification cache: {e}")
             return {}
 
     def _save_cache(self, data: Dict):
         try:
-            with open(self._cache_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp = f"{self._cache_path}.tmp"
+            with self._cache_lock:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self._cache_path)
         except Exception as e:
             logger.error(f"Cannot save notification cache: {e}")
 
@@ -116,6 +125,7 @@ class NotificationManager:
 
     def _mark_as_notified(self, items: List[Dict]):
         cache = self._load_cache()
+        updated = False
         for item in items:
             task = item["task"]
             ms = item["milestone"]
@@ -126,8 +136,10 @@ class NotificationManager:
                 
             if ms not in cache[url]:
                 cache[url].append(ms)
+                updated = True
                 
-        self._save_cache(cache)
+        if updated:
+            self._save_cache(cache)
 
     def dispatch(self, assignments: List[Any]):
         # Đang trong giờ nghỉ thì thôi, đừng làm phiền người ta

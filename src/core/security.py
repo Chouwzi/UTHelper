@@ -17,12 +17,32 @@ class HTMLSanitizer:
         for tag in soup.find_all(blacklist):
             tag.decompose()
             
-        # 2. Làm sạch các thuộc tính (loại bỏ các trình xử lý sự kiện 'on*' và 'style' nội dòng)
+        # 2. Làm sạch các thuộc tính
         for tag in soup.find_all(True):
             attrs = dict(tag.attrs)
-            for attr in attrs:
-                if attr.lower().startswith("on") or attr.lower() == "style":
-                    del tag.attrs[attr]
+            for attr, val in attrs.items():
+                al = attr.lower()
+                # Loại bỏ các event handlers và style inline
+                if al.startswith("on") or al == "style":
+                    try:
+                        del tag.attrs[attr]
+                    except Exception:
+                        pass
+                    continue
+                # Loại bỏ các URI nguy hiểm trong href/src
+                if al in ("href", "src", "data-src", "srcdoc"):
+                    try:
+                        v = val.strip() if isinstance(val, str) else ""
+                        if v.lower().startswith("javascript:") or v.lower().startswith("data:"):
+                            try:
+                                del tag.attrs[attr]
+                            except Exception:
+                                pass
+                    except Exception:
+                        try:
+                            del tag.attrs[attr]
+                        except Exception:
+                            pass
         
         # 3. Xử lý Dark/Light mode: việc xóa thuộc tính 'style' ở trên là cách an toàn nhất để reset màu sắc.
         

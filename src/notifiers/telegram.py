@@ -1,4 +1,5 @@
 import logging
+import html
 import requests
 from typing import List
 from models import Assignment, UrgencyLevel
@@ -60,6 +61,18 @@ class TelegramNotifier(BaseNotifier):
 
             url = getattr(a, "link", getattr(a, "url", ""))
             task_type = getattr(a, "type", getattr(a, "event_type", "Bài tập"))
+
+            # Escape user-provided fields before embedding into HTML
+            try:
+                title = html.escape(str(title))
+                course = html.escape(str(course))
+                deadline = html.escape(str(deadline))
+                task_type = html.escape(str(task_type))
+                if open_time:
+                    open_time = html.escape(str(open_time))
+                url = html.escape(str(url), quote=True)
+            except Exception:
+                pass
 
             text += f"{icon} <b>Môn học:</b> {course}\n"
             text += f"📝 <b>Loại:</b> {task_type}\n"

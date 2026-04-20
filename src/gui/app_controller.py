@@ -575,8 +575,11 @@ class AppController:
         old_search = getattr(self, "active_search", "")
         
         # Clear specific lists and the page
+        # Preserve _reusable_cards to prevent flash-bang & memory thrashing
         if hasattr(self, '_reusable_cards'):
-            self._reusable_cards.clear()
+            for card in self._reusable_cards:
+                card.update_data(card.data, force=True)
+                
         self.page.controls.clear()
         
         # Re-build UI completely
@@ -725,7 +728,10 @@ class AppController:
 
     async def _countdown_loop_async(self):
         while self._page_alive.is_set():
-            await asyncio.sleep(60)
+            slept = 0
+            while slept < 60 and self._page_alive.is_set():
+                await asyncio.sleep(1)
+                slept += 1
             if not self._page_alive.is_set(): break
             try:
                 with self._cards_lock:
@@ -742,11 +748,15 @@ class AppController:
     async def _auto_refresh_loop_async(self):
         while self._page_alive.is_set():
             interval = settings.CHECK_INTERVAL_MINUTES
-            if interval <= 0:
-                await asyncio.sleep(60)
+            target_sleep = 60 if interval <= 0 else interval * 60
+            slept = 0
+            while slept < target_sleep and self._page_alive.is_set():
+                await asyncio.sleep(2)
+                slept += 2
+                
+            if not self._page_alive.is_set() or interval <= 0:
                 continue
-            await asyncio.sleep(interval * 60)
-            if not self._page_alive.is_set(): break
+                
             try:
                 await self._load_data_async()
             except Exception:

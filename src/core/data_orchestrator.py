@@ -1,4 +1,5 @@
 import logging
+import threading
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from typing import List, Dict, Any
@@ -9,14 +10,14 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Khởi tạo ProcessPool duy nhất để parse HTML bằng LXML/BeautifulSoup mà không khóa GIL
+# Khởi tạo ThreadPool duy nhất để parse HTML giảm thiểu overhead của Process trên app Desktop
 _PARSER_POOL = None
 def get_parser_pool():
     global _PARSER_POOL
     if _PARSER_POOL is None:
-        # Số lượng tiến trình con = số CPU chia đôi để tránh quá tải
-        workers = max(1, multiprocessing.cpu_count() // 2)
-        _PARSER_POOL = ProcessPoolExecutor(max_workers=workers)
+        # Use configured prefetch workers (bounded)
+        workers = max(1, int(getattr(settings, 'PREFETCH_WORKERS', 4)))
+        _PARSER_POOL = ThreadPoolExecutor(max_workers=workers)
     return _PARSER_POOL
 
 class DataOrchestrator:
@@ -29,6 +30,7 @@ class DataOrchestrator:
         self.client = MoodleClient()
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → full activity dict
+        self._detail_lock = threading.Lock()
 
     def login(self) -> bool:
         """Thực hiện đăng nhập bằng thông tin từ settings."""
@@ -157,7 +159,8 @@ class DataOrchestrator:
 
             # Cập nhật dữ liệu cũ với thông tin chi tiết mới
             result = self._format_assignment(full_activity)
-            self._detail_cache[url] = result
+            with self._detail_lock:
+                self._detail_cache[url] = result
             return result
 
         return activity_data

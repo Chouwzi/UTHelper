@@ -98,8 +98,8 @@ class ActivityCard(ft.Container):
         self._is_critical_active = False
         self.update_data(data)
 
-    def update_data(self, data: dict, on_tap=None):
-        if self.data == data and getattr(self, '_initialized', False):
+    def update_data(self, data: dict, force: bool = False, on_tap=None):
+        if not force and self.data == data and getattr(self, '_initialized', False):
             return
         self.data = data
         if on_tap:

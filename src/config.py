@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 import os
 from pathlib import Path
+import keyring
 
 import sys
 # Mò đường dẫn thư mục gốc, chạy script lẻ hay đóng gói exe đều dùng được
@@ -15,11 +16,14 @@ else:
 
 
 import json
+import logging
 
 # Chỗ lưu cài đặt, để trong AppData
 _USER_DATA_DIR = Path(os.getenv('APPDATA', BASE_DIR)) / "UTHElearningAlert"
 _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_FILE = _USER_DATA_DIR / "settings.json"
+
+KEYRING_SERVICE_NAME = "UTHElearningAlert"
 
 class Settings(BaseModel):
     """
@@ -29,7 +33,7 @@ class Settings(BaseModel):
 
     # Thông tin đăng nhập UTH
     UTH_USERNAME: str = Field(default="", description="Mã số sinh viên (MSSV)")
-    UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập")
+    UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập")
 
     # Địa chỉ mấy trang web của trường mình
@@ -101,20 +105,44 @@ class Settings(BaseModel):
 
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:
+    s = Settings()
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return Settings(**data)
-        except Exception:
-            pass
-    return Settings()
+            legacy_pass = data.pop("UTH_PASSWORD", None)
+            s = Settings(**data)
+            if legacy_pass and isinstance(legacy_pass, str):
+                s.UTH_PASSWORD = legacy_pass
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
+            
+    if s.UTH_USERNAME:
+        try:
+            kp = keyring.get_password(KEYRING_SERVICE_NAME, s.UTH_USERNAME)
+            if kp: s.UTH_PASSWORD = kp
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Keyring access failed: {e}")
+            
+    return s
 
 settings = load_settings()
 
 def save_settings():
     """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng."""
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        # Pydantic v2
-        json.dump(settings.model_dump(), f, indent=4, ensure_ascii=False)
+    try:
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            # Pydantic v2
+            json.dump(settings.model_dump(), f, indent=4, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp), str(CONFIG_FILE))
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to save settings to {CONFIG_FILE}: {e}")
 
+    try:
+        if settings.UTH_USERNAME and settings.UTH_PASSWORD:
+            keyring.set_password(KEYRING_SERVICE_NAME, settings.UTH_USERNAME, settings.UTH_PASSWORD)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to write password to keyring: {e}")

@@ -1,4 +1,5 @@
 import logging
+import html
 import smtplib
 from email.message import EmailMessage
 from typing import List
@@ -76,6 +77,16 @@ class EmailNotifier(BaseNotifier):
                 deadline = 'Không rõ hạn'
                 
             url = getattr(task, 'link', getattr(task, 'url', ''))
+            open_time_str = None
+
+            # Escape user data for HTML
+            try:
+                title = html.escape(str(title))
+                course = html.escape(str(course))
+                deadline = html.escape(str(deadline))
+                url = html.escape(str(url), quote=True)
+            except Exception:
+                pass
 
             html_content += f"""
                       <div class="task-card {css_class}">
@@ -84,6 +95,10 @@ class EmailNotifier(BaseNotifier):
             """
             if hasattr(task, 'details') and task.details and getattr(task.details, 'open_time', None):
                 open_time_str = task.details.open_time.strftime('%H:%M %d/%m/%Y')
+                try:
+                    open_time_str = html.escape(open_time_str)
+                except Exception:
+                    pass
                 html_content += f'<div class="meta"><strong>🗓️ Ngày mở:</strong> {open_time_str}</div>'
 
             # Calculate remaining time (again for email)
