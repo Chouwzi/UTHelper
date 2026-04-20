@@ -35,16 +35,20 @@ class TelegramNotifier(BaseNotifier):
             icon = ""
 
             title = getattr(a, "title", "Không rõ tiêu đề")
+            title = html.escape(str(title))
             course = getattr(a, "course_name", getattr(a, "course", "Không rõ môn"))
+            course = html.escape(str(course))
             
             if hasattr(a, "deadline_str") and a.deadline_str:
                 deadline = a.deadline_str
             else:
                 deadline = a.deadline.strftime("%H:%M %d/%m/%Y") if hasattr(a, "deadline") and a.deadline else "Không rõ hạn"
+            deadline = html.escape(str(deadline))
                 
             open_time = None
             if hasattr(a, 'details') and a.details and getattr(a.details, 'open_time', None):
                 open_time = a.details.open_time.strftime('%H:%M %d/%m/%Y')
+            open_time = html.escape(str(open_time)) if open_time else None
                 
             remaining = "Không rõ"
             if hasattr(a, 'deadline') and a.deadline:
@@ -62,6 +66,11 @@ class TelegramNotifier(BaseNotifier):
             url = getattr(a, "link", getattr(a, "url", ""))
             task_type = getattr(a, "type", getattr(a, "event_type", "Bài tập"))
 
+            # Escape computed fields
+            remaining = html.escape(str(remaining)) if remaining is not None else ""
+            task_type = html.escape(str(task_type)) if task_type is not None else ""
+            url_escaped = html.escape(str(url), quote=True) if url else ""
+
             text += f"<b>Môn học:</b> {course}\n"
             text += f"<b>Loại:</b> {task_type}\n"
             text += f"<b>Tiêu đề:</b> {title}\n"
@@ -69,7 +78,7 @@ class TelegramNotifier(BaseNotifier):
                 text += f"<b>Ngày mở:</b> {open_time}\n"
             text += f"<b>Hạn chót:</b> <u>{deadline}</u> ({remaining})\n"
             if url:
-                text += f"<a href='{url}'>Nhấn vào đây để xem chi tiết</a>\n"
+                text += f"<a href=\"{url_escaped}\">Nhấn vào đây để xem chi tiết</a>\n"
             text += "\n"
 
         text += "➖➖➖➖➖➖➖➖➖➖➖➖\n"
