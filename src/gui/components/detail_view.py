@@ -40,7 +40,7 @@ class DetailView(ft.Container):
 
         back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK_IOS_ROUNDED, size=13, color=C.TEXT_SECONDARY),
+                ft.Icon(ft.Icons.ARROW_BACK, size=13, color=C.TEXT_SECONDARY),
                 ft.Text("Quay lại", size=13, color=C.TEXT_SECONDARY),
             ], spacing=4, tight=True),
             on_click=lambda _: on_close(),

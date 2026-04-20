@@ -105,7 +105,7 @@ class AppController:
 
     def _init_ui(self):
         # Footer components
-        self.status_text     = ft.Text("Đang khởi tạo...", size=11, color=C.TEXT_SECONDARY)
+        self.status_text     = ft.Text("Đang khởi động...", size=11, color=C.TEXT_SECONDARY)
         self.footer_critical = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.footer_warning  = ft.Text("", size=11, color=C.WARNING,  weight=ft.FontWeight.W_600)
         self.footer_safe     = ft.Text("", size=11, color=C.SAFE,     weight=ft.FontWeight.W_600)
@@ -163,7 +163,7 @@ class AppController:
         )
 
         self.search_field = ft.TextField(
-            hint_text="Tìm kiếm hoạt động, môn học...",
+            hint_text="Tìm hoạt động hoặc môn học",
             hint_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
             prefix_icon=ft.Icons.SEARCH,
             border_radius=10,
@@ -220,7 +220,7 @@ class AppController:
         self.empty_state  = ft.Container(
             content=ft.Column(controls=[
                 ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
-                ft.Text("Mọi thứ đều ổn", size=12, color=C.BORDER),
+                ft.Text("Không có thông báo mới", size=12, color=C.BORDER),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )

@@ -9,12 +9,13 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
     Tách biệt khỏi AppController để đảm bảo SRP.
     """
     username_field = ft.TextField(
-        label="Mã số sinh viên", prefix_icon=ft.Icons.PERSON, 
+        label="Mã số sinh viên (MSSV)",
         border_radius=8, border_color=C.BORDER, focused_border_color=C.ACCENT, 
         bgcolor=C.SURFACE, text_size=13, height=50, autofocus=True
     )
     password_field = ft.TextField(
-        label="Mật khẩu", prefix_icon=ft.Icons.PASSWORD, password=True, can_reveal_password=True, 
+        label="Mật khẩu",
+        password=True, can_reveal_password=True, 
         border_radius=8, border_color=C.BORDER, focused_border_color=C.ACCENT, 
         bgcolor=C.SURFACE, text_size=13, height=50
     )
@@ -22,8 +23,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
     loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)
 
     btn_login = ft.ElevatedButton(
-        "Lưu và Đăng nhập",
-        icon=ft.Icons.LOGIN_ROUNDED,
+        "Lưu và đăng nhập",
         style=ft.ButtonStyle(
             color=ft.Colors.WHITE,
             bgcolor=C.ACCENT,
@@ -63,11 +63,11 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             page.run_task(on_success_callback)
         else:
             btn_login.disabled = False
-            btn_login.text = "Đăng nhập"
+            btn_login.text = "Lưu và đăng nhập"
             username_field.disabled = False
             password_field.disabled = False
             loading_bar.visible = False
-            error_text.value = "Sai tài khoản, mật khẩu hoặc lỗi kết nối!"
+            error_text.value = "Đăng nhập thất bại. Vui lòng kiểm tra tài khoản và kết nối." 
             error_text.visible = True
             page.update()
 
