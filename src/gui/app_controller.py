@@ -1,5 +1,6 @@
 import flet as ft
 from datetime import datetime
+from core.time_utils import parse_datetime
 import asyncio
 import logging
 from gui.tray import TrayApp
@@ -587,16 +588,15 @@ class AppController:
         for d in old_data:
             dt_str = d.get("deadline")
             if dt_str:
-                try:
-                    diff_h = (datetime.fromisoformat(dt_str) - datetime.now()).total_seconds() / 3600
+                dt = parse_datetime(dt_str)
+                if dt:
+                    diff_h = (dt - datetime.now()).total_seconds() / 3600
                     if diff_h < settings.URGENCY_CRITICAL_HOURS:
                         d["urgency"] = "critical"
                     elif diff_h < settings.URGENCY_WARNING_HOURS:
                         d["urgency"] = "warning"
                     else:
                         d["urgency"] = "safe"
-                except:
-                    pass
         
         # Restore states
         self.all_data = old_data

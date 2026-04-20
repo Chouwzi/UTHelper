@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
 from datetime import datetime
+from core.time_utils import parse_datetime
 from gui.core.utils import clean_course_name, urgency_str
 from gui.core.theme import _TYPE_FILTER_MAP
 
@@ -42,10 +43,7 @@ class FilterService:
         for a in activities:
             # Lấy trước mấy thông tin cần thiết
             dl_str = a.get("deadline", "")
-            try:
-                dl = datetime.fromisoformat(dl_str) if dl_str else None
-            except Exception:
-                dl = None
+            dl = parse_datetime(dl_str) if dl_str else None
 
             # Tính độ khẩn cấp, xem có bị quá hạn không
             is_overdue = dl and dl < now
@@ -72,11 +70,9 @@ class FilterService:
             is_open_override = a.get("is_open", False)
             open_time_str = a.get("details", {}).get("open_time", "")
             if open_time_str:
-                try:
-                    if datetime.now() < datetime.fromisoformat(open_time_str):
-                        is_open_override = True
-                except Exception:
-                    pass
+                ot = parse_datetime(open_time_str)
+                if ot and datetime.now() < ot:
+                    is_open_override = True
             
             # Phân loại cho nó chuẩn bài
             a_type = "open" if is_open_override else a.get("type", "other")

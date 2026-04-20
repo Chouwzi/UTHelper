@@ -7,6 +7,7 @@ with open(path, 'r', encoding='utf-8') as f: text = f.read()
 # Replace _update_footer
 new_method = '''    def _update_footer(self):
         from datetime import datetime as _dt
+        from core.time_utils import parse_datetime as _parse_datetime
         now = _dt.now()
         
         # Base filter like in _render_cards
@@ -14,8 +15,7 @@ new_method = '''    def _update_footer(self):
         
         def match_urgency(d, u_target):
             dl_str = d.get("deadline", "")
-            try: dl = _dt.fromisoformat(dl_str) if dl_str else None
-            except: dl = None
+            dl = _parse_datetime(dl_str) if dl_str else None
             if u_target == "overdue": return dl and dl < now
             if u_target == "all": return True
             if dl and dl < now: return False
@@ -47,8 +47,7 @@ new_method = '''    def _update_footer(self):
         for d in base:
             if match_course(d, self.active_course) and match_type(d, self.active_type):
                 dl_str = d.get("deadline", "")
-                try: dl = _dt.fromisoformat(dl_str) if dl_str else None
-                except: dl = None
+                dl = _parse_datetime(dl_str) if dl_str else None
                 if dl and dl < now: n_overdue += 1
                 else:
                     u = urgency_str(d.get("urgency"))
