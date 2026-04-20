@@ -338,7 +338,7 @@ class SettingsView(ft.Container):
             bgcolor=C.BG, border_radius=10,
         )
 
-        # Thêm nhóm tính năng báo thức (Smart Alert Phase 3)
+        # Thêm nhóm tính năng báo thức (UTHelper Phase 3)
         self._sw_dnd_enable = ft.Switch(
             value=getattr(settings, 'NOTIFY_DND_ENABLE', False), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -533,7 +533,7 @@ class SettingsView(ft.Container):
                             [row_cri, row_warn, row_safe, ft.Divider(height=10, color=C.BORDER), row_quiz, row_ass, row_att, row_open, row_other, ft.Divider(height=10, color=C.BORDER), self.btn_reset]
                         ),
                         _setting_group(
-                            "Cảnh báo thông minh (Smart Alert)",
+                            "Cảnh báo thông minh (UTHelper)",
                             "Tùy chỉnh đối tượng và thời gian",
                             [
                                 self._sw_ignore_sub,
@@ -916,7 +916,7 @@ class SettingsView(ft.Container):
             settings.TELEGRAM_CHAT_ID        = self._tel_chat_field.value
             settings.DEBUG_MODE              = self._sw_debug.value
 
-            # Smart Alert Setting Saves
+            # UTHelper Setting Saves
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
             settings.NOTIFY_DND_START        = int(self._dnd_start_field.value or "23")
             settings.NOTIFY_DND_END          = int(self._dnd_end_field.value or "6")

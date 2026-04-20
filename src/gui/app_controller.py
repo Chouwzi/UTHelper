@@ -533,7 +533,7 @@ class AppController:
                 try:
                     self.notifier.dispatch(self.all_data)
                 except Exception as e:
-                    logger.error(f"[Smart Alert] Dispatcher lỗi: {e}")
+                    logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
             self._update_footer()
             self._render_cards()

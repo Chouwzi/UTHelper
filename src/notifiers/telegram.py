@@ -27,7 +27,7 @@ class TelegramNotifier(BaseNotifier):
         # Combine all tasks into one beautifully formatted message
         # Telegram max length is 4096 chars.
         text = "<b>THÔNG BÁO BÀI TẬP UTH</b>\n"
-        text += "<i>Thông tin nhắc nhở hạn nộp bài</i>\n\n"}{
+        text += "<i>Thông tin nhắc nhở hạn nộp bài</i>\n\n"
         text += "--------------------------------\n\n"
 
         for a in tasks:
@@ -81,8 +81,8 @@ class TelegramNotifier(BaseNotifier):
                 text += f"<a href=\"{url_escaped}\">Nhấn vào đây để xem chi tiết</a>\n"
             text += "\n"
 
-        text += "➖➖➖➖➖➖➖➖➖➖➖➖\n"
-        text += "🎓 <i>UTH E-Learning Smart Alert</i>"
+        text += "--------------------------------\n"
+        text += "<i>UTHelper</i>"
 
         payload = {
             "chat_id": chat_id,
