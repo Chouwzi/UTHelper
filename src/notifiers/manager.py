@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta
+from core.time_utils import parse_datetime
 from typing import List, Any, Dict
 
 from .base import BaseNotifier
@@ -90,9 +91,9 @@ class NotificationManager:
             if not deadline_str:
                 continue
                 
-            try:
-                deadline = datetime.fromisoformat(deadline_str)
-            except ValueError:
+            # Parse deadline as timezone-aware when possible; skip if unparsable
+            deadline = parse_datetime(deadline_str)
+            if not deadline:
                 continue
 
             time_left = deadline - now

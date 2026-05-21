@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from core.time_utils import parse_datetime
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
 
@@ -21,70 +22,67 @@ def get_vi_weekday(dt: datetime) -> str:
     return days[dt.weekday()]
 
 def format_deadline(deadline_str: str) -> str:
-    try:
-        dt = datetime.fromisoformat(deadline_str)
-        if dt.year >= 2099:
-            return "Không có thời hạn"
-        return f"{get_vi_weekday(dt)}, {dt.strftime('%d/%m/%Y')} • {dt.strftime('%H:%M')}"
-    except Exception:
+    dt = parse_datetime(deadline_str)
+    if not dt:
         return deadline_str
+    if dt.year >= 2099:
+        return "Không có thời hạn"
+    return f"{get_vi_weekday(dt)}, {dt.strftime('%d/%m/%Y')} • {dt.strftime('%H:%M')}"
 
 def get_countdown(deadline_str: str, act_type: str = "") -> tuple:
     """Return (text, is_overdue)."""
-    try:
-        dt  = datetime.fromisoformat(deadline_str)
-        
-        # Nếu là năm 2099, tức là không có deadline
-        if dt.year >= 2099:
-            return "Không có thời hạn", False
-            
-        now = datetime.now()
-        diff = dt - now
-        total = abs(diff.total_seconds())
-        if total < 60:
-            return "Đang đến hạn!", True
-        
-        # Nếu đây là sự kiện "Mở từ" calendar, nó hiển thị text khác
-        is_open_event = act_type == "open" or act_type.endswith("_open")
-        
-        days  = int(total // 86400)
-        hours = int((total % 86400) // 3600)
-        mins  = int((total % 3600) // 60)
-        
-        # Tính toán tháng nếu số ngày > 30
-        months = days // 30
-        remaining_days = days % 30
-
-        if diff.total_seconds() < 0:
-            if is_open_event:
-                if months: return f"Đã mở {months} tháng {remaining_days} ngày", False
-                if days: return f"Đã mở {days} ngày {hours} giờ", False
-                if hours: return f"Đã mở {hours} giờ {mins} phút", False
-                return f"Đã mở {mins} phút", False
-
-            if months: return f"Quá hạn {months} tháng {remaining_days} ngày", True
-            if days: return f"Quá hạn {days} ngày {hours} giờ", True
-            if hours: return f"Quá hạn {hours} giờ {mins} phút", True
-            return f"Quá hạn {mins} phút", True
-        else:
-            prefix = "Mở sau" if is_open_event else "Còn"
-            if months: return f"{prefix} {months} tháng {remaining_days} ngày", False
-            if days: return f"{prefix} {days} ngày {hours} giờ", False
-            if hours: return f"{prefix} {hours} giờ {mins} phút", False
-            return f"{prefix} {mins} phút", False
-    except Exception:
+    dt = parse_datetime(deadline_str)
+    if not dt:
         return "Không xác định", False
+
+    # Nếu là năm 2099, tức là không có deadline
+    if dt.year >= 2099:
+        return "Không có thời hạn", False
+
+    now = datetime.now()
+    diff = dt - now
+    total = abs(diff.total_seconds())
+    if total < 60:
+        return "Đang đến hạn!", True
+
+    # Nếu đây là sự kiện "Mở từ" calendar, nó hiển thị text khác
+    is_open_event = act_type == "open" or act_type.endswith("_open")
+
+    days  = int(total // 86400)
+    hours = int((total % 86400) // 3600)
+    mins  = int((total % 3600) // 60)
+
+    # Tính toán tháng nếu số ngày > 30
+    months = days // 30
+    remaining_days = days % 30
+
+    if diff.total_seconds() < 0:
+        if is_open_event:
+            if months: return f"Đã mở {months} tháng {remaining_days} ngày", False
+            if days: return f"Đã mở {days} ngày {hours} giờ", False
+            if hours: return f"Đã mở {hours} giờ {mins} phút", False
+            return f"Đã mở {mins} phút", False
+
+        if months: return f"Quá hạn {months} tháng {remaining_days} ngày", True
+        if days: return f"Quá hạn {days} ngày {hours} giờ", True
+        if hours: return f"Quá hạn {hours} giờ {mins} phút", True
+        return f"Quá hạn {mins} phút", True
+    else:
+        prefix = "Mở sau" if is_open_event else "Còn"
+        if months: return f"{prefix} {months} tháng {remaining_days} ngày", False
+        if days: return f"{prefix} {days} ngày {hours} giờ", False
+        if hours: return f"{prefix} {hours} giờ {mins} phút", False
+        return f"{prefix} {mins} phút", False
 
 def get_progress_value(deadline_str: str) -> float:
     """1.0 = 7 days before deadline, 0.0 = at or past deadline."""
-    try:
-        dt   = datetime.fromisoformat(deadline_str)
-        diff = (dt - datetime.now()).total_seconds()
-        if diff <= 0:
-            return 0.0
-        return min(diff / (7 * 86400), 1.0)
-    except Exception:
+    dt = parse_datetime(deadline_str)
+    if not dt:
         return 0.5
+    diff = (dt - datetime.now()).total_seconds()
+    if diff <= 0:
+        return 0.0
+    return min(diff / (7 * 86400), 1.0)
 
 def urgency_str(urgency) -> str:
     """Normalise UrgencyLevel enum or plain string to lowercase value."""
@@ -124,8 +122,9 @@ def get_status_tag(data: dict) -> tuple:
 
     # Ưu tiên kiểm tra thời gian mở nếu có
     if open_time_str:
-        try:
-            diff_h = (datetime.fromisoformat(open_time_str) - datetime.now()).total_seconds() / 3600
+        ot = parse_datetime(open_time_str)
+        if ot:
+            diff_h = (ot - datetime.now()).total_seconds() / 3600
             if diff_h > settings.OPENING_SOON_HOURS:
                 return "CHƯA MỞ", C.TEXT_SECONDARY
             elif diff_h > 0:
@@ -135,33 +134,29 @@ def get_status_tag(data: dict) -> tuple:
                 is_open = True
                 if status == "not_opened":
                     status = "unknown"
-        except Exception:
-            pass
 
     if status == "not_opened":
         return "CHƯA MỞ", C.TEXT_SECONDARY
 
     if deadline_str:
-        try:
-            dt = datetime.fromisoformat(deadline_str)
+        dt = parse_datetime(deadline_str)
+        if dt:
             if dt.year >= 2099:
                 return "ĐANG MỞ", C.SAFE
-                
+
             diff_h = (dt - datetime.now()).total_seconds() / 3600
-            
+
             # Xử lý riêng sự kiện lịch thuộc loại bắt đầu mở
             if is_open_event or deadline_str == open_time_str:
                 if diff_h <= 0:
                     return "ĐANG MỞ", C.SAFE
                 else:
                     return "SẮP MỞ", _TYPE_COLORS.get("open", C.TEXT_SECONDARY)
-                    
+
             if diff_h < 0:
                 return "QUÁ HẠN", C.CRITICAL
             if is_open:
                 return "ĐANG MỞ", C.SAFE
-        except Exception:
-            pass
             
     if is_open:
         return "SẮP MỞ", _TYPE_COLORS.get("open", C.TEXT_SECONDARY)
@@ -195,14 +190,13 @@ def get_submission_badge(data: dict):
     
     # Nếu chưa tới thời gian mở thì hiển thị tuỳ theo số giờ
     if open_time_str:
-        try:
-            diff_h = (datetime.fromisoformat(open_time_str) - datetime.now()).total_seconds() / 3600
+        ot = parse_datetime(open_time_str)
+        if ot:
+            diff_h = (ot - datetime.now()).total_seconds() / 3600
             if diff_h > settings.OPENING_SOON_HOURS:
                 return "Chưa mở", C.TEXT_SECONDARY
             elif diff_h > 0:
                 return "Sắp mở", C.WARNING
-        except Exception:
-            pass
 
     # Trạng thái nộp lấy ở cấp độ ngoài (top-level)
     ss = data.get("submission_status", "unknown")

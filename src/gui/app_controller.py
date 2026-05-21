@@ -1,5 +1,6 @@
 import flet as ft
 from datetime import datetime
+from core.time_utils import parse_datetime
 import asyncio
 import logging
 from gui.tray import TrayApp
@@ -104,7 +105,7 @@ class AppController:
 
     def _init_ui(self):
         # Footer components
-        self.status_text     = ft.Text("Đang khởi tạo...", size=11, color=C.TEXT_SECONDARY)
+        self.status_text     = ft.Text("Đang khởi động...", size=11, color=C.TEXT_SECONDARY)
         self.footer_critical = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.footer_warning  = ft.Text("", size=11, color=C.WARNING,  weight=ft.FontWeight.W_600)
         self.footer_safe     = ft.Text("", size=11, color=C.SAFE,     weight=ft.FontWeight.W_600)
@@ -162,7 +163,7 @@ class AppController:
         )
 
         self.search_field = ft.TextField(
-            hint_text="Tìm kiếm hoạt động, môn học...",
+            hint_text="Tìm hoạt động hoặc môn học",
             hint_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
             prefix_icon=ft.Icons.SEARCH,
             border_radius=10,
@@ -219,7 +220,7 @@ class AppController:
         self.empty_state  = ft.Container(
             content=ft.Column(controls=[
                 ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
-                ft.Text("Mọi thứ đều ổn", size=12, color=C.BORDER),
+                ft.Text("Không có thông báo mới", size=12, color=C.BORDER),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
@@ -532,7 +533,7 @@ class AppController:
                 try:
                     self.notifier.dispatch(self.all_data)
                 except Exception as e:
-                    logger.error(f"[Smart Alert] Dispatcher lỗi: {e}")
+                    logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
             self._update_footer()
             self._render_cards()
@@ -590,16 +591,15 @@ class AppController:
         for d in old_data:
             dt_str = d.get("deadline")
             if dt_str:
-                try:
-                    diff_h = (datetime.fromisoformat(dt_str) - datetime.now()).total_seconds() / 3600
+                dt = parse_datetime(dt_str)
+                if dt:
+                    diff_h = (dt - datetime.now()).total_seconds() / 3600
                     if diff_h < settings.URGENCY_CRITICAL_HOURS:
                         d["urgency"] = "critical"
                     elif diff_h < settings.URGENCY_WARNING_HOURS:
                         d["urgency"] = "warning"
                     else:
                         d["urgency"] = "safe"
-                except:
-                    pass
         
         # Restore states
         self.all_data = old_data

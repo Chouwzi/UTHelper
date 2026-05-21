@@ -21,7 +21,7 @@ class SettingsView(ft.Container):
 
         self._username_field = ft.TextField(
             value=settings.UTH_USERNAME,
-            label="MSSV",
+            label="Mã số sinh viên (MSSV)",
             text_size=14, label_style=ft.TextStyle(size=13, color=C.TEXT_SECONDARY),
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY,
@@ -40,8 +40,7 @@ class SettingsView(ft.Container):
         )
 
         self._test_login_btn = ft.ElevatedButton(
-            "Kiểm tra đăng nhập",
-            icon=ft.Icons.LOGIN_ROUNDED,
+            "Kiểm tra kết nối",
             on_click=self._handle_test_login,
             style=ft.ButtonStyle(
                 color=ft.Colors.WHITE,
@@ -58,7 +57,7 @@ class SettingsView(ft.Container):
         self._sw_always_on_top = ft.Switch(
 
             value=settings.ALWAYS_ON_TOP, active_color=C.ACCENT,
-            label="Luôn hiển thị trên cùng",
+            label="Luôn ở trên cùng",
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
         )
 
@@ -179,19 +178,19 @@ class SettingsView(ft.Container):
         self._sw_start_minimized = ft.Switch(
             value=settings.START_MINIMIZED, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Khởi động thu nhỏ (Ngầm)"
+            label="Khởi động ở chế độ thu nhỏ"
         )
         self._sw_minimize_to_tray = ft.Switch(
             value=settings.MINIMIZE_TO_TRAY, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Thu nhỏ xuống System Tray"
+            label="Thu nhỏ vào khay hệ thống"
         )
 
 
         self._sw_email = ft.Switch(
             value=settings.ENABLE_GMAIL, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Bật gửi qua Gmail",
+            label="Kích hoạt thông báo qua Gmail",
             on_change=lambda e: self._toggle_integration_ui()
         )
         self._gmail_addr_field = ft.TextField(
@@ -211,7 +210,7 @@ class SettingsView(ft.Container):
         self._sw_discord = ft.Switch(
             value=settings.ENABLE_DISCORD, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Bật gửi qua Discord",
+            label="Kích hoạt thông báo qua Discord",
             on_change=lambda e: self._toggle_integration_ui()
         )
         self._discord_wh_field = ft.TextField(
@@ -224,7 +223,7 @@ class SettingsView(ft.Container):
         self._sw_telegram = ft.Switch(
             value=settings.ENABLE_TELEGRAM, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Bật gửi qua Telegram Bot",
+            label="Kích hoạt thông báo qua Telegram",
             on_change=lambda e: self._toggle_telegram_ui()
         )
         self._tel_token_field = ft.TextField(
@@ -267,7 +266,7 @@ class SettingsView(ft.Container):
         
         self._test_panel = ft.Container(
             content=ft.Column([
-                ft.Text("Công cụ Debug - Mock Test", color=C.CRITICAL, weight=ft.FontWeight.BOLD),
+                ft.Text("Công cụ kiểm thử (Debug / Mock)", color=C.CRITICAL, weight=ft.FontWeight.BOLD),
                 self._mock_type_drp,
                 ft.Row([
                     ft.ElevatedButton("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
@@ -339,11 +338,11 @@ class SettingsView(ft.Container):
             bgcolor=C.BG, border_radius=10,
         )
 
-        # Thêm nhóm tính năng báo thức (Smart Alert Phase 3)
+        # Thêm nhóm tính năng báo thức (UTHelper Phase 3)
         self._sw_dnd_enable = ft.Switch(
             value=getattr(settings, 'NOTIFY_DND_ENABLE', False), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Bật chế độ Không Làm Phiền (DND)"
+            label="Kích hoạt chế độ Không làm phiền (DND)"
         )
         self._dnd_start_field = ft.TextField(
             value=str(getattr(settings, 'NOTIFY_DND_START', 23)),
@@ -423,7 +422,7 @@ class SettingsView(ft.Container):
 
         back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK_IOS_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                ft.Icon(ft.Icons.ARROW_BACK, size=14, color=C.TEXT_SECONDARY),
                 ft.Text("Quay lại", size=13, color=C.TEXT_SECONDARY),
             ], spacing=4, tight=True),
             on_click=self._handle_back,
@@ -534,7 +533,7 @@ class SettingsView(ft.Container):
                             [row_cri, row_warn, row_safe, ft.Divider(height=10, color=C.BORDER), row_quiz, row_ass, row_att, row_open, row_other, ft.Divider(height=10, color=C.BORDER), self.btn_reset]
                         ),
                         _setting_group(
-                            "Cảnh báo thông minh (Smart Alert)",
+                            "Cảnh báo thông minh (UTHelper)",
                             "Tùy chỉnh đối tượng và thời gian",
                             [
                                 self._sw_ignore_sub,
@@ -917,7 +916,7 @@ class SettingsView(ft.Container):
             settings.TELEGRAM_CHAT_ID        = self._tel_chat_field.value
             settings.DEBUG_MODE              = self._sw_debug.value
 
-            # Smart Alert Setting Saves
+            # UTHelper Setting Saves
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
             settings.NOTIFY_DND_START        = int(self._dnd_start_field.value or "23")
             settings.NOTIFY_DND_END          = int(self._dnd_end_field.value or "6")

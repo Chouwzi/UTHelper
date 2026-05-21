@@ -26,25 +26,26 @@ class TelegramNotifier(BaseNotifier):
 
         # Combine all tasks into one beautifully formatted message
         # Telegram max length is 4096 chars.
-        text = "🔔 <b>THÔNG BÁO BÀI TẬP UTH MỚI</b>\n"
-        text += "<i>Đừng để nước đến chân mới nhảy nhé!</i>\n\n"
-        text += "➖➖➖➖➖➖➖➖➖➖➖➖\n\n"
+        text = "<b>THÔNG BÁO BÀI TẬP UTH</b>\n"
+        text += "<i>Thông tin nhắc nhở hạn nộp bài</i>\n\n"
+        text += "--------------------------------\n\n"
 
         for a in tasks:
-            is_critical = a.urgency == UrgencyLevel.CRITICAL
-            icon = "🔴" if a.urgency == UrgencyLevel.CRITICAL else ("🟠" if a.urgency == UrgencyLevel.WARNING else "🟢")
-
             title = getattr(a, "title", "Không rõ tiêu đề")
+            title = html.escape(str(title))
             course = getattr(a, "course_name", getattr(a, "course", "Không rõ môn"))
+            course = html.escape(str(course))
             
             if hasattr(a, "deadline_str") and a.deadline_str:
                 deadline = a.deadline_str
             else:
                 deadline = a.deadline.strftime("%H:%M %d/%m/%Y") if hasattr(a, "deadline") and a.deadline else "Không rõ hạn"
+            deadline = html.escape(str(deadline))
                 
             open_time = None
             if hasattr(a, 'details') and a.details and getattr(a.details, 'open_time', None):
                 open_time = a.details.open_time.strftime('%H:%M %d/%m/%Y')
+            open_time = html.escape(str(open_time)) if open_time else None
                 
             remaining = "Không rõ"
             if hasattr(a, 'deadline') and a.deadline:
@@ -62,30 +63,23 @@ class TelegramNotifier(BaseNotifier):
             url = getattr(a, "link", getattr(a, "url", ""))
             task_type = getattr(a, "type", getattr(a, "event_type", "Bài tập"))
 
-            # Escape user-provided fields before embedding into HTML
-            try:
-                title = html.escape(str(title))
-                course = html.escape(str(course))
-                deadline = html.escape(str(deadline))
-                task_type = html.escape(str(task_type))
-                if open_time:
-                    open_time = html.escape(str(open_time))
-                url = html.escape(str(url), quote=True)
-            except Exception:
-                pass
+            # Escape computed fields
+            remaining = html.escape(str(remaining)) if remaining is not None else ""
+            task_type = html.escape(str(task_type)) if task_type is not None else ""
+            url_escaped = html.escape(str(url), quote=True) if url else ""
 
-            text += f"{icon} <b>Môn học:</b> {course}\n"
-            text += f"📝 <b>Loại:</b> {task_type}\n"
-            text += f"📌 <b>Tiêu đề:</b> {title}\n"
+            text += f"<b>Môn học:</b> {course}\n"
+            text += f"<b>Loại:</b> {task_type}\n"
+            text += f"<b>Tiêu đề:</b> {title}\n"
             if open_time:
-                text += f"🗓️ <b>Ngày mở:</b> {open_time}\n"
-            text += f"⏰ <b>Hạn chót:</b> <u>{deadline}</u> ({remaining})\n"
+                text += f"<b>Ngày mở:</b> {open_time}\n"
+            text += f"<b>Hạn chót:</b> <u>{deadline}</u> ({remaining})\n"
             if url:
-                text += f"🔗 👉 <a href='{url}'>Nhấn vào đây để xem chi tiết</a>\n"
+                text += f"<a href=\"{url_escaped}\">Nhấn vào đây để xem chi tiết</a>\n"
             text += "\n"
 
-        text += "➖➖➖➖➖➖➖➖➖➖➖➖\n"
-        text += "🎓 <i>UTH E-Learning Smart Alert</i>"
+        text += "--------------------------------\n"
+        text += "<i>UTHelper</i>"
 
         payload = {
             "chat_id": chat_id,

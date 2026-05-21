@@ -7,6 +7,7 @@ from core.client import MoodleClient
 from core.parser import MoodleParser
 from models import Assignment
 from config import settings
+from core.time_utils import parse_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +124,9 @@ class DataOrchestrator:
         if full_activity:
             # Ghi đè lại deadline từ timeline (activity_data) nếu parse page không thấy deadline (bị trả về 2099)
             if full_activity.deadline.year >= 2099 and activity_data.get("deadline"):
-                from datetime import datetime
-                try:
-                    full_activity.deadline = datetime.fromisoformat(activity_data["deadline"])
-                except Exception:
-                    pass
+                parsed_deadline = parse_datetime(activity_data["deadline"])
+                if parsed_deadline:
+                    full_activity.deadline = parsed_deadline
                     
             # Kế thừa title gốc từ lịch nếu không trang chi tiết trống hoặc không chính xác
             if full_activity.title == "Hoạt động không tên" and activity_data.get("title"):
@@ -138,18 +137,14 @@ class DataOrchestrator:
             if timeline_open_time and full_activity.details:
                 # Nếu trang chi tiết không có open_time riêng, kế thừa từ timeline
                 if not full_activity.details.open_time:
-                    from datetime import datetime
-                    try:
-                        full_activity.details.open_time = datetime.fromisoformat(timeline_open_time)
-                    except Exception:
-                        pass
+                    parsed_ot = parse_datetime(timeline_open_time)
+                    if parsed_ot:
+                        full_activity.details.open_time = parsed_ot
             elif timeline_open_time and not full_activity.details:
                 from models import ActivityDetail
-                from datetime import datetime
-                try:
-                    full_activity.details = ActivityDetail(open_time=datetime.fromisoformat(timeline_open_time))
-                except Exception:
-                    pass
+                parsed_ot = parse_datetime(timeline_open_time)
+                if parsed_ot:
+                    full_activity.details = ActivityDetail(open_time=parsed_ot)
 
             # Kế thừa cờ is_open từ dữ liệu lịch
             if activity_data.get("is_open"):
