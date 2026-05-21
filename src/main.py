@@ -1,6 +1,16 @@
 import logging
-import flet as ft
 import os
+from pathlib import Path
+
+_APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
+_FLET_DATA_DIR = _APPDATA_DIR / "flet" / "data"
+_FLET_TEMP_DIR = _APPDATA_DIR / "flet" / "temp"
+_FLET_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_FLET_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("FLET_APP_STORAGE_DATA", str(_FLET_DATA_DIR))
+os.environ.setdefault("FLET_APP_STORAGE_TEMP", str(_FLET_TEMP_DIR))
+
+import flet as ft
 from config import settings
 from gui.compact_desktop import main as app_main
 

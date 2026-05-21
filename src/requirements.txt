@@ -1,0 +1,13 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.3
+pydantic>=2.6.4
+pydantic-settings>=2.2.1
+flet>=0.82.0
+pystray>=0.19.5
+pillow>=10.2.0
+python-dotenv>=1.0.1
+pywin32>=306.0
+windows-toasts>=1.3.1
+lxml>=6.0.2
+keyring>=25.0.0
+python-dateutil>=2.8.2
