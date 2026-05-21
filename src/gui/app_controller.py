@@ -400,7 +400,7 @@ class AppController:
         self._refresh_ui()
 
     def _render_cards(self):
-        pass
+        self._refresh_ui()
 
     async def _set_urgency(self, key: str):
         self.active_urgency = key
@@ -438,7 +438,6 @@ class AppController:
         _save_setting("INCLUDE_PAST_DUE", settings.INCLUDE_PAST_DUE)
         
         self._update_footer()
-        self._render_cards()
         self.page.update()
 
     def _on_search(self, e):
@@ -459,11 +458,11 @@ class AppController:
             activities,
             workers,
             lambda: self._prefetch_cancel,
-            True
+            False
         )
 
         if not self._prefetch_cancel and not self._is_loading:
-            cache = self.orchestrator._detail_cache
+            cache = self.orchestrator.get_cached_details_snapshot()
             for i, item in enumerate(self.all_data):
                 url = item.get("url")
                 if url and url in cache:
@@ -484,7 +483,6 @@ class AppController:
                 x.get("deadline", "")
             ))
             self._update_footer()
-            self._render_cards()
             self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động  ✓ sẵn sàng"
             self.loading_bar.visible = False
             self.page.update()
@@ -505,7 +503,7 @@ class AppController:
             result   = await asyncio.to_thread(self.orchestrator.get_latest_activities)
             self.all_data = result or []
             
-            cache = self.orchestrator._detail_cache
+            cache = self.orchestrator.get_cached_details_snapshot()
             for i, item in enumerate(self.all_data):
                 url = item.get("url")
                 if url and url in cache:
@@ -536,7 +534,6 @@ class AppController:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
             self._update_footer()
-            self._render_cards()
             
             self._prefetch_cancel = False
             self.page.run_task(self._prefetch_details_async, list(self.all_data))
@@ -617,7 +614,6 @@ class AppController:
             self._needs_reload = False
             self.page.run_task(self._load_data_async)
         else:
-            self._render_cards()
             self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động  ✓ sẵn sàng"
             self.page.update()
 
@@ -702,6 +698,27 @@ class AppController:
             self.detail_view.update_detail(data)
         self.page.update()
 
+    def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
+        changed = False
+        for card in cards_snapshot:
+            if getattr(card, "_is_critical_active", False):
+                card.shadow = [ft.BoxShadow(
+                    spread_radius=1 if pulse_high else 0,
+                    blur_radius=4 if pulse_high else 3,
+                    color="#BBEF4444" if pulse_high else "#33EF4444",
+                    offset=ft.Offset(0, 0),
+                )]
+                changed = True
+        if changed:
+            self.page.update()
+
+    def _countdown_cards_once(self, cards_snapshot: list):
+        if not cards_snapshot:
+            return
+        for card in cards_snapshot:
+            card.update_countdown()
+        self.page.update()
+
     async def _pulse_loop_async(self):
         pulse_high = True
         while self._page_alive.is_set():
@@ -711,18 +728,7 @@ class AppController:
             try:
                 with self._cards_lock:
                     cards_snapshot = list(self.active_cards)
-                for card in cards_snapshot:
-                    if getattr(card, "_is_critical_active", False):
-                        card.shadow = [ft.BoxShadow(
-                            spread_radius=1 if pulse_high else 0,
-                            blur_radius=4 if pulse_high else 3,
-                            color="#BBEF4444" if pulse_high else "#33EF4444",
-                            offset=ft.Offset(0, 0),
-                        )]
-                        try:
-                            card.update()
-                        except Exception:
-                            pass
+                self._pulse_cards_once(cards_snapshot, pulse_high)
             except Exception:
                 pass
 
@@ -736,12 +742,7 @@ class AppController:
             try:
                 with self._cards_lock:
                     cards_snapshot = list(self.active_cards)
-                for card in cards_snapshot:
-                    card.update_countdown()
-                    try:
-                        card.update()
-                    except Exception:
-                        pass
+                self._countdown_cards_once(cards_snapshot)
             except Exception:
                 pass
 

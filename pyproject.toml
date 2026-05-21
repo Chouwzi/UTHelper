@@ -30,6 +30,12 @@ uth-alert = "main:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+[tool.flet]
+product = "UTHelper"
+artifact = "UTHelper"
+company = "UTHelper"
+copyright = "Copyright (c) 2026"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

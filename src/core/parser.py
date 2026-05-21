@@ -242,7 +242,23 @@ class MoodleParser:
             if content_v:
                 event_content = content_v.find("div", class_="event-content") or content_v.find("div", class_="no-overflow")
                 if event_content: intro = event_content
-        return HTMLSanitizer.sanitize(str(intro)) if intro else ""
+        if not intro:
+            return ""
+
+        sanitized = HTMLSanitizer.sanitize(str(intro))
+        clean_soup = BeautifulSoup(sanitized, "lxml")
+        clean_intro = (
+            clean_soup.find("div", id="intro")
+            or clean_soup.find("div", class_="description")
+            or clean_soup.find("div", id="event-description")
+            or clean_soup.find("div", class_="event-content")
+            or clean_soup.find("div", class_="no-overflow")
+        )
+        if clean_intro:
+            return clean_intro.decode_contents().strip()
+        if clean_soup.body:
+            return clean_soup.body.decode_contents().strip()
+        return sanitized
 
     @staticmethod
     def _extract_status_data(soup: BeautifulSoup) -> dict:
@@ -373,7 +389,7 @@ class MoodleParser:
         Đã chia nhỏ các hàm xử lý để code trông gọn gàng, dễ bảo trì hơn. 
         """
         if not html: return None
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, "lxml")
         
         title = MoodleParser._extract_title(soup)
         course_name, course_full_name = MoodleParser._extract_course_names(soup)

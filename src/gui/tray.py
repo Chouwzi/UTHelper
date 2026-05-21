@@ -6,6 +6,18 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+def _resolve_tray_icon_path() -> str:
+    candidates = [
+        os.path.join(BASE_DIR, "src", "assets", "icon.ico"),
+        os.path.join(BASE_DIR, "assets", "icon.ico"),
+        os.path.join(BASE_DIR, "src", "assets", "icon.png"),
+        os.path.join(BASE_DIR, "assets", "icon.png"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[-1]
+
 class TrayApp:
     """Minimal system-tray wrapper that exposes a .notify() method and context menu."""
 
@@ -21,9 +33,7 @@ class TrayApp:
             
             if self._icon is None:
                 # Thử tìm icon.ico trước (tốt nhất cho Windows Tray), sau đó mới tới icon.png
-                icon_path = os.path.join(BASE_DIR, "src", "assets", "icon.ico")
-                if not os.path.exists(icon_path):
-                    icon_path = os.path.join(BASE_DIR, "src", "assets", "icon.png")
+                icon_path = _resolve_tray_icon_path()
                 
                 try:
                     img = Image.open(icon_path).convert("RGBA")

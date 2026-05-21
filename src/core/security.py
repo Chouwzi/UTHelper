@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+from urllib.parse import urlsplit
 
 class HTMLSanitizer:
     """
@@ -22,6 +23,12 @@ class HTMLSanitizer:
             attrs = dict(tag.attrs)
             for attr, val in attrs.items():
                 al = attr.lower()
+                if al == "srcdoc":
+                    try:
+                        del tag.attrs[attr]
+                    except Exception:
+                        pass
+                    continue
                 # Loại bỏ các event handlers và style inline
                 if al.startswith("on") or al == "style":
                     try:
@@ -30,10 +37,11 @@ class HTMLSanitizer:
                         pass
                     continue
                 # Loại bỏ các URI nguy hiểm trong href/src
-                if al in ("href", "src", "data-src", "srcdoc"):
+                if al in ("href", "src", "data-src"):
                     try:
                         v = val.strip() if isinstance(val, str) else ""
-                        if v.lower().startswith("javascript:") or v.lower().startswith("data:"):
+                        scheme = urlsplit(v).scheme.lower()
+                        if scheme and scheme not in {"http", "https", "mailto"}:
                             try:
                                 del tag.attrs[attr]
                             except Exception:

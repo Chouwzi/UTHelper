@@ -1,7 +1,8 @@
 import logging
 import threading
-import multiprocessing
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any
 from core.client import MoodleClient
 from core.parser import MoodleParser
@@ -31,7 +32,42 @@ class DataOrchestrator:
         self.client = MoodleClient()
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → full activity dict
+        self._detail_cache_saved_at: dict[str, float] = {}
+        self._detail_cache_lru: OrderedDict[str, None] = OrderedDict()
+        self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
+        self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
         self._detail_lock = threading.Lock()
+
+    def _get_cached_detail(self, url: str):
+        now = time.monotonic()
+        with self._detail_lock:
+            cached = self._detail_cache.get(url)
+            saved_at = self._detail_cache_saved_at.get(url)
+            if cached is None or saved_at is None:
+                return None
+            if now - saved_at > self._detail_cache_ttl_seconds:
+                self._detail_cache.pop(url, None)
+                self._detail_cache_saved_at.pop(url, None)
+                self._detail_cache_lru.pop(url, None)
+                return None
+            self._detail_cache_lru[url] = None
+            self._detail_cache_lru.move_to_end(url)
+            return cached
+
+    def _set_cached_detail(self, url: str, value: Dict[str, Any]):
+        with self._detail_lock:
+            self._detail_cache[url] = value
+            self._detail_cache_saved_at[url] = time.monotonic()
+            self._detail_cache_lru[url] = None
+            self._detail_cache_lru.move_to_end(url)
+            while len(self._detail_cache_lru) > self._detail_cache_max_entries:
+                old_url, _ = self._detail_cache_lru.popitem(last=False)
+                self._detail_cache.pop(old_url, None)
+                self._detail_cache_saved_at.pop(old_url, None)
+
+    def get_cached_details_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        with self._detail_lock:
+            return dict(self._detail_cache)
 
     def login(self) -> bool:
         """Thực hiện đăng nhập bằng thông tin từ settings."""
@@ -107,8 +143,10 @@ class DataOrchestrator:
             return activity_data
 
         # Trả về cache nếu đã tải trước đó và không force refresh
-        if not force_refresh and url in self._detail_cache:
-            return self._detail_cache[url]
+        if not force_refresh:
+            cached = self._get_cached_detail(url)
+            if cached is not None:
+                return cached
             
         if not self.login():
             return activity_data
@@ -154,8 +192,7 @@ class DataOrchestrator:
 
             # Cập nhật dữ liệu cũ với thông tin chi tiết mới
             result = self._format_assignment(full_activity)
-            with self._detail_lock:
-                self._detail_cache[url] = result
+            self._set_cached_detail(url, result)
             return result
 
         return activity_data
@@ -166,11 +203,13 @@ class DataOrchestrator:
         Dùng cho background prefetch - không raise exception.
         """
         url = activity_data.get("url")
-        if not force_refresh and (not url or url in self._detail_cache):
+        if not url:
+            return True
+        if not force_refresh and self._get_cached_detail(url) is not None:
             return True
         try:
             self.fetch_full_details(activity_data, force_refresh)
-            return url in self._detail_cache
+            return self._get_cached_detail(url) is not None
         except Exception:
             return False
 
@@ -185,7 +224,7 @@ class DataOrchestrator:
         if force_refresh:
             pending = [a for a in activities if a.get("url")]
         else:
-            pending = [a for a in activities if a.get("url") and a["url"] not in self._detail_cache]
+            pending = [a for a in activities if a.get("url") and self._get_cached_detail(a["url"]) is None]
             
         if not pending:
             return 0

@@ -102,6 +102,8 @@ class Settings(BaseModel):
 
     # Cài đặt hiệu năng
     PREFETCH_WORKERS: int = Field(default=4, description="Số luồng đồng thời khi prefetch chi tiết (1-10)")
+    DETAIL_CACHE_TTL_SECONDS: int = Field(default=1800, description="Thời gian giữ cache chi tiết hoạt động (giây)")
+    DETAIL_CACHE_MAX_ENTRIES: int = Field(default=100, description="Số hoạt động chi tiết tối đa giữ trong RAM")
 
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:

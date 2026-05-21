@@ -751,8 +751,13 @@ class SettingsView(ft.Container):
 
         # Cập nhật danh sách môn học cho ExpansionTile
         self._known_courses = set()
-        if hasattr(self, '_orchestrator') and getattr(self._orchestrator, '_detail_cache', None):
-            for cached in self._orchestrator._detail_cache.values():
+        if hasattr(self, '_orchestrator'):
+            cache = (
+                self._orchestrator.get_cached_details_snapshot()
+                if hasattr(self._orchestrator, "get_cached_details_snapshot")
+                else getattr(self._orchestrator, "_detail_cache", {})
+            )
+            for cached in cache.values():
                 c = cached.get('course')
                 if c:
                     from gui.core.utils import clean_course_name
