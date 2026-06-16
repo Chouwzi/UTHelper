@@ -7,6 +7,9 @@ set PYTHONIOENCODING=utf-8
 set FLET_CLI_NO_RICH_OUTPUT=true
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$base = Join-Path $env:APPDATA 'UTHElearningAlert\flet'; New-Item -ItemType Directory -Force -Path (Join-Path $base 'data'), (Join-Path $base 'temp') | Out-Null"
 
+echo [UTHelper] Stopping any running UTHelper.exe...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process UTHelper -ErrorAction SilentlyContinue | Stop-Process -Force"
+
 echo [UTHelper] Running tests...
 if exist ".venv\Scripts\python.exe" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%CD%\.venv\Scripts\python.exe' -m pytest; exit $LASTEXITCODE"
@@ -27,9 +30,9 @@ if exist "dist\flet-build" rmdir /s /q "dist\flet-build"
 echo.
 echo [UTHelper] Building Windows app...
 if exist ".venv\Scripts\flet.exe" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%CD%\.venv\Scripts\flet.exe' build windows src --module-name main --project uthelper --product 'UTHelper' --artifact 'UTHelper' --description 'UTHelper' --company 'UTHelper' --copyright 'Copyright (c) 2026' --output 'dist\flet-build' --yes --clear-cache 2>&1 | Out-Host; exit $LASTEXITCODE"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%CD%\.venv\Scripts\flet.exe' build windows . --project uthelper --product 'UTHelper' --artifact 'UTHelper' --description 'UTHelper' --company 'UTHelper' --copyright 'Copyright (c) 2026' --output 'dist\flet-build' --yes --clear-cache 2>&1 | Out-Host; exit $LASTEXITCODE"
 ) else (
-    flet build windows src --module-name main --project uthelper --product "UTHelper" --artifact "UTHelper" --description "UTHelper" --company "UTHelper" --copyright "Copyright (c) 2026" --output "dist\flet-build" --yes --clear-cache
+    flet build windows . --project uthelper --product "UTHelper" --artifact "UTHelper" --description "UTHelper" --company "UTHelper" --copyright "Copyright (c) 2026" --output "dist\flet-build" --yes --clear-cache
 )
 set FLET_BUILD_EXIT=%ERRORLEVEL%
 if %FLET_BUILD_EXIT% NEQ 0 (
@@ -50,12 +53,12 @@ if errorlevel 1 (
 
 echo.
 echo [UTHelper] Rebuilding patched Flutter Windows runner...
-pushd "src\build\flutter"
+pushd "build\flutter"
 call flutter build windows --release
 set FLUTTER_BUILD_EXIT=%ERRORLEVEL%
 popd
 if %FLUTTER_BUILD_EXIT% NEQ 0 (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath '%CD%\src\build\flutter\build\windows\x64\runner\Release\UTHelper.exe') { exit 0 } else { exit 1 }"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath '%CD%\build\flutter\build\windows\x64\runner\Release\UTHelper.exe') { exit 0 } else { exit 1 }"
     if errorlevel 1 (
         echo.
         echo [UTHelper] Patched Flutter rebuild failed before producing UTHelper.exe.

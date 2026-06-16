@@ -36,6 +36,10 @@ artifact = "UTHelper"
 company = "UTHelper"
 copyright = "Copyright (c) 2026"
 
+[tool.flet.app]
+path = "src"
+module = "main"
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

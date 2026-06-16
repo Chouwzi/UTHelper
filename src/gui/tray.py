@@ -7,11 +7,14 @@ import threading
 logger = logging.getLogger(__name__)
 
 def _resolve_tray_icon_path() -> str:
+    app_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     candidates = [
         os.path.join(BASE_DIR, "src", "assets", "icon.ico"),
         os.path.join(BASE_DIR, "assets", "icon.ico"),
         os.path.join(BASE_DIR, "src", "assets", "icon.png"),
         os.path.join(BASE_DIR, "assets", "icon.png"),
+        os.path.join(app_dir, "assets", "icon.ico"),
+        os.path.join(app_dir, "assets", "icon.png"),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -38,7 +41,7 @@ class TrayApp:
                 try:
                     img = Image.open(icon_path).convert("RGBA")
                 except Exception as e:
-                    logger.warning("Không nạp được icon (%s), dùng icon mặc định: %s", icon_path, e)
+                    logger.warning("Tray icon load failed (%s), using default icon: %r", icon_path, e)
                     img = Image.new("RGBA", (64, 64), color=(59, 130, 246, 255))
                 
                 menu = pystray.Menu(

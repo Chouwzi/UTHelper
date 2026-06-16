@@ -23,7 +23,10 @@ class WindowsNotifier:
             if not os.path.exists(self._icon_path):
                 self._icon_path = os.path.abspath(os.path.join(BASE_DIR, "src", "assets", "icon.png"))
 
-        self._ensure_shortcut()
+        try:
+            self._ensure_shortcut()
+        except Exception as exc:
+            logger.warning("Shortcut AUMID setup failed: %r", exc)
 
     def _ensure_shortcut(self):
         """
@@ -62,7 +65,7 @@ class WindowsNotifier:
             props.SetValue(pscon.PKEY_AppUserModel_ID, prop_variant)
             props.Commit()
         except Exception as e:
-            logger.warning(f"Không thể tạo Shortcut AUMID: {e}")
+            logger.warning("Shortcut AUMID setup failed: %r", e)
 
     def notify(self, assignments: List[Assignment]):
         """

@@ -2,8 +2,10 @@ param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 )
 
-$build = Join-Path $ProjectRoot "src\build\flutter\build\windows\x64"
-$flutterBuild = Join-Path $ProjectRoot "src\build\flutter\build"
+$ErrorActionPreference = "Stop"
+
+$build = Join-Path $ProjectRoot "build\flutter\build\windows\x64"
+$flutterBuild = Join-Path $ProjectRoot "build\flutter\build"
 $release = Join-Path $build "runner\Release"
 $data = Join-Path $release "data"
 $exe = Join-Path $release "UTHelper.exe"

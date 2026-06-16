@@ -2,7 +2,7 @@ param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 )
 
-$mainDart = Join-Path $ProjectRoot "src\build\flutter\lib\main.dart"
+$mainDart = Join-Path $ProjectRoot "build\flutter\lib\main.dart"
 if (!(Test-Path -LiteralPath $mainDart)) {
     Write-Error "Generated Flet main.dart was not found: $mainDart"
     exit 1

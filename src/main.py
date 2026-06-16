@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from pathlib import Path
 
 _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
@@ -13,6 +14,12 @@ os.environ.setdefault("FLET_APP_STORAGE_TEMP", str(_FLET_TEMP_DIR))
 import flet as ft
 from config import settings
 from gui.compact_desktop import main as app_main
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 logging.getLogger("flet_core").setLevel(logging.INFO)
 logging.getLogger("flet").setLevel(logging.INFO)

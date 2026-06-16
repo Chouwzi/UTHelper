@@ -26,7 +26,10 @@ class NotificationManager:
         self._cache_lock = threading.Lock()
 
         if tray_app:
-            self.register(WindowsNotifier(tray_app=tray_app))
+            try:
+                self.register(WindowsNotifier(tray_app=tray_app))
+            except Exception as exc:
+                logger.warning("Windows notifier disabled during startup: %r", exc)
         
     def register(self, notifier: BaseNotifier):
         self.notifiers.append(notifier)
