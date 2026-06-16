@@ -3,19 +3,9 @@ from datetime import datetime
 from core.time_utils import parse_datetime
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
+from core.display_utils import clean_course_name, urgency_str  # canonical source
 
-def clean_course_name(course: str) -> str:
-    """Strip prefixes/suffixes, keep only human-readable course name."""
-    # Định dạng ban đầu: [ID]_HKII..._Tên_Môn MãHP
-    cleaned = re.sub(r'^\[.*?\]_HKII\d{4}-\d{4}_', '', course)
-    cleaned = re.sub(r'_\d{9,}$', '', cleaned)
-    # Định dạng hiển thị bằng dấu gạch ngang
-    dash_match = re.match(r'^\[.*?\]\s*-\s*(.+?)\s*-\s*[\dA-Z]{6,}$', cleaned)
-    if dash_match:
-        cleaned = dash_match.group(1)
-    # Nếu không khớp, xoá tiền tố ngoặc vuông
-    cleaned = re.sub(r'^\[.*?\]\s*[-_]?\s*', '', cleaned)
-    return cleaned.strip() or course
+# clean_course_name is imported from core.display_utils above
 
 def get_vi_weekday(dt: datetime) -> str:
     days = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
@@ -84,13 +74,7 @@ def get_progress_value(deadline_str: str) -> float:
         return 0.0
     return min(diff / (7 * 86400), 1.0)
 
-def urgency_str(urgency) -> str:
-    """Normalise UrgencyLevel enum or plain string to lowercase value."""
-    raw = str(urgency)
-    for v in ("critical", "warning", "safe"):
-        if v in raw.lower():
-            return v
-    return "safe"
+# urgency_str is imported from core.display_utils above
 
 def get_urgency_color(urgency) -> str:
     u = urgency_str(urgency)
@@ -209,7 +193,7 @@ def get_submission_badge(data: dict):
     if act_type == "quiz" and "KẾT QUẢ" in status_data:
         grade_text = status_data["KẾT QUẢ"]
         # Thử tìm chuỗi "10.00/10.00"
-        import re
+
         grade_match = re.search(r"(\d+(\.\d+)?/\d+(\.\d+)?)", grade_text)
         if grade_match:
             return f"Điểm: {grade_match.group(1)}", C.SAFE

@@ -21,13 +21,7 @@ _TYPE_LABELS = {
 
 _DEADLINE_TYPES = {"deadline", "quiz", "assignment"}
 
-_TYPE_FILTER_MAP = {
-    "quiz":       {"quiz"},
-    "assignment": {"assignment", "deadline"},
-    "attendance": {"attendance"},
-    "open":       {"open"},
-    "other":      {"other"},
-}
+from core.display_utils import _TYPE_FILTER_MAP  # canonical source in core layer
 
 _TYPE_COLORS = {
     "quiz":       "#7C3AED",   # tím

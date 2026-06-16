@@ -1,8 +1,7 @@
 from typing import List, Dict, Any, Tuple
 from datetime import datetime
 from core.time_utils import parse_datetime
-from gui.core.utils import clean_course_name, urgency_str
-from gui.core.theme import _TYPE_FILTER_MAP
+from core.display_utils import clean_course_name, urgency_str, _TYPE_FILTER_MAP
 
 class FilterService:
     """

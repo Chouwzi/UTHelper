@@ -4,6 +4,9 @@ from typing import Optional
 from enum import Enum
 from config import settings
 
+# Sentinel date: dùng cho bài tập không có deadline, các nơi khác kiểm tra year >= 2099
+NO_DEADLINE_DATE = datetime(2099, 12, 31, 23, 59, 59)
+
 class UrgencyLevel(str, Enum):
     CRITICAL = "critical" # Gấp lắm rồi (dưới 24h)
     WARNING = "warning"   # Sắp đến hạn (dưới 3 ngày)
