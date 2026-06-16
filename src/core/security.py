@@ -55,3 +55,50 @@ class HTMLSanitizer:
         # 3. Xử lý Dark/Light mode: việc xóa thuộc tính 'style' ở trên là cách an toàn nhất để reset màu sắc.
         
         return str(soup)
+
+    @staticmethod
+    def sanitize_soup(tag) -> None:
+        """
+        Sanitize a pre-parsed BeautifulSoup tag IN-PLACE.
+        Avoids the cost of serializing to string and re-parsing.
+        Same logic as sanitize() but operates on the existing parse tree.
+        """
+        if tag is None:
+            return
+
+        # 1. Loại bỏ các thẻ nằm trong danh sách đen
+        blacklist = ["script", "style", "iframe", "object", "embed", "applet", "meta", "link"]
+        for child in tag.find_all(blacklist):
+            child.decompose()
+
+        # 2. Làm sạch các thuộc tính
+        for child in tag.find_all(True):
+            attrs = dict(child.attrs)
+            for attr, val in attrs.items():
+                al = attr.lower()
+                if al == "srcdoc":
+                    try:
+                        del child.attrs[attr]
+                    except Exception:
+                        pass
+                    continue
+                if al.startswith("on") or al == "style":
+                    try:
+                        del child.attrs[attr]
+                    except Exception:
+                        pass
+                    continue
+                if al in ("href", "src", "data-src"):
+                    try:
+                        v = val.strip() if isinstance(val, str) else ""
+                        scheme = urlsplit(v).scheme.lower()
+                        if scheme and scheme not in {"http", "https", "mailto"}:
+                            try:
+                                del child.attrs[attr]
+                            except Exception:
+                                pass
+                    except Exception:
+                        try:
+                            del child.attrs[attr]
+                        except Exception:
+                            pass

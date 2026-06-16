@@ -1,15 +1,23 @@
 from bs4 import BeautifulSoup
 from typing import List, Optional
-from models import Assignment, ActivityDetail
+from models import Assignment, ActivityDetail, NO_DEADLINE_DATE
 from core.security import HTMLSanitizer
 from datetime import datetime
 import logging
 import re
-import json
 
 logger = logging.getLogger(__name__)
 
 class MoodleParser:
+    # Class-level constants — avoid re-creating on every loop iteration
+    _COMPONENT_MAP = {
+        "mod_quiz":       "quiz",
+        "mod_assign":     "assignment",
+        "mod_attendance": "attendance",
+        "mod_scorm":      "quiz",
+        "mod_lesson":     "quiz",
+    }
+
     @staticmethod
     def parse_assignments(html: str) -> List[Assignment]:
         """
@@ -52,13 +60,7 @@ class MoodleParser:
                 raw_eventtype = event.get("data-event-eventtype", "")
                 raw_component = event.get("data-event-component", "")   # mod_quiz, mod_assign, mod_attendance …
 
-                _COMPONENT_MAP = {
-                    "mod_quiz":       "quiz",
-                    "mod_assign":     "assignment",
-                    "mod_attendance": "attendance",
-                    "mod_scorm":      "quiz",
-                    "mod_lesson":     "quiz",
-                }
+                # Use class-level constant instead of re-creating per iteration
 
                 # Làm sạch tiêu đề cho nó đẹp giao diện
                 clean_title = title
@@ -76,7 +78,7 @@ class MoodleParser:
 
                 # Phân loại dựa trên eventtype và component của Moodle
                 is_open      = raw_eventtype == "open" or "bắt đầu" in title_lower
-                module_type  = _COMPONENT_MAP.get(raw_component, "")
+                module_type  = MoodleParser._COMPONENT_MAP.get(raw_component, "")
 
                 if raw_eventtype == "attendance" or "điểm danh" in title_lower:
                     mapped_type = "attendance"
@@ -102,7 +104,7 @@ class MoodleParser:
                     # Không có giờ cụ thể thì mặc định là cuối ngày cho chắc
                     deadline = dt.replace(hour=23, minute=59, second=59)
                 else:
-                    deadline = datetime(2099, 12, 31, 23, 59, 59)
+                    deadline = NO_DEADLINE_DATE
 
                 # CMID lấy từ URL là cái ID chuẩn nhất để định danh hoạt động
                 cmid_match = re.search(r"id=(\d+)", url)
@@ -245,20 +247,9 @@ class MoodleParser:
         if not intro:
             return ""
 
-        sanitized = HTMLSanitizer.sanitize(str(intro))
-        clean_soup = BeautifulSoup(sanitized, "lxml")
-        clean_intro = (
-            clean_soup.find("div", id="intro")
-            or clean_soup.find("div", class_="description")
-            or clean_soup.find("div", id="event-description")
-            or clean_soup.find("div", class_="event-content")
-            or clean_soup.find("div", class_="no-overflow")
-        )
-        if clean_intro:
-            return clean_intro.decode_contents().strip()
-        if clean_soup.body:
-            return clean_soup.body.decode_contents().strip()
-        return sanitized
+        # Sanitize in-place on the already-parsed soup to avoid a second full parse
+        HTMLSanitizer.sanitize_soup(intro)
+        return intro.decode_contents().strip()
 
     @staticmethod
     def _extract_status_data(soup: BeautifulSoup) -> dict:
