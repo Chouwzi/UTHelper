@@ -34,12 +34,28 @@ python main.py
 
 ### Build Windows executable
 ```bash
+# Set encoding (required for Flet CLI on Windows)
+$env:PYTHONIOENCODING = 'utf-8'
+
 # Build bằng Flet CLI
 flet build windows
 
 # Cleanup để giảm kích thước bundle
 python scripts/post_build_cleanup.py
+
+# Package thành portable folder
+powershell scripts/package_flet_windows_bundle.ps1
 ```
+
+### Yêu cầu build
+- Visual Studio Build Tools 2022+ với C++ Desktop workload
+- Flutter SDK (tự động cài bởi Flet CLI)
+- CMake (đi kèm VS Build Tools)
+
+### Troubleshooting build
+- **MSBuild errors**: Cài Visual Studio Build Tools với "C++ Desktop development" workload
+- **Unicode errors (cp1252)**: Set `$env:PYTHONIOENCODING = 'utf-8'` trước khi build
+- **Bundle quá lớn**: Chạy `python scripts/post_build_cleanup.py` sau build
 
 ## Kiến trúc
 
