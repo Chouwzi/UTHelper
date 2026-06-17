@@ -3,6 +3,8 @@
 *.key
 *.pem
 credentials.json
+notifications_cache.json
+settings.json
 
 node_modules/
 vendor/

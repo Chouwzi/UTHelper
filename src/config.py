@@ -34,8 +34,8 @@ class Settings(BaseModel):
     # Thông tin đăng nhập UTH
     UTH_USERNAME: str = Field(default="", description="Mã số sinh viên (MSSV)")
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
-    MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập")
-    MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)")
+    MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
+    MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     USE_WS_API: bool = Field(default=True, description="Ưu tiên dùng WS API thay vì HTML scraping")
 
     # Địa chỉ mấy trang web của trường mình
@@ -60,14 +60,14 @@ class Settings(BaseModel):
 
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")
-    DISCORD_WEBHOOK_URL: str = Field(default="", description="Webhook URL của Discord")
+    DISCORD_WEBHOOK_URL: str = Field(default="", description="Webhook URL của Discord", exclude=True)
     ENABLE_GMAIL: bool = Field(default=False, description="Bật gửi email nhắc nhở")
     GMAIL_ADDRESS: str = Field(default="", description="Địa chỉ nhận email")
-    GMAIL_APP_PASSWORD: str = Field(default="", description="Mật khẩu ứng dụng Gmail (để gửi)")
+    GMAIL_APP_PASSWORD: str = Field(default="", description="Mật khẩu ứng dụng Gmail (để gửi)", exclude=True)
 
     # Telegram
     ENABLE_TELEGRAM: bool = Field(default=False, description="Bật thông báo qua Telegram")
-    TELEGRAM_BOT_TOKEN: str = Field(default="", description="Token của Telegram Bot")
+    TELEGRAM_BOT_TOKEN: str = Field(default="", description="Token của Telegram Bot", exclude=True)
     TELEGRAM_CHAT_ID: str = Field(default="", description="Chat ID nhận thông báo")
 
     # Hiển thị
@@ -121,12 +121,31 @@ def load_settings() -> Settings:
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
             
-    if s.UTH_USERNAME:
+    # Khôi phục tất cả secrets từ keyring
+    _SECRETS = {
+        'UTH_PASSWORD': 'password',
+        'MOODLE_SESSION': 'moodle_session',
+        'MOODLE_WS_TOKEN': 'ws_token',
+        'GMAIL_APP_PASSWORD': 'gmail_app_password',
+        'DISCORD_WEBHOOK_URL': 'discord_webhook',
+        'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
+    }
+    for attr, key_suffix in _SECRETS.items():
+        try:
+            val = keyring.get_password(KEYRING_SERVICE_NAME, key_suffix)
+            if val:
+                setattr(s, attr, val)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Keyring read failed for {attr}: {e}")
+    
+    # Legacy: migrate password from old key format
+    if s.UTH_USERNAME and not s.UTH_PASSWORD:
         try:
             kp = keyring.get_password(KEYRING_SERVICE_NAME, s.UTH_USERNAME)
-            if kp: s.UTH_PASSWORD = kp
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"Keyring access failed: {e}")
+            if kp:
+                s.UTH_PASSWORD = kp
+        except Exception:
+            pass
             
     return s
 
@@ -145,8 +164,19 @@ def save_settings():
     except Exception as e:
         logging.getLogger(__name__).error(f"Failed to save settings to {CONFIG_FILE}: {e}")
 
+    # Lưu tất cả secrets vào keyring (không phải JSON)
+    _SECRETS = {
+        'UTH_PASSWORD': 'password',
+        'MOODLE_SESSION': 'moodle_session',
+        'MOODLE_WS_TOKEN': 'ws_token',
+        'GMAIL_APP_PASSWORD': 'gmail_app_password',
+        'DISCORD_WEBHOOK_URL': 'discord_webhook',
+        'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
+    }
     try:
-        if settings.UTH_USERNAME and settings.UTH_PASSWORD:
-            keyring.set_password(KEYRING_SERVICE_NAME, settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        for attr, key_suffix in _SECRETS.items():
+            val = getattr(settings, attr, '')
+            if val:
+                keyring.set_password(KEYRING_SERVICE_NAME, key_suffix, val)
     except Exception as e:
-        logging.getLogger(__name__).warning(f"Failed to write password to keyring: {e}")
+        logging.getLogger(__name__).warning(f"Failed to write secrets to keyring: {e}")

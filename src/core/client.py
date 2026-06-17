@@ -7,7 +7,6 @@ from requests.exceptions import TooManyRedirects
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from typing import Optional
-import httpx
 from config import settings
 import logging
 from core.network_utils import retry_with_backoff
@@ -164,53 +163,14 @@ class MoodleClient:
     # ─── Async Web Services API (dùng httpx, non-blocking) ───────────
 
     async def call_ws_api_async(self, function: str, **params) -> Optional[dict]:
-        """Gọi Moodle WS API bất đồng bộ (dùng httpx.AsyncClient).
+        """Gọi Moodle WS API bất đồng bộ.
         
-        Non-blocking, dùng trực tiếp trong asyncio event loop.
-        Không cần asyncio.to_thread().
+        Dùng asyncio.to_thread() để chạy sync call_ws_api trong thread pool.
+        Lý do: Cloudflare chặn httpx TLS fingerprint dù có đúng User-Agent.
+        Vẫn non-blocking từ event loop perspective.
         """
-        token = self._get_ws_token()  # Token cache check is fast, sync OK
-        if not token:
-            return None
-        
-        request_params = {
-            'wstoken': token,
-            'wsfunction': function,
-            'moodlewsrestformat': 'json',
-        }
-        request_params.update(params)
-        
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(
-                    f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
-                    data=request_params,
-                )
-                result = resp.json()
-            
-            # Token expired → sync refresh (infrequent), then async retry
-            if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
-                logger.warning("WS token hết hạn, đang refresh...")
-                settings.MOODLE_WS_TOKEN = ""
-                token = self._get_ws_token(force=True)
-                if not token:
-                    return None
-                request_params['wstoken'] = token
-                async with httpx.AsyncClient(timeout=20) as client:
-                    resp = await client.post(
-                        f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
-                        data=request_params,
-                    )
-                    result = resp.json()
-            
-            if isinstance(result, dict) and 'exception' in result:
-                logger.error("WS API async error [%s]: %s", function, result.get('message', 'Unknown'))
-                return None
-            
-            return result
-        except Exception as e:
-            logger.error("Lỗi async WS API [%s]: %s", function, e)
-            return None
+        import asyncio
+        return await asyncio.to_thread(self.call_ws_api, function, **params)
 
 
     def get_portal_token(self, username: str = None, password: str = None) -> str:
