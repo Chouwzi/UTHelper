@@ -103,11 +103,19 @@ class DataOrchestrator:
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON)."""
         try:
-            events = ws_functions.get_calendar_action_events(
-                self.client.call_ws_api,
-                limit=100,
+            from datetime import datetime
+            now_ts = int(datetime.now().timestamp())
+            result = self.client.call_ws_api(
+                'core_calendar_get_action_events_by_timesort',
+                timesortfrom=now_ts,
+                timesortto=now_ts + (90 * 24 * 3600),
+                limitnum=50,  # Moodle max is 50
             )
-            if events is None:
+            if result is None:
+                return None
+            
+            events = result.get('events', []) if isinstance(result, dict) else []
+            if not events:
                 return None
             
             # Convert WS events to UTHelper format
@@ -122,19 +130,13 @@ class DataOrchestrator:
     async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng WS API bất đồng bộ (httpx, non-blocking)."""
         try:
-            events = ws_functions.get_calendar_action_events(
-                self.client.call_ws_api_async,  # async callable
-                limit=100,
-            )
-            # If call_api is async, we need to await the inner calls
-            # But ws_functions calls call_api synchronously, so we use the sync version
-            # For true async, call WS API directly
-            import asyncio
+            from datetime import datetime
+            now_ts = int(datetime.now().timestamp())
             result = await self.client.call_ws_api_async(
                 'core_calendar_get_action_events_by_timesort',
-                timesortfrom=int(__import__('datetime').datetime.now().timestamp()),
-                timesortto=int(__import__('datetime').datetime.now().timestamp()) + (90 * 24 * 3600),
-                limitnum=100,
+                timesortfrom=now_ts,
+                timesortto=now_ts + (90 * 24 * 3600),
+                limitnum=50,  # Moodle max is 50
             )
             if result is None:
                 return None

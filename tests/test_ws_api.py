@@ -215,9 +215,6 @@ class TestOrchestratorWSFallback:
         mock_settings.DETAIL_CACHE_TTL_SECONDS = 1800
         mock_settings.DETAIL_CACHE_MAX_ENTRIES = 100
         
-        mock_ws.get_calendar_action_events.return_value = [
-            {'name': 'Test', 'modulename': 'assign', 'timesort': 1234567890}
-        ]
         mock_ws.ws_events_to_assignments.return_value = [
             {'title': 'Test', 'type': 'assignment', 'source': 'ws_api'}
         ]
@@ -225,6 +222,10 @@ class TestOrchestratorWSFallback:
         from core.data_orchestrator import DataOrchestrator
         orch = DataOrchestrator()
         orch.client = MagicMock()
+        # Mock call_ws_api to return events dict directly
+        orch.client.call_ws_api.return_value = {
+            'events': [{'name': 'Test', 'modulename': 'assign', 'timesort': 1234567890}]
+        }
         
         result = orch.get_latest_activities()
         assert len(result) == 1
