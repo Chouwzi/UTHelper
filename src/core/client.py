@@ -7,6 +7,7 @@ from requests.exceptions import TooManyRedirects
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from typing import Optional
+import httpx
 from config import settings
 import logging
 from core.network_utils import retry_with_backoff
@@ -55,6 +56,162 @@ class MoodleClient:
             logger.debug("Đã lưu session cookie vào config.")
         except Exception as e:
             logger.error(f"Lỗi lưu cookie: {e}")
+
+
+    # ─── Web Services API (Token-based, stateless) ───────────────────
+    
+    def _get_ws_token(self, username: str = None, password: str = None, force: bool = False) -> str:
+        """Lấy Web Services token từ Moodle.
+        
+        Token này stateless, không ảnh hưởng browser session.
+        Valid rất lâu (~30 ngày), cache trong settings.
+        """
+        # Return cached token nếu có
+        if not force and settings.MOODLE_WS_TOKEN:
+            return settings.MOODLE_WS_TOKEN
+        
+        user = username or settings.UTH_USERNAME
+        pwd = password or settings.UTH_PASSWORD
+        
+        if not user or not pwd:
+            logger.warning("Chưa có thông tin đăng nhập để lấy WS token.")
+            return ""
+        
+        try:
+            resp = self.session.post(
+                f"{settings.MOODLE_BASE_URL}/login/token.php",
+                data={
+                    'username': user,
+                    'password': pwd,
+                    'service': 'moodle_mobile_app'
+                },
+                timeout=15
+            )
+            data = resp.json()
+            
+            if 'token' in data:
+                settings.MOODLE_WS_TOKEN = data['token']
+                from config import save_settings
+                save_settings()
+                logger.info("Lấy WS API token thành công.")
+                return data['token']
+            else:
+                error = data.get('error', 'Unknown error')
+                logger.warning(f"Không lấy được WS token: {error}")
+                return ""
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy WS token: {e}")
+            return ""
+    
+    def call_ws_api(self, function: str, **params) -> Optional[dict]:
+        """Gọi Moodle Web Services REST API.
+        
+        Args:
+            function: Tên WS function (vd: core_calendar_get_action_events_by_timesort)
+            **params: Tham số cho function
+            
+        Returns:
+            JSON response dict, hoặc None nếu lỗi.
+        """
+        token = self._get_ws_token()
+        if not token:
+            return None
+        
+        request_params = {
+            'wstoken': token,
+            'wsfunction': function,
+            'moodlewsrestformat': 'json',
+        }
+        request_params.update(params)
+        
+        try:
+            resp = self.session.post(
+                f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+                data=request_params,
+                timeout=20
+            )
+            result = resp.json()
+            
+            # Check for token expiry or invalid token
+            if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
+                logger.warning(f"WS token hết hạn hoặc không hợp lệ: {result.get('error', '')}")
+                # Token expired → force refresh
+                settings.MOODLE_WS_TOKEN = ""
+                token = self._get_ws_token(force=True)
+                if token:
+                    request_params['wstoken'] = token
+                    resp = self.session.post(
+                        f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+                        data=request_params,
+                        timeout=20
+                    )
+                    result = resp.json()
+                else:
+                    return None
+            
+            # Check for other errors
+            if isinstance(result, dict) and 'exception' in result:
+                logger.error(f"WS API error [{function}]: {result.get('message', result.get('error', 'Unknown'))}")
+                return None
+            
+            return result
+        except Exception as e:
+            logger.error(f"Lỗi khi gọi WS API [{function}]: {e}")
+            return None
+
+
+
+    # ─── Async Web Services API (dùng httpx, non-blocking) ───────────
+
+    async def call_ws_api_async(self, function: str, **params) -> Optional[dict]:
+        """Gọi Moodle WS API bất đồng bộ (dùng httpx.AsyncClient).
+        
+        Non-blocking, dùng trực tiếp trong asyncio event loop.
+        Không cần asyncio.to_thread().
+        """
+        token = self._get_ws_token()  # Token cache check is fast, sync OK
+        if not token:
+            return None
+        
+        request_params = {
+            'wstoken': token,
+            'wsfunction': function,
+            'moodlewsrestformat': 'json',
+        }
+        request_params.update(params)
+        
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+                    data=request_params,
+                )
+                result = resp.json()
+            
+            # Token expired → sync refresh (infrequent), then async retry
+            if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
+                logger.warning("WS token hết hạn, đang refresh...")
+                settings.MOODLE_WS_TOKEN = ""
+                token = self._get_ws_token(force=True)
+                if not token:
+                    return None
+                request_params['wstoken'] = token
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(
+                        f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+                        data=request_params,
+                    )
+                    result = resp.json()
+            
+            if isinstance(result, dict) and 'exception' in result:
+                logger.error("WS API async error [%s]: %s", function, result.get('message', 'Unknown'))
+                return None
+            
+            return result
+        except Exception as e:
+            logger.error("Lỗi async WS API [%s]: %s", function, e)
+            return None
+
 
     def get_portal_token(self, username: str = None, password: str = None) -> str:
         """Lấy JWT token từ Portal UTH (dùng cho autologin deep-link)."""

@@ -35,6 +35,8 @@ class Settings(BaseModel):
     UTH_USERNAME: str = Field(default="", description="Mã số sinh viên (MSSV)")
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập")
+    MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)")
+    USE_WS_API: bool = Field(default=True, description="Ưu tiên dùng WS API thay vì HTML scraping")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"

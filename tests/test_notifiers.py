@@ -47,7 +47,7 @@ def test_milestone_filtering(manager, mock_config):
     task_25h = {
         "url": "http://test.com/1",
         "title": "Task 1",
-        "course": "Toán 1",
+        "course_name": "Toán 1",
         "deadline": (now + timedelta(hours=25)).isoformat(),
         "submission_status": "not_submitted",
         "is_open": True
@@ -56,20 +56,20 @@ def test_milestone_filtering(manager, mock_config):
     task_overdue = {
         "url": "http://test.com/2",
         "title": "Task 2",
-        "course": "Toán 2",
+        "course_name": "Toán 2",
         "deadline": (now - timedelta(hours=1)).isoformat(),
         "submission_status": "not_submitted",
         "is_open": True
     }
     
-    filtered = manager._filter_tasks([task_25h, task_overdue])
+    filtered = manager._filter_assignments([task_25h, task_overdue])
     
     assert len(filtered) == 1
-    assert filtered[0]["task"]["url"] == "http://test.com/1"
+    assert filtered[0]["assignment"]["url"] == "http://test.com/1"
     assert filtered[0]["milestone"] == 72
 
-    manager._mark_as_notified([filtered[0]])
-    filtered_again = manager._filter_tasks([task_25h])
+    manager._mark_assignments_notified([filtered[0]])
+    filtered_again = manager._filter_assignments([task_25h])
     assert len(filtered_again) == 0
 
 def test_muted_courses(manager, mock_config):
@@ -77,7 +77,7 @@ def test_muted_courses(manager, mock_config):
     task_muted = {
         "url": "http://test.com/3",
         "title": "Bài tập XSTK",
-        "course": "Xác suất thống kê",
+        "course_name": "Xác suất thống kê",
         "deadline": (now + timedelta(hours=20)).isoformat(),
         "submission_status": "not_submitted",
         "is_open": True
@@ -86,15 +86,15 @@ def test_muted_courses(manager, mock_config):
     task_normal = {
         "url": "http://test.com/4",
         "title": "Bài tập Toán",
-        "course": "Toán 2",
+        "course_name": "Toán 2",
         "deadline": (now + timedelta(hours=20)).isoformat(),
         "submission_status": "not_submitted",
         "is_open": True
     }
 
-    filtered = manager._filter_tasks([task_muted, task_normal])
+    filtered = manager._filter_assignments([task_muted, task_normal])
     assert len(filtered) == 1
-    assert filtered[0]["task"]["url"] == "http://test.com/4"
+    assert filtered[0]["assignment"]["url"] == "http://test.com/4"
 
 def test_ignore_submitted(manager, mock_config):
     now = datetime.now()
@@ -116,5 +116,5 @@ def test_ignore_submitted(manager, mock_config):
         "is_open": True
     }
 
-    filtered = manager._filter_tasks([task_submitted, task_graded])
+    filtered = manager._filter_assignments([task_submitted, task_graded])
     assert len(filtered) == 0
