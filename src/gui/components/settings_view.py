@@ -507,7 +507,7 @@ class SettingsView(ft.Container):
                     ft.Column(controls=[
                         ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700,
                                 color=C.TEXT_PRIMARY),
-                        ft.Text("UTHelper v2.1.0", size=11, color=C.TEXT_SECONDARY),
+                        ft.Text(f"UTHelper v{__import__('main').__version__}", size=11, color=C.TEXT_SECONDARY),
                     ], spacing=2),
                 ]),
                 ft.Divider(height=16, color=C.BORDER),

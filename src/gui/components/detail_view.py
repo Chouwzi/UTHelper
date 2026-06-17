@@ -224,9 +224,9 @@ class DetailView(ft.Container):
         open_time_str = details.get("open_time", "")
         if open_time_str:
             self._opentime_txt.value = format_deadline(open_time_str)
-            self._opentime_row.visible = True
         else:
-            self._opentime_row.visible = False
+            self._opentime_txt.value = "Không giới hạn"
+        self._opentime_row.visible = True
 
         # Trích xuất thông tin Tên môn học
         full_name = details.get("course_full_name", "")
@@ -234,6 +234,12 @@ class DetailView(ft.Container):
 
         # ── Trạng thái nộp bài ──
         status_data = details.get("status_data", {})
+        # Keys to skip: raw HTML fields, duplicates (time shown in info box), comment templates
+        _SKIP_KEYS = {
+            "Online text", "Submission comments", "Mở từ",
+            "Đăng tải các bình luận.",          # Moodle comment template (raw HTML)
+            "Time remaining", "Thời gian còn lại",  # Already shown in info box above
+        }
         if status_data:
             rows = [
                 ft.Row(controls=[
@@ -241,7 +247,10 @@ class DetailView(ft.Container):
                     ft.Text(_translate_status(str(v)), size=12, color=C.TEXT_PRIMARY, expand=True),
                 ], spacing=8)
                 for k, v in status_data.items()
-                if k not in ("Online text", "Submission comments", "Mở từ") and v
+                if k not in _SKIP_KEYS
+                and v
+                and str(v).strip() not in ("-", "")
+                and "___" not in str(v)   # Strip leaked Moodle HTML templates
             ]
             if rows:
                 self._content_col.controls.append(self._section("Trạng thái", rows))

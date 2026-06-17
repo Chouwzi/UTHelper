@@ -18,6 +18,12 @@ from gui.components.settings_view import SettingsView
 
 logger = logging.getLogger(__name__)
 
+try:
+    from main import __version__
+    APP_VERSION = f"v{__version__}"
+except ImportError:
+    APP_VERSION = "v2.1.0"
+
 def _save_setting(key: str, value):
     try:
         from config import settings, save_settings
@@ -52,9 +58,11 @@ class AppController:
         
         # Events
         self.page.on_disconnect = self._on_disconnect
+        self.page.on_keyboard_event = self._on_keyboard_event
         self.page.run_task(self._pulse_loop_async)
         self.page.run_task(self._countdown_loop_async)
         self.page.run_task(self._auto_refresh_loop_async)
+        self._tray_balloon_shown = False  # H-01: only show once
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self.page.run_task(self._show_login_dialog)
@@ -99,10 +107,27 @@ class AppController:
         if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
             if settings.MINIMIZE_TO_TRAY:
                 self.page.window.visible = False
-                # Ẩn đi chứ không đóng hẳn, nhờ có prevent_close=True ở trên
                 self.page.update()
+                # H-01: Show tray balloon the first time so user knows app is still running
+                if not self._tray_balloon_shown:
+                    self._tray_balloon_shown = True
+                    try:
+                        self.tray._icon.notify(
+                            "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
+                            "UTHelper",
+                        )
+                    except Exception:
+                        pass
             else:
                 await self.page.window.destroy()
+
+    async def _on_keyboard_event(self, e):
+        """H-04: Escape key to go back from Detail/Settings views."""
+        if e.key == "Escape":
+            if self.settings_view.visible:
+                await self._close_settings()
+            elif self.detail_view.visible:
+                await self._close_detail()
 
     def _init_ui(self):
         # Skeleton loading cards
@@ -158,7 +183,7 @@ class AppController:
 
         self._overdue_cb = ft.Checkbox(
             value=settings.INCLUDE_PAST_DUE,
-            label="Hiển thị quá hạn",
+            label="Quá hạn",
             label_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
             active_color=C.CRITICAL,
             check_color=C.BG,
@@ -182,14 +207,16 @@ class AppController:
         )
 
         # Header
-        self.refresh_btn  = ft.IconButton(
+        self.refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=18, tooltip="Làm mới",
+            icon_color=C.TEXT_SECONDARY, icon_size=18,
+            tooltip="Làm mới",
             on_click=lambda e: self.page.run_task(self._load_data_async),
         )
         self.settings_btn = ft.IconButton(
             ft.Icons.SETTINGS_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=18, tooltip="Cài đặt",
+            icon_color=C.TEXT_SECONDARY, icon_size=18,
+            tooltip="Cài đặt",
             on_click=lambda e: self.page.run_task(self._show_settings),
         )
 
@@ -199,7 +226,7 @@ class AppController:
                     ft.Row(controls=[
                         ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
                         ft.Container(
-                            content=ft.Text("v2.1.0", size=9, color=C.TEXT_SECONDARY),
+                            content=ft.Text(APP_VERSION, size=9, color=C.TEXT_SECONDARY),
                             padding=ft.Padding.symmetric(horizontal=5, vertical=1),
                             border=ft.border.all(1, C.BORDER),
                             border_radius=4,
@@ -260,8 +287,8 @@ class AppController:
             content=ft.Row(controls=[
                 self.footer_critical, self.footer_warning, self.footer_safe, self.footer_overdue,
             ], spacing=12, alignment=ft.MainAxisAlignment.CENTER),
-            bgcolor=C.SURFACE, padding=ft.Padding.symmetric(vertical=8),
-            border=ft.Border.only(top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "40")),
+            bgcolor=C.SURFACE, padding=ft.Padding.symmetric(vertical=10),
+            border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
         )
 
         self.dashboard = ft.Column(
