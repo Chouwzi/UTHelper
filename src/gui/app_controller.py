@@ -500,7 +500,11 @@ class AppController:
         self.page.update()
 
         try:
-            result   = await asyncio.to_thread(self.orchestrator.get_latest_activities)
+            # Ưu tiên async WS API (non-blocking), fallback sync in thread
+            if hasattr(self.orchestrator, 'get_latest_activities_async'):
+                result = await self.orchestrator.get_latest_activities_async()
+            else:
+                result = await asyncio.to_thread(self.orchestrator.get_latest_activities)
             self.all_data = result or []
             
             cache = self.orchestrator.get_cached_details_snapshot()

@@ -119,6 +119,51 @@ class DataOrchestrator:
             logger.warning("WS API fetch thất bại: %s", e)
             return None
     
+    async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
+        """Lấy activities bằng WS API bất đồng bộ (httpx, non-blocking)."""
+        try:
+            events = ws_functions.get_calendar_action_events(
+                self.client.call_ws_api_async,  # async callable
+                limit=100,
+            )
+            # If call_api is async, we need to await the inner calls
+            # But ws_functions calls call_api synchronously, so we use the sync version
+            # For true async, call WS API directly
+            import asyncio
+            result = await self.client.call_ws_api_async(
+                'core_calendar_get_action_events_by_timesort',
+                timesortfrom=int(__import__('datetime').datetime.now().timestamp()),
+                timesortto=int(__import__('datetime').datetime.now().timestamp()) + (90 * 24 * 3600),
+                limitnum=100,
+            )
+            if result is None:
+                return None
+            
+            events = result.get('events', []) if isinstance(result, dict) else []
+            if not events:
+                return None
+            
+            results = ws_functions.ws_events_to_assignments(events)
+            logger.info("WS API async trả về %d events.", len(results))
+            self.is_logged_in = True
+            return results
+        except Exception as e:
+            logger.warning("WS API async fetch thất bại: %s", e)
+            return None
+    
+    async def get_latest_activities_async(self) -> List[Dict[str, Any]]:
+        """Phiên bản async của get_latest_activities — dùng trực tiếp trong event loop."""
+        if settings.USE_WS_API:
+            ws_result = await self._fetch_via_ws_api_async()
+            if ws_result is not None:
+                return ws_result
+            logger.info("WS API async không khả dụng, fallback sang scraping (sync thread).")
+        
+        # Fallback to sync scraping in thread
+        import asyncio
+        return await asyncio.to_thread(self._fetch_via_scraping)
+
+
     def _fetch_via_scraping(self) -> List[Dict[str, Any]]:
         """Lấy activities bằng HTML scraping (fallback)."""
         if not self.login():
