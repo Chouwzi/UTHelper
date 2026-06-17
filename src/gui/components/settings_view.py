@@ -662,14 +662,6 @@ class SettingsView(ft.Container):
         self._gmail_pw_field.update()
         self._discord_wh_field.update()
 
-    def _toggle_integration_ui(self):
-        self._gmail_addr_field.visible = self._sw_email.value
-        self._gmail_pw_field.visible = self._sw_email.value
-        self._discord_wh_field.visible = self._sw_discord.value
-        self._gmail_addr_field.update()
-        self._gmail_pw_field.update()
-        self._discord_wh_field.update()
-
     def _toggle_telegram_ui(self):
         v = self._sw_telegram.value
         self._tel_token_field.visible = v
@@ -902,26 +894,6 @@ class SettingsView(ft.Container):
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
-            if hasattr(self, '_gmail_addr_field'):
-                settings.GMAIL_ADDRESS = self._gmail_addr_field.value
-                settings.GMAIL_APP_PASSWORD = self._gmail_pw_field.value
-                settings.DISCORD_WEBHOOK_URL = self._discord_wh_field.value
-                
-                
-                
-            if hasattr(self, '_gmail_addr_field'):
-                settings.GMAIL_ADDRESS = self._gmail_addr_field.value
-                settings.GMAIL_APP_PASSWORD = self._gmail_pw_field.value
-                settings.DISCORD_WEBHOOK_URL = self._discord_wh_field.value
-                
-                
-                
-            settings.ENABLE_TELEGRAM         = self._sw_telegram.value
-            settings.TELEGRAM_BOT_TOKEN      = self._tel_token_field.value
-            settings.TELEGRAM_CHAT_ID        = self._tel_chat_field.value
-            settings.DEBUG_MODE              = self._sw_debug.value
-
-            # UTHelper Setting Saves
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
             settings.NOTIFY_DND_START        = int(self._dnd_start_field.value or "23")
             settings.NOTIFY_DND_END          = int(self._dnd_end_field.value or "6")

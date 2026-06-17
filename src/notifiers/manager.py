@@ -76,113 +76,96 @@ class NotificationManager:
                 
         return False
 
-    def _filter_tasks(self, tasks: List[Dict]) -> List[Dict]:
-        filtered = []
-        cache = self._load_cache()
-        now = datetime.now()
-
-        for task in tasks:
-            course = task.get("course", "")
-            if course in config.NOTIFY_MUTED_COURSES:
-                continue
-
-            status = task.get("submission_status", "")
-            if config.NOTIFY_IGNORE_SUBMITTED and status in ["submitted", "graded"]:
-                continue
-
-            deadline_str = task.get("deadline")
-            if not deadline_str:
-                continue
-                
-            # Parse deadline as timezone-aware when possible; skip if unparsable
-            deadline = parse_datetime(deadline_str)
-            if not deadline:
-                continue
-
-            time_left = deadline - now
-            time_left_hours = time_left.total_seconds() / 3600.0
-            
-            if time_left_hours < 0:
-                continue
-
-            milestones = sorted(config.NOTIFY_MILESTONES)
-            matched_milestone = None
-            
-            for ms in milestones:
-                if time_left_hours <= ms:
-                    matched_milestone = ms
-                    break
-                    
-            if not matched_milestone:
-                continue
-
-            url = task.get("url", "")
-            task_cache = cache.get(url, [])
-            
-            if matched_milestone not in task_cache:
-                filtered.append({
-                    "task": task,
-                    "milestone": matched_milestone
-                })
-
-        return filtered
-
-    def _mark_as_notified(self, items: List[Dict]):
-        cache = self._load_cache()
-        updated = False
-        for item in items:
-            task = item["task"]
-            ms = item["milestone"]
-            url = task.get("url", "")
-            
-            if url not in cache:
-                cache[url] = []
-                
-            if ms not in cache[url]:
-                cache[url].append(ms)
-                updated = True
-                
-        if updated:
-            self._save_cache(cache)
-
     def dispatch(self, assignments: List[Any]):
+        """Dispatch notifications for assignments that hit milestone thresholds."""
         # Đang trong giờ nghỉ thì thôi, đừng làm phiền người ta
         if self._is_in_dnd():
             logger.info("Do Not Disturb is on. Skipping notifications.")
             return
 
-        # Chuẩn hóa dữ liệu: chấp nhận cả dict lẫn Object cho linh hoạt
-        tasks = []
-        for a in assignments:
-            if isinstance(a, dict):
-                tasks.append(a)
-            elif hasattr(a, '__dict__'):
-                tasks.append(a.__dict__)
-
         # Lọc lại xem cái nào thực sự cần bắn thông báo
-        to_notify_items = self._filter_tasks(tasks)
+        to_notify_items = self._filter_assignments(assignments)
 
         if not to_notify_items:
             return
 
-        class DummyAssign:
-            def __init__(self, data):
-                self.id = data.get("id", data.get("url"))
-                self.title = data.get("title", "Không tên")
-                self.urgency_str = data.get("urgency", "safe")
-                if self.urgency_str == "critical":
-                    self.urgency = UrgencyLevel.CRITICAL
-                elif self.urgency_str == "warning":
-                    self.urgency = UrgencyLevel.WARNING
-                else:
-                    self.urgency = UrgencyLevel.SAFE
-
-        extracted_tasks = [DummyAssign(item["task"]) for item in to_notify_items]
+        # Pass real Assignment objects directly — no more DummyAssign wrapper
+        notify_assignments = [item["assignment"] for item in to_notify_items]
 
         for notifier in self.notifiers:
             try:
-                notifier.notify(extracted_tasks)
+                notifier.notify(notify_assignments)
             except Exception as e:
                 logger.error(f"Failed via channel {notifier.__class__.__name__}: {e}")
 
-        self._mark_as_notified(to_notify_items)
+        self._mark_assignments_notified(to_notify_items)
+
+    def _filter_assignments(self, assignments: List[Any]) -> List[Dict]:
+        """Filter assignments that need notification based on milestones and cache."""
+        filtered = []
+        cache = self._load_cache()
+        now = datetime.now()
+
+        for a in assignments:
+            # Support both Assignment objects and dicts for backward compatibility
+            course = getattr(a, 'course_name', '') or (a.get('course_name', '') if isinstance(a, dict) else '')
+            if course in config.NOTIFY_MUTED_COURSES:
+                continue
+
+            status = getattr(a, 'submission_status', '') or (a.get('submission_status', '') if isinstance(a, dict) else '')
+            if config.NOTIFY_IGNORE_SUBMITTED and status in ["submitted", "graded"]:
+                continue
+
+            deadline = getattr(a, 'deadline', None)
+            if deadline is None and isinstance(a, dict):
+                deadline_str = a.get("deadline")
+                deadline = parse_datetime(deadline_str) if deadline_str else None
+            if not deadline:
+                continue
+
+            time_left = deadline - now
+            time_left_hours = time_left.total_seconds() / 3600.0
+
+            if time_left_hours < 0:
+                continue
+
+            milestones = sorted(config.NOTIFY_MILESTONES)
+            matched_milestone = None
+
+            for ms in milestones:
+                if time_left_hours <= ms:
+                    matched_milestone = ms
+                    break
+
+            if not matched_milestone:
+                continue
+
+            url = getattr(a, 'url', '') or (a.get('url', '') if isinstance(a, dict) else '')
+            task_cache = cache.get(url, [])
+
+            if matched_milestone not in task_cache:
+                filtered.append({
+                    "assignment": a,
+                    "url": url,
+                    "milestone": matched_milestone
+                })
+
+        return filtered
+
+    def _mark_assignments_notified(self, items: List[Dict]):
+        """Mark assignments as notified in cache."""
+        cache = self._load_cache()
+        updated = False
+        for item in items:
+            url = item["url"]
+            ms = item["milestone"]
+
+            if url not in cache:
+                cache[url] = []
+
+            if ms not in cache[url]:
+                cache[url].append(ms)
+                updated = True
+
+        if updated:
+            self._save_cache(cache)

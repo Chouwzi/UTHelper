@@ -5,6 +5,7 @@ from email.message import EmailMessage
 from typing import List
 from models import Assignment, UrgencyLevel
 from config import settings
+from core.time_utils import format_remaining_time
 from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
@@ -101,19 +102,8 @@ class EmailNotifier(BaseNotifier):
                     pass
                 html_content += f'<div class="meta"><strong>🗓️ Ngày mở:</strong> {open_time_str}</div>'
 
-            # Calculate remaining time (again for email)
-            remaining = "Không rõ"
-            if hasattr(task, 'deadline') and task.deadline:
-                import datetime
-                delta = task.deadline - datetime.datetime.now()
-                days, seconds = delta.days, delta.seconds
-                hours = seconds // 3600
-                if days < 0:
-                    remaining = "Quá hạn rồi!"
-                elif days > 0:
-                    remaining = f"Còn {days} ngày {hours} giờ"
-                else:
-                    remaining = f"Còn {hours} giờ {seconds % 3600 // 60} phút"
+            # Calculate remaining time using shared utility
+            remaining = format_remaining_time(getattr(task, 'deadline', None))
 
             html_content += f"""
                         <div class="meta"><strong>⏰ Hạn chót:</strong> <span style="font-weight: bold;">{deadline}</span></div>

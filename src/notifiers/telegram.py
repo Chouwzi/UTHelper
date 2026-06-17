@@ -4,6 +4,7 @@ import requests
 from typing import List
 from models import Assignment, UrgencyLevel
 from config import settings
+from core.time_utils import format_remaining_time
 from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
@@ -47,18 +48,7 @@ class TelegramNotifier(BaseNotifier):
                 open_time = a.details.open_time.strftime('%H:%M %d/%m/%Y')
             open_time = html.escape(str(open_time)) if open_time else None
                 
-            remaining = "Không rõ"
-            if hasattr(a, 'deadline') and a.deadline:
-                import datetime
-                delta = a.deadline - datetime.datetime.now()
-                days, seconds = delta.days, delta.seconds
-                hours = seconds // 3600
-                if days < 0:
-                    remaining = "Quá hạn rồi!"
-                elif days > 0:
-                    remaining = f"Còn {days} ngày {hours} giờ"
-                else:
-                    remaining = f"Còn {hours} giờ {seconds % 3600 // 60} phút"
+            remaining = format_remaining_time(getattr(a, 'deadline', None))
 
             url = getattr(a, "link", getattr(a, "url", ""))
             task_type = getattr(a, "type", getattr(a, "event_type", "Bài tập"))

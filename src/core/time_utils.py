@@ -38,3 +38,36 @@ def parse_datetime(s: str) -> datetime | None:
     except Exception as e:
         logger.debug(f"parse_datetime failed for '{s}': {e}")
         return None
+
+
+def format_remaining_time(deadline: datetime | None) -> str:
+    """Format the remaining time from now until deadline as a human-readable Vietnamese string.
+
+    Used by all notifiers (Windows, Discord, Telegram, Email) to avoid duplicating
+    the days/hours/minutes calculation logic.
+
+    Returns:
+        "Không rõ"     – if deadline is None
+        "Quá hạn!"     – if deadline is in the past
+        "Còn X ngày Yh" – if more than 1 day remains
+        "Còn Xh Yp"    – if less than 1 day remains
+    """
+    if not deadline:
+        return "Không rõ"
+
+    delta = deadline - datetime.now()
+    total_seconds = int(delta.total_seconds())
+
+    if total_seconds < 0:
+        return "Quá hạn!"
+
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+
+    if days > 0:
+        return f"Còn {days} ngày {hours} giờ"
+    if hours > 0:
+        return f"Còn {hours} giờ {minutes} phút"
+    return f"Còn {minutes} phút"
+

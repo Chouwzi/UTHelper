@@ -9,6 +9,7 @@ import sys
 from typing import List
 from models import Assignment, UrgencyLevel
 from config import BASE_DIR
+from core.time_utils import format_remaining_time
 
 logger = logging.getLogger(__name__)
 
@@ -84,17 +85,7 @@ class WindowsNotifier:
             title = getattr(a, 'title', 'Bài tập mới')
             course = getattr(a, 'course_name', getattr(a, 'course', 'Không rõ môn'))
             
-            remaining = "Không rõ"
-            if hasattr(a, 'deadline') and a.deadline:
-                import datetime
-                delta = a.deadline - datetime.datetime.now()
-                d, s = delta.days, delta.seconds
-                if d < 0:
-                    remaining = "Quá hạn!"
-                elif d > 0:
-                    remaining = f"Còn {d} ngày {s//3600}h"
-                else:
-                    remaining = f"Còn {s//3600}h {(s%3600)//60}p"
+            remaining = format_remaining_time(getattr(a, 'deadline', None))
             
             msg = f"Môn: {course}\nThời hạn: {remaining} | {getattr(a, 'urgency_str', getattr(a, 'urgency', '...'))}"
         else:

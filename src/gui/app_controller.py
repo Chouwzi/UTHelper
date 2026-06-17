@@ -565,27 +565,9 @@ class AppController:
         from gui.core.theme import load_theme_from_settings
         load_theme_from_settings()
 
-        # Lưu lại trạng thái hiện tại để tí phục hồi
-        old_data = self.all_data
-        old_urgency = getattr(self, "active_urgency", "all")
-        old_type = getattr(self, "active_type", "all")
-        old_course = getattr(self, "active_course", "all")
-        old_search = getattr(self, "active_search", "")
-        
-        # Clear specific lists and the page
-        # Preserve _reusable_cards to prevent flash-bang & memory thrashing
-        if hasattr(self, '_reusable_cards'):
-            for card in self._reusable_cards:
-                card.update_data(card.data, force=True)
-                
-        self.page.controls.clear()
-        
-        # Re-build UI completely
-        self._init_ui()
-        
-        # Recalculate urgency dynamically using new settings 
+        # Recalculate urgency dynamically using new settings thresholds
         from datetime import datetime
-        for d in old_data:
+        for d in self.all_data:
             dt_str = d.get("deadline")
             if dt_str:
                 dt = parse_datetime(dt_str)
@@ -598,13 +580,7 @@ class AppController:
                     else:
                         d["urgency"] = "safe"
         
-        # Restore states
-        self.all_data = old_data
-        self.active_urgency = old_urgency
-        self.active_type = old_type
-        self.active_course = old_course
-        self.active_search = old_search
-        
+        # Toggle visibility - no full rebuild needed (fixes white flash)
         self.settings_view.visible = False
         self.dashboard.visible = True
         
@@ -614,7 +590,8 @@ class AppController:
             self._needs_reload = False
             self.page.run_task(self._load_data_async)
         else:
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động  ✓ sẵn sàng"
+            # Re-apply filters with potentially changed urgency thresholds
+            self._refresh_ui()
             self.page.update()
 
 
@@ -726,6 +703,9 @@ class AppController:
             if not self._page_alive.is_set(): break
             pulse_high = not pulse_high
             try:
+                # Skip lock acquisition when there are no cards to pulse
+                if not self.active_cards:
+                    continue
                 with self._cards_lock:
                     cards_snapshot = list(self.active_cards)
                 self._pulse_cards_once(cards_snapshot, pulse_high)

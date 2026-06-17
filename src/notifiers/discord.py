@@ -3,6 +3,7 @@ import requests
 from typing import List
 from models import Assignment, UrgencyLevel
 from config import settings
+from core.time_utils import format_remaining_time
 from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
@@ -36,18 +37,7 @@ class DiscordNotifier(BaseNotifier):
                 open_time = task.details.open_time.strftime('%H:%M %d/%m/%Y')
             
             # Tính thời gian còn lại
-            remaining = "Không rõ"
-            if hasattr(task, 'deadline') and task.deadline:
-                import datetime
-                delta = task.deadline - datetime.datetime.now()
-                days, seconds = delta.days, delta.seconds
-                hours = seconds // 3600
-                if days < 0:
-                    remaining = "Quá hạn rồi!"
-                elif days > 0:
-                    remaining = f"Còn {days} ngày {hours} giờ"
-                else:
-                    remaining = f"Còn {hours} giờ {seconds % 3600 // 60} phút"
+            remaining = format_remaining_time(getattr(task, 'deadline', None))
 
             url = getattr(task, 'link', getattr(task, 'url', ''))
 
