@@ -8,6 +8,14 @@ from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
 
+
+def _get(obj, key, default=''):
+    """Get attribute from both Assignment objects and dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 class DiscordNotifier(BaseNotifier):
     def notify(self, assignments: List[Assignment]) -> bool:
         if not getattr(settings, 'ENABLE_DISCORD', False) or not getattr(settings, 'DISCORD_WEBHOOK_URL', None):
@@ -20,26 +28,39 @@ class DiscordNotifier(BaseNotifier):
 
         embeds = []
         for task in tasks:
-            is_critical = task.urgency == UrgencyLevel.CRITICAL
-            color = 15158332 if task.urgency == UrgencyLevel.CRITICAL else (15105570 if task.urgency == UrgencyLevel.WARNING else 3066993)
+            urgency = _get(task, 'urgency', 'safe')
+            is_critical = urgency in ('critical', UrgencyLevel.CRITICAL)
+            is_warning = urgency in ('warning', UrgencyLevel.WARNING)
+            color = 15158332 if is_critical else (15105570 if is_warning else 3066993)
 
-            title = getattr(task, 'title', 'Không rõ tiêu đề')
-            course = getattr(task, 'course_name', getattr(task, 'course', 'Không rõ môn học'))
+            title = _get(task, 'title', 'Không rõ tiêu đề')
+            course = _get(task, 'course_name', '') or _get(task, 'course', 'Không rõ môn học')
             
-            deadline = getattr(task, 'deadline_str', '')
-            if not deadline and getattr(task, 'deadline', None):
-                deadline = task.deadline.strftime('%H:%M %d/%m/%Y')
-            elif not deadline:
-                deadline = 'Không rõ'
+            deadline = _get(task, 'deadline_str', '')
+            if not deadline:
+                dl = _get(task, 'deadline', None)
+                if dl and hasattr(dl, 'strftime'):
+                    deadline = dl.strftime('%H:%M %d/%m/%Y')
+                elif not deadline:
+                    deadline = 'Không rõ'
                 
             open_time = 'Không có'
-            if hasattr(task, 'details') and task.details and getattr(task.details, 'open_time', None):
-                open_time = task.details.open_time.strftime('%H:%M %d/%m/%Y')
+            details = _get(task, 'details', None)
+            if details and not isinstance(details, dict) and getattr(details, 'open_time', None):
+                open_time = details.open_time.strftime('%H:%M %d/%m/%Y')
             
             # Tính thời gian còn lại
-            remaining = format_remaining_time(getattr(task, 'deadline', None))
+            remaining = format_remaining_time(_get(task, 'deadline', None))
 
-            url = getattr(task, 'link', getattr(task, 'url', ''))
+            url = _get(task, 'link', '') or _get(task, 'url', '')
+
+            # Status text
+            if is_critical:
+                status_text = '🔴 Khẩn cấp'
+            elif is_warning:
+                status_text = '🟠 Sắp tới hạn'
+            else:
+                status_text = '🟢 An toàn'
 
             embed = {
                 'title': title,
@@ -48,9 +69,9 @@ class DiscordNotifier(BaseNotifier):
                 'fields': [
                     {'name': 'Hạn chót', 'value': f'{deadline}', 'inline': True},
                     {'name': 'Còn lại', 'value': remaining, 'inline': True},
-                    {'name': 'Trạng thái', 'value': '🔴 Khẩn cấp' if task.urgency == UrgencyLevel.CRITICAL else ('🟠 Sắp tới hạn' if task.urgency == UrgencyLevel.WARNING else '🟢 An toàn'), 'inline': False},
+                    {'name': 'Trạng thái', 'value': status_text, 'inline': False},
                 ],
-                'footer': {'text': 'Power by UTHelper - Made by Chouwzi'}
+                'footer': {'text': 'Powered by UTHelper - Made by Chouwzi'}
             }
             if open_time != 'Không có':
                 embed['fields'].insert(0, {'name': 'Ngày mở', 'value': open_time, 'inline': True})

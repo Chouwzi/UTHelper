@@ -153,6 +153,10 @@ settings = load_settings()
 
 def save_settings():
     """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng."""
+    _logger = logging.getLogger(__name__)
+
+    # --- Step 1: Save non-secret settings to JSON ---
+    json_ok = False
     try:
         tmp = CONFIG_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
@@ -161,10 +165,11 @@ def save_settings():
             f.flush()
             os.fsync(f.fileno())
         os.replace(str(tmp), str(CONFIG_FILE))
+        json_ok = True
     except Exception as e:
-        logging.getLogger(__name__).error(f"Failed to save settings to {CONFIG_FILE}: {e}")
+        _logger.error(f"Failed to save settings to {CONFIG_FILE}: {e}")
 
-    # Lưu tất cả secrets vào keyring (không phải JSON)
+    # --- Step 2: Save all secrets to keyring (independent of JSON success) ---
     _SECRETS = {
         'UTH_PASSWORD': 'password',
         'MOODLE_SESSION': 'moodle_session',
@@ -173,10 +178,32 @@ def save_settings():
         'DISCORD_WEBHOOK_URL': 'discord_webhook',
         'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
     }
-    try:
-        for attr, key_suffix in _SECRETS.items():
+    for attr, key_suffix in _SECRETS.items():
+        try:
             val = getattr(settings, attr, '')
             if val:
                 keyring.set_password(KEYRING_SERVICE_NAME, key_suffix, val)
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Failed to write secrets to keyring: {e}")
+        except Exception as e:
+            _logger.warning(f"Failed to write {attr} to keyring: {e}")
+
+    # --- Step 3: Cleanup legacy password from JSON file ---
+    # If the JSON was written successfully, re-read and strip any secrets
+    # that leaked via model_dump() (exclude=True fields shouldn't appear,
+    # but guard against Pydantic misconfiguration or future schema drift).
+    if json_ok:
+        _SECRET_KEYS = {'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
+                        'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN'}
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            stripped = {k: v for k, v in data.items() if k not in _SECRET_KEYS}
+            if len(stripped) < len(data):
+                tmp = CONFIG_FILE.with_suffix(".tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(stripped, f, indent=4, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(str(tmp), str(CONFIG_FILE))
+                _logger.info("Cleaned legacy secrets from settings JSON file")
+        except Exception as e:
+            _logger.warning(f"Failed to clean legacy secrets from JSON: {e}")

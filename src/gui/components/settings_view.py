@@ -115,10 +115,18 @@ class SettingsView(ft.Container):
                 container_box.update()
                 tb_field.update()
                 dlg.open = False
+                try:
+                    self._page.overlay.remove(dlg)
+                except (ValueError, AttributeError):
+                    pass
                 self._page.update()
 
             def _cancel(e):
                 dlg.open = False
+                try:
+                    self._page.overlay.remove(dlg)
+                except (ValueError, AttributeError):
+                    pass
                 self._page.update()
 
             dlg = ft.AlertDialog(
@@ -820,15 +828,27 @@ class SettingsView(ft.Container):
         if self.has_changes():
             def close_dlg(e):
                 confirm_dlg.open = False
+                try:
+                    self._page.overlay.remove(confirm_dlg)
+                except (ValueError, AttributeError):
+                    pass
                 self._page.update()
             
             def discard_and_close(e):
                 confirm_dlg.open = False
+                try:
+                    self._page.overlay.remove(confirm_dlg)
+                except (ValueError, AttributeError):
+                    pass
                 self._page.update()
                 self._on_close_cb()
 
             async def save_and_close(e):
                 confirm_dlg.open = False
+                try:
+                    self._page.overlay.remove(confirm_dlg)
+                except (ValueError, AttributeError):
+                    pass
                 self._page.update()
                 await self._save(e)
                 self._on_close_cb()
@@ -876,7 +896,7 @@ class SettingsView(ft.Container):
             
             if settings.START_WITH_WINDOWS != self._sw_start_with_windows.value:
                 try:
-                    import src.core.autostart as autostart
+                    import core.autostart as autostart
                     if self._sw_start_with_windows.value:
                         autostart.add_to_startup()
                     else:
@@ -895,8 +915,8 @@ class SettingsView(ft.Container):
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
-            settings.NOTIFY_DND_START        = int(self._dnd_start_field.value or "23")
-            settings.NOTIFY_DND_END          = int(self._dnd_end_field.value or "6")
+            settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "23")))
+            settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "6")))
             settings.NOTIFY_IGNORE_SUBMITTED = self._sw_ignore_sub.value
             
             try:

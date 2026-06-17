@@ -10,6 +10,14 @@ from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
 
+
+def _get(obj, key, default=''):
+    """Get attribute from both Assignment objects and dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 class EmailNotifier(BaseNotifier):
     """
     Trình quản lý thông báo Email/Gmail với giao diện Pro Max.
@@ -45,7 +53,8 @@ class EmailNotifier(BaseNotifier):
                 .task-card { background: #ffffff; border-left: 5px solid #4f46e5; margin-bottom: 20px; padding: 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); transition: transform 0.2s; }
                 .task-card:hover { transform: translateY(-2px); }
                 .task-card.critical { border-left-color: #ef4444; background: #fff5f5; }
-                .task-card.warning { border-left-color: #f59e0b; background: #fffbeb; }\n                .task-card.safe { border-left-color: #10b981; background: #f0fdf4; }
+                .task-card.warning { border-left-color: #f59e0b; background: #fffbeb; }
+                .task-card.safe { border-left-color: #10b981; background: #f0fdf4; }
                 .title { font-size: 18px; font-weight: bold; margin: 0 0 10px 0; color: #1f2937; }
                 .meta { font-size: 14px; color: #4b5563; margin-bottom: 8px; display: flex; align-items: center; }
                 .meta strong { min-width: 90px; display: inline-block; color: #374151; }
@@ -64,20 +73,24 @@ class EmailNotifier(BaseNotifier):
             """
 
         for task in tasks:
-            is_critical = task.urgency == UrgencyLevel.CRITICAL
-            css_class = 'critical' if task.urgency == UrgencyLevel.CRITICAL else ('warning' if task.urgency == UrgencyLevel.WARNING else 'safe')
-            status_text = 'Khẩn cấp 🔴' if task.urgency == UrgencyLevel.CRITICAL else ('Sắp tới hạn 🟠' if task.urgency == UrgencyLevel.WARNING else 'An toàn 🟢')
+            urgency = _get(task, 'urgency', 'safe')
+            is_critical = urgency in ('critical', UrgencyLevel.CRITICAL)
+            is_warning = urgency in ('warning', UrgencyLevel.WARNING)
+            css_class = 'critical' if is_critical else ('warning' if is_warning else 'safe')
+            status_text = 'Khẩn cấp 🔴' if is_critical else ('Sắp tới hạn 🟠' if is_warning else 'An toàn 🟢')
             
-            title = getattr(task, 'title', 'Không rõ tiêu đề')
-            course = getattr(task, 'course_name', getattr(task, 'course', 'Không rõ môn'))
+            title = _get(task, 'title', 'Không rõ tiêu đề')
+            course = _get(task, 'course_name', '') or _get(task, 'course', 'Không rõ môn')
             
-            deadline = getattr(task, 'deadline_str', '')
-            if not deadline and getattr(task, 'deadline', None):
-                deadline = task.deadline.strftime('%H:%M %d/%m/%Y')
-            elif not deadline:
-                deadline = 'Không rõ hạn'
+            deadline = _get(task, 'deadline_str', '')
+            if not deadline:
+                dl = _get(task, 'deadline', None)
+                if dl and hasattr(dl, 'strftime'):
+                    deadline = dl.strftime('%H:%M %d/%m/%Y')
+                elif not deadline:
+                    deadline = 'Không rõ hạn'
                 
-            url = getattr(task, 'link', getattr(task, 'url', ''))
+            url = _get(task, 'link', '') or _get(task, 'url', '')
             open_time_str = None
 
             # Escape user data for HTML
@@ -94,8 +107,9 @@ class EmailNotifier(BaseNotifier):
                           <p class="title">{title}</p>
                           <div class="meta"><strong>📚 Môn học:</strong> {course}</div>
             """
-            if hasattr(task, 'details') and task.details and getattr(task.details, 'open_time', None):
-                open_time_str = task.details.open_time.strftime('%H:%M %d/%m/%Y')
+            details = _get(task, 'details', None)
+            if details and not isinstance(details, dict) and getattr(details, 'open_time', None):
+                open_time_str = details.open_time.strftime('%H:%M %d/%m/%Y')
                 try:
                     open_time_str = html.escape(open_time_str)
                 except Exception:
@@ -103,7 +117,7 @@ class EmailNotifier(BaseNotifier):
                 html_content += f'<div class="meta"><strong>🗓️ Ngày mở:</strong> {open_time_str}</div>'
 
             # Calculate remaining time using shared utility
-            remaining = format_remaining_time(getattr(task, 'deadline', None))
+            remaining = format_remaining_time(_get(task, 'deadline', None))
 
             html_content += f"""
                         <div class="meta"><strong>⏰ Hạn chót:</strong> <span style="font-weight: bold;">{deadline}</span></div>
@@ -129,7 +143,7 @@ class EmailNotifier(BaseNotifier):
         msg.add_alternative(html_content, subtype='html')
 
         try:
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as server:
                 server.login(email_address, app_password)
                 server.send_message(msg)
             logger.info(f"[Email] Đã gửi {len(tasks)} bài tập tới {email_address}")

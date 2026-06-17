@@ -57,12 +57,16 @@ class TrayApp:
     def show_app(self, icon, item):
         if self._page:
             try:
-                # Phải gán qua thread an toàn hoặc update page
-                self._page.window.visible = True
-                self._page.window.minimized = False
-                self._page.update()
+                # Schedule UI update on Flet event loop (thread-safe)
+                self._page.run_task(self._show_app_async)
             except Exception as e:
                 logger.error(f"Lỗi khi phục hồi app: {e}")
+
+    async def _show_app_async(self):
+        """Thread-safe UI update via Flet event loop."""
+        self._page.window.visible = True
+        self._page.window.minimized = False
+        self._page.update()
 
     def exit_app(self, icon, item):
         if self._page:
@@ -72,8 +76,9 @@ class TrayApp:
                 logger.error(f"Error destroying window: {e}")
         if self._icon:
             self._icon.stop()
-        import os
-        os._exit(0)
+        # Clean shutdown — sys.exit runs atexit handlers and flushes files
+        import sys
+        sys.exit(0)
 
     def notify(self, title: str, message: str):
         """Send a Windows balloon notification via pystray, with fallback."""   

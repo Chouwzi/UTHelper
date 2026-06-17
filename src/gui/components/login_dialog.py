@@ -59,6 +59,10 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             save_settings()
 
             dlg.open = False
+            try:
+                page.overlay.remove(dlg)
+            except (ValueError, AttributeError):
+                pass
             page.update()
             page.run_task(on_success_callback)
         else:

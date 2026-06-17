@@ -300,19 +300,11 @@ class DetailView(ft.Container):
             pass
 
         if client:
-            # Mở tự động đăng nhập (Tab 1)
-            token     = client.get_portal_token()
-            course_id = self._current_data.get("course_id", "")
-            details   = self._current_data.get("details", {})
-            # Ưu tiên dùng course_id nếu có
-            course_id = details.get("course_id") or course_id
-            if token and course_id:
-                course_url   = f"https://courses.ut.edu.vn/course/view.php?id={course_id}&token={token}"
-                activity_url = self._current_url
-                webbrowser.open(course_url)
-                # Delay mở môn học để đợi tự động đăng nhập thực thi (Tab 2)
-                threading.Timer(1.2, webbrowser.open, args=(activity_url,)).start()
-                return
+            # Sử dụng autologin URL thông qua Moodle login endpoint
+            activity_url = self._current_url
+            autologin_url = client.build_autologin_url(activity_url)
+            webbrowser.open(autologin_url)
+            return
 
         # Dự phòng mở thẳng khi không có cookie
         webbrowser.open(self._current_url)

@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+__version__ = "2.1.0"
+
 _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
 _FLET_DATA_DIR = _APPDATA_DIR / "flet" / "data"
 _FLET_TEMP_DIR = _APPDATA_DIR / "flet" / "temp"

@@ -427,8 +427,8 @@ class AppController:
             status      = details.get("status_data", {})
             grading     = status.get("Grading status", "")
             submission  = status.get("Submission status", "")
-            is_graded   = "Graded" in grading or "Đã chấm" in grading
-            is_submitted = "Submitted" in submission or "Đã nộp" in submission
+            is_graded   = (grading in ("Graded", "Đã chấm") or (grading.startswith("Graded") and "Not" not in grading))
+            is_submitted = (submission in ("Submitted for grading", "Đã nộp") or ("Submitted" in submission and "Not" not in submission) or ("Đã nộp" in submission and "Chưa" not in submission))
 
             if is_graded and not settings.INCLUDE_GRADED: continue
             if is_submitted and not is_graded and not settings.INCLUDE_SUBMITTED: continue
@@ -565,7 +565,7 @@ class AppController:
             with self._data_lock:
                 self.all_data = []
             
-            self.error_text.value = f"Lỗi kết nối: {str(exc)[:70]}"
+            self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
             self.error_state.visible = True
             self.status_text.value = "Lỗi kết nối server"
         finally:

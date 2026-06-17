@@ -196,7 +196,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
                 cm_id = evt.get('instance', '')
                 if modulename and cm_id:
                     url = (
-                        f"https://courses.ut.edu.vn/mod/{modulename}"
+                        f"{settings.MOODLE_BASE_URL}/mod/{modulename}"
                         f"/view.php?id={cm_id}"
                     )
 
@@ -217,8 +217,14 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
                 course_data = {}
             course_fullname = course_data.get('fullname', '') or ''
 
+            # --- Build id ---
+            evt_id = evt.get('id', '') or ''
+            if not evt_id and modulename and cm_id:
+                evt_id = f"{modulename}_{cm_id}"
+
             # --- Build dict ---
             assignment: Dict[str, Any] = {
+                'id': str(evt_id),
                 'title': evt.get('name') or 'Không tên',
                 'course_name': course_fullname,
                 'course': course_fullname,

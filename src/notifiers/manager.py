@@ -15,6 +15,9 @@ from models import UrgencyLevel
 
 logger = logging.getLogger(__name__)
 
+# Stale cache entries older than this are evicted
+_CACHE_TTL_DAYS = 90
+
 class NotificationManager:
     """
     Bộ não quản lý thông báo: Xử lý vụ ngủ (DND), 
@@ -42,12 +45,29 @@ class NotificationManager:
         try:
             with self._cache_lock:
                 with open(self._cache_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    raw = json.load(f)
         except Exception as e:
             logger.warning(f"Cannot load notification cache: {e}")
             return {}
 
+        # Migrate old format: {url: [milestones]} → {url: {"milestones": [...], "updated_at": "..."}}
+        migrated = False
+        for url, value in list(raw.items()):
+            if isinstance(value, list):
+                raw[url] = {
+                    "milestones": value,
+                    "updated_at": datetime.now().isoformat(),
+                }
+                migrated = True
+
+        if migrated:
+            self._save_cache(raw)
+
+        return raw
+
     def _save_cache(self, data: Dict):
+        # Evict stale entries before writing
+        self._evict_stale_entries(data)
         try:
             tmp = f"{self._cache_path}.tmp"
             with self._cache_lock:
@@ -58,6 +78,29 @@ class NotificationManager:
                 os.replace(tmp, self._cache_path)
         except Exception as e:
             logger.error(f"Cannot save notification cache: {e}")
+
+    def _evict_stale_entries(self, data: Dict):
+        """Remove cache entries older than _CACHE_TTL_DAYS."""
+        cutoff = datetime.now() - timedelta(days=_CACHE_TTL_DAYS)
+        stale_keys = []
+        for url, entry in data.items():
+            if not isinstance(entry, dict):
+                stale_keys.append(url)
+                continue
+            updated_at_str = entry.get("updated_at", "")
+            if not updated_at_str:
+                stale_keys.append(url)
+                continue
+            try:
+                updated_at = datetime.fromisoformat(updated_at_str)
+                if updated_at < cutoff:
+                    stale_keys.append(url)
+            except (ValueError, TypeError):
+                stale_keys.append(url)
+        for key in stale_keys:
+            del data[key]
+        if stale_keys:
+            logger.debug("Evicted %d stale notification cache entries", len(stale_keys))
 
     def _is_in_dnd(self) -> bool:
         if not config.NOTIFY_DND_ENABLE:
@@ -107,6 +150,7 @@ class NotificationManager:
         filtered = []
         cache = self._load_cache()
         now = datetime.now()
+        notify_minutes = getattr(config, 'NOTIFY_MINUTES_BEFORE', 0)
 
         for a in assignments:
             # Support both Assignment objects and dicts for backward compatibility
@@ -131,6 +175,15 @@ class NotificationManager:
             if time_left_hours < 0:
                 continue
 
+            url = getattr(a, 'url', '') or (a.get('url', '') if isinstance(a, dict) else '')
+            cache_entry = cache.get(url, {})
+            # Backward compat: old format was a list
+            if isinstance(cache_entry, list):
+                task_milestones = cache_entry
+            else:
+                task_milestones = cache_entry.get("milestones", [])
+
+            # --- Milestone matching ---
             milestones = sorted(config.NOTIFY_MILESTONES)
             matched_milestone = None
 
@@ -139,13 +192,21 @@ class NotificationManager:
                     matched_milestone = ms
                     break
 
+            # --- NOTIFY_MINUTES_BEFORE: trigger when close to deadline ---
+            minutes_before_triggered = False
+            if notify_minutes > 0:
+                time_left_minutes = time_left.total_seconds() / 60.0
+                if time_left_minutes <= notify_minutes:
+                    # Use a special sentinel milestone to track "minutes_before" notifications
+                    sentinel = f"_min_{notify_minutes}"
+                    if sentinel not in task_milestones:
+                        minutes_before_triggered = True
+                        matched_milestone = sentinel
+
             if not matched_milestone:
                 continue
 
-            url = getattr(a, 'url', '') or (a.get('url', '') if isinstance(a, dict) else '')
-            task_cache = cache.get(url, [])
-
-            if matched_milestone not in task_cache:
+            if matched_milestone not in task_milestones:
                 filtered.append({
                     "assignment": a,
                     "url": url,
@@ -163,10 +224,17 @@ class NotificationManager:
             ms = item["milestone"]
 
             if url not in cache:
-                cache[url] = []
+                cache[url] = {"milestones": [], "updated_at": datetime.now().isoformat()}
 
-            if ms not in cache[url]:
-                cache[url].append(ms)
+            entry = cache[url]
+            # Backward compat: migrate list → dict in-place
+            if isinstance(entry, list):
+                entry = {"milestones": entry, "updated_at": datetime.now().isoformat()}
+                cache[url] = entry
+
+            if ms not in entry["milestones"]:
+                entry["milestones"].append(ms)
+                entry["updated_at"] = datetime.now().isoformat()
                 updated = True
 
         if updated:

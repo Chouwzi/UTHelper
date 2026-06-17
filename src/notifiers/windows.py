@@ -13,6 +13,14 @@ from core.time_utils import format_remaining_time
 
 logger = logging.getLogger(__name__)
 
+
+def _get(obj, key, default=''):
+    """Get attribute from both Assignment objects and dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 class WindowsNotifier:
     def __init__(self, tray_app=None):
         self.tray_app = tray_app
@@ -75,19 +83,20 @@ class WindowsNotifier:
         if not assignments:
             return
 
-        critical = [a for a in assignments if getattr(a, 'urgency', None) == UrgencyLevel.CRITICAL]
-        warnings = [a for a in assignments if getattr(a, 'urgency', None) == UrgencyLevel.WARNING]
-        safes = [a for a in assignments if getattr(a, 'urgency', None) == UrgencyLevel.SAFE]
+        critical = [a for a in assignments if _get(a, 'urgency', 'safe') in ('critical', UrgencyLevel.CRITICAL)]
+        warnings = [a for a in assignments if _get(a, 'urgency', 'safe') in ('warning', UrgencyLevel.WARNING)]
+        safes = [a for a in assignments if _get(a, 'urgency', 'safe') in ('safe', UrgencyLevel.SAFE)]
         other_count = len(assignments) - len(critical) - len(warnings) - len(safes)
         title = "UTHelper - Thông báo"
         if len(assignments) == 1:
             a = assignments[0]
-            title = getattr(a, 'title', 'Bài tập mới')
-            course = getattr(a, 'course_name', getattr(a, 'course', 'Không rõ môn'))
+            title = _get(a, 'title', 'Bài tập mới')
+            course = _get(a, 'course_name', '') or _get(a, 'course', 'Không rõ môn')
             
-            remaining = format_remaining_time(getattr(a, 'deadline', None))
+            remaining = format_remaining_time(_get(a, 'deadline', None))
             
-            msg = f"Môn: {course}\nThời hạn: {remaining} | {getattr(a, 'urgency_str', getattr(a, 'urgency', '...'))}"
+            urgency_display = _get(a, 'urgency_str', '') or _get(a, 'urgency', '...')
+            msg = f"Môn: {course}\nThời hạn: {remaining} | {urgency_display}"
         else:
             msg = f"Bạn có {len(critical)} bài cực gấp, {len(warnings)} sắp tới hạn và {len(safes) + other_count} bài khác."
 
