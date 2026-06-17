@@ -726,6 +726,9 @@ class AppController:
             if not self._page_alive.is_set(): break
             pulse_high = not pulse_high
             try:
+                # Skip lock acquisition when there are no cards to pulse
+                if not self.active_cards:
+                    continue
                 with self._cards_lock:
                     cards_snapshot = list(self.active_cards)
                 self._pulse_cards_once(cards_snapshot, pulse_high)
