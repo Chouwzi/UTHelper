@@ -3,12 +3,13 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
 from core.parser import MoodleParser
 from models import Assignment
 from config import settings
 from core.time_utils import parse_datetime
+from core import ws_functions
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +88,39 @@ class DataOrchestrator:
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
         """
-        Đăng nhập và lấy danh sách hoạt động mới nhất từ lịch Moodle.
+        Đăng nhập và lấy danh sách hoạt động mới nhất.
+        Ưu tiên dùng WS API (nhanh, JSON), fallback sang HTML scraping.
         """
+        # Thử WS API trước nếu được bật
+        if settings.USE_WS_API:
+            ws_result = self._fetch_via_ws_api()
+            if ws_result is not None:
+                return ws_result
+            logger.info("WS API không khả dụng, fallback sang HTML scraping.")
+        
+        return self._fetch_via_scraping()
+    
+    def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
+        """Lấy activities bằng Moodle Web Services API (stateless, JSON)."""
+        try:
+            events = ws_functions.get_calendar_action_events(
+                self.client.call_ws_api,
+                limit=100,
+            )
+            if events is None:
+                return None
+            
+            # Convert WS events to UTHelper format
+            results = ws_functions.ws_events_to_assignments(events)
+            logger.info("WS API trả về %d events thành công.", len(results))
+            self.is_logged_in = True  # WS token works = we're authenticated
+            return results
+        except Exception as e:
+            logger.warning("WS API fetch thất bại: %s", e)
+            return None
+    
+    def _fetch_via_scraping(self) -> List[Dict[str, Any]]:
+        """Lấy activities bằng HTML scraping (fallback)."""
         if not self.login():
             logger.error("Đăng nhập thất bại, không thể lấy dữ liệu.")
             return []
@@ -126,11 +158,12 @@ class DataOrchestrator:
                     if not any(a.id == p.id for a in all_assignments):
                         all_assignments.append(p)
             except Exception as e:
-                logger.error(f"[Orchestrator] Lỗi parse lịch: {e}")
+                logger.error("[Orchestrator] Lỗi parse lịch: %s", e)
 
         # Chuyển đổi sang format chuẩn cho UI
         results = [self._format_assignment(a) for a in all_assignments]
         return results
+
 
     def fetch_full_details(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> Dict[str, Any]:
         """
