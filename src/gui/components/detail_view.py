@@ -4,6 +4,52 @@ import threading
 from gui.core.theme import C
 from gui.core.utils import get_urgency_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
 
+_STATUS_TRANSLATIONS = {
+    "No submissions have been made yet": "Chưa nộp bài",
+    "No submission": "Chưa nộp",
+    "Submitted for grading": "Đã nộp, chờ chấm",
+    "Not graded": "Chưa chấm",
+    "Graded": "Đã chấm",
+    "No attempt": "Chưa thực hiện",
+    "Finished": "Đã hoàn thành",
+    "In progress": "Đang thực hiện",
+    "Not yet open": "Chưa mở",
+    "This submission is being graded": "Đang chấm bài",
+}
+
+def _translate_status(text: str) -> str:
+    """Translate common Moodle English status strings to Vietnamese."""
+    if not text:
+        return text
+    # Exact match first
+    if text in _STATUS_TRANSLATIONS:
+        return _STATUS_TRANSLATIONS[text]
+    # Try case-insensitive
+    text_lower = text.lower()
+    for en, vi in _STATUS_TRANSLATIONS.items():
+        if en.lower() == text_lower:
+            return vi
+    # Partial match for 'remaining' → 'còn lại'
+    if 'remaining' in text_lower:
+        return text.replace('remaining', 'còn lại').replace('Remaining', 'còn lại')
+    return text
+
+# Also translate status keys
+_KEY_TRANSLATIONS = {
+    "Submission status": "Trạng thái nộp bài",
+    "Grading status": "Trạng thái chấm",
+    "Time remaining": "Thời gian còn lại",
+    "Last modified": "Sửa lần cuối",
+    "Attempts allowed": "Số lần cho phép",
+    "File submissions": "Bài nộp",
+    "Grading method": "Phương pháp chấm",
+    "Cut-off date": "Hạn cuối",
+}
+
+def _translate_key(key: str) -> str:
+    return _KEY_TRANSLATIONS.get(key, key)
+
+
 class DetailView(ft.Container):
     def __init__(self, page: ft.Page, on_close, get_client=None):
         super().__init__()
@@ -24,6 +70,17 @@ class DetailView(ft.Container):
         self._opentime_txt  = ft.Text("", size=13, color=C.TEXT_PRIMARY)
         self._loading_bar   = ft.ProgressBar(color=C.ACCENT, bgcolor=C.BORDER,
                                              visible=False)
+        self._error_banner = ft.Container(
+            content=ft.Row(controls=[
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=14, color=C.WARNING),
+                ft.Text("Không thể tải chi tiết đầy đủ", size=11, color=C.WARNING),
+            ], spacing=6),
+            bgcolor=C.SURFACE,
+            padding=ft.padding.symmetric(horizontal=12, vertical=6),
+            border_radius=6,
+            border=ft.border.all(1, C.WARNING),
+            visible=False,
+        )
         self._content_col   = ft.Column(spacing=12)
 
         self._open_btn = ft.Container(
@@ -40,10 +97,11 @@ class DetailView(ft.Container):
 
         back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK, size=13, color=C.TEXT_SECONDARY),
-                ft.Text("Quay lại", size=13, color=C.TEXT_SECONDARY),
+                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
+                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
             ], spacing=4, tight=True),
             on_click=lambda _: on_close(),
+            style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
         )
 
         self._opentime_row = ft.Row(controls=[
@@ -81,6 +139,7 @@ class DetailView(ft.Container):
                     padding=ft.Padding.only(left=8, top=16, bottom=8),
                 ),
                 self._loading_bar,
+                self._error_banner,
                 ft.Container(
                     content=ft.Column(
                         controls=[
@@ -154,6 +213,7 @@ class DetailView(ft.Container):
 
     def update_detail(self, data: dict):
         self._loading_bar.visible  = False
+        self._error_banner.visible = False
         self._title_text.value     = data.get("title", "Không có tiêu đề")
         self._current_url          = data.get("url", "")
         self._current_data         = data
@@ -177,8 +237,8 @@ class DetailView(ft.Container):
         if status_data:
             rows = [
                 ft.Row(controls=[
-                    ft.Text(k, size=12, color=C.TEXT_SECONDARY, width=130),
-                    ft.Text(str(v), size=12, color=C.TEXT_PRIMARY, expand=True),
+                    ft.Text(_translate_key(k), size=12, color=C.TEXT_SECONDARY, width=130),
+                    ft.Text(_translate_status(str(v)), size=12, color=C.TEXT_PRIMARY, expand=True),
                 ], spacing=8)
                 for k, v in status_data.items()
                 if k not in ("Online text", "Submission comments", "Mở từ") and v
@@ -273,6 +333,9 @@ class DetailView(ft.Container):
             ]))
 
         # Chỉ thay đổi giao diện, không tự gọi update
+
+    def show_error_banner(self):
+        self._error_banner.visible = True
 
     # ── Hàm nội bộ (Private) ──
     def _section(self, title: str, controls: list) -> ft.Container:

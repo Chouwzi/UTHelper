@@ -105,6 +105,9 @@ class AppController:
                 await self.page.window.destroy()
 
     def _init_ui(self):
+        # Skeleton loading cards
+        self._skeleton_visible = True
+
         # Footer components
         self.status_text     = ft.Text("Đang khởi động...", size=11, color=C.TEXT_SECONDARY)
         self.footer_critical = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
@@ -143,7 +146,7 @@ class AppController:
         self.course_popup = ft.PopupMenuButton(
             content=ft.Container(
                 content=ft.Row([
-                    ft.Container(content=self.course_btn_label, width=60, alignment=ft.Alignment(-1, 0)),
+                    ft.Container(content=self.course_btn_label, width=80, alignment=ft.Alignment(-1, 0)),
                     ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)
                 ], spacing=2, tight=True),
                 bgcolor=C.SURFACE, border=ft.border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=8, vertical=8),
@@ -155,8 +158,8 @@ class AppController:
 
         self._overdue_cb = ft.Checkbox(
             value=settings.INCLUDE_PAST_DUE,
-            label="Quá hạn",
-            label_style=ft.TextStyle(size=13, color=C.TEXT_SECONDARY),
+            label="Hiển thị quá hạn",
+            label_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
             active_color=C.CRITICAL,
             check_color=C.BG,
             scale=1,
@@ -193,7 +196,15 @@ class AppController:
         header = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
-                    ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+                    ft.Row(controls=[
+                        ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+                        ft.Container(
+                            content=ft.Text("v2.1.0", size=9, color=C.TEXT_SECONDARY),
+                            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                            border=ft.border.all(1, C.BORDER),
+                            border_radius=4,
+                        ),
+                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Row(controls=[self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
@@ -220,8 +231,10 @@ class AppController:
         self.cards_column = ft.ListView(spacing=8, expand=True)
         self.empty_state  = ft.Container(
             content=ft.Column(controls=[
+                ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER),
+                ft.Container(height=4),
                 ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
-                ft.Text("Không có thông báo mới", size=12, color=C.BORDER),
+                ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
@@ -248,12 +261,13 @@ class AppController:
                 self.footer_critical, self.footer_warning, self.footer_safe, self.footer_overdue,
             ], spacing=12, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=C.SURFACE, padding=ft.Padding.symmetric(vertical=8),
-            border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
+            border=ft.Border.only(top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "40")),
         )
 
         self.dashboard = ft.Column(
             controls=[header, filter_container, content_area, footer],
             spacing=0, expand=True,
+            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
         self.detail_view   = DetailView(self.page, on_close=lambda: self.page.run_task(self._close_detail), get_client=lambda: self.orchestrator.client)
@@ -269,6 +283,44 @@ class AppController:
         )
 
         self.page.add(ft.Stack(controls=[self.dashboard, self.detail_view, self.settings_view], expand=True))
+
+        # Show skeleton cards immediately while data loads
+        self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
+
+    def _make_skeleton_card(self):
+        """Create a skeleton placeholder card that mimics ActivityCard layout."""
+        _shimmer = C.BORDER
+        return ft.Container(
+            content=ft.Row([
+                ft.Container(width=3, bgcolor=_shimmer,
+                             border_radius=ft.BorderRadius.only(top_left=10, bottom_left=10)),
+                ft.Container(
+                    content=ft.Column(controls=[
+                        ft.Row(controls=[
+                            ft.Container(width=50, height=18, bgcolor=_shimmer, border_radius=4),
+                            ft.Container(width=55, height=18, bgcolor=_shimmer, border_radius=4),
+                        ], spacing=6),
+                        ft.Container(width=120, height=12, bgcolor=_shimmer, border_radius=3),
+                        ft.Container(width=260, height=14, bgcolor=_shimmer, border_radius=3),
+                        ft.Container(width=180, height=11, bgcolor=_shimmer, border_radius=3),
+                        ft.Container(height=4, bgcolor=_shimmer, border_radius=2),
+                    ], spacing=8),
+                    padding=ft.Padding.only(left=14, right=14, top=12, bottom=12),
+                    expand=True,
+                ),
+            ], spacing=0),
+            bgcolor=C.SURFACE,
+            border_radius=10,
+            border=ft.border.all(1, C.BORDER),
+            animate_opacity=ft.Animation(600, ft.AnimationCurve.EASE_IN_OUT),
+            opacity=0.5,
+        )
+
+    def _clear_skeletons(self):
+        """Remove skeleton cards when real data arrives."""
+        if self._skeleton_visible:
+            self._skeleton_visible = False
+            self.cards_column.controls.clear()
 
     def _make_filter_popup(self, cfg, on_select_cb):
         btn_label = ft.Text(cfg[0][1], size=12, color=cfg[0][2], weight=ft.FontWeight.W_500)
@@ -358,15 +410,20 @@ class AppController:
             ))
         self.course_popup.items = c_items
 
-        self.footer_critical.value = f"Khẩn cấp · {n_critical}" if n_critical else ""
-        self.footer_warning.value  = f"Sắp đến hạn · {n_warning}" if n_warning else ""
-        self.footer_safe.value     = f"An toàn · {n_safe}" if n_safe else ""
-        self.footer_overdue.value  = f"Quá hạn · {n_overdue}" if n_overdue else ""
+        self.footer_critical.value = f"Khẩn cấp · {n_critical}"
+        self.footer_critical.color = C.CRITICAL if n_critical else C.BORDER
+        self.footer_warning.value  = f"Sắp hạn · {n_warning}"
+        self.footer_warning.color  = C.WARNING if n_warning else C.BORDER
+        self.footer_safe.value     = f"An toàn · {n_safe}"
+        self.footer_safe.color     = C.SAFE if n_safe else C.BORDER
+        self.footer_overdue.value  = f"Quá hạn · {n_overdue}"
+        self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
 
         self._update_urgency_counts(counts["urgency"])
         self._update_type_counts(type_counts)
 
         # Render cards
+        self._clear_skeletons()
         self.empty_state.visible = (len(filtered_items) == 0 and not self.loading_bar.visible)
         self.error_state.visible = False
 
@@ -445,7 +502,13 @@ class AppController:
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
-        self._render_cards()
+        # Debounce: cancel previous timer, wait 300ms before rendering
+        if hasattr(self, '_search_task') and self._search_task:
+            self._search_task.cancel()
+        async def _delayed_render():
+            await asyncio.sleep(0.3)
+            self._render_cards()
+        self._search_task = self.page.run_task(_delayed_render)
 
     async def _prefetch_details_async(self, activities: list):
         total = len(activities)
@@ -453,7 +516,7 @@ class AppController:
         
         with self._data_lock:
             count = len(self.all_data)
-        self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {count} hoạt động  (đang cập nhật chi tiết...)"
+        self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {count} hoạt động"
         self.loading_bar.visible = True
         self.page.update()
 
@@ -490,7 +553,7 @@ class AppController:
             with self._data_lock:
                 self.all_data = data_copy
             self._update_footer()
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(data_copy)} hoạt động  ✓ sẵn sàng"
+            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {len(data_copy)} hoạt động ✓"
             self.loading_bar.visible = False
             self.page.update()
 
@@ -543,7 +606,7 @@ class AppController:
             ))
             with self._data_lock:
                 self.all_data = data_copy
-            self.status_text.value = f"{source_tag} • {datetime.now().strftime('%H:%M')} • {len(data_copy)} hoạt động"
+            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {len(data_copy)} hoạt động"
             
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
@@ -576,6 +639,7 @@ class AppController:
 
     async def _close_detail(self):
         self.detail_view.visible = False
+        self.dashboard.opacity = 1.0
         self.dashboard.visible   = True
         self.page.update()
 
@@ -612,6 +676,7 @@ class AppController:
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
         self.settings_view.visible = False
+        self.dashboard.opacity = 1.0
         self.dashboard.visible = True
         
         self._update_footer()
@@ -703,6 +768,7 @@ class AppController:
             self.detail_view.update_detail(full_data)
         except Exception:
             self.detail_view.update_detail(data)
+            self.detail_view.show_error_banner()
         self.page.update()
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
@@ -744,8 +810,14 @@ class AppController:
 
     async def _countdown_loop_async(self):
         while self._page_alive.is_set():
+            # Adaptive interval: faster when critical items exist
+            has_critical = any(
+                getattr(c, '_is_critical_active', False)
+                for c in (self.active_cards or [])
+            )
+            interval = 15 if has_critical else 60
             slept = 0
-            while slept < 60 and self._page_alive.is_set():
+            while slept < interval and self._page_alive.is_set():
                 await asyncio.sleep(1)
                 slept += 1
             if not self._page_alive.is_set(): break

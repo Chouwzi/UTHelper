@@ -58,6 +58,18 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             orchestrator.is_logged_in = True  # Đồng bộ trạng thái orchestrator
             save_settings()
 
+            # Success feedback before closing
+            btn_login.text = "✓ Đăng nhập thành công!"
+            btn_login.style = ft.ButtonStyle(
+                color=ft.Colors.WHITE,
+                bgcolor=C.SAFE,
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=12,
+            )
+            loading_bar.visible = False
+            page.update()
+            await asyncio.sleep(0.6)
+
             dlg.open = False
             try:
                 page.overlay.remove(dlg)

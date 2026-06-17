@@ -76,6 +76,7 @@ class ActivityCard(ft.Container):
         self.bgcolor = C.SURFACE
         self.border_radius = 10
         self.ink = True
+        self.mouse_cursor = ft.MouseCursor.CLICK
         
         self.animate = ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT)
         self.on_click = lambda _: self.on_tap_cb(self.data)
