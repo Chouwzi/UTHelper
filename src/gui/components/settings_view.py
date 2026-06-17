@@ -662,14 +662,6 @@ class SettingsView(ft.Container):
         self._gmail_pw_field.update()
         self._discord_wh_field.update()
 
-    def _toggle_integration_ui(self):
-        self._gmail_addr_field.visible = self._sw_email.value
-        self._gmail_pw_field.visible = self._sw_email.value
-        self._discord_wh_field.visible = self._sw_discord.value
-        self._gmail_addr_field.update()
-        self._gmail_pw_field.update()
-        self._discord_wh_field.update()
-
     def _toggle_telegram_ui(self):
         v = self._sw_telegram.value
         self._tel_token_field.visible = v
