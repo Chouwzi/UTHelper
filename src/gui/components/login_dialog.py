@@ -227,7 +227,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
                         spacing=6, alignment=ft.MainAxisAlignment.CENTER,
                     ),
                 ),
-            ], tight=True, spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ], tight=True, spacing=4, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             padding=ft.Padding.only(top=8, bottom=4),
         ),
         content_padding=24,
