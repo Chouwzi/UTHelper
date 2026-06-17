@@ -79,6 +79,29 @@ if errorlevel 1 (
 )
 
 echo.
-echo [UTHelper] Build finished.
-echo Output: %CD%\dist\flet-build\UTHelper
+echo [UTHelper] Creating installer...
+set "ISCC="
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files\Inno Setup 6\ISCC.exe"
+
+if defined ISCC (
+    "%ISCC%" "%CD%\installer.iss"
+    if errorlevel 1 (
+        echo.
+        echo [UTHelper] Installer creation failed.
+        pause
+        exit /b 1
+    )
+    echo.
+    echo [UTHelper] Build finished.
+    echo EXE Bundle: %CD%\dist\flet-build\UTHelper
+    echo Installer:  %CD%\dist\UTHelper_Setup_v2.1.0.exe
+) else (
+    echo [UTHelper] Inno Setup not found. Skipping installer creation.
+    echo [UTHelper] Install Inno Setup 6 to create an installer: winget install JRSoftware.InnoSetup
+    echo.
+    echo [UTHelper] Build finished.
+    echo Output: %CD%\dist\flet-build\UTHelper
+)
 pause
