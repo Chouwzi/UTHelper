@@ -7,7 +7,6 @@ from requests.exceptions import TooManyRedirects
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from typing import Optional
-import httpx
 from config import settings
 import logging
 from core.network_utils import retry_with_backoff
