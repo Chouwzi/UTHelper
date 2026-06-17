@@ -22,7 +22,9 @@ class NotificationManager:
     """
     def __init__(self, tray_app=None, cache_file="notifications_cache.json"):
         self.notifiers: List[BaseNotifier] = []
-        self._cache_path = cache_file
+        # Store cache in AppData alongside settings.json
+        from config import _USER_DATA_DIR
+        self._cache_path = str(_USER_DATA_DIR / cache_file)
         self._cache_lock = threading.Lock()
 
         if tray_app:

@@ -34,7 +34,7 @@ class Settings(BaseModel):
     # Thông tin đăng nhập UTH
     UTH_USERNAME: str = Field(default="", description="Mã số sinh viên (MSSV)")
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
-    MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập")
+    MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     USE_WS_API: bool = Field(default=True, description="Ưu tiên dùng WS API thay vì HTML scraping")
 
@@ -124,6 +124,7 @@ def load_settings() -> Settings:
     # Khôi phục tất cả secrets từ keyring
     _SECRETS = {
         'UTH_PASSWORD': 'password',
+        'MOODLE_SESSION': 'moodle_session',
         'MOODLE_WS_TOKEN': 'ws_token',
         'GMAIL_APP_PASSWORD': 'gmail_app_password',
         'DISCORD_WEBHOOK_URL': 'discord_webhook',
@@ -166,6 +167,7 @@ def save_settings():
     # Lưu tất cả secrets vào keyring (không phải JSON)
     _SECRETS = {
         'UTH_PASSWORD': 'password',
+        'MOODLE_SESSION': 'moodle_session',
         'MOODLE_WS_TOKEN': 'ws_token',
         'GMAIL_APP_PASSWORD': 'gmail_app_password',
         'DISCORD_WEBHOOK_URL': 'discord_webhook',
