@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import threading
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -24,6 +25,8 @@ def test_background_prefetch_uses_cache_by_default():
     controller.all_data = []
     controller._prefetch_cancel = False
     controller._is_loading = False
+    controller._data_lock = threading.Lock()
+    controller._prefetch_cancel_event = threading.Event()
     controller._update_footer = lambda: None
     controller._render_cards = lambda: None
 
