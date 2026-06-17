@@ -122,7 +122,9 @@ class ActivityCard(ft.Container):
 
         _details = data.get("details", {})
         _full_name = _details.get("course_full_name", "")
-        course_clean = clean_course_name(_full_name or data.get("course", ""))
+        # WS API provides course_name directly (cleaner than HTML scraping)
+        _ws_course = data.get("course_name", "")
+        course_clean = clean_course_name(_ws_course or _full_name or data.get("course", ""))
 
         cd_color = C.CRITICAL if overdue else color
         bar_color = color
