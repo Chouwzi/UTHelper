@@ -15,13 +15,23 @@ logger = logging.getLogger(__name__)
 
 # Khởi tạo ThreadPool duy nhất để parse HTML giảm thiểu overhead của Process trên app Desktop
 _PARSER_POOL = None
+_PARSER_POOL_LOCK = threading.Lock()
+
 def get_parser_pool():
     global _PARSER_POOL
     if _PARSER_POOL is None:
-        # Use configured prefetch workers (bounded)
-        workers = max(1, int(getattr(settings, 'PREFETCH_WORKERS', 4)))
-        _PARSER_POOL = ThreadPoolExecutor(max_workers=workers)
+        with _PARSER_POOL_LOCK:
+            if _PARSER_POOL is None:  # double-check
+                workers = max(1, int(getattr(settings, 'PREFETCH_WORKERS', 4)))
+                _PARSER_POOL = ThreadPoolExecutor(max_workers=workers)
     return _PARSER_POOL
+
+def shutdown_parser_pool():
+    """Shutdown the global parser pool and release threads."""
+    global _PARSER_POOL
+    if _PARSER_POOL:
+        _PARSER_POOL.shutdown(wait=False)
+        _PARSER_POOL = None
 
 class DataOrchestrator:
     """

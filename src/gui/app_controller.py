@@ -23,14 +23,15 @@ def _save_setting(key: str, value):
         from config import settings, save_settings
         setattr(settings, key, value)
         save_settings()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to save setting {key}: {e}")
 
 
 class AppController:
     def __init__(self, page: ft.Page):
         self.page = page
         self._cards_lock = threading.Lock()
+        self._data_lock = threading.Lock()
         self._page_alive = threading.Event()
         self._page_alive.set()
         
@@ -44,7 +45,7 @@ class AppController:
         self.active_search = ""
         self._is_loading = False
         
-        self._prefetch_cancel = False
+        self._prefetch_cancel_event = threading.Event()
 
         self._init_window()
         self._init_ui()
@@ -312,8 +313,11 @@ class AppController:
         return popup, update_counts
 
     def _refresh_ui(self):
+        # Snapshot all_data under lock for thread safety
+        with self._data_lock:
+            data_snapshot = list(self.all_data)
         # Lọc sơ bộ dữ liệu theo cài đặt chung
-        base = self._apply_settings_filter(self.all_data)
+        base = self._apply_settings_filter(data_snapshot)
         
         from core.filter_service import FilterService
         filtered_items, counts = FilterService.filter_and_count(
@@ -438,18 +442,18 @@ class AppController:
         _save_setting("INCLUDE_PAST_DUE", settings.INCLUDE_PAST_DUE)
         
         self._update_footer()
-        self.page.update()
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
         self._render_cards()
-        self.page.update()
 
     async def _prefetch_details_async(self, activities: list):
         total = len(activities)
         workers = max(1, min(settings.PREFETCH_WORKERS, 10))
         
-        self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động  (đang cập nhật chi tiết...)"
+        with self._data_lock:
+            count = len(self.all_data)
+        self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {count} hoạt động  (đang cập nhật chi tiết...)"
         self.loading_bar.visible = True
         self.page.update()
 
@@ -457,17 +461,19 @@ class AppController:
             self.orchestrator.prefetch_all_details,
             activities,
             workers,
-            lambda: self._prefetch_cancel,
+            lambda: self._prefetch_cancel_event.is_set(),
             False
         )
 
-        if not self._prefetch_cancel and not self._is_loading:
+        if not self._prefetch_cancel_event.is_set() and not self._is_loading:
             cache = self.orchestrator.get_cached_details_snapshot()
-            for i, item in enumerate(self.all_data):
+            with self._data_lock:
+                data_copy = list(self.all_data)
+            for i, item in enumerate(data_copy):
                 url = item.get("url")
                 if url and url in cache:
                     enriched = cache[url]
-                    self.all_data[i] = {
+                    data_copy[i] = {
                         **item,
                         "type": enriched.get("type", item.get("type", "other")),
                         "course": enriched.get("course", item.get("course", "")),
@@ -477,20 +483,21 @@ class AppController:
                         "is_open": enriched.get("is_open", item.get("is_open")),
                         "urgency": enriched.get("urgency", item.get("urgency")),
                     }
-            
-            self.all_data.sort(key=lambda x: (
+            data_copy.sort(key=lambda x: (
                 0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
                 x.get("deadline", "")
             ))
+            with self._data_lock:
+                self.all_data = data_copy
             self._update_footer()
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động  ✓ sẵn sàng"
+            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(data_copy)} hoạt động  ✓ sẵn sàng"
             self.loading_bar.visible = False
             self.page.update()
 
     async def _load_data_async(self):
         if self._is_loading: return
         self._is_loading = True
-        self._prefetch_cancel = True
+        self._prefetch_cancel_event.set()
 
         self.refresh_btn.disabled = True
         self.status_text.value    = "Đang kết nối Moodle..."
@@ -505,14 +512,17 @@ class AppController:
                 result = await self.orchestrator.get_latest_activities_async()
             else:
                 result = await asyncio.to_thread(self.orchestrator.get_latest_activities)
-            self.all_data = result or []
+            with self._data_lock:
+                self.all_data = result or []
             
             cache = self.orchestrator.get_cached_details_snapshot()
-            for i, item in enumerate(self.all_data):
+            with self._data_lock:
+                data_copy = list(self.all_data)
+            for i, item in enumerate(data_copy):
                 url = item.get("url")
                 if url and url in cache:
                     enriched = cache[url]
-                    self.all_data[i] = {
+                    data_copy[i] = {
                         **item,
                         "type": enriched.get("type", item.get("type", "other")),
                         "course": enriched.get("course", item.get("course", "")),
@@ -525,28 +535,35 @@ class AppController:
                     
             
             # Determine data source for status display
-            ws_count = sum(1 for x in self.all_data if x.get('source') == 'ws_api')
+            ws_count = sum(1 for x in data_copy if x.get('source') == 'ws_api')
             source_tag = "⚡ API" if ws_count > 0 else "🌐 Web"
-            self.status_text.value = f"{source_tag} • {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động"
-            self.all_data.sort(key=lambda x: (
+            data_copy.sort(key=lambda x: (
                 0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
                 x.get("deadline", "")
             ))
+            with self._data_lock:
+                self.all_data = data_copy
+            self.status_text.value = f"{source_tag} • {datetime.now().strftime('%H:%M')} • {len(data_copy)} hoạt động"
             
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
                 try:
-                    self.notifier.dispatch(self.all_data)
+                    with self._data_lock:
+                        dispatch_copy = list(self.all_data)
+                    self.notifier.dispatch(dispatch_copy)
                 except Exception as e:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
             self._update_footer()
             
-            self._prefetch_cancel = False
-            self.page.run_task(self._prefetch_details_async, list(self.all_data))
+            self._prefetch_cancel_event.clear()
+            with self._data_lock:
+                prefetch_copy = list(self.all_data)
+            self.page.run_task(self._prefetch_details_async, prefetch_copy)
         except Exception as exc:
             logger.exception(f"[Load] Lỗi: {exc}")
-            self.all_data = []
+            with self._data_lock:
+                self.all_data = []
             
             self.error_text.value = f"Lỗi kết nối: {str(exc)[:70]}"
             self.error_state.visible = True
@@ -574,18 +591,24 @@ class AppController:
 
         # Recalculate urgency dynamically using new settings thresholds
         from datetime import datetime
-        for d in self.all_data:
+        with self._data_lock:
+            data_copy = list(self.all_data)
+        for d in data_copy:
             dt_str = d.get("deadline")
             if dt_str:
                 dt = parse_datetime(dt_str)
                 if dt:
                     diff_h = (dt - datetime.now()).total_seconds() / 3600
-                    if diff_h < settings.URGENCY_CRITICAL_HOURS:
+                    if diff_h < 0:
+                        d["urgency"] = "overdue"
+                    elif diff_h < settings.URGENCY_CRITICAL_HOURS:
                         d["urgency"] = "critical"
                     elif diff_h < settings.URGENCY_WARNING_HOURS:
                         d["urgency"] = "warning"
                     else:
                         d["urgency"] = "safe"
+        with self._data_lock:
+            self.all_data = data_copy
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
         self.settings_view.visible = False
@@ -752,4 +775,14 @@ class AppController:
 
     def _on_disconnect(self, e):
         self._page_alive.clear()
+        self._prefetch_cancel_event.set()
+        try:
+            self.orchestrator.client.close()
+        except Exception:
+            pass
+        try:
+            from core.data_orchestrator import shutdown_parser_pool
+            shutdown_parser_pool()
+        except Exception:
+            pass
 
