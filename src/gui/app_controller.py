@@ -524,7 +524,10 @@ class AppController:
                     }
                     
             
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động"
+            # Determine data source for status display
+            ws_count = sum(1 for x in self.all_data if x.get('source') == 'ws_api')
+            source_tag = "⚡ API" if ws_count > 0 else "🌐 Web"
+            self.status_text.value = f"{source_tag} • {datetime.now().strftime('%H:%M')} • {len(self.all_data)} hoạt động"
             self.all_data.sort(key=lambda x: (
                 0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
                 x.get("deadline", "")
