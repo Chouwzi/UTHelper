@@ -27,7 +27,6 @@ class MoodleClient:
         pool_size = max(10, settings.PREFETCH_WORKERS + 5)
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=pool_size, pool_maxsize=pool_size)
         self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
 
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -36,6 +35,10 @@ class MoodleClient:
         })
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
         self._load_cookies()
+
+    def close(self):
+        """Close the underlying requests session and release connection pool."""
+        self.session.close()
 
     def _load_cookies(self):
         if settings.MOODLE_SESSION:
@@ -129,7 +132,11 @@ class MoodleClient:
                 data=request_params,
                 timeout=20
             )
-            result = resp.json()
+            try:
+                result = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                logger.error(f"WS API [{function}] trả về response không phải JSON (status={resp.status_code}).")
+                return None
             
             # Check for token expiry or invalid token
             if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
@@ -144,7 +151,11 @@ class MoodleClient:
                         data=request_params,
                         timeout=20
                     )
-                    result = resp.json()
+                    try:
+                        result = resp.json()
+                    except (json.JSONDecodeError, ValueError):
+                        logger.error(f"WS API [{function}] retry trả về response không phải JSON (status={resp.status_code}).")
+                        return None
                 else:
                     return None
             
@@ -180,7 +191,7 @@ class MoodleClient:
         user = username or settings.UTH_USERNAME
         pwd  = password or settings.UTH_PASSWORD
         try:
-            r = requests.post(
+            r = self.session.post(
                 f"{settings.PORTAL_API_BASE}/user/login",
                 json={"username": user, "password": pwd},
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
@@ -255,6 +266,9 @@ class MoodleClient:
                 return False
                 
             token = token_input.get("value")
+            if not token:
+                logger.error("Login token tìm thấy nhưng không có giá trị (value=None).")
+                return False
 
             # Bước 2: Gửi yêu cầu đăng nhập (POST)
             payload = {
@@ -294,7 +308,6 @@ class MoodleClient:
                 logger.warning("Đăng nhập thất bại (sai tài khoản hoặc mật khẩu).")
             
             self.session.cookies.clear()
-            self._save_cookies()
             return False
             
         except Exception as e:
@@ -350,7 +363,14 @@ class MoodleClient:
     def fetch_url(self, url: str, timeout: int = 10) -> Optional[str]:
         """
         Lấy nội dung HTML của một đường dẫn bất kỳ bằng session hiện tại.
+        Chỉ cho phép URL thuộc MOODLE_BASE_URL hoặc PORTAL_API_BASE (chống SSRF).
         """
+        # SSRF guard: chỉ cho phép domain đã biết
+        allowed_prefixes = (settings.MOODLE_BASE_URL, settings.PORTAL_API_BASE)
+        if not url or not url.startswith(allowed_prefixes):
+            logger.error(f"fetch_url bị chặn vì URL không thuộc domain cho phép: {url}")
+            return None
+
         try:
             res = self.session.get(url, timeout=timeout)
             res.raise_for_status()
