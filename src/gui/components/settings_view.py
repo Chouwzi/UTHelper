@@ -41,6 +41,7 @@ class SettingsView(ft.Container):
 
         self._test_login_btn = ft.ElevatedButton(
             "Kiểm tra kết nối",
+            icon=ft.Icons.WIFI_FIND_ROUNDED,
             on_click=self._handle_test_login,
             style=ft.ButtonStyle(
                 color=ft.Colors.WHITE,
@@ -428,22 +429,33 @@ class SettingsView(ft.Container):
 
         self._save_status = ft.Text("", size=12, color=C.SAFE)
 
+        self._unsaved_dot = ft.Container(
+            width=8, height=8, border_radius=4,
+            bgcolor=C.CRITICAL, visible=False,
+        )
         back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK, size=14, color=C.TEXT_SECONDARY),
-                ft.Text("Quay lại", size=13, color=C.TEXT_SECONDARY),
-            ], spacing=4, tight=True),
+                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
+                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
+                self._unsaved_dot,
+            ], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             on_click=self._handle_back,
             style=ft.ButtonStyle(
                 color=C.TEXT_SECONDARY,
-                overlay_color=ft.Colors.with_opacity(0.1, C.TEXT_SECONDARY)
+                overlay_color=ft.Colors.with_opacity(0.1, C.TEXT_SECONDARY),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=10),
             )
         )
 
         save_btn = ft.Container(
-            content=ft.Text("Lưu cài đặt", size=13, color=ft.Colors.WHITE,
-                            weight=ft.FontWeight.BOLD,
-                            text_align=ft.TextAlign.CENTER),
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.SAVE_ROUNDED, size=16, color=ft.Colors.WHITE),
+                    ft.Text("Lưu cài đặt", size=14, color=ft.Colors.WHITE,
+                            weight=ft.FontWeight.BOLD),
+                ],
+                spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+            ),
             bgcolor=C.ACCENT,
             padding=ft.Padding.symmetric(vertical=14),
             border_radius=10,
@@ -459,10 +471,12 @@ class SettingsView(ft.Container):
         
         self._tiles = []
 
-        def _setting_group(title, subtitle, controls, default_open=False):
+        def _setting_group(title, subtitle, controls, default_open=False, icon=None):
+            leading_icon = ft.Icon(icon, size=20, color=C.ACCENT) if icon else None
             tile = ft.ExpansionTile(
                 title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
                 subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
+                leading=leading_icon,
                 affinity=ft.Theme.color_scheme,
                 controls=[
                     ft.Container(content=ft.Column(controls, horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=10)
@@ -484,121 +498,155 @@ class SettingsView(ft.Container):
                 clip_behavior=ft.ClipBehavior.HARD_EDGE
             )
 
+        # --- Scrollable content (settings groups) ---
+        _scroll_content = ft.Column(
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            controls=[
+                # Title row
+                ft.Row(controls=[
+                    ft.Column(controls=[
+                        ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700,
+                                color=C.TEXT_PRIMARY),
+                        ft.Text("UTHelper v2.1.0", size=11, color=C.TEXT_SECONDARY),
+                    ], spacing=2),
+                ]),
+                ft.Divider(height=16, color=C.BORDER),
+
+                _setting_group(
+                    "Tài khoản UTH",
+                    "Thông tin đăng nhập hệ thống elearning",
+                    [self._username_field, self._password_field, self._test_loading_bar, self._test_login_status, self._test_login_btn],
+                    icon=ft.Icons.PERSON_OUTLINE_ROUNDED,
+                ),
+                _setting_group(
+                    "Hiển thị",
+                    "Cách hiển thị trên màn hình",
+                    [self._sw_submitted, self._sw_graded, self._sw_always_on_top],
+                    icon=ft.Icons.VISIBILITY_OUTLINED,
+                ),
+
+                _setting_group(
+                    "Hệ thống",
+                    "Khởi động và tự động cập nhật",
+                    [
+                        self._sw_start_with_windows, self._sw_start_minimized, self._sw_minimize_to_tray,
+                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                        self._interval_field,
+                          _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                          self._fetch_months_field,
+                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
+                    ],
+                    icon=ft.Icons.SETTINGS_OUTLINED,
+                ),
+
+                _setting_group(
+                    "Cảnh báo",
+                    "Ngưỡng thời gian màu sắc",
+                    [
+                        ft.Text("Mức độ", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._critical_hours_field,
+                        self._warning_hours_field,
+                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                        ft.Text("Trạng thái", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._opening_soon_hours_field,
+                        _hint("Hoạt động sẽ được đánh dấu 'Sắp mở' khi thời gian mở nhỏ hơn mức này.")
+                    ],
+                    icon=ft.Icons.NOTIFICATIONS_ACTIVE_OUTLINED,
+                ),
+
+                _setting_group(
+                    "Giao diện",
+                    "Tùy chỉnh màu thông báo và thẻ",
+                    [row_cri, row_warn, row_safe, ft.Divider(height=10, color=C.BORDER), row_quiz, row_ass, row_att, row_open, row_other, ft.Divider(height=10, color=C.BORDER), self.btn_reset],
+                    icon=ft.Icons.PALETTE_OUTLINED,
+                ),
+                _setting_group(
+                    "Cảnh báo thông minh",
+                    "Tùy chỉnh đối tượng và thời gian",
+                    [
+                        self._sw_ignore_sub,
+                        ft.Divider(height=10, color=C.BORDER),
+                        ft.Text("Các mốc nhắc nhở (giờ)", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._milestones_field,
+                        ft.Divider(height=10, color=C.BORDER),
+                        ft.Text("Không làm phiền (Im lặng)", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._sw_dnd_enable,
+                        self._dnd_start_field,
+                        self._dnd_end_field,
+                        ft.Divider(height=10, color=C.BORDER),
+                        ft.Text("Bỏ qua môn học", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._muted_courses_drp,
+                        self._muted_courses_field,
+                        ft.Divider(height=10, color=C.BORDER),
+                        ft.Text("Thông báo nhắc nhở cơ bản", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._notify_min_field,
+                    ],
+                    icon=ft.Icons.SMART_TOY_OUTLINED,
+                ),
+
+                _setting_group(
+                    "Tích hợp",
+                    "Nhắn tin qua Bot & Email",
+                    [
+                        self._sw_email,
+                        self._gmail_addr_field,
+                        self._gmail_pw_field,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._sw_discord,
+                        self._discord_wh_field,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._sw_telegram,
+                        self._tel_token_field,
+                        self._tel_chat_field,
+                    ],
+                    icon=ft.Icons.INTEGRATION_INSTRUCTIONS_OUTLINED,
+                ),
+
+                _setting_group(
+                    "Nâng cao",
+                    "Luồng tải, Log hệ thống",
+                    [
+                        self._workers_field,
+                        _hint("Tăng để tải chi tiết nhanh hơn. Nhỏ đi nếu bị block."),
+                        self._sw_debug,
+                        self._test_panel,
+                    ],
+                    icon=ft.Icons.BUILD_OUTLINED,
+                ),
+
+                ft.Container(height=16),
+            ],
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+        # --- Sticky footer (save button) ---
+        _sticky_footer = ft.Container(
+            content=ft.Column(controls=[
+                save_btn,
+                self._save_status,
+            ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=C.BG,
+            padding=ft.Padding.only(left=20, right=20, top=10, bottom=12),
+            border=ft.Border.only(top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "30")),
+        )
+
         self.content = ft.Column(
             controls=[
+                # Back button header
                 ft.Container(
                     content=ft.Row(controls=[back_btn],
                                    alignment=ft.MainAxisAlignment.START),
-                    padding=ft.Padding.only(left=8, top=16, bottom=8),
+                    padding=ft.Padding.only(left=8, top=16, bottom=4),
                 ),
+                # Scrollable content
                 ft.Container(
-                    content=ft.Column(horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
-                        ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700,
-                                color=C.TEXT_PRIMARY),
-                        ft.Divider(height=20, color=C.BORDER),
-
-                        _setting_group(
-                            "Tài khoản UTH",
-                            "Thông tin đăng nhập hệ thống elearning",
-                            [self._username_field, self._password_field, self._test_loading_bar, self._test_login_status, self._test_login_btn],
-                        ),
-                        _setting_group(
-                            "Hiển thị",
-                            "Cách hiển thị trên màn hình",
-                            [self._sw_submitted, self._sw_graded, self._sw_always_on_top]
-                        ),
-
-                        _setting_group(
-                            "Hệ thống",
-                            "Khởi động và tự động cập nhật",
-                            [
-                                self._sw_start_with_windows, self._sw_start_minimized, self._sw_minimize_to_tray,
-                                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                                self._interval_field,
-                                  _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
-                                  self._fetch_months_field,
-                                  _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
-                            ]
-                        ),
-
-                        _setting_group(
-                            "Cảnh báo",
-                            "Ngưỡng thời gian màu sắc",
-                            [
-                                ft.Text("Mức độ", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                                self._critical_hours_field,
-                                self._warning_hours_field,
-                                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                                ft.Text("Trạng thái", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                                self._opening_soon_hours_field,
-                                _hint("Hoạt động sẽ được đánh dấu 'Sắp mở' khi thời gian mở nhỏ hơn mức này.")
-                            ]
-                        ),
-
-                        _setting_group(
-                            "Giao diện",
-                            "Tùy chỉnh màu thông báo và thẻ",
-                            [row_cri, row_warn, row_safe, ft.Divider(height=10, color=C.BORDER), row_quiz, row_ass, row_att, row_open, row_other, ft.Divider(height=10, color=C.BORDER), self.btn_reset]
-                        ),
-                        _setting_group(
-                            "Cảnh báo thông minh (UTHelper)",
-                            "Tùy chỉnh đối tượng và thời gian",
-                            [
-                                self._sw_ignore_sub,
-                                ft.Divider(height=10, color=C.BORDER),
-                                ft.Text("Các mốc nhắc nhở (giờ)", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                                self._milestones_field,
-                                ft.Divider(height=10, color=C.BORDER),
-                                ft.Text("Không làm phiền (Im lặng)", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                                self._sw_dnd_enable,
-                                self._dnd_start_field,
-                                self._dnd_end_field,
-                                ft.Divider(height=10, color=C.BORDER),
-                                ft.Text("Bỏ qua môn học", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                                self._muted_courses_drp,
-                                self._muted_courses_field,
-                                ft.Divider(height=10, color=C.BORDER),
-                                ft.Text("Thông báo nhắc nhở cơ bản", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                                self._notify_min_field,
-                            ]
-                        ),
-
-                        _setting_group(
-                            "Tích hợp",
-                            "Nhắn tin qua Bot & Email",
-                            [
-                                self._sw_email,
-                                self._gmail_addr_field,
-                                self._gmail_pw_field,
-                                ft.Divider(height=10, color=C.BORDER),
-                                self._sw_discord,
-                                self._discord_wh_field,
-                                ft.Divider(height=10, color=C.BORDER),
-                                self._sw_telegram,
-                                self._tel_token_field,
-                                self._tel_chat_field,
-                            ]
-                        ),
-
-                        _setting_group(
-                            "Nâng cao",
-                            "Luồng tải, Log hệ thống",
-                            [
-                                self._workers_field,
-                                _hint("Tăng để tải chi tiết nhanh hơn. Nhỏ đi nếu bị block."),
-                                self._sw_debug,
-                                self._test_panel,
-                            ]
-                        ),
-
-                        ft.Container(height=4),
-                        save_btn,
-                        self._save_status,
-                        ft.Container(height=20)
-                    ], spacing=10, scroll=ft.ScrollMode.AUTO),
+                    content=_scroll_content,
                     padding=ft.Padding.symmetric(horizontal=20),
                     expand=True,
                 ),
+                # Fixed save button at bottom
+                _sticky_footer,
             ],
             spacing=0,
             expand=True,
@@ -628,7 +676,7 @@ class SettingsView(ft.Container):
         user = self._username_field.value.strip()
         pwd = self._password_field.value.strip()
         if not user or not pwd:
-            self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
+            self._test_login_status.value = "⚠ Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
             self.update()
             return
@@ -636,7 +684,8 @@ class SettingsView(ft.Container):
         self._test_login_btn.disabled = True
         self._username_field.disabled = True
         self._password_field.disabled = True
-        self._test_login_btn.text = "Đang kiểm tra đăng nhập..."
+        self._test_login_btn.text = "Đang kiểm tra..."
+        self._test_login_btn.icon = ft.Icons.HOURGLASS_TOP_ROUNDED
         self._test_loading_bar.visible = True
         self._test_login_status.value = ""
         self.update()
@@ -644,19 +693,20 @@ class SettingsView(ft.Container):
         try:
             success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
             if success:
-                self._test_login_status.value = "Đăng nhập thành công!"
+                self._test_login_status.value = "✓ Kết nối thành công!"
                 self._test_login_status.color = C.SAFE
             else:
-                self._test_login_status.value = "Đăng nhập thất bại. Kiểm tra lại thông tin!"
+                self._test_login_status.value = "✗ Đăng nhập thất bại. Kiểm tra lại thông tin!"
                 self._test_login_status.color = C.CRITICAL
         except Exception as ex:
-            self._test_login_status.value = f"Lỗi: {str(ex)}"
+            self._test_login_status.value = f"✗ Lỗi: {str(ex)}"
             self._test_login_status.color = C.CRITICAL
         finally:
             self._test_login_btn.disabled = False
             self._username_field.disabled = False
             self._password_field.disabled = False
-            self._test_login_btn.text = "Kiểm tra đăng nhập"
+            self._test_login_btn.text = "Kiểm tra kết nối"
+            self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
             self._test_loading_bar.visible = False
             self.update()
 
@@ -703,8 +753,13 @@ class SettingsView(ft.Container):
             tile.expanded = False
 
         self._test_login_status.value = ""
-        self._test_login_btn.text = "Kiểm tra đăng nhập"
+        self._test_login_btn.text = "Kiểm tra kết nối"
+        self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
         self._test_loading_bar.visible = False
+
+        # Reset unsaved indicator
+        if hasattr(self, '_unsaved_dot'):
+            self._unsaved_dot.visible = False
 
         if hasattr(self, '_c_tb_critical'):
             self._c_tb_critical.value = getattr(settings, 'COLOR_CRITICAL', '#EF4444')
@@ -854,14 +909,23 @@ class SettingsView(ft.Container):
                 self._on_close_cb()
 
             confirm_dlg = ft.AlertDialog(
-                title=ft.Text("Chưa lưu cài đặt", size=16, weight=ft.FontWeight.BOLD),
-                content=ft.Text("Bạn có thay đổi chưa lưu. Bạn muốn lưu lại không?", size=13),
+                title=ft.Row(controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=20, color=C.WARNING),
+                    ft.Text("Chưa lưu cài đặt", size=16, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
+                ], spacing=8),
+                content=ft.Text("Bạn có thay đổi chưa lưu. Bạn muốn lưu lại không?",
+                                size=13, color=C.TEXT_SECONDARY),
                 actions=[
-                    ft.TextButton("Hủy", on_click=close_dlg),
-                    ft.TextButton("Bỏ qua", on_click=discard_and_close),
-                    ft.TextButton("Lưu", on_click=save_and_close),
+                    ft.TextButton("Hủy", on_click=close_dlg,
+                                  style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
+                    ft.TextButton("Bỏ thay đổi", on_click=discard_and_close,
+                                  style=ft.ButtonStyle(color=C.CRITICAL)),
+                    ft.ElevatedButton("Lưu", on_click=save_and_close,
+                                      bgcolor=C.ACCENT, color=ft.Colors.WHITE),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
+                shape=ft.RoundedRectangleBorder(radius=12),
+                bgcolor=C.BG,
             )
             self._page.overlay.append(confirm_dlg)
             confirm_dlg.open = True
@@ -928,8 +992,10 @@ class SettingsView(ft.Container):
 
             save_settings()
 
-            self._save_status.value   = "Đã lưu cài đặt. Cần khởi động lại ứng dụng nếu đổi tài khoản!"
+            self._save_status.value   = "✓ Đã lưu cài đặt thành công"
             self._save_status.color   = C.SAFE
+            if hasattr(self, '_unsaved_dot'):
+                self._unsaved_dot.visible = False
             
             self._page.window.always_on_top = settings.ALWAYS_ON_TOP
             self.update()
