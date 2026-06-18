@@ -59,7 +59,7 @@ adaptive_icon_background = "#0F172A"
 
 # Android needs cleartext traffic for some Moodle instances
 [tool.flet.android.manifest_application]
-"android:usesCleartextTraffic" = "true"
+"usesCleartextTraffic" = "true"
 
 [dependency-groups]
 dev = [
