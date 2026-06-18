@@ -207,7 +207,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         shape=ft.RoundedRectangleBorder(radius=16),
         bgcolor=C.BG,
         content=ft.Container(
-            width=min(360, page.width - 32) if page.width else 360,
+            width=min(360, page.width - 32) if (page.width and page.width > 200) else 360,
             content=ft.Column([
                 # Header — Icon + Title
                 ft.Container(

@@ -393,7 +393,7 @@ class AppController:
 
         # UX: Slide-in transitions for views
         for _view in (self.detail_view, self.settings_view, self.calendar_view):
-            _view.offset = ft.transform.Offset(1, 0)  # start off-screen right
+            _view.offset = ft.Offset(1, 0)  # start off-screen right
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
@@ -883,7 +883,7 @@ class AppController:
             self.page.update()
 
     async def _close_detail(self):
-        self.detail_view.offset = ft.transform.Offset(1, 0)  # slide out
+        self.detail_view.offset = ft.Offset(1, 0)  # slide out
         self.detail_view.opacity = 0.0
         self.page.update()
         await asyncio.sleep(0.25)  # wait for animation
@@ -913,14 +913,14 @@ class AppController:
             data_snapshot = list(self.all_data)
         self.calendar_view.update_data(data_snapshot)
         self.calendar_view.show()
-        self.calendar_view.offset = ft.transform.Offset(0, 0)
+        self.calendar_view.offset = ft.Offset(0, 0)
         self.calendar_view.opacity = 1.0
         self.calendar_btn.icon_color = C.ACCENT
         self.page.update()
 
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
-        self.calendar_view.offset = ft.transform.Offset(1, 0)
+        self.calendar_view.offset = ft.Offset(1, 0)
         self.calendar_view.opacity = 0.0
         self.page.update()
         await asyncio.sleep(0.25)
@@ -934,7 +934,7 @@ class AppController:
         self.dashboard.visible = False
         self.settings_view.load_current_settings()
         self.settings_view.visible = True
-        self.settings_view.offset = ft.transform.Offset(0, 0)
+        self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
         self.page.update()
 
@@ -964,7 +964,7 @@ class AppController:
             self.all_data = data_copy
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
-        self.settings_view.offset = ft.transform.Offset(1, 0)
+        self.settings_view.offset = ft.Offset(1, 0)
         self.settings_view.opacity = 0.0
         self.page.update()
         await asyncio.sleep(0.25)
@@ -1084,7 +1084,7 @@ class AppController:
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.settings_view.visible = False
-        self.detail_view.offset = ft.transform.Offset(0, 0)  # slide in
+        self.detail_view.offset = ft.Offset(0, 0)  # slide in
         self.detail_view.opacity = 1.0
         self.detail_view.show_loading(data)
         self.page.update()
