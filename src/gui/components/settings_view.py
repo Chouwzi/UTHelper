@@ -3,6 +3,7 @@ import asyncio
 from gui.core.theme import C
 from config import settings
 from config import save_settings
+from platform_utils import IS_MOBILE as _IS_MOBILE
 
 class SettingsView(ft.Container):
     def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_tele=None, on_test_discord=None, on_test_mail=None):
@@ -521,11 +522,14 @@ class SettingsView(ft.Container):
                 _setting_group(
                     "Hiển thị",
                     "Cách hiển thị trên màn hình",
-                    [self._sw_submitted, self._sw_graded, self._sw_always_on_top],
+                    [self._sw_submitted, self._sw_graded] + (
+                        [self._sw_always_on_top] if not _IS_MOBILE else []
+                    ),
                     icon=ft.Icons.VISIBILITY_OUTLINED,
                 ),
 
-                _setting_group(
+                # Desktop-only system settings (Windows: autostart, tray, etc.)
+                *([_setting_group(
                     "Hệ thống",
                     "Khởi động và tự động cập nhật",
                     [
@@ -537,7 +541,17 @@ class SettingsView(ft.Container):
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
-                ),
+                )] if not _IS_MOBILE else [_setting_group(
+                    "Cập nhật",
+                    "Tần suất kiểm tra",
+                    [
+                        self._interval_field,
+                          _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                          self._fetch_months_field,
+                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
+                    ],
+                    icon=ft.Icons.SETTINGS_OUTLINED,
+                )]),
 
                 _setting_group(
                     "Cảnh báo",
@@ -958,23 +972,25 @@ class SettingsView(ft.Container):
             settings.PREFETCH_WORKERS        = max(1, min(workers, 10))
             self._workers_field.value        = str(settings.PREFETCH_WORKERS)
             
-            if settings.START_WITH_WINDOWS != self._sw_start_with_windows.value:
-                try:
-                    import core.autostart as autostart
-                    if self._sw_start_with_windows.value:
-                        autostart.add_to_startup()
-                    else:
-                        autostart.remove_from_startup()
-                except Exception as ex:
+            # Desktop-only settings (autostart, tray, always on top)
+            if not _IS_MOBILE:
+                if settings.START_WITH_WINDOWS != self._sw_start_with_windows.value:
                     try:
-                        import logging
-                        logging.error(f"Failed handling autostart: {ex}")
-                    except Exception:
-                        pass
-                    
-            settings.START_WITH_WINDOWS = self._sw_start_with_windows.value
-            settings.START_MINIMIZED = self._sw_start_minimized.value
-            settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
+                        import core.autostart as autostart
+                        if self._sw_start_with_windows.value:
+                            autostart.add_to_startup()
+                        else:
+                            autostart.remove_from_startup()
+                    except Exception as ex:
+                        try:
+                            import logging
+                            logging.error(f"Failed handling autostart: {ex}")
+                        except Exception:
+                            pass
+                        
+                settings.START_WITH_WINDOWS = self._sw_start_with_windows.value
+                settings.START_MINIMIZED = self._sw_start_minimized.value
+                settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value

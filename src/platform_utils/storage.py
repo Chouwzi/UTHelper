@@ -112,7 +112,7 @@ def get_credential_store(page=None) -> BaseCredentialStore:
     - Mobile (with page) → FletClientStore (encrypted client storage)
     - Fallback → FileStore (JSON file)
     """
-    from platform import IS_WINDOWS, IS_MOBILE
+    from platform_utils import IS_WINDOWS, IS_MOBILE
 
     if IS_WINDOWS:
         try:

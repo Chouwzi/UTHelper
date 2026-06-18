@@ -3,7 +3,7 @@ from datetime import datetime
 from core.time_utils import parse_datetime
 import asyncio
 import logging
-from gui.tray import TrayApp
+from platform_utils import IS_WINDOWS, IS_MOBILE, detect_platform
 from notifiers.manager import NotificationManager
 import threading
 
@@ -82,36 +82,50 @@ class AppController:
         await show_login_dialog(self.page, self.orchestrator, self._load_data_async)
 
     def _init_window(self):
-        self.page.window.width        = 420
-        self.page.window.height       = 720
-        self.page.window.max_width    = 420
-        self.page.window.min_width    = 420
-        self.page.window.always_on_top = settings.ALWAYS_ON_TOP
-        self.page.window.resizable    = False
-        self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
+        # Runtime platform detection for accurate mobile/desktop flags
+        detect_platform(self.page)
+        
+        # ── Desktop-only: Fixed-size window with tray support ──
+        if not IS_MOBILE:
+            self.page.window.width        = 420
+            self.page.window.height       = 720
+            self.page.window.max_width    = 420
+            self.page.window.min_width    = 420
+            self.page.window.always_on_top = settings.ALWAYS_ON_TOP
+            self.page.window.resizable    = False
+            self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
+            self.page.window.prevent_close = True
+            self.page.window.on_event = self._on_window_event
+        
         self.page.title               = "UTHelper"
         self.page.bgcolor             = C.BG
         self.page.padding             = 0
         self.page.spacing             = 0
         self.page.theme_mode          = ft.ThemeMode.DARK
-        self.page.window.prevent_close = True
-        self.page.window.on_event = self._on_window_event
         
-        self.tray = TrayApp(self.page)
-        self.tray.setup()
-        self.notifier = NotificationManager(self.tray)
+        # ── Tray & Notifications (platform-aware) ──
+        if IS_WINDOWS:
+            from gui.tray import TrayApp
+            self.tray = TrayApp(self.page)
+            self.tray.setup()
+            self.notifier = NotificationManager(self.tray)
+        else:
+            self.tray = None
+            self.notifier = NotificationManager()
         
         # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
         import sys
-        if settings.START_MINIMIZED and "--autostart" in sys.argv:
+        if not IS_MOBILE and settings.START_MINIMIZED and "--autostart" in sys.argv:
             self.page.window.visible = False
-        else:
+        elif not IS_MOBILE:
             self.page.window.visible = True
             
         self.page.update()
 
     async def _on_window_event(self, e):
-        # Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
+        # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
+        if IS_MOBILE:
+            return
         if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
             if settings.MINIMIZE_TO_TRAY:
                 self.page.window.visible = False
@@ -120,10 +134,11 @@ class AppController:
                 if not self._tray_balloon_shown:
                     self._tray_balloon_shown = True
                     try:
-                        self.tray._icon.notify(
-                            "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
-                            "UTHelper",
-                        )
+                        if self.tray:
+                            self.tray._icon.notify(
+                                "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
+                                "UTHelper",
+                            )
                     except Exception:
                         pass
             else:

@@ -5,7 +5,17 @@ from pathlib import Path
 
 __version__ = "2.1.0"
 
-_APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
+# ── Platform-aware data directories ──
+# On Windows: APPDATA/UTHElearningAlert
+# On Android: FLET_APP_STORAGE_DATA is set by Flet runtime
+# On other: ~/.uthelper
+if sys.platform == 'win32':
+    _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
+elif os.environ.get('FLET_APP_STORAGE_DATA'):
+    _APPDATA_DIR = Path(os.environ['FLET_APP_STORAGE_DATA'])
+else:
+    _APPDATA_DIR = Path.home() / ".uthelper"
+
 _FLET_DATA_DIR = _APPDATA_DIR / "flet" / "data"
 _FLET_TEMP_DIR = _APPDATA_DIR / "flet" / "temp"
 _FLET_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -17,6 +27,7 @@ import flet as ft
 from config import settings
 from gui.compact_desktop import main as app_main
 
+# ── Console encoding fix (Windows-only, harmless on other platforms) ──
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -53,11 +64,14 @@ try:
 except Exception:
     pass  # Không để log setup lỗi crash app
 
-import multiprocessing
 
 def main():
     ft.app(target=app_main, assets_dir=os.path.abspath(os.path.join(os.path.dirname(__file__), "assets")))
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
+    # multiprocessing.freeze_support() chỉ cần cho Windows PyInstaller builds
+    if sys.platform == 'win32':
+        import multiprocessing
+        multiprocessing.freeze_support()
     main()
+

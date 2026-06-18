@@ -1,9 +1,17 @@
 from pydantic import BaseModel, Field
 import os
 from pathlib import Path
-import keyring
-
 import sys
+import json
+import logging
+
+# ── Conditional keyring import (Windows-only) ──
+try:
+    import keyring
+    _HAS_KEYRING = True
+except ImportError:
+    _HAS_KEYRING = False
+
 # Mò đường dẫn thư mục gốc, chạy script lẻ hay đóng gói exe đều dùng được
 if getattr(sys, 'frozen', False):
     # Nếu đang chạy từ file exe được build bởi PyInstaller
@@ -15,11 +23,19 @@ else:
 # Fix specifically for Flet build missing standard directories sometimes when using --add-data "assets;assets"
 
 
-import json
-import logging
+# ── Platform-aware data directory ──
+def _get_user_data_dir() -> Path:
+    """Trả về thư mục lưu trữ dữ liệu phù hợp với nền tảng."""
+    if sys.platform == 'win32':
+        return Path(os.getenv('APPDATA', BASE_DIR)) / "UTHElearningAlert"
+    # Android: Flet sets FLET_APP_STORAGE_DATA env var
+    flet_data = os.environ.get('FLET_APP_STORAGE_DATA')
+    if flet_data:
+        return Path(flet_data) / "UTHElearningAlert"
+    # Fallback for Linux/macOS
+    return Path.home() / ".uthelper"
 
-# Chỗ lưu cài đặt, để trong AppData
-_USER_DATA_DIR = Path(os.getenv('APPDATA', BASE_DIR)) / "UTHElearningAlert"
+_USER_DATA_DIR = _get_user_data_dir()
 _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_FILE = _USER_DATA_DIR / "settings.json"
 
@@ -122,7 +138,7 @@ def load_settings() -> Settings:
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
             
-    # Khôi phục tất cả secrets từ keyring
+    # Khôi phục tất cả secrets từ keyring (chỉ trên platforms có keyring)
     _SECRETS = {
         'UTH_PASSWORD': 'password',
         'MOODLE_SESSION': 'moodle_session',
@@ -131,16 +147,17 @@ def load_settings() -> Settings:
         'DISCORD_WEBHOOK_URL': 'discord_webhook',
         'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
     }
-    for attr, key_suffix in _SECRETS.items():
-        try:
-            val = keyring.get_password(KEYRING_SERVICE_NAME, key_suffix)
-            if val:
-                setattr(s, attr, val)
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"Keyring read failed for {attr}: {e}")
+    if _HAS_KEYRING:
+        for attr, key_suffix in _SECRETS.items():
+            try:
+                val = keyring.get_password(KEYRING_SERVICE_NAME, key_suffix)
+                if val:
+                    setattr(s, attr, val)
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Keyring read failed for {attr}: {e}")
     
     # Legacy: migrate password from old key format
-    if s.UTH_USERNAME and not s.UTH_PASSWORD:
+    if _HAS_KEYRING and s.UTH_USERNAME and not s.UTH_PASSWORD:
         try:
             kp = keyring.get_password(KEYRING_SERVICE_NAME, s.UTH_USERNAME)
             if kp:
@@ -179,13 +196,16 @@ def save_settings():
         'DISCORD_WEBHOOK_URL': 'discord_webhook',
         'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
     }
-    for attr, key_suffix in _SECRETS.items():
-        try:
-            val = getattr(settings, attr, '')
-            if val:
-                keyring.set_password(KEYRING_SERVICE_NAME, key_suffix, val)
-        except Exception as e:
-            _logger.warning(f"Failed to write {attr} to keyring: {e}")
+    if _HAS_KEYRING:
+        for attr, key_suffix in _SECRETS.items():
+            try:
+                val = getattr(settings, attr, '')
+                if val:
+                    keyring.set_password(KEYRING_SERVICE_NAME, key_suffix, val)
+            except Exception as e:
+                _logger.warning(f"Failed to write {attr} to keyring: {e}")
+    else:
+        _logger.debug("Keyring not available, secrets only saved if included in JSON export")
 
     # --- Step 3: Cleanup legacy password from JSON file ---
     # If the JSON was written successfully, re-read and strip any secrets

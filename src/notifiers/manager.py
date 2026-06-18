@@ -33,7 +33,7 @@ class NotificationManager:
         self._history = NotificationHistory()
 
         # Platform-aware notifier registration
-        from platform import IS_WINDOWS
+        from platform_utils import IS_WINDOWS
         if IS_WINDOWS and tray_app:
             try:
                 from notifiers.windows import WindowsNotifier
@@ -42,7 +42,7 @@ class NotificationManager:
                 logger.warning("Windows notifier disabled during startup: %r", exc)
         elif not IS_WINDOWS:
             try:
-                from platform.notifications import get_platform_notifier
+                from platform_utils.notifications import get_platform_notifier
                 mobile_notifier = get_platform_notifier()
                 self.register(mobile_notifier)
             except Exception as exc:
