@@ -131,12 +131,20 @@ class DetailView(ft.Container):
             border=ft.border.all(1, C.BORDER),
         )
 
+        # UX: Compact open-in-browser button in header for quick access
+        self._header_open_btn = ft.IconButton(
+            ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+            icon_color=C.ACCENT, icon_size=20,
+            tooltip="Mở trong trình duyệt",
+            on_click=self._open_browser,
+        )
+
         self.content = ft.Column(
             controls=[
                 ft.Container(
-                    content=ft.Row(controls=[back_btn],
-                                   alignment=ft.MainAxisAlignment.START),
-                    padding=ft.Padding.only(left=8, top=16, bottom=8),
+                    content=ft.Row(controls=[back_btn, self._header_open_btn],
+                                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    padding=ft.Padding.only(left=8, right=8, top=16, bottom=8),
                 ),
                 self._loading_bar,
                 self._error_banner,

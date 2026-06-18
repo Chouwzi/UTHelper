@@ -63,6 +63,10 @@ class AppController:
         # Events
         self.page.on_disconnect = self._on_disconnect
         self.page.on_keyboard_event = self._on_keyboard_event
+        
+        # Android back button — intercept to navigate within app instead of exiting
+        if IS_MOBILE:
+            self.page.on_view_pop = self._on_back_button
         self.page.run_task(self._pulse_loop_async)
         self.page.run_task(self._countdown_loop_async)
         self.page.run_task(self._auto_refresh_loop_async)
@@ -151,12 +155,30 @@ class AppController:
     async def _on_keyboard_event(self, e):
         """H-04: Escape key to go back from Detail/Settings/Calendar views."""
         if e.key == "Escape":
-            if self.settings_view.visible:
-                await self._close_settings()
-            elif self.detail_view.visible:
-                await self._close_detail()
-            elif self.calendar_view.visible:
-                await self._close_calendar()
+            await self._navigate_back()
+
+    async def _on_back_button(self, e):
+        """Android back button handler — navigate within app instead of exiting."""
+        handled = await self._navigate_back()
+        if not handled:
+            # On dashboard with nothing to go back to — minimize app (don't exit)
+            try:
+                self.page.window.close()
+            except (AttributeError, TypeError):
+                pass
+
+    async def _navigate_back(self) -> bool:
+        """Shared back-navigation logic. Returns True if a view was closed."""
+        if self.settings_view.visible:
+            await self._close_settings()
+            return True
+        elif self.detail_view.visible:
+            await self._close_detail()
+            return True
+        elif self.calendar_view.visible:
+            await self._close_calendar()
+            return True
+        return False
 
     def _init_ui(self):
         # Skeleton loading cards
@@ -213,7 +235,7 @@ class AppController:
         self._overdue_cb = ft.Checkbox(
             value=settings.INCLUDE_PAST_DUE,
             label="Quá hạn",
-            label_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
+            label_style=ft.TextStyle(size=13, color=C.TEXT_SECONDARY),
             active_color=C.CRITICAL,
             check_color=C.BG,
             scale=1,
@@ -229,28 +251,28 @@ class AppController:
             focused_border_color=C.ACCENT,
             bgcolor=C.SURFACE,
             text_size=12,
-            height=38,
+            height=44,
             expand=True,
-            content_padding=ft.Padding.only(right=10, top=8, bottom=8),
+            content_padding=ft.Padding.only(left=12, right=10, top=10, bottom=10),
             on_change=self._on_search,
         )
 
         # Header
         self.calendar_btn = ft.IconButton(
             ft.Icons.CALENDAR_MONTH_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=18,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Lịch",
             on_click=lambda e: self.page.run_task(self._toggle_calendar),
         )
         self.refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=18,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Làm mới",
             on_click=lambda e: self.page.run_task(self._load_data_async),
         )
         self.settings_btn = ft.IconButton(
             ft.Icons.SETTINGS_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=18,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Cài đặt",
             on_click=lambda e: self.page.run_task(self._show_settings),
         )
@@ -369,6 +391,12 @@ class AppController:
             on_test_mail=self._on_test_mail
         )
 
+        # UX: Slide-in transitions for views
+        for _view in (self.detail_view, self.settings_view, self.calendar_view):
+            _view.offset = ft.transform.Offset(1, 0)  # start off-screen right
+            _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
+            _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
+
         self.page.add(ft.Stack(controls=[self.dashboard, self.calendar_view, self.detail_view, self.settings_view], expand=True))
 
         # Show skeleton cards immediately while data loads
@@ -436,7 +464,7 @@ class AppController:
         popup = ft.PopupMenuButton(
             content=ft.Container(
                 content=ft.Row([btn_label, ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                bgcolor=C.SURFACE, border=ft.border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=10),
             ),
             items=items,
             menu_position=ft.PopupMenuPosition.UNDER,
@@ -510,10 +538,10 @@ class AppController:
         # P5: Dynamic overdue checkbox label with count
         if n_overdue > 0:
             self._overdue_cb.label = f"Quá hạn ({n_overdue})"
-            self._overdue_cb.label_style = ft.TextStyle(size=12, color=C.CRITICAL)
+            self._overdue_cb.label_style = ft.TextStyle(size=13, color=C.CRITICAL)
         else:
             self._overdue_cb.label = "Quá hạn"
-            self._overdue_cb.label_style = ft.TextStyle(size=12, color=C.TEXT_SECONDARY)
+            self._overdue_cb.label_style = ft.TextStyle(size=13, color=C.TEXT_SECONDARY)
 
         # Render cards
         self._clear_skeletons()
@@ -813,6 +841,8 @@ class AppController:
                 else:
                     progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
             self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {total_count} hoạt động{progress_text}"
+            if not self._skeleton_visible:
+                self._show_snackbar(f"Đã cập nhật {total_count} hoạt động", ft.Icons.SYNC_ROUNDED, C.ACCENT)
             
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
@@ -853,6 +883,10 @@ class AppController:
             self.page.update()
 
     async def _close_detail(self):
+        self.detail_view.offset = ft.transform.Offset(1, 0)  # slide out
+        self.detail_view.opacity = 0.0
+        self.page.update()
+        await asyncio.sleep(0.25)  # wait for animation
         self.detail_view.visible = False
         # Return to calendar if it was the source, otherwise dashboard
         if getattr(self, '_detail_from_calendar', False):
@@ -879,11 +913,17 @@ class AppController:
             data_snapshot = list(self.all_data)
         self.calendar_view.update_data(data_snapshot)
         self.calendar_view.show()
+        self.calendar_view.offset = ft.transform.Offset(0, 0)
+        self.calendar_view.opacity = 1.0
         self.calendar_btn.icon_color = C.ACCENT
         self.page.update()
 
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
+        self.calendar_view.offset = ft.transform.Offset(1, 0)
+        self.calendar_view.opacity = 0.0
+        self.page.update()
+        await asyncio.sleep(0.25)
         self.calendar_view.hide()
         self.dashboard.opacity = 1.0
         self.dashboard.visible = True
@@ -894,6 +934,8 @@ class AppController:
         self.dashboard.visible = False
         self.settings_view.load_current_settings()
         self.settings_view.visible = True
+        self.settings_view.offset = ft.transform.Offset(0, 0)
+        self.settings_view.opacity = 1.0
         self.page.update()
 
     async def _close_settings(self):
@@ -922,6 +964,10 @@ class AppController:
             self.all_data = data_copy
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
+        self.settings_view.offset = ft.transform.Offset(1, 0)
+        self.settings_view.opacity = 0.0
+        self.page.update()
+        await asyncio.sleep(0.25)
         self.settings_view.visible = False
         self.dashboard.opacity = 1.0
         self.dashboard.visible = True
@@ -934,6 +980,18 @@ class AppController:
         # _update_footer() already calls _refresh_ui() which calls page.update()
         # No extra page.update() needed
 
+    def _show_snackbar(self, msg: str, icon=ft.Icons.CHECK_CIRCLE_ROUNDED, color=C.SAFE):
+        """UX: Show a brief toast-like notification."""
+        self.page.snack_bar = ft.SnackBar(
+            content=ft.Row([
+                ft.Icon(icon, color=color, size=16),
+                ft.Text(msg, size=13, color=C.TEXT_PRIMARY),
+            ], spacing=8),
+            bgcolor=C.SURFACE,
+            duration=2500,
+        )
+        self.page.snack_bar.open = True
+        self.page.update()
 
     def _test_notification_base(self, mock_type="critical"):
         import random, datetime
@@ -1016,6 +1074,7 @@ class AppController:
 
     def _on_settings_saved(self):
         self._needs_reload = True
+        self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _show_detail(self, data: dict):
         self.page.run_task(self._show_detail_async, data)
 
@@ -1025,6 +1084,8 @@ class AppController:
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.settings_view.visible = False
+        self.detail_view.offset = ft.transform.Offset(0, 0)  # slide in
+        self.detail_view.opacity = 1.0
         self.detail_view.show_loading(data)
         self.page.update()
         try:

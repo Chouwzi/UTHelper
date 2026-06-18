@@ -132,11 +132,29 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             page.update()
             await asyncio.sleep(0.7)
 
+            # Dismiss dialog — use multiple strategies for cross-platform compat
             dlg.open = False
+            page.update()
+            
+            # Strategy 1: Remove from overlay (desktop Flet)
             try:
                 page.overlay.remove(dlg)
             except (ValueError, AttributeError):
                 pass
+            
+            # Strategy 2: page.close() (Flet 0.21+)
+            try:
+                page.close(dlg)
+            except (TypeError, AttributeError):
+                pass
+            
+            # Strategy 3: Clear page.dialog if it was set
+            try:
+                if hasattr(page, 'dialog') and page.dialog == dlg:
+                    page.dialog = None
+            except Exception:
+                pass
+            
             page.update()
             page.run_task(on_success_callback)
         else:
@@ -155,7 +173,15 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             username_field.disabled = False
             password_field.disabled = False
             loading_bar.visible = False
-            _show_error("Đăng nhập thất bại. Vui lòng kiểm tra tài khoản và kết nối mạng.")
+            # UX: Specific error messages based on failure reason
+            error_reason = getattr(orchestrator.client, '_last_login_error', '')
+            if error_reason == 'network_error':
+                error_msg = "Không thể kết nối server. Kiểm tra mạng."
+            elif error_reason == 'missing_credentials':
+                error_msg = "Vui lòng nhập đầy đủ MSSV và mật khẩu."
+            else:
+                error_msg = "Sai mã số sinh viên hoặc mật khẩu."
+            _show_error(error_msg)
 
     # --- Auto-clear error on typing ---
     def _on_field_change(e):
@@ -181,7 +207,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         shape=ft.RoundedRectangleBorder(radius=16),
         bgcolor=C.BG,
         content=ft.Container(
-            width=360,
+            width=min(360, page.width - 32) if page.width else 360,
             content=ft.Column([
                 # Header — Icon + Title
                 ft.Container(
@@ -232,8 +258,18 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
     )
 
     try:
-        page.overlay.append(dlg)
-        dlg.open = True
+        # Strategy 1: page.open() — Flet 0.21+ recommended API
+        try:
+            page.open(dlg)
+        except (TypeError, AttributeError):
+            # Strategy 2: overlay approach (desktop Flet)
+            try:
+                page.overlay.append(dlg)
+                dlg.open = True
+            except (AttributeError, TypeError):
+                # Strategy 3: page.dialog (legacy)
+                page.dialog = dlg
+                dlg.open = True
         page.update()
     except Exception:
         import traceback

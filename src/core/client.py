@@ -25,6 +25,7 @@ _DEFAULT_UA = (
 class MoodleClient:
     def __init__(self):
         self.session = requests.Session()
+        self._last_login_error = ""
         
         # Performance optimization: Connection pooling and auto-retries
         retry_strategy = Retry(
@@ -269,6 +270,7 @@ class MoodleClient:
 
         if not user or not pwd:
             logger.error("Chưa cung cấp thông tin tài khoản")
+            self._last_login_error = "missing_credentials"
             return False
 
         try:
@@ -319,8 +321,10 @@ class MoodleClient:
                 if err_node:
                     err_msg = err_node.text.strip()
                     logger.warning(f"Đăng nhập thất bại: {err_msg}")
+                    self._last_login_error = "invalid_credentials"
                 else:
                     logger.warning("Đăng nhập thất bại, vui lòng kiểm tra lại tài khoản/mật khẩu.")
+                    self._last_login_error = "invalid_credentials"
             else:
                 # Đối với trường hợp redirect (30x) quay lại trang login
                 logger.warning("Đăng nhập thất bại (sai tài khoản hoặc mật khẩu).")
@@ -330,7 +334,12 @@ class MoodleClient:
             
         except Exception as e:
             logger.error(f"Lỗi khi đăng nhập: {str(e)}")
+            self._last_login_error = "network_error"
             return False
+
+    @property
+    def last_login_error(self) -> str:
+        return getattr(self, '_last_login_error', '')
 
     @retry_with_backoff(retries=3)
     def fetch_calendar(self, month: int = None, year: int = None) -> Optional[str]:

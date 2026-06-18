@@ -274,14 +274,18 @@ class SettingsView(ft.Container):
             text_size=13
         )
         
+        # Debug test panel — hide Windows-only buttons on mobile
+        _tray_btn = ft.ElevatedButton("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
+        _debug_buttons_row1 = ft.Row([
+            *([_tray_btn] if not _IS_MOBILE else []),
+            ft.ElevatedButton("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
+        ], wrap=True)
+        
         self._test_panel = ft.Container(
             content=ft.Column([
                 ft.Text("Công cụ kiểm thử (Debug / Mock)", color=C.CRITICAL, weight=ft.FontWeight.BOLD),
                 self._mock_type_drp,
-                ft.Row([
-                    ft.ElevatedButton("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-                    ft.ElevatedButton("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
-                ], wrap=True),
+                _debug_buttons_row1,
                 ft.Row([
                     ft.ElevatedButton("Discord", on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
                     ft.ElevatedButton("Gmail", on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
