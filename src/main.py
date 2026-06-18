@@ -127,6 +127,11 @@ def main():
         try:
             logger.info("Starting app imports...")
             
+            # ── Flet compatibility shim (MUST run before any GUI imports) ──
+            from gui.flet_compat import patch_flet
+            patch_flet()
+            logger.info("Flet compat patched OK")
+            
             # Import config first (may fail on Android if keyring is missing)
             from config import settings
             logger.info("Config loaded OK")
