@@ -84,9 +84,13 @@ class AppController:
     def _init_window(self):
         # Runtime platform detection for accurate mobile/desktop flags
         detect_platform(self.page)
+        # Re-read flags after runtime detection (they may have changed)
+        import platform_utils
+        _is_mobile = platform_utils.IS_MOBILE
+        _is_windows = platform_utils.IS_WINDOWS
         
         # ── Desktop-only: Fixed-size window with tray support ──
-        if not IS_MOBILE:
+        if not _is_mobile:
             self.page.window.width        = 420
             self.page.window.height       = 720
             self.page.window.max_width    = 420
@@ -104,7 +108,7 @@ class AppController:
         self.page.theme_mode          = ft.ThemeMode.DARK
         
         # ── Tray & Notifications (platform-aware) ──
-        if IS_WINDOWS:
+        if _is_windows:
             from gui.tray import TrayApp
             self.tray = TrayApp(self.page)
             self.tray.setup()
@@ -115,9 +119,9 @@ class AppController:
         
         # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
         import sys
-        if not IS_MOBILE and settings.START_MINIMIZED and "--autostart" in sys.argv:
+        if not _is_mobile and settings.START_MINIMIZED and "--autostart" in sys.argv:
             self.page.window.visible = False
-        elif not IS_MOBILE:
+        elif not _is_mobile:
             self.page.window.visible = True
             
         self.page.update()

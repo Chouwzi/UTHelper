@@ -1013,7 +1013,8 @@ class SettingsView(ft.Container):
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
             
-            self._page.window.always_on_top = settings.ALWAYS_ON_TOP
+            if not _IS_MOBILE:
+                self._page.window.always_on_top = settings.ALWAYS_ON_TOP
             self.update()
 
             if self._on_saved:

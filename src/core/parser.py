@@ -2,6 +2,7 @@ from bs4 import BeautifulSoup
 from typing import List, Optional
 from models import Assignment, ActivityDetail, NO_DEADLINE_DATE
 from core.security import HTMLSanitizer
+from core.html_compat import BS4_PARSER
 from datetime import datetime
 import logging
 import re
@@ -27,7 +28,7 @@ class MoodleParser:
         if not html:
             return []
 
-        soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html, BS4_PARSER)
         assignments = {}
 
         # 1. Lấy danh sách môn học từ cái dropdown lọc bài
@@ -380,7 +381,7 @@ class MoodleParser:
         Đã chia nhỏ các hàm xử lý để code trông gọn gàng, dễ bảo trì hơn. 
         """
         if not html: return None
-        soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html, BS4_PARSER)
         
         title = MoodleParser._extract_title(soup)
         course_name, course_full_name = MoodleParser._extract_course_names(soup)

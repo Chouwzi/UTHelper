@@ -43,11 +43,19 @@ copyright = "Copyright (c) 2026"
 path = "src"
 module = "main"
 
-# ── Android permissions ──
+# ── Android-specific configuration ──
+[tool.flet.android]
+adaptive_icon_background = "#0F172A"
+
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true
 "android.permission.POST_NOTIFICATIONS" = true
 "android.permission.RECEIVE_BOOT_COMPLETED" = true
+"android.permission.SCHEDULE_EXACT_ALARM" = true
+
+# Android needs cleartext traffic for some Moodle instances
+[tool.flet.android.manifest_application]
+"android:usesCleartextTraffic" = "true"
 
 [dependency-groups]
 dev = [

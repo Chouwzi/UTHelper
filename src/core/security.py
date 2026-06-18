@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup, NavigableString
 from urllib.parse import urlsplit
+from core.html_compat import BS4_PARSER
 
 class HTMLSanitizer:
     """
@@ -71,7 +72,7 @@ class HTMLSanitizer:
         if not html:
             return ""
 
-        soup = BeautifulSoup(html, "lxml")
+        soup = BeautifulSoup(html, BS4_PARSER)
 
         # 1. Whitelist: chỉ giữ các thẻ an toàn, unwrap phần còn lại
         HTMLSanitizer._strip_disallowed_tags(soup)

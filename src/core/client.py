@@ -10,8 +10,16 @@ from typing import Optional
 from config import settings
 import logging
 from core.network_utils import retry_with_backoff
+from core.html_compat import BS4_PARSER
+import sys as _sys
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_UA = (
+    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+    if hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
+    else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 class MoodleClient:
@@ -29,7 +37,7 @@ class MoodleClient:
         self.session.mount("https://", adapter)
 
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": _DEFAULT_UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9,vi;q=0.8"
         })
@@ -268,7 +276,7 @@ class MoodleClient:
             res = self.session.get(settings.MOODLE_LOGIN_URL, timeout=15)
             res.raise_for_status()
 
-            soup = BeautifulSoup(res.text, "lxml")
+            soup = BeautifulSoup(res.text, BS4_PARSER)
             token_input = soup.find("input", {"name": "logintoken"})
             
             if not token_input:
@@ -306,7 +314,7 @@ class MoodleClient:
             # Nếu ở lại trang login hoặc bị redirect lại chính nó (tức là đăng nhập thất bại)
             if login_res.status_code == 200:
                 # Nếu request về 200, thử tìm thông báo lỗi trên trang login
-                login_soup = BeautifulSoup(login_res.text, "lxml")
+                login_soup = BeautifulSoup(login_res.text, BS4_PARSER)
                 err_node = login_soup.find("div", {"class": "alert-danger"}) or login_soup.find("span", {"class": "error"})
                 if err_node:
                     err_msg = err_node.text.strip()

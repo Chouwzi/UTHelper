@@ -66,7 +66,11 @@ except Exception:
 
 
 def main():
-    ft.app(target=app_main, assets_dir=os.path.abspath(os.path.join(os.path.dirname(__file__), "assets")))
+    # On Android, Flet bundles assets automatically and sets FLET_ASSETS_DIR
+    _assets = os.environ.get("FLET_ASSETS_DIR") or os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "assets")
+    )
+    ft.app(target=app_main, assets_dir=_assets)
 
 if __name__ == "__main__":
     # multiprocessing.freeze_support() chỉ cần cho Windows PyInstaller builds

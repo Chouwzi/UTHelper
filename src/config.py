@@ -131,10 +131,25 @@ def load_settings() -> Settings:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            legacy_pass = data.pop("UTH_PASSWORD", None)
+            # Extract secrets from JSON data before Pydantic validation
+            # (Pydantic's exclude=True prevents them from being set via **data)
+            _SECRET_FIELDS = {
+                'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
+                'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN',
+            }
+            secret_values = {}
+            for key in _SECRET_FIELDS:
+                val = data.pop(key, None)
+                if val and isinstance(val, str):
+                    secret_values[key] = val
             s = Settings(**data)
-            if legacy_pass and isinstance(legacy_pass, str):
-                s.UTH_PASSWORD = legacy_pass
+            # On mobile (no keyring), restore secrets from JSON
+            if not _HAS_KEYRING:
+                for key, val in secret_values.items():
+                    setattr(s, key, val)
+            # Legacy: also restore UTH_PASSWORD from JSON if present
+            elif 'UTH_PASSWORD' in secret_values:
+                s.UTH_PASSWORD = secret_values['UTH_PASSWORD']
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
             
@@ -173,13 +188,28 @@ def save_settings():
     """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng."""
     _logger = logging.getLogger(__name__)
 
-    # --- Step 1: Save non-secret settings to JSON ---
+    # --- Step 1: Save settings to JSON ---
+    # On mobile (no keyring), include secrets in JSON since
+    # Android's app-private storage is already sandboxed.
     json_ok = False
     try:
+        if _HAS_KEYRING:
+            # Desktop: exclude secrets from JSON (saved to keyring in Step 2)
+            data = settings.model_dump()
+        else:
+            # Mobile: include ALL fields including secrets
+            data = settings.model_dump()
+            _SECRET_FIELDS = {
+                'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
+                'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN',
+            }
+            for field_name in _SECRET_FIELDS:
+                val = getattr(settings, field_name, '')
+                if val:
+                    data[field_name] = val
         tmp = CONFIG_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            # Pydantic v2
-            json.dump(settings.model_dump(), f, indent=4, ensure_ascii=False)
+            json.dump(data, f, indent=4, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
         os.replace(str(tmp), str(CONFIG_FILE))
@@ -208,10 +238,10 @@ def save_settings():
         _logger.debug("Keyring not available, secrets only saved if included in JSON export")
 
     # --- Step 3: Cleanup legacy password from JSON file ---
-    # If the JSON was written successfully, re-read and strip any secrets
-    # that leaked via model_dump() (exclude=True fields shouldn't appear,
-    # but guard against Pydantic misconfiguration or future schema drift).
-    if json_ok:
+    # Only strip secrets from JSON if keyring is available (Windows).
+    # On mobile, keep secrets in JSON since Android's app-private storage
+    # is already sandboxed and encrypted.
+    if json_ok and _HAS_KEYRING:
         _SECRET_KEYS = {'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
                         'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN'}
         try:
@@ -228,3 +258,4 @@ def save_settings():
                 _logger.info("Cleaned legacy secrets from settings JSON file")
         except Exception as e:
             _logger.warning(f"Failed to clean legacy secrets from JSON: {e}")
+
