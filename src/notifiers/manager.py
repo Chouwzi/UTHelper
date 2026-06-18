@@ -7,7 +7,6 @@ from core.time_utils import parse_datetime
 from typing import List, Any, Dict
 
 from .base import BaseNotifier
-from notifiers.windows import WindowsNotifier
 from notifiers.discord import DiscordNotifier
 from notifiers.email import EmailNotifier
 from config import settings as config
@@ -30,11 +29,24 @@ class NotificationManager:
         self._cache_path = str(_USER_DATA_DIR / cache_file)
         self._cache_lock = threading.Lock()
 
-        if tray_app:
+        from core.notification_history import NotificationHistory
+        self._history = NotificationHistory()
+
+        # Platform-aware notifier registration
+        from platform import IS_WINDOWS
+        if IS_WINDOWS and tray_app:
             try:
+                from notifiers.windows import WindowsNotifier
                 self.register(WindowsNotifier(tray_app=tray_app))
             except Exception as exc:
                 logger.warning("Windows notifier disabled during startup: %r", exc)
+        elif not IS_WINDOWS:
+            try:
+                from platform.notifications import get_platform_notifier
+                mobile_notifier = get_platform_notifier()
+                self.register(mobile_notifier)
+            except Exception as exc:
+                logger.warning("Mobile notifier disabled: %r", exc)
 
         # Auto-register integration channels when credentials are configured
         if getattr(config, 'DISCORD_WEBHOOK_URL', ''):
@@ -160,13 +172,24 @@ class NotificationManager:
         # Pass real Assignment objects directly — no more DummyAssign wrapper
         notify_assignments = [item["assignment"] for item in to_notify_items]
 
+        any_success = False
         for notifier in self.notifiers:
             try:
-                notifier.notify(notify_assignments)
+                result = notifier.notify(notify_assignments)
+                # notify() trả về True khi gửi thành công
+                if result is not False:
+                    any_success = True
             except Exception as e:
                 logger.error(f"Failed via channel {notifier.__class__.__name__}: {e}")
 
-        self._mark_assignments_notified(to_notify_items)
+        # CHỈ đánh dấu đã gửi khi ít nhất 1 channel thành công
+        if any_success:
+            self._mark_assignments_notified(to_notify_items)
+            # Ghi lịch sử thông báo
+            success_channels = [n.__class__.__name__ for n in self.notifiers]
+            self._history.add(notify_assignments, success_channels)
+        else:
+            logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
 
     def _filter_assignments(self, assignments: List[Any]) -> List[Dict]:
         """Filter assignments that need notification based on milestones and cache."""
@@ -183,6 +206,12 @@ class NotificationManager:
 
             status = getattr(a, 'submission_status', '') or (a.get('submission_status', '') if isinstance(a, dict) else '')
             if config.NOTIFY_IGNORE_SUBMITTED and status in ["submitted", "graded"]:
+                continue
+
+            # Lọc theo loại hoạt động (assignment/quiz/attendance/...)
+            event_type = getattr(a, 'event_type', '') or (a.get('type', '') if isinstance(a, dict) else '')
+            notify_types = getattr(config, 'NOTIFY_TYPES', None)
+            if notify_types and event_type and event_type not in notify_types:
                 continue
 
             deadline = getattr(a, 'deadline', None)
@@ -262,3 +291,8 @@ class NotificationManager:
 
         if updated:
             self._save_cache(cache)
+
+    @property
+    def history(self):
+        """Truy cập lịch sử thông báo."""
+        return self._history

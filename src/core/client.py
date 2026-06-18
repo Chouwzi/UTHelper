@@ -225,10 +225,20 @@ class MoodleClient:
             return autologin
         return f"{settings.MOODLE_BASE_URL}/login/index.php?token={token}"
 
+    def login_ws_only(self, username: str = None, password: str = None) -> bool:
+        """Đăng nhập chỉ bằng WS token — KHÔNG tạo session, KHÔNG kick browser.
+        
+        Dùng thay cho login() khi trường giới hạn 1 session đồng thời.
+        """
+        token = self._get_ws_token(username, password)
+        return bool(token)
+
     @retry_with_backoff(retries=3, backoff_in_seconds=2)
     def login(self, username: str = None, password: str = None, force: bool = False) -> bool:
         """
         Thực hiện đăng nhập vào hệ thống UTH Moodle.
+        CẢNH BÁO: Tạo session mới → kick browser nếu trường giới hạn 1 session.
+        Chỉ gọi khi ALLOW_SESSION_LOGIN = True.
         """
         if force:
             self.session.cookies.clear()
@@ -335,6 +345,9 @@ class MoodleClient:
             
             # Kiểm tra nếu bị chuyển hướng về trang đăng nhập -> Session hết hạn
             if "login/index.php" in res.url:
+                if not settings.ALLOW_SESSION_LOGIN:
+                    logger.warning("Session hết hạn khi gọi fetch_calendar. Không auto re-login vì ALLOW_SESSION_LOGIN=False (tránh kick browser).")
+                    return None
                 logger.warning("Session hết hạn khi gọi fetch_calendar, tự động đăng nhập lại...")
                 if self.login(force=True):
                     res = self.session.get(url, timeout=15)
@@ -346,6 +359,9 @@ class MoodleClient:
                     
             return res.text
         except TooManyRedirects:
+            if not settings.ALLOW_SESSION_LOGIN:
+                logger.warning("Session bị vô hiệu hoá (TooManyRedirects). Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
+                return None
             logger.warning("Session bị vô hiệu hoá (TooManyRedirects). Đang tự động đăng nhập lại...")
             if self.login(force=True):
                 try:
@@ -377,6 +393,9 @@ class MoodleClient:
             
             # Kiểm tra nếu bị chuyển hướng về trang đăng nhập -> Session hết hạn
             if "login/index.php" in res.url:
+                if not settings.ALLOW_SESSION_LOGIN:
+                    logger.warning(f"Session hết hạn khi gọi {url}. Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
+                    return None
                 logger.warning(f"Session hết hạn khi gọi {url}, tự động đăng nhập lại...")
                 if self.login(force=True):
                     res = self.session.get(url, timeout=timeout)
@@ -388,6 +407,9 @@ class MoodleClient:
                     
             return res.text
         except TooManyRedirects:
+            if not settings.ALLOW_SESSION_LOGIN:
+                logger.warning(f"Session bị vô hiệu hoá (TooManyRedirects) khi gọi {url}. Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
+                return None
             logger.warning(f"Session bị vô hiệu hoá (TooManyRedirects) khi gọi {url}. Đang tự động đăng nhập lại...")
             if self.login(force=True):
                 try:

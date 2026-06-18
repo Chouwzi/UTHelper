@@ -1,8 +1,5 @@
-# Ghi chú: Yêu cầu win11toast hoặc winotify, nhưng hiện tại chúng tôi sẽ sử dụng in chuẩn 
-# hoặc cách tiếp cận đơn giản hơn nếu không có sẵn các thư viện này.
-# Vì chúng tôi không thêm win11toast vào danh sách yêu cầu, tạm thời sẽ dùng một 
-# thông báo cơ bản hoặc chuông hệ thống, nhưng về mặt kiến trúc, phần này được tách riêng 
-# để có thể dễ dàng cập nhật sang các thư viện chuyên dụng như `windows-toasts` hoặc `win11toast`.
+# Windows Desktop Toast Notifications
+# Requires windows-toasts library, with fallback to pystray balloon
 import logging
 import os
 import sys
@@ -10,6 +7,7 @@ from typing import List
 from models import Assignment, UrgencyLevel
 from config import BASE_DIR
 from core.time_utils import format_remaining_time
+from core.display_utils import get_type_display, get_urgency_display, urgency_str, clean_course_name
 
 logger = logging.getLogger(__name__)
 
@@ -77,28 +75,41 @@ class WindowsNotifier:
             logger.warning("Shortcut AUMID setup failed: %r", e)
 
     def notify(self, assignments: List[Assignment]):
-        """
-        Gửi thông báo desktop sử dụng windows-toasts.
-        """
+        """Gửi thông báo desktop sử dụng windows-toasts."""
         if not assignments:
             return
 
-        critical = [a for a in assignments if _get(a, 'urgency', 'safe') in ('critical', UrgencyLevel.CRITICAL)]
-        warnings = [a for a in assignments if _get(a, 'urgency', 'safe') in ('warning', UrgencyLevel.WARNING)]
-        safes = [a for a in assignments if _get(a, 'urgency', 'safe') in ('safe', UrgencyLevel.SAFE)]
-        other_count = len(assignments) - len(critical) - len(warnings) - len(safes)
-        title = "UTHelper - Thông báo"
+        # Build concise, scannable notification text
         if len(assignments) == 1:
             a = assignments[0]
-            title = _get(a, 'title', 'Bài tập mới')
-            course = _get(a, 'course_name', '') or _get(a, 'course', 'Không rõ môn')
-            
+            title_raw = _get(a, 'title', 'Bài tập mới')
+            course_raw = _get(a, 'course_name', '') or _get(a, 'course', '')
+            course = clean_course_name(course_raw) if course_raw else course_raw
+
+            # Type & urgency display
+            task_type = _get(a, 'type', '') or _get(a, 'event_type', '')
+            type_emoji, type_label = get_type_display(task_type)
+            urg_emoji, urg_label = get_urgency_display(_get(a, 'urgency', 'safe'))
             remaining = format_remaining_time(_get(a, 'deadline', None))
-            
-            urgency_display = _get(a, 'urgency_str', '') or _get(a, 'urgency', '...')
-            msg = f"Môn: {course}\nThời hạn: {remaining} | {urgency_display}"
+
+            title = f"{urg_emoji} {title_raw}"
+            msg = f"📚 {course} · {type_emoji} {type_label}\n⏰ {remaining}"
         else:
-            msg = f"Bạn có {len(critical)} bài cực gấp, {len(warnings)} sắp tới hạn và {len(safes) + other_count} bài khác."
+            # Count by urgency
+            critical = sum(1 for a in assignments if urgency_str(_get(a, 'urgency', 'safe')) == 'critical')
+            warning = sum(1 for a in assignments if urgency_str(_get(a, 'urgency', 'safe')) == 'warning')
+            other = len(assignments) - critical - warning
+
+            title = f"📋 UTHelper · {len(assignments)} hoạt động"
+
+            parts = []
+            if critical:
+                parts.append(f"🔴 {critical} khẩn cấp")
+            if warning:
+                parts.append(f"🟠 {warning} sắp hạn")
+            if other:
+                parts.append(f"🟢 {other} khác")
+            msg = " · ".join(parts)
 
         try:
             from windows_toasts import InteractableWindowsToaster, Toast
@@ -108,7 +119,7 @@ class WindowsNotifier:
             toast.text_fields = [title, msg]
             
             toaster.show_toast(toast)
-            logger.info(f"Đã gửi thông báo bằng windows-toasts: {msg}")
+            logger.info(f"[Windows] Đã gửi thông báo: {msg}")
         except Exception as e:
             logger.warning(f"windows-toasts lỗi, dùng tray mặc định: {e}")
             if self.tray_app:

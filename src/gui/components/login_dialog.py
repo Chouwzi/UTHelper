@@ -19,7 +19,6 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         border_radius=8,
         border=ft.border.all(1, C.CRITICAL + "40"),
         visible=False,
-        animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
     )
 
     def _show_error(msg: str):
@@ -67,7 +66,6 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         border_radius=10,
         ink=True,
         alignment=ft.Alignment(0, 0),
-        animate=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
     )
 
     loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)

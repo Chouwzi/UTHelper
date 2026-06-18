@@ -5,6 +5,9 @@ from dateutil import parser as _dateutil_parser
 
 logger = logging.getLogger(__name__)
 
+# F19: Cache local timezone — avoid recomputing on every parse call
+_LOCAL_TZ = datetime.now().astimezone().tzinfo
+
 
 def parse_datetime(s: str) -> datetime | None:
     """Parse a wide range of datetime strings into a naive local datetime.
@@ -23,8 +26,7 @@ def parse_datetime(s: str) -> datetime | None:
         dt = datetime.fromisoformat(s)
         # normalize timezone-aware -> local naive
         if dt.tzinfo:
-            local_tz = datetime.now().astimezone().tzinfo
-            dt = dt.astimezone(local_tz).replace(tzinfo=None)
+            dt = dt.astimezone(_LOCAL_TZ).replace(tzinfo=None)
         return dt
     except Exception:
         pass
@@ -32,8 +34,7 @@ def parse_datetime(s: str) -> datetime | None:
     try:
         dt = _dateutil_parser.parse(s)
         if dt.tzinfo:
-            local_tz = datetime.now().astimezone().tzinfo
-            dt = dt.astimezone(local_tz).replace(tzinfo=None)
+            dt = dt.astimezone(_LOCAL_TZ).replace(tzinfo=None)
         return dt
     except Exception as e:
         logger.debug(f"parse_datetime failed for '{s}': {e}")

@@ -1,9 +1,11 @@
 import logging
 import requests
+from datetime import datetime
 from typing import List
 from models import Assignment, UrgencyLevel
 from config import settings
 from core.time_utils import format_remaining_time
+from core.display_utils import get_type_display, get_urgency_display, urgency_str, clean_course_name
 from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
@@ -16,6 +18,18 @@ def _get(obj, key, default=''):
     return getattr(obj, key, default)
 
 
+def _get_deadline_str(task) -> str:
+    """Extract deadline string from task, with fallback formatting."""
+    deadline = _get(task, 'deadline_str', '')
+    if not deadline:
+        dl = _get(task, 'deadline', None)
+        if dl and hasattr(dl, 'strftime'):
+            deadline = dl.strftime('%H:%M %d/%m/%Y')
+        else:
+            deadline = 'Chưa rõ'
+    return deadline
+
+
 class DiscordNotifier(BaseNotifier):
     def notify(self, assignments: List[Assignment]) -> bool:
         if not getattr(settings, 'ENABLE_DISCORD', False) or not getattr(settings, 'DISCORD_WEBHOOK_URL', None):
@@ -26,61 +40,76 @@ class DiscordNotifier(BaseNotifier):
 
         webhook_url = settings.DISCORD_WEBHOOK_URL
 
+        # Count urgencies for smart summary
+        critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
+        warning_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'warning')
+
+        # Smart summary line
+        summary_parts = []
+        if critical_count:
+            summary_parts.append(f"🔴 {critical_count} khẩn cấp")
+        if warning_count:
+            summary_parts.append(f"🟠 {warning_count} sắp hạn")
+        safe_count = len(tasks) - critical_count - warning_count
+        if safe_count > 0:
+            summary_parts.append(f"🟢 {safe_count} bình thường")
+        summary = " · ".join(summary_parts)
+
         embeds = []
         for task in tasks:
             urgency = _get(task, 'urgency', 'safe')
-            is_critical = urgency in ('critical', UrgencyLevel.CRITICAL)
-            is_warning = urgency in ('warning', UrgencyLevel.WARNING)
+            urg_normalized = urgency_str(urgency)
+            is_critical = urg_normalized == 'critical'
+            is_warning = urg_normalized == 'warning'
             color = 15158332 if is_critical else (15105570 if is_warning else 3066993)
 
-            title = _get(task, 'title', 'Không rõ tiêu đề')
-            course = _get(task, 'course_name', '') or _get(task, 'course', 'Không rõ môn học')
+            title_raw = _get(task, 'title', 'Không rõ tiêu đề')
+            course_raw = _get(task, 'course_name', '') or _get(task, 'course', 'Không rõ môn')
+            course = clean_course_name(course_raw) if course_raw else course_raw
             
-            deadline = _get(task, 'deadline_str', '')
-            if not deadline:
-                dl = _get(task, 'deadline', None)
-                if dl and hasattr(dl, 'strftime'):
-                    deadline = dl.strftime('%H:%M %d/%m/%Y')
-                elif not deadline:
-                    deadline = 'Không rõ'
-                
-            open_time = 'Không có'
-            details = _get(task, 'details', None)
-            if details and not isinstance(details, dict) and getattr(details, 'open_time', None):
-                open_time = details.open_time.strftime('%H:%M %d/%m/%Y')
-            
-            # Tính thời gian còn lại
+            deadline = _get_deadline_str(task)
             remaining = format_remaining_time(_get(task, 'deadline', None))
+
+            # Type display
+            task_type = _get(task, 'type', '') or _get(task, 'event_type', '')
+            type_emoji, type_label = get_type_display(task_type)
+            urg_emoji, urg_label = get_urgency_display(urgency)
+
+            # Submission status
+            submission = _get(task, 'submission_status', '')
+            if submission in ('submitted', 'Đã nộp'):
+                sub_display = '✅ Đã nộp'
+            elif submission in ('graded', 'Đã chấm'):
+                sub_display = '✅ Đã chấm'
+            else:
+                sub_display = '⏳ Chưa nộp'
 
             url = _get(task, 'link', '') or _get(task, 'url', '')
 
-            # Status text
-            if is_critical:
-                status_text = '🔴 Khẩn cấp'
-            elif is_warning:
-                status_text = '🟠 Sắp tới hạn'
-            else:
-                status_text = '🟢 An toàn'
+            # Title with urgency prefix
+            embed_title = f"{urg_emoji} {title_raw}"
 
             embed = {
-                'title': title,
-                'description': f'**Môn học:** {course}',
+                'title': embed_title,
+                'description': f'📚 **{course}** · {type_emoji} {type_label}',
                 'color': color,
                 'fields': [
-                    {'name': 'Hạn chót', 'value': f'{deadline}', 'inline': True},
-                    {'name': 'Còn lại', 'value': remaining, 'inline': True},
-                    {'name': 'Trạng thái', 'value': status_text, 'inline': False},
+                    {'name': '⏰ Hạn chót', 'value': deadline, 'inline': True},
+                    {'name': '⏳ Còn lại', 'value': remaining, 'inline': True},
+                    {'name': '📊 Nộp bài', 'value': sub_display, 'inline': True},
                 ],
-                'footer': {'text': 'Powered by UTHelper - Made by Chouwzi'}
+                'footer': {
+                    'text': f'UTHelper · {datetime.now().strftime("%H:%M %d/%m/%Y")}'
+                }
             }
-            if open_time != 'Không có':
-                embed['fields'].insert(0, {'name': 'Ngày mở', 'value': open_time, 'inline': True})
-            if url: embed['url'] = url
+            if url:
+                embed['url'] = url
             embeds.append(embed)
 
         payload = {
             'username': 'UTHelper',
-            'content': '🔔 **Thông báo có bài tập mới!**',
+            'avatar_url': 'https://i.imgur.com/AfFp7pu.png',
+            'content': f'📋 **UTHelper** · {len(tasks)} hoạt động cần chú ý\n{summary}',
             'embeds': embeds[:10]
         }
 

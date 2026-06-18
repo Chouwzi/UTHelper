@@ -37,6 +37,7 @@ class Settings(BaseModel):
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     USE_WS_API: bool = Field(default=True, description="Ưu tiên dùng WS API thay vì HTML scraping")
+    ALLOW_SESSION_LOGIN: bool = Field(default=False, description="Cho phép session login (sẽ kick browser nếu trường giới hạn 1 session)")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
