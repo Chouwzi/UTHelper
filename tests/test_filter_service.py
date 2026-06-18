@@ -79,3 +79,30 @@ def test_filter_service_sorting(sample_data):
     assert filtered[0]['id'] == "1" # 10h
     assert filtered[1]['id'] == "2" # 40h
     assert filtered[2]['id'] == "3" # 100h
+
+
+def test_filter_service_string_deadline_no_crash():
+    """Regression: str deadline in _deadline_dt should not crash (TypeError)."""
+    data = [
+        {
+            "id": "bad",
+            "course": "Test",
+            "title": "String deadline",
+            "deadline": "2026-01-01 23:59",
+            "_deadline_dt": "2026-01-01 23:59",  # str instead of datetime
+            "type": "assignment",
+            "submission_status": "",
+        },
+        {
+            "id": "none_dt",
+            "course": "Test",
+            "title": "None deadline_dt",
+            "deadline": "invalid-date",
+            "_deadline_dt": None,
+            "type": "quiz",
+            "submission_status": "",
+        },
+    ]
+    # Should not raise TypeError
+    filtered, counts = FilterService.filter_and_count(data, include_overdue=True)
+    assert counts["urgency"]["all"] >= 0

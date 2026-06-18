@@ -33,6 +33,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+# ── Persistent log file for production debugging ──
+try:
+    from logging.handlers import RotatingFileHandler
+    _LOG_DIR = _APPDATA_DIR / "logs"
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        _LOG_DIR / "app.log",
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger().addHandler(_file_handler)
+except Exception:
+    pass  # Không để log setup lỗi crash app
+
 import multiprocessing
 
 def main():

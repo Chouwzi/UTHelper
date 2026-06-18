@@ -12,9 +12,11 @@ from config import settings
 
 from gui.core.theme import C, _TYPE_FILTER_MAP
 from gui.core.utils import clean_course_name, urgency_str
+from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
 from gui.components.settings_view import SettingsView
+from gui.components.calendar_view import CalendarView
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,8 @@ class AppController:
         self._page_alive.set()
         
         self.orchestrator = DataOrchestrator()
+        from core.data_cache import DataCache
+        self._data_cache = DataCache()
         
         self.all_data = []
         self.active_cards = []
@@ -63,6 +67,10 @@ class AppController:
         self.page.run_task(self._countdown_loop_async)
         self.page.run_task(self._auto_refresh_loop_async)
         self._tray_balloon_shown = False  # H-01: only show once
+        
+        # Check update in background
+        from core.update_checker import check_for_update_async
+        check_for_update_async(APP_VERSION, self._on_update_check)
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self.page.run_task(self._show_login_dialog)
@@ -122,12 +130,14 @@ class AppController:
                 await self.page.window.destroy()
 
     async def _on_keyboard_event(self, e):
-        """H-04: Escape key to go back from Detail/Settings views."""
+        """H-04: Escape key to go back from Detail/Settings/Calendar views."""
         if e.key == "Escape":
             if self.settings_view.visible:
                 await self._close_settings()
             elif self.detail_view.visible:
                 await self._close_detail()
+            elif self.calendar_view.visible:
+                await self._close_calendar()
 
     def _init_ui(self):
         # Skeleton loading cards
@@ -207,6 +217,12 @@ class AppController:
         )
 
         # Header
+        self.calendar_btn = ft.IconButton(
+            ft.Icons.CALENDAR_MONTH_ROUNDED,
+            icon_color=C.TEXT_SECONDARY, icon_size=18,
+            tooltip="Lịch",
+            on_click=lambda e: self.page.run_task(self._toggle_calendar),
+        )
         self.refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=18,
@@ -232,14 +248,30 @@ class AppController:
                             border_radius=4,
                         ),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.refresh_btn, self.settings_btn], spacing=0),
+                    ft.Row(controls=[self.calendar_btn, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
                 self.loading_bar,
             ], spacing=4),
-            padding=ft.Padding.only(left=16, right=8, top=20, bottom=8),
+            padding=ft.Padding.only(left=16, right=8, top=20, bottom=4),
             bgcolor=C.BG,
         )
+
+        # Update banner (ẩn mặc định)
+        self._update_banner = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.SYSTEM_UPDATE, size=14, color="#FCD34D"),
+                ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", expand=True),
+                ft.TextButton("Tải về", style=ft.ButtonStyle(color="#FCD34D"), on_click=self._open_update_url),
+            ], spacing=6),
+            bgcolor="#1C1917",
+            border=ft.border.all(1, "#FCD34D40"),
+            border_radius=8,
+            padding=ft.Padding(left=10, right=6, top=4, bottom=4),
+            margin=ft.Margin(left=14, right=14, top=0, bottom=0),
+            visible=False,
+        )
+        self._update_url = ""
 
         filter_container = ft.Container(
             content=ft.Column(
@@ -256,12 +288,16 @@ class AppController:
         )
 
         self.cards_column = ft.ListView(spacing=8, expand=True)
+        # P2/P6: Dynamic empty state — changes based on context
+        self._empty_icon = ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER)
+        self._empty_title = ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500)
+        self._empty_subtitle = ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER)
         self.empty_state  = ft.Container(
             content=ft.Column(controls=[
-                ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER),
+                self._empty_icon,
                 ft.Container(height=4),
-                ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
-                ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER),
+                self._empty_title,
+                self._empty_subtitle,
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
@@ -292,12 +328,17 @@ class AppController:
         )
 
         self.dashboard = ft.Column(
-            controls=[header, filter_container, content_area, footer],
+            controls=[header, self._update_banner, filter_container, content_area, footer],
             spacing=0, expand=True,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
         self.detail_view   = DetailView(self.page, on_close=lambda: self.page.run_task(self._close_detail), get_client=lambda: self.orchestrator.client)
+        self.calendar_view = CalendarView(
+            self.page,
+            on_close=lambda: self.page.run_task(self._close_calendar),
+            on_open_detail=lambda data: self.page.run_task(self._show_detail_async, data),
+        )
         self.settings_view = SettingsView(
             self.page,
             self.orchestrator,
@@ -309,7 +350,7 @@ class AppController:
             on_test_mail=self._on_test_mail
         )
 
-        self.page.add(ft.Stack(controls=[self.dashboard, self.detail_view, self.settings_view], expand=True))
+        self.page.add(ft.Stack(controls=[self.dashboard, self.calendar_view, self.detail_view, self.settings_view], expand=True))
 
         # Show skeleton cards immediately while data loads
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
@@ -339,7 +380,6 @@ class AppController:
             bgcolor=C.SURFACE,
             border_radius=10,
             border=ft.border.all(1, C.BORDER),
-            animate_opacity=ft.Animation(600, ft.AnimationCurve.EASE_IN_OUT),
             opacity=0.5,
         )
 
@@ -398,7 +438,6 @@ class AppController:
         # Lọc sơ bộ dữ liệu theo cài đặt chung
         base = self._apply_settings_filter(data_snapshot)
         
-        from core.filter_service import FilterService
         filtered_items, counts = FilterService.filter_and_count(
             base,
             self.active_urgency,
@@ -449,10 +488,49 @@ class AppController:
         self._update_urgency_counts(counts["urgency"])
         self._update_type_counts(type_counts)
 
+        # P5: Dynamic overdue checkbox label with count
+        if n_overdue > 0:
+            self._overdue_cb.label = f"Quá hạn ({n_overdue})"
+            self._overdue_cb.label_style = ft.TextStyle(size=12, color=C.CRITICAL)
+        else:
+            self._overdue_cb.label = "Quá hạn"
+            self._overdue_cb.label_style = ft.TextStyle(size=12, color=C.TEXT_SECONDARY)
+
         # Render cards
         self._clear_skeletons()
-        self.empty_state.visible = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        is_empty = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        self.empty_state.visible = is_empty
         self.error_state.visible = False
+
+        # P2/P6: Contextual empty state messaging
+        if is_empty:
+            has_filter = (self.active_urgency != "all" or self.active_type != "all"
+                          or self.active_course != "all" or self.active_search)
+            # Check if all activities are submitted (victory state)
+            all_total = counts["urgency"].get("all", 0)
+            submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
+            all_submitted = all_total > 0 and all(
+                a.get("submission_status", "") in submitted_statuses for a in base
+            ) if not has_filter else False
+
+            if all_submitted:
+                # P6: Victory state — positive reinforcement
+                self._empty_icon.name = ft.Icons.EMOJI_EVENTS_ROUNDED
+                self._empty_icon.color = C.SAFE
+                self._empty_title.value = "Tuyệt vời! Đã nộp tất cả 🎉"
+                self._empty_subtitle.value = "Bạn đã hoàn thành mọi bài tập. Nghỉ ngơi thôi!"
+            elif has_filter:
+                # Filter active — guide user to adjust
+                self._empty_icon.name = ft.Icons.FILTER_ALT_OFF_ROUNDED
+                self._empty_icon.color = C.BORDER
+                self._empty_title.value = "Không tìm thấy kết quả"
+                self._empty_subtitle.value = "Thử bỏ bớt bộ lọc hoặc đổi từ khóa tìm kiếm"
+            else:
+                # Default
+                self._empty_icon.name = ft.Icons.INBOX_ROUNDED
+                self._empty_icon.color = C.BORDER
+                self._empty_title.value = "Không có hoạt động nào"
+                self._empty_subtitle.value = "Nhấn nút làm mới để cập nhật dữ liệu"
 
         if not hasattr(self, '_reusable_cards'):
             self._reusable_cards = []
@@ -488,7 +566,49 @@ class AppController:
         self._refresh_ui()
 
     def _render_cards(self):
+        """Full UI refresh — rebuilds filters + cards."""
         self._refresh_ui()
+
+    def _render_cards_only(self):
+        """Lightweight render — only re-filter and update card list, skip popup rebuild."""
+        with self._data_lock:
+            data_snapshot = list(self.all_data)
+        base = self._apply_settings_filter(data_snapshot)
+
+        filtered_items, counts = FilterService.filter_and_count(
+            base, self.active_urgency, self.active_type,
+            self.active_course, self.active_search,
+            settings.INCLUDE_PAST_DUE
+        )
+
+        self._clear_skeletons()
+        self.empty_state.visible = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        self.error_state.visible = False
+
+        if not hasattr(self, '_reusable_cards'):
+            self._reusable_cards = []
+
+        current_cards = self._reusable_cards
+        for i, item in enumerate(filtered_items):
+            if i < len(current_cards):
+                current_cards[i].update_data(item, on_tap=self._show_detail)
+                current_cards[i].visible = True
+            else:
+                new_card = ActivityCard(item, on_tap=self._show_detail, animate=False)
+                new_card.visible = True
+                current_cards.append(new_card)
+
+        for i in range(len(filtered_items), len(current_cards)):
+            current_cards[i].visible = False
+
+        render_cards = current_cards[:len(filtered_items)]
+        self._reusable_cards = current_cards
+
+        with self._cards_lock:
+            self.active_cards = render_cards
+
+        self.cards_column.controls = render_cards
+        self.page.update()
 
     async def _set_urgency(self, key: str):
         self.active_urgency = key
@@ -529,12 +649,12 @@ class AppController:
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
-        # Debounce: cancel previous timer, wait 300ms before rendering
+        # Debounce: 150ms — fast enough to feel instant, prevents excessive renders
         if hasattr(self, '_search_task') and self._search_task:
             self._search_task.cancel()
         async def _delayed_render():
-            await asyncio.sleep(0.3)
-            self._render_cards()
+            await asyncio.sleep(0.15)
+            self._render_cards_only()
         self._search_task = self.page.run_task(_delayed_render)
 
     async def _prefetch_details_async(self, activities: list):
@@ -596,6 +716,25 @@ class AppController:
         self.error_state.visible  = False
         self.page.update()
 
+        # Hiển thị cache cũ ngay lập tức (nếu có) trong khi chờ server
+        if not self.all_data:  # Chỉ load cache khi chưa có data
+            cached_data, cached_at = self._data_cache.load()
+            if cached_data:
+                with self._data_lock:
+                    self.all_data = cached_data
+                from core.time_utils import parse_datetime as _parse_dt
+                for item in cached_data:
+                    dl = item.get("deadline", "")
+                    if dl and "_deadline_dt" not in item:
+                        item["_deadline_dt"] = _parse_dt(dl)
+                    if "_title_lower" not in item:
+                        item["_title_lower"] = str(item.get("title", "")).lower()
+                    if "_course_lower" not in item:
+                        item["_course_lower"] = str(item.get("course", "")).lower()
+                self.status_text.value = f"📦 Dữ liệu cache · Đang cập nhật..."
+                self._update_footer()
+                self.page.update()
+
         try:
             # Ưu tiên async WS API (non-blocking), fallback sync in thread
             if hasattr(self.orchestrator, 'get_latest_activities_async'):
@@ -631,9 +770,30 @@ class AppController:
                 0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
                 x.get("deadline", "")
             ))
+            # C4: Pre-parse deadlines + pre-compute lowercase for hot-path filter
+            for item in data_copy:
+                dl = item.get("deadline", "")
+                if dl and "_deadline_dt" not in item:
+                    item["_deadline_dt"] = parse_datetime(dl)
+                if "_title_lower" not in item:
+                    item["_title_lower"] = str(item.get("title", "")).lower()
+                if "_course_lower" not in item:
+                    item["_course_lower"] = str(item.get("course", "")).lower()
             with self._data_lock:
                 self.all_data = data_copy
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {len(data_copy)} hoạt động"
+            # Lưu cache offline
+            self._data_cache.save(data_copy)
+            # P3: Tính tiến độ nộp bài — positive reinforcement
+            submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
+            total_count = len(data_copy)
+            submitted_count = sum(1 for x in data_copy if x.get("submission_status", "") in submitted_statuses)
+            progress_text = ""
+            if total_count > 0 and submitted_count > 0:
+                if submitted_count == total_count:
+                    progress_text = " · Đã nộp hết ✓"
+                else:
+                    progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
+            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {total_count} hoạt động{progress_text}"
             
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
@@ -655,9 +815,18 @@ class AppController:
             with self._data_lock:
                 self.all_data = []
             
-            self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
-            self.error_state.visible = True
-            self.status_text.value = "Lỗi kết nối server"
+            # Thử dùng cache khi offline
+            cached_data, cached_at = self._data_cache.load()
+            if cached_data:
+                with self._data_lock:
+                    self.all_data = cached_data
+                self.status_text.value = f"⚡ Offline · Dữ liệu cache"
+                self.error_state.visible = False
+                self._update_footer()
+            else:
+                self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
+                self.error_state.visible = True
+                self.status_text.value = "Lỗi kết nối server"
         finally:
             self.loading_bar.visible  = False
             self.refresh_btn.disabled = False
@@ -666,8 +835,40 @@ class AppController:
 
     async def _close_detail(self):
         self.detail_view.visible = False
+        # Return to calendar if it was the source, otherwise dashboard
+        if getattr(self, '_detail_from_calendar', False):
+            self._detail_from_calendar = False
+            self.calendar_view.visible = True
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+        self.page.update()
+
+    async def _toggle_calendar(self):
+        """Toggle between dashboard list view and calendar view."""
+        if self.calendar_view.visible:
+            await self._close_calendar()
+        else:
+            await self._show_calendar()
+
+    async def _show_calendar(self):
+        """Show calendar view with current data."""
+        self.dashboard.visible = False
+        self.detail_view.visible = False
+        self.settings_view.visible = False
+        with self._data_lock:
+            data_snapshot = list(self.all_data)
+        self.calendar_view.update_data(data_snapshot)
+        self.calendar_view.show()
+        self.calendar_btn.icon_color = C.ACCENT
+        self.page.update()
+
+    async def _close_calendar(self):
+        """Return from calendar to dashboard."""
+        self.calendar_view.hide()
         self.dashboard.opacity = 1.0
-        self.dashboard.visible   = True
+        self.dashboard.visible = True
+        self.calendar_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     async def _show_settings(self):
@@ -711,10 +912,8 @@ class AppController:
         if getattr(self, '_needs_reload', False):
             self._needs_reload = False
             self.page.run_task(self._load_data_async)
-        else:
-            # Re-apply filters with potentially changed urgency thresholds
-            self._refresh_ui()
-            self.page.update()
+        # _update_footer() already calls _refresh_ui() which calls page.update()
+        # No extra page.update() needed
 
 
     def _test_notification_base(self, mock_type="critical"):
@@ -780,13 +979,32 @@ class AppController:
         from notifiers.email import EmailNotifier
         EmailNotifier().notify([dummy])
 
+    def _on_update_check(self, has_update: bool, version: str, url: str):
+        """Callback từ background thread khi kiểm tra update xong."""
+        if has_update and version:
+            self._update_url = url or ""
+            self._update_banner.visible = True
+            self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    async def _open_update_url(self, e):
+        """Mở trang tải bản cập nhật trên trình duyệt."""
+        if self._update_url:
+            self.page.launch_url(self._update_url)
+
     def _on_settings_saved(self):
         self._needs_reload = True
     def _show_detail(self, data: dict):
         self.page.run_task(self._show_detail_async, data)
 
     async def _show_detail_async(self, data: dict):
+        # Track if detail was opened from calendar for back-navigation
+        self._detail_from_calendar = self.calendar_view.visible
         self.dashboard.visible = False
+        self.calendar_view.visible = False
         self.settings_view.visible = False
         self.detail_view.show_loading(data)
         self.page.update()
@@ -800,14 +1018,10 @@ class AppController:
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
         changed = False
+        shadow = ActivityCard._PULSE_SHADOW_HIGH if pulse_high else ActivityCard._PULSE_SHADOW_LOW
         for card in cards_snapshot:
             if getattr(card, "_is_critical_active", False):
-                card.shadow = [ft.BoxShadow(
-                    spread_radius=1 if pulse_high else 0,
-                    blur_radius=4 if pulse_high else 3,
-                    color="#BBEF4444" if pulse_high else "#33EF4444",
-                    offset=ft.Offset(0, 0),
-                )]
+                card.shadow = shadow
                 changed = True
         if changed:
             self.page.update()
@@ -815,18 +1029,23 @@ class AppController:
     def _countdown_cards_once(self, cards_snapshot: list):
         if not cards_snapshot:
             return
+        changed = False
         for card in cards_snapshot:
-            card.update_countdown()
-        self.page.update()
+            if card.update_countdown():
+                changed = True
+        if changed:
+            self.page.update()
 
     async def _pulse_loop_async(self):
         pulse_high = True
         while self._page_alive.is_set():
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(1.5)
             if not self._page_alive.is_set(): break
+            # Skip pulse when dashboard is not visible (calendar/detail/settings open)
+            if not self.dashboard.visible:
+                continue
             pulse_high = not pulse_high
             try:
-                # Skip lock acquisition when there are no cards to pulse
                 if not self.active_cards:
                     continue
                 with self._cards_lock:
@@ -848,6 +1067,9 @@ class AppController:
                 await asyncio.sleep(1)
                 slept += 1
             if not self._page_alive.is_set(): break
+            # Skip when dashboard not visible
+            if not self.dashboard.visible:
+                continue
             try:
                 with self._cards_lock:
                     cards_snapshot = list(self.active_cards)
@@ -868,6 +1090,9 @@ class AppController:
                 continue
                 
             try:
+                # H2: Skip auto-refresh when user is in settings/detail/calendar
+                if not self.dashboard.visible:
+                    continue
                 await self._load_data_async()
             except Exception:
                 pass

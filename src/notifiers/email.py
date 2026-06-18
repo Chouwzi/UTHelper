@@ -1,11 +1,13 @@
 import logging
 import html
 import smtplib
+from datetime import datetime
 from email.message import EmailMessage
 from typing import List
 from models import Assignment, UrgencyLevel
 from config import settings
 from core.time_utils import format_remaining_time
+from core.display_utils import get_type_display, get_urgency_display, urgency_str, clean_course_name
 from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
@@ -19,9 +21,8 @@ def _get(obj, key, default=''):
 
 
 class EmailNotifier(BaseNotifier):
-    """
-    Trình quản lý thông báo Email/Gmail với giao diện Pro Max.
-    """
+    """Email/Gmail notifier with professional HTML template."""
+
     def notify(self, assignments: List[Assignment]) -> bool:
         if not getattr(settings, 'ENABLE_GMAIL', False) or not getattr(settings, 'GMAIL_ADDRESS', ''):
             return False
@@ -36,62 +37,112 @@ class EmailNotifier(BaseNotifier):
         tasks = assignments
         if not tasks: return True
 
+        # Count urgencies for subject & summary
+        critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
+        warning_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'warning')
+
+        # Dynamic subject
+        if critical_count > 0:
+            msg_subject = f"[UTHelper] ⚠️ {critical_count} bài tập khẩn cấp cần nộp!"
+        else:
+            msg_subject = f"[UTHelper] {len(tasks)} deadline sắp đến"
+
         msg = EmailMessage()
-        msg['Subject'] = f"[UTHelper] Bạn có {len(tasks)} bài tập cần chú ý!"
+        msg['Subject'] = msg_subject
         msg['From'] = email_address
         msg['To'] = email_address
 
-        html_content = """
+        # Smart summary for header
+        summary_parts = []
+        if critical_count:
+            summary_parts.append(f"{critical_count} khẩn cấp")
+        if warning_count:
+            summary_parts.append(f"{warning_count} sắp hạn")
+        safe_count = len(tasks) - critical_count - warning_count
+        if safe_count > 0:
+            summary_parts.append(f"{safe_count} bình thường")
+        summary = " · ".join(summary_parts)
+
+        time_str = datetime.now().strftime("%H:%M %d/%m/%Y")
+
+        html_content = f"""
         <html>
         <head>
             <style>
-                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
-                .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); overflow: hidden; }
-                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; text-align: center; }
-                .header h2 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.5px; }
-                .content { padding: 30px; }
-                .task-card { background: #ffffff; border-left: 5px solid #4f46e5; margin-bottom: 20px; padding: 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); transition: transform 0.2s; }
-                .task-card:hover { transform: translateY(-2px); }
-                .task-card.critical { border-left-color: #ef4444; background: #fff5f5; }
-                .task-card.warning { border-left-color: #f59e0b; background: #fffbeb; }
-                .task-card.safe { border-left-color: #10b981; background: #f0fdf4; }
-                .title { font-size: 18px; font-weight: bold; margin: 0 0 10px 0; color: #1f2937; }
-                .meta { font-size: 14px; color: #4b5563; margin-bottom: 8px; display: flex; align-items: center; }
-                .meta strong { min-width: 90px; display: inline-block; color: #374151; }
-                .button { display: inline-block; padding: 10px 18px; background: #4f46e5; color: #ffffff !important; text-decoration: none; border-radius: 6px; font-size: 13px; margin-top: 15px; font-weight: 600; text-align: center; }
-                .button:hover { background: #4338ca; }
-                .footer { text-align: center; padding: 20px; color: #9ca3af; font-size: 13px; background: #f9fafb; border-top: 1px solid #f3f4f6; }
+                body {{ font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; color: #1f2937; }}
+                .container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e5e7eb; }}
+                .header {{ background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: white; padding: 28px 24px; }}
+                .header h2 {{ margin: 0; font-size: 22px; font-weight: 700; }}
+                .header .subtitle {{ margin: 6px 0 0 0; opacity: 0.85; font-size: 14px; }}
+                .summary {{ background: #f8fafc; padding: 14px 24px; border-bottom: 1px solid #e5e7eb; font-size: 13px; color: #64748b; }}
+                .content {{ padding: 24px; }}
+                .task-card {{ margin-bottom: 16px; padding: 18px; border-radius: 12px; border-left: 4px solid #4f46e5; background: #fafbfc; }}
+                .task-card.critical {{ border-left-color: #ef4444; background: #fef2f2; }}
+                .task-card.warning {{ border-left-color: #f59e0b; background: #fffbeb; }}
+                .task-card.safe {{ border-left-color: #10b981; background: #f0fdf4; }}
+                .task-title {{ font-size: 16px; font-weight: 600; margin: 0 0 10px 0; color: #111827; }}
+                .task-meta {{ font-size: 13px; color: #4b5563; margin-bottom: 6px; line-height: 1.6; }}
+                .task-meta strong {{ color: #374151; display: inline-block; min-width: 85px; }}
+                .badge {{ display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }}
+                .badge-critical {{ background: #fecaca; color: #dc2626; }}
+                .badge-warning {{ background: #fef3c7; color: #d97706; }}
+                .badge-safe {{ background: #d1fae5; color: #059669; }}
+                .badge-submitted {{ background: #d1fae5; color: #059669; }}
+                .badge-pending {{ background: #e5e7eb; color: #6b7280; }}
+                .btn {{ display: inline-block; padding: 10px 20px; background: #4f46e5; color: #ffffff !important; text-decoration: none; border-radius: 8px; font-size: 13px; font-weight: 600; margin-top: 12px; }}
+                .footer {{ text-align: center; padding: 18px 24px; color: #9ca3af; font-size: 12px; background: #f9fafb; border-top: 1px solid #f3f4f6; line-height: 1.6; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🚨 Thông báo Bài tập UTH</h2>
-                    <p style="margin: 8px 0 0 0; opacity: 0.9; font-size: 15px;">Đừng để miss deadline bạn nhé!</p>
+                    <h2>📋 Nhắc nhở deadline</h2>
+                    <p class="subtitle">{len(tasks)} hoạt động cần chú ý</p>
+                </div>
+                <div class="summary">
+                    {summary} · Cập nhật lúc {time_str}
                 </div>
                 <div class="content">
-            """
+        """
 
         for task in tasks:
             urgency = _get(task, 'urgency', 'safe')
-            is_critical = urgency in ('critical', UrgencyLevel.CRITICAL)
-            is_warning = urgency in ('warning', UrgencyLevel.WARNING)
-            css_class = 'critical' if is_critical else ('warning' if is_warning else 'safe')
-            status_text = 'Khẩn cấp 🔴' if is_critical else ('Sắp tới hạn 🟠' if is_warning else 'An toàn 🟢')
-            
+            urg_normalized = urgency_str(urgency)
+            css_class = urg_normalized
+
             title = _get(task, 'title', 'Không rõ tiêu đề')
-            course = _get(task, 'course_name', '') or _get(task, 'course', 'Không rõ môn')
-            
+            course_raw = _get(task, 'course_name', '') or _get(task, 'course', 'Không rõ môn')
+            course = clean_course_name(course_raw) if course_raw else course_raw
+
             deadline = _get(task, 'deadline_str', '')
             if not deadline:
                 dl = _get(task, 'deadline', None)
                 if dl and hasattr(dl, 'strftime'):
                     deadline = dl.strftime('%H:%M %d/%m/%Y')
-                elif not deadline:
-                    deadline = 'Không rõ hạn'
-                
+                else:
+                    deadline = 'Chưa rõ'
+
             url = _get(task, 'link', '') or _get(task, 'url', '')
-            open_time_str = None
+
+            # Type display
+            task_type = _get(task, 'type', '') or _get(task, 'event_type', '')
+            type_emoji, type_label = get_type_display(task_type)
+            urg_emoji, urg_label = get_urgency_display(urgency)
+
+            # Submission status
+            submission = _get(task, 'submission_status', '')
+            if submission in ('submitted', 'Đã nộp'):
+                sub_html = '<span class="badge badge-submitted">✅ Đã nộp</span>'
+            elif submission in ('graded', 'Đã chấm'):
+                sub_html = '<span class="badge badge-submitted">✅ Đã chấm</span>'
+            else:
+                sub_html = '<span class="badge badge-pending">⏳ Chưa nộp</span>'
+
+            # Urgency badge
+            urg_badge = f'<span class="badge badge-{css_class}">{urg_emoji} {urg_label}</span>'
+
+            # Calculate remaining time
+            remaining = format_remaining_time(_get(task, 'deadline', None))
 
             # Escape user data for HTML
             try:
@@ -99,47 +150,47 @@ class EmailNotifier(BaseNotifier):
                 course = html.escape(str(course))
                 deadline = html.escape(str(deadline))
                 url = html.escape(str(url), quote=True)
+                remaining = html.escape(str(remaining))
+                type_label = html.escape(type_label)
             except Exception:
                 pass
 
             html_content += f"""
-                      <div class="task-card {css_class}">
-                          <p class="title">{title}</p>
-                          <div class="meta"><strong>📚 Môn học:</strong> {course}</div>
-            """
-            details = _get(task, 'details', None)
-            if details and not isinstance(details, dict) and getattr(details, 'open_time', None):
-                open_time_str = details.open_time.strftime('%H:%M %d/%m/%Y')
-                try:
-                    open_time_str = html.escape(open_time_str)
-                except Exception:
-                    pass
-                html_content += f'<div class="meta"><strong>🗓️ Ngày mở:</strong> {open_time_str}</div>'
-
-            # Calculate remaining time using shared utility
-            remaining = format_remaining_time(_get(task, 'deadline', None))
-
-            html_content += f"""
-                        <div class="meta"><strong>⏰ Hạn chót:</strong> <span style="font-weight: bold;">{deadline}</span></div>
-                        <div class="meta"><strong>⏳ Còn lại:</strong> {remaining}</div>
-                        <div class="meta"><strong>🚨 Trạng thái:</strong> {status_text}</div>
+                    <div class="task-card {css_class}">
+                        <p class="task-title">{urg_emoji} {title}</p>
+                        <div class="task-meta"><strong>📚 Môn học</strong> {course}</div>
+                        <div class="task-meta"><strong>{type_emoji} Loại</strong> {type_label}</div>
+                        <div class="task-meta"><strong>⏰ Hạn chót</strong> <b>{deadline}</b></div>
+                        <div class="task-meta"><strong>⏳ Còn lại</strong> {remaining}</div>
+                        <div class="task-meta" style="margin-top: 8px;">{urg_badge} {sub_html}</div>
             """
             if url:
-                html_content += f'<a href="{url}" class="button">Đến Trang Nộp Bài</a>'
+                html_content += f'<a href="{url}" class="btn">Mở bài tập →</a>'
             html_content += "</div>"
 
         html_content += """
                 </div>
                 <div class="footer">
-                    Hệ thống cảnh báo tự động UTHelper. Không cần phản hồi email này.<br>
-                    <i>Stay productive & Keep learning!</i>
+                    Bạn nhận email này từ UTHelper — hệ thống nhắc nhở deadline tự động.<br>
+                    Chỉnh cài đặt thông báo trong ứng dụng UTHelper.
                 </div>
             </div>
         </body>
         </html>
-            """
+        """
 
-        msg.set_content(f"Bạn có {len(tasks)} thông báo bài tập mới. Vui lòng kiểm tra email và E-Learning để không bỏ lỡ hạn chót.")
+        # Plain text fallback
+        plain_lines = [f"UTHelper · {len(tasks)} hoạt động cần chú ý", ""]
+        for task in tasks:
+            t_title = _get(task, 'title', 'Không rõ')
+            t_course = _get(task, 'course_name', '') or _get(task, 'course', '')
+            t_remaining = format_remaining_time(_get(task, 'deadline', None))
+            plain_lines.append(f"• {t_title}")
+            plain_lines.append(f"  Môn: {t_course} · Còn: {t_remaining}")
+            plain_lines.append("")
+        plain_lines.append("—— UTHelper")
+
+        msg.set_content("\n".join(plain_lines))
         msg.add_alternative(html_content, subtype='html')
 
         try:

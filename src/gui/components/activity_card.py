@@ -78,7 +78,8 @@ class ActivityCard(ft.Container):
         self.ink = True
         self.mouse_cursor = ft.MouseCursor.CLICK
         
-        self.animate = ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT)
+        # Only enable container animation for reveal (animate=True). Otherwise None = instant.
+        self.animate = ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT) if animate else None
         self.on_click = lambda _: self.on_tap_cb(self.data)
 
         if animate:
@@ -99,9 +100,20 @@ class ActivityCard(ft.Container):
         self._is_critical_active = False
         self.update_data(data)
 
+    # Pre-allocated shadow constants — avoid GC pressure from pulse loop
+    _CRITICAL_SHADOW = [ft.BoxShadow(spread_radius=1, blur_radius=8, color="#88EF4444", offset=ft.Offset(0, 0))]
+    _PULSE_SHADOW_HIGH = [ft.BoxShadow(spread_radius=1, blur_radius=4, color="#BBEF4444", offset=ft.Offset(0, 0))]
+    _PULSE_SHADOW_LOW = [ft.BoxShadow(spread_radius=0, blur_radius=3, color="#33EF4444", offset=ft.Offset(0, 0))]
+
     def update_data(self, data: dict, force: bool = False, on_tap=None):
-        if not force and self.data == data and getattr(self, '_initialized', False):
-            return
+        # C7: Lightweight identity check instead of deep dict equality
+        if not force and getattr(self, '_initialized', False):
+            old_id = (self.data.get("id"), self.data.get("deadline"), self.data.get("submission_status"))
+            new_id = (data.get("id"), data.get("deadline"), data.get("submission_status"))
+            if old_id == new_id:
+                if on_tap:
+                    self.on_tap_cb = on_tap
+                return
         self.data = data
         if on_tap:
             self.on_tap_cb = on_tap
@@ -171,7 +183,7 @@ class ActivityCard(ft.Container):
 
         if is_critical_active:
             self.border = ft.border.all(1, C.CRITICAL)
-            self.shadow = [ft.BoxShadow(spread_radius=1, blur_radius=8, color="#88EF4444", offset=ft.Offset(0, 0))]
+            self.shadow = ActivityCard._CRITICAL_SHADOW
             self._is_critical_active = True
         else:
             _card_border_color = C.SAFE if _is_submitted else C.BORDER
@@ -181,19 +193,17 @@ class ActivityCard(ft.Container):
             
         self._initialized = True
 
-    def reveal(self):
-        self.opacity = 1.0
-        self.scale   = 1.0
-        self.offset  = ft.Offset(0, 0)
     def update_countdown(self):
         deadline_str = self.data.get("deadline", "")
         if not deadline_str:
-            return
+            return False
         act_type = self.data.get("type", "")
         color            = get_urgency_color(self.data.get("urgency", "safe"))
         cd_text, overdue = get_countdown(deadline_str, act_type)
         progress_val     = get_progress_value(deadline_str)
+        changed = (self._countdown_ctrl.value != cd_text)
         self._countdown_ctrl.value = cd_text
         self._countdown_ctrl.color = C.CRITICAL if overdue else color
         self._progress_ctrl.value  = progress_val
         self._progress_ctrl.color  = C.CRITICAL if overdue else color
+        return changed

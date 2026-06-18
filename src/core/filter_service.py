@@ -40,12 +40,14 @@ class FilterService:
         now = datetime.now()
 
         for a in activities:
-            # Lấy trước mấy thông tin cần thiết
             dl_str = a.get("deadline", "")
-            dl = parse_datetime(dl_str) if dl_str else None
+            # C4: Use pre-cached parsed datetime if available
+            dl = a.get("_deadline_dt")
+            if dl is None and dl_str:
+                dl = parse_datetime(dl_str)
 
             # Tính độ khẩn cấp, xem có bị quá hạn không
-            is_overdue = dl and dl < now
+            is_overdue = isinstance(dl, datetime) and dl < now
             if isinstance(a.get("urgency"), str):
                 u_str = a.get("urgency")
             else:
@@ -70,7 +72,7 @@ class FilterService:
             open_time_str = a.get("details", {}).get("open_time", "")
             if open_time_str:
                 ot = parse_datetime(open_time_str)
-                if ot and datetime.now() < ot:
+                if ot and now < ot:
                     is_open_override = True
             
             # Phân loại cho nó chuẩn bài
@@ -93,9 +95,10 @@ class FilterService:
             
             match_search = True
             if search_lower:
-                title_match = search_lower in str(a.get("title", "")).lower()
-                course_match = search_lower in str(a.get("course", "")).lower()
-                match_search = title_match or course_match
+                # F08: Use pre-computed lower if available
+                title_lower = a.get("_title_lower") or str(a.get("title", "")).lower()
+                course_lower = a.get("_course_lower") or str(a.get("course", "")).lower()
+                match_search = search_lower in title_lower or search_lower in course_lower
 
             if match_urgency and match_type and match_course and match_search:
                 filtered_results.append(a)

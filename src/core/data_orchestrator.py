@@ -81,7 +81,11 @@ class DataOrchestrator:
             return dict(self._detail_cache)
 
     def login(self) -> bool:
-        """Thực hiện đăng nhập bằng thông tin từ settings."""
+        """Thực hiện đăng nhập bằng thông tin từ settings.
+        
+        Ưu tiên WS token (không kick browser).
+        Chỉ dùng session login khi ALLOW_SESSION_LOGIN=True.
+        """
         if self.is_logged_in:
             return True
         
@@ -90,11 +94,26 @@ class DataOrchestrator:
         password = settings.UTH_PASSWORD
         
         if not username or not password:
-            logger.error("Chưa cấu hình MSSV hoặc mật khẩu trong .env")
+            logger.error("Chưa cấu hình MSSV hoặc mật khẩu trong Settings.")
             return False
-            
-        self.is_logged_in = self.client.login(username, password)
-        return self.is_logged_in
+        
+        # Ưu tiên WS token (không tạo session, không kick browser)
+        if settings.USE_WS_API:
+            ws_ok = self.client.login_ws_only(username, password)
+            if ws_ok:
+                self.is_logged_in = True
+                logger.info("Đăng nhập WS token thành công (không ảnh hưởng browser).")
+                return True
+            logger.warning("WS token không khả dụng.")
+        
+        # Fallback: session login (CHỈ khi được phép)
+        if settings.ALLOW_SESSION_LOGIN:
+            logger.warning("Dùng session login (CÓ THỂ kick browser).")
+            self.is_logged_in = self.client.login(username, password)
+            return self.is_logged_in
+        
+        logger.error("Đăng nhập thất bại. WS token không khả dụng và session login bị tắt (ALLOW_SESSION_LOGIN=False) để tránh kick browser.")
+        return False
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
         """
@@ -106,9 +125,15 @@ class DataOrchestrator:
             ws_result = self._fetch_via_ws_api()
             if ws_result is not None:
                 return ws_result
-            logger.info("WS API không khả dụng, fallback sang HTML scraping.")
+            logger.info("WS API không khả dụng.")
         
-        return self._fetch_via_scraping()
+        # Fallback sang scraping CHỈ khi được phép
+        if settings.ALLOW_SESSION_LOGIN:
+            logger.warning("Fallback sang HTML scraping (sẽ dùng session login).")
+            return self._fetch_via_scraping()
+        
+        logger.error("Không thể lấy dữ liệu: WS API fail và session login bị tắt (ALLOW_SESSION_LOGIN=False).")
+        return []
     
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON)."""
@@ -169,11 +194,16 @@ class DataOrchestrator:
             ws_result = await self._fetch_via_ws_api_async()
             if ws_result is not None:
                 return ws_result
-            logger.info("WS API async không khả dụng, fallback sang scraping (sync thread).")
+            logger.info("WS API async không khả dụng.")
         
-        # Fallback to sync scraping in thread
-        import asyncio
-        return await asyncio.to_thread(self._fetch_via_scraping)
+        # Fallback sang scraping CHỈ khi được phép
+        if settings.ALLOW_SESSION_LOGIN:
+            logger.warning("Fallback sang HTML scraping async (sẽ dùng session login).")
+            import asyncio
+            return await asyncio.to_thread(self._fetch_via_scraping)
+        
+        logger.error("Không thể lấy dữ liệu async: WS API fail và session login bị tắt.")
+        return []
 
 
     def _fetch_via_scraping(self) -> List[Dict[str, Any]]:
@@ -210,10 +240,12 @@ class DataOrchestrator:
             future = get_parser_pool().submit(MoodleParser.parse_assignments, html)
             try:
                 # Merge assignments nhưng tránh duplicate do sự kiện vắt qua 2 tháng
-                parsed_list = future.result()
+                parsed_list = future.result(timeout=30)
                 for p in parsed_list:
                     if not any(a.id == p.id for a in all_assignments):
                         all_assignments.append(p)
+            except TimeoutError:
+                logger.warning("Parse calendar page timeout after 30s")
             except Exception as e:
                 logger.error("[Orchestrator] Lỗi parse lịch: %s", e)
 
@@ -225,8 +257,9 @@ class DataOrchestrator:
     def fetch_full_details(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> Dict[str, Any]:
         """
         Tải toàn bộ chi tiết (mô tả, trạng thái nộp bài) từ URL của hoạt động.
-        Kết quả được cache theo URL để tránh gọi lại khi mở lại cùng hoạt động.
-        Nếu force_refresh=True, bỏ qua cache và tải lại dữ liệu mới nhất.
+        
+        Ưu tiên WS API (không kick browser).
+        Fallback sang HTML scraping chỉ khi ALLOW_SESSION_LOGIN=True.
         """
         url = activity_data.get("url")
         if not url:
@@ -237,6 +270,18 @@ class DataOrchestrator:
             cached = self._get_cached_detail(url)
             if cached is not None:
                 return cached
+        
+        # ── Thử WS API trước (stateless, không kick browser) ──
+        if settings.USE_WS_API and settings.MOODLE_WS_TOKEN:
+            ws_result = self._fetch_detail_via_ws(activity_data)
+            if ws_result:
+                self._set_cached_detail(url, ws_result)
+                return ws_result
+        
+        # ── Fallback: HTML scraping (CHỈ khi được phép) ──
+        if not settings.ALLOW_SESSION_LOGIN:
+            logger.debug("WS API không lấy được chi tiết, không fallback HTML vì ALLOW_SESSION_LOGIN=False.")
+            return activity_data
             
         if not self.login():
             return activity_data
@@ -247,7 +292,11 @@ class DataOrchestrator:
 
         # Parse chi tiết trang trên ProcessPool (để giải phóng GIL trong ThreadPool hiện tại)
         future = get_parser_pool().submit(MoodleParser.parse_activity_page, html, url)
-        full_activity = future.result()
+        try:
+            full_activity = future.result(timeout=30)
+        except TimeoutError:
+            logger.warning("Parse activity page timeout after 30s")
+            full_activity = None
         
         if full_activity:
             # Ghi đè lại deadline từ timeline (activity_data) nếu parse page không thấy deadline (bị trả về 2099)
@@ -286,6 +335,102 @@ class DataOrchestrator:
             return result
 
         return activity_data
+    
+    def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Lấy chi tiết bài tập qua WS API — không cần session, không kick browser."""
+        from core.ws_functions import get_assign_details_via_ws
+        
+        # Xác định cmid và course_id từ activity_data
+        url = activity_data.get("url", "")
+        activity_type = activity_data.get("type", "other")
+        
+        # Extract cmid từ URL: /mod/assign/view.php?id=CMID
+        cmid = None
+        if "id=" in url:
+            try:
+                cmid = int(url.split("id=")[-1].split("&")[0])
+            except (ValueError, IndexError):
+                pass
+        
+        if not cmid:
+            return None
+        
+        # Extract course_id — có thể trong activity_data hoặc cần tìm
+        course_id = activity_data.get("course_id")
+        if not course_id:
+            # Thử parse từ URL nếu có courseid param
+            if "course=" in url:
+                try:
+                    course_id = int(url.split("course=")[-1].split("&")[0])
+                except (ValueError, IndexError):
+                    pass
+        
+        if not course_id:
+            logger.debug("Không có course_id cho WS detail fetch.")
+            return None
+        
+        # Xác định modulename từ type
+        type_to_module = {
+            'assignment': 'assign',
+            'assign': 'assign',
+            'quiz': 'quiz',
+        }
+        modulename = type_to_module.get(activity_type, 'assign')
+        
+        # Nếu URL chứa /mod/quiz/ thì là quiz
+        if '/mod/quiz/' in url:
+            modulename = 'quiz'
+        elif '/mod/assign/' in url:
+            modulename = 'assign'
+        
+        try:
+            ws_details = get_assign_details_via_ws(
+                self.client.call_ws_api,
+                cmid=cmid,
+                course_id=int(course_id),
+                modulename=modulename,
+            )
+        except Exception as e:
+            logger.debug("WS detail fetch error: %s", e)
+            return None
+        
+        if not ws_details:
+            return None
+        
+        # Merge WS details vào activity_data
+        result = dict(activity_data)
+        details = result.get("details", {})
+        if isinstance(details, dict):
+            details = dict(details)
+        else:
+            details = {}
+        
+        # Update details with WS data
+        if ws_details.get('description_html'):
+            details['description_html'] = ws_details['description_html']
+        if ws_details.get('status_data'):
+            details['status_data'] = ws_details['status_data']
+        if ws_details.get('course_full_name'):
+            details['course_full_name'] = ws_details['course_full_name']
+        if ws_details.get('open_time'):
+            details['open_time'] = ws_details['open_time']
+        if ws_details.get('quiz_info'):
+            details['quiz_info'] = ws_details['quiz_info']
+        if ws_details.get('attempts_allowed'):
+            details['attempts_allowed'] = ws_details['attempts_allowed']
+        if ws_details.get('time_limit'):
+            details['time_limit'] = ws_details['time_limit']
+        
+        result['details'] = details
+        
+        # Cập nhật submission_status ở top level nếu có
+        status_data = ws_details.get('status_data', {})
+        if 'Trạng thái nộp bài' in status_data:
+            result['submission_status'] = status_data['Trạng thái nộp bài']
+        elif 'Trạng thái' in status_data:
+            result['submission_status'] = status_data['Trạng thái']
+        
+        return result
 
     def prefetch_one_detail(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> bool:
         """
@@ -330,7 +475,12 @@ class DataOrchestrator:
                     pool.shutdown(wait=False, cancel_futures=True)
                     logger.debug("[Orchestrator] Prefetch bị huỷ")
                     break
-                if future.result():
+                try:
+                    ok = future.result(timeout=30)
+                except TimeoutError:
+                    logger.warning("Prefetch detail timeout after 30s")
+                    ok = False
+                if ok:
                     done += 1
 
         return done
