@@ -90,8 +90,8 @@ class DetailView(ft.Container):
         self._content_col   = ft.Column(spacing=12)
 
         # ── FilePicker for in-app submission ──
-        self._file_picker = ft.FilePicker()
-        page.overlay.append(self._file_picker)
+        # FilePicker is a Service in Flet 0.82+ (not a Control)
+        # Do NOT add to page.overlay — just instantiate and call methods
 
         # ── File preview area ──
         self._file_list_col = ft.Column(spacing=4, visible=False)
@@ -518,7 +518,7 @@ class DetailView(ft.Container):
         if self._is_uploading:
             return
         try:
-            files = await self._file_picker.pick_files(
+            files = await ft.FilePicker().pick_files(
                 dialog_title="Chọn file nộp bài",
                 allow_multiple=True,
                 with_data=True,  # đọc bytes luôn cho mobile compatibility
