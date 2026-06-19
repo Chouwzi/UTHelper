@@ -1,7 +1,12 @@
 import flet as ft
 import threading
+import base64
+import asyncio
+import logging
 from gui.core.theme import C
 from gui.core.utils import get_urgency_color, get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
+
+logger = logging.getLogger(__name__)
 
 _STATUS_TRANSLATIONS = {
     "No submissions have been made yet": "Chưa nộp bài",
@@ -59,6 +64,8 @@ class DetailView(ft.Container):
         self._current_url   = ""
         self._current_data  = {}
         self._get_client    = get_client   # hàm lấy MoodleClient để truy xuất đường dẫn đăng nhập
+        self._selected_files = []          # list of FilePickerFile objects
+        self._is_uploading  = False
 
         self._title_text    = ft.Text("", size=18, weight=ft.FontWeight.BOLD,
                                       color=C.TEXT_PRIMARY, max_lines=3)
@@ -81,6 +88,73 @@ class DetailView(ft.Container):
             visible=False,
         )
         self._content_col   = ft.Column(spacing=12)
+
+        # ── FilePicker for in-app submission ──
+        self._file_picker = ft.FilePicker()
+        page.overlay.append(self._file_picker)
+
+        # ── File preview area ──
+        self._file_list_col = ft.Column(spacing=4, visible=False)
+        self._upload_progress = ft.ProgressBar(color=C.SAFE, bgcolor=C.BORDER, visible=False)
+        self._upload_status = ft.Text("", size=12, color=C.TEXT_SECONDARY, visible=False)
+
+        # ── Pick file button ──
+        self._pick_btn = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.ATTACH_FILE_ROUNDED, size=16, color=C.ACCENT),
+                    ft.Text("Chọn file", size=13, color=C.ACCENT, weight=ft.FontWeight.W_600),
+                ],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.ACCENT),
+            padding=ft.Padding.symmetric(vertical=10, horizontal=16),
+            border_radius=8,
+            on_click=self._on_pick_files,
+            ink=True,
+            visible=False,
+        )
+
+        # ── Submit button (for in-app submission) ──
+        self._submit_btn = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.CLOUD_UPLOAD_ROUNDED, size=16, color=ft.Colors.WHITE),
+                    ft.Text("Nộp bài", size=13, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                ],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SAFE,
+            padding=ft.Padding.symmetric(vertical=13),
+            border_radius=8,
+            on_click=self._on_submit,
+            ink=True,
+            visible=False,
+            expand=True,
+        )
+
+        # ── Submission area container ──
+        self._submission_area = ft.Container(
+            content=ft.Column(controls=[
+                ft.Text("📎 Chọn file để nộp:", size=13, color=C.TEXT_SECONDARY,
+                        weight=ft.FontWeight.W_500),
+                self._file_list_col,
+                self._upload_progress,
+                self._upload_status,
+                ft.Row(controls=[
+                    self._pick_btn,
+                    self._submit_btn,
+                ], spacing=8),
+            ], spacing=10),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=8,
+            padding=ft.Padding.all(14),
+            visible=False,
+        )
 
         # UX-8: Dynamic CTA — changes based on submission status
         self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=ft.Colors.WHITE)
@@ -171,6 +245,10 @@ class DetailView(ft.Container):
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
                             ft.Container(
+                                content=self._submission_area,
+                                padding=ft.Padding.symmetric(horizontal=16),
+                            ),
+                            ft.Container(
                                 content=self._open_btn,
                                 padding=ft.Padding.only(
                                     left=16, right=16, top=8, bottom=20),
@@ -232,9 +310,33 @@ class DetailView(ft.Container):
         self._current_data         = data
         self._content_col.controls.clear()
 
-        # UX-8: Dynamic CTA based on submission status
+        # UX-8: Dynamic CTA based on submission status and type
         sub_status = data.get("submission_status", "unknown")
-        if sub_status in ("submitted", "graded"):
+        act_type = data.get("type", "other")
+        is_assignment = act_type in ("assignment", "assign")
+
+        # Reset submission UI
+        self._selected_files.clear()
+        self._file_list_col.controls.clear()
+        self._file_list_col.visible = False
+        self._upload_progress.visible = False
+        self._upload_status.visible = False
+        self._is_uploading = False
+
+        if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
+            # Chưa nộp + là assignment → hiện submission area
+            self._submission_area.visible = True
+            self._pick_btn.visible = True
+            self._submit_btn.visible = False  # chỉ hiện khi đã chọn file
+            # CTA chính → mở browser (fallback)
+            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+            self._cta_text.value = "Mở trong trình duyệt"
+            self._open_btn.bgcolor = C.SURFACE
+            self._open_btn.border = ft.Border.all(1, C.ACCENT)
+            self._cta_text.color = C.ACCENT
+            self._cta_icon.color = C.ACCENT
+        elif sub_status in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
+            self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.VISIBILITY_ROUNDED
             self._cta_text.value = "Xem bài nộp"
             self._open_btn.bgcolor = C.SURFACE
@@ -242,9 +344,10 @@ class DetailView(ft.Container):
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
         else:
-            self._cta_icon.name = ft.Icons.UPLOAD_FILE_ROUNDED
-            self._cta_text.value = "Nộp bài ngay"
-            self._open_btn.bgcolor = C.SAFE
+            self._submission_area.visible = False
+            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+            self._cta_text.value = "Mở trong trình duyệt"
+            self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
             self._cta_text.color = ft.Colors.WHITE
             self._cta_icon.color = ft.Colors.WHITE
@@ -407,3 +510,181 @@ class DetailView(ft.Container):
             url_to_open = client.build_autologin_url(self._current_url)
 
         await ft.UrlLauncher().launch_url(url_to_open)
+
+    # ── In-App Submission ──────────────────────────────────────────────
+
+    async def _on_pick_files(self, e):
+        """Mở file picker để chọn file nộp bài."""
+        if self._is_uploading:
+            return
+        try:
+            files = await self._file_picker.pick_files(
+                dialog_title="Chọn file nộp bài",
+                allow_multiple=True,
+                with_data=True,  # đọc bytes luôn cho mobile compatibility
+            )
+            if files:
+                self._selected_files = files
+                self._update_file_preview()
+        except Exception as ex:
+            logger.error("FilePicker error: %s", ex)
+
+    def _update_file_preview(self):
+        """Cập nhật danh sách file đã chọn trong UI."""
+        self._file_list_col.controls.clear()
+        for i, f in enumerate(self._selected_files):
+            size_kb = (f.size or 0) / 1024
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+            row = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        ft.Icon(ft.Icons.DESCRIPTION_ROUNDED, size=16, color=C.ACCENT),
+                        ft.Text(f.name, size=12, color=C.TEXT_PRIMARY, expand=True,
+                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
+                        ft.IconButton(
+                            ft.Icons.CLOSE_ROUNDED, icon_size=14,
+                            icon_color=C.TEXT_SECONDARY,
+                            on_click=lambda _, idx=i: self._remove_file(idx),
+                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                        ),
+                    ],
+                    spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=C.BG,
+                border=ft.Border.all(1, C.BORDER),
+                border_radius=6,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            )
+            self._file_list_col.controls.append(row)
+
+        has_files = len(self._selected_files) > 0
+        self._file_list_col.visible = has_files
+        self._submit_btn.visible = has_files
+        self._upload_status.visible = False
+        self._upload_progress.visible = False
+        self._page.update()
+
+    def _remove_file(self, index: int):
+        """Xóa file khỏi danh sách đã chọn."""
+        if 0 <= index < len(self._selected_files):
+            self._selected_files.pop(index)
+            self._update_file_preview()
+
+    async def _on_submit(self, e):
+        """Upload files và nộp bài qua Moodle WS API."""
+        if self._is_uploading or not self._selected_files:
+            return
+
+        client = None
+        try:
+            client = self._get_client() if self._get_client else None
+        except Exception:
+            pass
+
+        if not client:
+            self._show_upload_status("❌ Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
+            return
+
+        # Resolve assign_id từ URL
+        data = self._current_data
+        url = data.get("url", "")
+        course_id = data.get("course_id")
+
+        if not url or not course_id or '/mod/assign/' not in url:
+            self._show_upload_status("❌ Không thể xác định bài tập. Thử mở trong trình duyệt.", C.CRITICAL)
+            return
+
+        self._is_uploading = True
+        self._upload_progress.visible = True
+        self._upload_progress.value = None  # indeterminate
+        self._pick_btn.visible = False
+        self._submit_btn.visible = False
+        self._show_upload_status("⏳ Đang tải lên...", C.TEXT_SECONDARY)
+
+        try:
+            success = await asyncio.to_thread(
+                self._do_submit_sync, client, url, int(course_id)
+            )
+            if success:
+                self._show_upload_status("✅ Nộp bài thành công!", C.SAFE)
+                self._upload_progress.value = 1.0
+                self._selected_files.clear()
+                self._file_list_col.controls.clear()
+                self._file_list_col.visible = False
+                self._submit_btn.visible = False
+                self._pick_btn.visible = True
+            else:
+                self._show_upload_status("❌ Nộp bài thất bại. Thử lại hoặc mở trình duyệt.", C.CRITICAL)
+                self._pick_btn.visible = True
+                self._submit_btn.visible = True
+                self._upload_progress.visible = False
+        except Exception as ex:
+            logger.error("Submit error: %s", ex)
+            self._show_upload_status(f"❌ Lỗi: {ex}", C.CRITICAL)
+            self._pick_btn.visible = True
+            self._submit_btn.visible = True
+            self._upload_progress.visible = False
+        finally:
+            self._is_uploading = False
+            self._page.update()
+
+    def _do_submit_sync(self, client, url: str, course_id: int) -> bool:
+        """Thực hiện upload + submit đồng bộ (chạy trong thread)."""
+        from core.ws_functions import (
+            resolve_cmid_to_assign_id,
+            upload_file_to_draft,
+            save_assignment_submission,
+        )
+
+        # 1. Extract cmid từ URL
+        cmid = None
+        if "id=" in url:
+            try:
+                cmid = int(url.split("id=")[-1].split("&")[0])
+            except (ValueError, IndexError):
+                pass
+        if not cmid:
+            logger.error("Không extract được cmid từ URL: %s", url)
+            return False
+
+        # 2. Resolve cmid → assign_id
+        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
+        if not assign_id:
+            logger.error("Không resolve được assign_id từ cmid=%d, course=%d", cmid, course_id)
+            return False
+
+        # 3. Lấy user_id
+        user_id = client.get_user_id()
+        if not user_id:
+            logger.error("Không lấy được user_id")
+            return False
+
+        # 4. Upload từng file
+        draft_itemid = 0
+        for f in self._selected_files:
+            file_bytes = f.bytes
+            if not file_bytes:
+                logger.warning("File '%s' không có dữ liệu, bỏ qua.", f.name)
+                continue
+            file_b64 = base64.b64encode(file_bytes).decode('utf-8')
+            result_id = upload_file_to_draft(
+                client.call_ws_api, f.name, file_b64, user_id, itemid=draft_itemid
+            )
+            if result_id is None:
+                logger.error("Upload thất bại cho file '%s'", f.name)
+                return False
+            draft_itemid = result_id  # dùng lại cho file tiếp theo
+
+        if draft_itemid == 0:
+            logger.error("Không có file nào được upload thành công")
+            return False
+
+        # 5. Save submission
+        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+
+    def _show_upload_status(self, text: str, color: str):
+        """Hiện thông báo trạng thái upload."""
+        self._upload_status.value = text
+        self._upload_status.color = color
+        self._upload_status.visible = True

@@ -433,6 +433,105 @@ def _get_quiz_detail(
 
 
 # ---------------------------------------------------------------------------
+# Assignment Submission (In-App Upload)
+# ---------------------------------------------------------------------------
+
+def upload_file_to_draft(
+    call_api: Callable,
+    filename: str,
+    file_content_b64: str,
+    user_id: int,
+    itemid: int = 0,
+) -> Optional[int]:
+    """Upload file lên Moodle draft area qua core_files_upload.
+    
+    Args:
+        call_api: WS API caller (client.call_ws_api).
+        filename: Tên file (vd: "baitap.pdf").
+        file_content_b64: Nội dung file đã encode base64.
+        user_id: Moodle user ID (từ get_user_id()).
+        itemid: Draft area ID. 0 = tạo mới. Dùng lại ID cũ để thêm nhiều file.
+    
+    Returns:
+        itemid của draft area, hoặc None nếu lỗi.
+    """
+    try:
+        result = call_api(
+            'core_files_upload',
+            component='user',
+            filearea='draft',
+            itemid=itemid,
+            filepath='/',
+            filename=filename,
+            filecontent=file_content_b64,
+            contextlevel='user',
+            instanceid=user_id,
+        )
+    except Exception as e:
+        logger.error("Lỗi khi upload file '%s': %s", filename, e)
+        return None
+
+    if result and isinstance(result, dict):
+        if 'itemid' in result:
+            logger.info("Upload thành công '%s' → draft itemid=%s", filename, result['itemid'])
+            return result['itemid']
+        if 'exception' in result:
+            logger.error("Upload lỗi: %s", result.get('message', result.get('error', '')))
+    
+    return None
+
+
+def save_assignment_submission(
+    call_api: Callable,
+    assign_id: int,
+    draft_itemid: int,
+) -> bool:
+    """Nộp bài assignment với file từ draft area.
+    
+    Gọi mod_assign_save_submission để lưu bài nộp.
+    
+    Args:
+        call_api: WS API caller.
+        assign_id: Assignment ID thật (KHÔNG phải cmid).
+        draft_itemid: Draft area itemid từ upload_file_to_draft().
+    
+    Returns:
+        True nếu nộp thành công, False nếu lỗi.
+    """
+    try:
+        result = call_api(
+            'mod_assign_save_submission',
+            assignmentid=assign_id,
+            **{'plugindata[files_filemanager]': draft_itemid},
+        )
+    except Exception as e:
+        logger.error("Lỗi khi nộp bài (assign_id=%d): %s", assign_id, e)
+        return False
+
+    if result is None:
+        return False
+    
+    # mod_assign_save_submission trả về [] (empty list) khi thành công
+    if isinstance(result, list) and len(result) == 0:
+        logger.info("Nộp bài thành công (assign_id=%d, draft=%d)", assign_id, draft_itemid)
+        return True
+    
+    # Trả về dict với warnings
+    if isinstance(result, dict):
+        warnings = result.get('warnings', [])
+        if warnings:
+            for w in warnings:
+                logger.warning("Submission warning: %s", w.get('message', w))
+            return False
+        # Không có warnings → coi như thành công
+        return True
+    
+    # List rỗng hoặc response không xác định → thử coi là thành công
+    logger.info("Nộp bài response (assign_id=%d): %s", assign_id, result)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Event → Assignment converter
 # ---------------------------------------------------------------------------
 

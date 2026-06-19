@@ -192,6 +192,22 @@ class MoodleClient:
         import asyncio
         return await asyncio.to_thread(self.call_ws_api, function, **params)
 
+    def get_user_id(self) -> Optional[int]:
+        """Lấy Moodle user ID từ core_webservice_get_site_info (cached).
+        
+        Cần cho core_files_upload (instanceid) và các API khác cần userid.
+        """
+        if hasattr(self, '_cached_user_id') and self._cached_user_id:
+            return self._cached_user_id
+        try:
+            result = self.call_ws_api('core_webservice_get_site_info')
+            if result and 'userid' in result:
+                self._cached_user_id = int(result['userid'])
+                return self._cached_user_id
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy user ID: {e}")
+        return None
+
 
     def get_portal_token(self, username: str = None, password: str = None) -> str:
         """Lấy JWT token từ Portal UTH (dùng cho autologin deep-link)."""
