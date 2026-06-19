@@ -391,7 +391,7 @@ class DetailView(ft.Container):
             ], spacing=6),
         )
 
-    def _open_browser(self, e):
+    async def _open_browser(self, e):
         if not self._current_url:
             return
 
@@ -405,8 +405,8 @@ class DetailView(ft.Container):
             # Sử dụng autologin URL thông qua Moodle login endpoint
             activity_url = self._current_url
             autologin_url = client.build_autologin_url(activity_url)
-            self._page.run_task(self._page.launch_url, autologin_url)
+            await self._page.launch_url(autologin_url)
             return
 
         # Dự phòng mở thẳng khi không có cookie
-        self._page.run_task(self._page.launch_url, self._current_url)
+        await self._page.launch_url(self._current_url)
