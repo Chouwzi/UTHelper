@@ -141,7 +141,10 @@ class CalendarView(ft.Container):
 
         # ── Mode toggle (Month / Week) ──
         self._mode_month_btn = ft.Container(
-            content=ft.Text("📅 Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY),
+            content=ft.Row(controls=[
+                ft.Icon(ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY),
+                ft.Text("Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY),
+            ], spacing=4, tight=True),
             bgcolor=C.ACCENT + "30",
             border_radius=12,
             padding=ft.Padding(left=14, right=14, top=5, bottom=5),
@@ -149,7 +152,10 @@ class CalendarView(ft.Container):
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
         self._mode_week_btn = ft.Container(
-            content=ft.Text("📋 Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY),
+            content=ft.Row(controls=[
+                ft.Icon(ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                ft.Text("Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY),
+            ], spacing=4, tight=True),
             bgcolor="transparent",
             border_radius=12,
             padding=ft.Padding(left=14, right=14, top=5, bottom=5),
@@ -365,7 +371,7 @@ class CalendarView(ft.Container):
 
         if week_total > 0:
             done_text = f" · {week_submitted} đã nộp" if week_submitted > 0 else ""
-            self._month_summary.value = f"📋 {week_total} bài tập{done_text}"
+            self._month_summary.value = f"{week_total} bài tập{done_text}"
         else:
             self._month_summary.value = "Không có bài tập trong tuần này"
 
@@ -531,7 +537,7 @@ class CalendarView(ft.Container):
 
         if month_total > 0:
             done_text = f" · {month_submitted} đã nộp" if month_submitted > 0 else ""
-            self._month_summary.value = f"📋 {month_total} bài tập{done_text}"
+            self._month_summary.value = f"{month_total} bài tập{done_text}"
         else:
             self._month_summary.value = "Không có bài tập trong tháng này"
 
@@ -763,9 +769,11 @@ class CalendarView(ft.Container):
         if mode == "month":
             # Update toggle styling
             self._mode_month_btn.bgcolor = C.ACCENT + "30"
-            self._mode_month_btn.content.color = C.TEXT_PRIMARY
+            self._mode_month_btn.content.controls[0].color = C.TEXT_PRIMARY
+            self._mode_month_btn.content.controls[1].color = C.TEXT_PRIMARY
             self._mode_week_btn.bgcolor = "transparent"
-            self._mode_week_btn.content.color = C.TEXT_SECONDARY
+            self._mode_week_btn.content.controls[0].color = C.TEXT_SECONDARY
+            self._mode_week_btn.content.controls[1].color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = True
             self._week_strip.visible = False
@@ -778,9 +786,11 @@ class CalendarView(ft.Container):
         else:
             # Update toggle styling
             self._mode_week_btn.bgcolor = C.ACCENT + "30"
-            self._mode_week_btn.content.color = C.TEXT_PRIMARY
+            self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY
+            self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY
             self._mode_month_btn.bgcolor = "transparent"
-            self._mode_month_btn.content.color = C.TEXT_SECONDARY
+            self._mode_month_btn.content.controls[0].color = C.TEXT_SECONDARY
+            self._mode_month_btn.content.controls[1].color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = False
             self._week_strip.visible = True

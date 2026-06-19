@@ -601,7 +601,7 @@ class AppController:
                 # P6: Victory state — positive reinforcement
                 self._empty_icon.name = ft.Icons.EMOJI_EVENTS_ROUNDED
                 self._empty_icon.color = C.SAFE
-                self._empty_title.value = "Tuyệt vời! Đã nộp tất cả 🎉"
+                self._empty_title.value = "Tuyệt vời! Đã nộp tất cả"
                 self._empty_subtitle.value = "Bạn đã hoàn thành mọi bài tập. Nghỉ ngơi thôi!"
             elif has_filter:
                 # Filter active — guide user to adjust
@@ -809,7 +809,7 @@ class AppController:
         self._prefetch_cancel_event.set()
 
         self.refresh_btn.disabled = True
-        self.status_text.value    = "⏳ Đang cập nhật dữ liệu..."
+        self.status_text.value    = "Đang cập nhật dữ liệu..."
         self.loading_bar.visible  = True
         self.empty_state.visible  = False
         self.error_state.visible  = False
@@ -830,7 +830,7 @@ class AppController:
                         item["_title_lower"] = str(item.get("title", "")).lower()
                     if "_course_lower" not in item:
                         item["_course_lower"] = str(item.get("course", "")).lower()
-                self.status_text.value = f"📦 Dữ liệu cache · Đang cập nhật..."
+                self.status_text.value = f"Dữ liệu cache · Đang cập nhật..."
                 self._update_footer()
                 self.page.update()
 
@@ -864,7 +864,7 @@ class AppController:
             
             # Determine data source for status display
             ws_count = sum(1 for x in data_copy if x.get('source') == 'ws_api')
-            source_tag = "⚡ API" if ws_count > 0 else "🌐 Web"
+            source_tag = "API" if ws_count > 0 else "Web"
             data_copy.sort(key=lambda x: (
                 0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
                 x.get("deadline", "")
@@ -921,7 +921,7 @@ class AppController:
             if cached_data:
                 with self._data_lock:
                     self.all_data = cached_data
-                self.status_text.value = f"⚡ Offline · Dữ liệu cache"
+                self.status_text.value = f"Offline · Dữ liệu cache"
                 self.error_state.visible = False
                 self._update_footer()
             else:

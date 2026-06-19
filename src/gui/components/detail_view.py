@@ -189,8 +189,11 @@ class DetailView(ft.Container):
         )
         self._submitted_area = ft.Container(
             content=ft.Column(controls=[
-                ft.Text("📁 File đã nộp:", size=13, color=C.TEXT_SECONDARY,
-                        weight=ft.FontWeight.W_500),
+                ft.Row(controls=[
+                    ft.Icon(ft.Icons.FOLDER_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                    ft.Text("File đã nộp:", size=13, color=C.TEXT_SECONDARY,
+                            weight=ft.FontWeight.W_500),
+                ], spacing=6),
                 self._submitted_files_col,
                 self._edit_submitted_btn,
             ], spacing=8),
@@ -242,8 +245,11 @@ class DetailView(ft.Container):
         # ── Submission area container ──
         self._submission_area = ft.Container(
             content=ft.Column(controls=[
-                ft.Text("📎 Chọn file để nộp:", size=13, color=C.TEXT_SECONDARY,
-                        weight=ft.FontWeight.W_500),
+                ft.Row(controls=[
+                    ft.Icon(ft.Icons.ATTACH_FILE_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                    ft.Text("Chọn file để nộp:", size=13, color=C.TEXT_SECONDARY,
+                            weight=ft.FontWeight.W_500),
+                ], spacing=6),
                 self._file_list_col,
                 self._upload_progress,
                 self._upload_status,
@@ -713,7 +719,7 @@ class DetailView(ft.Container):
             pass
 
         if not client:
-            self._show_upload_status("❌ Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
+            self._show_upload_status("Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
             return
 
         # Resolve assign_id từ URL
@@ -722,7 +728,7 @@ class DetailView(ft.Container):
         course_id = data.get("course_id")
 
         if not url or not course_id or '/mod/assign/' not in url:
-            self._show_upload_status("❌ Không thể xác định bài tập. Thử mở trong trình duyệt.", C.CRITICAL)
+            self._show_upload_status("Không thể xác định bài tập. Thử mở trong trình duyệt.", C.CRITICAL)
             return
 
         self._is_uploading = True
@@ -730,14 +736,14 @@ class DetailView(ft.Container):
         self._upload_progress.value = None  # indeterminate
         self._pick_btn.visible = False
         self._submit_btn.visible = False
-        self._show_upload_status("⏳ Đang tải lên...", C.TEXT_SECONDARY)
+        self._show_upload_status("Đang tải lên...", C.TEXT_SECONDARY)
 
         try:
             success = await asyncio.to_thread(
                 self._do_submit_sync, client, url, int(course_id)
             )
             if success:
-                self._show_upload_status("✅ Nộp bài thành công!", C.SAFE)
+                self._show_upload_status("Nộp bài thành công!", C.SAFE)
                 self._upload_progress.value = 1.0
                 self._selected_files.clear()
                 self._file_list_col.controls.clear()
@@ -749,13 +755,13 @@ class DetailView(ft.Container):
                     self._async_load_submitted_files(client, url, int(course_id))
                 )
             else:
-                self._show_upload_status("❌ Nộp bài thất bại. Thử lại hoặc mở trình duyệt.", C.CRITICAL)
+                self._show_upload_status("Nộp bài thất bại. Thử lại hoặc mở trình duyệt.", C.CRITICAL)
                 self._pick_btn.visible = True
                 self._submit_btn.visible = True
                 self._upload_progress.visible = False
         except Exception as ex:
             logger.error("Submit error: %s", ex)
-            self._show_upload_status(f"❌ Lỗi: {ex}", C.CRITICAL)
+            self._show_upload_status(f"Lỗi: {ex}", C.CRITICAL)
             self._pick_btn.visible = True
             self._submit_btn.visible = True
             self._upload_progress.visible = False
@@ -949,19 +955,19 @@ class DetailView(ft.Container):
         except Exception:
             pass
         if not client:
-            self._show_upload_status("❌ Chưa đăng nhập.", C.CRITICAL)
+            self._show_upload_status("Chưa đăng nhập.", C.CRITICAL)
             return
 
         data = self._current_data
         url = data.get("url", "")
         course_id = data.get("course_id")
         if not url or not course_id or '/mod/assign/' not in url:
-            self._show_upload_status("❌ Không xác định được bài tập.", C.CRITICAL)
+            self._show_upload_status("Không xác định được bài tập.", C.CRITICAL)
             return
 
         self._is_uploading = True
         self._show_upload_status(
-            f"⏳ Đang xóa '{file_to_remove.get('name', '')}'...", C.TEXT_SECONDARY
+            f"Đang xóa '{file_to_remove.get('name', '')}'...", C.TEXT_SECONDARY
         )
         self._page.update()
 
@@ -971,17 +977,17 @@ class DetailView(ft.Container):
             )
             if success:
                 self._show_upload_status(
-                    f"✅ Đã xóa '{file_to_remove.get('name', '')}'", C.SAFE
+                    f"Đã xóa '{file_to_remove.get('name', '')}'", C.SAFE
                 )
                 # Reload submitted files
                 asyncio.ensure_future(
                     self._async_load_submitted_files(client, url, int(course_id))
                 )
             else:
-                self._show_upload_status("❌ Xóa thất bại. Thử mở trình duyệt.", C.CRITICAL)
+                self._show_upload_status("Xóa thất bại. Thử mở trình duyệt.", C.CRITICAL)
         except Exception as ex:
             logger.error("Remove submitted file error: %s", ex)
-            self._show_upload_status(f"❌ Lỗi: {ex}", C.CRITICAL)
+            self._show_upload_status(f"Lỗi: {ex}", C.CRITICAL)
         finally:
             self._is_uploading = False
             self._page.update()
@@ -1098,7 +1104,7 @@ class DetailView(ft.Container):
         new_filepath = (self._edit_filepath.value or '/').strip()
 
         if not new_name:
-            self._edit_status.value = "⚠️ Tên file không được trống"
+            self._edit_status.value = "Tên file không được trống"
             self._edit_status.color = C.WARNING
             self._edit_status.visible = True
             self._page.update()
@@ -1117,7 +1123,7 @@ class DetailView(ft.Container):
         except Exception:
             pass
         if not client:
-            self._edit_status.value = "❌ Chưa đăng nhập"
+            self._edit_status.value = "Chưa đăng nhập"
             self._edit_status.color = C.CRITICAL
             self._edit_status.visible = True
             self._page.update()
@@ -1127,14 +1133,14 @@ class DetailView(ft.Container):
         url = data.get("url", "")
         course_id = data.get("course_id")
         if not url or not course_id or '/mod/assign/' not in url:
-            self._edit_status.value = "❌ Không xác định được bài tập"
+            self._edit_status.value = "Không xác định được bài tập"
             self._edit_status.color = C.CRITICAL
             self._edit_status.visible = True
             self._page.update()
             return
 
         self._is_uploading = True
-        self._edit_status.value = "⏳ Đang cập nhật..."
+        self._edit_status.value = "Đang cập nhật..."
         self._edit_status.color = C.TEXT_SECONDARY
         self._edit_status.visible = True
         self._page.update()
@@ -1154,18 +1160,18 @@ class DetailView(ft.Container):
             if success:
                 self._close_edit_dialog()
                 self._show_upload_status(
-                    f"✅ Đã cập nhật '{new_name}'", C.SAFE
+                    f"Đã cập nhật '{new_name}'", C.SAFE
                 )
                 asyncio.ensure_future(
                     self._async_load_submitted_files(client, url, int(course_id))
                 )
             else:
-                self._edit_status.value = "❌ Cập nhật thất bại"
+                self._edit_status.value = "Cập nhật thất bại"
                 self._edit_status.color = C.CRITICAL
                 self._edit_status.visible = True
         except Exception as ex:
             logger.error("Update metadata error: %s", ex)
-            self._edit_status.value = f"❌ {ex}"
+            self._edit_status.value = f"Lỗi: {ex}"
             self._edit_status.color = C.CRITICAL
             self._edit_status.visible = True
         finally:

@@ -694,7 +694,7 @@ class SettingsView(ft.Container):
         user = self._username_field.value.strip()
         pwd = self._password_field.value.strip()
         if not user or not pwd:
-            self._test_login_status.value = "⚠ Vui lòng nhập đủ MSSV và Mật khẩu!"
+            self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
             self.update()
             return
@@ -711,13 +711,13 @@ class SettingsView(ft.Container):
         try:
             success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
             if success:
-                self._test_login_status.value = "✓ Kết nối thành công!"
+                self._test_login_status.value = "Kết nối thành công!"
                 self._test_login_status.color = C.SAFE
             else:
-                self._test_login_status.value = "✗ Đăng nhập thất bại. Kiểm tra lại thông tin!"
+                self._test_login_status.value = "Đăng nhập thất bại. Kiểm tra lại thông tin!"
                 self._test_login_status.color = C.CRITICAL
         except Exception as ex:
-            self._test_login_status.value = f"✗ Lỗi: {str(ex)}"
+            self._test_login_status.value = f"Lỗi: {str(ex)}"
             self._test_login_status.color = C.CRITICAL
         finally:
             self._test_login_btn.disabled = False
@@ -1012,7 +1012,7 @@ class SettingsView(ft.Container):
 
             save_settings()
 
-            self._save_status.value   = "✓ Đã lưu cài đặt thành công"
+            self._save_status.value   = "Đã lưu cài đặt thành công"
             self._save_status.color   = C.SAFE
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
