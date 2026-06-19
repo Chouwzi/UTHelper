@@ -681,10 +681,11 @@ class AppController:
         for d in data:
             details     = d.get("details", {})
             status      = details.get("status_data", {})
-            grading     = status.get("Grading status", "")
-            submission  = status.get("Submission status", "")
+            # Check both English and Vietnamese keys (WS API uses Vietnamese)
+            grading     = status.get("Grading status", "") or status.get("Trạng thái chấm", "") or status.get("Chấm điểm", "")
+            submission  = status.get("Submission status", "") or status.get("Trạng thái nộp bài", "") or d.get("submission_status", "")
             is_graded   = (grading in ("Graded", "Đã chấm") or (grading.startswith("Graded") and "Not" not in grading))
-            is_submitted = (submission in ("Submitted for grading", "Đã nộp") or ("Submitted" in submission and "Not" not in submission) or ("Đã nộp" in submission and "Chưa" not in submission))
+            is_submitted = (submission in ("Submitted for grading", "Đã nộp", "Đã nộp, chờ chấm") or ("Submitted" in submission and "Not" not in submission) or ("Đã nộp" in submission and "Chưa" not in submission))
 
             if is_graded and not settings.INCLUDE_GRADED: continue
             if is_submitted and not is_graded and not settings.INCLUDE_SUBMITTED: continue
@@ -1064,11 +1065,13 @@ class AppController:
     def _on_update_check(self, has_update: bool, version: str, url: str):
         """Callback từ background thread khi kiểm tra update xong."""
         if has_update and version:
-            self._update_url = url or ""
-            self._update_banner.visible = True
-            self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
-            try:
+            async def _update_ui():
+                self._update_url = url or ""
+                self._update_banner.visible = True
+                self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
                 self.page.update()
+            try:
+                self.page.run_task(_update_ui)
             except Exception:
                 pass
 

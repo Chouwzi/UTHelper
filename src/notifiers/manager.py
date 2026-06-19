@@ -147,6 +147,10 @@ class NotificationManager:
         
         current_hour = now.hour
         
+        # Special case: start == end means 24-hour DND (always silent)
+        if start == end:
+            return True
+        
         if start > end: # Trường hợp DND xuyên màn đêm (qua 12h sáng)
             if current_hour >= start or current_hour < end:
                 return True

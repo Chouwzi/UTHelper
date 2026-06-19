@@ -41,11 +41,14 @@ def parse_datetime(s: str) -> datetime | None:
         return None
 
 
-def format_remaining_time(deadline: datetime | None) -> str:
+def format_remaining_time(deadline) -> str:
     """Format the remaining time from now until deadline as a human-readable Vietnamese string.
 
     Used by all notifiers (Windows, Discord, Telegram, Email) to avoid duplicating
     the days/hours/minutes calculation logic.
+
+    Args:
+        deadline: datetime object, ISO date string, or None.
 
     Returns:
         "Không rõ"     – if deadline is None
@@ -55,6 +58,12 @@ def format_remaining_time(deadline: datetime | None) -> str:
     """
     if not deadline:
         return "Không rõ"
+
+    # Auto-parse string deadlines (notifiers pass ISO strings from dicts)
+    if isinstance(deadline, str):
+        deadline = parse_datetime(deadline)
+        if not deadline:
+            return "Không rõ"
 
     delta = deadline - datetime.now()
     total_seconds = int(delta.total_seconds())

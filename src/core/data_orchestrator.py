@@ -384,10 +384,16 @@ class DataOrchestrator:
             modulename = 'assign'
         
         try:
+            cid = int(course_id) if not isinstance(course_id, int) else course_id
+        except (ValueError, TypeError):
+            logger.debug("course_id '%s' không hợp lệ, bỏ qua WS detail.", course_id)
+            return None
+
+        try:
             ws_details = get_assign_details_via_ws(
                 self.client.call_ws_api,
                 cmid=cmid,
-                course_id=int(course_id),
+                course_id=cid,
                 modulename=modulename,
             )
         except Exception as e:

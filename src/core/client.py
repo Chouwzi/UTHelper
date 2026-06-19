@@ -283,11 +283,13 @@ class MoodleClient:
             
             if not token_input:
                 logger.error("Không tìm thấy login token trên trang Moodle.")
+                self._last_login_error = "server_error"
                 return False
                 
             token = token_input.get("value")
             if not token:
                 logger.error("Login token tìm thấy nhưng không có giá trị (value=None).")
+                self._last_login_error = "server_error"
                 return False
 
             # Bước 2: Gửi yêu cầu đăng nhập (POST)
@@ -328,6 +330,7 @@ class MoodleClient:
             else:
                 # Đối với trường hợp redirect (30x) quay lại trang login
                 logger.warning("Đăng nhập thất bại (sai tài khoản hoặc mật khẩu).")
+                self._last_login_error = "invalid_credentials"
             
             self.session.cookies.clear()
             return False
