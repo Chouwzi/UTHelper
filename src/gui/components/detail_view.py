@@ -785,7 +785,7 @@ class DetailView(ft.Container):
             self._submitted_area.visible = False
             return
 
-        for f in self._submitted_files:
+        for i, f in enumerate(self._submitted_files):
             size_b = f.get('size', 0)
             size_kb = size_b / 1024
             size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
@@ -798,6 +798,15 @@ class DetailView(ft.Container):
                                 expand=True, max_lines=1,
                                 overflow=ft.TextOverflow.ELLIPSIS),
                         ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
+                        ft.IconButton(
+                            ft.Icons.CLOSE_ROUNDED, icon_size=14,
+                            icon_color=C.CRITICAL,
+                            tooltip="Xóa file này",
+                            on_click=lambda _, idx=i: asyncio.ensure_future(
+                                self._on_remove_submitted_file(idx)
+                            ),
+                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                        ),
                     ],
                     spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
@@ -810,11 +819,114 @@ class DetailView(ft.Container):
 
         self._submitted_files_col.visible = True
         self._submitted_area.visible = True
-        # Hiện nút chỉnh sửa nếu có file
         self._edit_submitted_btn.visible = True
 
+    async def _on_remove_submitted_file(self, index: int):
+        """Xóa file đã nộp: re-upload các file còn lại rồi re-submit.
+        
+        Workflow:
+        1. Download tất cả file CÒN LẠI từ server
+        2. Upload chúng vào draft area mới
+        3. mod_assign_save_submission để re-submit
+        """
+        if self._is_uploading:
+            return
+        if index < 0 or index >= len(self._submitted_files):
+            return
+        
+        file_to_remove = self._submitted_files[index]
+        files_to_keep = [f for i, f in enumerate(self._submitted_files) if i != index]
+        
+        client = None
+        try:
+            client = self._get_client() if self._get_client else None
+        except Exception:
+            pass
+        if not client:
+            self._show_upload_status("❌ Chưa đăng nhập.", C.CRITICAL)
+            return
+
+        data = self._current_data
+        url = data.get("url", "")
+        course_id = data.get("course_id")
+        if not url or not course_id or '/mod/assign/' not in url:
+            self._show_upload_status("❌ Không xác định được bài tập.", C.CRITICAL)
+            return
+
+        self._is_uploading = True
+        self._show_upload_status(
+            f"⏳ Đang xóa '{file_to_remove.get('name', '')}'...", C.TEXT_SECONDARY
+        )
+        self._page.update()
+
+        try:
+            success = await asyncio.to_thread(
+                self._do_remove_file_sync, client, url, int(course_id), files_to_keep
+            )
+            if success:
+                self._show_upload_status(
+                    f"✅ Đã xóa '{file_to_remove.get('name', '')}'", C.SAFE
+                )
+                # Reload submitted files
+                asyncio.ensure_future(
+                    self._async_load_submitted_files(client, url, int(course_id))
+                )
+            else:
+                self._show_upload_status("❌ Xóa thất bại. Thử mở trình duyệt.", C.CRITICAL)
+        except Exception as ex:
+            logger.error("Remove submitted file error: %s", ex)
+            self._show_upload_status(f"❌ Lỗi: {ex}", C.CRITICAL)
+        finally:
+            self._is_uploading = False
+            self._page.update()
+
+    def _do_remove_file_sync(self, client, url: str, course_id: int,
+                             files_to_keep: list) -> bool:
+        """Re-upload các file cần giữ rồi re-submit (chạy trong thread)."""
+        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission
+
+        cmid = None
+        if "id=" in url:
+            try:
+                cmid = int(url.split("id=")[-1].split("&")[0])
+            except (ValueError, IndexError):
+                pass
+        if not cmid:
+            return False
+
+        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
+        if not assign_id:
+            return False
+
+        if not files_to_keep:
+            # Xóa hết file → submit draft area rỗng
+            draft_itemid = 0
+        else:
+            # Download và re-upload các file cần giữ
+            draft_itemid = 0
+            for f in files_to_keep:
+                file_url = f.get('url', '')
+                if not file_url:
+                    logger.error("File '%s' không có URL", f.get('name'))
+                    return False
+                
+                file_bytes = client.download_file(file_url)
+                if not file_bytes:
+                    logger.error("Không tải được file '%s'", f.get('name'))
+                    return False
+                
+                result_id = client.upload_draft_file(
+                    f.get('name', 'file'), file_bytes, itemid=draft_itemid
+                )
+                if result_id is None:
+                    logger.error("Re-upload thất bại cho file '%s'", f.get('name'))
+                    return False
+                draft_itemid = result_id
+
+        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+
     async def _on_edit_submitted(self, e):
-        """Mở trình duyệt để chỉnh sửa bài nộp (Moodle không có API xóa file riêng lẻ)."""
+        """Mở trình duyệt để chỉnh sửa bài nộp."""
         if not self._current_url:
             return
         client = None

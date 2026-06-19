@@ -261,6 +261,56 @@ class MoodleClient:
         
         return None
 
+    def download_file(self, url: str) -> Optional[bytes]:
+        """Tải file từ Moodle server.
+        
+        URL có thể cần token để truy cập (pluginfile.php).
+        Tự động append wstoken nếu cần.
+        """
+        token = self._get_ws_token()
+        if not token:
+            return None
+        
+        # Append token to URL for pluginfile access
+        sep = '&' if '?' in url else '?'
+        authed_url = f"{url}{sep}token={token}"
+        
+        try:
+            resp = self.session.get(authed_url, timeout=60)
+            if resp.status_code == 200:
+                return resp.content
+            logger.error("Download failed (HTTP %d): %s", resp.status_code, url)
+        except Exception as e:
+            logger.error("Download error: %s", e)
+        return None
+
+    def delete_draft_file(self, draftitemid: int, filepath: str, filename: str) -> bool:
+        """Xóa một file cụ thể từ draft area.
+        
+        Sử dụng core_files_delete_draft_files API.
+        Verified hoạt động trên server UTH.
+        """
+        try:
+            result = self.call_ws_api(
+                'core_files_delete_draft_files',
+                draftitemid=draftitemid,
+                **{
+                    'files[0][filepath]': filepath,
+                    'files[0][filename]': filename,
+                }
+            )
+        except Exception as e:
+            logger.error("Lỗi xóa file '%s' từ draft %d: %s", filename, draftitemid, e)
+            return False
+
+        if isinstance(result, dict) and 'parentpaths' in result:
+            logger.info("Đã xóa file '%s' từ draft %d", filename, draftitemid)
+            return True
+        
+        if isinstance(result, dict) and 'exception' in result:
+            logger.error("Xóa file lỗi: %s", result.get('message', ''))
+        return False
+
     def get_portal_token(self, username: str = None, password: str = None) -> str:
         """Lấy JWT token từ Portal UTH (dùng cho autologin deep-link)."""
         if self._portal_token:
