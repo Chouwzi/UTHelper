@@ -208,6 +208,58 @@ class MoodleClient:
             logger.error(f"Lỗi khi lấy user ID: {e}")
         return None
 
+    def upload_draft_file(self, filename: str, file_bytes: bytes,
+                          itemid: int = 0) -> Optional[int]:
+        """Upload file lên Moodle draft area qua /webservice/upload.php.
+        
+        Đây là endpoint chính thức Moodle dùng cho mobile app upload.
+        Dùng multipart/form-data (không base64) → hiệu quả bộ nhớ hơn.
+        
+        Args:
+            filename: Tên file (vd: "baitap.pdf").
+            file_bytes: Nội dung file dạng bytes.
+            itemid: Draft area ID. 0 = tạo mới. Dùng lại ID cũ cho multi-file.
+        
+        Returns:
+            itemid của draft area, hoặc None nếu lỗi.
+        """
+        token = self._get_ws_token()
+        if not token:
+            logger.error("Không có WS token để upload file.")
+            return None
+        
+        try:
+            resp = self.session.post(
+                f"{settings.MOODLE_BASE_URL}/webservice/upload.php",
+                data={
+                    'token': token,
+                    'itemid': itemid,
+                    'filearea': 'draft',
+                    'filepath': '/',
+                },
+                files={
+                    'file': (filename, file_bytes),
+                },
+                timeout=60,
+            )
+            result = resp.json()
+        except Exception as e:
+            logger.error("Lỗi upload file '%s': %s", filename, e)
+            return None
+        
+        # Response là list khi thành công: [{"itemid": 123, "filename": "...", ...}]
+        if isinstance(result, list) and len(result) > 0:
+            item = result[0]
+            if 'itemid' in item:
+                logger.info("Upload thành công '%s' → draft itemid=%s", filename, item['itemid'])
+                return item['itemid']
+        
+        # Error response là dict: {"error": "...", "errorcode": "..."}
+        if isinstance(result, dict):
+            logger.error("Upload lỗi: %s (code=%s)", 
+                        result.get('error', ''), result.get('errorcode', ''))
+        
+        return None
 
     def get_portal_token(self, username: str = None, password: str = None) -> str:
         """Lấy JWT token từ Portal UTH (dùng cho autologin deep-link)."""

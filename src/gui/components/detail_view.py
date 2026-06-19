@@ -633,7 +633,6 @@ class DetailView(ft.Container):
         """Thực hiện upload + submit đồng bộ (chạy trong thread)."""
         from core.ws_functions import (
             resolve_cmid_to_assign_id,
-            upload_file_to_draft,
             save_assignment_submission,
         )
 
@@ -654,22 +653,15 @@ class DetailView(ft.Container):
             logger.error("Không resolve được assign_id từ cmid=%d, course=%d", cmid, course_id)
             return False
 
-        # 3. Lấy user_id
-        user_id = client.get_user_id()
-        if not user_id:
-            logger.error("Không lấy được user_id")
-            return False
-
-        # 4. Upload từng file
+        # 3. Upload từng file qua /webservice/upload.php
         draft_itemid = 0
         for f in self._selected_files:
             file_bytes = f.bytes
             if not file_bytes:
                 logger.warning("File '%s' không có dữ liệu, bỏ qua.", f.name)
                 continue
-            file_b64 = base64.b64encode(file_bytes).decode('utf-8')
-            result_id = upload_file_to_draft(
-                client.call_ws_api, f.name, file_b64, user_id, itemid=draft_itemid
+            result_id = client.upload_draft_file(
+                f.name, file_bytes, itemid=draft_itemid
             )
             if result_id is None:
                 logger.error("Upload thất bại cho file '%s'", f.name)
@@ -680,7 +672,7 @@ class DetailView(ft.Container):
             logger.error("Không có file nào được upload thành công")
             return False
 
-        # 5. Save submission
+        # 4. Save submission
         return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
 
     def _show_upload_status(self, text: str, color: str):
