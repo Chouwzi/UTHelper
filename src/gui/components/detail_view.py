@@ -878,8 +878,26 @@ class DetailView(ft.Container):
             logger.error("Không resolve được assign_id từ cmid=%d, course=%d", cmid, course_id)
             return False
 
-        # 3. Upload từng file qua /webservice/upload.php
+        # 3. Re-upload các file đã nộp trước đó (nếu có) để giữ chúng
         draft_itemid = 0
+        if self._submitted_files:
+            for f in self._submitted_files:
+                file_url = f.get('url', '')
+                if not file_url:
+                    continue
+                existing_bytes = client.download_file(file_url)
+                if not existing_bytes:
+                    logger.warning("Không tải được file cũ '%s', bỏ qua", f.get('name'))
+                    continue
+                result_id = client.upload_draft_file(
+                    f.get('name', 'file'), existing_bytes, itemid=draft_itemid
+                )
+                if result_id is None:
+                    logger.error("Re-upload thất bại cho file cũ '%s'", f.get('name'))
+                    return False
+                draft_itemid = result_id
+
+        # 4. Upload các file mới được chọn
         for f in self._selected_files:
             file_bytes = f.bytes
             if not file_bytes:
@@ -897,7 +915,7 @@ class DetailView(ft.Container):
             logger.error("Không có file nào được upload thành công")
             return False
 
-        # 4. Save submission
+        # 5. Save submission
         return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
 
     def _show_upload_status(self, text: str, color: str):
