@@ -13,7 +13,10 @@ _BOOT_LOG = []
 def _boot_log(msg):
     """Log during boot phase before logging is configured."""
     _BOOT_LOG.append(msg)
-    print(f"[BOOT] {msg}", file=sys.stderr, flush=True)
+    try:
+        print(f"[BOOT] {msg}", file=sys.stderr, flush=True)
+    except (OSError, ValueError, AttributeError):
+        pass  # stderr unavailable (e.g. during circular import or packaged app)
 
 _boot_log(f"Python {sys.version}")
 _boot_log(f"Platform: {sys.platform}")
