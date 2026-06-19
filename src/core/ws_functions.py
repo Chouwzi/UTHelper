@@ -160,7 +160,7 @@ def get_submitted_files(
     'file' trong submission plugins → trả về list file metadata.
     
     Returns:
-        List of dicts: [{name, size, url, timemodified}, ...]
+        List of dicts: [{name, size, url, timemodified, timecreated, mimetype, filepath}, ...]
     """
     status = get_submission_status(call_api, assign_id)
     if not status:
@@ -171,11 +171,13 @@ def get_submitted_files(
     submission = last_attempt.get('submission', {})
     plugins = submission.get('plugins', [])
     
+    # timecreated/timemodified ở cấp submission (không có ở file)
+    sub_timecreated = submission.get('timecreated', 0)
+    
     files = []
     for plugin in plugins:
         if plugin.get('type') != 'file':
             continue
-        # fileareas chứa danh sách file
         for area in plugin.get('fileareas', []):
             for f in area.get('files', []):
                 files.append({
@@ -183,8 +185,8 @@ def get_submitted_files(
                     'size': f.get('filesize', 0),
                     'url': f.get('fileurl', ''),
                     'timemodified': f.get('timemodified', 0),
-                    'author': f.get('author', ''),
-                    'license': f.get('license', 'unknown'),
+                    'timecreated': sub_timecreated,
+                    'mimetype': f.get('mimetype', ''),
                     'filepath': f.get('filepath', '/'),
                 })
     

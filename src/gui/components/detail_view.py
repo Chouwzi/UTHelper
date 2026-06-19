@@ -847,6 +847,7 @@ class DetailView(ft.Container):
 
     def _build_submitted_files_ui(self):
         """Xây dựng UI hiển thị file đã nộp trên server."""
+        from datetime import datetime
         self._submitted_files_col.controls.clear()
 
         if not self._submitted_files:
@@ -858,37 +859,65 @@ class DetailView(ft.Container):
             size_kb = size_b / 1024
             size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
 
+            # Format dates
+            tmod = f.get('timemodified', 0)
+            tcreated = f.get('timecreated', 0)
+            mod_str = datetime.fromtimestamp(tmod).strftime('%d/%m/%Y %H:%M') if tmod else '—'
+            created_str = datetime.fromtimestamp(tcreated).strftime('%d/%m/%Y %H:%M') if tcreated else '—'
+
+            # Metadata lines
+            meta_col = ft.Column(controls=[
+                ft.Row([
+                    ft.Text("Lần sửa đổi cuối", size=10, color=C.TEXT_SECONDARY, width=120),
+                    ft.Text(mod_str, size=10, color=C.TEXT_PRIMARY),
+                ], spacing=4),
+                ft.Row([
+                    ft.Text("Ngày tạo", size=10, color=C.TEXT_SECONDARY, width=120),
+                    ft.Text(created_str, size=10, color=C.TEXT_PRIMARY),
+                ], spacing=4),
+                ft.Row([
+                    ft.Text("Kích thước", size=10, color=C.TEXT_SECONDARY, width=120),
+                    ft.Text(size_str, size=10, color=C.TEXT_PRIMARY),
+                ], spacing=4),
+            ], spacing=2)
+
             row = ft.Container(
-                content=ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, size=14, color=C.SAFE),
-                        ft.Text(f.get('name', ''), size=12, color=C.TEXT_PRIMARY,
-                                expand=True, max_lines=1,
-                                overflow=ft.TextOverflow.ELLIPSIS),
-                        ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
-                        ft.IconButton(
-                            ft.Icons.EDIT_ROUNDED, icon_size=14,
-                            icon_color=C.ACCENT,
-                            tooltip="Chỉnh sửa",
-                            on_click=lambda _, idx=i: self._show_file_edit_dialog(idx),
-                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
-                        ),
-                        ft.IconButton(
-                            ft.Icons.CLOSE_ROUNDED, icon_size=14,
-                            icon_color=C.CRITICAL,
-                            tooltip="Xóa file này",
-                            on_click=lambda _, idx=i: asyncio.ensure_future(
-                                self._on_remove_submitted_file(idx)
+                content=ft.Column(controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.DESCRIPTION_ROUNDED, size=16, color=C.SAFE),
+                            ft.Text(f.get('name', ''), size=12, color=C.TEXT_PRIMARY,
+                                    expand=True, max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    weight=ft.FontWeight.W_500),
+                            ft.IconButton(
+                                ft.Icons.EDIT_ROUNDED, icon_size=14,
+                                icon_color=C.ACCENT,
+                                tooltip="Chỉnh sửa",
+                                on_click=lambda _, idx=i: self._show_file_edit_dialog(idx),
+                                style=ft.ButtonStyle(padding=ft.Padding.all(4)),
                             ),
-                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
-                        ),
-                    ],
-                    spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
+                            ft.IconButton(
+                                ft.Icons.CLOSE_ROUNDED, icon_size=14,
+                                icon_color=C.CRITICAL,
+                                tooltip="Xóa file này",
+                                on_click=lambda _, idx=i: asyncio.ensure_future(
+                                    self._on_remove_submitted_file(idx)
+                                ),
+                                style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                            ),
+                        ],
+                        spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Container(
+                        content=meta_col,
+                        padding=ft.Padding.only(left=28),  # align with text after icon
+                    ),
+                ], spacing=4),
                 bgcolor=C.BG,
                 border=ft.Border.all(1, C.SAFE + "30"),
                 border_radius=6,
-                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                 on_click=lambda _, idx=i: self._show_file_edit_dialog(idx),
                 ink=True,
             )
@@ -1026,9 +1055,20 @@ class DetailView(ft.Container):
         f = self._submitted_files[index]
 
         self._edit_filename.value = f.get('name', '')
-        self._edit_author.value = f.get('author', '')
-        self._edit_license.value = f.get('license', 'unknown')
         self._edit_filepath.value = f.get('filepath', '/')
+
+        # Lấy tên tác giả mặc định từ user profile
+        default_author = ''
+        try:
+            client = self._get_client() if self._get_client else None
+            if client:
+                site_info = client.call_ws_api('core_webservice_get_site_info')
+                if site_info and isinstance(site_info, dict):
+                    default_author = site_info.get('fullname', '')
+        except Exception:
+            pass
+        self._edit_author.value = default_author
+        self._edit_license.value = 'unknown'
         self._edit_status.value = ""
         self._edit_status.visible = False
 
@@ -1064,12 +1104,10 @@ class DetailView(ft.Container):
             self._page.update()
             return
 
-        # Check if anything changed
+        # Check if anything changed (author/license luôn cập nhật vì API không trả chúng)
         name_changed = new_name != old_file.get('name', '')
-        author_changed = new_author != old_file.get('author', '')
-        license_changed = new_license != old_file.get('license', 'unknown')
 
-        if not name_changed and not author_changed and not license_changed:
+        if not name_changed and not new_author:
             self._close_edit_dialog()
             return
 
@@ -1173,12 +1211,16 @@ class DetailView(ft.Container):
                 result_id = client.upload_draft_file(
                     meta['new_name'], file_bytes,
                     itemid=draft_itemid,
-                    author=meta.get('author'),
-                    license_key=meta.get('license'),
+                    author=meta.get('author', ''),
+                    license_key=meta.get('license', 'unknown'),
                 )
             else:
+                # Giữ nguyên file, nhưng vẫn gửi author/license
                 result_id = client.upload_draft_file(
-                    f.get('name', 'file'), file_bytes, itemid=draft_itemid,
+                    f.get('name', 'file'), file_bytes,
+                    itemid=draft_itemid,
+                    author=meta.get('author', ''),
+                    license_key=meta.get('license', 'unknown'),
                 )
 
             if result_id is None:
