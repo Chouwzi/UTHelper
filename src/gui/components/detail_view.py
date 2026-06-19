@@ -401,12 +401,9 @@ class DetailView(ft.Container):
         except Exception:
             pass
 
+        url_to_open = self._current_url
         if client:
             # Sử dụng autologin URL thông qua Moodle login endpoint
-            activity_url = self._current_url
-            autologin_url = client.build_autologin_url(activity_url)
-            await self._page.launch_url(autologin_url)
-            return
+            url_to_open = client.build_autologin_url(self._current_url)
 
-        # Dự phòng mở thẳng khi không có cookie
-        await self._page.launch_url(self._current_url)
+        await ft.UrlLauncher().launch_url(url_to_open)

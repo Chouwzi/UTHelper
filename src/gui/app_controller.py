@@ -1129,7 +1129,7 @@ class AppController:
     async def _open_update_url(self, e):
         """Mở trang tải bản cập nhật trên trình duyệt."""
         if self._update_url:
-            await self.page.launch_url(self._update_url)
+            await ft.UrlLauncher().launch_url(self._update_url)
 
     def _on_settings_saved(self):
         self._needs_reload = True
