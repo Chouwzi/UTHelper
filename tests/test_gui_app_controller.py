@@ -37,6 +37,7 @@ class _FakeCard:
 
     def update_countdown(self):
         self.countdown_count += 1
+        return True  # Simulate changed countdown
 
 
 def test_pulse_tick_batches_page_update_without_per_card_updates():

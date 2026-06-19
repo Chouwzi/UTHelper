@@ -84,6 +84,27 @@ def get_urgency_color(urgency) -> str:
         return C.WARNING
     return C.SAFE
 
+
+def get_countdown_color(deadline_str: str) -> str:
+    """Time-based countdown color: red < 24h, orange < 3d, green > 3d.
+    
+    Unlike get_urgency_color (which uses the urgency tag), this function
+    colors based on ACTUAL remaining time, giving a natural visual gradient.
+    """
+    dt = parse_datetime(deadline_str)
+    if not dt:
+        return C.TEXT_SECONDARY
+    
+    diff_seconds = (dt - datetime.now()).total_seconds()
+    
+    if diff_seconds <= 0:
+        return C.CRITICAL      # Overdue
+    if diff_seconds < 86400:     # < 24 hours
+        return C.CRITICAL      # Red — urgent
+    if diff_seconds < 259200:    # < 3 days (72h)
+        return C.WARNING       # Orange — approaching
+    return C.SAFE              # Green — safe
+
 def get_urgency_badge(urgency) -> tuple:
     """Return (label, color)."""
     u = urgency_str(urgency)

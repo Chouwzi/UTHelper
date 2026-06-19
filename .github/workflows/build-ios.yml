@@ -1,0 +1,90 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'pyproject.toml'
+  workflow_dispatch:  # Cho phép chạy thủ công từ Actions tab
+
+jobs:
+  build-ipa:
+    name: Build UTHelper iOS IPA
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      # ── 1. Checkout code ──
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ──
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ── 3. Install Flet CLI ──
+      - name: Install Flet
+        run: pip install flet
+
+      # ── 4. Build UNSIGNED IPA (không cần Apple Developer cert) ──
+      # Dùng cho test cá nhân qua AltStore/Sideloadly
+      - name: Build IPA (unsigned)
+        run: |
+          cd ${{ github.workspace }}
+          flet build ipa --no-codesign
+
+      # ── 5. Upload artifact ──
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: UTHelper-iOS-${{ github.sha }}
+          path: build/ipa/
+          retention-days: 30
+
+  # ── Job cho signed build (chỉ chạy khi có secrets) ──
+  build-ipa-signed:
+    name: Build Signed IPA (App Store)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    # Chỉ chạy khi có certificate secrets
+    if: ${{ secrets.CERTIFICATES_P12 != '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Flet
+        run: pip install flet
+
+      # ── Import signing certificate ──
+      - name: Import Code Signing Certificates
+        uses: Apple-Actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
+
+      # ── Install provisioning profile ──
+      - name: Install Provisioning Profile
+        run: |
+          PP_PATH="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PP_PATH"
+          echo -n "${{ secrets.PROVISION_PROFILE_BASE64 }}" | base64 --decode > "$PP_PATH/profile.mobileprovision"
+
+      # ── Build signed IPA ──
+      - name: Build IPA (signed)
+        run: flet build ipa
+
+      - name: Upload Signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: UTHelper-iOS-Signed-${{ github.sha }}
+          path: build/ipa/
+          retention-days: 90

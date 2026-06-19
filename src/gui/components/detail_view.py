@@ -1,7 +1,7 @@
 import flet as ft
 import threading
 from gui.core.theme import C
-from gui.core.utils import get_urgency_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
+from gui.core.utils import get_urgency_color, get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
 
 _STATUS_TRANSLATIONS = {
     "No submissions have been made yet": "Chưa nộp bài",
@@ -82,10 +82,16 @@ class DetailView(ft.Container):
         )
         self._content_col   = ft.Column(spacing=12)
 
+        # UX-8: Dynamic CTA — changes based on submission status
+        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=ft.Colors.WHITE)
+        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=ft.Colors.WHITE,
+                            weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
-            content=ft.Text("Xem trong trình duyệt", size=13, color=ft.Colors.WHITE,
-                            weight=ft.FontWeight.W_600,
-                            text_align=ft.TextAlign.CENTER),
+            content=ft.Row(
+                controls=[self._cta_icon, self._cta_text],
+                spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             bgcolor=C.ACCENT,
             padding=ft.Padding.symmetric(vertical=13),
             border_radius=8,
@@ -202,8 +208,8 @@ class DetailView(ft.Container):
         act_type = data.get("type", "")
         cd_text, overdue = get_countdown(deadline_str, act_type)
         self._countdown_txt.value = cd_text
-        self._countdown_txt.color = C.CRITICAL if overdue else get_urgency_color(
-            data.get("urgency", "safe"))
+        # UX-7: Time-based countdown color consistent with cards
+        self._countdown_txt.color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
         
         details = data.get("details", {})
         open_time_str = details.get("open_time", "")
@@ -225,6 +231,23 @@ class DetailView(ft.Container):
         self._current_url          = data.get("url", "")
         self._current_data         = data
         self._content_col.controls.clear()
+
+        # UX-8: Dynamic CTA based on submission status
+        sub_status = data.get("submission_status", "unknown")
+        if sub_status in ("submitted", "graded"):
+            self._cta_icon.name = ft.Icons.VISIBILITY_ROUNDED
+            self._cta_text.value = "Xem bài nộp"
+            self._open_btn.bgcolor = C.SURFACE
+            self._open_btn.border = ft.border.all(1, C.ACCENT)
+            self._cta_text.color = C.ACCENT
+            self._cta_icon.color = C.ACCENT
+        else:
+            self._cta_icon.name = ft.Icons.UPLOAD_FILE_ROUNDED
+            self._cta_text.value = "Nộp bài ngay"
+            self._open_btn.bgcolor = C.SAFE
+            self._open_btn.border = None
+            self._cta_text.color = ft.Colors.WHITE
+            self._cta_icon.color = ft.Colors.WHITE
 
         details = data.get("details", {})
 

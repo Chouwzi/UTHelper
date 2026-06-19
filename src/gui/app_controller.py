@@ -83,7 +83,11 @@ class AppController:
 
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
-        await show_login_dialog(self.page, self.orchestrator, self._load_data_async)
+        async def _on_login_success():
+            # UX-5: Show success snackbar after dialog closes
+            self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
+            await self._load_data_async()
+        await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
     def _init_window(self):
         # Runtime platform detection for accurate mobile/desktop flags
@@ -342,13 +346,25 @@ class AppController:
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
-        self.error_text = ft.Text("", size=13, color=C.CRITICAL)
+        self._error_icon = ft.Icon(ft.Icons.CLOUD_OFF_ROUNDED, size=48, color=C.WARNING)
+        self._error_title = ft.Text("Không thể tải dữ liệu", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_600)
+        self.error_text = ft.Text("Kiểm tra kết nối mạng và thử lại", size=12, color=C.BORDER)
+        self._error_retry_btn = ft.ElevatedButton(
+            "Thử lại",
+            icon=ft.Icons.REFRESH_ROUNDED,
+            on_click=lambda _: self.page.run_task(self._load_data_async),
+            bgcolor=C.ACCENT, color=C.TEXT_PRIMARY,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+        )
         self.error_state = ft.Container(
             content=ft.Column(controls=[
-                ft.Text("Không thể kết nối", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
+                self._error_icon,
+                ft.Container(height=4),
+                self._error_title,
                 self.error_text,
-                ft.TextButton("Thử lại", on_click=lambda _: self.page.run_task(self._load_data_async)),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+                ft.Container(height=8),
+                self._error_retry_btn,
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
 
@@ -407,6 +423,20 @@ class AppController:
         # Show skeleton cards immediately while data loads
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
 
+        # UX-4: Trigger shimmer pulse after initial render
+        async def _pulse_skeletons():
+            import asyncio
+            while self._skeleton_visible:
+                for card in self.cards_column.controls:
+                    if hasattr(card, 'opacity'):
+                        card.opacity = 0.7 if card.opacity < 0.6 else 0.4
+                try:
+                    self.page.update()
+                except Exception:
+                    break
+                await asyncio.sleep(0.8)
+        self.page.run_task(_pulse_skeletons)
+
     def _make_skeleton_card(self):
         """Create a skeleton placeholder card that mimics ActivityCard layout."""
         _shimmer = C.BORDER
@@ -432,7 +462,9 @@ class AppController:
             bgcolor=C.SURFACE,
             border_radius=10,
             border=ft.border.all(1, C.BORDER),
-            opacity=0.5,
+            # UX-4: Shimmer pulse animation
+            opacity=0.4,
+            animate_opacity=ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT),
         )
 
     def _clear_skeletons(self):
@@ -527,14 +559,14 @@ class AppController:
                 on_click=lambda e, name=c: _on_course_select(e, name)
             ))
         self.course_popup.items = c_items
-
-        self.footer_critical.value = f"Khẩn cấp · {n_critical}"
+        # UX-3: Natural language order — "N label" instead of "Label · N"
+        self.footer_critical.value = f"{n_critical} khẩn cấp" if n_critical else "0 khẩn cấp"
         self.footer_critical.color = C.CRITICAL if n_critical else C.BORDER
-        self.footer_warning.value  = f"Sắp hạn · {n_warning}"
+        self.footer_warning.value  = f"{n_warning} sắp hạn" if n_warning else "0 sắp hạn"
         self.footer_warning.color  = C.WARNING if n_warning else C.BORDER
-        self.footer_safe.value     = f"An toàn · {n_safe}"
+        self.footer_safe.value     = f"{n_safe} an toàn" if n_safe else "0 an toàn"
         self.footer_safe.color     = C.SAFE if n_safe else C.BORDER
-        self.footer_overdue.value  = f"Quá hạn · {n_overdue}"
+        self.footer_overdue.value  = f"{n_overdue} quá hạn" if n_overdue else "0 quá hạn"
         self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
 
         self._update_urgency_counts(counts["urgency"])
@@ -664,6 +696,13 @@ class AppController:
 
     async def _set_urgency(self, key: str):
         self.active_urgency = key
+        # Sync overdue checkbox with urgency popup selection
+        if key == "overdue":
+            self._overdue_cb.value = True
+            settings.INCLUDE_PAST_DUE = True
+        else:
+            self._overdue_cb.value = False
+            settings.INCLUDE_PAST_DUE = False
         self._refresh_ui()
 
     async def _set_type(self, key: str):
@@ -697,6 +736,13 @@ class AppController:
     async def _toggle_overdue(self, e):
         settings.INCLUDE_PAST_DUE = self._overdue_cb.value
         _save_setting("INCLUDE_PAST_DUE", settings.INCLUDE_PAST_DUE)
+        
+        # When checkbox is ON: filter to show ONLY overdue items
+        # When OFF: reset urgency filter to show all (excluding overdue)
+        if self._overdue_cb.value:
+            self.active_urgency = "overdue"
+        else:
+            self.active_urgency = "all"
         
         self._update_footer()
 
@@ -763,7 +809,7 @@ class AppController:
         self._prefetch_cancel_event.set()
 
         self.refresh_btn.disabled = True
-        self.status_text.value    = "Đang kết nối Moodle..."
+        self.status_text.value    = "⏳ Đang cập nhật dữ liệu..."
         self.loading_bar.visible  = True
         self.empty_state.visible  = False
         self.error_state.visible  = False

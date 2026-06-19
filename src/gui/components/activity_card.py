@@ -1,6 +1,6 @@
 import flet as ft
 from gui.core.theme import C
-from gui.core.utils import get_urgency_color, get_type_label, get_type_color, clean_course_name, format_deadline, get_countdown, get_progress_value, urgency_str, get_urgency_badge, get_status_tag, get_submission_badge
+from gui.core.utils import get_urgency_color, get_countdown_color, get_type_label, get_type_color, clean_course_name, format_deadline, get_countdown, get_progress_value, urgency_str, get_urgency_badge, get_status_tag, get_submission_badge
 
 class ActivityCard(ft.Container):
     def __init__(self, data: dict, on_tap, animate: bool = False):
@@ -139,8 +139,9 @@ class ActivityCard(ft.Container):
         _ws_course = data.get("course_name", "")
         course_clean = clean_course_name(_ws_course or _full_name or data.get("course", ""))
 
-        cd_color = C.CRITICAL if overdue else color
-        bar_color = color
+        # UX-7: Time-based countdown color (red < 24h, orange < 3d, green > 3d)
+        cd_color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
+        bar_color = get_countdown_color(deadline_str) if not overdue else C.CRITICAL
 
         self._type_text.value = type_label
         self._type_text.color = type_color
@@ -198,12 +199,13 @@ class ActivityCard(ft.Container):
         if not deadline_str:
             return False
         act_type = self.data.get("type", "")
-        color            = get_urgency_color(self.data.get("urgency", "safe"))
         cd_text, overdue = get_countdown(deadline_str, act_type)
         progress_val     = get_progress_value(deadline_str)
+        # UX-7: Time-based color for countdown
+        cd_color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
         changed = (self._countdown_ctrl.value != cd_text)
         self._countdown_ctrl.value = cd_text
-        self._countdown_ctrl.color = C.CRITICAL if overdue else color
+        self._countdown_ctrl.color = cd_color
         self._progress_ctrl.value  = progress_val
-        self._progress_ctrl.color  = C.CRITICAL if overdue else color
+        self._progress_ctrl.color  = cd_color
         return changed
