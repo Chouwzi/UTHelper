@@ -75,9 +75,9 @@ class DetailView(ft.Container):
                 ft.Text("Không thể tải chi tiết đầy đủ", size=11, color=C.WARNING),
             ], spacing=6),
             bgcolor=C.SURFACE,
-            padding=ft.padding.symmetric(horizontal=12, vertical=6),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             border_radius=6,
-            border=ft.border.all(1, C.WARNING),
+            border=ft.Border.all(1, C.WARNING),
             visible=False,
         )
         self._content_col   = ft.Column(spacing=12)
@@ -131,9 +131,9 @@ class DetailView(ft.Container):
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ], spacing=10),
             bgcolor=C.SURFACE,
-            padding=ft.padding.all(14),
+            padding=ft.Padding.all(14),
             border_radius=8,
-            border=ft.border.all(1, C.BORDER),
+            border=ft.Border.all(1, C.BORDER),
         )
 
         # UX: Compact open-in-browser button in header for quick access
@@ -199,7 +199,7 @@ class DetailView(ft.Container):
         self._badge_ctrl.content      = ft.Text(badge_text, size=10, color=badge_color,
                                                  weight=ft.FontWeight.BOLD)
         self._badge_ctrl.bgcolor      = None
-        self._badge_ctrl.border       = ft.border.all(1, badge_color)
+        self._badge_ctrl.border       = ft.Border.all(1, badge_color)
         self._badge_ctrl.padding      = ft.Padding.symmetric(horizontal=8, vertical=3)
         self._badge_ctrl.border_radius = 5
         self._badge_ctrl.visible      = True
@@ -238,7 +238,7 @@ class DetailView(ft.Container):
             self._cta_icon.name = ft.Icons.VISIBILITY_ROUNDED
             self._cta_text.value = "Xem bài nộp"
             self._open_btn.bgcolor = C.SURFACE
-            self._open_btn.border = ft.border.all(1, C.ACCENT)
+            self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
         else:
@@ -354,8 +354,8 @@ class DetailView(ft.Container):
                             *extra_rows,
                         ], spacing=4),
                         bgcolor=C.SURFACE, border_radius=8,
-                        padding=ft.padding.all(10),
-                        border=ft.border.all(1, C.BORDER),
+                        padding=ft.Padding.all(10),
+                        border=ft.Border.all(1, C.BORDER),
                     )
                 )
             self._content_col.controls.append(self._section("Điểm danh", att_rows))
@@ -367,7 +367,7 @@ class DetailView(ft.Container):
                 ft.Container(
                     content=ft.Text(desc, size=12, color=C.TEXT_SECONDARY),
                     bgcolor=C.SURFACE, border_radius=8,
-                    padding=ft.padding.all(12),
+                    padding=ft.Padding.all(12),
                 )
             ]))
 
@@ -385,8 +385,8 @@ class DetailView(ft.Container):
                 ft.Container(
                     content=ft.Column(controls=controls, spacing=8),
                     bgcolor=C.SURFACE, border_radius=8,
-                    padding=ft.padding.all(12),
-                    border=ft.border.all(1, C.BORDER),
+                    padding=ft.Padding.all(12),
+                    border=ft.Border.all(1, C.BORDER),
                 ),
             ], spacing=6),
         )
@@ -405,8 +405,8 @@ class DetailView(ft.Container):
             # Sử dụng autologin URL thông qua Moodle login endpoint
             activity_url = self._current_url
             autologin_url = client.build_autologin_url(activity_url)
-            self._page.launch_url(autologin_url)
+            self._page.run_task(self._page.launch_url, autologin_url)
             return
 
         # Dự phòng mở thẳng khi không có cookie
-        self._page.launch_url(self._current_url)
+        self._page.run_task(self._page.launch_url, self._current_url)

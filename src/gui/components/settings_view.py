@@ -40,7 +40,7 @@ class SettingsView(ft.Container):
             on_submit=self._handle_test_login
         )
 
-        self._test_login_btn = ft.ElevatedButton(
+        self._test_login_btn = ft.Button(
             "Kiểm tra kết nối",
             icon=ft.Icons.WIFI_FIND_ROUNDED,
             on_click=self._handle_test_login,
@@ -104,12 +104,12 @@ class SettingsView(ft.Container):
             try: r_v, g_v, b_v = int(curr[0:2], 16), int(curr[2:4], 16), int(curr[4:6], 16)
             except: r_v, g_v, b_v = 0, 0, 0
 
-            r_sl = ft.Slider(min=0, max=255, value=r_v, active_color=ft.colors.RED_400, on_change=_update_from_sliders, expand=True)
-            g_sl = ft.Slider(min=0, max=255, value=g_v, active_color=ft.colors.GREEN_400, on_change=_update_from_sliders, expand=True)
-            b_sl = ft.Slider(min=0, max=255, value=b_v, active_color=ft.colors.BLUE_400, on_change=_update_from_sliders, expand=True)
+            r_sl = ft.Slider(min=0, max=255, value=r_v, active_color=ft.Colors.RED_400, on_change=_update_from_sliders, expand=True)
+            g_sl = ft.Slider(min=0, max=255, value=g_v, active_color=ft.Colors.GREEN_400, on_change=_update_from_sliders, expand=True)
+            b_sl = ft.Slider(min=0, max=255, value=b_v, active_color=ft.Colors.BLUE_400, on_change=_update_from_sliders, expand=True)
             
             hex_inp = ft.TextField(value=tb_field.value, on_change=_update_from_hex, text_align=ft.TextAlign.CENTER, border_radius=8, content_padding=5, text_size=13, width=100)
-            prv = ft.Container(width=100, height=40, bgcolor=tb_field.value, border_radius=8, border=ft.border.all(1, C.BORDER))
+            prv = ft.Container(width=100, height=40, bgcolor=tb_field.value, border_radius=8, border=ft.Border.all(1, C.BORDER))
 
             def _apply(e):
                 container_box.bgcolor = hex_inp.value
@@ -138,14 +138,14 @@ class SettingsView(ft.Container):
                     content=ft.Column([
                         ft.Row([prv, hex_inp], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                         ft.Container(height=10),
-                        ft.Row([ft.Text("R", color=ft.colors.RED_400, weight=ft.FontWeight.BOLD, width=20), r_sl]),
-                        ft.Row([ft.Text("G", color=ft.colors.GREEN_400, weight=ft.FontWeight.BOLD, width=20), g_sl]),
-                        ft.Row([ft.Text("B", color=ft.colors.BLUE_400, weight=ft.FontWeight.BOLD, width=20), b_sl]),
+                        ft.Row([ft.Text("R", color=ft.Colors.RED_400, weight=ft.FontWeight.BOLD, width=20), r_sl]),
+                        ft.Row([ft.Text("G", color=ft.Colors.GREEN_400, weight=ft.FontWeight.BOLD, width=20), g_sl]),
+                        ft.Row([ft.Text("B", color=ft.Colors.BLUE_400, weight=ft.FontWeight.BOLD, width=20), b_sl]),
                     ], tight=True)
                 ),
                 actions=[
                     ft.TextButton("Hủy", on_click=_cancel),
-                    ft.ElevatedButton("Áp dụng", on_click=_apply, bgcolor=C.ACCENT, color=ft.colors.WHITE),
+                    ft.Button("Áp dụng", on_click=_apply, bgcolor=C.ACCENT, color=ft.Colors.WHITE),
                 ],
                 shape=ft.RoundedRectangleBorder(radius=12)
             )
@@ -155,7 +155,7 @@ class SettingsView(ft.Container):
 
         def _color_field(label_text, default_color):
             tb = ft.TextField(value=default_color, width=90, text_size=12, height=36, border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, content_padding=6)
-            box = ft.Container(width=24, height=24, bgcolor=default_color, border_radius=4, border=ft.border.all(1, "#333333"), ink=True)
+            box = ft.Container(width=24, height=24, bgcolor=default_color, border_radius=4, border=ft.Border.all(1, "#333333"), ink=True)
             
             # Click event for the box
             def _on_box_click(e):
@@ -275,10 +275,10 @@ class SettingsView(ft.Container):
         )
         
         # Debug test panel — hide Windows-only buttons on mobile
-        _tray_btn = ft.ElevatedButton("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
+        _tray_btn = ft.Button("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
         _debug_buttons_row1 = ft.Row([
             *([_tray_btn] if not _IS_MOBILE else []),
-            ft.ElevatedButton("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
+            ft.Button("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
         ], wrap=True)
         
         self._test_panel = ft.Container(
@@ -287,12 +287,12 @@ class SettingsView(ft.Container):
                 self._mock_type_drp,
                 _debug_buttons_row1,
                 ft.Row([
-                    ft.ElevatedButton("Discord", on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
-                    ft.ElevatedButton("Gmail", on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+                    ft.Button("Discord", on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
+                    ft.Button("Gmail", on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
                 ], wrap=True),
             ]),
             visible=settings.DEBUG_MODE,
-            padding=10, border=ft.border.all(1, C.CRITICAL), border_radius=8, margin=ft.margin.only(top=10)
+            padding=10, border=ft.Border.all(1, C.CRITICAL), border_radius=8, margin=ft.Margin.only(top=10)
         )
         
         self._interval_field = ft.TextField(
@@ -393,7 +393,7 @@ class SettingsView(ft.Container):
                     padding=10,
                     bgcolor=C.BG,
                     border_radius=10,
-                    border=ft.border.all(1, C.BORDER)
+                    border=ft.Border.all(1, C.BORDER)
                 )
             ],
             visible=False,
@@ -497,9 +497,9 @@ class SettingsView(ft.Container):
                 content=tile,
                 bgcolor=C.SURFACE,
                 border_radius=10,
-                border=ft.border.all(1, C.BORDER),
+                border=ft.Border.all(1, C.BORDER),
                 padding=0,
-                margin=ft.margin.only(bottom=3),
+                margin=ft.Margin.only(bottom=3),
                 clip_behavior=ft.ClipBehavior.HARD_EDGE
             )
 
@@ -938,7 +938,7 @@ class SettingsView(ft.Container):
                                   style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
                     ft.TextButton("Bỏ thay đổi", on_click=discard_and_close,
                                   style=ft.ButtonStyle(color=C.CRITICAL)),
-                    ft.ElevatedButton("Lưu", on_click=save_and_close,
+                    ft.Button("Lưu", on_click=save_and_close,
                                       bgcolor=C.ACCENT, color=ft.Colors.WHITE),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,

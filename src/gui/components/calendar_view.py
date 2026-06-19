@@ -165,7 +165,7 @@ class CalendarView(ft.Container):
             bgcolor=C.SURFACE,
             border_radius=14,
             padding=ft.Padding(left=3, right=3, top=3, bottom=3),
-            border=ft.border.all(1, C.BORDER),
+            border=ft.Border.all(1, C.BORDER),
             margin=ft.Margin(left=60, right=60, top=4, bottom=6),
         )
 
@@ -398,25 +398,25 @@ class CalendarView(ft.Container):
             wd_label: ft.Text = cell.data["wd_label"]
             if is_selected and is_today:
                 cell.bgcolor = C.ACCENT + "20"
-                cell.border = ft.border.all(2, C.ACCENT)
+                cell.border = ft.Border.all(2, C.ACCENT)
                 day_text.color = C.ACCENT
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.ACCENT
             elif is_selected:
                 cell.bgcolor = "#15889AAF"
-                cell.border = ft.border.all(1.5, "#99AABBCC")
+                cell.border = ft.Border.all(1.5, "#99AABBCC")
                 day_text.color = C.TEXT_PRIMARY
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.TEXT_PRIMARY
             elif is_today:
                 cell.bgcolor = C.ACCENT + "10"
-                cell.border = ft.border.all(1, C.ACCENT + "50")
+                cell.border = ft.Border.all(1, C.ACCENT + "50")
                 day_text.color = C.ACCENT
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.ACCENT
             elif has_deadline:
                 cell.bgcolor = (most_urgent_color or C.ACCENT) + "0D"
-                cell.border = ft.border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+                cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
                 day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
                 day_text.weight = ft.FontWeight.W_500
                 wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
@@ -581,13 +581,13 @@ class CalendarView(ft.Container):
                 if is_selected and is_today:
                     # Both: accent text + white selection border + today dot
                     cell.bgcolor = "#1A8899AA"  # subtle cool tint
-                    cell.border = ft.border.all(1.5, "#99AABBCC")
+                    cell.border = ft.Border.all(1.5, "#99AABBCC")
                     day_text.color = C.ACCENT
                     day_text.weight = ft.FontWeight.W_700
                 elif is_selected:
                     # Selected only: white/silver border, neutral bg
                     cell.bgcolor = "#15889AAF"
-                    cell.border = ft.border.all(1.5, "#99AABBCC")
+                    cell.border = ft.Border.all(1.5, "#99AABBCC")
                     day_text.color = C.TEXT_PRIMARY
                     day_text.weight = ft.FontWeight.W_600
                 elif is_today:
@@ -599,7 +599,7 @@ class CalendarView(ft.Container):
                 elif has_deadline:
                     # Has deadline: subtle urgency bg
                     cell.bgcolor = (most_urgent_color or C.ACCENT) + "10"
-                    cell.border = ft.border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+                    cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
                     day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
                     day_text.weight = ft.FontWeight.W_500
                 else:
@@ -665,12 +665,12 @@ class CalendarView(ft.Container):
 
         if is_selected and is_today:
             cell.bgcolor = "#1A8899AA"
-            cell.border = ft.border.all(1.5, "#99AABBCC")
+            cell.border = ft.Border.all(1.5, "#99AABBCC")
             day_text.color = C.ACCENT
             day_text.weight = ft.FontWeight.W_700
         elif is_selected:
             cell.bgcolor = "#15889AAF"
-            cell.border = ft.border.all(1.5, "#99AABBCC")
+            cell.border = ft.Border.all(1.5, "#99AABBCC")
             day_text.color = C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_600
         elif is_today:
@@ -680,7 +680,7 @@ class CalendarView(ft.Container):
             day_text.weight = ft.FontWeight.W_700
         elif has_deadline:
             cell.bgcolor = (most_urgent_color or C.ACCENT) + "10"
-            cell.border = ft.border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+            cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
             day_text.color = C.CRITICAL if col == 6 else C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_500
         else:
@@ -935,7 +935,7 @@ class CalendarView(ft.Container):
                                         ft.Container(
                                             content=ft.Text(type_label, size=9, weight=ft.FontWeight.W_600, color=type_color),
                                             padding=ft.Padding.symmetric(horizontal=6, vertical=1),
-                                            border=ft.border.all(1, type_color),
+                                            border=ft.Border.all(1, type_color),
                                             border_radius=4,
                                         ),
                                         ft.Text(
@@ -967,7 +967,7 @@ class CalendarView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border_radius=8,
-            border=ft.border.all(1, C.BORDER),
+            border=ft.Border.all(1, C.BORDER),
             on_click=lambda _, a=act: self._on_card_click(a),
             ink=True,
         )

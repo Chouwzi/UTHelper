@@ -17,7 +17,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         bgcolor=C.CRITICAL + "15",
         padding=ft.Padding.symmetric(horizontal=12, vertical=8),
         border_radius=8,
-        border=ft.border.all(1, C.CRITICAL + "40"),
+        border=ft.Border.all(1, C.CRITICAL + "40"),
         visible=False,
     )
 

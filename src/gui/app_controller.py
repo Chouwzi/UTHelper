@@ -229,7 +229,7 @@ class AppController:
                     ft.Container(content=self.course_btn_label, width=80, alignment=ft.Alignment(-1, 0)),
                     ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)
                 ], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=8, vertical=8),
             ),
             items=[],
             menu_position=ft.PopupMenuPosition.UNDER,
@@ -289,7 +289,7 @@ class AppController:
                         ft.Container(
                             content=ft.Text(APP_VERSION, size=9, color=C.TEXT_SECONDARY),
                             padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                            border=ft.border.all(1, C.BORDER),
+                            border=ft.Border.all(1, C.BORDER),
                             border_radius=4,
                         ),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -310,7 +310,7 @@ class AppController:
                 ft.TextButton("Tải về", style=ft.ButtonStyle(color="#FCD34D"), on_click=self._open_update_url),
             ], spacing=6),
             bgcolor="#1C1917",
-            border=ft.border.all(1, "#FCD34D40"),
+            border=ft.Border.all(1, "#FCD34D40"),
             border_radius=8,
             padding=ft.Padding(left=10, right=6, top=4, bottom=4),
             margin=ft.Margin(left=14, right=14, top=0, bottom=0),
@@ -349,7 +349,7 @@ class AppController:
         self._error_icon = ft.Icon(ft.Icons.CLOUD_OFF_ROUNDED, size=48, color=C.WARNING)
         self._error_title = ft.Text("Không thể tải dữ liệu", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_600)
         self.error_text = ft.Text("Kiểm tra kết nối mạng và thử lại", size=12, color=C.BORDER)
-        self._error_retry_btn = ft.ElevatedButton(
+        self._error_retry_btn = ft.Button(
             "Thử lại",
             icon=ft.Icons.REFRESH_ROUNDED,
             on_click=lambda _: self.page.run_task(self._load_data_async),
@@ -461,7 +461,7 @@ class AppController:
             ], spacing=0),
             bgcolor=C.SURFACE,
             border_radius=10,
-            border=ft.border.all(1, C.BORDER),
+            border=ft.Border.all(1, C.BORDER),
             # UX-4: Shimmer pulse animation
             opacity=0.4,
             animate_opacity=ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT),
@@ -501,7 +501,7 @@ class AppController:
         popup = ft.PopupMenuButton(
             content=ft.Container(
                 content=ft.Row([btn_label, ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=10),
             ),
             items=items,
             menu_position=ft.PopupMenuPosition.UNDER,
@@ -1034,7 +1034,7 @@ class AppController:
 
     def _show_snackbar(self, msg: str, icon=ft.Icons.CHECK_CIRCLE_ROUNDED, color=C.SAFE):
         """UX: Show a brief toast-like notification."""
-        self.page.snack_bar = ft.SnackBar(
+        sb = ft.SnackBar(
             content=ft.Row([
                 ft.Icon(icon, color=color, size=16),
                 ft.Text(msg, size=13, color=C.TEXT_PRIMARY),
@@ -1042,8 +1042,13 @@ class AppController:
             bgcolor=C.SURFACE,
             duration=2500,
         )
-        self.page.snack_bar.open = True
-        self.page.update()
+        try:
+            self.page.show_dialog(sb)
+        except (AttributeError, TypeError):
+            # Fallback for older Flet
+            self.page.overlay.append(sb)
+            sb.open = True
+            self.page.update()
 
     def _test_notification_base(self, mock_type="critical"):
         import random, datetime
@@ -1124,7 +1129,7 @@ class AppController:
     async def _open_update_url(self, e):
         """Mở trang tải bản cập nhật trên trình duyệt."""
         if self._update_url:
-            self.page.launch_url(self._update_url)
+            await self.page.launch_url(self._update_url)
 
     def _on_settings_saved(self):
         self._needs_reload = True

@@ -145,15 +145,15 @@ class ActivityCard(ft.Container):
 
         self._type_text.value = type_label
         self._type_text.color = type_color
-        self._type_container.border = ft.border.all(1, type_color)
+        self._type_container.border = ft.Border.all(1, type_color)
 
         self._status_text.value = status_label
         self._status_text.color = status_color
-        self._status_container.border = ft.border.all(1, status_color)
+        self._status_container.border = ft.Border.all(1, status_color)
 
         self._urgency_text.value = urgency_label
         self._urgency_text.color = urgency_color
-        self._urgency_container.border = ft.border.all(1, urgency_color)
+        self._urgency_container.border = ft.Border.all(1, urgency_color)
 
         self._course_text.value = course_clean
         self._title_text.value = data.get("title", "Không có tiêu đề")
@@ -171,7 +171,7 @@ class ActivityCard(ft.Container):
                 ft.Container(
                     content=ft.Text(sub_label, size=10, color=sub_color, weight=ft.FontWeight.W_500),
                     padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                    border=ft.border.all(1, sub_color),
+                    border=ft.Border.all(1, sub_color),
                     border_radius=4,
                 )
             )
@@ -183,12 +183,12 @@ class ActivityCard(ft.Container):
         is_critical_active = (urgency_str(urgency) == "critical") and not overdue and not _is_submitted
 
         if is_critical_active:
-            self.border = ft.border.all(1, C.CRITICAL)
+            self.border = ft.Border.all(1, C.CRITICAL)
             self.shadow = ActivityCard._CRITICAL_SHADOW
             self._is_critical_active = True
         else:
             _card_border_color = C.SAFE if _is_submitted else C.BORDER
-            self.border = ft.border.all(1, _card_border_color)
+            self.border = ft.Border.all(1, _card_border_color)
             self.shadow = None
             self._is_critical_active = False
             

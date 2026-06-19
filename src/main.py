@@ -157,7 +157,7 @@ def main():
         os.path.join(os.path.dirname(__file__), "assets")
     )
     
-    ft.app(target=_app_target, assets_dir=_assets)
+    ft.run(main=_app_target, assets_dir=_assets)
 
 
 if __name__ == "__main__":
