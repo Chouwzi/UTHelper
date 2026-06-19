@@ -5,33 +5,11 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
-from core.parser import MoodleParser
-from models import Assignment
 from config import settings
 from core.time_utils import parse_datetime
 from core import ws_functions
 
 logger = logging.getLogger(__name__)
-
-# Khởi tạo ThreadPool duy nhất để parse HTML giảm thiểu overhead của Process trên app Desktop
-_PARSER_POOL = None
-_PARSER_POOL_LOCK = threading.Lock()
-
-def get_parser_pool():
-    global _PARSER_POOL
-    if _PARSER_POOL is None:
-        with _PARSER_POOL_LOCK:
-            if _PARSER_POOL is None:  # double-check
-                workers = max(1, int(getattr(settings, 'PREFETCH_WORKERS', 4)))
-                _PARSER_POOL = ThreadPoolExecutor(max_workers=workers)
-    return _PARSER_POOL
-
-def shutdown_parser_pool():
-    """Shutdown the global parser pool and release threads."""
-    global _PARSER_POOL
-    if _PARSER_POOL:
-        _PARSER_POOL.shutdown(wait=False)
-        _PARSER_POOL = None
 
 class DataOrchestrator:
     """
@@ -81,15 +59,10 @@ class DataOrchestrator:
             return dict(self._detail_cache)
 
     def login(self) -> bool:
-        """Thực hiện đăng nhập bằng thông tin từ settings.
-        
-        Ưu tiên WS token (không kick browser).
-        Chỉ dùng session login khi ALLOW_SESSION_LOGIN=True.
-        """
+        """Đăng nhập bằng WS token (stateless, không kick browser)."""
         if self.is_logged_in:
             return True
         
-        # Lấy thông tin từ config (thông tin trong file .env)
         username = settings.UTH_USERNAME
         password = settings.UTH_PASSWORD
         
@@ -97,42 +70,17 @@ class DataOrchestrator:
             logger.error("Chưa cấu hình MSSV hoặc mật khẩu trong Settings.")
             return False
         
-        # Ưu tiên WS token (không tạo session, không kick browser)
-        if settings.USE_WS_API:
-            ws_ok = self.client.login_ws_only(username, password)
-            if ws_ok:
-                self.is_logged_in = True
-                logger.info("Đăng nhập WS token thành công (không ảnh hưởng browser).")
-                return True
-            logger.warning("WS token không khả dụng.")
-        
-        # Fallback: session login (CHỈ khi được phép)
-        if settings.ALLOW_SESSION_LOGIN:
-            logger.warning("Dùng session login (CÓ THỂ kick browser).")
-            self.is_logged_in = self.client.login(username, password)
-            return self.is_logged_in
-        
-        logger.error("Đăng nhập thất bại. WS token không khả dụng và session login bị tắt (ALLOW_SESSION_LOGIN=False) để tránh kick browser.")
-        return False
+        self.is_logged_in = self.client.login(username, password)
+        if self.is_logged_in:
+            logger.info("Đăng nhập WS token thành công.")
+        return self.is_logged_in
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
-        """
-        Đăng nhập và lấy danh sách hoạt động mới nhất.
-        Ưu tiên dùng WS API (nhanh, JSON), fallback sang HTML scraping.
-        """
-        # Thử WS API trước nếu được bật
-        if settings.USE_WS_API:
-            ws_result = self._fetch_via_ws_api()
-            if ws_result is not None:
-                return ws_result
-            logger.info("WS API không khả dụng.")
-        
-        # Fallback sang scraping CHỈ khi được phép
-        if settings.ALLOW_SESSION_LOGIN:
-            logger.warning("Fallback sang HTML scraping (sẽ dùng session login).")
-            return self._fetch_via_scraping()
-        
-        logger.error("Không thể lấy dữ liệu: WS API fail và session login bị tắt (ALLOW_SESSION_LOGIN=False).")
+        """Đăng nhập và lấy danh sách hoạt động mới nhất qua WS API."""
+        ws_result = self._fetch_via_ws_api()
+        if ws_result is not None:
+            return ws_result
+        logger.error("Không thể lấy dữ liệu từ WS API.")
         return []
     
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
@@ -329,77 +277,17 @@ class DataOrchestrator:
     
     async def get_latest_activities_async(self) -> List[Dict[str, Any]]:
         """Phiên bản async của get_latest_activities — dùng trực tiếp trong event loop."""
-        if settings.USE_WS_API:
-            ws_result = await self._fetch_via_ws_api_async()
-            if ws_result is not None:
-                return ws_result
-            logger.info("WS API async không khả dụng.")
-        
-        # Fallback sang scraping CHỈ khi được phép
-        if settings.ALLOW_SESSION_LOGIN:
-            logger.warning("Fallback sang HTML scraping async (sẽ dùng session login).")
-            import asyncio
-            return await asyncio.to_thread(self._fetch_via_scraping)
-        
-        logger.error("Không thể lấy dữ liệu async: WS API fail và session login bị tắt.")
+        ws_result = await self._fetch_via_ws_api_async()
+        if ws_result is not None:
+            return ws_result
+        logger.error("Không thể lấy dữ liệu async từ WS API.")
         return []
 
 
-    def _fetch_via_scraping(self) -> List[Dict[str, Any]]:
-        """Lấy activities bằng HTML scraping (fallback)."""
-        if not self.login():
-            logger.error("Đăng nhập thất bại, không thể lấy dữ liệu.")
-            return []
-            
-        all_htmls = []
-        from datetime import datetime
-        now = datetime.now()
-        
-        # Đảm bảo số tháng tải về trong quy định (1-3)
-        months_to_fetch = max(1, min(int(getattr(settings, "FETCH_MONTHS", 1)), 3))
-        
-        for i in range(months_to_fetch):
-            month = now.month + i
-            year = now.year
-            if month > 12:
-                month -= 12
-                year += 1
-            
-            html = self.client.fetch_calendar(month=month, year=year)
-            if html:
-                all_htmls.append(html)
-
-        if not all_htmls:
-            return []
-
-        all_assignments = []
-        
-        # Parse từng trang lịch trả về
-        for html in all_htmls:
-            future = get_parser_pool().submit(MoodleParser.parse_assignments, html)
-            try:
-                # Merge assignments nhưng tránh duplicate do sự kiện vắt qua 2 tháng
-                parsed_list = future.result(timeout=30)
-                for p in parsed_list:
-                    if not any(a.id == p.id for a in all_assignments):
-                        all_assignments.append(p)
-            except TimeoutError:
-                logger.warning("Parse calendar page timeout after 30s")
-            except Exception as e:
-                logger.error("[Orchestrator] Lỗi parse lịch: %s", e)
-
-        # Chuyển đổi sang format chuẩn cho UI
-        results = [self._format_assignment(a) for a in all_assignments]
-        return results
 
 
     def fetch_full_details(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> Dict[str, Any]:
-        """
-        Tải toàn bộ chi tiết (mô tả, trạng thái nộp bài) từ URL của hoạt động.
-        
-        Ưu tiên WS API (không kick browser).
-        Fallback sang HTML scraping chỉ khi ALLOW_SESSION_LOGIN=True.
-        """
+        """Tải toàn bộ chi tiết (mô tả, trạng thái nộp bài) qua WS API."""
         url = activity_data.get("url")
         if not url:
             return activity_data
@@ -410,69 +298,14 @@ class DataOrchestrator:
             if cached is not None:
                 return cached
         
-        # ── Thử WS API trước (stateless, không kick browser) ──
-        if settings.USE_WS_API and settings.MOODLE_WS_TOKEN:
+        # ── WS API (stateless, không kick browser) ──
+        if settings.MOODLE_WS_TOKEN:
             ws_result = self._fetch_detail_via_ws(activity_data)
             if ws_result:
                 self._set_cached_detail(url, ws_result)
                 return ws_result
         
-        # ── Fallback: HTML scraping (CHỈ khi được phép) ──
-        if not settings.ALLOW_SESSION_LOGIN:
-            logger.debug("WS API không lấy được chi tiết, không fallback HTML vì ALLOW_SESSION_LOGIN=False.")
-            return activity_data
-            
-        if not self.login():
-            return activity_data
-            
-        html = self.client.fetch_url(url)
-        if not html:
-            return activity_data
-
-        # Parse chi tiết trang trên ProcessPool (để giải phóng GIL trong ThreadPool hiện tại)
-        future = get_parser_pool().submit(MoodleParser.parse_activity_page, html, url)
-        try:
-            full_activity = future.result(timeout=30)
-        except TimeoutError:
-            logger.warning("Parse activity page timeout after 30s")
-            full_activity = None
-        
-        if full_activity:
-            # Ghi đè lại deadline từ timeline (activity_data) nếu parse page không thấy deadline (bị trả về 2099)
-            if full_activity.deadline.year >= 2099 and activity_data.get("deadline"):
-                parsed_deadline = parse_datetime(activity_data["deadline"])
-                if parsed_deadline:
-                    full_activity.deadline = parsed_deadline
-                    
-            # Kế thừa title gốc từ lịch nếu không trang chi tiết trống hoặc không chính xác
-            if full_activity.title == "Hoạt động không tên" and activity_data.get("title"):
-                full_activity.title = activity_data["title"]
-                
-            # Kế thừa open_time nếu có (từ timeline sang model details)
-            timeline_open_time = activity_data.get("details", {}).get("open_time")
-            if timeline_open_time and full_activity.details:
-                # Nếu trang chi tiết không có open_time riêng, kế thừa từ timeline
-                if not full_activity.details.open_time:
-                    parsed_ot = parse_datetime(timeline_open_time)
-                    if parsed_ot:
-                        full_activity.details.open_time = parsed_ot
-            elif timeline_open_time and not full_activity.details:
-                from models import ActivityDetail
-                parsed_ot = parse_datetime(timeline_open_time)
-                if parsed_ot:
-                    full_activity.details = ActivityDetail(open_time=parsed_ot)
-
-            # Kế thừa cờ is_open từ dữ liệu lịch
-            if activity_data.get("is_open"):
-                # Cập nhật event_type để _format_assignment nhận diện được đây là sự kiện open
-                if not full_activity.event_type.endswith("_open"):
-                    full_activity.event_type = f"{full_activity.event_type}_open"
-
-            # Cập nhật dữ liệu cũ với thông tin chi tiết mới
-            result = self._format_assignment(full_activity)
-            self._set_cached_detail(url, result)
-            return result
-
+        logger.debug("WS API không lấy được chi tiết cho %s.", url)
         return activity_data
     
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
