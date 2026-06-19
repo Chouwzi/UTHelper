@@ -218,21 +218,34 @@ class DataOrchestrator:
         """Bổ sung bài tập đã nộp vào danh sách calendar events.
         
         Moodle calendar API loại bỏ events khi bài đã nộp (no action needed).
-        Hàm này gọi mod_assign_get_assignments từ các khóa học ĐANG HỌC,
-        rồi merge những bài chưa có trong calendar_results.
-        Chỉ lấy bài tập có deadline trong khoảng ±90 ngày.
+        Lấy tất cả assignments từ enrolled courses, chỉ giữ bài có deadline
+        từ đầu tháng hiện tại → FETCH_MONTHS tháng tới (theo setting).
         """
         from datetime import datetime
         
-        now_ts = int(datetime.now().timestamp())
-        # Chỉ lấy bài tập có deadline trong khoảng hợp lý
-        min_deadline = now_ts - (90 * 86400)   # 90 ngày trước
-        max_deadline = now_ts + (90 * 86400)    # 90 ngày sau
+        now = datetime.now()
+        # Đầu tháng hiện tại
+        month_start = datetime(now.year, now.month, 1)
+        min_ts = int(month_start.timestamp())
         
-        # Lấy courses đang học (inprogress) — không lấy tất cả courses
+        # Cuối khoảng = FETCH_MONTHS tháng tới
+        fetch_months = max(1, min(int(getattr(settings, "FETCH_MONTHS", 1)), 3))
+        future_month = now.month + fetch_months
+        future_year = now.year + (future_month - 1) // 12
+        future_month = ((future_month - 1) % 12) + 1
+        max_ts = int(datetime(future_year, future_month, 1).timestamp())
+        
+        # Lấy userid + tất cả enrolled courses
         try:
-            courses_result = ws_functions.get_enrolled_courses(
-                self.client.call_ws_api, classification='inprogress'
+            site_info = self.client.call_ws_api('core_webservice_get_site_info')
+            if not site_info or not isinstance(site_info, dict):
+                return calendar_results
+            userid = site_info.get('userid')
+            if not userid:
+                return calendar_results
+            
+            courses_result = self.client.call_ws_api(
+                'core_enrol_get_users_courses', userid=userid
             )
             if not courses_result or not isinstance(courses_result, list):
                 return calendar_results
@@ -243,28 +256,23 @@ class DataOrchestrator:
         if not course_ids:
             return calendar_results
         
-        # Lấy assignments từ courses đang học
+        # Lấy assignments
         all_assigns = ws_functions.get_assignments(self.client.call_ws_api, course_ids)
         if not all_assigns:
             return calendar_results
         
-        # Build set URLs đã có từ calendar events
-        existing_urls = set()
+        # Build set cmids đã có từ calendar events
         existing_cmids = set()
         for item in calendar_results:
             url = item.get('url', '')
-            if url:
-                existing_urls.add(url)
-            # Extract cmid from url
             if 'id=' in url:
                 try:
-                    cmid = int(url.split('id=')[-1].split('&')[0])
-                    existing_cmids.add(cmid)
+                    existing_cmids.add(int(url.split('id=')[-1].split('&')[0]))
                 except (ValueError, IndexError):
                     pass
         
-        # Merge missing assignments
-        now_ts = int(datetime.now().timestamp())
+        # Merge bài tập thiếu (chỉ trong khoảng thời gian)
+        now_ts = int(now.timestamp())
         merged_count = 0
         
         for course_data in all_assigns:
@@ -276,21 +284,14 @@ class DataOrchestrator:
             for assign in course_data.get('assignments', []):
                 cmid = assign.get('cmid')
                 if cmid and cmid in existing_cmids:
-                    continue  # Already in calendar results
-                
-                # Chỉ lấy bài tập có deadline trong khoảng ±90 ngày
-                duedate = assign.get('duedate', 0)
-                if duedate and (duedate < min_deadline or duedate > max_deadline):
-                    continue  # Quá cũ hoặc quá xa
-                if not duedate:
-                    continue  # Không có deadline → skip
-                
-                # Build URL
-                assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
-                if assign_url in existing_urls:
                     continue
                 
-                # Determine deadline & urgency (duedate already set above)
+                duedate = assign.get('duedate', 0)
+                if not duedate or duedate < min_ts or duedate > max_ts:
+                    continue
+                
+                assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
+                
                 deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
                 remaining = duedate - now_ts
                 if remaining < 0:
@@ -302,7 +303,7 @@ class DataOrchestrator:
                 else:
                     urgency = 'safe'
                 
-                assignment_dict = {
+                calendar_results.append({
                     'id': f"assign_{assign.get('id', cmid)}",
                     'title': assign.get('name', 'Không tên'),
                     'course_name': course_name,
@@ -317,12 +318,12 @@ class DataOrchestrator:
                     'submission_status': 'unknown',
                     'details': {},
                     'is_open': False,
-                }
-                calendar_results.append(assignment_dict)
+                })
                 merged_count += 1
         
         if merged_count > 0:
-            logger.info("Merged %d additional assignments from mod_assign_get_assignments.", merged_count)
+            logger.info("Merged %d assignments (tháng %d → +%d tháng).",
+                        merged_count, now.month, fetch_months)
         
         return calendar_results
     
