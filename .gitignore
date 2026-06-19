@@ -1,28 +1,43 @@
+# ── Secrets & credentials ──
 .env
-.agent/
 *.key
 *.pem
 credentials.json
 notifications_cache.json
 settings.json
 
+# ── Dependencies ──
 node_modules/
 vendor/
 .venv/
+
+# ── Python cache ──
 __pycache__/
+*.pyc
+*.pyo
 .pytest_cache/
 
+# ── OS files ──
 .DS_Store
 Thumbs.db
 
+# ── IDE ──
 .vscode/
 .idea/
 *.swp
 
+# ── Logs ──
 *.log
 npm-debug.log*
+
+# ── Build output ──
 tmp/
 dist/
 build/
 
-parsepage
+# ── Project-specific ──
+parsepage/
+benchmark_*.py
+
+# ── Agent workspace (skill configs, not source) ──
+.agent/
