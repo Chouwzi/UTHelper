@@ -1,28 +1,21 @@
 import json
 import os
+import ssl
 import urllib.parse
+import urllib.request
 from typing import Optional
 from config import settings
 import logging
 from core.network_utils import retry_with_backoff
 import sys as _sys
 
-# ── iOS/mobile detection ──
+logger = logging.getLogger(__name__)
+
+# ── Platform detection ──
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
 _is_ios = _sys.platform == 'ios' or (
     _sys.platform == 'darwin' and os.environ.get('FLET_APP_STORAGE_DATA', '') != ''
 )
-_is_mobile = _is_android or _is_ios
-
-# ── HTTP client selection ──
-# Desktop: requests (TLS fingerprint not blocked by Cloudflare)
-# Mobile:  httpx (requests' urllib3 C-extensions don't work on iOS)
-if _is_mobile:
-    import httpx
-else:
-    import requests as _requests_lib
-
-logger = logging.getLogger(__name__)
 
 if _is_android:
     _DEFAULT_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
@@ -31,45 +24,131 @@ elif _is_ios:
 else:
     _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-_COMMON_HEADERS = {
-    "User-Agent": _DEFAULT_UA,
-    "Accept": "application/json, */*",
-    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-}
+# ── SSL context (dùng certifi nếu có, quan trọng cho iOS) ──
+# ── SSL context ──
+# Desktop: None → urllib dùng default SSL (Cloudflare KHÔNG chặn)
+# iOS/Android: certifi context (vì iOS không có system CA store cho Python)
+_ssl_ctx = None
+if _is_ios or _is_android:
+    _ssl_ctx = ssl.create_default_context()
+    try:
+        import certifi
+        _ssl_ctx.load_verify_locations(certifi.where())
+    except ImportError:
+        pass
+
+
+def _urlopen(req, timeout=15):
+    """urlopen wrapper: truyền SSL context chỉ trên iOS/Android."""
+    if _ssl_ctx is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 class MoodleClient:
+    """HTTP client dùng urllib.request (stdlib) — zero dependency, mọi platform.
+    
+    Cloudflare KHÔNG chặn urllib (đã test).
+    Chạy trên Desktop, iOS, Android mà không cần cài thêm gì.
+    """
+    
     def __init__(self):
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
-        
-        if _is_mobile:
-            # httpx: works on iOS/Android (no C-extension dependency)
-            try:
-                import certifi
-                verify_val = certifi.where()
-            except ImportError:
-                verify_val = True
-            transport = httpx.HTTPTransport(retries=3)
-            self.session = httpx.Client(
-                transport=transport,
-                verify=verify_val,
-                follow_redirects=True,
-                timeout=httpx.Timeout(15.0),
-                headers=_COMMON_HEADERS,
-            )
-        else:
-            # requests: standard, Cloudflare doesn't block its TLS fingerprint
-            self.session = _requests_lib.Session()
-            self.session.headers.update(_COMMON_HEADERS)
 
     def close(self):
-        """Close the underlying HTTP client and release connection pool."""
-        self.session.close()
+        """Không cần cleanup — urllib không dùng connection pool."""
+        pass
+
+    # ─── Low-level HTTP helpers ──────────────────────────────
+
+    def _post(self, url: str, data: dict, timeout: float = 15) -> tuple:
+        """POST form-encoded data. Returns (status, parsed_json_or_None)."""
+        encoded = urllib.parse.urlencode(data).encode('utf-8')
+        req = urllib.request.Request(url, data=encoded, method='POST')
+        req.add_header('User-Agent', _DEFAULT_UA)
+        req.add_header('Accept', 'application/json, */*')
+        req.add_header('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8')
+        
+        resp = _urlopen(req, timeout=timeout)
+        body = resp.read()
+        try:
+            return resp.status, json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            return resp.status, None
+
+    def _post_json(self, url: str, data: dict, timeout: float = 15) -> tuple:
+        """POST JSON body. Returns (status, parsed_json_or_None)."""
+        body = json.dumps(data).encode('utf-8')
+        req = urllib.request.Request(url, data=body, method='POST')
+        req.add_header('User-Agent', _DEFAULT_UA)
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Accept', 'application/json')
+        
+        resp = _urlopen(req, timeout=timeout)
+        resp_body = resp.read()
+        try:
+            return resp.status, json.loads(resp_body)
+        except (json.JSONDecodeError, ValueError):
+            return resp.status, None
+
+    def _post_multipart(self, url: str, fields: dict, files: dict, timeout: float = 60) -> tuple:
+        """POST multipart/form-data (cho upload file). Returns (status, parsed_json_or_None)."""
+        import uuid
+        boundary = uuid.uuid4().hex
+        
+        body_parts = []
+        # Form fields
+        for key, val in fields.items():
+            body_parts.append(
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f'{val}\r\n'
+            )
+        # File fields
+        for field_name, (filename, file_bytes) in files.items():
+            body_parts.append(
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+                f'Content-Type: application/octet-stream\r\n\r\n'
+            )
+            # File bytes added separately (not string)
+        body_parts.append(f'--{boundary}--\r\n')
+        
+        # Build binary body
+        body = b''
+        file_items = list(files.items())
+        file_idx = 0
+        for i, part in enumerate(body_parts):
+            body += part.encode('utf-8')
+            # Insert file bytes after the header of each file part
+            if i < len(body_parts) - 1 and 'filename=' in part:
+                _, (_, file_bytes) = file_items[file_idx]
+                body += file_bytes + b'\r\n'
+                file_idx += 1
+        
+        req = urllib.request.Request(url, data=body, method='POST')
+        req.add_header('User-Agent', _DEFAULT_UA)
+        req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+        
+        resp = _urlopen(req, timeout=timeout)
+        resp_body = resp.read()
+        try:
+            return resp.status, json.loads(resp_body)
+        except (json.JSONDecodeError, ValueError):
+            return resp.status, None
+
+    def _get(self, url: str, timeout: float = 15) -> tuple:
+        """GET request. Returns (status, raw_bytes)."""
+        req = urllib.request.Request(url)
+        req.add_header('User-Agent', _DEFAULT_UA)
+        
+        resp = _urlopen(req, timeout=timeout)
+        return resp.status, resp.read()
 
 
     # ─── Web Services API (Token-based, stateless) ───────────────────
-    
+
     def _get_ws_token(self, username: str = None, password: str = None, force: bool = False) -> str:
         """Lấy Web Services token từ Moodle.
         
@@ -89,32 +168,30 @@ class MoodleClient:
             return ""
         
         try:
-            resp = self.session.post(
+            status, data = self._post(
                 f"{settings.MOODLE_BASE_URL}/login/token.php",
-                data={
-                    'username': user,
-                    'password': pwd,
-                    'service': 'moodle_mobile_app'
-                },
+                {'username': user, 'password': pwd, 'service': 'moodle_mobile_app'},
                 timeout=15
             )
-            data = resp.json()
             
-            if 'token' in data:
+            if data and 'token' in data:
                 settings.MOODLE_WS_TOKEN = data['token']
                 from config import save_settings
                 save_settings()
                 logger.info("Lấy WS API token thành công.")
                 self._last_login_error = ""
                 return data['token']
-            else:
+            elif data:
                 error = data.get('error', 'Unknown error')
                 logger.warning(f"Không lấy được WS token: {error}")
-                # Phân loại lỗi cho UI
                 if 'invalidlogin' in data.get('errorcode', ''):
                     self._last_login_error = "invalid_credentials"
                 else:
                     self._last_login_error = "server_error"
+                return ""
+            else:
+                logger.error("Response không phải JSON khi lấy WS token.")
+                self._last_login_error = "server_error"
                 return ""
         except Exception as e:
             logger.error(f"Lỗi khi lấy WS token: {e}")
@@ -154,15 +231,14 @@ class MoodleClient:
         request_params.update(params)
         
         try:
-            resp = self.session.post(
+            status, result = self._post(
                 f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
-                data=request_params,
+                request_params,
                 timeout=20
             )
-            try:
-                result = resp.json()
-            except (json.JSONDecodeError, ValueError):
-                logger.error(f"WS API [{function}] trả về response không phải JSON (status={resp.status_code}).")
+            
+            if result is None:
+                logger.error(f"WS API [{function}] trả về response không phải JSON (status={status}).")
                 return None
             
             # Check for token expiry or invalid token
@@ -173,15 +249,13 @@ class MoodleClient:
                 token = self._get_ws_token(force=True)
                 if token:
                     request_params['wstoken'] = token
-                    resp = self.session.post(
+                    status, result = self._post(
                         f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
-                        data=request_params,
+                        request_params,
                         timeout=20
                     )
-                    try:
-                        result = resp.json()
-                    except (json.JSONDecodeError, ValueError):
-                        logger.error(f"WS API [{function}] retry trả về response không phải JSON (status={resp.status_code}).")
+                    if result is None:
+                        logger.error(f"WS API [{function}] retry trả về response không phải JSON (status={status}).")
                         return None
                 else:
                     return None
@@ -242,7 +316,7 @@ class MoodleClient:
         
         form_data = {
             'token': token,
-            'itemid': itemid,
+            'itemid': str(itemid),
             'filearea': 'draft',
             'filepath': '/',
         }
@@ -252,15 +326,12 @@ class MoodleClient:
             form_data['license'] = license_key
 
         try:
-            resp = self.session.post(
+            status, result = self._post_multipart(
                 f"{settings.MOODLE_BASE_URL}/webservice/upload.php",
-                data=form_data,
-                files={
-                    'file': (filename, file_bytes),
-                },
+                fields=form_data,
+                files={'file': (filename, file_bytes)},
                 timeout=60.0,
             )
-            result = resp.json()
         except Exception as e:
             logger.error("Lỗi upload file '%s': %s", filename, e)
             return None
@@ -287,10 +358,10 @@ class MoodleClient:
         authed_url = f"{url}{sep}token={token}"
         
         try:
-            resp = self.session.get(authed_url, timeout=60)
-            if resp.status_code == 200:
-                return resp.content
-            logger.error("Download failed (HTTP %d): %s", resp.status_code, url)
+            status, content = self._get(authed_url, timeout=60)
+            if status == 200:
+                return content
+            logger.error("Download failed (HTTP %d): %s", status, url)
         except Exception as e:
             logger.error("Download error: %s", e)
         return None
@@ -325,17 +396,15 @@ class MoodleClient:
         user = username or settings.UTH_USERNAME
         pwd  = password or settings.UTH_PASSWORD
         try:
-            r = self.session.post(
+            status, data = self._post_json(
                 f"{settings.PORTAL_API_BASE}/user/login",
-                json={"username": user, "password": pwd},
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                {"username": user, "password": pwd},
                 timeout=10,
             )
-            data = r.json()
-            if data.get("success") and data.get("token"):
+            if data and data.get("success") and data.get("token"):
                 self._portal_token = data["token"]
                 logger.info("Lấy Portal JWT token thành công.")
-            else:
+            elif data:
                 logger.warning(f"Portal login không thành công: {data.get('message')}")
         except Exception as e:
             logger.error(f"Lỗi khi lấy Portal token: {e}")
