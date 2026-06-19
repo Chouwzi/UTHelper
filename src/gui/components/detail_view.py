@@ -524,7 +524,19 @@ class DetailView(ft.Container):
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
-        elif sub_status in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
+        elif sub_status in ("submitted", "Đã nộp"):
+            # Đã nộp nhưng chưa chấm → vẫn cho nộp thêm file
+            self._submission_area.visible = True
+            self._pick_btn.visible = True
+            self._submit_btn.visible = False
+            self._cta_icon.name = ft.Icons.VISIBILITY_ROUNDED
+            self._cta_text.value = "Xem bài nộp"
+            self._open_btn.bgcolor = C.SURFACE
+            self._open_btn.border = ft.Border.all(1, C.ACCENT)
+            self._cta_text.color = C.ACCENT
+            self._cta_icon.color = C.ACCENT
+        elif sub_status in ("graded", "Đã chấm điểm"):
+            # Đã chấm điểm → ẩn submission area
             self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.VISIBILITY_ROUNDED
             self._cta_text.value = "Xem bài nộp"
