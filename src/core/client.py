@@ -2,12 +2,10 @@ import httpx
 import json
 import os
 import urllib.parse
-from bs4 import BeautifulSoup
 from typing import Optional
 from config import settings
 import logging
 from core.network_utils import retry_with_backoff
-from core.html_compat import BS4_PARSER
 import sys as _sys
 
 # ── iOS/mobile SSL fix: explicitly use certifi CA bundle ──
@@ -34,7 +32,7 @@ else:
 
 class MoodleClient:
     def __init__(self):
-        # ── httpx Client: works on iOS/Android (unlike requests) ──
+        # ── httpx Client: WS API only, works on iOS/Android/Desktop ──
         verify_val = _CA_BUNDLE if isinstance(_CA_BUNDLE, str) else _CA_BUNDLE
         transport = httpx.HTTPTransport(retries=3)
         self.session = httpx.Client(
@@ -44,36 +42,16 @@ class MoodleClient:
             timeout=httpx.Timeout(15.0),
             headers={
                 "User-Agent": _DEFAULT_UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept": "application/json, */*",
                 "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
             },
         )
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
-        self._load_cookies()
 
     def close(self):
         """Close the underlying httpx client and release connection pool."""
         self.session.close()
-
-    def _load_cookies(self):
-        if settings.MOODLE_SESSION:
-            try:
-                cookies_dict = json.loads(settings.MOODLE_SESSION)
-                self.session.cookies.update(cookies_dict)
-                logger.debug("Đã tải lại session cookie từ config.")
-            except Exception as e:
-                logger.error(f"Lỗi tải cookie từ config: {e}")
-
-    def _save_cookies(self):
-        try:
-            cookies_dict = dict(self.session.cookies)
-            settings.MOODLE_SESSION = json.dumps(cookies_dict)
-            from config import save_settings
-            save_settings()
-            logger.debug("Đã lưu session cookie vào config.")
-        except Exception as e:
-            logger.error(f"Lỗi lưu cookie: {e}")
 
 
     # ─── Web Services API (Token-based, stateless) ───────────────────
@@ -93,6 +71,7 @@ class MoodleClient:
         
         if not user or not pwd:
             logger.warning("Chưa có thông tin đăng nhập để lấy WS token.")
+            self._last_login_error = "missing_credentials"
             return ""
         
         try:
@@ -112,14 +91,32 @@ class MoodleClient:
                 from config import save_settings
                 save_settings()
                 logger.info("Lấy WS API token thành công.")
+                self._last_login_error = ""
                 return data['token']
             else:
                 error = data.get('error', 'Unknown error')
                 logger.warning(f"Không lấy được WS token: {error}")
+                # Phân loại lỗi cho UI
+                if 'invalidlogin' in data.get('errorcode', ''):
+                    self._last_login_error = "invalid_credentials"
+                else:
+                    self._last_login_error = "server_error"
                 return ""
         except Exception as e:
             logger.error(f"Lỗi khi lấy WS token: {e}")
+            self._last_login_error = "network_error"
             return ""
+    
+    def login(self, username: str = None, password: str = None, force: bool = False) -> bool:
+        """Đăng nhập bằng WS token — KHÔNG tạo session, KHÔNG kick browser.
+        
+        Đây là phương thức login duy nhất. Sử dụng Moodle WS API,
+        hoạt động trên mọi nền tảng (iOS, Android, Desktop).
+        """
+        if force:
+            settings.MOODLE_WS_TOKEN = ""
+        token = self._get_ws_token(username, password, force=force)
+        return bool(token)
     
     def call_ws_api(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle Web Services REST API.
@@ -198,6 +195,7 @@ class MoodleClient:
         import asyncio
         return await asyncio.to_thread(self.call_ws_api, function, **params)
 
+
     def get_user_id(self) -> Optional[int]:
         """Lấy Moodle user ID từ core_webservice_get_site_info (cached).
         
@@ -222,16 +220,6 @@ class MoodleClient:
         
         Đây là endpoint chính thức Moodle dùng cho mobile app upload.
         Dùng multipart/form-data (không base64) → hiệu quả bộ nhớ hơn.
-        
-        Args:
-            filename: Tên file (vd: "baitap.pdf").
-            file_bytes: Nội dung file dạng bytes.
-            itemid: Draft area ID. 0 = tạo mới. Dùng lại ID cũ cho multi-file.
-            author: Tên tác giả (tùy chọn, gửi cho Moodle upload.php).
-            license_key: Mã giấy phép (vd: "cc-4.0", tùy chọn).
-        
-        Returns:
-            itemid của draft area, hoặc None nếu lỗi.
         """
         token = self._get_ws_token()
         if not token:
@@ -263,14 +251,12 @@ class MoodleClient:
             logger.error("Lỗi upload file '%s': %s", filename, e)
             return None
         
-        # Response là list khi thành công: [{"itemid": 123, "filename": "...", ...}]
         if isinstance(result, list) and len(result) > 0:
             item = result[0]
             if 'itemid' in item:
                 logger.info("Upload thành công '%s' → draft itemid=%s", filename, item['itemid'])
                 return item['itemid']
         
-        # Error response là dict: {"error": "...", "errorcode": "..."}
         if isinstance(result, dict):
             logger.error("Upload lỗi: %s (code=%s)", 
                         result.get('error', ''), result.get('errorcode', ''))
@@ -278,16 +264,11 @@ class MoodleClient:
         return None
 
     def download_file(self, url: str) -> Optional[bytes]:
-        """Tải file từ Moodle server.
-        
-        URL có thể cần token để truy cập (pluginfile.php).
-        Tự động append wstoken nếu cần.
-        """
+        """Tải file từ Moodle server. Tự động append wstoken."""
         token = self._get_ws_token()
         if not token:
             return None
         
-        # Append token to URL for pluginfile access
         sep = '&' if '?' in url else '?'
         authed_url = f"{url}{sep}token={token}"
         
@@ -301,11 +282,7 @@ class MoodleClient:
         return None
 
     def delete_draft_file(self, draftitemid: int, filepath: str, filename: str) -> bool:
-        """Xóa một file cụ thể từ draft area.
-        
-        Sử dụng core_files_delete_draft_files API.
-        Verified hoạt động trên server UTH.
-        """
+        """Xóa một file cụ thể từ draft area."""
         try:
             result = self.call_ws_api(
                 'core_files_delete_draft_files',
@@ -351,11 +328,7 @@ class MoodleClient:
         return self._portal_token
 
     def build_autologin_url(self, activity_url: str = "", username: str = None, password: str = None) -> str:
-        """
-        Tạo URL autologin dẫn thẳng tới activity/course mà không cần session trình duyệt.
-        - Nếu activity_url là Moodle URL bình thường → wrap thành autologin + wantsurl
-        - Trả về URL gốc nếu không lấy được token
-        """
+        """Tạo URL autologin dẫn thẳng tới activity/course."""
         token = self.get_portal_token(username, password)
         if not token:
             return activity_url
@@ -368,211 +341,6 @@ class MoodleClient:
             return autologin
         return f"{settings.MOODLE_BASE_URL}/login/index.php?token={token}"
 
-    def login_ws_only(self, username: str = None, password: str = None) -> bool:
-        """Đăng nhập chỉ bằng WS token — KHÔNG tạo session, KHÔNG kick browser.
-        
-        Dùng thay cho login() khi trường giới hạn 1 session đồng thời.
-        """
-        token = self._get_ws_token(username, password)
-        return bool(token)
-
-    @retry_with_backoff(retries=3, backoff_in_seconds=2)
-    def login(self, username: str = None, password: str = None, force: bool = False) -> bool:
-        """
-        Thực hiện đăng nhập vào hệ thống UTH Moodle.
-        CẢNH BÁO: Tạo session mới → kick browser nếu trường giới hạn 1 session.
-        Chỉ gọi khi ALLOW_SESSION_LOGIN = True.
-        """
-        if force:
-            self.session.cookies.clear()
-
-        user = username or settings.UTH_USERNAME
-        pwd = password or settings.UTH_PASSWORD
-
-        if not force and "MoodleSession" in dict(self.session.cookies):
-            try:
-                # Không chuyển hướng để tránh loop 303. Nếu 303 là nó redirect ra trang Login
-                r = self.session.get(f"{settings.MOODLE_BASE_URL}/my/", follow_redirects=False, timeout=5)
-                if r.status_code == 200 or (r.status_code in (301, 302, 303) and "login/index.php" not in r.headers.get("Location", "")):
-                    logger.info("Session lấy từ bộ nhớ vẫn còn hiệu lực, tăng tốc khởi động.")
-                    return True
-                else:
-                    self.session.cookies.clear()
-            except Exception as e:
-                logger.debug(f"Test session bypass thất bại: {e}")
-                self.session.cookies.clear()
-
-        if not user or not pwd:
-            logger.error("Chưa cung cấp thông tin tài khoản")
-            self._last_login_error = "missing_credentials"
-            return False
-
-        try:
-            # Bước 1: Lấy 'logintoken' từ trang đăng nhập
-            res = self.session.get(settings.MOODLE_LOGIN_URL, timeout=15)
-            res.raise_for_status()
-
-            soup = BeautifulSoup(res.text, BS4_PARSER)
-            token_input = soup.find("input", {"name": "logintoken"})
-            
-            if not token_input:
-                logger.error("Không tìm thấy login token trên trang Moodle.")
-                self._last_login_error = "server_error"
-                return False
-                
-            token = token_input.get("value")
-            if not token:
-                logger.error("Login token tìm thấy nhưng không có giá trị (value=None).")
-                self._last_login_error = "server_error"
-                return False
-
-            # Bước 2: Gửi yêu cầu đăng nhập (POST)
-            payload = {
-                "username": user,
-                "password": pwd,
-                "logintoken": token
-            }
-            
-            # Tắt redirect để kiểm soát lỗi chuyển hướng vô tận (nếu có sự cố mismatch/loop)
-            login_res = self.session.post(settings.MOODLE_LOGIN_URL, data=payload, timeout=15, follow_redirects=False)
-            
-            # Nếu Moodle xác thực thành công, nó sẽ trả về location tới trang testsession hoặc trang index
-            if login_res.status_code in (301, 302, 303):
-                loc = login_res.headers.get("Location", "")
-                if loc and ("testsession" in loc or "my/" in loc or "courses.ut.edu.vn/?redirect=0" in loc):
-                    logger.info("Đăng nhập UTH Moodle thành công.")
-                    self._save_cookies()
-                    return True
-                elif loc and "login/index.php" not in loc:
-                    # Trong vài trường hợp redirect ra chỗ khác
-                    logger.info(f"Đăng nhập UTH Moodle có thể thành công (Location: {loc}).")
-                    self._save_cookies()
-                    return True
-            
-            # Nếu ở lại trang login hoặc bị redirect lại chính nó (tức là đăng nhập thất bại)
-            if login_res.status_code == 200:
-                # Nếu request về 200, thử tìm thông báo lỗi trên trang login
-                login_soup = BeautifulSoup(login_res.text, BS4_PARSER)
-                err_node = login_soup.find("div", {"class": "alert-danger"}) or login_soup.find("span", {"class": "error"})
-                if err_node:
-                    err_msg = err_node.text.strip()
-                    logger.warning(f"Đăng nhập thất bại: {err_msg}")
-                    self._last_login_error = "invalid_credentials"
-                else:
-                    logger.warning("Đăng nhập thất bại, vui lòng kiểm tra lại tài khoản/mật khẩu.")
-                    self._last_login_error = "invalid_credentials"
-            else:
-                # Đối với trường hợp redirect (30x) quay lại trang login
-                logger.warning("Đăng nhập thất bại (sai tài khoản hoặc mật khẩu).")
-                self._last_login_error = "invalid_credentials"
-            
-            self.session.cookies.clear()
-            return False
-            
-        except Exception as e:
-            logger.error(f"Lỗi khi đăng nhập: {str(e)}")
-            self._last_login_error = "network_error"
-            return False
-
     @property
     def last_login_error(self) -> str:
         return getattr(self, '_last_login_error', '')
-
-    @retry_with_backoff(retries=3)
-    def fetch_calendar(self, month: int = None, year: int = None) -> Optional[str]:
-        """
-        Lấy nội dung trang lịch theo tháng/năm cụ thể.
-        """
-        url = f"{settings.MOODLE_BASE_URL}/calendar/view.php?view=month"
-        if month and year:
-            import datetime
-            # Convert month and year to a timestamp representing the middle of the month
-            # so timezone differences don't accidentally knock us into the previous month
-            dt = datetime.datetime(year, month, 15)
-            timestamp = int(dt.timestamp())
-            url += f"&time={timestamp}"
-
-        try:
-            # allow_redirects=True is default, but we should be aware that it can follow many redirects
-            res = self.session.get(url, timeout=15)
-            res.raise_for_status()
-            
-            # Kiểm tra nếu bị chuyển hướng về trang đăng nhập -> Session hết hạn
-            if "login/index.php" in str(res.url):
-                if not settings.ALLOW_SESSION_LOGIN:
-                    logger.warning("Session hết hạn khi gọi fetch_calendar. Không auto re-login vì ALLOW_SESSION_LOGIN=False (tránh kick browser).")
-                    return None
-                logger.warning("Session hết hạn khi gọi fetch_calendar, tự động đăng nhập lại...")
-                if self.login(force=True):
-                    res = self.session.get(url, timeout=15)
-                    res.raise_for_status()
-                    if "login/index.php" in str(res.url):
-                        return None
-                else:
-                    return None
-                    
-            return res.text
-        except httpx.TooManyRedirects:
-            if not settings.ALLOW_SESSION_LOGIN:
-                logger.warning("Session bị vô hiệu hoá (TooManyRedirects). Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
-                return None
-            logger.warning("Session bị vô hiệu hoá (TooManyRedirects). Đang tự động đăng nhập lại...")
-            if self.login(force=True):
-                try:
-                    res = self.session.get(url, timeout=15)
-                    res.raise_for_status()
-                    return res.text
-                except Exception as ex:
-                    logger.error(f"Lỗi sau khi re-login lấy calendar: {str(ex)}")
-            return None
-        except Exception as e:
-            logger.error(f"Lỗi khi lấy dữ liệu lịch: {str(e)}")
-            return None
-
-    @retry_with_backoff(retries=1)
-    def fetch_url(self, url: str, timeout: int = 10) -> Optional[str]:
-        """
-        Lấy nội dung HTML của một đường dẫn bất kỳ bằng session hiện tại.
-        Chỉ cho phép URL thuộc MOODLE_BASE_URL hoặc PORTAL_API_BASE (chống SSRF).
-        """
-        # SSRF guard: chỉ cho phép domain đã biết
-        allowed_prefixes = (settings.MOODLE_BASE_URL, settings.PORTAL_API_BASE)
-        if not url or not url.startswith(allowed_prefixes):
-            logger.error(f"fetch_url bị chặn vì URL không thuộc domain cho phép: {url}")
-            return None
-
-        try:
-            res = self.session.get(url, timeout=timeout)
-            res.raise_for_status()
-            
-            # Kiểm tra nếu bị chuyển hướng về trang đăng nhập -> Session hết hạn
-            if "login/index.php" in str(res.url):
-                if not settings.ALLOW_SESSION_LOGIN:
-                    logger.warning(f"Session hết hạn khi gọi {url}. Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
-                    return None
-                logger.warning(f"Session hết hạn khi gọi {url}, tự động đăng nhập lại...")
-                if self.login(force=True):
-                    res = self.session.get(url, timeout=timeout)
-                    res.raise_for_status()
-                    if "login/index.php" in str(res.url):
-                        return None
-                else:
-                    return None
-                    
-            return res.text
-        except httpx.TooManyRedirects:
-            if not settings.ALLOW_SESSION_LOGIN:
-                logger.warning(f"Session bị vô hiệu hoá (TooManyRedirects) khi gọi {url}. Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
-                return None
-            logger.warning(f"Session bị vô hiệu hoá (TooManyRedirects) khi gọi {url}. Đang tự động đăng nhập lại...")
-            if self.login(force=True):
-                try:
-                    res = self.session.get(url, timeout=timeout)
-                    res.raise_for_status()
-                    return res.text
-                except Exception as ex:
-                    logger.error(f"Lỗi sau khi re-login lấy URL: {str(ex)}")
-            return None
-        except Exception as e:
-            logger.error(f"Lỗi khi truy cập URL {url}: {str(e)}")
-            return None
