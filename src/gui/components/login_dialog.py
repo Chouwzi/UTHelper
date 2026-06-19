@@ -132,29 +132,21 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             page.update()
             await asyncio.sleep(0.7)
 
-            # Dismiss dialog — use multiple strategies for cross-platform compat
-            dlg.open = False
-            page.update()
-            
-            # Strategy 1: Remove from overlay (desktop Flet)
-            try:
-                page.overlay.remove(dlg)
-            except (ValueError, AttributeError):
-                pass
-            
-            # Strategy 2: page.close() (Flet 0.21+)
+            # Dismiss dialog — page.close() is the primary API for Flet 0.80+
             try:
                 page.close(dlg)
-            except (TypeError, AttributeError):
-                pass
-            
-            # Strategy 3: Clear page.dialog if it was set
-            try:
-                if hasattr(page, 'dialog') and page.dialog == dlg:
-                    page.dialog = None
             except Exception:
-                pass
-            
+                # Fallback: try legacy approaches
+                try:
+                    dlg.open = False
+                    page.overlay.remove(dlg)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(page, 'dialog') and page.dialog == dlg:
+                        page.dialog = None
+                except Exception:
+                    pass
             page.update()
             page.run_task(on_success_callback)
         else:
