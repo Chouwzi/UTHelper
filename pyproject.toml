@@ -10,8 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # ── Core (cross-platform) ──
-    "requests>=2.32.0",   # Desktop HTTP (Cloudflare-friendly TLS)
-    "httpx>=0.28.0",       # iOS/Android HTTP (no C-extension needed)
+    # HTTP: uses urllib.request (stdlib) — zero dependency, Cloudflare-friendly
     "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
     "pydantic>=2.6.4",
