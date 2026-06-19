@@ -24,29 +24,73 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Don't install Flutter separately - Flet manages its own Flutter SDK
       - name: Install Flet
         run: |
           pip install flet
           flet --version
 
-      # Use 'yes' to auto-confirm Flutter SDK install prompt
-      - name: Build IPA
+      # Flet builds xcarchive (unsigned, no codesign)
+      - name: Build with Flet
         run: |
-          echo "🔨 Building UTHelper IPA..."
+          echo "🔨 Building UTHelper..."
           yes | flet build ipa --verbose
 
-      - name: List build output
+      # Convert xcarchive to IPA manually
+      - name: Package xcarchive as IPA
+        run: |
+          echo "📦 Converting xcarchive to IPA..."
+          
+          # Find the .xcarchive
+          XCARCHIVE=$(find build/ -name "*.xcarchive" -type d | head -1)
+          if [ -z "$XCARCHIVE" ]; then
+            echo "❌ No .xcarchive found"
+            find build/ -type d -maxdepth 4 2>/dev/null
+            exit 1
+          fi
+          echo "Found: $XCARCHIVE"
+          
+          # Find the .app inside xcarchive
+          APP_PATH="$XCARCHIVE/Products/Applications"
+          APP=$(find "$APP_PATH" -name "*.app" -maxdepth 1 | head -1)
+          if [ -z "$APP" ]; then
+            echo "❌ No .app found in xcarchive"
+            ls -la "$XCARCHIVE/Products/" 2>/dev/null
+            exit 1
+          fi
+          echo "Found app: $APP"
+          
+          # Create Payload structure and zip as IPA
+          mkdir -p output/Payload
+          cp -r "$APP" output/Payload/
+          cd output
+          zip -r -q UTHelper.ipa Payload
+          
+          echo "✅ IPA created!"
+          ls -lh UTHelper.ipa
+
+      - name: List all outputs
         if: always()
         run: |
-          echo "📦 Build artifacts:"
-          find . -name "*.ipa" -o -name "*.app" 2>/dev/null | head -20
-          ls -la build/ipa/ 2>/dev/null || echo "No build/ipa/"
+          echo "=== xcarchive ==="
+          find build/ -name "*.xcarchive" -type d 2>/dev/null
+          echo "=== IPA ==="
+          find . -name "*.ipa" 2>/dev/null
+          echo "=== app ==="
+          find build/ -name "*.app" -type d 2>/dev/null | head -5
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: UTHelper-iOS-${{ github.sha }}
+          path: output/UTHelper.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      # Also upload xcarchive for Xcode re-signing
+      - name: Upload xcarchive
+        uses: actions/upload-artifact@v4
+        with:
+          name: UTHelper-xcarchive-${{ github.sha }}
           path: build/ipa/
           retention-days: 30
           if-no-files-found: warn
