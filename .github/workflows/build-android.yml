@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/**'
       - 'pyproject.toml'
+      - '.github/workflows/build-android.yml'
   workflow_dispatch:
 
 jobs:
