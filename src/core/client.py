@@ -1,4 +1,3 @@
-import httpx
 import json
 import os
 import urllib.parse
@@ -8,19 +7,28 @@ import logging
 from core.network_utils import retry_with_backoff
 import sys as _sys
 
-# ── iOS/mobile SSL fix: explicitly use certifi CA bundle ──
-try:
-    import certifi
-    _CA_BUNDLE = certifi.where()
-except ImportError:
-    _CA_BUNDLE = True  # Fallback to default behavior on desktop
-
-logger = logging.getLogger(__name__)
-
+# ── iOS/mobile detection ──
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
 _is_ios = _sys.platform == 'ios' or (
     _sys.platform == 'darwin' and os.environ.get('FLET_APP_STORAGE_DATA', '') != ''
 )
+_is_mobile = _is_android or _is_ios
+
+# ── HTTP client selection ──
+# Desktop: curl_cffi (bypasses Cloudflare TLS fingerprint blocking)
+# Mobile:  httpx (curl_cffi C-extensions don't work on iOS/Android)
+_USE_CURL_CFFI = False
+if not _is_mobile:
+    try:
+        from curl_cffi import requests as _cffi_requests
+        _USE_CURL_CFFI = True
+    except ImportError:
+        pass
+
+if not _USE_CURL_CFFI:
+    import httpx
+
+logger = logging.getLogger(__name__)
 
 if _is_android:
     _DEFAULT_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
@@ -32,25 +40,42 @@ else:
 
 class MoodleClient:
     def __init__(self):
-        # ── httpx Client: WS API only, works on iOS/Android/Desktop ──
-        verify_val = _CA_BUNDLE if isinstance(_CA_BUNDLE, str) else _CA_BUNDLE
-        transport = httpx.HTTPTransport(retries=3)
-        self.session = httpx.Client(
-            transport=transport,
-            verify=verify_val,
-            follow_redirects=True,
-            timeout=httpx.Timeout(15.0),
-            headers={
-                "User-Agent": _DEFAULT_UA,
-                "Accept": "application/json, */*",
-                "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-            },
-        )
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
+        
+        if _USE_CURL_CFFI:
+            # curl_cffi: impersonates Chrome TLS fingerprint → bypasses Cloudflare
+            self.session = _cffi_requests.Session(
+                impersonate="chrome124",
+                timeout=15,
+                headers={
+                    "User-Agent": _DEFAULT_UA,
+                    "Accept": "application/json, */*",
+                    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+                },
+            )
+        else:
+            # httpx: works on iOS/Android (pure Python friendly)
+            try:
+                import certifi
+                verify_val = certifi.where()
+            except ImportError:
+                verify_val = True
+            transport = httpx.HTTPTransport(retries=3)
+            self.session = httpx.Client(
+                transport=transport,
+                verify=verify_val,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                headers={
+                    "User-Agent": _DEFAULT_UA,
+                    "Accept": "application/json, */*",
+                    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+                },
+            )
 
     def close(self):
-        """Close the underlying httpx client and release connection pool."""
+        """Close the underlying HTTP client and release connection pool."""
         self.session.close()
 
 

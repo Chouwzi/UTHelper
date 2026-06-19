@@ -19,10 +19,14 @@ dependencies = [
     "python-dateutil>=2.8.2",
 ]
 
-# Windows-specific packages - install with:
-#   pip install "uthelper[windows]"
+# Desktop-specific: curl_cffi bypasses Cloudflare TLS fingerprint blocking
+# Not available on iOS/Android — code auto-detects and falls back to httpx
 [project.optional-dependencies]
+desktop = [
+    "curl_cffi>=0.9.0",
+]
 windows = [
+    "curl_cffi>=0.9.0",
     "pystray>=0.19.5",
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
