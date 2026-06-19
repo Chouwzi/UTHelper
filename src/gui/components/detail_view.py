@@ -53,6 +53,18 @@ _KEY_TRANSLATIONS = {
 def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
+# Moodle license shortnames → display names
+_LICENSE_OPTIONS = [
+    ("unknown", "Licence not specified"),
+    ("allrightsreserved", "All rights reserved"),
+    ("public", "Public domain"),
+    ("cc-4.0", "Creative Commons - 4.0 International"),
+    ("cc-nc-4.0", "CC - NonCommercial 4.0"),
+    ("cc-nd-4.0", "CC - NoDerivatives 4.0"),
+    ("cc-nc-nd-4.0", "CC - NonCommercial-NoDerivatives 4.0"),
+    ("cc-nc-sa-4.0", "CC - NonCommercial-ShareAlike 4.0"),
+    ("cc-sa-4.0", "CC - ShareAlike 4.0"),
+]
 
 class DetailView(ft.Container):
     def __init__(self, page: ft.Page, on_close, get_client=None):
@@ -100,6 +112,62 @@ class DetailView(ft.Container):
 
         # ── Submitted files area (files already on server) ──
         self._submitted_files: list = []  # [{name, size, url, timemodified}]
+        self._editing_file_index: int = -1  # index of file being edited
+
+        # ── File edit dialog fields ──
+        self._edit_filename = ft.TextField(
+            label="Tên", text_size=13, dense=True,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
+            bgcolor=C.BG,
+        )
+        self._edit_author = ft.TextField(
+            label="Tác giả", text_size=13, dense=True,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
+            bgcolor=C.BG,
+        )
+        self._edit_license = ft.Dropdown(
+            label="Chọn giấy phép", text_size=13, dense=True,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
+            bgcolor=C.BG, filled=True, fill_color=C.BG,
+            options=[ft.dropdown.Option(key=k, text=v) for k, v in _LICENSE_OPTIONS],
+        )
+        self._edit_filepath = ft.TextField(
+            label="Đường dẫn", text_size=13, dense=True,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
+            bgcolor=C.BG, value="/",
+        )
+        self._edit_status = ft.Text("", size=12, visible=False)
+        self._file_edit_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Chỉnh sửa file", size=16, weight=ft.FontWeight.BOLD,
+                          color=C.TEXT_PRIMARY),
+            bgcolor=C.SURFACE,
+            content=ft.Container(
+                content=ft.Column(controls=[
+                    self._edit_filename,
+                    self._edit_author,
+                    self._edit_license,
+                    self._edit_filepath,
+                    self._edit_status,
+                ], spacing=12, tight=True),
+                width=340,
+            ),
+            actions=[
+                ft.TextButton("Hủy", on_click=self._close_edit_dialog,
+                              style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
+                ft.ElevatedButton(
+                    "Cập nhật",
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    on_click=lambda _: asyncio.ensure_future(self._on_update_file_metadata()),
+                    bgcolor=C.ACCENT, color=ft.Colors.WHITE,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
         self._submitted_files_col = ft.Column(spacing=4, visible=False)
         self._edit_submitted_btn = ft.Container(
             content=ft.Row(
@@ -799,6 +867,13 @@ class DetailView(ft.Container):
                                 overflow=ft.TextOverflow.ELLIPSIS),
                         ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
                         ft.IconButton(
+                            ft.Icons.EDIT_ROUNDED, icon_size=14,
+                            icon_color=C.ACCENT,
+                            tooltip="Chỉnh sửa",
+                            on_click=lambda _, idx=i: self._show_file_edit_dialog(idx),
+                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                        ),
+                        ft.IconButton(
                             ft.Icons.CLOSE_ROUNDED, icon_size=14,
                             icon_color=C.CRITICAL,
                             tooltip="Xóa file này",
@@ -808,12 +883,14 @@ class DetailView(ft.Container):
                             style=ft.ButtonStyle(padding=ft.Padding.all(4)),
                         ),
                     ],
-                    spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 bgcolor=C.BG,
                 border=ft.Border.all(1, C.SAFE + "30"),
                 border_radius=6,
                 padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                on_click=lambda _, idx=i: self._show_file_edit_dialog(idx),
+                ink=True,
             )
             self._submitted_files_col.controls.append(row)
 
@@ -938,3 +1015,171 @@ class DetailView(ft.Container):
         if client:
             url = client.build_autologin_url(self._current_url)
         await ft.UrlLauncher().launch_url(url)
+
+    # ── File Edit Dialog ──────────────────────────────────────
+
+    def _show_file_edit_dialog(self, index: int):
+        """Mở popup chỉnh sửa thông tin file đã nộp."""
+        if index < 0 or index >= len(self._submitted_files):
+            return
+        self._editing_file_index = index
+        f = self._submitted_files[index]
+
+        self._edit_filename.value = f.get('name', '')
+        self._edit_author.value = f.get('author', '')
+        self._edit_license.value = f.get('license', 'unknown')
+        self._edit_filepath.value = f.get('filepath', '/')
+        self._edit_status.value = ""
+        self._edit_status.visible = False
+
+        self._page.open(self._file_edit_dialog)
+        self._page.update()
+
+    def _close_edit_dialog(self, e=None):
+        """Đóng popup chỉnh sửa file."""
+        self._page.close(self._file_edit_dialog)
+        self._page.update()
+
+    async def _on_update_file_metadata(self):
+        """Xử lý cập nhật thông tin file: đổi tên, author, license, filepath."""
+        idx = self._editing_file_index
+        if idx < 0 or idx >= len(self._submitted_files):
+            return
+        if self._is_uploading:
+            return
+
+        old_file = self._submitted_files[idx]
+        new_name = (self._edit_filename.value or '').strip()
+        new_author = (self._edit_author.value or '').strip()
+        new_license = self._edit_license.value or 'unknown'
+        new_filepath = (self._edit_filepath.value or '/').strip()
+
+        if not new_name:
+            self._edit_status.value = "⚠️ Tên file không được trống"
+            self._edit_status.color = C.WARNING
+            self._edit_status.visible = True
+            self._page.update()
+            return
+
+        # Check if anything changed
+        name_changed = new_name != old_file.get('name', '')
+        author_changed = new_author != old_file.get('author', '')
+        license_changed = new_license != old_file.get('license', 'unknown')
+
+        if not name_changed and not author_changed and not license_changed:
+            self._close_edit_dialog()
+            return
+
+        client = None
+        try:
+            client = self._get_client() if self._get_client else None
+        except Exception:
+            pass
+        if not client:
+            self._edit_status.value = "❌ Chưa đăng nhập"
+            self._edit_status.color = C.CRITICAL
+            self._edit_status.visible = True
+            self._page.update()
+            return
+
+        data = self._current_data
+        url = data.get("url", "")
+        course_id = data.get("course_id")
+        if not url or not course_id or '/mod/assign/' not in url:
+            self._edit_status.value = "❌ Không xác định được bài tập"
+            self._edit_status.color = C.CRITICAL
+            self._edit_status.visible = True
+            self._page.update()
+            return
+
+        self._is_uploading = True
+        self._edit_status.value = "⏳ Đang cập nhật..."
+        self._edit_status.color = C.TEXT_SECONDARY
+        self._edit_status.visible = True
+        self._page.update()
+
+        meta = {
+            'new_name': new_name,
+            'author': new_author,
+            'license': new_license,
+            'filepath': new_filepath,
+        }
+
+        try:
+            success = await asyncio.to_thread(
+                self._do_update_metadata_sync,
+                client, url, int(course_id), idx, meta,
+            )
+            if success:
+                self._close_edit_dialog()
+                self._show_upload_status(
+                    f"✅ Đã cập nhật '{new_name}'", C.SAFE
+                )
+                asyncio.ensure_future(
+                    self._async_load_submitted_files(client, url, int(course_id))
+                )
+            else:
+                self._edit_status.value = "❌ Cập nhật thất bại"
+                self._edit_status.color = C.CRITICAL
+                self._edit_status.visible = True
+        except Exception as ex:
+            logger.error("Update metadata error: %s", ex)
+            self._edit_status.value = f"❌ {ex}"
+            self._edit_status.color = C.CRITICAL
+            self._edit_status.visible = True
+        finally:
+            self._is_uploading = False
+            self._page.update()
+
+    def _do_update_metadata_sync(self, client, url: str, course_id: int,
+                                 target_idx: int, meta: dict) -> bool:
+        """Re-upload tất cả file với metadata mới cho file target (chạy trong thread).
+
+        Workflow:
+        1. Download tất cả submitted files
+        2. Upload lại vào draft area mới, file target dùng tên/metadata mới
+        3. mod_assign_save_submission
+        """
+        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission
+
+        cmid = None
+        if "id=" in url:
+            try:
+                cmid = int(url.split("id=")[-1].split("&")[0])
+            except (ValueError, IndexError):
+                pass
+        if not cmid:
+            return False
+
+        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
+        if not assign_id:
+            return False
+
+        draft_itemid = 0
+        for i, f in enumerate(self._submitted_files):
+            file_url = f.get('url', '')
+            if not file_url:
+                return False
+
+            file_bytes = client.download_file(file_url)
+            if not file_bytes:
+                return False
+
+            if i == target_idx:
+                # Upload with new metadata
+                result_id = client.upload_draft_file(
+                    meta['new_name'], file_bytes,
+                    itemid=draft_itemid,
+                    author=meta.get('author'),
+                    license_key=meta.get('license'),
+                )
+            else:
+                result_id = client.upload_draft_file(
+                    f.get('name', 'file'), file_bytes, itemid=draft_itemid,
+                )
+
+            if result_id is None:
+                return False
+            draft_itemid = result_id
+
+        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)

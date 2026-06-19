@@ -183,6 +183,9 @@ def get_submitted_files(
                     'size': f.get('filesize', 0),
                     'url': f.get('fileurl', ''),
                     'timemodified': f.get('timemodified', 0),
+                    'author': f.get('author', ''),
+                    'license': f.get('license', 'unknown'),
+                    'filepath': f.get('filepath', '/'),
                 })
     
     return files

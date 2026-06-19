@@ -209,7 +209,9 @@ class MoodleClient:
         return None
 
     def upload_draft_file(self, filename: str, file_bytes: bytes,
-                          itemid: int = 0) -> Optional[int]:
+                          itemid: int = 0,
+                          author: str = None,
+                          license_key: str = None) -> Optional[int]:
         """Upload file lên Moodle draft area qua /webservice/upload.php.
         
         Đây là endpoint chính thức Moodle dùng cho mobile app upload.
@@ -219,6 +221,8 @@ class MoodleClient:
             filename: Tên file (vd: "baitap.pdf").
             file_bytes: Nội dung file dạng bytes.
             itemid: Draft area ID. 0 = tạo mới. Dùng lại ID cũ cho multi-file.
+            author: Tên tác giả (tùy chọn, gửi cho Moodle upload.php).
+            license_key: Mã giấy phép (vd: "cc-4.0", tùy chọn).
         
         Returns:
             itemid của draft area, hoặc None nếu lỗi.
@@ -228,15 +232,21 @@ class MoodleClient:
             logger.error("Không có WS token để upload file.")
             return None
         
+        form_data = {
+            'token': token,
+            'itemid': itemid,
+            'filearea': 'draft',
+            'filepath': '/',
+        }
+        if author:
+            form_data['author'] = author
+        if license_key:
+            form_data['license'] = license_key
+
         try:
             resp = self.session.post(
                 f"{settings.MOODLE_BASE_URL}/webservice/upload.php",
-                data={
-                    'token': token,
-                    'itemid': itemid,
-                    'filearea': 'draft',
-                    'filepath': '/',
-                },
+                data=form_data,
                 files={
                     'file': (filename, file_bytes),
                 },
