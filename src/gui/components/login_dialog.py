@@ -132,24 +132,12 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             page.update()
             await asyncio.sleep(0.7)
 
-            # Dismiss dialog — use matching close for the open method
-            if _open_method == "page_open":
-                try:
-                    page.close(dlg)
-                except Exception:
-                    dlg.open = False
-            elif _open_method == "overlay":
-                try:
-                    dlg.open = False
-                    page.overlay.remove(dlg)
-                except Exception:
-                    pass
-            else:  # "dialog" legacy
-                try:
-                    dlg.open = False
-                    page.dialog = None
-                except Exception:
-                    pass
+            # Dismiss dialog — Flet 0.82+: page.pop_dialog()
+            try:
+                page.pop_dialog()
+            except (AttributeError, TypeError):
+                # Fallback for older Flet: dlg.open = False
+                dlg.open = False
             page.update()
             page.run_task(on_success_callback)
         else:
@@ -252,21 +240,15 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         content_padding=24,
     )
 
-    # Track which open method works — close must match
-    _open_method = "page_open"
+    # Open dialog — Flet 0.82+: page.show_dialog()
     try:
+        page.show_dialog(dlg)
+    except (AttributeError, TypeError):
+        # Fallback for older Flet
         try:
-            page.open(dlg)
-        except (TypeError, AttributeError):
-            try:
-                page.overlay.append(dlg)
-                dlg.open = True
-                _open_method = "overlay"
-            except (AttributeError, TypeError):
-                page.dialog = dlg
-                dlg.open = True
-                _open_method = "dialog"
-        page.update()
-    except Exception:
-        import traceback
-        traceback.print_exc()
+            page.overlay.append(dlg)
+            dlg.open = True
+        except (AttributeError, TypeError):
+            page.dialog = dlg
+            dlg.open = True
+    page.update()
