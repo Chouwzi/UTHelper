@@ -342,16 +342,17 @@ class DetailView(ft.Container):
             ink=True,
             expand=True,
         )
+        self._upload_mode_warning_icon = ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=12, color=C.WARNING)
+        self._upload_mode_warning_text = ft.Text(
+            "Sẽ ghi đè toàn bộ file đã nộp trước đó.",
+            size=10, color=C.WARNING, italic=True, expand=True,
+        )
         self._upload_mode_warning = ft.Container(
             content=ft.Row([
-                ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=12, color=C.WARNING),
-                ft.Text(
-                    "Chế độ thêm file sẽ tải lại file cũ trước khi nộp. "
-                    "Có thể lâu nếu file nặng.",
-                    size=10, color=C.WARNING, italic=True, expand=True,
-                ),
+                self._upload_mode_warning_icon,
+                self._upload_mode_warning_text,
             ], spacing=4),
-            visible=False,  # only show in append mode
+            visible=True,  # always show when mode row is visible
         )
         self._upload_mode_row = ft.Column(
             controls=[
@@ -861,7 +862,8 @@ class DetailView(ft.Container):
             self._mode_append_btn.content.controls[0].color = C.TEXT_SECONDARY
             self._mode_append_btn.content.controls[1].color = C.TEXT_SECONDARY
             self._mode_append_btn.content.controls[1].weight = ft.FontWeight.W_500
-            self._upload_mode_warning.visible = False
+            self._upload_mode_warning_icon.name = ft.Icons.WARNING_AMBER_ROUNDED
+            self._upload_mode_warning_text.value = "Sẽ ghi đè toàn bộ file đã nộp trước đó."
         else:
             # Append active
             self._mode_append_btn.bgcolor = C.ACCENT
@@ -875,7 +877,11 @@ class DetailView(ft.Container):
             self._mode_overwrite_btn.content.controls[0].color = C.TEXT_SECONDARY
             self._mode_overwrite_btn.content.controls[1].color = C.TEXT_SECONDARY
             self._mode_overwrite_btn.content.controls[1].weight = ft.FontWeight.W_500
-            self._upload_mode_warning.visible = True
+            self._upload_mode_warning_icon.name = ft.Icons.INFO_OUTLINE_ROUNDED
+            self._upload_mode_warning_text.value = (
+                "Sẽ tải lại file cũ trước khi nộp. "
+                "Có thể lâu nếu file nặng."
+            )
         self._page.update()
 
     async def _on_submit(self, e):
