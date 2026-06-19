@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     # ── Core (cross-platform, safe for Android build) ──
     "requests>=2.34.2",
+    "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
     "pydantic>=2.6.4",
     "pydantic-settings>=2.2.1",

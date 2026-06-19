@@ -4,6 +4,16 @@ import sys
 import traceback
 from pathlib import Path
 
+# ── iOS/mobile SSL fix: must be set BEFORE any requests/urllib3 import ──
+# Python in sandboxed iOS/Android apps cannot locate system CA certificates.
+# Setting these env vars ensures SSL verification works everywhere.
+try:
+    import certifi
+    os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
+    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+except ImportError:
+    pass  # certifi not available on desktop (uses system certs)
+
 __version__ = "2.1.0"
 
 # ── Crash-safe startup logging ──

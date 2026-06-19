@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 import urllib.parse
 import requests.utils
 from requests.adapters import HTTPAdapter
@@ -13,19 +14,37 @@ from core.network_utils import retry_with_backoff
 from core.html_compat import BS4_PARSER
 import sys as _sys
 
+# ── iOS/mobile SSL fix: explicitly use certifi CA bundle ──
+# Python in sandboxed iOS apps cannot find system CA certificates,
+# causing SSL: CERTIFICATE_VERIFY_FAILED errors on all HTTPS requests.
+try:
+    import certifi
+    _CA_BUNDLE = certifi.where()
+except ImportError:
+    _CA_BUNDLE = True  # Fallback to default behavior on desktop
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_UA = (
-    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-    if hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
-    else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+_is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
+_is_ios = _sys.platform == 'ios' or (
+    _sys.platform == 'darwin' and os.environ.get('FLET_APP_STORAGE_DATA', '') != ''
 )
+
+if _is_android:
+    _DEFAULT_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+elif _is_ios:
+    _DEFAULT_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+else:
+    _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 
 class MoodleClient:
     def __init__(self):
         self.session = requests.Session()
         self._last_login_error = ""
+        
+        # ── iOS/mobile SSL fix: set CA bundle on session ──
+        self.session.verify = _CA_BUNDLE
         
         # Performance optimization: Connection pooling and auto-retries
         retry_strategy = Retry(
