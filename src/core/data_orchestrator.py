@@ -136,7 +136,13 @@ class DataOrchestrator:
         return []
     
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
-        """Lấy activities bằng Moodle Web Services API (stateless, JSON)."""
+        """Lấy activities bằng Moodle Web Services API (stateless, JSON).
+        
+        Kết hợp 2 nguồn:
+        1. calendar action events (bài chưa nộp, có deadline tương lai)
+        2. mod_assign_get_assignments (TẤT CẢ bài tập kể cả đã nộp)
+        Merge lại để bài đã nộp không bị mất khỏi danh sách.
+        """
         try:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
@@ -146,16 +152,24 @@ class DataOrchestrator:
                 timesortto=now_ts + (90 * 24 * 3600),
                 limitnum=50,  # Moodle max is 50
             )
-            if result is None:
-                return None
             
-            events = result.get('events', []) if isinstance(result, dict) else []
-            if not events:
-                return None
+            events = []
+            if result and isinstance(result, dict):
+                events = result.get('events', [])
             
             # Convert WS events to UTHelper format
-            results = ws_functions.ws_events_to_assignments(events)
-            logger.info("WS API trả về %d events thành công.", len(results))
+            results = ws_functions.ws_events_to_assignments(events) if events else []
+            
+            # Bổ sung bài tập đã nộp từ mod_assign_get_assignments
+            try:
+                results = self._merge_all_assignments(results)
+            except Exception as e:
+                logger.debug("Merge assignments failed (non-critical): %s", e)
+            
+            if not results:
+                return None
+            
+            logger.info("WS API trả về %d activities (merged).", len(results))
             self.is_logged_in = True  # WS token works = we're authenticated
             return results
         except Exception as e:
@@ -163,7 +177,10 @@ class DataOrchestrator:
             return None
     
     async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
-        """Lấy activities bằng WS API bất đồng bộ (httpx, non-blocking)."""
+        """Lấy activities bằng WS API bất đồng bộ (httpx, non-blocking).
+        
+        Kết hợp calendar events + mod_assign_get_assignments.
+        """
         try:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
@@ -173,20 +190,140 @@ class DataOrchestrator:
                 timesortto=now_ts + (90 * 24 * 3600),
                 limitnum=50,  # Moodle max is 50
             )
-            if result is None:
+            
+            events = []
+            if result and isinstance(result, dict):
+                events = result.get('events', [])
+            
+            results = ws_functions.ws_events_to_assignments(events) if events else []
+            
+            # Bổ sung bài tập đã nộp từ mod_assign_get_assignments (blocking in thread)
+            try:
+                import asyncio
+                results = await asyncio.to_thread(self._merge_all_assignments, results)
+            except Exception as e:
+                logger.debug("Merge assignments async failed (non-critical): %s", e)
+            
+            if not results:
                 return None
             
-            events = result.get('events', []) if isinstance(result, dict) else []
-            if not events:
-                return None
-            
-            results = ws_functions.ws_events_to_assignments(events)
-            logger.info("WS API async trả về %d events.", len(results))
+            logger.info("WS API async trả về %d activities (merged).", len(results))
             self.is_logged_in = True
             return results
         except Exception as e:
             logger.warning("WS API async fetch thất bại: %s", e)
             return None
+
+    def _merge_all_assignments(self, calendar_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Bổ sung bài tập đã nộp vào danh sách calendar events.
+        
+        Moodle calendar API loại bỏ events khi bài đã nộp (no action needed).
+        Hàm này gọi mod_assign_get_assignments để lấy TẤT CẢ bài tập,
+        rồi merge những bài chưa có trong calendar_results.
+        """
+        from datetime import datetime
+        
+        # Lấy user info + enrolled courses
+        try:
+            site_info = self.client.call_ws_api('core_webservice_get_site_info')
+            if not site_info or not isinstance(site_info, dict):
+                return calendar_results
+            userid = site_info.get('userid')
+            if not userid:
+                return calendar_results
+            
+            courses_result = self.client.call_ws_api(
+                'core_enrol_get_users_courses', userid=userid
+            )
+            if not courses_result or not isinstance(courses_result, list):
+                return calendar_results
+        except Exception:
+            return calendar_results
+        
+        course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
+        if not course_ids:
+            return calendar_results
+        
+        # Lấy tất cả assignments
+        all_assigns = ws_functions.get_assignments(self.client.call_ws_api, course_ids)
+        if not all_assigns:
+            return calendar_results
+        
+        # Build set URLs đã có từ calendar events
+        existing_urls = set()
+        existing_cmids = set()
+        for item in calendar_results:
+            url = item.get('url', '')
+            if url:
+                existing_urls.add(url)
+            # Extract cmid from url
+            if 'id=' in url:
+                try:
+                    cmid = int(url.split('id=')[-1].split('&')[0])
+                    existing_cmids.add(cmid)
+                except (ValueError, IndexError):
+                    pass
+        
+        # Merge missing assignments
+        now_ts = int(datetime.now().timestamp())
+        merged_count = 0
+        
+        for course_data in all_assigns:
+            if not isinstance(course_data, dict):
+                continue
+            course_name = course_data.get('fullname', '')
+            course_id = course_data.get('id', '')
+            
+            for assign in course_data.get('assignments', []):
+                cmid = assign.get('cmid')
+                if cmid and cmid in existing_cmids:
+                    continue  # Already in calendar results
+                
+                # Build URL
+                assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
+                if assign_url in existing_urls:
+                    continue
+                
+                # Determine deadline & urgency
+                duedate = assign.get('duedate', 0)
+                if duedate:
+                    deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
+                    remaining = duedate - now_ts
+                    if remaining < 0:
+                        urgency = 'overdue'
+                    elif remaining < 86400:
+                        urgency = 'critical'
+                    elif remaining < 3 * 86400:
+                        urgency = 'warning'
+                    else:
+                        urgency = 'safe'
+                else:
+                    deadline_str = ''
+                    urgency = 'safe'
+                
+                assignment_dict = {
+                    'id': f"assign_{assign.get('id', cmid)}",
+                    'title': assign.get('name', 'Không tên'),
+                    'course_name': course_name,
+                    'course': course_name,
+                    'course_id': course_id,
+                    'deadline': deadline_str,
+                    'deadline_str': deadline_str,
+                    'url': assign_url,
+                    'type': 'assign',
+                    'urgency': urgency,
+                    'source': 'ws_assign_api',
+                    'submission_status': 'unknown',
+                    'details': {},
+                    'is_open': False,
+                }
+                calendar_results.append(assignment_dict)
+                merged_count += 1
+        
+        if merged_count > 0:
+            logger.info("Merged %d additional assignments from mod_assign_get_assignments.", merged_count)
+        
+        return calendar_results
     
     async def get_latest_activities_async(self) -> List[Dict[str, Any]]:
         """Phiên bản async của get_latest_activities — dùng trực tiếp trong event loop."""

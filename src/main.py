@@ -160,7 +160,16 @@ def main():
         os.path.join(os.path.dirname(__file__), "assets")
     )
     
-    ft.run(main=_app_target, assets_dir=_assets)
+    # Support web mode for testing: set FLET_WEB=1 or pass --web
+    web_mode = os.environ.get("FLET_WEB") == "1" or "--web" in sys.argv
+    web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
+    
+    run_kwargs = dict(main=_app_target, assets_dir=_assets)
+    if web_mode:
+        run_kwargs["view"] = ft.AppView.WEB_BROWSER
+        run_kwargs["port"] = web_port
+    
+    ft.run(**run_kwargs)
 
 
 if __name__ == "__main__":
