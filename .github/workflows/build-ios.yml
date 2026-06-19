@@ -24,20 +24,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-
+      # Don't install Flutter separately - Flet manages its own Flutter SDK
       - name: Install Flet
         run: |
           pip install flet
           flet --version
 
+      # Use 'yes' to auto-confirm Flutter SDK install prompt
       - name: Build IPA
         run: |
           echo "🔨 Building UTHelper IPA..."
-          flet build ipa --verbose
+          yes | flet build ipa --verbose
 
       - name: List build output
         if: always()
@@ -50,7 +47,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: UTHelper-iOS-${{ github.sha }}
-          path: |
-            build/ipa/
+          path: build/ipa/
           retention-days: 30
           if-no-files-found: warn
