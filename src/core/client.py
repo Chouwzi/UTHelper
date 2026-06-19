@@ -1,6 +1,5 @@
 import json
 import os
-import ssl
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -24,24 +23,13 @@ elif _is_ios:
 else:
     _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-# ── SSL context (dùng certifi nếu có, quan trọng cho iOS) ──
-# ── SSL context ──
-# Desktop: None → urllib dùng default SSL (Cloudflare KHÔNG chặn)
-# iOS/Android: certifi context (vì iOS không có system CA store cho Python)
-_ssl_ctx = None
-if _is_ios or _is_android:
-    _ssl_ctx = ssl.create_default_context()
-    try:
-        import certifi
-        _ssl_ctx.load_verify_locations(certifi.where())
-    except ImportError:
-        pass
+# ── SSL: dùng urllib default trên MỌI platform ──
+# Custom ssl.create_default_context() bị Cloudflare chặn (403).
+# urllib default SSL không bị chặn. Nếu iOS gặp cert error → thêm certifi sau.
 
 
 def _urlopen(req, timeout=15):
-    """urlopen wrapper: truyền SSL context chỉ trên iOS/Android."""
-    if _ssl_ctx is not None:
-        return urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx)
+    """urlopen wrapper — dùng urllib default SSL."""
     return urllib.request.urlopen(req, timeout=timeout)
 
 
