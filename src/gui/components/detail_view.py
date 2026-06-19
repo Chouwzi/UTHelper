@@ -113,6 +113,8 @@ class DetailView(ft.Container):
         # ── Submitted files area (files already on server) ──
         self._submitted_files: list = []  # [{name, size, url, timemodified}]
         self._editing_file_index: int = -1  # index of file being edited
+        self._selected_file_indices: set = set()  # indices selected for batch delete
+        self._is_multiselect_mode: bool = False
 
         # ── File edit dialog fields ──
         self._edit_filename = ft.TextField(
@@ -168,7 +170,74 @@ class DetailView(ft.Container):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
+
+        # ── Delete confirmation dialog ──
+        self._delete_confirm_text = ft.Text("", size=13, color=C.TEXT_PRIMARY)
+        self._delete_confirm_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Xác nhận xóa", size=16, weight=ft.FontWeight.BOLD,
+                          color=C.CRITICAL),
+            bgcolor=C.SURFACE,
+            content=ft.Container(
+                content=self._delete_confirm_text,
+                width=320,
+            ),
+            actions=[
+                ft.TextButton("Hủy", on_click=self._close_delete_confirm,
+                              style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
+                ft.ElevatedButton(
+                    "Xóa",
+                    icon=ft.Icons.DELETE_ROUNDED,
+                    on_click=lambda _: asyncio.ensure_future(self._do_confirmed_delete()),
+                    bgcolor=C.CRITICAL, color=ft.Colors.WHITE,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._pending_delete_indices: list = []  # indices to delete after confirm
+
         self._submitted_files_col = ft.Column(spacing=4, visible=False)
+
+        # ── Batch delete button (visible in multi-select mode) ──
+        self._batch_delete_btn = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.DELETE_SWEEP_ROUNDED, size=14, color=C.CRITICAL),
+                    ft.Text("Xóa đã chọn", size=12, color=C.CRITICAL,
+                            weight=ft.FontWeight.W_500),
+                ],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.CRITICAL),
+            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            border_radius=6,
+            on_click=lambda _: self._confirm_batch_delete(),
+            ink=True,
+            visible=False,
+        )
+
+        # ── Multi-select toggle button ──
+        self._multiselect_btn = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.CHECKLIST_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                    ft.Text("Chọn nhiều", size=12, color=C.TEXT_SECONDARY,
+                            weight=ft.FontWeight.W_500),
+                ],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            border_radius=6,
+            on_click=lambda _: self._toggle_multiselect(),
+            ink=True,
+            visible=False,
+        )
+
         self._edit_submitted_btn = ft.Container(
             content=ft.Row(
                 controls=[
@@ -195,6 +264,10 @@ class DetailView(ft.Container):
                             weight=ft.FontWeight.W_500),
                 ], spacing=6),
                 self._submitted_files_col,
+                ft.Row(controls=[
+                    self._multiselect_btn,
+                    self._batch_delete_btn,
+                ], spacing=8),
                 self._edit_submitted_btn,
             ], spacing=8),
             bgcolor=C.SURFACE,
@@ -855,9 +928,13 @@ class DetailView(ft.Container):
         """Xây dựng UI hiển thị file đã nộp trên server."""
         from datetime import datetime
         self._submitted_files_col.controls.clear()
+        self._selected_file_indices.clear()
+        self._is_multiselect_mode = False
 
         if not self._submitted_files:
             self._submitted_area.visible = False
+            self._multiselect_btn.visible = False
+            self._batch_delete_btn.visible = False
             return
 
         for i, f in enumerate(self._submitted_files):
@@ -887,10 +964,19 @@ class DetailView(ft.Container):
                 ], spacing=4),
             ], spacing=2)
 
+            # Checkbox for multi-select (hidden by default)
+            cb = ft.Checkbox(
+                value=False,
+                on_change=lambda e, idx=i: self._on_file_checkbox_changed(idx, e.control.value),
+                active_color=C.CRITICAL,
+                visible=False,  # hidden until multiselect mode
+            )
+
             row = ft.Container(
                 content=ft.Column(controls=[
                     ft.Row(
                         controls=[
+                            cb,
                             ft.Icon(ft.Icons.DESCRIPTION_ROUNDED, size=16, color=C.SAFE),
                             ft.Text(f.get('name', ''), size=12, color=C.TEXT_PRIMARY,
                                     expand=True, max_lines=1,
@@ -904,12 +990,10 @@ class DetailView(ft.Container):
                                 style=ft.ButtonStyle(padding=ft.Padding.all(4)),
                             ),
                             ft.IconButton(
-                                ft.Icons.CLOSE_ROUNDED, icon_size=14,
+                                ft.Icons.DELETE_OUTLINE_ROUNDED, icon_size=14,
                                 icon_color=C.CRITICAL,
                                 tooltip="Xóa file này",
-                                on_click=lambda _, idx=i: asyncio.ensure_future(
-                                    self._on_remove_submitted_file(idx)
-                                ),
+                                on_click=lambda _, idx=i: self._confirm_single_delete(idx),
                                 style=ft.ButtonStyle(padding=ft.Padding.all(4)),
                             ),
                         ],
@@ -917,24 +1001,25 @@ class DetailView(ft.Container):
                     ),
                     ft.Container(
                         content=meta_col,
-                        padding=ft.Padding.only(left=28),  # align with text after icon
+                        padding=ft.Padding.only(left=28),
                     ),
                 ], spacing=4),
                 bgcolor=C.BG,
                 border=ft.Border.all(1, C.SAFE + "30"),
                 border_radius=6,
                 padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                on_click=lambda _, idx=i: self._show_file_edit_dialog(idx),
-                ink=True,
             )
             self._submitted_files_col.controls.append(row)
 
         self._submitted_files_col.visible = True
         self._submitted_area.visible = True
         self._edit_submitted_btn.visible = True
+        # Show multi-select button only when >1 file
+        self._multiselect_btn.visible = len(self._submitted_files) > 1
+        self._batch_delete_btn.visible = False
 
-    async def _on_remove_submitted_file(self, index: int):
-        """Xóa file đã nộp: re-upload các file còn lại rồi re-submit.
+    async def _on_remove_submitted_files(self, indices: list):
+        """Xóa nhiều file đã nộp: re-upload các file còn lại rồi re-submit.
         
         Workflow:
         1. Download tất cả file CÒN LẠI từ server
@@ -943,11 +1028,10 @@ class DetailView(ft.Container):
         """
         if self._is_uploading:
             return
-        if index < 0 or index >= len(self._submitted_files):
-            return
+        indices_set = set(indices)
         
-        file_to_remove = self._submitted_files[index]
-        files_to_keep = [f for i, f in enumerate(self._submitted_files) if i != index]
+        removed_names = [self._submitted_files[i].get('name', '') for i in indices if 0 <= i < len(self._submitted_files)]
+        files_to_keep = [f for i, f in enumerate(self._submitted_files) if i not in indices_set]
         
         client = None
         try:
@@ -966,9 +1050,11 @@ class DetailView(ft.Container):
             return
 
         self._is_uploading = True
-        self._show_upload_status(
-            f"Đang xóa '{file_to_remove.get('name', '')}'...", C.TEXT_SECONDARY
-        )
+        count = len(removed_names)
+        if count == 1:
+            self._show_upload_status(f"Đang xóa '{removed_names[0]}'...", C.TEXT_SECONDARY)
+        else:
+            self._show_upload_status(f"Đang xóa {count} file...", C.TEXT_SECONDARY)
         self._page.update()
 
         try:
@@ -976,9 +1062,10 @@ class DetailView(ft.Container):
                 self._do_remove_file_sync, client, url, int(course_id), files_to_keep
             )
             if success:
-                self._show_upload_status(
-                    f"Đã xóa '{file_to_remove.get('name', '')}'", C.SAFE
-                )
+                if count == 1:
+                    self._show_upload_status(f"Đã xóa '{removed_names[0]}'", C.SAFE)
+                else:
+                    self._show_upload_status(f"Đã xóa {count} file", C.SAFE)
                 # Reload submitted files
                 asyncio.ensure_future(
                     self._async_load_submitted_files(client, url, int(course_id))
@@ -1087,6 +1174,100 @@ class DetailView(ft.Container):
     def _close_edit_dialog(self, e=None):
         """Đóng popup chỉnh sửa file."""
         self._file_edit_dialog.open = False
+        self._page.update()
+
+    # ── Delete Confirmation ──────────────────────────────────
+
+    def _confirm_single_delete(self, index: int):
+        """Hiện popup xác nhận xóa 1 file."""
+        if index < 0 or index >= len(self._submitted_files):
+            return
+        name = self._submitted_files[index].get('name', 'file')
+        self._pending_delete_indices = [index]
+        self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
+        dlg = self._delete_confirm_dialog
+        if dlg not in self._page.overlay:
+            self._page.overlay.append(dlg)
+        dlg.open = True
+        self._page.update()
+
+    def _confirm_batch_delete(self):
+        """Hiện popup xác nhận xóa nhiều file đã chọn."""
+        if not self._selected_file_indices:
+            return
+        indices = sorted(self._selected_file_indices)
+        names = [self._submitted_files[i].get('name', '') for i in indices]
+        self._pending_delete_indices = indices
+        if len(names) == 1:
+            self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{names[0]}'?"
+        else:
+            file_list = "\n".join(f"  • {n}" for n in names)
+            self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa {len(names)} file?\n{file_list}"
+        dlg = self._delete_confirm_dialog
+        if dlg not in self._page.overlay:
+            self._page.overlay.append(dlg)
+        dlg.open = True
+        self._page.update()
+
+    def _close_delete_confirm(self, e=None):
+        """Đóng popup xác nhận xóa."""
+        self._delete_confirm_dialog.open = False
+        self._pending_delete_indices = []
+        self._page.update()
+
+    async def _do_confirmed_delete(self):
+        """Thực hiện xóa sau khi người dùng xác nhận."""
+        self._delete_confirm_dialog.open = False
+        self._page.update()
+        indices = self._pending_delete_indices
+        self._pending_delete_indices = []
+        if not indices:
+            return
+        # Xóa nhiều file: giữ lại những file KHÔNG nằm trong indices
+        await self._on_remove_submitted_files(indices)
+
+    # ── Multi-select Mode ────────────────────────────────────
+
+    def _toggle_multiselect(self):
+        """Bật/tắt chế độ chọn nhiều file."""
+        self._is_multiselect_mode = not self._is_multiselect_mode
+        self._selected_file_indices.clear()
+
+        # Update button appearance
+        btn_row = self._multiselect_btn.content
+        if self._is_multiselect_mode:
+            btn_row.controls[0].color = C.ACCENT
+            btn_row.controls[1].value = "Hủy chọn"
+            btn_row.controls[1].color = C.ACCENT
+            self._multiselect_btn.border = ft.Border.all(1, C.ACCENT)
+        else:
+            btn_row.controls[0].color = C.TEXT_SECONDARY
+            btn_row.controls[1].value = "Chọn nhiều"
+            btn_row.controls[1].color = C.TEXT_SECONDARY
+            self._multiselect_btn.border = ft.Border.all(1, C.BORDER)
+
+        # Show/hide checkboxes
+        for container in self._submitted_files_col.controls:
+            header_row = container.content.controls[0]  # Row with [cb, icon, text, edit, delete]
+            cb = header_row.controls[0]  # Checkbox
+            cb.visible = self._is_multiselect_mode
+            cb.value = False
+
+        self._batch_delete_btn.visible = False
+        self._page.update()
+
+    def _on_file_checkbox_changed(self, index: int, checked: bool):
+        """Xử lý khi checkbox file thay đổi."""
+        if checked:
+            self._selected_file_indices.add(index)
+        else:
+            self._selected_file_indices.discard(index)
+        # Show/hide batch delete button
+        self._batch_delete_btn.visible = len(self._selected_file_indices) > 0
+        # Update batch delete text
+        count = len(self._selected_file_indices)
+        btn_row = self._batch_delete_btn.content
+        btn_row.controls[1].value = f"Xóa đã chọn ({count})" if count > 0 else "Xóa đã chọn"
         self._page.update()
 
     async def _on_update_file_metadata(self):
