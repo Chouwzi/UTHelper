@@ -315,6 +315,56 @@ class DetailView(ft.Container):
             expand=True,
         )
 
+        # ── Upload mode selector ──
+        self._upload_mode_overwrite = True  # default: overwrite
+        self._mode_overwrite_btn = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.SWAP_HORIZ_ROUNDED, size=14, color=ft.Colors.WHITE),
+                ft.Text("Ghi đè", size=11, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+            ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
+            bgcolor=C.ACCENT,
+            border_radius=6,
+            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            on_click=lambda _: self._set_upload_mode(True),
+            ink=True,
+            expand=True,
+        )
+        self._mode_append_btn = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                ft.Text("Thêm file", size=11, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
+            ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
+            bgcolor=C.BG,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=6,
+            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            on_click=lambda _: self._set_upload_mode(False),
+            ink=True,
+            expand=True,
+        )
+        self._upload_mode_warning = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=12, color=C.WARNING),
+                ft.Text(
+                    "Chế độ thêm file sẽ tải lại file cũ trước khi nộp. "
+                    "Có thể lâu nếu file nặng.",
+                    size=10, color=C.WARNING, italic=True, expand=True,
+                ),
+            ], spacing=4),
+            visible=False,  # only show in append mode
+        )
+        self._upload_mode_row = ft.Column(
+            controls=[
+                ft.Row([
+                    self._mode_overwrite_btn,
+                    self._mode_append_btn,
+                ], spacing=6),
+                self._upload_mode_warning,
+            ],
+            spacing=4,
+            visible=False,  # only show when there are existing files
+        )
+
         # ── Submission area container ──
         self._submission_area = ft.Container(
             content=ft.Column(controls=[
@@ -324,6 +374,7 @@ class DetailView(ft.Container):
                             weight=ft.FontWeight.W_500),
                 ], spacing=6),
                 self._file_list_col,
+                self._upload_mode_row,
                 self._upload_progress,
                 self._upload_status,
                 ft.Row(controls=[
@@ -784,6 +835,8 @@ class DetailView(ft.Container):
         self._submit_btn.visible = has_files
         self._upload_status.visible = False
         self._upload_progress.visible = False
+        # Show upload mode toggle when there are both new files and existing submitted files
+        self._upload_mode_row.visible = has_files and bool(self._submitted_files)
         self._page.update()
 
     def _remove_file(self, index: int):
@@ -791,6 +844,39 @@ class DetailView(ft.Container):
         if 0 <= index < len(self._selected_files):
             self._selected_files.pop(index)
             self._update_file_preview()
+
+    def _set_upload_mode(self, overwrite: bool):
+        """Chuyển chế độ upload: ghi đè hoặc thêm file."""
+        self._upload_mode_overwrite = overwrite
+        if overwrite:
+            # Overwrite active
+            self._mode_overwrite_btn.bgcolor = C.ACCENT
+            self._mode_overwrite_btn.border = None
+            self._mode_overwrite_btn.content.controls[0].color = ft.Colors.WHITE
+            self._mode_overwrite_btn.content.controls[1].color = ft.Colors.WHITE
+            self._mode_overwrite_btn.content.controls[1].weight = ft.FontWeight.W_600
+            # Append inactive
+            self._mode_append_btn.bgcolor = C.BG
+            self._mode_append_btn.border = ft.Border.all(1, C.BORDER)
+            self._mode_append_btn.content.controls[0].color = C.TEXT_SECONDARY
+            self._mode_append_btn.content.controls[1].color = C.TEXT_SECONDARY
+            self._mode_append_btn.content.controls[1].weight = ft.FontWeight.W_500
+            self._upload_mode_warning.visible = False
+        else:
+            # Append active
+            self._mode_append_btn.bgcolor = C.ACCENT
+            self._mode_append_btn.border = None
+            self._mode_append_btn.content.controls[0].color = ft.Colors.WHITE
+            self._mode_append_btn.content.controls[1].color = ft.Colors.WHITE
+            self._mode_append_btn.content.controls[1].weight = ft.FontWeight.W_600
+            # Overwrite inactive
+            self._mode_overwrite_btn.bgcolor = C.BG
+            self._mode_overwrite_btn.border = ft.Border.all(1, C.BORDER)
+            self._mode_overwrite_btn.content.controls[0].color = C.TEXT_SECONDARY
+            self._mode_overwrite_btn.content.controls[1].color = C.TEXT_SECONDARY
+            self._mode_overwrite_btn.content.controls[1].weight = ft.FontWeight.W_500
+            self._upload_mode_warning.visible = True
+        self._page.update()
 
     async def _on_submit(self, e):
         """Upload files và nộp bài qua Moodle WS API."""
@@ -878,9 +964,9 @@ class DetailView(ft.Container):
             logger.error("Không resolve được assign_id từ cmid=%d, course=%d", cmid, course_id)
             return False
 
-        # 3. Re-upload các file đã nộp trước đó (nếu có) để giữ chúng
+        # 3. Re-upload các file đã nộp trước đó (chỉ khi chế độ "Thêm file")
         draft_itemid = 0
-        if self._submitted_files:
+        if not self._upload_mode_overwrite and self._submitted_files:
             for f in self._submitted_files:
                 file_url = f.get('url', '')
                 if not file_url:
