@@ -1215,12 +1215,10 @@ class DetailView(ft.Container):
                     license_key=meta.get('license', 'unknown'),
                 )
             else:
-                # Giữ nguyên file, nhưng vẫn gửi author/license
+                # Giữ nguyên file khác, không thay đổi metadata
                 result_id = client.upload_draft_file(
                     f.get('name', 'file'), file_bytes,
                     itemid=draft_itemid,
-                    author=meta.get('author', ''),
-                    license_key=meta.get('license', 'unknown'),
                 )
 
             if result_id is None:
