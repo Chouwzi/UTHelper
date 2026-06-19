@@ -15,18 +15,12 @@ _is_ios = _sys.platform == 'ios' or (
 _is_mobile = _is_android or _is_ios
 
 # ── HTTP client selection ──
-# Desktop: curl_cffi (bypasses Cloudflare TLS fingerprint blocking)
-# Mobile:  httpx (curl_cffi C-extensions don't work on iOS/Android)
-_USE_CURL_CFFI = False
-if not _is_mobile:
-    try:
-        from curl_cffi import requests as _cffi_requests
-        _USE_CURL_CFFI = True
-    except ImportError:
-        pass
-
-if not _USE_CURL_CFFI:
+# Desktop: requests (TLS fingerprint not blocked by Cloudflare)
+# Mobile:  httpx (requests' urllib3 C-extensions don't work on iOS)
+if _is_mobile:
     import httpx
+else:
+    import requests as _requests_lib
 
 logger = logging.getLogger(__name__)
 
@@ -37,25 +31,20 @@ elif _is_ios:
 else:
     _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+_COMMON_HEADERS = {
+    "User-Agent": _DEFAULT_UA,
+    "Accept": "application/json, */*",
+    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+}
+
 
 class MoodleClient:
     def __init__(self):
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
         
-        if _USE_CURL_CFFI:
-            # curl_cffi: impersonates Chrome TLS fingerprint → bypasses Cloudflare
-            self.session = _cffi_requests.Session(
-                impersonate="chrome124",
-                timeout=15,
-                headers={
-                    "User-Agent": _DEFAULT_UA,
-                    "Accept": "application/json, */*",
-                    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-                },
-            )
-        else:
-            # httpx: works on iOS/Android (pure Python friendly)
+        if _is_mobile:
+            # httpx: works on iOS/Android (no C-extension dependency)
             try:
                 import certifi
                 verify_val = certifi.where()
@@ -67,12 +56,12 @@ class MoodleClient:
                 verify=verify_val,
                 follow_redirects=True,
                 timeout=httpx.Timeout(15.0),
-                headers={
-                    "User-Agent": _DEFAULT_UA,
-                    "Accept": "application/json, */*",
-                    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-                },
+                headers=_COMMON_HEADERS,
             )
+        else:
+            # requests: standard, Cloudflare doesn't block its TLS fingerprint
+            self.session = _requests_lib.Session()
+            self.session.headers.update(_COMMON_HEADERS)
 
     def close(self):
         """Close the underlying HTTP client and release connection pool."""
