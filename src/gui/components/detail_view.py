@@ -1220,8 +1220,18 @@ class DetailView(ft.Container):
             return False
 
         if not files_to_keep:
-            # Xóa hết file → submit draft area rỗng
-            draft_itemid = 0
+            # Xóa hết file → lấy draft area rỗng hợp lệ từ API
+            try:
+                draft_result = client.call_ws_api('core_files_get_unused_draft_itemid')
+                if draft_result and isinstance(draft_result, dict):
+                    draft_itemid = draft_result.get('itemid', 0)
+                else:
+                    draft_itemid = 0
+            except Exception:
+                draft_itemid = 0
+            if not draft_itemid:
+                logger.error("Không lấy được draft area rỗng")
+                return False
         else:
             # Download và re-upload các file cần giữ
             draft_itemid = 0
