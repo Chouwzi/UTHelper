@@ -397,7 +397,12 @@ class AppController:
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
-        self.page.add(ft.Stack(controls=[self.dashboard, self.calendar_view, self.detail_view, self.settings_view], expand=True))
+        # UX: SafeArea for iOS notch/Dynamic Island & Android status bar
+        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.detail_view, self.settings_view], expand=True)
+        if IS_MOBILE:
+            self.page.add(ft.SafeArea(content=main_stack, expand=True))
+        else:
+            self.page.add(main_stack)
 
         # Show skeleton cards immediately while data loads
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]

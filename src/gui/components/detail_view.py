@@ -1,5 +1,4 @@
 import flet as ft
-import webbrowser
 import threading
 from gui.core.theme import C
 from gui.core.utils import get_urgency_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
@@ -383,8 +382,8 @@ class DetailView(ft.Container):
             # Sử dụng autologin URL thông qua Moodle login endpoint
             activity_url = self._current_url
             autologin_url = client.build_autologin_url(activity_url)
-            webbrowser.open(autologin_url)
+            self._page.launch_url(autologin_url)
             return
 
         # Dự phòng mở thẳng khi không có cookie
-        webbrowser.open(self._current_url)
+        self._page.launch_url(self._current_url)

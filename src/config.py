@@ -28,11 +28,14 @@ def _get_user_data_dir() -> Path:
     """Trả về thư mục lưu trữ dữ liệu phù hợp với nền tảng."""
     if sys.platform == 'win32':
         return Path(os.getenv('APPDATA', BASE_DIR)) / "UTHElearningAlert"
-    # Android: Flet sets FLET_APP_STORAGE_DATA env var
+    # Mobile (Android/iOS): Flet sets FLET_APP_STORAGE_DATA env var
     flet_data = os.environ.get('FLET_APP_STORAGE_DATA')
     if flet_data:
         return Path(flet_data) / "UTHElearningAlert"
-    # Fallback for Linux/macOS
+    # macOS/iOS native fallback (Application Support)
+    if sys.platform == 'darwin':
+        return Path.home() / "Library" / "Application Support" / "UTHElearningAlert"
+    # Fallback for Linux/other
     return Path.home() / ".uthelper"
 
 _USER_DATA_DIR = _get_user_data_dir()

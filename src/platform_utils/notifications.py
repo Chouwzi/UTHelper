@@ -26,7 +26,7 @@ def get_platform_notifier(tray_app=None) -> BaseNotifier:
     - Android → MobileNotifier (local notifications via flet_notifications)
     - Fallback → LogNotifier (log-only)
     """
-    from platform_utils import IS_WINDOWS, IS_ANDROID
+    from platform_utils import IS_WINDOWS, IS_MOBILE
 
     if IS_WINDOWS:
         try:
@@ -36,7 +36,7 @@ def get_platform_notifier(tray_app=None) -> BaseNotifier:
             logger.warning("WindowsNotifier not available, falling back to log-only")
             return LogNotifier()
 
-    if IS_ANDROID:
+    if IS_MOBILE:
         try:
             from notifiers.mobile import MobileNotifier
             return MobileNotifier()

@@ -61,6 +61,16 @@ adaptive_icon_background = "#0F172A"
 [tool.flet.android.manifest_application]
 "usesCleartextTraffic" = "true"
 
+# ── iOS-specific configuration ──
+[tool.flet.ios]
+bundle_id = "com.uthelper.UTHelper"
+
+[tool.flet.ios.info]
+# Allow cleartext HTTP for Moodle instances without HTTPS
+NSAppTransportSecurity = { NSAllowsArbitraryLoads = true }
+# Permission descriptions (required by App Store)
+NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để nhắc deadline bài tập."
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
