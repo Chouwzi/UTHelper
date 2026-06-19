@@ -1243,9 +1243,4 @@ class AppController:
             self.orchestrator.client.close()
         except Exception:
             pass
-        try:
-            from core.data_orchestrator import shutdown_parser_pool
-            shutdown_parser_pool()
-        except Exception:
-            pass
 

@@ -5,33 +5,11 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
-from core.parser import MoodleParser
-from models import Assignment
 from config import settings
 from core.time_utils import parse_datetime
 from core import ws_functions
 
 logger = logging.getLogger(__name__)
-
-# Khởi tạo ThreadPool duy nhất để parse HTML giảm thiểu overhead của Process trên app Desktop
-_PARSER_POOL = None
-_PARSER_POOL_LOCK = threading.Lock()
-
-def get_parser_pool():
-    global _PARSER_POOL
-    if _PARSER_POOL is None:
-        with _PARSER_POOL_LOCK:
-            if _PARSER_POOL is None:  # double-check
-                workers = max(1, int(getattr(settings, 'PREFETCH_WORKERS', 4)))
-                _PARSER_POOL = ThreadPoolExecutor(max_workers=workers)
-    return _PARSER_POOL
-
-def shutdown_parser_pool():
-    """Shutdown the global parser pool and release threads."""
-    global _PARSER_POOL
-    if _PARSER_POOL:
-        _PARSER_POOL.shutdown(wait=False)
-        _PARSER_POOL = None
 
 class DataOrchestrator:
     """
