@@ -218,22 +218,21 @@ class DataOrchestrator:
         """Bổ sung bài tập đã nộp vào danh sách calendar events.
         
         Moodle calendar API loại bỏ events khi bài đã nộp (no action needed).
-        Hàm này gọi mod_assign_get_assignments để lấy TẤT CẢ bài tập,
+        Hàm này gọi mod_assign_get_assignments từ các khóa học ĐANG HỌC,
         rồi merge những bài chưa có trong calendar_results.
+        Chỉ lấy bài tập có deadline trong khoảng ±90 ngày.
         """
         from datetime import datetime
         
-        # Lấy user info + enrolled courses
+        now_ts = int(datetime.now().timestamp())
+        # Chỉ lấy bài tập có deadline trong khoảng hợp lý
+        min_deadline = now_ts - (90 * 86400)   # 90 ngày trước
+        max_deadline = now_ts + (90 * 86400)    # 90 ngày sau
+        
+        # Lấy courses đang học (inprogress) — không lấy tất cả courses
         try:
-            site_info = self.client.call_ws_api('core_webservice_get_site_info')
-            if not site_info or not isinstance(site_info, dict):
-                return calendar_results
-            userid = site_info.get('userid')
-            if not userid:
-                return calendar_results
-            
-            courses_result = self.client.call_ws_api(
-                'core_enrol_get_users_courses', userid=userid
+            courses_result = ws_functions.get_enrolled_courses(
+                self.client.call_ws_api, classification='inprogress'
             )
             if not courses_result or not isinstance(courses_result, list):
                 return calendar_results
@@ -244,7 +243,7 @@ class DataOrchestrator:
         if not course_ids:
             return calendar_results
         
-        # Lấy tất cả assignments
+        # Lấy assignments từ courses đang học
         all_assigns = ws_functions.get_assignments(self.client.call_ws_api, course_ids)
         if not all_assigns:
             return calendar_results
@@ -279,26 +278,28 @@ class DataOrchestrator:
                 if cmid and cmid in existing_cmids:
                     continue  # Already in calendar results
                 
+                # Chỉ lấy bài tập có deadline trong khoảng ±90 ngày
+                duedate = assign.get('duedate', 0)
+                if duedate and (duedate < min_deadline or duedate > max_deadline):
+                    continue  # Quá cũ hoặc quá xa
+                if not duedate:
+                    continue  # Không có deadline → skip
+                
                 # Build URL
                 assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
                 if assign_url in existing_urls:
                     continue
                 
-                # Determine deadline & urgency
-                duedate = assign.get('duedate', 0)
-                if duedate:
-                    deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
-                    remaining = duedate - now_ts
-                    if remaining < 0:
-                        urgency = 'overdue'
-                    elif remaining < 86400:
-                        urgency = 'critical'
-                    elif remaining < 3 * 86400:
-                        urgency = 'warning'
-                    else:
-                        urgency = 'safe'
+                # Determine deadline & urgency (duedate already set above)
+                deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
+                remaining = duedate - now_ts
+                if remaining < 0:
+                    urgency = 'overdue'
+                elif remaining < 86400:
+                    urgency = 'critical'
+                elif remaining < 3 * 86400:
+                    urgency = 'warning'
                 else:
-                    deadline_str = ''
                     urgency = 'safe'
                 
                 assignment_dict = {

@@ -1032,12 +1032,15 @@ class DetailView(ft.Container):
         self._edit_status.value = ""
         self._edit_status.visible = False
 
-        self._page.open(self._file_edit_dialog)
+        dlg = self._file_edit_dialog
+        if dlg not in self._page.overlay:
+            self._page.overlay.append(dlg)
+        dlg.open = True
         self._page.update()
 
     def _close_edit_dialog(self, e=None):
         """Đóng popup chỉnh sửa file."""
-        self._page.close(self._file_edit_dialog)
+        self._file_edit_dialog.open = False
         self._page.update()
 
     async def _on_update_file_metadata(self):
