@@ -260,7 +260,7 @@ class DataOrchestrator:
                     'deadline': deadline_str,
                     'deadline_str': deadline_str,
                     'url': assign_url,
-                    'type': 'assign',
+                    'type': 'assignment',
                     'urgency': urgency,
                     'source': 'ws_assign_api',
                     'submission_status': 'unknown',
