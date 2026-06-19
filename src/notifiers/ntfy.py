@@ -6,7 +6,7 @@ Students install the ntfy.sh Android app and subscribe to their topic.
 No server, no Firebase, no Google account needed.
 """
 import logging
-import requests
+import httpx
 from notifiers.base import BaseNotifier
 from config import settings
 
@@ -59,7 +59,7 @@ class NtfyNotifier(BaseNotifier):
                 headers["Click"] = activity_url
 
             try:
-                resp = requests.post(url, data=body.encode('utf-8'), headers=headers, timeout=10)
+                resp = httpx.post(url, content=body.encode('utf-8'), headers=headers, timeout=10)
                 if resp.status_code == 200:
                     success = True
                 else:

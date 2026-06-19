@@ -17,8 +17,8 @@ def check_for_update(current_version: str) -> Tuple[bool, Optional[str], Optiona
         (has_update, latest_version, download_url)
     """
     try:
-        import requests
-        resp = requests.get(
+        import httpx
+        resp = httpx.get(
             _RELEASES_URL,
             timeout=10,
             headers={"Accept": "application/vnd.github.v3+json"},

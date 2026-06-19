@@ -9,8 +9,8 @@ description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # ── Core (cross-platform, safe for Android build) ──
-    "requests>=2.34.2",
+    # ── Core (cross-platform, safe for iOS/Android build) ──
+    "httpx>=0.28.0",
     "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
     "pydantic>=2.6.4",

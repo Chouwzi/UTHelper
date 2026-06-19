@@ -1,11 +1,7 @@
-import requests
+import httpx
 import json
 import os
 import urllib.parse
-import requests.utils
-from requests.adapters import HTTPAdapter
-from requests.exceptions import TooManyRedirects
-from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from typing import Optional
 from config import settings
@@ -15,8 +11,6 @@ from core.html_compat import BS4_PARSER
 import sys as _sys
 
 # ── iOS/mobile SSL fix: explicitly use certifi CA bundle ──
-# Python in sandboxed iOS apps cannot find system CA certificates,
-# causing SSL: CERTIFICATE_VERIFY_FAILED errors on all HTTPS requests.
 try:
     import certifi
     _CA_BUNDLE = certifi.where()
@@ -40,32 +34,26 @@ else:
 
 class MoodleClient:
     def __init__(self):
-        self.session = requests.Session()
-        self._last_login_error = ""
-        
-        # ── iOS/mobile SSL fix: set CA bundle on session ──
-        self.session.verify = _CA_BUNDLE
-        
-        # Performance optimization: Connection pooling and auto-retries
-        retry_strategy = Retry(
-            total=3,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        # ── httpx Client: works on iOS/Android (unlike requests) ──
+        verify_val = _CA_BUNDLE if isinstance(_CA_BUNDLE, str) else _CA_BUNDLE
+        transport = httpx.HTTPTransport(retries=3)
+        self.session = httpx.Client(
+            transport=transport,
+            verify=verify_val,
+            follow_redirects=True,
+            timeout=httpx.Timeout(15.0),
+            headers={
+                "User-Agent": _DEFAULT_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+            },
         )
-        pool_size = max(10, settings.PREFETCH_WORKERS + 5)
-        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=pool_size, pool_maxsize=pool_size)
-        self.session.mount("https://", adapter)
-
-        self.session.headers.update({
-            "User-Agent": _DEFAULT_UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,vi;q=0.8"
-        })
+        self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
         self._load_cookies()
 
     def close(self):
-        """Close the underlying requests session and release connection pool."""
+        """Close the underlying httpx client and release connection pool."""
         self.session.close()
 
     def _load_cookies(self):
@@ -79,7 +67,7 @@ class MoodleClient:
 
     def _save_cookies(self):
         try:
-            cookies_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
+            cookies_dict = dict(self.session.cookies)
             settings.MOODLE_SESSION = json.dumps(cookies_dict)
             from config import save_settings
             save_settings()
@@ -199,13 +187,12 @@ class MoodleClient:
 
 
 
-    # ─── Async Web Services API (dùng httpx, non-blocking) ───────────
+    # ─── Async Web Services API (non-blocking) ───────────
 
     async def call_ws_api_async(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle WS API bất đồng bộ.
         
         Dùng asyncio.to_thread() để chạy sync call_ws_api trong thread pool.
-        Lý do: Cloudflare chặn httpx TLS fingerprint dù có đúng User-Agent.
         Vẫn non-blocking từ event loop perspective.
         """
         import asyncio
@@ -269,7 +256,7 @@ class MoodleClient:
                 files={
                     'file': (filename, file_bytes),
                 },
-                timeout=60,
+                timeout=60.0,
             )
             result = resp.json()
         except Exception as e:
@@ -402,10 +389,10 @@ class MoodleClient:
         user = username or settings.UTH_USERNAME
         pwd = password or settings.UTH_PASSWORD
 
-        if not force and "MoodleSession" in self.session.cookies.get_dict():
+        if not force and "MoodleSession" in dict(self.session.cookies):
             try:
                 # Không chuyển hướng để tránh loop 303. Nếu 303 là nó redirect ra trang Login
-                r = self.session.get(f"{settings.MOODLE_BASE_URL}/my/", allow_redirects=False, timeout=5)
+                r = self.session.get(f"{settings.MOODLE_BASE_URL}/my/", follow_redirects=False, timeout=5)
                 if r.status_code == 200 or (r.status_code in (301, 302, 303) and "login/index.php" not in r.headers.get("Location", "")):
                     logger.info("Session lấy từ bộ nhớ vẫn còn hiệu lực, tăng tốc khởi động.")
                     return True
@@ -447,7 +434,7 @@ class MoodleClient:
             }
             
             # Tắt redirect để kiểm soát lỗi chuyển hướng vô tận (nếu có sự cố mismatch/loop)
-            login_res = self.session.post(settings.MOODLE_LOGIN_URL, data=payload, timeout=15, allow_redirects=False)
+            login_res = self.session.post(settings.MOODLE_LOGIN_URL, data=payload, timeout=15, follow_redirects=False)
             
             # Nếu Moodle xác thực thành công, nó sẽ trả về location tới trang testsession hoặc trang index
             if login_res.status_code in (301, 302, 303):
@@ -511,7 +498,7 @@ class MoodleClient:
             res.raise_for_status()
             
             # Kiểm tra nếu bị chuyển hướng về trang đăng nhập -> Session hết hạn
-            if "login/index.php" in res.url:
+            if "login/index.php" in str(res.url):
                 if not settings.ALLOW_SESSION_LOGIN:
                     logger.warning("Session hết hạn khi gọi fetch_calendar. Không auto re-login vì ALLOW_SESSION_LOGIN=False (tránh kick browser).")
                     return None
@@ -519,13 +506,13 @@ class MoodleClient:
                 if self.login(force=True):
                     res = self.session.get(url, timeout=15)
                     res.raise_for_status()
-                    if "login/index.php" in res.url:
+                    if "login/index.php" in str(res.url):
                         return None
                 else:
                     return None
                     
             return res.text
-        except TooManyRedirects:
+        except httpx.TooManyRedirects:
             if not settings.ALLOW_SESSION_LOGIN:
                 logger.warning("Session bị vô hiệu hoá (TooManyRedirects). Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
                 return None
@@ -559,7 +546,7 @@ class MoodleClient:
             res.raise_for_status()
             
             # Kiểm tra nếu bị chuyển hướng về trang đăng nhập -> Session hết hạn
-            if "login/index.php" in res.url:
+            if "login/index.php" in str(res.url):
                 if not settings.ALLOW_SESSION_LOGIN:
                     logger.warning(f"Session hết hạn khi gọi {url}. Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
                     return None
@@ -567,13 +554,13 @@ class MoodleClient:
                 if self.login(force=True):
                     res = self.session.get(url, timeout=timeout)
                     res.raise_for_status()
-                    if "login/index.php" in res.url:
+                    if "login/index.php" in str(res.url):
                         return None
                 else:
                     return None
                     
             return res.text
-        except TooManyRedirects:
+        except httpx.TooManyRedirects:
             if not settings.ALLOW_SESSION_LOGIN:
                 logger.warning(f"Session bị vô hiệu hoá (TooManyRedirects) khi gọi {url}. Không auto re-login vì ALLOW_SESSION_LOGIN=False.")
                 return None

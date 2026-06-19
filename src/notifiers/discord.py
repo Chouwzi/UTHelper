@@ -1,5 +1,5 @@
 import logging
-import requests
+import httpx
 from datetime import datetime
 from typing import List
 from models import Assignment, UrgencyLevel
@@ -114,7 +114,7 @@ class DiscordNotifier(BaseNotifier):
         }
 
         try:
-            r = requests.post(webhook_url, json=payload, timeout=5)
+            r = httpx.post(webhook_url, json=payload, timeout=5)
             r.raise_for_status()
             logger.info(f'[Discord] Đã gửi thông báo cho {len(tasks)} bài tập.')
             return True
