@@ -93,10 +93,45 @@ class DetailView(ft.Container):
         # FilePicker is a Service in Flet 0.82+ (not a Control)
         # Do NOT add to page.overlay — just instantiate and call methods
 
-        # ── File preview area ──
+        # ── File preview area (files to upload) ──
         self._file_list_col = ft.Column(spacing=4, visible=False)
         self._upload_progress = ft.ProgressBar(color=C.SAFE, bgcolor=C.BORDER, visible=False)
         self._upload_status = ft.Text("", size=12, color=C.TEXT_SECONDARY, visible=False)
+
+        # ── Submitted files area (files already on server) ──
+        self._submitted_files: list = []  # [{name, size, url, timemodified}]
+        self._submitted_files_col = ft.Column(spacing=4, visible=False)
+        self._edit_submitted_btn = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.EDIT_ROUNDED, size=14, color=C.WARNING),
+                    ft.Text("Chỉnh sửa bài nộp", size=12, color=C.WARNING,
+                            weight=ft.FontWeight.W_500),
+                ],
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.WARNING),
+            padding=ft.Padding.symmetric(vertical=8, horizontal=12),
+            border_radius=6,
+            on_click=self._on_edit_submitted,
+            ink=True,
+            visible=False,
+        )
+        self._submitted_area = ft.Container(
+            content=ft.Column(controls=[
+                ft.Text("📁 File đã nộp:", size=13, color=C.TEXT_SECONDARY,
+                        weight=ft.FontWeight.W_500),
+                self._submitted_files_col,
+                self._edit_submitted_btn,
+            ], spacing=8),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.SAFE + "40"),
+            border_radius=8,
+            padding=ft.Padding.all(14),
+            visible=False,
+        )
 
         # ── Pick file button ──
         self._pick_btn = ft.Container(
@@ -245,6 +280,10 @@ class DetailView(ft.Container):
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
                             ft.Container(
+                                content=self._submitted_area,
+                                padding=ft.Padding.symmetric(horizontal=16),
+                            ),
+                            ft.Container(
                                 content=self._submission_area,
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
@@ -322,6 +361,9 @@ class DetailView(ft.Container):
         self._upload_progress.visible = False
         self._upload_status.visible = False
         self._is_uploading = False
+        self._submitted_files.clear()
+        self._submitted_files_col.controls.clear()
+        self._submitted_area.visible = False
 
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
             # Chưa nộp + là assignment → hiện submission area
@@ -343,6 +385,21 @@ class DetailView(ft.Container):
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
+
+        # Load submitted files in background (for assignments)
+        if is_assignment:
+            url = data.get("url", "")
+            course_id = data.get("course_id")
+            if url and course_id and '/mod/assign/' in url:
+                client = None
+                try:
+                    client = self._get_client() if self._get_client else None
+                except Exception:
+                    pass
+                if client:
+                    asyncio.ensure_future(
+                        self._async_load_submitted_files(client, url, int(course_id))
+                    )
         else:
             self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
@@ -524,7 +581,12 @@ class DetailView(ft.Container):
                 with_data=True,  # đọc bytes luôn cho mobile compatibility
             )
             if files:
-                self._selected_files = files
+                # Append mode: thêm vào danh sách hiện tại
+                existing_names = {f.name for f in self._selected_files}
+                for f in files:
+                    if f.name not in existing_names:
+                        self._selected_files.append(f)
+                        existing_names.add(f.name)
                 self._update_file_preview()
         except Exception as ex:
             logger.error("FilePicker error: %s", ex)
@@ -614,6 +676,10 @@ class DetailView(ft.Container):
                 self._file_list_col.visible = False
                 self._submit_btn.visible = False
                 self._pick_btn.visible = True
+                # Reload submitted files to show what's on server
+                asyncio.ensure_future(
+                    self._async_load_submitted_files(client, url, int(course_id))
+                )
             else:
                 self._show_upload_status("❌ Nộp bài thất bại. Thử lại hoặc mở trình duyệt.", C.CRITICAL)
                 self._pick_btn.visible = True
@@ -680,3 +746,83 @@ class DetailView(ft.Container):
         self._upload_status.value = text
         self._upload_status.color = color
         self._upload_status.visible = True
+
+    async def _async_load_submitted_files(self, client, url: str, course_id: int):
+        """Async wrapper: load submitted files in bg thread, then update UI."""
+        try:
+            await asyncio.to_thread(
+                self._load_submitted_files, client, url, course_id
+            )
+            self._build_submitted_files_ui()
+            self._page.update()
+        except Exception as ex:
+            logger.debug("Load submitted files error: %s", ex)
+
+    def _load_submitted_files(self, client, url: str, course_id: int):
+        """Load danh sách file đã nộp từ server (chạy trong thread)."""
+        from core.ws_functions import resolve_cmid_to_assign_id, get_submitted_files
+
+        cmid = None
+        if "id=" in url:
+            try:
+                cmid = int(url.split("id=")[-1].split("&")[0])
+            except (ValueError, IndexError):
+                pass
+        if not cmid:
+            return
+
+        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
+        if not assign_id:
+            return
+
+        self._submitted_files = get_submitted_files(client.call_ws_api, assign_id)
+
+    def _build_submitted_files_ui(self):
+        """Xây dựng UI hiển thị file đã nộp trên server."""
+        self._submitted_files_col.controls.clear()
+
+        if not self._submitted_files:
+            self._submitted_area.visible = False
+            return
+
+        for f in self._submitted_files:
+            size_b = f.get('size', 0)
+            size_kb = size_b / 1024
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+
+            row = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, size=14, color=C.SAFE),
+                        ft.Text(f.get('name', ''), size=12, color=C.TEXT_PRIMARY,
+                                expand=True, max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
+                    ],
+                    spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=C.BG,
+                border=ft.Border.all(1, C.SAFE + "30"),
+                border_radius=6,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            )
+            self._submitted_files_col.controls.append(row)
+
+        self._submitted_files_col.visible = True
+        self._submitted_area.visible = True
+        # Hiện nút chỉnh sửa nếu có file
+        self._edit_submitted_btn.visible = True
+
+    async def _on_edit_submitted(self, e):
+        """Mở trình duyệt để chỉnh sửa bài nộp (Moodle không có API xóa file riêng lẻ)."""
+        if not self._current_url:
+            return
+        client = None
+        try:
+            client = self._get_client() if self._get_client else None
+        except Exception:
+            pass
+        url = self._current_url
+        if client:
+            url = client.build_autologin_url(self._current_url)
+        await ft.UrlLauncher().launch_url(url)

@@ -150,6 +150,44 @@ def get_submission_status(
     return None
 
 
+def get_submitted_files(
+    call_api: Callable,
+    assign_id: int,
+) -> List[Dict[str, Any]]:
+    """Lấy danh sách file đã nộp từ submission status.
+    
+    Parse response từ mod_assign_get_submission_status → tìm plugin
+    'file' trong submission plugins → trả về list file metadata.
+    
+    Returns:
+        List of dicts: [{name, size, url, timemodified}, ...]
+    """
+    status = get_submission_status(call_api, assign_id)
+    if not status:
+        return []
+    
+    # Navigate: lastattempt → submission → plugins → type=='file'
+    last_attempt = status.get('lastattempt', {})
+    submission = last_attempt.get('submission', {})
+    plugins = submission.get('plugins', [])
+    
+    files = []
+    for plugin in plugins:
+        if plugin.get('type') != 'file':
+            continue
+        # fileareas chứa danh sách file
+        for area in plugin.get('fileareas', []):
+            for f in area.get('files', []):
+                files.append({
+                    'name': f.get('filename', ''),
+                    'size': f.get('filesize', 0),
+                    'url': f.get('fileurl', ''),
+                    'timemodified': f.get('timemodified', 0),
+                })
+    
+    return files
+
+
 def get_quizzes_by_courses(
     call_api: Callable,
     course_ids: List[int],
