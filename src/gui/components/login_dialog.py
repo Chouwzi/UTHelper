@@ -132,19 +132,22 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             page.update()
             await asyncio.sleep(0.7)
 
-            # Dismiss dialog — page.close() is the primary API for Flet 0.80+
-            try:
-                page.close(dlg)
-            except Exception:
-                # Fallback: try legacy approaches
+            # Dismiss dialog — use matching close for the open method
+            if _open_method == "page_open":
+                try:
+                    page.close(dlg)
+                except Exception:
+                    dlg.open = False
+            elif _open_method == "overlay":
                 try:
                     dlg.open = False
                     page.overlay.remove(dlg)
                 except Exception:
                     pass
+            else:  # "dialog" legacy
                 try:
-                    if hasattr(page, 'dialog') and page.dialog == dlg:
-                        page.dialog = None
+                    dlg.open = False
+                    page.dialog = None
                 except Exception:
                     pass
             page.update()
@@ -249,19 +252,20 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         content_padding=24,
     )
 
+    # Track which open method works — close must match
+    _open_method = "page_open"
     try:
-        # Strategy 1: page.open() — Flet 0.21+ recommended API
         try:
             page.open(dlg)
         except (TypeError, AttributeError):
-            # Strategy 2: overlay approach (desktop Flet)
             try:
                 page.overlay.append(dlg)
                 dlg.open = True
+                _open_method = "overlay"
             except (AttributeError, TypeError):
-                # Strategy 3: page.dialog (legacy)
                 page.dialog = dlg
                 dlg.open = True
+                _open_method = "dialog"
         page.update()
     except Exception:
         import traceback
