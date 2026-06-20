@@ -326,11 +326,21 @@ class SettingsView(ft.Container):
         _cache_buttons = ft.Row([
             ft.Button("Xóa cache thông báo", icon=ft.Icons.NOTIFICATIONS_OFF_ROUNDED, on_click=lambda e: self._do_clear_notif_cache(), bgcolor=C.SURFACE, color=C.WARNING),
             ft.Button("Xóa lịch sử thông báo", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa cache offline", icon=ft.Icons.CACHED_ROUNDED, on_click=lambda e: self._do_clear_data_cache(), bgcolor=C.SURFACE, color=C.WARNING),
+        ], wrap=True, spacing=6)
+
+        # Section 3b: Notification history viewer
+        _history_section_label = ft.Text("Lịch sử thông báo đã gửi", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_history_text = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True, max_lines=15)
+        _history_buttons = ft.Row([
+            ft.Button("Xem gần đây", icon=ft.Icons.HISTORY_ROUNDED, on_click=lambda e: self._do_show_notif_history(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
         ], wrap=True, spacing=6)
 
         # Section 4: Background scheduler (Android only)
         _bg_section_label = ft.Text("Background Scheduler (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_scheduler_status = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
         _bg_buttons = ft.Row([
+            ft.Button("Trạng thái", icon=ft.Icons.QUERY_STATS_ROUNDED, on_click=lambda e: self._do_show_scheduler_status(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
             ft.Button("Start Foreground", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, on_click=lambda e: self._do_start_foreground(), bgcolor=C.SURFACE, color=C.SAFE),
             ft.Button("Stop Foreground", icon=ft.Icons.STOP_CIRCLE_OUTLINED, on_click=lambda e: self._do_stop_foreground(), bgcolor=C.SURFACE, color=C.CRITICAL),
             ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
@@ -360,6 +370,11 @@ class SettingsView(ft.Container):
             # Cache management
             _cache_section_label,
             _cache_buttons,
+            ft.Divider(height=1, color=C.BORDER),
+            # Notification history
+            _history_section_label,
+            _history_buttons,
+            self._debug_history_text,
         ]
 
         # Android-only: background scheduler controls
@@ -368,6 +383,7 @@ class SettingsView(ft.Container):
                 ft.Divider(height=1, color=C.BORDER),
                 _bg_section_label,
                 _bg_buttons,
+                self._debug_scheduler_status,
             ])
 
         # Update checker (all platforms)
@@ -379,7 +395,7 @@ class SettingsView(ft.Container):
         ])
 
         self._test_panel = ft.Container(
-            content=ft.Column(_debug_sections, spacing=8),
+            content=ft.Column(_debug_sections, spacing=8, scroll=ft.ScrollMode.AUTO),
             visible=settings.DEBUG_MODE,
             padding=12, border=ft.Border.all(1, C.CRITICAL), border_radius=10, margin=ft.Margin.only(top=10)
         )
@@ -1288,6 +1304,63 @@ class SettingsView(ft.Container):
             self._debug_info_text.value = f"Lỗi xóa lịch sử: {ex}"
             self._debug_info_text.color = C.CRITICAL
         self._debug_info_text.update()
+
+    def _do_clear_data_cache(self):
+        """Clear offline activities data cache."""
+        try:
+            from core.data_cache import DataCache
+            cache = DataCache()
+            cache.clear()
+            self._debug_info_text.value = "Cache offline đã xóa. Dữ liệu sẽ được tải lại từ Moodle."
+            self._debug_info_text.color = C.SAFE
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi xóa data cache: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    def _do_show_notif_history(self):
+        """Show recent notification history entries."""
+        try:
+            from core.notification_history import NotificationHistory
+            history = NotificationHistory()
+            entries = history.get_all()
+            if not entries:
+                self._debug_history_text.value = "Chưa có thông báo nào được gửi."
+                self._debug_history_text.color = C.TEXT_SECONDARY
+            else:
+                lines = []
+                for i, e in enumerate(entries[:10]):  # Show last 10
+                    sent = e.get("sent_at", "?")[:16].replace("T", " ")
+                    title = e.get("title", "?")[:40]
+                    channels = ", ".join(e.get("channels", []))
+                    lines.append(f"{i+1}. [{sent}] {title}\n   Qua: {channels}")
+                self._debug_history_text.value = "\n".join(lines)
+                if len(entries) > 10:
+                    self._debug_history_text.value += f"\n... và {len(entries) - 10} mục khác"
+                self._debug_history_text.color = C.TEXT_PRIMARY
+        except Exception as ex:
+            self._debug_history_text.value = f"Lỗi đọc lịch sử: {ex}"
+            self._debug_history_text.color = C.CRITICAL
+        self._debug_history_text.update()
+
+    def _do_show_scheduler_status(self):
+        """Show background scheduler status (Android)."""
+        try:
+            from core.background_scheduler import get_scheduler
+            scheduler = get_scheduler()
+            lines = [
+                f"Available: {'Yes' if scheduler.is_available else 'No'}",
+                f"Active: {'Yes' if scheduler._is_active else 'No'}",
+                f"Backend: {'flet-android-notifications' if scheduler._android_notif else 'None'}",
+                f"Interval: {settings.BACKGROUND_CHECK_INTERVAL} min",
+                f"Enabled: {'Yes' if settings.BACKGROUND_CHECK_ANDROID else 'No'}",
+            ]
+            self._debug_scheduler_status.value = "\n".join(lines)
+            self._debug_scheduler_status.color = C.SAFE if scheduler._is_active else C.TEXT_SECONDARY
+        except Exception as ex:
+            self._debug_scheduler_status.value = f"Lỗi: {ex}"
+            self._debug_scheduler_status.color = C.CRITICAL
+        self._debug_scheduler_status.update()
 
     # ── Background scheduler (Android) ──
     def _do_start_foreground(self):
