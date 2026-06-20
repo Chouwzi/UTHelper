@@ -25,7 +25,7 @@
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/flet-0.82+-7C4DFF?style=flat-square" alt="Flet" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS-E8710A?style=flat-square" alt="Platform" />
-  <img src="https://img.shields.io/github/license/Chouwzi/UTHelper?style=flat-square" alt="License" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20NC-red?style=flat-square" alt="License: PolyForm Noncommercial" /></a>
 </p>
 
 ---
@@ -245,4 +245,10 @@ perf(parser): reduce memory usage in HTML parsing
 
 ## 📄 License
 
-[MIT License](LICENSE) — Made with ❤️ for UTH students.
+[PolyForm Noncommercial 1.0.0](LICENSE)
+
+> ⚠️ **Mã nguồn mở nhưng CẤM sử dụng thương mại.**
+> Bạn được phép xem, sử dụng, sửa đổi cho mục đích cá nhân, học tập, nghiên cứu.
+> **Không được** sao chép ý tưởng, bán, hoặc dùng cho mục đích thương mại mà không có sự đồng ý bằng văn bản của tác giả.
+
+Made with ❤️ for UTH students by [@Chouwzi](https://github.com/Chouwzi).
