@@ -498,6 +498,34 @@ class SettingsView(ft.Container):
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
             label="Bỏ qua bài tập đã nộp/chấm điểm"
         )
+
+        # ── NOTIFY_TYPES: checkboxes cho từng loại hoạt động ──
+        _current_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
+        self._notify_type_checks = {}
+        _type_options = [
+            ("quiz",       "Trắc nghiệm"),
+            ("assignment", "Bài tập"),
+            ("attendance", "Điểm danh"),
+            ("forum",      "Thảo luận"),
+            ("resource",   "Tài liệu"),
+            ("choice",     "Khảo sát"),
+        ]
+        for key, label in _type_options:
+            self._notify_type_checks[key] = ft.Checkbox(
+                label=label,
+                value=(key in _current_types),
+                fill_color={ft.ControlState.SELECTED: C.ACCENT},
+                check_color=C.BG,
+                label_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+                on_change=lambda e: self._check_unsaved(),
+            )
+        self._notify_types_row = ft.Row(
+            controls=list(self._notify_type_checks.values()),
+            wrap=True,
+            spacing=4,
+            run_spacing=0,
+        )
+
         self._milestones_field = ft.TextField(
             value=", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3]))),
             label="Số giờ nhắc nhở (VD: 72, 24, 3)",
@@ -731,6 +759,9 @@ class SettingsView(ft.Container):
                     "Tùy chỉnh đối tượng và thời gian",
                     [
                         self._sw_ignore_sub,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._make_themed_label("Loại hoạt động nhận thông báo"),
+                        self._notify_types_row,
                         ft.Divider(height=10, color=C.BORDER),
                         self._make_themed_label("Các mốc nhắc nhở (giờ)"),
                         self._milestones_field,
@@ -1741,6 +1772,9 @@ class SettingsView(ft.Container):
         self._dnd_start_field.value = str(getattr(settings, 'NOTIFY_DND_START', 23))
         self._dnd_end_field.value = str(getattr(settings, 'NOTIFY_DND_END', 6))
         self._sw_ignore_sub.value = getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True)
+        _saved_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
+        for key, cb in self._notify_type_checks.items():
+            cb.value = (key in _saved_types)
         self._milestones_field.value = ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])))
         self._muted_courses_field.value = ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', []))
 
@@ -1817,6 +1851,9 @@ class SettingsView(ft.Container):
         if self._dnd_start_field.value != str(getattr(settings, 'NOTIFY_DND_START', 23)): return True
         if self._dnd_end_field.value != str(getattr(settings, 'NOTIFY_DND_END', 6)): return True
         if self._sw_ignore_sub.value != getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True): return True
+        _saved_types = set(getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"]))
+        _current_types = set(k for k, cb in self._notify_type_checks.items() if cb.value)
+        if _saved_types != _current_types: return True
         if self._milestones_field.value != ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3]))): return True
         if self._muted_courses_field.value != ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', [])): return True
         
@@ -1939,6 +1976,7 @@ class SettingsView(ft.Container):
             settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "23")))
             settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "6")))
             settings.NOTIFY_IGNORE_SUBMITTED = self._sw_ignore_sub.value
+            settings.NOTIFY_TYPES = [k for k, cb in self._notify_type_checks.items() if cb.value]
             
             try:
                 settings.NOTIFY_MILESTONES = [int(x.strip()) for x in self._milestones_field.value.split(",") if x.strip()]
