@@ -1,12 +1,12 @@
 import flet as ft
 import asyncio
-from gui.core.theme import C
+from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
 from platform_utils import IS_MOBILE as _IS_MOBILE
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_tele=None, on_test_discord=None, on_test_mail=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
         super().__init__()
         self._page    = page
         self._orchestrator = orchestrator
@@ -16,9 +16,13 @@ class SettingsView(ft.Container):
         self._on_test_tele = on_test_tele
         self._on_test_discord = on_test_discord
         self._on_test_mail = on_test_mail
+        self._on_theme_preview = on_theme_preview
         self.visible  = False
         self.expand   = True
         self.bgcolor  = C.BG
+        self._selected_theme = getattr(settings, 'THEME', 'midnight_blue')
+        self._original_theme = self._selected_theme  # For revert on discard
+        self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
 
         self._username_field = ft.TextField(
             value=settings.UTH_USERNAME,
@@ -172,7 +176,9 @@ class SettingsView(ft.Container):
                 box.bgcolor = tb.value
                 box.update()
             tb.on_change = _on_change
-            return tb, ft.Row([ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True), box_click, tb], spacing=10, tight=True)
+            label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
+            self._themed_texts.append(label_txt)
+            return tb, ft.Row([label_txt, box_click, tb], spacing=10, tight=True)
 
         self._c_tb_critical, row_cri = _color_field("Cấp bách / Quá hạn", getattr(settings, 'COLOR_CRITICAL', '#EF4444'))
         self._c_tb_warning, row_warn = _color_field("Sắp tới", getattr(settings, 'COLOR_WARNING', '#F59E0B'))
@@ -183,6 +189,9 @@ class SettingsView(ft.Container):
         self._c_tb_open, row_open = _color_field("Tag Sắp mở", getattr(settings, 'COLOR_OPEN', '#0891B2'))
         self._c_tb_other, row_other = _color_field("Tag Sự kiện", getattr(settings, 'COLOR_OTHER', '#6B7280'))
         
+        # ── Theme Selector ──
+        self._theme_cards_row = self._build_theme_selector()
+
         self.btn_reset = ft.OutlinedButton("Khôi phục mặc định", width=400, on_click=self._handle_reset_defaults, style=ft.ButtonStyle(color=C.TEXT_SECONDARY))
 
         self._sw_start_minimized = ft.Switch(
@@ -438,10 +447,13 @@ class SettingsView(ft.Container):
             width=8, height=8, border_radius=4,
             bgcolor=C.CRITICAL, visible=False,
         )
-        back_btn = ft.TextButton(
+        # Store refs for live theme refresh
+        self._back_icon = ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY)
+        self._back_text = ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY)
+        self._back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
-                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
+                self._back_icon,
+                self._back_text,
                 self._unsaved_dot,
             ], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             on_click=self._handle_back,
@@ -452,7 +464,7 @@ class SettingsView(ft.Container):
             )
         )
 
-        save_btn = ft.Container(
+        self._save_btn = ft.Container(
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.SAVE_ROUNDED, size=16, color=ft.Colors.WHITE),
@@ -469,12 +481,17 @@ class SettingsView(ft.Container):
             alignment=ft.Alignment(0, 0),
         )
 
-        def _hint(text): return ft.Container(
-            content=ft.Text(text, size=11, color=C.TEXT_SECONDARY),
-            padding=ft.Padding.only(left=4),
-        )
-        
+        # Track all hint containers for live theme refresh
+        self._hint_containers = []
+
+        def _hint(text):
+            txt = ft.Text(text, size=11, color=C.TEXT_SECONDARY)
+            c = ft.Container(content=txt, padding=ft.Padding.only(left=4))
+            self._hint_containers.append((c, txt))
+            return c
+
         self._tiles = []
+        self._section_containers = []  # Track for live theme refresh
 
         def _setting_group(title, subtitle, controls, default_open=False, icon=None):
             leading_icon = ft.Icon(icon, size=20, color=C.ACCENT) if icon else None
@@ -493,7 +510,7 @@ class SettingsView(ft.Container):
                 expanded=default_open,
             )
             self._tiles.append(tile)
-            return ft.Container(
+            container = ft.Container(
                 content=tile,
                 bgcolor=C.SURFACE,
                 border_radius=10,
@@ -502,20 +519,24 @@ class SettingsView(ft.Container):
                 margin=ft.Margin.only(bottom=3),
                 clip_behavior=ft.ClipBehavior.HARD_EDGE
             )
+            self._section_containers.append(container)
+            return container
 
         # --- Scrollable content (settings groups) ---
+        self._title_text = ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY)
+        self._version_text = ft.Text(f"UTHelper v{__import__('main').__version__}", size=11, color=C.TEXT_SECONDARY)
+        self._header_divider = ft.Divider(height=16, color=C.BORDER)
         _scroll_content = ft.Column(
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[
                 # Title row
                 ft.Row(controls=[
                     ft.Column(controls=[
-                        ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700,
-                                color=C.TEXT_PRIMARY),
-                        ft.Text(f"UTHelper v{__import__('main').__version__}", size=11, color=C.TEXT_SECONDARY),
+                        self._title_text,
+                        self._version_text,
                     ], spacing=2),
                 ]),
-                ft.Divider(height=16, color=C.BORDER),
+                self._header_divider,
 
                 _setting_group(
                     "Tài khoản UTH",
@@ -561,11 +582,11 @@ class SettingsView(ft.Container):
                     "Cảnh báo",
                     "Ngưỡng thời gian màu sắc",
                     [
-                        ft.Text("Mức độ", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._make_themed_label("Mức độ"),
                         self._critical_hours_field,
                         self._warning_hours_field,
                         ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                        ft.Text("Trạng thái", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._make_themed_label("Trạng thái"),
                         self._opening_soon_hours_field,
                         _hint("Hoạt động sẽ được đánh dấu 'Sắp mở' khi thời gian mở nhỏ hơn mức này.")
                     ],
@@ -574,8 +595,19 @@ class SettingsView(ft.Container):
 
                 _setting_group(
                     "Giao diện",
-                    "Tùy chỉnh màu thông báo và thẻ",
-                    [row_cri, row_warn, row_safe, ft.Divider(height=10, color=C.BORDER), row_quiz, row_ass, row_att, row_open, row_other, ft.Divider(height=10, color=C.BORDER), self.btn_reset],
+                    "Theme và tùy chỉnh màu sắc",
+                    [
+                        self._make_themed_label("Chọn Theme"),
+                        self._theme_cards_row,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._make_themed_label("Tùy chỉnh màu"),
+                        _hint("Thay đổi màu riêng sẽ ghi đè preset theme."),
+                        row_cri, row_warn, row_safe,
+                        ft.Divider(height=10, color=C.BORDER),
+                        row_quiz, row_ass, row_att, row_open, row_other,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self.btn_reset,
+                    ],
                     icon=ft.Icons.PALETTE_OUTLINED,
                 ),
                 _setting_group(
@@ -584,19 +616,19 @@ class SettingsView(ft.Container):
                     [
                         self._sw_ignore_sub,
                         ft.Divider(height=10, color=C.BORDER),
-                        ft.Text("Các mốc nhắc nhở (giờ)", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._make_themed_label("Các mốc nhắc nhở (giờ)"),
                         self._milestones_field,
                         ft.Divider(height=10, color=C.BORDER),
-                        ft.Text("Không làm phiền (Im lặng)", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._make_themed_label("Không làm phiền (Im lặng)"),
                         self._sw_dnd_enable,
                         self._dnd_start_field,
                         self._dnd_end_field,
                         ft.Divider(height=10, color=C.BORDER),
-                        ft.Text("Bỏ qua môn học", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._make_themed_label("Bỏ qua môn học"),
                         self._muted_courses_drp,
                         self._muted_courses_field,
                         ft.Divider(height=10, color=C.BORDER),
-                        ft.Text("Thông báo nhắc nhở cơ bản", weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13),
+                        self._make_themed_label("Thông báo nhắc nhở cơ bản"),
                         self._notify_min_field,
                     ],
                     icon=ft.Icons.SMART_TOY_OUTLINED,
@@ -639,9 +671,9 @@ class SettingsView(ft.Container):
         )
 
         # --- Sticky footer (save button) ---
-        _sticky_footer = ft.Container(
+        self._sticky_footer = ft.Container(
             content=ft.Column(controls=[
-                save_btn,
+                self._save_btn,
                 self._save_status,
             ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=C.BG,
@@ -653,7 +685,7 @@ class SettingsView(ft.Container):
             controls=[
                 # Back button header
                 ft.Container(
-                    content=ft.Row(controls=[back_btn],
+                    content=ft.Row(controls=[self._back_btn],
                                    alignment=ft.MainAxisAlignment.START),
                     padding=ft.Padding.only(left=8, top=16, bottom=4),
                 ),
@@ -664,22 +696,330 @@ class SettingsView(ft.Container):
                     expand=True,
                 ),
                 # Fixed save button at bottom
-                _sticky_footer,
+                self._sticky_footer,
             ],
             spacing=0,
             expand=True,
         )
 
 
+    # ── Helper: themed label with tracked reference ─────────────────────
+
+    def _make_themed_label(self, text: str) -> "ft.Text":
+        """Create a themed label text and track it for live refresh."""
+        t = ft.Text(text, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13)
+        self._themed_texts.append(t)
+        return t
+
+    # ── Theme Selector Builder ────────────────────────────────────────
+
+    def _build_theme_selector(self):
+        """Build a scrollable row of theme preview cards."""
+        cards = []
+        for key in THEME_ORDER:
+            preset = THEME_PRESETS[key]
+            is_sel = (key == self._selected_theme)
+            card = self._make_theme_card(key, preset, is_sel)
+            cards.append(card)
+
+        return ft.Container(
+            content=ft.Row(
+                controls=cards,
+                spacing=10,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            padding=ft.Padding.only(top=4, bottom=4),
+        )
+
+    def _make_theme_card(self, key: str, preset: dict, selected: bool):
+        """Create a single theme preview card."""
+        border_col = preset["accent"] if selected else (preset["border"] + "80")
+        border_w = 2.5 if selected else 1
+
+        # Color strip: 5 small color dots showing the palette
+        dots = ft.Row(
+            controls=[
+                ft.Container(width=10, height=10, border_radius=5, bgcolor=preset["bg"]),
+                ft.Container(width=10, height=10, border_radius=5, bgcolor=preset["surface"]),
+                ft.Container(width=10, height=10, border_radius=5, bgcolor=preset["accent"]),
+                ft.Container(width=10, height=10, border_radius=5, bgcolor=preset["critical"]),
+                ft.Container(width=10, height=10, border_radius=5, bgcolor=preset["safe"]),
+            ],
+            spacing=4,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+
+        # Selected indicator
+        check_icon = ft.Icon(
+            ft.Icons.CHECK_CIRCLE_ROUNDED,
+            size=16,
+            color=preset["accent"],
+            visible=selected,
+        )
+
+        label = ft.Text(
+            preset["label"],
+            size=11,
+            weight=ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL,
+            color=preset["text_primary"],
+            text_align=ft.TextAlign.CENTER,
+        )
+        sublabel = ft.Text(
+            preset["description"],
+            size=9,
+            color=preset["text_secondary"],
+            text_align=ft.TextAlign.CENTER,
+        )
+
+        card_content = ft.Column(
+            controls=[
+                ft.Row([check_icon], alignment=ft.MainAxisAlignment.END),
+                # Gradient preview strip
+                ft.Container(
+                    width=90, height=28,
+                    border_radius=6,
+                    gradient=ft.LinearGradient(
+                        begin=ft.Alignment(-1, 0),
+                        end=ft.Alignment(1, 0),
+                        colors=[preset["bg"], preset["surface"], preset["accent"]],
+                    ),
+                ),
+                dots,
+                label,
+                sublabel,
+            ],
+            spacing=3,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        def _select(e, theme_key=key):
+            self._on_theme_select(theme_key)
+
+        return ft.Container(
+            content=card_content,
+            width=115,
+            padding=ft.Padding.all(8),
+            border_radius=12,
+            bgcolor=preset["surface"],
+            border=ft.Border.all(border_w, border_col),
+            on_click=_select,
+            ink=True,
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+        )
+
+    def _on_theme_select(self, theme_key: str):
+        """Handle theme card selection — applies IMMEDIATELY for live preview."""
+        import logging
+        log = logging.getLogger("UTHelper.settings")
+        log.info(f"[THEME] _on_theme_select called: {theme_key}")
+        try:
+            self._selected_theme = theme_key
+            self._apply_theme_colors(theme_key)
+            self._rebuild_theme_cards()
+            # Apply theme globally RIGHT NOW for instant preview
+            apply_theme(theme_key)
+            log.info(f"[THEME] After apply_theme: TEXT_PRIMARY={C.TEXT_PRIMARY}, TEXT_SECONDARY={C.TEXT_SECONDARY}")
+            # Sync Flet's page.theme ColorScheme
+            from gui.core.theme import set_page_theme
+            set_page_theme(self._page)
+            # Update settings view own colors
+            self.bgcolor = C.BG
+            # Refresh all section containers with new theme colors
+            self._refresh_section_colors()
+            log.info(f"[THEME] After _refresh_section_colors: _back_text.color={getattr(self._back_text, 'color', '?')}, _title_text.color={getattr(self._title_text, 'color', '?')}")
+            log.info(f"[THEME] themed_texts={len(self._themed_texts)}, hint_containers={len(self._hint_containers)}, tiles={len(self._tiles)}")
+            # Notify app_controller to refresh entire UI (dashboard, header, footer, cards)
+            if self._on_theme_preview:
+                self._on_theme_preview()
+            # Show unsaved indicator
+            if hasattr(self, '_unsaved_dot'):
+                self._unsaved_dot.visible = True
+            # Force full page repaint
+            self._page.update()
+            log.info(f"[THEME] page.update() completed successfully")
+        except Exception as exc:
+            log.error(f"[THEME] EXCEPTION in _on_theme_select: {exc}", exc_info=True)
+
+    def _refresh_section_colors(self):
+        """Update ALL settings controls with current C values for live theme preview.
+
+        Covers: section containers, expansion tiles, text fields, switches,
+        save button, sticky footer, back button, test login, etc.
+        """
+        # ── Section containers (bg + border) ──
+        for container in getattr(self, '_section_containers', []):
+            container.bgcolor = C.SURFACE
+            container.border = ft.Border.all(1, C.BORDER)
+            try:
+                container.update()
+            except Exception:
+                pass
+
+        # ── Expansion tiles (title text + icon colors) ──
+        for tile in getattr(self, '_tiles', []):
+            tile.collapsed_text_color = C.TEXT_PRIMARY
+            tile.text_color = C.ACCENT
+            tile.icon_color = C.ACCENT
+            tile.collapsed_icon_color = C.TEXT_SECONDARY
+            if tile.leading:
+                tile.leading.color = C.ACCENT
+            try:
+                tile.update()
+            except Exception:
+                pass
+
+        # ── ALL text fields — update border, focus, text, bg colors ──
+        _all_fields = [
+            '_username_field', '_password_field',
+            '_interval_field', '_fetch_months_field',
+            '_critical_hours_field', '_warning_hours_field',
+            '_opening_soon_hours_field', '_notify_min_field', '_workers_field',
+            '_gmail_addr_field', '_gmail_pw_field',
+            '_discord_wh_field', '_tel_token_field', '_tel_chat_field',
+            '_dnd_start_field', '_dnd_end_field',
+            '_milestones_field', '_muted_courses_field',
+            '_c_tb_critical', '_c_tb_warning', '_c_tb_safe',
+            '_c_tb_quiz', '_c_tb_ass', '_c_tb_att', '_c_tb_open', '_c_tb_other',
+        ]
+        for fname in _all_fields:
+            field = getattr(self, fname, None)
+            if field and isinstance(field, ft.TextField):
+                field.border_color = C.BORDER
+                field.focused_border_color = C.ACCENT
+                field.color = C.TEXT_PRIMARY
+                field.bgcolor = C.BG
+                field.label_style = ft.TextStyle(size=13, color=C.TEXT_SECONDARY)
+
+        # ── Dropdown ──
+        if hasattr(self, '_mock_type_drp'):
+            self._mock_type_drp.border_color = C.BORDER
+            self._mock_type_drp.focused_border_color = C.ACCENT
+            self._mock_type_drp.color = C.TEXT_PRIMARY
+            self._mock_type_drp.bgcolor = C.BG
+
+        # ── ALL switches — update active_color + label text style ──
+        _all_switches = [
+            '_sw_always_on_top', '_sw_submitted', '_sw_graded',
+            '_sw_start_with_windows', '_sw_start_minimized', '_sw_minimize_to_tray',
+            '_sw_email', '_sw_discord', '_sw_telegram',
+            '_sw_dnd_enable', '_sw_ignore_sub', '_sw_debug',
+        ]
+        for sname in _all_switches:
+            sw = getattr(self, sname, None)
+            if sw and isinstance(sw, ft.Switch):
+                # _sw_debug uses C.CRITICAL as active_color
+                if sname != '_sw_debug':
+                    sw.active_color = C.ACCENT
+                sw.label_text_style = ft.TextStyle(color=C.TEXT_PRIMARY, size=13)
+
+        # ── Save button ──
+        if hasattr(self, '_save_btn'):
+            self._save_btn.bgcolor = C.ACCENT
+            try:
+                self._save_btn.update()
+            except Exception:
+                pass
+
+        # ── Sticky footer ──
+        if hasattr(self, '_sticky_footer'):
+            self._sticky_footer.bgcolor = C.BG
+            self._sticky_footer.border = ft.Border.only(
+                top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "30")
+            )
+            try:
+                self._sticky_footer.update()
+            except Exception:
+                pass
+
+        # ── Test login button ──
+        if hasattr(self, '_test_login_btn'):
+            self._test_login_btn.style = ft.ButtonStyle(
+                color=ft.Colors.WHITE,
+                bgcolor=C.ACCENT,
+                shape=ft.RoundedRectangleBorder(radius=10),
+                padding=12,
+                animation_duration=300,
+            )
+
+        # ── Loading bar ──
+        if hasattr(self, '_test_loading_bar'):
+            self._test_loading_bar.color = C.ACCENT
+            self._test_loading_bar.bgcolor = C.SURFACE
+
+        # ── Reset button ──
+        if hasattr(self, 'btn_reset'):
+            self.btn_reset.style = ft.ButtonStyle(color=C.TEXT_SECONDARY)
+
+        # ── Back button (icon + text + style) ──
+        if hasattr(self, '_back_icon'):
+            self._back_icon.color = C.TEXT_SECONDARY
+        if hasattr(self, '_back_text'):
+            self._back_text.color = C.TEXT_SECONDARY
+        if hasattr(self, '_back_btn'):
+            self._back_btn.style = ft.ButtonStyle(
+                color=C.TEXT_SECONDARY,
+                overlay_color=ft.Colors.with_opacity(0.1, C.TEXT_SECONDARY),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=10),
+            )
+
+        # ── Header texts ──
+        if hasattr(self, '_title_text'):
+            self._title_text.color = C.TEXT_PRIMARY
+        if hasattr(self, '_version_text'):
+            self._version_text.color = C.TEXT_SECONDARY
+        if hasattr(self, '_header_divider'):
+            self._header_divider.color = C.BORDER
+
+        # ── Unsaved dot ──
+        if hasattr(self, '_unsaved_dot'):
+            self._unsaved_dot.bgcolor = C.CRITICAL
+
+        # ── All themed sub-labels (section titles like "Mức độ", "Chọn Theme") ──
+        for txt in getattr(self, '_themed_texts', []):
+            txt.color = C.TEXT_PRIMARY
+
+        # ── All hint containers (description texts) ──
+        for _container, txt in getattr(self, '_hint_containers', []):
+            txt.color = C.TEXT_SECONDARY
+
+        # ── Expansion tile title + subtitle texts (deep access) ──
+        for tile in getattr(self, '_tiles', []):
+            if tile.title and hasattr(tile.title, 'color'):
+                tile.title.color = C.TEXT_PRIMARY
+            if tile.subtitle and hasattr(tile.subtitle, 'color'):
+                tile.subtitle.color = C.TEXT_SECONDARY
+
+    def _apply_theme_colors(self, theme_key: str):
+        """Fill color text fields from preset values."""
+        preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["midnight_blue"])
+        self._c_tb_critical.value = preset["critical"]
+        self._c_tb_warning.value = preset["warning"]
+        self._c_tb_safe.value = preset["safe"]
+        self._c_tb_quiz.value = preset["quiz"]
+        self._c_tb_ass.value = preset["assignment"]
+        self._c_tb_att.value = preset["attendance"]
+        self._c_tb_open.value = preset["open"]
+        self._c_tb_other.value = preset["other"]
+
+    def _rebuild_theme_cards(self):
+        """Rebuild theme cards row to reflect new selection."""
+        new_row = self._build_theme_selector()
+        self._theme_cards_row.content = new_row.content
+
+
     async def _handle_reset_defaults(self, e):
-        self._c_tb_critical.value = "#EF4444"
-        self._c_tb_warning.value = "#F59E0B"
-        self._c_tb_safe.value = "#10B981"
-        self._c_tb_quiz.value = "#7C3AED"
-        self._c_tb_ass.value = "#2563EB"
-        self._c_tb_att.value = "#D97706"
-        self._c_tb_open.value = "#0891B2"
-        self._c_tb_other.value = "#6B7280"
+        # Reset theme to default
+        self._selected_theme = "midnight_blue"
+        self._apply_theme_colors("midnight_blue")
+        self._rebuild_theme_cards()
+        # Apply theme live preview
+        apply_theme("midnight_blue")
+        from gui.core.theme import set_page_theme
+        set_page_theme(self._page)
+        self.bgcolor = C.BG
+        self._refresh_section_colors()
+        if self._on_theme_preview:
+            self._on_theme_preview()
         
         self._critical_hours_field.value = "24"
         self._warning_hours_field.value = "72"
@@ -779,6 +1119,11 @@ class SettingsView(ft.Container):
         if hasattr(self, '_unsaved_dot'):
             self._unsaved_dot.visible = False
 
+        # Reload theme selection and store original for revert
+        self._selected_theme = getattr(settings, 'THEME', 'midnight_blue')
+        self._original_theme = self._selected_theme
+        self._rebuild_theme_cards()
+
         if hasattr(self, '_c_tb_critical'):
             self._c_tb_critical.value = getattr(settings, 'COLOR_CRITICAL', '#EF4444')
             self._c_tb_warning.value = getattr(settings, 'COLOR_WARNING', '#F59E0B')
@@ -863,6 +1208,7 @@ class SettingsView(ft.Container):
         self.update()
 
     def has_changes(self):
+        if self._selected_theme != getattr(settings, 'THEME', 'midnight_blue'): return True
         if self._username_field.value != settings.UTH_USERNAME: return True
         if self._password_field.value != settings.UTH_PASSWORD: return True
         if self._sw_always_on_top.value != settings.ALWAYS_ON_TOP: return True
@@ -913,6 +1259,13 @@ class SettingsView(ft.Container):
                     self._page.overlay.remove(confirm_dlg)
                 except (ValueError, AttributeError):
                     pass
+                # Revert theme to original if it was changed
+                if self._selected_theme != self._original_theme:
+                    apply_theme(self._original_theme)
+                    from gui.core.theme import set_page_theme
+                    set_page_theme(self._page)
+                    if self._on_theme_preview:
+                        self._on_theme_preview()
                 self._page.update()
                 self._on_close_cb()
 
@@ -953,6 +1306,8 @@ class SettingsView(ft.Container):
 
     async def _save(self, e):
         try:
+            # Save theme preset
+            settings.THEME                   = self._selected_theme
             settings.COLOR_CRITICAL          = getattr(self, '_c_tb_critical', ft.TextField(value='#EF4444')).value
             settings.COLOR_WARNING           = getattr(self, '_c_tb_warning', ft.TextField(value='#F59E0B')).value
             settings.COLOR_SAFE              = getattr(self, '_c_tb_safe', ft.TextField(value='#10B981')).value
@@ -1011,6 +1366,9 @@ class SettingsView(ft.Container):
             settings.NOTIFY_MUTED_COURSES = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
 
             save_settings()
+
+            # Update original theme reference so discard won't revert
+            self._original_theme = self._selected_theme
 
             self._save_status.value   = "Đã lưu cài đặt thành công"
             self._save_status.color   = C.SAFE
