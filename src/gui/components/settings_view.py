@@ -209,7 +209,18 @@ class SettingsView(ft.Container):
         self._sw_bg_check = ft.Switch(
             value=settings.BACKGROUND_CHECK_ANDROID, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Kiểm tra deadline khi thu nhỏ (Android)"
+            label="Kiểm tra deadline khi thu nhỏ (Android)",
+            on_change=lambda e: self._toggle_bg_check_ui()
+        )
+        self._bg_interval_field = ft.TextField(
+            value=str(settings.BACKGROUND_CHECK_INTERVAL),
+            label="Tần suất kiểm tra nền (phút)",
+            text_size=13,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            width=200,
+            visible=settings.BACKGROUND_CHECK_ANDROID,
         )
 
         self._sw_email = ft.Switch(
@@ -582,7 +593,8 @@ class SettingsView(ft.Container):
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
                           ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                           self._sw_bg_check,
-                          _hint("Dùng AlarmManager để kiểm tra deadline mỗi 30 phút khi thu nhỏ. Tắt pin tối ưu để hoạt động tốt nhất."),
+                          self._bg_interval_field,
+                          _hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 15 phút). Vào Cài đặt > Pin > Không hạn chế để hoạt động tốt nhất."),
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
                 )]),
@@ -1094,6 +1106,11 @@ class SettingsView(ft.Container):
         self._tel_token_field.update()
         self._tel_chat_field.update()
 
+    def _toggle_bg_check_ui(self):
+        v = self._sw_bg_check.value
+        self._bg_interval_field.visible = v
+        self._bg_interval_field.update()
+
     def _toggle_debug_ui(self):
         self._test_panel.visible = self._sw_debug.value
         self._test_panel.update()
@@ -1152,6 +1169,8 @@ class SettingsView(ft.Container):
         self._sw_start_minimized.value = settings.START_MINIMIZED
         self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
         self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
+        self._bg_interval_field.value = str(settings.BACKGROUND_CHECK_INTERVAL)
+        self._toggle_bg_check_ui()
         self._sw_email.value = settings.ENABLE_GMAIL
         self._sw_discord.value = getattr(settings, 'ENABLE_DISCORD', False)
         self._gmail_addr_field.value = getattr(settings, 'GMAIL_ADDRESS', '')
@@ -1228,6 +1247,7 @@ class SettingsView(ft.Container):
         if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
         if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
         if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
+        if self._bg_interval_field.value != str(settings.BACKGROUND_CHECK_INTERVAL): return True
         if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
         if self._sw_discord.value != getattr(settings, 'ENABLE_DISCORD', False): return True
         if getattr(self, '_gmail_addr_field', None) and self._gmail_addr_field.value != getattr(settings, 'GMAIL_ADDRESS', ''): return True
@@ -1363,6 +1383,7 @@ class SettingsView(ft.Container):
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
 
             settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
+            settings.BACKGROUND_CHECK_INTERVAL = max(15, int(self._bg_interval_field.value or "30"))
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
