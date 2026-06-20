@@ -1206,11 +1206,12 @@ class AppController:
         from notifiers.email import EmailNotifier
         EmailNotifier().notify([dummy])
 
-    def _on_update_check(self, has_update: bool, version: str, url: str):
+    def _on_update_check(self, has_update: bool, version: str, release_url: str, asset_url: str = None):
         """Callback từ background thread khi kiểm tra update xong."""
         if has_update and version:
             async def _update_ui():
-                self._update_url = url or ""
+                # Ưu tiên asset URL (APK/EXE) > release page
+                self._update_url = asset_url or release_url or ""
                 self._update_banner.visible = True
                 self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
                 self.page.update()
@@ -1220,9 +1221,13 @@ class AppController:
                 pass
 
     async def _open_update_url(self, e):
-        """Mở trang tải bản cập nhật trên trình duyệt."""
+        """Mở trang tải bản cập nhật — browser mở URL release/download."""
         if self._update_url:
-            await ft.UrlLauncher().launch_url(self._update_url)
+            try:
+                self.page.launch_url(self._update_url)
+            except Exception:
+                import webbrowser
+                webbrowser.open(self._update_url)
 
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
