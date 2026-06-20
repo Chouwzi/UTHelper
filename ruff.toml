@@ -18,3 +18,4 @@ ignore = [
 
 [lint.per-file-ignores]
 "tests/*" = ["F401", "F811"]
+"src/gui/core/utils.py" = ["F401"]  # re-exports clean_course_name, urgency_str
