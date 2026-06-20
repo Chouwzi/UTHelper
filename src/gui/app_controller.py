@@ -306,16 +306,24 @@ class AppController:
         )
 
         # Update banner (ẩn mặc định)
+        self._update_icon = ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color="#FCD34D")
+        self._update_text = ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", weight=ft.FontWeight.W_500, expand=True)
+        self._update_progress = ft.ProgressBar(value=0, width=0, height=3, color="#FCD34D", bgcolor="#FCD34D20", visible=False)
+        self._update_btn = ft.TextButton(
+            "Cập nhật",
+            icon=ft.Icons.DOWNLOAD_ROUNDED,
+            style=ft.ButtonStyle(color="#FCD34D"),
+            on_click=self._open_update_url,
+        )
         self._update_banner = ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.Icons.SYSTEM_UPDATE, size=14, color="#FCD34D"),
-                ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", expand=True),
-                ft.TextButton("Tải về", style=ft.ButtonStyle(color="#FCD34D"), on_click=self._open_update_url),
-            ], spacing=6),
+            content=ft.Column([
+                ft.Row([self._update_icon, self._update_text, self._update_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self._update_progress,
+            ], spacing=2, tight=True),
             bgcolor="#1C1917",
-            border=ft.Border.all(1, "#FCD34D40"),
-            border_radius=8,
-            padding=ft.Padding(left=10, right=6, top=4, bottom=4),
+            border=ft.Border.all(1, "#FCD34D30"),
+            border_radius=10,
+            padding=ft.Padding(left=12, right=8, top=8, bottom=8),
             margin=ft.Margin(left=14, right=14, top=0, bottom=0),
             visible=False,
         )
@@ -1214,8 +1222,14 @@ class AppController:
                 self._update_release_url = release_url or ""
                 self._update_url = asset_url or release_url or ""
                 self._update_version = version
+                self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
+                self._update_icon.color = "#FCD34D"
+                self._update_text.value = f"Phiên bản mới v{version} đã sẵn sàng!"
+                self._update_btn.visible = True
+                self._update_btn.text = "Cập nhật"
+                self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
+                self._update_progress.visible = False
                 self._update_banner.visible = True
-                self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
                 self.page.update()
             try:
                 self.page.run_task(_update_ui)
@@ -1253,13 +1267,19 @@ class AppController:
         import asyncio
         from core.update_checker import download_update, apply_update_windows
 
-        banner_text = self._update_banner.content.controls[1]
-        banner_text.value = "⬇ Đang tải xuống... 0%"
+        # Switch banner to download state
+        self._update_icon.name = ft.Icons.DOWNLOADING_ROUNDED
+        self._update_icon.color = "#60A5FA"
+        self._update_text.value = "Đang tải xuống... 0%"
+        self._update_btn.visible = False
+        self._update_progress.visible = True
+        self._update_progress.value = 0
         self.page.update()
 
         def _progress(pct):
             async def _upd():
-                banner_text.value = f"⬇ Đang tải xuống... {int(pct * 100)}%"
+                self._update_text.value = f"Đang tải xuống... {int(pct * 100)}%"
+                self._update_progress.value = pct
                 self.page.update()
             try: self.page.run_task(_upd)
             except Exception: pass
@@ -1267,7 +1287,10 @@ class AppController:
         zip_path = await asyncio.to_thread(download_update, url, _progress)
 
         if zip_path:
-            banner_text.value = "🔄 Đang cài đặt... Ứng dụng sẽ khởi động lại."
+            self._update_icon.name = ft.Icons.INSTALL_DESKTOP_ROUNDED
+            self._update_icon.color = C.SAFE
+            self._update_text.value = "Đang cài đặt... Ứng dụng sẽ khởi động lại."
+            self._update_progress.value = 1.0
             self.page.update()
             await asyncio.sleep(0.5)
 
@@ -1275,10 +1298,22 @@ class AppController:
             if success:
                 sys.exit(0)
             else:
-                banner_text.value = "❌ Cập nhật thất bại. Vui lòng tải thủ công."
+                self._update_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                self._update_icon.color = C.CRITICAL
+                self._update_text.value = "Cập nhật thất bại. Vui lòng tải thủ công."
+                self._update_btn.visible = True
+                self._update_btn.text = "Tải thủ công"
+                self._update_btn.icon = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+                self._update_progress.visible = False
                 self.page.update()
         else:
-            banner_text.value = "❌ Tải xuống thất bại."
+            self._update_icon.name = ft.Icons.CLOUD_OFF_ROUNDED
+            self._update_icon.color = C.CRITICAL
+            self._update_text.value = "Tải xuống thất bại."
+            self._update_btn.visible = True
+            self._update_btn.text = "Thử lại"
+            self._update_btn.icon = ft.Icons.REFRESH_ROUNDED
+            self._update_progress.visible = False
             self.page.update()
 
     async def _do_auto_update_android(self, url: str):
@@ -1286,13 +1321,19 @@ class AppController:
         import asyncio
         from core.update_checker import download_update, apply_update_android
 
-        banner_text = self._update_banner.content.controls[1]
-        banner_text.value = "⬇ Đang tải APK... 0%"
+        # Switch banner to download state
+        self._update_icon.name = ft.Icons.DOWNLOADING_ROUNDED
+        self._update_icon.color = "#60A5FA"
+        self._update_text.value = "Đang tải APK... 0%"
+        self._update_btn.visible = False
+        self._update_progress.visible = True
+        self._update_progress.value = 0
         self.page.update()
 
         def _progress(pct):
             async def _upd():
-                banner_text.value = f"⬇ Đang tải APK... {int(pct * 100)}%"
+                self._update_text.value = f"Đang tải APK... {int(pct * 100)}%"
+                self._update_progress.value = pct
                 self.page.update()
             try: self.page.run_task(_upd)
             except Exception: pass
@@ -1300,19 +1341,30 @@ class AppController:
         apk_path = await asyncio.to_thread(download_update, url, _progress)
 
         if apk_path:
-            banner_text.value = "📦 Đang mở trình cài đặt..."
+            self._update_icon.name = ft.Icons.INSTALL_MOBILE_ROUNDED
+            self._update_icon.color = C.SAFE
+            self._update_text.value = "Đang mở trình cài đặt..."
+            self._update_progress.value = 1.0
             self.page.update()
             await asyncio.sleep(0.3)
 
             success = apply_update_android(apk_path)
             if not success:
-                # Fallback: open browser
-                banner_text.value = "Mở trình duyệt để tải..."
+                self._update_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+                self._update_icon.color = C.WARNING
+                self._update_text.value = "Mở trình duyệt để tải..."
+                self._update_progress.visible = False
                 self.page.update()
                 try: self.page.launch_url(url)
                 except Exception: pass
         else:
-            banner_text.value = "❌ Tải APK thất bại."
+            self._update_icon.name = ft.Icons.CLOUD_OFF_ROUNDED
+            self._update_icon.color = C.CRITICAL
+            self._update_text.value = "Tải APK thất bại."
+            self._update_btn.visible = True
+            self._update_btn.text = "Thử lại"
+            self._update_btn.icon = ft.Icons.REFRESH_ROUNDED
+            self._update_progress.visible = False
             self.page.update()
 
 
