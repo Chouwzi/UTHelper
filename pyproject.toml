@@ -55,6 +55,7 @@ adaptive_icon_background = "#0F172A"
 "android.permission.POST_NOTIFICATIONS" = true
 "android.permission.RECEIVE_BOOT_COMPLETED" = true
 "android.permission.SCHEDULE_EXACT_ALARM" = true
+"android.permission.REQUEST_INSTALL_PACKAGES" = true  # Auto-update APK
 
 # Android needs cleartext traffic for some Moodle instances
 [tool.flet.android.manifest_application]

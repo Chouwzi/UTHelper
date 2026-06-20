@@ -1210,8 +1210,10 @@ class AppController:
         """Callback từ background thread khi kiểm tra update xong."""
         if has_update and version:
             async def _update_ui():
-                # Ưu tiên asset URL (APK/EXE) > release page
+                self._update_asset_url = asset_url or ""
+                self._update_release_url = release_url or ""
                 self._update_url = asset_url or release_url or ""
+                self._update_version = version
                 self._update_banner.visible = True
                 self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
                 self.page.update()
@@ -1221,13 +1223,98 @@ class AppController:
                 pass
 
     async def _open_update_url(self, e):
-        """Mở trang tải bản cập nhật — browser mở URL release/download."""
-        if self._update_url:
+        """Smart update: auto-download trên Windows/Android, browser trên iOS/other."""
+        from core.update_checker import _is_windows, _is_android
+
+        asset_url = getattr(self, "_update_asset_url", "")
+        release_url = getattr(self, "_update_release_url", "")
+
+        # ── Windows: download .zip → batch updater → restart ──
+        if _is_windows() and asset_url and asset_url.endswith(".zip"):
+            await self._do_auto_update_windows(asset_url)
+            return
+
+        # ── Android: download .apk → install intent ──
+        if _is_android() and asset_url and asset_url.endswith(".apk"):
+            await self._do_auto_update_android(asset_url)
+            return
+
+        # ── Fallback: open browser ──
+        url = asset_url or release_url
+        if url:
             try:
-                self.page.launch_url(self._update_url)
+                self.page.launch_url(url)
             except Exception:
-                import webbrowser
-                webbrowser.open(self._update_url)
+                import webbrowser; webbrowser.open(url)
+
+    async def _do_auto_update_windows(self, url: str):
+        """Download .zip and apply via batch updater (Windows)."""
+        import sys
+        import asyncio
+        from core.update_checker import download_update, apply_update_windows
+
+        banner_text = self._update_banner.content.controls[1]
+        banner_text.value = "⬇ Đang tải xuống... 0%"
+        self.page.update()
+
+        def _progress(pct):
+            async def _upd():
+                banner_text.value = f"⬇ Đang tải xuống... {int(pct * 100)}%"
+                self.page.update()
+            try: self.page.run_task(_upd)
+            except Exception: pass
+
+        zip_path = await asyncio.to_thread(download_update, url, _progress)
+
+        if zip_path:
+            banner_text.value = "🔄 Đang cài đặt... Ứng dụng sẽ khởi động lại."
+            self.page.update()
+            await asyncio.sleep(0.5)
+
+            success = apply_update_windows(zip_path)
+            if success:
+                sys.exit(0)
+            else:
+                banner_text.value = "❌ Cập nhật thất bại. Vui lòng tải thủ công."
+                self.page.update()
+        else:
+            banner_text.value = "❌ Tải xuống thất bại."
+            self.page.update()
+
+    async def _do_auto_update_android(self, url: str):
+        """Download .apk and trigger install intent (Android)."""
+        import asyncio
+        from core.update_checker import download_update, apply_update_android
+
+        banner_text = self._update_banner.content.controls[1]
+        banner_text.value = "⬇ Đang tải APK... 0%"
+        self.page.update()
+
+        def _progress(pct):
+            async def _upd():
+                banner_text.value = f"⬇ Đang tải APK... {int(pct * 100)}%"
+                self.page.update()
+            try: self.page.run_task(_upd)
+            except Exception: pass
+
+        apk_path = await asyncio.to_thread(download_update, url, _progress)
+
+        if apk_path:
+            banner_text.value = "📦 Đang mở trình cài đặt..."
+            self.page.update()
+            await asyncio.sleep(0.3)
+
+            success = apply_update_android(apk_path)
+            if not success:
+                # Fallback: open browser
+                banner_text.value = "Mở trình duyệt để tải..."
+                self.page.update()
+                try: self.page.launch_url(url)
+                except Exception: pass
+        else:
+            banner_text.value = "❌ Tải APK thất bại."
+            self.page.update()
+
 
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
