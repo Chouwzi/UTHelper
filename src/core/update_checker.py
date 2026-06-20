@@ -9,7 +9,6 @@ Platforms:
 import json
 import logging
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -20,6 +19,8 @@ import urllib.error
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional, Tuple
+
+from platform_utils import IS_ANDROID, IS_WINDOWS, IS_IOS
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +39,6 @@ def _version_tuple(v: str) -> tuple:
         return tuple(int(x) for x in v.strip().lstrip("v").split("."))
     except (ValueError, AttributeError):
         return (0,)
-
-
-def _is_android() -> bool:
-    """Detect Flet Android runtime."""
-    return os.environ.get("FLET_PLATFORM", "").lower() == "android" or (
-        platform.system().lower() == "linux" and "ANDROID_ROOT" in os.environ
-    )
-
-
-def _is_windows() -> bool:
-    return platform.system().lower() == "windows"
-
-
-def _is_ios() -> bool:
-    return os.environ.get("FLET_PLATFORM", "").lower() == "ios"
 
 
 def _get_update_temp_dir() -> Path:
@@ -101,12 +87,12 @@ def _find_platform_asset(assets: list) -> Optional[str]:
     if not assets:
         return None
 
-    if _is_android():
+    if IS_ANDROID:
         preferred = [".apk"]
-    elif _is_windows():
+    elif IS_WINDOWS:
         # Prefer .zip for auto-extract, .exe as fallback
         preferred = [".zip", ".exe"]
-    elif _is_ios():
+    elif IS_IOS:
         preferred = [".ipa"]
     else:
         preferred = [".apk", ".zip"]
