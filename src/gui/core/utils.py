@@ -3,7 +3,7 @@ from datetime import datetime
 from core.time_utils import parse_datetime
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
-from core.display_utils import urgency_str  # canonical source
+from core.display_utils import urgency_str, clean_course_name  # re-exported
 
 # clean_course_name is imported from core.display_utils above
 
