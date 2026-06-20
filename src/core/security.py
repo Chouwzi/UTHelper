@@ -1,4 +1,4 @@
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
 from urllib.parse import urlsplit
 from core.html_compat import BS4_PARSER
 

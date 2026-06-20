@@ -1,10 +1,8 @@
 import flet as ft
-import threading
-import base64
 import asyncio
 import logging
 from gui.core.theme import C
-from gui.core.utils import get_urgency_color, get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
+from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
 
 logger = logging.getLogger(__name__)
 

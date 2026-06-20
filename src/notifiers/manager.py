@@ -10,7 +10,6 @@ from .base import BaseNotifier
 from notifiers.discord import DiscordNotifier
 from notifiers.email import EmailNotifier
 from config import settings as config
-from models import UrgencyLevel
 
 logger = logging.getLogger(__name__)
 
@@ -249,14 +248,12 @@ class NotificationManager:
                     break
 
             # --- NOTIFY_MINUTES_BEFORE: trigger when close to deadline ---
-            minutes_before_triggered = False
             if notify_minutes > 0:
                 time_left_minutes = time_left.total_seconds() / 60.0
                 if time_left_minutes <= notify_minutes:
                     # Use a special sentinel milestone to track "minutes_before" notifications
                     sentinel = f"_min_{notify_minutes}"
                     if sentinel not in task_milestones:
-                        minutes_before_triggered = True
                         matched_milestone = sentinel
 
             if not matched_milestone:

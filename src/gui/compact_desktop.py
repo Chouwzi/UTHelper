@@ -9,7 +9,7 @@ if project_root not in sys.path:
 from gui.app_controller import AppController
 
 def main(page: ft.Page):
-    app = AppController(page)
+    AppController(page)
 
 if __name__ == "__main__":
     ft.app(target=main, assets_dir=os.path.join(project_root, "assets"))

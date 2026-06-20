@@ -5,7 +5,6 @@ import urllib.request
 from typing import Optional
 from config import settings
 import logging
-from core.network_utils import retry_with_backoff
 import sys as _sys
 
 logger = logging.getLogger(__name__)

@@ -18,7 +18,6 @@ import flet as ft
 
 from gui.core.theme import C
 from gui.core.utils import (
-    format_deadline,
     get_countdown,
     get_urgency_color,
     parse_datetime,

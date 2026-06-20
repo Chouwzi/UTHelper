@@ -3,7 +3,7 @@ import html
 import httpx
 from datetime import datetime
 from typing import List
-from models import Assignment, UrgencyLevel
+from models import Assignment
 from config import settings
 from core.time_utils import format_remaining_time
 from core.display_utils import get_type_display, get_urgency_display, urgency_str, clean_course_name
@@ -53,12 +53,12 @@ class TelegramNotifier(BaseNotifier):
         summary = " · ".join(summary_parts)
 
         # Build header
-        header = f"📋 <b>UTHelper</b> · Nhắc nhở deadline\n"
+        header = "📋 <b>UTHelper</b> · Nhắc nhở deadline\n"
         header += f"<i>{summary}</i>\n\n"
 
         # Footer
         time_str = datetime.now().strftime("%H:%M %d/%m/%Y")
-        footer = f"━━━━━━━━━━━━━━━━━\n"
+        footer = "━━━━━━━━━━━━━━━━━\n"
         footer += f"<i>UTHelper · {time_str}</i>"
 
         # Build task blocks

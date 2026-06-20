@@ -37,7 +37,7 @@ def check_for_update(current_version: str) -> Tuple[bool, Optional[str], Optiona
         
         # Simple version comparison
         try:
-            from packaging.version import Version, InvalidVersion
+            from packaging.version import Version
             has_update = Version(latest_tag) > Version(current)
         except (ImportError, Exception):
             # packaging not available, fallback: string comparison
