@@ -78,6 +78,10 @@ class Settings(BaseModel):
     START_MINIMIZED: bool = Field(default=True, description="Chạy ngầm khi khởi động")
     MINIMIZE_TO_TRAY: bool = Field(default=True, description="Thu nhỏ xuống khay hệ thống (System Tray)")
 
+    # Android background notifications (AlarmManager)
+    BACKGROUND_CHECK_ANDROID: bool = Field(default=True, description="Kiểm tra deadline nền trên Android (AlarmManager)")
+    BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="Tần suất kiểm tra nền (phút, tối thiểu 15)")
+
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")
     DISCORD_WEBHOOK_URL: str = Field(default="", description="Webhook URL của Discord", exclude=True)

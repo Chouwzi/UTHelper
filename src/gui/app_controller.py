@@ -75,6 +75,10 @@ class AppController:
         from core.update_checker import check_for_update_async
         check_for_update_async(APP_VERSION, self._on_update_check)
         
+        # Android: Start background scheduler for deadline checks via AlarmManager
+        if IS_MOBILE and settings.BACKGROUND_CHECK_ANDROID:
+            self.page.run_task(self._start_background_scheduler)
+        
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self.page.run_task(self._show_login_dialog)
         else:
@@ -1476,6 +1480,22 @@ class AppController:
                 await self._load_data_async()
             except Exception:
                 pass
+
+    async def _start_background_scheduler(self):
+        """Initialize Android background scheduler for periodic deadline checks."""
+        try:
+            from core.background_scheduler import get_scheduler
+            scheduler = get_scheduler()
+            if not scheduler.is_available:
+                logger.debug("Background scheduler not available on this platform")
+                return
+
+            await scheduler.request_permissions()
+            interval = max(15, settings.BACKGROUND_CHECK_INTERVAL)
+            await scheduler.start_periodic_check(interval_minutes=interval)
+            logger.info("Android background scheduler started (every %d min)", interval)
+        except Exception as e:
+            logger.warning("Failed to start background scheduler: %s", e)
 
     def _on_disconnect(self, e):
         self._page_alive.clear()

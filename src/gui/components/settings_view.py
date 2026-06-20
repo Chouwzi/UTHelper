@@ -205,6 +205,12 @@ class SettingsView(ft.Container):
             label="Thu nhỏ vào khay hệ thống"
         )
 
+        # Android background check switch
+        self._sw_bg_check = ft.Switch(
+            value=settings.BACKGROUND_CHECK_ANDROID, active_color=C.ACCENT,
+            label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+            label="Kiểm tra deadline khi thu nhỏ (Android)"
+        )
 
         self._sw_email = ft.Switch(
             value=settings.ENABLE_GMAIL, active_color=C.ACCENT,
@@ -573,7 +579,10 @@ class SettingsView(ft.Container):
                         self._interval_field,
                           _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
                           self._fetch_months_field,
-                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
+                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
+                          ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                          self._sw_bg_check,
+                          _hint("Dùng AlarmManager để kiểm tra deadline mỗi 30 phút khi thu nhỏ. Tắt pin tối ưu để hoạt động tốt nhất."),
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
                 )]),
@@ -1142,6 +1151,7 @@ class SettingsView(ft.Container):
         self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
         self._sw_start_minimized.value = settings.START_MINIMIZED
         self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
+        self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
         self._sw_email.value = settings.ENABLE_GMAIL
         self._sw_discord.value = getattr(settings, 'ENABLE_DISCORD', False)
         self._gmail_addr_field.value = getattr(settings, 'GMAIL_ADDRESS', '')
@@ -1217,6 +1227,7 @@ class SettingsView(ft.Container):
         if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
         if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
         if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
+        if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
         if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
         if self._sw_discord.value != getattr(settings, 'ENABLE_DISCORD', False): return True
         if getattr(self, '_gmail_addr_field', None) and self._gmail_addr_field.value != getattr(settings, 'GMAIL_ADDRESS', ''): return True
@@ -1350,6 +1361,8 @@ class SettingsView(ft.Container):
                 settings.START_WITH_WINDOWS = self._sw_start_with_windows.value
                 settings.START_MINIMIZED = self._sw_start_minimized.value
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
+
+            settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value

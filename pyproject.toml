@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.2.1",
     "flet>=0.82.0",
     "python-dateutil>=2.8.2",
+    "flet-android-notifications>=0.4.0; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,8 @@ adaptive_icon_background = "#0F172A"
 "android.permission.RECEIVE_BOOT_COMPLETED" = true
 "android.permission.SCHEDULE_EXACT_ALARM" = true
 "android.permission.REQUEST_INSTALL_PACKAGES" = true  # Auto-update APK
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
 
 # Android needs cleartext traffic for some Moodle instances
 [tool.flet.android.manifest_application]
