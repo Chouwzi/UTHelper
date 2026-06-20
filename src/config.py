@@ -80,7 +80,7 @@ class Settings(BaseModel):
 
     # Android background notifications (AlarmManager)
     BACKGROUND_CHECK_ANDROID: bool = Field(default=True, description="Kiểm tra deadline nền trên Android (AlarmManager)")
-    BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="Tần suất kiểm tra nền (phút, tối thiểu 15)")
+    BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="Tần suất kiểm tra nền (phút, tối thiểu 5)")
 
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")

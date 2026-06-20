@@ -1491,7 +1491,7 @@ class AppController:
                 return
 
             await scheduler.request_permissions()
-            interval = max(15, settings.BACKGROUND_CHECK_INTERVAL)
+            interval = max(5, settings.BACKGROUND_CHECK_INTERVAL)
             await scheduler.start_periodic_check(interval_minutes=interval)
             logger.info("Android background scheduler started (every %d min)", interval)
         except Exception as e:

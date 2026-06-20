@@ -66,7 +66,7 @@ class BackgroundScheduler:
             logger.debug("BackgroundScheduler: already active, skip")
             return
 
-        interval_seconds = max(900, interval_minutes * 60)  # Min 15 min
+        interval_seconds = max(300, interval_minutes * 60)  # Min 5 min
 
         try:
             await self._android_notif.periodically_show_with_duration(

@@ -594,7 +594,7 @@ class SettingsView(ft.Container):
                           ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                           self._sw_bg_check,
                           self._bg_interval_field,
-                          _hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 15 phút). Vào Cài đặt > Pin > Không hạn chế để hoạt động tốt nhất."),
+                          _hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 5 phút). Dưới 15 phút có thể bị delay bởi chế độ tiết kiệm pin."),
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
                 )]),
@@ -1383,7 +1383,7 @@ class SettingsView(ft.Container):
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
 
             settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
-            settings.BACKGROUND_CHECK_INTERVAL = max(15, int(self._bg_interval_field.value or "30"))
+            settings.BACKGROUND_CHECK_INTERVAL = max(5, int(self._bg_interval_field.value or "30"))
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
