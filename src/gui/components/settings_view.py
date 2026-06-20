@@ -300,7 +300,6 @@ class SettingsView(ft.Container):
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=8,
             text_size=13
         )
-        
         # ── Debug panel: Comprehensive test tools ──
         # Section 1: Notification channel tests (platform-aware)
         _notif_section_label = ft.Text("Kiểm thử kênh thông báo", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
@@ -311,6 +310,7 @@ class SettingsView(ft.Container):
             ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
             ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
             ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+            ft.Button("Gửi tất cả", icon=ft.Icons.CAMPAIGN_ROUNDED, on_click=lambda e: self._do_test_broadcast(), bgcolor=C.SURFACE, color=C.CRITICAL),
         ], wrap=True, spacing=6)
 
         # Section 2: System diagnostics
@@ -318,14 +318,19 @@ class SettingsView(ft.Container):
         self._debug_info_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
         _sys_buttons = ft.Row([
             ft.Button("Thông tin thiết bị", icon=ft.Icons.INFO_OUTLINE_ROUNDED, on_click=lambda e: self._do_show_device_info(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("Kiểm tra kết nối Moodle", icon=ft.Icons.CLOUD_SYNC_ROUNDED, on_click=lambda e: self._do_test_moodle_connection(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Kết nối Moodle", icon=ft.Icons.CLOUD_SYNC_ROUNDED, on_click=lambda e: self._do_test_moodle_connection(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Ping Moodle", icon=ft.Icons.SPEED_ROUNDED, on_click=lambda e: self._do_test_latency(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Notifiers", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=lambda e: self._do_show_notifiers(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("DND Status", icon=ft.Icons.DO_NOT_DISTURB_ROUNDED, on_click=lambda e: self._do_check_dnd(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
         ], wrap=True, spacing=6)
 
         # Section 3: Cache & data management
         _cache_section_label = ft.Text("Bộ nhớ đệm & dữ liệu", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_cache_stats = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True)
         _cache_buttons = ft.Row([
+            ft.Button("Thống kê cache", icon=ft.Icons.ANALYTICS_ROUNDED, on_click=lambda e: self._do_show_cache_stats(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
             ft.Button("Xóa cache thông báo", icon=ft.Icons.NOTIFICATIONS_OFF_ROUNDED, on_click=lambda e: self._do_clear_notif_cache(), bgcolor=C.SURFACE, color=C.WARNING),
-            ft.Button("Xóa lịch sử thông báo", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa lịch sử", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
             ft.Button("Xóa cache offline", icon=ft.Icons.CACHED_ROUNDED, on_click=lambda e: self._do_clear_data_cache(), bgcolor=C.SURFACE, color=C.WARNING),
         ], wrap=True, spacing=6)
 
@@ -353,6 +358,13 @@ class SettingsView(ft.Container):
             ft.Button("Force check update", icon=ft.Icons.SYSTEM_UPDATE_ROUNDED, on_click=lambda e: self._do_force_check_update(), bgcolor=C.SURFACE, color=C.ACCENT),
         ], wrap=True, spacing=6)
 
+        # Section 6: Data & actions
+        _action_section_label = ft.Text("Hành động nhanh", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _action_buttons = ft.Row([
+            ft.Button("Force Refresh", icon=ft.Icons.REFRESH_ROUNDED, on_click=lambda e: self._do_force_refresh(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Reset Settings", icon=ft.Icons.RESTART_ALT_ROUNDED, on_click=lambda e: self._do_reset_settings(), bgcolor=C.SURFACE, color=C.CRITICAL),
+        ], wrap=True, spacing=6)
+
         # Assemble debug panel with platform-aware sections
         _debug_sections = [
             ft.Text("Công cụ gỡ lỗi nâng cao", color=C.CRITICAL, weight=ft.FontWeight.BOLD, size=14),
@@ -370,6 +382,7 @@ class SettingsView(ft.Container):
             # Cache management
             _cache_section_label,
             _cache_buttons,
+            self._debug_cache_stats,
             ft.Divider(height=1, color=C.BORDER),
             # Notification history
             _history_section_label,
@@ -386,12 +399,15 @@ class SettingsView(ft.Container):
                 self._debug_scheduler_status,
             ])
 
-        # Update checker (all platforms)
+        # Update checker + quick actions (all platforms)
         _debug_sections.extend([
             ft.Divider(height=1, color=C.BORDER),
             _update_section_label,
             _update_buttons,
             self._debug_update_text,
+            ft.Divider(height=1, color=C.BORDER),
+            _action_section_label,
+            _action_buttons,
         ])
 
         self._test_panel = ft.Container(
@@ -1449,7 +1465,220 @@ class SettingsView(ft.Container):
             except Exception:
                 pass
 
-        threading.Thread(target=_worker, daemon=True).start()
+        threading.Thread(target=_worker, daemon=True, name="debug-update").start()
+
+    # ── Broadcast all channels ──
+    def _do_test_broadcast(self):
+        """Send mock notification to ALL registered channels simultaneously."""
+        t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
+        sent = []
+        if self._on_test_tray and not _IS_MOBILE:
+            try:
+                self._on_test_tray(t); sent.append("Windows Tray")
+            except Exception:
+                pass
+        if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _IS_MOBILE:
+            try:
+                self._on_test_mobile(t); sent.append("Mobile")
+            except Exception:
+                pass
+        for name, cb in [("Telegram", "_on_test_tele"), ("Discord", "_on_test_discord"), ("Gmail", "_on_test_mail")]:
+            fn = getattr(self, cb, None)
+            if fn:
+                try:
+                    fn(t); sent.append(name)
+                except Exception:
+                    pass
+        self._debug_info_text.value = f"Broadcast [{t}] tới: {', '.join(sent) or 'Không có kênh nào'}"
+        self._debug_info_text.color = C.SAFE if sent else C.WARNING
+        self._debug_info_text.update()
+
+    # ── Network latency test ──
+    def _do_test_latency(self):
+        """Ping Moodle server and measure response time."""
+        import threading
+        self._debug_info_text.value = "Đang ping Moodle..."
+        self._debug_info_text.color = C.TEXT_SECONDARY
+        self._debug_info_text.update()
+
+        def _ping():
+            import time, urllib.request
+            url = settings.MOODLE_BASE_URL.rstrip("/")
+            results = []
+            for _ in range(3):
+                try:
+                    start = time.perf_counter()
+                    req = urllib.request.Request(url, method="HEAD")
+                    req.add_header("User-Agent", "UTHelper/ping")
+                    urllib.request.urlopen(req, timeout=10)
+                    results.append((time.perf_counter() - start) * 1000)
+                except Exception:
+                    results.append(None)
+
+            valid = [r for r in results if r is not None]
+            if valid:
+                avg = sum(valid) / len(valid)
+                detail = " | ".join([f"{r:.0f}ms" if r else "FAIL" for r in results])
+                result = f"Ping {url}\n{detail}\nTB: {avg:.0f}ms ({len(valid)}/3 OK)"
+                color = C.SAFE if avg < 1000 else C.WARNING
+            else:
+                result = f"Không thể kết nối {url}"
+                color = C.CRITICAL
+            self._debug_info_text.value = result
+            self._debug_info_text.color = color
+            try: self._debug_info_text.update()
+            except Exception: pass
+
+        threading.Thread(target=_ping, daemon=True, name="debug-ping").start()
+
+    # ── Show registered notifiers ──
+    def _do_show_notifiers(self):
+        """Show all registered notification channels and their status."""
+        try:
+            mgr = getattr(self._orchestrator, 'notifier', None)
+            if not mgr or not hasattr(mgr, 'notifiers'):
+                self._debug_info_text.value = "NotificationManager chưa khởi tạo."
+                self._debug_info_text.color = C.WARNING
+            else:
+                ns = mgr.notifiers
+                if not ns:
+                    lines = ["Không có notifier nào đăng ký."]
+                else:
+                    lines = [f"{len(ns)} kênh đã đăng ký:"]
+                    for i, n in enumerate(ns, 1):
+                        cls = n.__class__.__name__
+                        extra = f" ({n.backend_name})" if hasattr(n, 'backend_name') else ""
+                        lines.append(f"  {i}. {cls}{extra}")
+                self._debug_info_text.value = "\n".join(lines)
+                self._debug_info_text.color = C.SAFE if ns else C.WARNING
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    # ── DND status check ──
+    def _do_check_dnd(self):
+        """Check current Do Not Disturb status."""
+        from datetime import datetime
+        now = datetime.now()
+        enabled = settings.NOTIFY_DND_ENABLE
+        s, e = settings.NOTIFY_DND_START, settings.NOTIFY_DND_END
+        h = now.hour
+        if not enabled:
+            is_active = False
+        elif s == e:
+            is_active = True
+        elif s > e:
+            is_active = h >= s or h < e
+        else:
+            is_active = s <= h < e
+
+        lines = [
+            f"DND: {'BẬT' if enabled else 'TẮT'}",
+            f"Khung giờ: {s}:00 – {e}:00",
+            f"Hiện tại: {now.strftime('%H:%M')}",
+            f"Trạng thái: {'ĐANG IM LẶNG' if (enabled and is_active) else 'Bình thường'}",
+        ]
+        self._debug_info_text.value = "\n".join(lines)
+        self._debug_info_text.color = C.WARNING if (enabled and is_active) else C.SAFE
+        self._debug_info_text.update()
+
+    # ── Cache statistics ──
+    def _do_show_cache_stats(self):
+        """Show cache sizes and statistics."""
+        import os, json
+        from config import _USER_DATA_DIR
+        stats = []
+        for label, fname in [("Cache thông báo", "notifications_cache.json"),
+                              ("Lịch sử thông báo", "notification_history.json"),
+                              ("Cache offline", "activities_cache.json")]:
+            path = _USER_DATA_DIR / fname
+            if path.exists():
+                size = os.path.getsize(str(path))
+                try:
+                    with open(str(path), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    count = len(data) if isinstance(data, (list, dict)) else "?"
+                    stats.append(f"{label}: {count} mục ({size:,} B)")
+                except Exception:
+                    stats.append(f"{label}: {size:,} B")
+            else:
+                stats.append(f"{label}: trống")
+
+        detail = self._orchestrator.get_cached_details_snapshot() if hasattr(self._orchestrator, 'get_cached_details_snapshot') else {}
+        stats.append(f"Detail cache (RAM): {len(detail)} mục")
+        sp = _USER_DATA_DIR / "settings.json"
+        if sp.exists():
+            stats.append(f"Settings: {os.path.getsize(str(sp)):,} B")
+        self._debug_cache_stats.value = "\n".join(stats)
+        self._debug_cache_stats.color = C.TEXT_PRIMARY
+        self._debug_cache_stats.update()
+
+    # ── Force data refresh ──
+    def _do_force_refresh(self):
+        """Trigger immediate data reload from Moodle."""
+        async def _refresh():
+            self._debug_info_text.value = "Đang tải lại dữ liệu..."
+            self._debug_info_text.color = C.TEXT_SECONDARY
+            self._debug_info_text.update()
+            try:
+                import time
+                start = time.perf_counter()
+                acts = await self._orchestrator.get_latest_activities_async()
+                elapsed = time.perf_counter() - start
+                self._debug_info_text.value = f"Tải xong {len(acts) if acts else 0} hoạt động trong {elapsed:.1f}s"
+                self._debug_info_text.color = C.SAFE
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_refresh)
+
+    # ── Reset settings ──
+    def _do_reset_settings(self):
+        """Reset all settings to factory defaults (with confirmation dialog)."""
+        async def _confirm():
+            confirmed = [False]
+            def _yes(e):
+                confirmed[0] = True; dlg.open = False; self._page.update()
+            def _no(e):
+                dlg.open = False; self._page.update()
+
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Xác nhận Reset"),
+                content=ft.Text("Đặt lại TẤT CẢ cài đặt về mặc định?\nThao tác không thể hoàn tác."),
+                actions=[
+                    ft.TextButton("Hủy", on_click=_no),
+                    ft.TextButton("Reset", on_click=_yes, style=ft.ButtonStyle(color=C.CRITICAL)),
+                ],
+            )
+            self._page.overlay.append(dlg)
+            dlg.open = True
+            self._page.update()
+
+            import asyncio
+            for _ in range(300):
+                await asyncio.sleep(0.1)
+                if not dlg.open:
+                    break
+            if dlg in self._page.overlay:
+                self._page.overlay.remove(dlg)
+
+            if confirmed[0]:
+                try:
+                    from config import _USER_DATA_DIR
+                    import os
+                    sp = _USER_DATA_DIR / "settings.json"
+                    if sp.exists():
+                        os.remove(str(sp))
+                    self._debug_info_text.value = "Settings đã reset. Khởi động lại app để áp dụng."
+                    self._debug_info_text.color = C.SAFE
+                except Exception as ex:
+                    self._debug_info_text.value = f"Lỗi reset: {ex}"
+                    self._debug_info_text.color = C.CRITICAL
+                self._debug_info_text.update()
+        self._page.run_task(_confirm)
 
     def load_current_settings(self):
         for tile in getattr(self, '_tiles', []):
