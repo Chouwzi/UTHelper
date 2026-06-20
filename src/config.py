@@ -64,7 +64,7 @@ class Settings(BaseModel):
     PORTAL_API_BASE: str = "https://portal.ut.edu.vn/api/v1"
     
     # Cài đặt chung của ứng dụng
-    THEME: str = Field(default="system", description="Giao diện: system (hệ thống), dark (tối), light (sáng)")
+    THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất kiểm tra thông báo tự động (phút)")
     FETCH_MONTHS: int = Field(default=1, description="Số tháng lấy sự kiện từ lịch (1-3 tháng)")
 
