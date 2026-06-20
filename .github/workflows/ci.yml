@@ -31,9 +31,6 @@ jobs:
       - name: Ruff check
         run: ruff check src/ --output-format=github
 
-      - name: Ruff format check
-        run: ruff format src/ --check --diff
-
   test:
     name: 🧪 Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

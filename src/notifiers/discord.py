@@ -2,7 +2,7 @@ import logging
 import httpx
 from datetime import datetime
 from typing import List
-from models import Assignment, UrgencyLevel
+from models import Assignment
 from config import settings
 from core.time_utils import format_remaining_time
 from core.display_utils import get_type_display, get_urgency_display, urgency_str, clean_course_name

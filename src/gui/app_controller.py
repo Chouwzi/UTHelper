@@ -3,15 +3,14 @@ from datetime import datetime
 from core.time_utils import parse_datetime
 import asyncio
 import logging
-from platform_utils import IS_WINDOWS, IS_MOBILE, detect_platform
+from platform_utils import IS_MOBILE, detect_platform
 from notifiers.manager import NotificationManager
 import threading
 
 from core.data_orchestrator import DataOrchestrator
 from config import settings
 
-from gui.core.theme import C, _TYPE_FILTER_MAP
-from gui.core.utils import clean_course_name, urgency_str
+from gui.core.theme import C
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
@@ -762,7 +761,7 @@ class AppController:
         self._search_task = self.page.run_task(_delayed_render)
 
     async def _prefetch_details_async(self, activities: list):
-        total = len(activities)
+        len(activities)
         workers = max(1, min(settings.PREFETCH_WORKERS, 10))
         
         with self._data_lock:
@@ -771,7 +770,7 @@ class AppController:
         self.loading_bar.visible = True
         self.page.update()
 
-        done = await asyncio.to_thread(
+        await asyncio.to_thread(
             self.orchestrator.prefetch_all_details,
             activities,
             workers,
@@ -835,7 +834,7 @@ class AppController:
                         item["_title_lower"] = str(item.get("title", "")).lower()
                     if "_course_lower" not in item:
                         item["_course_lower"] = str(item.get("course", "")).lower()
-                self.status_text.value = f"Dữ liệu cache · Đang cập nhật..."
+                self.status_text.value = "Dữ liệu cache · Đang cập nhật..."
                 self._update_footer()
                 self.page.update()
 
@@ -868,8 +867,7 @@ class AppController:
                     
             
             # Determine data source for status display
-            ws_count = sum(1 for x in data_copy if x.get('source') == 'ws_api')
-            source_tag = "API" if ws_count > 0 else "Web"
+            sum(1 for x in data_copy if x.get('source') == 'ws_api')
             data_copy.sort(key=lambda x: (
                 0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
                 x.get("deadline", "")
@@ -926,7 +924,7 @@ class AppController:
             if cached_data:
                 with self._data_lock:
                     self.all_data = cached_data
-                self.status_text.value = f"Offline · Dữ liệu cache"
+                self.status_text.value = "Offline · Dữ liệu cache"
                 self.error_state.visible = False
                 self._update_footer()
             else:
@@ -1001,7 +999,7 @@ class AppController:
         Because controls store hardcoded color strings at init time,
         we must explicitly reassign every color property when the theme changes.
         """
-        from gui.core.theme import C as _C, _TYPE_COLORS
+        from gui.core.theme import C as _C
 
         # ── Page ──
         self.page.bgcolor = _C.BG
@@ -1145,7 +1143,8 @@ class AppController:
             self.page.update()
 
     def _test_notification_base(self, mock_type="critical"):
-        import random, datetime
+        import random
+        import datetime
         from models import Assignment, ActivityDetail
 
         # Mặc định

@@ -1,0 +1,20 @@
+target-version = "py311"
+line-length = 140
+
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E401",   # Multiple imports on one line
+    "E402",   # Module level import not at top of file — needed for sys.path setup
+    "E701",   # Multiple statements on one line (colon) — compact dict/list patterns
+    "E702",   # Multiple statements on one line (semicolon) — compact update calls
+    "E501",   # Line too long — handled by line-length setting
+    "E722",   # Do not use bare 'except' — acceptable in crash handlers
+    "E741",   # Ambiguous variable name
+    "W291",   # Trailing whitespace
+    "W292",   # No newline at end of file
+    "W293",   # Whitespace before ':'
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]

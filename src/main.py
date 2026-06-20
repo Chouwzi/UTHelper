@@ -146,7 +146,6 @@ def main():
             logger.info("Flet compat patched OK")
             
             # Import config first (may fail on Android if keyring is missing)
-            from config import settings
             logger.info("Config loaded OK")
             
             # Import GUI 
@@ -157,7 +156,7 @@ def main():
             app_main(page)
             logger.info("App started successfully")
             
-        except Exception as exc:
+        except Exception:
             error_msg = traceback.format_exc()
             logger.critical("App crashed during startup:\n%s", error_msg)
             try:

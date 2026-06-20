@@ -836,7 +836,7 @@ class SettingsView(ft.Container):
                 self._unsaved_dot.visible = True
             # Force full page repaint
             self._page.update()
-            log.info(f"[THEME] page.update() completed successfully")
+            log.info("[THEME] page.update() completed successfully")
         except Exception as exc:
             log.error(f"[THEME] EXCEPTION in _on_theme_select: {exc}", exc_info=True)
 

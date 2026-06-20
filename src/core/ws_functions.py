@@ -294,7 +294,6 @@ def get_assign_details_via_ws(
 def _fill_course_name(call_api: Callable, course_id: int, details: Dict[str, Any]):
     """Điền tên môn học từ enrolled courses."""
     try:
-        from config import settings
         result = call_api('core_webservice_get_site_info')
         if result and 'userid' in result:
             courses = call_api('core_enrol_get_users_courses', userid=result['userid'])
@@ -641,7 +640,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             cm_id = evt.get('instance', '')
             if not url:
                 course_data = evt.get('course') or {}
-                course_id = course_data.get('id', '') if isinstance(course_data, dict) else ''
+                course_data.get('id', '') if isinstance(course_data, dict) else ''
                 if modulename and cm_id:
                     url = (
                         f"{settings.MOODLE_BASE_URL}/mod/{modulename}"

@@ -121,7 +121,7 @@ class ActivityCard(ft.Container):
         urgency = data.get("urgency", "safe")
         act_type = data.get("type", "other")
         
-        color = get_urgency_color(urgency)
+        get_urgency_color(urgency)
         type_color = get_type_color(act_type)
         type_label = get_type_label(act_type)
         status_label, status_color = get_status_tag(data)
