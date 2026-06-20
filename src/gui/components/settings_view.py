@@ -301,26 +301,87 @@ class SettingsView(ft.Container):
             text_size=13
         )
         
-        # Debug test panel — platform-aware buttons
-        _tray_btn = ft.Button("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
-        _mobile_btn = ft.Button("Mobile", on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
-        _debug_buttons_row1 = ft.Row([
+        # ── Debug panel: Comprehensive test tools ──
+        # Section 1: Notification channel tests (platform-aware)
+        _notif_section_label = ft.Text("Kiểm thử kênh thông báo", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _tray_btn = ft.Button("Windows Tray", icon=ft.Icons.DESKTOP_WINDOWS_ROUNDED, on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
+        _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
+        _notif_buttons = ft.Row([
             *([_tray_btn] if not _IS_MOBILE else [_mobile_btn]),
-            ft.Button("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
-        ], wrap=True)
-        
+            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
+            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
+            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+        ], wrap=True, spacing=6)
+
+        # Section 2: System diagnostics
+        _sys_section_label = ft.Text("Chẩn đoán hệ thống", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_info_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _sys_buttons = ft.Row([
+            ft.Button("Thông tin thiết bị", icon=ft.Icons.INFO_OUTLINE_ROUNDED, on_click=lambda e: self._do_show_device_info(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Kiểm tra kết nối Moodle", icon=ft.Icons.CLOUD_SYNC_ROUNDED, on_click=lambda e: self._do_test_moodle_connection(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        # Section 3: Cache & data management
+        _cache_section_label = ft.Text("Bộ nhớ đệm & dữ liệu", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _cache_buttons = ft.Row([
+            ft.Button("Xóa cache thông báo", icon=ft.Icons.NOTIFICATIONS_OFF_ROUNDED, on_click=lambda e: self._do_clear_notif_cache(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa lịch sử thông báo", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
+        ], wrap=True, spacing=6)
+
+        # Section 4: Background scheduler (Android only)
+        _bg_section_label = ft.Text("Background Scheduler (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _bg_buttons = ft.Row([
+            ft.Button("Start Foreground", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, on_click=lambda e: self._do_start_foreground(), bgcolor=C.SURFACE, color=C.SAFE),
+            ft.Button("Stop Foreground", icon=ft.Icons.STOP_CIRCLE_OUTLINED, on_click=lambda e: self._do_stop_foreground(), bgcolor=C.SURFACE, color=C.CRITICAL),
+            ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        # Section 5: Update checker
+        _update_section_label = ft.Text("Kiểm tra cập nhật", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_update_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _update_buttons = ft.Row([
+            ft.Button("Force check update", icon=ft.Icons.SYSTEM_UPDATE_ROUNDED, on_click=lambda e: self._do_force_check_update(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        # Assemble debug panel with platform-aware sections
+        _debug_sections = [
+            ft.Text("Công cụ gỡ lỗi nâng cao", color=C.CRITICAL, weight=ft.FontWeight.BOLD, size=14),
+            ft.Divider(height=1, color=C.BORDER),
+            # Notification tests
+            _notif_section_label,
+            self._mock_type_drp,
+            _notif_buttons,
+            ft.Divider(height=1, color=C.BORDER),
+            # System diagnostics
+            _sys_section_label,
+            _sys_buttons,
+            self._debug_info_text,
+            ft.Divider(height=1, color=C.BORDER),
+            # Cache management
+            _cache_section_label,
+            _cache_buttons,
+        ]
+
+        # Android-only: background scheduler controls
+        if _IS_MOBILE:
+            _debug_sections.extend([
+                ft.Divider(height=1, color=C.BORDER),
+                _bg_section_label,
+                _bg_buttons,
+            ])
+
+        # Update checker (all platforms)
+        _debug_sections.extend([
+            ft.Divider(height=1, color=C.BORDER),
+            _update_section_label,
+            _update_buttons,
+            self._debug_update_text,
+        ])
+
         self._test_panel = ft.Container(
-            content=ft.Column([
-                ft.Text("Công cụ kiểm thử (Debug / Mock)", color=C.CRITICAL, weight=ft.FontWeight.BOLD),
-                self._mock_type_drp,
-                _debug_buttons_row1,
-                ft.Row([
-                    ft.Button("Discord", on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
-                    ft.Button("Gmail", on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
-                ], wrap=True),
-            ]),
+            content=ft.Column(_debug_sections, spacing=8),
             visible=settings.DEBUG_MODE,
-            padding=10, border=ft.Border.all(1, C.CRITICAL), border_radius=8, margin=ft.Margin.only(top=10)
+            padding=12, border=ft.Border.all(1, C.CRITICAL), border_radius=10, margin=ft.Margin.only(top=10)
         )
         
         self._interval_field = ft.TextField(
@@ -1137,6 +1198,185 @@ class SettingsView(ft.Container):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mail') and self._on_test_mail: self._on_test_mail(t)
 
+    # ── System diagnostics ──
+    def _do_show_device_info(self):
+        """Show device/platform info for debugging."""
+        import sys
+        import platform as pf
+        from platform_utils import IS_ANDROID, IS_IOS, IS_MOBILE, IS_WINDOWS
+        try:
+            import flet as ft_info
+            flet_ver = getattr(ft_info, '__version__', 'unknown')
+        except Exception:
+            flet_ver = 'unknown'
+
+        from config import settings as cfg
+        lines = [
+            f"Python: {sys.version.split()[0]}",
+            f"Platform: {pf.system()} {pf.release()} ({pf.machine()})",
+            f"Flet: {flet_ver}",
+            f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
+            f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
+            f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
+            f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.BACKGROUND_CHECK_INTERVAL}m)",
+            f"DND: {'ON' if cfg.NOTIFY_DND_ENABLE else 'OFF'} ({cfg.NOTIFY_DND_START}h-{cfg.NOTIFY_DND_END}h)",
+        ]
+        self._debug_info_text.value = "\n".join(lines)
+        self._debug_info_text.update()
+
+    def _do_test_moodle_connection(self):
+        """Quick Moodle API connectivity test."""
+        import threading
+        self._debug_info_text.value = "Đang kiểm tra kết nối Moodle..."
+        self._debug_info_text.color = C.TEXT_SECONDARY
+        self._debug_info_text.update()
+
+        def _worker():
+            try:
+                ok = self._orchestrator.client.login(
+                    username=settings.UTH_USERNAME,
+                    password=settings.UTH_PASSWORD,
+                    force=True,
+                )
+                if ok:
+                    token = self._orchestrator.client.token or "?"
+                    masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
+                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {self._orchestrator.client.user_id}"
+                    color = C.SAFE
+                else:
+                    result = "Đăng nhập Moodle thất bại!"
+                    color = C.CRITICAL
+            except Exception as ex:
+                result = f"Lỗi kết nối: {ex}"
+                color = C.CRITICAL
+
+            self._debug_info_text.value = result
+            self._debug_info_text.color = color
+            try:
+                self._debug_info_text.update()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ── Cache management ──
+    def _do_clear_notif_cache(self):
+        """Clear notification milestone cache (forces re-notification)."""
+        try:
+            from config import _USER_DATA_DIR
+            import os
+            cache_path = _USER_DATA_DIR / "notifications_cache.json"
+            if cache_path.exists():
+                os.remove(str(cache_path))
+            self._debug_info_text.value = "Cache thông báo đã xóa. Tất cả milestones sẽ được gửi lại."
+            self._debug_info_text.color = C.SAFE
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi xóa cache: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    def _do_clear_notif_history(self):
+        """Clear notification history log."""
+        try:
+            from core.notification_history import NotificationHistory
+            history = NotificationHistory()
+            count = len(history.get_all())
+            history.clear()
+            self._debug_info_text.value = f"Đã xóa {count} mục lịch sử thông báo."
+            self._debug_info_text.color = C.SAFE
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi xóa lịch sử: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    # ── Background scheduler (Android) ──
+    def _do_start_foreground(self):
+        """Start Android foreground service for persistent background."""
+        async def _start():
+            try:
+                from core.background_scheduler import get_scheduler
+                scheduler = get_scheduler()
+                if not scheduler.is_available:
+                    self._debug_info_text.value = "Background scheduler không khả dụng trên nền tảng này."
+                    self._debug_info_text.color = C.WARNING
+                else:
+                    await scheduler.start_foreground_service()
+                    self._debug_info_text.value = "Foreground service đã khởi động. App sẽ chạy ngầm liên tục."
+                    self._debug_info_text.color = C.SAFE
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi foreground: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_start)
+
+    def _do_stop_foreground(self):
+        """Stop Android foreground service."""
+        async def _stop():
+            try:
+                from core.background_scheduler import get_scheduler
+                scheduler = get_scheduler()
+                await scheduler.stop_foreground_service()
+                self._debug_info_text.value = "Foreground service đã dừng."
+                self._debug_info_text.color = C.TEXT_SECONDARY
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi stop foreground: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_stop)
+
+    def _do_test_immediate_notif(self):
+        """Send an immediate test notification via background scheduler."""
+        async def _send():
+            try:
+                from core.background_scheduler import get_scheduler
+                scheduler = get_scheduler()
+                if not scheduler.is_available:
+                    self._debug_info_text.value = "Scheduler không khả dụng."
+                    self._debug_info_text.color = C.WARNING
+                else:
+                    await scheduler.send_immediate(
+                        title="UTHelper Test",
+                        body="Thông báo test từ Background Scheduler"
+                    )
+                    self._debug_info_text.value = "Đã gửi immediate notification qua scheduler."
+                    self._debug_info_text.color = C.SAFE
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi immediate: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_send)
+
+    # ── Update checker ──
+    def _do_force_check_update(self):
+        """Force check for app updates."""
+        import threading
+        self._debug_update_text.value = "Đang kiểm tra cập nhật..."
+        self._debug_update_text.color = C.TEXT_SECONDARY
+        self._debug_update_text.update()
+
+        def _worker():
+            try:
+                from core.update_checker import check_for_update
+                from gui.app_controller import APP_VERSION
+                has_update, version, url, asset = check_for_update(APP_VERSION)
+                if has_update:
+                    result = f"Phiên bản mới: v{version}\nURL: {url}\nAsset: {asset or 'N/A'}"
+                    color = C.ACCENT
+                else:
+                    result = f"Đang dùng phiên bản mới nhất (v{APP_VERSION})."
+                    color = C.SAFE
+            except Exception as ex:
+                result = f"Lỗi kiểm tra: {ex}"
+                color = C.CRITICAL
+
+            self._debug_update_text.value = result
+            self._debug_update_text.color = color
+            try:
+                self._debug_update_text.update()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def load_current_settings(self):
         for tile in getattr(self, '_tiles', []):
