@@ -1,19 +1,31 @@
 <p align="center">
-  <img src="src/assets/icon.png" alt="UTHelper Logo" width="120" />
+  <img src="src/assets/icon.png" alt="UTHelper Logo" width="140" />
 </p>
 
 <h1 align="center">UTHelper</h1>
 
 <p align="center">
-  <strong>🎓 Ứng dụng theo dõi deadline & bài tập UTH Elearning</strong>
+  <em>🎓 Theo dõi deadline & bài tập UTH Elearning — Không bỏ lỡ bất kỳ deadline nào.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/ci.yml">
+    <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/ci.yml/badge.svg?branch=develop" alt="CI" />
+  </a>
+  <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/build-android.yml">
+    <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/build-android.yml/badge.svg" alt="Android Build" />
+  </a>
+  <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/build-ios.yml">
+    <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/build-ios.yml/badge.svg" alt="iOS Build" />
+  </a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.1.0-blue?style=flat-square" alt="Version" />
-  <img src="https://img.shields.io/badge/python-3.11+-green?style=flat-square&logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/flet-0.82+-purple?style=flat-square" alt="Flet" />
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS-orange?style=flat-square" alt="Platform" />
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/flet-0.82+-7C4DFF?style=flat-square" alt="Flet" />
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS-E8710A?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/github/license/Chouwzi/UTHelper?style=flat-square" alt="License" />
 </p>
 
 ---

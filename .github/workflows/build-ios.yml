@@ -1,84 +1,77 @@
-name: Build iOS IPA
+name: 🍎 Build iOS
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'pyproject.toml'
-      - '.github/workflows/build-ios.yml'
+    tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-ipa:
-    name: Build UTHelper iOS IPA
+  build:
+    name: Build iOS
     runs-on: macos-latest
     timeout-minutes: 45
 
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      - name: Install Flet
+      - name: 📦 Install Flet CLI
         run: |
           pip install flet
           flet --version
 
-      # Flet builds xcarchive (unsigned, no codesign)
-      - name: Build with Flet
+      - name: 🔨 Build IPA (unsigned)
         run: |
-          echo "🔨 Building UTHelper..."
+          echo "Building UTHelper for iOS..."
           yes | flet build ipa --verbose
 
-      # Convert xcarchive to IPA manually
-      - name: Package xcarchive as IPA
+      - name: 📦 Package xcarchive → IPA
         run: |
-          echo "📦 Converting xcarchive to IPA..."
-          
-          # Find the .xcarchive
           XCARCHIVE=$(find build/ -name "*.xcarchive" -type d | head -1)
           if [ -z "$XCARCHIVE" ]; then
             echo "❌ No .xcarchive found"
             find build/ -type d -maxdepth 4 2>/dev/null
             exit 1
           fi
-          echo "Found: $XCARCHIVE"
-          
-          # Find the .app inside xcarchive
-          APP_PATH="$XCARCHIVE/Products/Applications"
-          APP=$(find "$APP_PATH" -name "*.app" -maxdepth 1 | head -1)
+          echo "✅ Found: $XCARCHIVE"
+
+          # Find .app inside xcarchive
+          APP=$(find "$XCARCHIVE/Products/Applications" -name "*.app" -maxdepth 1 | head -1)
           if [ -z "$APP" ]; then
-            echo "❌ No .app found in xcarchive"
-            ls -la "$XCARCHIVE/Products/" 2>/dev/null
+            echo "❌ No .app found"
             exit 1
           fi
-          echo "Found app: $APP"
-          
-          # Create Payload structure and zip as IPA
+          echo "✅ App: $APP"
+
+          # Create IPA from Payload
           mkdir -p output/Payload
           cp -r "$APP" output/Payload/
           cd output
           zip -r -q UTHelper.ipa Payload
-          
-          echo "✅ IPA created!"
-          ls -lh UTHelper.ipa
+          echo "✅ IPA created: $(ls -lh UTHelper.ipa | awk '{print $5}')"
 
-      - name: List all outputs
+      - name: 📋 List outputs
         if: always()
         run: |
           echo "=== xcarchive ==="
           find build/ -name "*.xcarchive" -type d 2>/dev/null
           echo "=== IPA ==="
-          find . -name "*.ipa" 2>/dev/null
-          echo "=== app ==="
-          find build/ -name "*.app" -type d 2>/dev/null | head -5
+          find . -name "*.ipa" -exec ls -lh {} \; 2>/dev/null
 
-      - name: Upload IPA
+      - name: 📤 Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: UTHelper-iOS-${{ github.sha }}
@@ -86,11 +79,18 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # Also upload xcarchive for Xcode re-signing
-      - name: Upload xcarchive
+      - name: 📤 Upload xcarchive
         uses: actions/upload-artifact@v4
         with:
           name: UTHelper-xcarchive-${{ github.sha }}
           path: build/ipa/
           retention-days: 30
           if-no-files-found: warn
+
+      - name: 🏷️ Release IPA
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/UTHelper.ipa
+          draft: true
+          generate_release_notes: true
