@@ -417,6 +417,7 @@ class AppController:
             on_close=lambda: self.page.run_task(self._close_settings),
             on_saved=self._on_settings_saved,
             on_test_tray=self._on_test_tray,
+            on_test_mobile=self._on_test_mobile,
             on_test_tele=self._on_test_tele,
             on_test_discord=self._on_test_discord,
             on_test_mail=self._on_test_mail,
@@ -1202,6 +1203,11 @@ class AppController:
         dummy = self._test_notification_base(mock_type)
         from notifiers.windows import WindowsNotifier
         WindowsNotifier().notify([dummy])
+
+    def _on_test_mobile(self, mock_type="critical"):
+        dummy = self._test_notification_base(mock_type)
+        from notifiers.mobile import MobileNotifier
+        MobileNotifier().notify([dummy])
 
     def _on_test_tele(self, mock_type="critical"):
         dummy = self._test_notification_base(mock_type)

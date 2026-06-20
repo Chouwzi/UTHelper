@@ -6,13 +6,14 @@ from config import save_settings
 from platform_utils import IS_MOBILE as _IS_MOBILE
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
         super().__init__()
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
         self._on_saved = on_saved
         self._on_test_tray = on_test_tray
+        self._on_test_mobile = on_test_mobile
         self._on_test_tele = on_test_tele
         self._on_test_discord = on_test_discord
         self._on_test_mail = on_test_mail
@@ -300,10 +301,11 @@ class SettingsView(ft.Container):
             text_size=13
         )
         
-        # Debug test panel — hide Windows-only buttons on mobile
+        # Debug test panel — platform-aware buttons
         _tray_btn = ft.Button("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
+        _mobile_btn = ft.Button("Mobile", on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
         _debug_buttons_row1 = ft.Row([
-            *([_tray_btn] if not _IS_MOBILE else []),
+            *([_tray_btn] if not _IS_MOBILE else [_mobile_btn]),
             ft.Button("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
         ], wrap=True)
         
@@ -1118,6 +1120,10 @@ class SettingsView(ft.Container):
     def _do_test_tray(self):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if self._on_test_tray: self._on_test_tray(t)
+
+    def _do_test_mobile(self):
+        t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
+        if hasattr(self, '_on_test_mobile') and self._on_test_mobile: self._on_test_mobile(t)
 
     def _do_test_tele(self):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
