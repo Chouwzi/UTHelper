@@ -147,7 +147,7 @@ class TelegramNotifier(BaseNotifier):
         url_escaped = html.escape(str(url), quote=True) if url else ""
 
         # Build block
-        block = f"━━━━━━━━━━━━━━━━━\n"
+        block = "━━━━━━━━━━━━━━━━━\n"
         block += f"{urg_emoji} <b>{title}</b>\n"
         block += f"📚 {course} · {type_emoji} {type_label}\n"
         block += f"⏰ Hạn: <u>{deadline_str}</u> · {remaining}\n"
