@@ -114,6 +114,10 @@ class AppController:
         self.page.padding             = 0
         self.page.spacing             = 0
         self.page.theme_mode          = ft.ThemeMode.DARK
+
+        # Sync Flet's page.theme ColorScheme with our C values
+        from gui.core.theme import set_page_theme
+        set_page_theme(self.page)
         
         # ── Tray & Notifications (platform-aware) ──
         if _is_windows:
@@ -404,7 +408,8 @@ class AppController:
             on_test_tray=self._on_test_tray,
             on_test_tele=self._on_test_tele,
             on_test_discord=self._on_test_discord,
-            on_test_mail=self._on_test_mail
+            on_test_mail=self._on_test_mail,
+            on_theme_preview=self._rebuild_colors,
         )
 
         # UX: Slide-in transitions for views
@@ -990,9 +995,98 @@ class AppController:
         self.settings_view.opacity = 1.0
         self.page.update()
 
+    def _rebuild_colors(self):
+        """Repaint ALL existing controls with current C values for live theme switching.
+
+        Because controls store hardcoded color strings at init time,
+        we must explicitly reassign every color property when the theme changes.
+        """
+        from gui.core.theme import C as _C, _TYPE_COLORS
+
+        # ── Page ──
+        self.page.bgcolor = _C.BG
+
+        # ── Header ──
+        header = self.dashboard.controls[0]  # ft.Container
+        header.bgcolor = _C.BG
+        # Walk header children: title text, version badge, status text
+        try:
+            header_col = header.content  # ft.Column
+            title_row = header_col.controls[0]  # ft.Row
+            left_row = title_row.controls[0]  # ft.Row with title + version
+            # "UTHelper" text
+            left_row.controls[0].color = _C.TEXT_PRIMARY
+            # Version badge container
+            ver_badge = left_row.controls[1]
+            ver_badge.content.color = _C.TEXT_SECONDARY
+            ver_badge.border = ft.Border.all(1, _C.BORDER)
+        except (IndexError, AttributeError):
+            pass
+
+        # Status text
+        self.status_text.color = _C.TEXT_SECONDARY
+
+        # ── Filter area ──
+        filter_container = self.dashboard.controls[2]
+        filter_container.bgcolor = _C.BG
+        self.search_field.bgcolor = _C.SURFACE
+        self.search_field.border_color = _C.BORDER
+        self.search_field.focused_border_color = _C.ACCENT
+        self.search_field.color = _C.TEXT_PRIMARY
+
+        # ── Empty state ──
+        if hasattr(self, '_empty_icon'):
+            self._empty_icon.color = _C.BORDER
+        if hasattr(self, '_empty_title'):
+            self._empty_title.color = _C.TEXT_SECONDARY
+        if hasattr(self, '_empty_subtitle'):
+            self._empty_subtitle.color = _C.BORDER
+
+        # ── Footer ──
+        footer = self.dashboard.controls[-1]
+        footer.bgcolor = _C.SURFACE
+        footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
+        # Footer counter colors are set dynamically by _refresh_counts,
+        # but update the base colors here too
+        self.footer_critical.color = _C.CRITICAL if self.footer_critical.value else _C.BORDER
+        self.footer_warning.color = _C.WARNING if self.footer_warning.value else _C.BORDER
+        self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
+        self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
+
+        # ── Cards ── Re-color all existing recycled cards
+        if hasattr(self, '_reusable_cards'):
+            for card in self._reusable_cards:
+                card.bgcolor = _C.SURFACE
+                if hasattr(card, '_title_text'):
+                    card._title_text.color = _C.TEXT_PRIMARY
+                if hasattr(card, '_course_text'):
+                    card._course_text.color = _C.ACCENT
+                if hasattr(card, '_deadline_text'):
+                    card._deadline_text.color = _C.TEXT_SECONDARY
+                if hasattr(card, '_progress_ctrl'):
+                    card._progress_ctrl.bgcolor = _C.BORDER
+
+        # ── Icon buttons ──
+        for btn in (self.calendar_btn, self.refresh_btn, self.settings_btn):
+            btn.icon_color = _C.TEXT_SECONDARY
+
+        # ── Loading bar ──
+        self.loading_bar.color = _C.ACCENT
+        self.loading_bar.bgcolor = _C.BORDER
+
+        # ── Settings view bgcolor ──
+        self.settings_view.bgcolor = _C.BG
+
+        self.page.update()
+
+
     async def _close_settings(self):
-        from gui.core.theme import load_theme_from_settings
+        from gui.core.theme import load_theme_from_settings, set_page_theme
         load_theme_from_settings()
+        set_page_theme(self.page)
+
+        # Rebuild all colors from the saved theme
+        self._rebuild_colors()
 
         # Recalculate urgency dynamically using new settings thresholds
         from datetime import datetime
@@ -1132,6 +1226,10 @@ class AppController:
             await ft.UrlLauncher().launch_url(self._update_url)
 
     def _on_settings_saved(self):
+        from gui.core.theme import load_theme_from_settings, set_page_theme
+        load_theme_from_settings()
+        set_page_theme(self.page)
+        self._rebuild_colors()
         self._needs_reload = True
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _show_detail(self, data: dict):

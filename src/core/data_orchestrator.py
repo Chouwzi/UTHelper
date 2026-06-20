@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
 from config import settings
+from models import Assignment
 from core.time_utils import parse_datetime
 from core import ws_functions
 

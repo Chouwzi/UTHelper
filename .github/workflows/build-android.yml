@@ -1,57 +1,80 @@
-name: Build Android APK
+name: 📱 Build Android APK
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'pyproject.toml'
-      - '.github/workflows/build-android.yml'
+    tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'apk'
+        type: choice
+        options: [apk, aab]
+
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-apk:
-    name: Build UTHelper Android APK
+  build:
+    name: Build Android
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
 
-      - name: Setup Java
+      - name: ☕ Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # Don't install Flutter separately - Flet manages its own SDK
-      - name: Install Flet
+      - name: 📦 Install Flet CLI
         run: |
           pip install flet
           flet --version
 
-      - name: Build APK
+      - name: 🔨 Build APK
         run: |
-          echo "🔨 Building UTHelper APK..."
-          yes | flet build apk --verbose
+          BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
+          echo "Building $BUILD_TYPE..."
+          yes | flet build $BUILD_TYPE --verbose
 
-      - name: List build output
+      - name: 📋 List build outputs
         if: always()
         run: |
-          echo "📦 Build artifacts:"
-          find . -name "*.apk" 2>/dev/null | head -10
-          ls -la build/apk/ 2>/dev/null || echo "No build/apk/"
+          echo "=== APK ==="
+          find build/ -name "*.apk" -exec ls -lh {} \; 2>/dev/null
+          echo "=== AAB ==="
+          find build/ -name "*.aab" -exec ls -lh {} \; 2>/dev/null
 
-      - name: Upload APK
+      - name: 📤 Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: UTHelper-Android-${{ github.sha }}
-          path: build/apk/
+          path: |
+            build/apk/*.apk
+            build/aab/*.aab
           retention-days: 30
           if-no-files-found: warn
+
+      - name: 🏷️ Release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/apk/*.apk
+          draft: true
+          generate_release_notes: true
