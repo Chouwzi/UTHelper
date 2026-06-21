@@ -86,8 +86,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-logging.getLogger("flet_core").setLevel(logging.INFO)
-logging.getLogger("flet").setLevel(logging.INFO)
+logging.getLogger("flet_core").setLevel(logging.WARNING)
+logging.getLogger("flet").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)

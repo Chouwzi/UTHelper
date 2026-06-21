@@ -517,7 +517,6 @@ class SettingsView(ft.Container):
                 fill_color={ft.ControlState.SELECTED: C.ACCENT},
                 check_color=C.BG,
                 label_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-                on_change=lambda e: self._check_unsaved(),
             )
         self._notify_types_row = ft.Row(
             controls=list(self._notify_type_checks.values()),
