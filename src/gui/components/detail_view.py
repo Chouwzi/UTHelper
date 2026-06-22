@@ -948,7 +948,8 @@ class DetailView(ft.Container):
         """Thực hiện upload + submit đồng bộ (chạy trong thread)."""
         from core.ws_functions import (
             resolve_cmid_to_assign_id,
-            save_assignment_submission,
+            save_and_submit,
+            check_needs_submit,
         )
 
         # 1. Extract cmid từ URL
@@ -1005,8 +1006,9 @@ class DetailView(ft.Container):
             logger.error("Không có file nào được upload thành công")
             return False
 
-        # 5. Save submission
-        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        # 5. Save submission + auto-submit for grading
+        needs_submit = check_needs_submit(client.call_ws_api, assign_id, course_id)
+        return save_and_submit(client.call_ws_api, assign_id, draft_itemid, needs_submit)
 
     def _show_upload_status(self, text: str, color: str):
         """Hiện thông báo trạng thái upload."""
@@ -1202,7 +1204,7 @@ class DetailView(ft.Container):
     def _do_remove_file_sync(self, client, url: str, course_id: int,
                              files_to_keep: list) -> bool:
         """Re-upload các file cần giữ rồi re-submit (chạy trong thread)."""
-        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission
+        from core.ws_functions import resolve_cmid_to_assign_id, save_and_submit, check_needs_submit
 
         cmid = None
         if "id=" in url:
@@ -1252,7 +1254,9 @@ class DetailView(ft.Container):
                     return False
                 draft_itemid = result_id
 
-        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        # Save + auto-submit for grading
+        needs_submit = check_needs_submit(client.call_ws_api, assign_id, course_id)
+        return save_and_submit(client.call_ws_api, assign_id, draft_itemid, needs_submit)
 
     async def _on_edit_submitted(self, e):
         """Mở trình duyệt để chỉnh sửa bài nộp."""
@@ -1498,7 +1502,7 @@ class DetailView(ft.Container):
         2. Upload lại vào draft area mới, file target dùng tên/metadata mới
         3. mod_assign_save_submission
         """
-        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission
+        from core.ws_functions import resolve_cmid_to_assign_id, save_and_submit, check_needs_submit
 
         cmid = None
         if "id=" in url:
@@ -1542,4 +1546,6 @@ class DetailView(ft.Container):
                 return False
             draft_itemid = result_id
 
-        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        # Save + auto-submit for grading
+        needs_submit = check_needs_submit(client.call_ws_api, assign_id, course_id)
+        return save_and_submit(client.call_ws_api, assign_id, draft_itemid, needs_submit)

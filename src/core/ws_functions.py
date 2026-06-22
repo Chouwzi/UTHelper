@@ -572,6 +572,107 @@ def save_assignment_submission(
     logger.info("Nộp bài response (assign_id=%d): %s", assign_id, result)
     return True
 
+# ---------------------------------------------------------------------------
+# Submit for Grading (after save_submission)
+# ---------------------------------------------------------------------------
+
+def submit_for_grading(
+    call_api: Callable,
+    assign_id: int,
+) -> bool:
+    """mod_assign_submit_for_grading — chính thức nộp bài sau khi save draft.
+
+    Bắt buộc gọi sau save_assignment_submission khi assignment có
+    submissiondrafts=1. Nếu không gọi, bài nộp chỉ ở trạng thái 'draft'
+    và GV sẽ KHÔNG thấy.
+
+    Args:
+        call_api: WS API caller.
+        assign_id: Assignment ID thật (KHÔNG phải cmid).
+
+    Returns:
+        True nếu submit thành công, False nếu lỗi.
+    """
+    try:
+        result = call_api(
+            'mod_assign_submit_for_grading',
+            assignmentid=assign_id,
+            acceptsubmissionstatement=1,
+        )
+    except Exception as e:
+        logger.error("Submit for grading failed (assign_id=%d): %s", assign_id, e)
+        return False
+
+    # Thành công trả về [] (empty list) hoặc dict không có warnings
+    if isinstance(result, list) and len(result) == 0:
+        logger.info("Submit for grading OK (assign_id=%d)", assign_id)
+        return True
+
+    if isinstance(result, dict):
+        warnings = result.get('warnings', [])
+        if warnings:
+            for w in warnings:
+                logger.warning("Submit for grading warning: %s", w.get('message', w))
+            return False
+        return True
+
+    logger.info("Submit for grading response (assign_id=%d): %s", assign_id, result)
+    return True
+
+
+def save_and_submit(
+    call_api: Callable,
+    assign_id: int,
+    draft_itemid: int,
+    needs_submit: bool = True,
+) -> bool:
+    """Save submission rồi auto-submit for grading nếu cần.
+
+    Đây là hàm nên dùng thay save_assignment_submission trực tiếp.
+
+    Args:
+        call_api: WS API caller.
+        assign_id: Assignment ID thật.
+        draft_itemid: Draft area itemid từ upload_file_to_draft().
+        needs_submit: True để tự động gọi submit_for_grading sau save.
+            Set False nếu assignment KHÔNG bật submissiondrafts.
+
+    Returns:
+        True nếu save (và submit nếu cần) đều thành công.
+    """
+    if not save_assignment_submission(call_api, assign_id, draft_itemid):
+        return False
+
+    if needs_submit:
+        return submit_for_grading(call_api, assign_id)
+
+    return True
+
+
+def check_needs_submit(
+    call_api: Callable,
+    assign_id: int,
+    course_id: int,
+) -> bool:
+    """Kiểm tra assignment có yêu cầu submit_for_grading hay không.
+
+    Trả về True nếu assignment bật submissiondrafts=1 (chế độ draft,
+    cần submit thủ công), hoặc True by default khi không xác định được
+    (an toàn hơn là luôn submit).
+    """
+    courses = get_assignments(call_api, course_ids=[course_id])
+    if not courses:
+        return True  # Default: submit cho an toàn
+
+    for course in courses:
+        for assign in course.get('assignments', []):
+            if assign.get('id') == assign_id:
+                # submissiondrafts=1 → cần submit_for_grading
+                # submissiondrafts=0 → save_submission đã đủ (auto-submit)
+                return bool(assign.get('submissiondrafts', 1))
+
+    return True  # Không tìm thấy → submit cho an toàn
+
 
 # ---------------------------------------------------------------------------
 # Event → Assignment converter
