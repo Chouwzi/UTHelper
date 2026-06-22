@@ -230,6 +230,105 @@ def get_quiz_attempts(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Grade Report wrappers
+# ---------------------------------------------------------------------------
+
+def get_grade_items(
+    call_api: Callable,
+    course_id: int,
+    user_id: Optional[int] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """gradereport_user_get_grade_items — điểm chi tiết từng thành phần (CC, KT, GK, CK).
+
+    Returns:
+        List of grade item dicts. Mỗi item có: itemname, graderaw,
+        gradeformatted, grademax, percentageformatted, ...
+    """
+    params: Dict[str, Any] = {'courseid': course_id}
+    if user_id is not None:
+        params['userid'] = user_id
+
+    try:
+        result = call_api('gradereport_user_get_grade_items', **params)
+    except Exception as e:
+        logger.error("Lỗi khi gọi gradereport_user_get_grade_items: %s", e)
+        return None
+
+    if result and isinstance(result, dict):
+        user_grades = result.get('usergrades', [])
+        if user_grades and isinstance(user_grades, list):
+            return user_grades[0].get('gradeitems', [])
+    return None
+
+
+def get_course_grades(
+    call_api: Callable,
+    user_id: Optional[int] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """gradereport_overview_get_course_grades — điểm tổng kết tất cả môn.
+
+    Trả về list dict: courseid, grade (string), rawgrade (float), rank.
+    """
+    params: Dict[str, Any] = {}
+    if user_id is not None:
+        params['userid'] = user_id
+
+    try:
+        result = call_api('gradereport_overview_get_course_grades', **params)
+    except Exception as e:
+        logger.error("Lỗi khi gọi gradereport_overview_get_course_grades: %s", e)
+        return None
+
+    if result and isinstance(result, dict) and 'grades' in result:
+        return result['grades']
+    return None
+
+
+def get_completion_status(
+    call_api: Callable,
+    course_id: int,
+    user_id: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """core_completion_get_activities_completion_status — tiến độ hoàn thành.
+
+    Mỗi item: cmid, modname, state (0=incomplete, 1=complete, 2=pass, 3=fail).
+    """
+    try:
+        result = call_api(
+            'core_completion_get_activities_completion_status',
+            courseid=course_id, userid=user_id,
+        )
+    except Exception as e:
+        logger.error("Lỗi khi gọi get_activities_completion_status: %s", e)
+        return None
+
+    if result and isinstance(result, dict) and 'statuses' in result:
+        return result['statuses']
+    return None
+
+
+def get_unread_notification_count(
+    call_api: Callable,
+    user_id: int,
+) -> int:
+    """message_popup_get_unread_popup_notification_count — số thông báo chưa đọc."""
+    try:
+        result = call_api(
+            'message_popup_get_unread_popup_notification_count',
+            useridto=user_id,
+        )
+    except Exception as e:
+        logger.debug("get_unread_notification_count failed: %s", e)
+        return 0
+
+    if isinstance(result, int):
+        return result
+    if isinstance(result, dict):
+        return result.get('count', 0)
+    return 0
+
+
 def resolve_cmid_to_assign_id(
     call_api: Callable,
     cmid: int,
