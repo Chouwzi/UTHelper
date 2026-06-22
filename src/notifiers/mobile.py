@@ -10,7 +10,6 @@ On iOS:
   - Falls back to logging.
 """
 import logging
-from typing import List
 from notifiers.base import BaseNotifier
 from platform_utils import IS_ANDROID
 from core.display_utils import clean_course_name

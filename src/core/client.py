@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -39,9 +40,21 @@ class MoodleClient:
     Chạy trên Desktop, iOS, Android mà không cần cài thêm gì.
     """
     
+    # ── Client-side rate limiting (Moodle has NO server-side throttle) ──
+    _MIN_INTERVAL = 0.2  # 200ms = max 5 req/s
+
     def __init__(self):
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
+        self._last_call_time: float = 0.0  # monotonic timestamp
+
+    def _throttle(self):
+        """Ensure minimum interval between API calls."""
+        now = time.monotonic()
+        elapsed = now - self._last_call_time
+        if elapsed < self._MIN_INTERVAL:
+            time.sleep(self._MIN_INTERVAL - elapsed)
+        self._last_call_time = time.monotonic()
 
     def close(self):
         """Không cần cleanup — urllib không dùng connection pool."""
@@ -57,6 +70,7 @@ class MoodleClient:
         req.add_header('Accept', 'application/json, */*')
         req.add_header('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8')
         
+        self._throttle()
         resp = _urlopen(req, timeout=timeout)
         body = resp.read()
         try:
@@ -72,6 +86,7 @@ class MoodleClient:
         req.add_header('Content-Type', 'application/json')
         req.add_header('Accept', 'application/json')
         
+        self._throttle()
         resp = _urlopen(req, timeout=timeout)
         resp_body = resp.read()
         try:
