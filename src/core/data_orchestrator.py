@@ -26,6 +26,11 @@ class DataOrchestrator:
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
         self._detail_lock = threading.Lock()
+        
+        # Session-level cache for site_info + enrolled_courses (avoid redundant API calls)
+        self._userid: Optional[int] = None
+        self._enrolled_courses: Optional[list] = None
+        self._courses_cache_lock = threading.Lock()
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -74,6 +79,57 @@ class DataOrchestrator:
         if self.is_logged_in:
             logger.info("Đăng nhập WS token thành công.")
         return self.is_logged_in
+
+    def get_userid(self) -> Optional[int]:
+        """Lấy userid, cache sau lần đầu."""
+        if self._userid is not None:
+            return self._userid
+        with self._courses_cache_lock:
+            if self._userid is not None:
+                return self._userid
+            try:
+                site_info = self.client.call_ws_api('core_webservice_get_site_info')
+                if site_info and isinstance(site_info, dict):
+                    self._userid = site_info.get('userid')
+            except Exception as e:
+                logger.debug("get_userid failed: %s", e)
+        return self._userid
+
+    def get_enrolled_courses(self) -> list:
+        """Lấy enrolled courses, cache sau lần đầu."""
+        if self._enrolled_courses is not None:
+            return self._enrolled_courses
+        with self._courses_cache_lock:
+            if self._enrolled_courses is not None:
+                return self._enrolled_courses
+            userid = self.get_userid()
+            if not userid:
+                return []
+            try:
+                result = self.client.call_ws_api(
+                    'core_enrol_get_users_courses', userid=userid
+                )
+                if isinstance(result, list):
+                    self._enrolled_courses = result
+                else:
+                    self._enrolled_courses = []
+            except Exception as e:
+                logger.debug("get_enrolled_courses failed: %s", e)
+                self._enrolled_courses = []
+        return self._enrolled_courses
+
+    def get_course_name(self, course_id: int) -> str:
+        """Lấy tên môn từ cache, không gọi API thêm."""
+        for c in self.get_enrolled_courses():
+            if c.get('id') == course_id:
+                return c.get('fullname', '')
+        return ''
+
+    def invalidate_session_cache(self):
+        """Reset session cache khi re-login hoặc token hết hạn."""
+        with self._courses_cache_lock:
+            self._userid = None
+            self._enrolled_courses = None
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
         """Đăng nhập và lấy danh sách hoạt động mới nhất qua WS API."""
@@ -183,21 +239,9 @@ class DataOrchestrator:
         future_month = ((future_month - 1) % 12) + 1
         max_ts = int(datetime(future_year, future_month, 1).timestamp())
         
-        # Lấy userid + tất cả enrolled courses
-        try:
-            site_info = self.client.call_ws_api('core_webservice_get_site_info')
-            if not site_info or not isinstance(site_info, dict):
-                return calendar_results
-            userid = site_info.get('userid')
-            if not userid:
-                return calendar_results
-            
-            courses_result = self.client.call_ws_api(
-                'core_enrol_get_users_courses', userid=userid
-            )
-            if not courses_result or not isinstance(courses_result, list):
-                return calendar_results
-        except Exception:
+        # Lấy userid + tất cả enrolled courses (session-cached)
+        courses_result = self.get_enrolled_courses()
+        if not courses_result:
             return calendar_results
         
         course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
