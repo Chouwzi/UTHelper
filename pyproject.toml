@@ -17,6 +17,7 @@ dependencies = [
     "flet>=0.82.0",
     "python-dateutil>=2.8.2",
     "flet-android-notifications>=0.4.0; sys_platform != 'win32'",
+    "flet-notifications>=0.1.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

@@ -41,9 +41,9 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 📦 Install Flet CLI
+      - name: 📦 Install Flet CLI & Notification Extension
         run: |
-          pip install flet
+          pip install flet flet-android-notifications
           flet --version
 
       - name: 🔨 Build APK
@@ -51,6 +51,11 @@ jobs:
           BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
           echo "Building $BUILD_TYPE..."
           yes | flet build $BUILD_TYPE --verbose
+
+      - name: 🔔 Patch Android Notifications
+        run: |
+          echo "Patching notification receivers, Gradle desugaring, multidex..."
+          flet-android-notifications-patch --project-root build/flutter
 
       - name: 📋 List build outputs
         if: always()
