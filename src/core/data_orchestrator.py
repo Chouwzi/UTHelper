@@ -286,8 +286,15 @@ class DataOrchestrator:
                 
                 deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
                 remaining = duedate - now_ts
+                
+                # Cutoff date: sau ngày này không thể nộp bài
+                cutoffdate = assign.get('cutoffdate', 0)
+                
                 if remaining < 0:
-                    urgency = 'overdue'
+                    if cutoffdate and cutoffdate > 0 and now_ts > cutoffdate:
+                        urgency = 'closed'  # Quá hạn + hết thời gian nộp
+                    else:
+                        urgency = 'overdue'  # Quá hạn nhưng vẫn nộp được
                 elif remaining < 86400:
                     urgency = 'critical'
                 elif remaining < 3 * 86400:
@@ -295,7 +302,7 @@ class DataOrchestrator:
                 else:
                     urgency = 'safe'
                 
-                calendar_results.append({
+                result_item = {
                     'id': f"assign_{assign.get('id', cmid)}",
                     'title': assign.get('name', 'Không tên'),
                     'course_name': course_name,
@@ -310,7 +317,14 @@ class DataOrchestrator:
                     'submission_status': 'unknown',
                     'details': {},
                     'is_open': False,
-                })
+                }
+                
+                # Thêm cutoff date nếu có (để UI hiện cảnh báo)
+                if cutoffdate and cutoffdate > 0:
+                    result_item['cutoff_date'] = datetime.fromtimestamp(cutoffdate).strftime('%d/%m/%Y %H:%M')
+                    result_item['can_submit'] = now_ts <= cutoffdate
+                
+                calendar_results.append(result_item)
                 merged_count += 1
         
         if merged_count > 0:
