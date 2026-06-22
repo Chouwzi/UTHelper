@@ -473,30 +473,104 @@ class SettingsView(ft.Container):
             bgcolor=C.BG, border_radius=10,
         )
 
-        # Thêm nhóm tính năng báo thức (UTHelper Phase 3)
+        # ── Notification Profile Presets ──
+        _PROFILES = {
+            "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
+            "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
+            "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [72, 24, 6, 1], "dnd": False, "dnd_start": 22, "dnd_end": 7, "min_before": 15},
+        }
+        self._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
+        self._profile_cards = {}
+        self._profile_summary = ft.Text("", size=12, color=C.TEXT_SECONDARY, italic=True)
+
+        def _on_profile_select(profile_key):
+            def handler(e):
+                self._current_profile = profile_key
+                prof = _PROFILES[profile_key]
+                # Auto-apply profile settings
+                self._sw_dnd_enable.value = prof["dnd"]
+                self._dnd_start_field.value = str(prof["dnd_start"])
+                self._dnd_end_field.value = str(prof["dnd_end"])
+                self._notify_min_field.value = str(prof["min_before"])
+                # Update milestone chips
+                for h, chip in self._milestone_chips.items():
+                    chip.selected = h in prof["milestones"]
+                self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
+                # Update card styles
+                for k, card in self._profile_cards.items():
+                    is_sel = (k == profile_key)
+                    card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+                    card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+                self._update_profile_summary()
+                self._update_dnd_summary()
+                self.update()
+            return handler
+
+        for pkey, pval in _PROFILES.items():
+            is_sel = (pkey == self._current_profile)
+            card = ft.Container(
+                content=ft.Column([
+                    ft.Icon(pval["icon"], size=24, color=C.ACCENT if is_sel else C.TEXT_SECONDARY),
+                    ft.Text(pval["label"], size=13, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER),
+                    ft.Text(pval["desc"], size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER),
+                ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                width=110, padding=12, border_radius=12,
+                bgcolor=C.ACCENT + "15" if is_sel else C.SURFACE,
+                border=ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER),
+                on_click=_on_profile_select(pkey),
+                ink=True,
+            )
+            self._profile_cards[pkey] = card
+
+        self._profile_row = ft.Row(
+            controls=list(self._profile_cards.values()),
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+        )
+
+        # ── DND (Không làm phiền) — Visual Time Cards ──
         self._sw_dnd_enable = ft.Switch(
             value=getattr(settings, 'NOTIFY_DND_ENABLE', False), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Kích hoạt chế độ Không làm phiền (DND)"
+            label="Không làm phiền",
+            on_change=lambda e: self._update_dnd_summary()
         )
         self._dnd_start_field = ft.TextField(
-            value=str(getattr(settings, 'NOTIFY_DND_START', 23)),
-            label="Bắt đầu im lặng (giờ)",
+            value=str(getattr(settings, 'NOTIFY_DND_START', 22)),
+            label="Từ (giờ)",
             keyboard_type=ft.KeyboardType.NUMBER,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            width=100, text_align=ft.TextAlign.CENTER,
+            prefix_icon=ft.Icons.DARK_MODE_OUTLINED,
+            on_change=lambda e: self._update_dnd_summary()
         )
         self._dnd_end_field = ft.TextField(
-            value=str(getattr(settings, 'NOTIFY_DND_END', 6)),
-            label="Kết thúc im lặng (giờ)",
+            value=str(getattr(settings, 'NOTIFY_DND_END', 7)),
+            label="Đến (giờ)",
             keyboard_type=ft.KeyboardType.NUMBER,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            width=100, text_align=ft.TextAlign.CENTER,
+            prefix_icon=ft.Icons.LIGHT_MODE_OUTLINED,
+            on_change=lambda e: self._update_dnd_summary()
         )
+        self._dnd_summary = ft.Text("", size=12, color=C.TEXT_SECONDARY, italic=True)
+        self._dnd_time_row = ft.Row(
+            controls=[
+                self._dnd_start_field,
+                ft.Text("—", size=16, color=C.TEXT_SECONDARY, weight=ft.FontWeight.BOLD),
+                self._dnd_end_field,
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=8,
+        )
+
+        # ── Bỏ qua bài đã nộp ──
         self._sw_ignore_sub = ft.Switch(
             value=getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Bỏ qua bài tập đã nộp/chấm điểm"
+            label="Bỏ qua bài đã nộp"
         )
 
         # ── NOTIFY_TYPES: checkboxes cho từng loại hoạt động ──
@@ -525,11 +599,53 @@ class SettingsView(ft.Container):
             run_spacing=0,
         )
 
+        # ── Milestone Chips (thay thế TextField raw) ──
+        _current_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
+        self._milestone_chips = {}
+        _milestone_options = [
+            (168, "1 tuần"),
+            (72, "3 ngày"),
+            (24, "1 ngày"),
+            (6, "6 giờ"),
+            (3, "3 giờ"),
+            (1, "1 giờ"),
+        ]
+
+        def _on_milestone_toggle(hours):
+            def handler(e):
+                chip = self._milestone_chips[hours]
+                chip.selected = not chip.selected
+                # Sync to hidden field
+                active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
+                self._milestones_field.value = ", ".join(str(h) for h in active)
+                self._milestone_summary.value = f"Bạn sẽ nhận {len(active)} lần nhắc cho mỗi deadline" if active else "Không có mốc nhắc nhở nào"
+                self.update()
+            return handler
+
+        for hours, label in _milestone_options:
+            self._milestone_chips[hours] = ft.Chip(
+                label=ft.Text(label, size=12),
+                selected=(hours in _current_milestones),
+                show_checkmark=True,
+                selected_color=C.ACCENT,
+                bgcolor=C.SURFACE,
+                on_select=_on_milestone_toggle(hours),
+            )
+        self._milestone_chips_row = ft.Row(
+            controls=list(self._milestone_chips.values()),
+            wrap=True,
+            spacing=6,
+            run_spacing=4,
+        )
+        _active_count = sum(1 for h in _current_milestones if h in self._milestone_chips)
+        self._milestone_summary = ft.Text(
+            f"Bạn sẽ nhận {_active_count} lần nhắc cho mỗi deadline" if _active_count else "Không có mốc nhắc nhở nào",
+            size=12, color=C.TEXT_SECONDARY, italic=True
+        )
+        # Hidden field to store raw milestone values (for save compatibility)
         self._milestones_field = ft.TextField(
-            value=", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3]))),
-            label="Số giờ nhắc nhở (VD: 72, 24, 3)",
-            border_color=C.BORDER, focused_border_color=C.ACCENT,
-            color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            value=", ".join(map(str, _current_milestones)),
+            visible=False,
         )
         
         self._muted_courses_list = ft.Column(spacing=2)
@@ -754,30 +870,43 @@ class SettingsView(ft.Container):
                     icon=ft.Icons.PALETTE_OUTLINED,
                 ),
                 _setting_group(
-                    "Cảnh báo thông minh",
-                    "Tùy chỉnh đối tượng và thời gian",
+                    "Thông báo",
+                    "Chế độ và thời gian nhắc nhở",
                     [
+                        self._make_themed_label("Chế độ thông báo"),
+                        self._profile_row,
+                        self._profile_summary,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._sw_dnd_enable,
+                        self._dnd_time_row,
+                        self._dnd_summary,
+                        ft.Divider(height=10, color=C.BORDER),
                         self._sw_ignore_sub,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Loại hoạt động nhận thông báo"),
-                        self._notify_types_row,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Các mốc nhắc nhở (giờ)"),
+                    ],
+                    icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                    default_open=True,
+                ),
+                _setting_group(
+                    "Tùy chỉnh nâng cao",
+                    "Mốc nhắc, loại bài, tắt theo môn",
+                    [
+                        self._make_themed_label("Nhắc trước deadline"),
+                        self._milestone_chips_row,
+                        self._milestone_summary,
                         self._milestones_field,
                         ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Không làm phiền (Im lặng)"),
-                        self._sw_dnd_enable,
-                        self._dnd_start_field,
-                        self._dnd_end_field,
+                        self._make_themed_label("Nhắc phút cuối"),
+                        self._notify_min_field,
+                        _hint("Gửi thêm 1 lần nhắc khi chỉ còn X phút. Đặt 0 để tắt."),
                         ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Bỏ qua môn học"),
+                        self._make_themed_label("Loại hoạt động"),
+                        self._notify_types_row,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._make_themed_label("Tắt thông báo theo môn"),
                         self._muted_courses_drp,
                         self._muted_courses_field,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Thông báo nhắc nhở cơ bản"),
-                        self._notify_min_field,
                     ],
-                    icon=ft.Icons.SMART_TOY_OUTLINED,
+                    icon=ft.Icons.TUNE_OUTLINED,
                 ),
 
                 _setting_group(
@@ -856,6 +985,39 @@ class SettingsView(ft.Container):
         t = ft.Text(text, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13)
         self._themed_texts.append(t)
         return t
+
+    # ── Notification Profile & DND Summary Helpers ────────────────────
+
+    def _update_profile_summary(self):
+        """Update the profile summary text based on current profile selection."""
+        _labels = {"quiet": "Yên tĩnh", "balanced": "Cân bằng", "exam_week": "Tuần thi"}
+        _descs = {
+            "quiet": "Chỉ nhắc deadline gấp (1 ngày và 1 giờ trước)",
+            "balanced": "Nhắc 3 ngày, 1 ngày và 3 giờ trước deadline",
+            "exam_week": "Nhắc liên tục, không bỏ lỡ bất kỳ deadline nào",
+        }
+        profile = getattr(self, '_current_profile', 'balanced')
+        self._profile_summary.value = _descs.get(profile, "")
+
+    def _update_dnd_summary(self):
+        """Update DND summary text based on current toggle and time values."""
+        try:
+            enabled = self._sw_dnd_enable.value
+            start = int(self._dnd_start_field.value or "22")
+            end = int(self._dnd_end_field.value or "7")
+            if not enabled:
+                self._dnd_summary.value = "Thông báo hoạt động 24/7"
+            else:
+                # Calculate quiet hours
+                if start > end:
+                    hours = (24 - start) + end
+                elif start < end:
+                    hours = end - start
+                else:
+                    hours = 24
+                self._dnd_summary.value = f"Yên tĩnh {hours} tiếng mỗi đêm (từ {start}:00 đến {end}:00)"
+        except (ValueError, AttributeError):
+            self._dnd_summary.value = ""
 
     # ── Theme Selector Builder ────────────────────────────────────────
 
@@ -1128,6 +1290,28 @@ class SettingsView(ft.Container):
         for _container, txt in getattr(self, '_hint_containers', []):
             txt.color = C.TEXT_SECONDARY
 
+        # ── Profile cards (notification presets) ──
+        for k, card in getattr(self, '_profile_cards', {}).items():
+            is_sel = (k == getattr(self, '_current_profile', 'balanced'))
+            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            col = card.content
+            if col and hasattr(col, 'controls') and len(col.controls) >= 3:
+                col.controls[0].color = C.ACCENT if is_sel else C.TEXT_SECONDARY  # icon
+                col.controls[1].color = C.TEXT_PRIMARY  # label
+                col.controls[2].color = C.TEXT_SECONDARY  # desc
+
+        # ── Milestone chips ──
+        for h, chip in getattr(self, '_milestone_chips', {}).items():
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = C.SURFACE
+
+        # ── Summary texts (profile, DND, milestone) ──
+        for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):
+            txt = getattr(self, attr, None)
+            if txt:
+                txt.color = C.TEXT_SECONDARY
+
         # ── Expansion tile title + subtitle texts (deep access) ──
         for tile in getattr(self, '_tiles', []):
             if tile.title and hasattr(tile.title, 'color'):
@@ -1173,6 +1357,25 @@ class SettingsView(ft.Container):
         self._interval_field.value = "60"
         self._fetch_months_field.value = "1"
         self._notify_min_field.value = "30"
+        
+        # Reset notification profile to balanced
+        self._current_profile = "balanced"
+        for k, card in self._profile_cards.items():
+            is_sel = (k == "balanced")
+            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+        # Reset milestone chips to defaults [72, 24, 3]
+        _default_milestones = [72, 24, 3]
+        for h, chip in self._milestone_chips.items():
+            chip.selected = h in _default_milestones
+        self._milestones_field.value = "72, 24, 3"
+        self._milestone_summary.value = "Bạn sẽ nhận 3 lần nhắc cho mỗi deadline"
+        # Reset DND
+        self._sw_dnd_enable.value = False
+        self._dnd_start_field.value = "22"
+        self._dnd_end_field.value = "7"
+        self._update_profile_summary()
+        self._update_dnd_summary()
         
         self.update()
 
@@ -1768,13 +1971,27 @@ class SettingsView(ft.Container):
         self._workers_field.value = str(settings.PREFETCH_WORKERS)
         
         self._sw_dnd_enable.value = getattr(settings, 'NOTIFY_DND_ENABLE', False)
-        self._dnd_start_field.value = str(getattr(settings, 'NOTIFY_DND_START', 23))
-        self._dnd_end_field.value = str(getattr(settings, 'NOTIFY_DND_END', 6))
+        self._dnd_start_field.value = str(getattr(settings, 'NOTIFY_DND_START', 22))
+        self._dnd_end_field.value = str(getattr(settings, 'NOTIFY_DND_END', 7))
         self._sw_ignore_sub.value = getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True)
         _saved_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
         for key, cb in self._notify_type_checks.items():
             cb.value = (key in _saved_types)
-        self._milestones_field.value = ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])))
+        _saved_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
+        self._milestones_field.value = ", ".join(map(str, _saved_milestones))
+        # Sync milestone chips
+        for h, chip in self._milestone_chips.items():
+            chip.selected = h in _saved_milestones
+        _active_count = sum(1 for h in _saved_milestones if h in self._milestone_chips)
+        self._milestone_summary.value = f"Bạn sẽ nhận {_active_count} lần nhắc cho mỗi deadline" if _active_count else "Không có mốc nhắc nhở nào"
+        # Sync profile cards
+        self._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
+        for k, card in self._profile_cards.items():
+            is_sel = (k == self._current_profile)
+            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+        self._update_profile_summary()
+        self._update_dnd_summary()
         self._muted_courses_field.value = ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', []))
 
         # Cập nhật danh sách môn học cho ExpansionTile
@@ -1847,9 +2064,10 @@ class SettingsView(ft.Container):
         if self._workers_field.value != str(settings.PREFETCH_WORKERS): return True
         
         if self._sw_dnd_enable.value != getattr(settings, 'NOTIFY_DND_ENABLE', False): return True
-        if self._dnd_start_field.value != str(getattr(settings, 'NOTIFY_DND_START', 23)): return True
-        if self._dnd_end_field.value != str(getattr(settings, 'NOTIFY_DND_END', 6)): return True
+        if self._dnd_start_field.value != str(getattr(settings, 'NOTIFY_DND_START', 22)): return True
+        if self._dnd_end_field.value != str(getattr(settings, 'NOTIFY_DND_END', 7)): return True
         if self._sw_ignore_sub.value != getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True): return True
+        if getattr(self, '_current_profile', 'balanced') != getattr(settings, 'NOTIFICATION_PROFILE', 'balanced'): return True
         _saved_types = set(getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"]))
         _current_types = set(k for k, cb in self._notify_type_checks.items() if cb.value)
         if _saved_types != _current_types: return True
@@ -1972,9 +2190,10 @@ class SettingsView(ft.Container):
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
-            settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "23")))
-            settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "6")))
+            settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "22")))
+            settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "7")))
             settings.NOTIFY_IGNORE_SUBMITTED = self._sw_ignore_sub.value
+            settings.NOTIFICATION_PROFILE    = getattr(self, '_current_profile', 'balanced')
             settings.NOTIFY_TYPES = [k for k, cb in self._notify_type_checks.items() if cb.value]
             
             try:
