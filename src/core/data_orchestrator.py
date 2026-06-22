@@ -30,7 +30,7 @@ class DataOrchestrator:
         # Session-level cache for site_info + enrolled_courses (avoid redundant API calls)
         self._userid: Optional[int] = None
         self._enrolled_courses: Optional[list] = None
-        self._courses_cache_lock = threading.Lock()
+        self._courses_cache_lock = threading.RLock()
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
