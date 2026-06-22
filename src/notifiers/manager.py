@@ -47,15 +47,15 @@ class NotificationManager:
             except Exception as exc:
                 logger.warning("Mobile notifier disabled: %r", exc)
 
-        # Auto-register integration channels when credentials are configured
-        if getattr(config, 'DISCORD_WEBHOOK_URL', ''):
+        # Auto-register integration channels when ENABLED and credentials are configured
+        if getattr(config, 'ENABLE_DISCORD', False) and getattr(config, 'DISCORD_WEBHOOK_URL', ''):
             try:
                 self.register(DiscordNotifier())
                 logger.info("Discord notifier registered")
             except Exception as exc:
                 logger.warning("Discord notifier failed: %r", exc)
 
-        if getattr(config, 'TELEGRAM_BOT_TOKEN', '') and getattr(config, 'TELEGRAM_CHAT_ID', ''):
+        if getattr(config, 'ENABLE_TELEGRAM', False) and getattr(config, 'TELEGRAM_BOT_TOKEN', '') and getattr(config, 'TELEGRAM_CHAT_ID', ''):
             try:
                 from notifiers.telegram import TelegramNotifier
                 self.register(TelegramNotifier())
@@ -63,7 +63,7 @@ class NotificationManager:
             except Exception as exc:
                 logger.warning("Telegram notifier failed: %r", exc)
 
-        if getattr(config, 'GMAIL_ADDRESS', '') and getattr(config, 'GMAIL_APP_PASSWORD', ''):
+        if getattr(config, 'ENABLE_GMAIL', False) and getattr(config, 'GMAIL_ADDRESS', '') and getattr(config, 'GMAIL_APP_PASSWORD', ''):
             try:
                 self.register(EmailNotifier())
                 logger.info("Email notifier registered")

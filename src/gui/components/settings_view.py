@@ -1977,6 +1977,15 @@ class SettingsView(ft.Container):
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
+            settings.ENABLE_TELEGRAM         = self._sw_telegram.value
+
+            # Save integration credentials (BUG FIX: these were never persisted)
+            settings.GMAIL_ADDRESS           = self._gmail_addr_field.value or ''
+            settings.GMAIL_APP_PASSWORD      = self._gmail_pw_field.value or ''
+            settings.DISCORD_WEBHOOK_URL     = self._discord_wh_field.value or ''
+            settings.TELEGRAM_BOT_TOKEN      = self._tel_token_field.value or ''
+            settings.TELEGRAM_CHAT_ID        = self._tel_chat_field.value or ''
+
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
             settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "23")))
             settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "6")))
