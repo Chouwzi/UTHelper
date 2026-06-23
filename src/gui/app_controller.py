@@ -921,6 +921,26 @@ class AppController:
                 except Exception as e:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
+                # Check for grade changes
+                try:
+                    grade_changes = self.orchestrator.check_grade_changes()
+                    if grade_changes:
+                        self.notifier.dispatch_grade_alert(grade_changes)
+                        # Show in-app snackbar
+                        msg = f"📊 {len(grade_changes)} điểm mới: "
+                        msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
+                        if len(grade_changes) > 3:
+                            msg += f" +{len(grade_changes) - 3} khác"
+                        self.page.snack_bar = ft.SnackBar(
+                            content=ft.Text(msg, color=ft.Colors.WHITE),
+                            bgcolor="#22C55E",
+                            duration=5000,
+                        )
+                        self.page.snack_bar.open = True
+                        self.page.update()
+                except Exception as e:
+                    logger.debug("Grade check failed (non-critical): %s", e)
+
             self._update_footer()
             
             self._prefetch_cancel_event.clear()

@@ -6,6 +6,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
+from core.grade_monitor import GradeMonitor
 from config import settings
 from models import Assignment
 from core import ws_functions
@@ -30,6 +31,8 @@ class DataOrchestrator:
         # Smart polling state
         self._last_fetch_ts: int = 0
         self._userid_cache: Optional[int] = None
+        # Grade monitoring
+        self.grade_monitor = GradeMonitor()
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -134,6 +137,19 @@ class DataOrchestrator:
             return ws_result
         logger.error("Không thể lấy dữ liệu từ WS API.")
         return []
+
+    def check_grade_changes(self) -> List:
+        """Check for grade changes using GradeMonitor.
+
+        Returns:
+            List of GradeChange objects if changes detected, empty list otherwise.
+        """
+        userid = self._get_userid()
+        if userid is None:
+            return []
+        return self.grade_monitor.check_for_changes(
+            self.client.call_ws_api, userid
+        )
     
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).

@@ -297,3 +297,45 @@ class NotificationManager:
     def history(self):
         """Truy cập lịch sử thông báo."""
         return self._history
+
+    def dispatch_grade_alert(self, grade_changes: list):
+        """Send notifications for grade changes.
+
+        Args:
+            grade_changes: List of GradeChange objects from GradeMonitor.
+        """
+        if not grade_changes:
+            return
+
+        # Check DND
+        if self._is_in_dnd():
+            logger.info("DND active, skipping grade alerts.")
+            return
+
+        # Build notification text
+        for change in grade_changes:
+            title = f"📊 Điểm mới: {change.item_name}"
+            body_parts = [f"Môn: {change.course_name}"]
+            if change.old_grade:
+                body_parts.append(f"Điểm cũ: {change.old_grade}")
+            body_parts.append(f"Điểm mới: {change.new_grade}")
+            body = "\n".join(body_parts)
+
+            # Create a minimal "assignment-like" object for notifiers
+            class _GradeNotif:
+                def __init__(self, t, b, cn):
+                    self.title = t
+                    self.body = b
+                    self.course_name = cn
+                    self.url = ""
+                    self.deadline_str = ""
+
+            grade_notif = _GradeNotif(title, body, change.course_name)
+
+            for notifier in self.notifiers:
+                try:
+                    notifier.notify([grade_notif])
+                except Exception as e:
+                    logger.error("Grade alert via %s failed: %s", notifier.__class__.__name__, e)
+
+        logger.info("Dispatched %d grade alerts", len(grade_changes))
