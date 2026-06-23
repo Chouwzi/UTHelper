@@ -424,6 +424,21 @@ class SettingsView(ft.Container):
             color=C.TEXT_PRIMARY,
             bgcolor=C.BG, border_radius=10,
         )
+        self._dd_poll_interval = ft.Dropdown(
+            label="Tần suất kiểm tra tự động",
+            value=str(getattr(settings, 'POLL_INTERVAL_MINUTES', 15)),
+            options=[
+                ft.dropdown.Option("5", "5 phút"),
+                ft.dropdown.Option("10", "10 phút"),
+                ft.dropdown.Option("15", "15 phút (mặc định)"),
+                ft.dropdown.Option("30", "30 phút"),
+                ft.dropdown.Option("60", "1 giờ"),
+            ],
+            text_size=13, color=C.TEXT_PRIMARY,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            bgcolor=C.BG, border_radius=10,
+            width=250,
+        )
         self._fetch_months_field = ft.TextField(
             value=str(settings.FETCH_MONTHS),
             label="Số tháng lấy sự kiện (1-3)",
@@ -817,6 +832,8 @@ class SettingsView(ft.Container):
                         ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                         self._interval_field,
                           _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                          self._dd_poll_interval,
+                          _hint("Tần suất kiểm tra tự động dữ liệu mới."),
                           self._fetch_months_field,
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
                     ],
@@ -827,6 +844,8 @@ class SettingsView(ft.Container):
                     [
                         self._interval_field,
                           _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                          self._dd_poll_interval,
+                          _hint("Tần suất kiểm tra tự động dữ liệu mới."),
                           self._fetch_months_field,
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
                           ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
@@ -1968,6 +1987,7 @@ class SettingsView(ft.Container):
         self._tel_chat_field.value = settings.TELEGRAM_CHAT_ID
         self._toggle_telegram_ui()
         self._interval_field.value = str(settings.CHECK_INTERVAL_MINUTES)
+        self._dd_poll_interval.value = str(getattr(settings, 'POLL_INTERVAL_MINUTES', 15))
         self._fetch_months_field.value = str(settings.FETCH_MONTHS)
         self._critical_hours_field.value = str(settings.URGENCY_CRITICAL_HOURS)
         self._warning_hours_field.value = str(settings.URGENCY_WARNING_HOURS)
@@ -2157,6 +2177,7 @@ class SettingsView(ft.Container):
             settings.INCLUDE_SUBMITTED       = self._sw_submitted.value
             settings.INCLUDE_GRADED          = self._sw_graded.value
             settings.CHECK_INTERVAL_MINUTES  = max(0, int(self._interval_field.value or "60"))
+            settings.POLL_INTERVAL_MINUTES   = max(5, int(self._dd_poll_interval.value or "15"))
             settings.FETCH_MONTHS            = max(1, min(int(self._fetch_months_field.value or "1"), 3))
             settings.URGENCY_CRITICAL_HOURS  = max(1, int(self._critical_hours_field.value or "24"))
             settings.URGENCY_WARNING_HOURS   = max(1, int(self._warning_hours_field.value or "72"))

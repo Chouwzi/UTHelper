@@ -927,6 +927,10 @@ class AppController:
             with self._data_lock:
                 prefetch_copy = list(self.all_data)
             self.page.run_task(self._prefetch_details_async, prefetch_copy)
+
+            # Start auto-poll if not already running
+            if not hasattr(self, '_auto_poll_task') or self._auto_poll_task is None:
+                self._auto_poll_task = self.page.run_task(self._auto_poll_loop)
         except Exception as exc:
             logger.exception(f"[Load] Lỗi: {exc}")
             with self._data_lock:
@@ -949,6 +953,34 @@ class AppController:
             self.refresh_btn.disabled = False
             self._is_loading          = False
             self.page.update()
+
+    async def _auto_poll_loop(self):
+        """Background loop that periodically refreshes data based on POLL_INTERVAL_MINUTES."""
+        logger.info("[AutoPoll] Started with interval=%d min", getattr(settings, 'POLL_INTERVAL_MINUTES', 15))
+        while self._page_alive.is_set():
+            interval = getattr(settings, 'POLL_INTERVAL_MINUTES', 15) * 60
+            await asyncio.sleep(interval)
+            if not self._page_alive.is_set():
+                break
+            if self._is_loading:
+                logger.debug("[AutoPoll] Skipping — another load in progress")
+                continue
+            logger.info("[AutoPoll] Running periodic refresh...")
+            try:
+                # Smart poll: check if anything changed first
+                if getattr(settings, 'SMART_POLL_ENABLED', True):
+                    changed = self.orchestrator.get_updates_since(
+                        self.orchestrator._last_fetch_ts
+                    )
+                    if changed is not None and len(changed) == 0:
+                        logger.info("[AutoPoll] No changes detected, skipping full fetch")
+                        continue
+                    if changed:
+                        logger.info("[AutoPoll] %d courses changed, doing full fetch", len(changed))
+                await self._load_data()
+            except Exception as e:
+                logger.error("[AutoPoll] Error: %s", e)
+        logger.info("[AutoPoll] Loop ended")
 
     async def _close_detail(self):
         self.detail_view.offset = ft.Offset(1, 0)  # slide out

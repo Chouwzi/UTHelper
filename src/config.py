@@ -150,6 +150,8 @@ class Settings(BaseModel):
     # Cài đặt chung của ứng dụng
     THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất kiểm tra thông báo tự động (phút)")
+    POLL_INTERVAL_MINUTES: int = Field(default=15, description="Tần suất kiểm tra tự động (phút)")
+    SMART_POLL_ENABLED: bool = Field(default=True, description="Bật chế độ poll thông minh (chỉ fetch khi có thay đổi)")
     FETCH_MONTHS: int = Field(default=1, description="Số tháng lấy sự kiện từ lịch (1-3 tháng)")
 
     # Bộ lọc hiển thị cho danh sách bài tập

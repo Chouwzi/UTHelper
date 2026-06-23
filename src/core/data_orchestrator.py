@@ -27,6 +27,9 @@ class DataOrchestrator:
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
         self._detail_lock = threading.Lock()
+        # Smart polling state
+        self._last_fetch_ts: int = 0
+        self._userid_cache: Optional[int] = None
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -58,6 +61,54 @@ class DataOrchestrator:
     def get_cached_details_snapshot(self) -> Dict[str, Dict[str, Any]]:
         with self._detail_lock:
             return dict(self._detail_cache)
+
+    def _get_userid(self) -> Optional[int]:
+        """Get cached userid or fetch from site_info."""
+        if self._userid_cache is not None:
+            return self._userid_cache
+        try:
+            info = ws_functions.get_site_info(self.client.call_ws_api)
+            if info and 'userid' in info:
+                self._userid_cache = info['userid']
+                return self._userid_cache
+        except Exception as e:
+            logger.debug("Failed to get userid: %s", e)
+        return None
+
+    def get_updates_since(self, timestamp: int) -> Optional[List[int]]:
+        """Check for course updates since last fetch using core_course_get_updates_since.
+
+        Returns:
+            list of changed course IDs if changes detected,
+            empty list if no changes,
+            None if error (caller should do full fetch).
+        """
+        if timestamp <= 0:
+            return None  # No previous fetch, must do full fetch
+        try:
+            courses = ws_functions.get_enrolled_courses(
+                self.client.call_ws_api, self._get_userid()
+            )
+            if not courses:
+                return None
+            changed_courses = []
+            for course in courses:
+                cid = course.get('id')
+                if not cid:
+                    continue
+                updates = ws_functions.get_course_updates_since(
+                    self.client.call_ws_api, cid, timestamp
+                )
+                if updates:  # Non-empty = something changed
+                    changed_courses.append(cid)
+            if changed_courses:
+                logger.info("Smart poll: %d courses changed since %d", len(changed_courses), timestamp)
+            else:
+                logger.debug("Smart poll: no changes since %d", timestamp)
+            return changed_courses
+        except Exception as e:
+            logger.warning("Smart poll failed, falling back to full fetch: %s", e)
+            return None
 
     def login(self) -> bool:
         """Đăng nhập bằng WS token (stateless, không kick browser)."""
@@ -120,6 +171,7 @@ class DataOrchestrator:
             
             logger.info("WS API trả về %d activities (merged).", len(results))
             self.is_logged_in = True  # WS token works = we're authenticated
+            self._last_fetch_ts = int(datetime.now().timestamp())  # Smart poll: mark last fetch
             return results
         except Exception as e:
             logger.warning("WS API fetch thất bại: %s", e)
@@ -158,6 +210,7 @@ class DataOrchestrator:
             
             logger.info("WS API async trả về %d activities (merged).", len(results))
             self.is_logged_in = True
+            self._last_fetch_ts = int(datetime.now().timestamp())  # Smart poll: mark last fetch
             return results
         except Exception as e:
             logger.warning("WS API async fetch thất bại: %s", e)
