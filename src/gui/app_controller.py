@@ -16,6 +16,7 @@ from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
+from gui.components.grade_overview_view import GradeOverviewView
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +288,12 @@ class AppController:
             tooltip="Cài đặt",
             on_click=lambda e: self.page.run_task(self._show_settings),
         )
+        self.grades_btn = ft.IconButton(
+            ft.Icons.INSIGHTS_ROUNDED,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
+            tooltip="Bảng điểm",
+            on_click=lambda e: self.page.run_task(self._toggle_grades),
+        )
 
         header = ft.Container(
             content=ft.Column(controls=[
@@ -300,7 +307,7 @@ class AppController:
                             border_radius=4,
                         ),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.refresh_btn, self.settings_btn], spacing=0),
+                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
                 self.loading_bar,
@@ -423,15 +430,18 @@ class AppController:
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
         )
+        self.grade_overview_view = GradeOverviewView(
+            on_close=lambda: self.page.run_task(self._close_grades),
+        )
 
         # UX: Slide-in transitions for views
-        for _view in (self.detail_view, self.settings_view, self.calendar_view):
+        for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
             _view.offset = ft.Offset(1, 0)  # start off-screen right
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
         # UX: SafeArea for iOS notch/Dynamic Island & Android status bar
-        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.detail_view, self.settings_view], expand=True)
+        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
         if IS_MOBILE:
             self.page.add(ft.SafeArea(content=main_stack, expand=True))
         else:
@@ -1006,6 +1016,62 @@ class AppController:
         self.settings_view.opacity = 1.0
         self.page.update()
 
+    async def _toggle_grades(self):
+        """Toggle the grade overview panel."""
+        if self.grade_overview_view.visible:
+            await self._close_grades()
+        else:
+            await self._show_grades()
+
+    async def _show_grades(self):
+        """Show grade overview panel and fetch data."""
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.detail_view.visible = False
+        self.grade_overview_view.show_loading()
+        self.grades_btn.icon_color = C.ACCENT
+        self.page.update()
+
+        # Fetch grades in background
+        try:
+            from core import ws_functions
+            userid = self.orchestrator._get_userid()
+            if userid:
+                courses_grades = ws_functions.get_course_grades(
+                    self.orchestrator.client.call_ws_api, userid
+                )
+                grade_items = {}
+                if courses_grades:
+                    for cg in courses_grades:
+                        cid = str(cg.get('courseid', ''))
+                        if cid:
+                            try:
+                                items = ws_functions.get_grade_items(
+                                    self.orchestrator.client.call_ws_api, cid, userid
+                                )
+                                if items:
+                                    grade_items[cid] = items
+                            except Exception:
+                                pass
+                self.grade_overview_view.update_grades(courses_grades or [], grade_items)
+            else:
+                self.grade_overview_view.update_grades([], {})
+        except Exception as e:
+            logger.error("Grade fetch failed: %s", e)
+            self.grade_overview_view.update_grades([], {})
+        self.page.update()
+
+    async def _close_grades(self):
+        """Close grade overview and return to dashboard."""
+        self.grade_overview_view.hide()
+        self.page.update()
+        await asyncio.sleep(0.25)
+        self.grade_overview_view.visible = False
+        self.dashboard.opacity = 1.0
+        self.dashboard.visible = True
+        self.grades_btn.icon_color = C.TEXT_SECONDARY
+        self.page.update()
+
     def _rebuild_colors(self):
         """Repaint ALL existing controls with current C values for live theme switching.
 
@@ -1078,7 +1144,7 @@ class AppController:
                     card._progress_ctrl.bgcolor = _C.BORDER
 
         # ── Icon buttons ──
-        for btn in (self.calendar_btn, self.refresh_btn, self.settings_btn):
+        for btn in (self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn):
             btn.icon_color = _C.TEXT_SECONDARY
 
         # ── Loading bar ──
