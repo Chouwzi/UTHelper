@@ -312,7 +312,7 @@ class AppController:
                     icon_color=C.TEXT_SECONDARY,
                     icon_size=20,
                     tooltip="Thông báo",
-                    on_click=self._on_notification_click,
+                    on_click=lambda e: self.page.run_task(self._on_notification_click, e),
                 ),
                 ft.Container(
                     content=self._notification_badge,
@@ -1039,7 +1039,7 @@ class AppController:
                         continue
                     if changed:
                         logger.info("[AutoPoll] %d courses changed, doing full fetch", len(changed))
-                await self._load_data()
+                await self._load_data_async()
             except Exception as e:
                 logger.error("[AutoPoll] Error: %s", e)
         logger.info("[AutoPoll] Loop ended")
