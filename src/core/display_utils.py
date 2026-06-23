@@ -3,6 +3,7 @@ Display utilities shared between core and GUI layers.
 Functions here are pure-logic (no Flet imports) so both the core
 filter service and the GUI layer can use them without circular deps.
 """
+import html
 import re
 from functools import lru_cache
 
@@ -15,7 +16,9 @@ _RE_BRACKET_PREFIX = re.compile(r'^\[.*?\]\s*[-_]?\s*')
 
 @lru_cache(maxsize=256)
 def clean_course_name(course: str) -> str:
-    """Strip prefixes/suffixes, keep only human-readable course name."""
+    """Strip prefixes/suffixes, decode HTML entities, keep only human-readable course name."""
+    # Decode HTML entities first (Moodle returns &amp; etc.)
+    course = html.unescape(course)
     cleaned = _RE_HKII.sub('', course)
     cleaned = _RE_TRAILING_ID.sub('', cleaned)
     dash_match = _RE_DASH_FORMAT.match(cleaned)
