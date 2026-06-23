@@ -2088,11 +2088,12 @@ class SettingsView(ft.Container):
         if self.has_changes():
             def close_dlg(e):
                 _log.warning(">>> CANCEL button clicked!")
-                self._page.close(confirm_dlg)
+                self._page.pop_dialog()
+                self._page.update()
 
             def discard_and_close(e):
                 _log.warning(">>> DISCARD button clicked!")
-                self._page.close(confirm_dlg)
+                self._page.pop_dialog()
                 # Revert theme to original if it was changed
                 if self._selected_theme != self._original_theme:
                     apply_theme(self._original_theme)
@@ -2105,12 +2106,13 @@ class SettingsView(ft.Container):
 
             def save_and_close(e):
                 _log.warning(">>> SAVE button clicked!")
-                self._page.close(confirm_dlg)
+                self._page.pop_dialog()
                 # Schedule async save + close via run_task
                 async def _do_save_close():
                     _log.warning("  _do_save_close running...")
                     await self._save(e)
                     self._on_close_cb()
+                    _log.warning("  save+close done")
                 self._page.run_task(_do_save_close)
 
             confirm_dlg = ft.AlertDialog(
@@ -2132,8 +2134,8 @@ class SettingsView(ft.Container):
                 shape=ft.RoundedRectangleBorder(radius=12),
                 bgcolor=C.BG,
             )
-            self._page.open(confirm_dlg)
-            _log.warning("Dialog opened via page.open()")
+            self._page.show_dialog(confirm_dlg)
+            _log.warning("Dialog opened via page.show_dialog()")
         else:
             self._on_close_cb()
 
