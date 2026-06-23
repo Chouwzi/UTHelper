@@ -950,6 +950,7 @@ class DetailView(ft.Container):
         from core.ws_functions import (
             resolve_cmid_to_assign_id,
             save_assignment_submission,
+            submit_for_grading,
         )
 
         # 1. Extract cmid từ URL
@@ -1007,7 +1008,13 @@ class DetailView(ft.Container):
             return False
 
         # 5. Save submission
-        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        if save_ok:
+            # 6. Submit for grading (chính thức nộp)
+            grading_ok = submit_for_grading(client.call_ws_api, assign_id)
+            if not grading_ok:
+                logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
+        return save_ok
 
     def _show_upload_status(self, text: str, color: str):
         """Hiện thông báo trạng thái upload."""
@@ -1203,7 +1210,7 @@ class DetailView(ft.Container):
     def _do_remove_file_sync(self, client, url: str, course_id: int,
                              files_to_keep: list) -> bool:
         """Re-upload các file cần giữ rồi re-submit (chạy trong thread)."""
-        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission
+        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission, submit_for_grading
 
         cmid = None
         if "id=" in url:
@@ -1253,7 +1260,12 @@ class DetailView(ft.Container):
                     return False
                 draft_itemid = result_id
 
-        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        if save_ok:
+            grading_ok = submit_for_grading(client.call_ws_api, assign_id)
+            if not grading_ok:
+                logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
+        return save_ok
 
     async def _on_edit_submitted(self, e):
         """Mở trình duyệt để chỉnh sửa bài nộp."""
@@ -1537,7 +1549,7 @@ class DetailView(ft.Container):
         2. Upload lại vào draft area mới, file target dùng tên/metadata mới
         3. mod_assign_save_submission
         """
-        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission
+        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission, submit_for_grading
 
         cmid = None
         if "id=" in url:
@@ -1581,4 +1593,9 @@ class DetailView(ft.Container):
                 return False
             draft_itemid = result_id
 
-        return save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
+        if save_ok:
+            grading_ok = submit_for_grading(client.call_ws_api, assign_id)
+            if not grading_ok:
+                logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
+        return save_ok
