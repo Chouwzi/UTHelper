@@ -2082,20 +2082,17 @@ class SettingsView(ft.Container):
         return False
 
     async def _handle_back(self, e):
+        import logging
+        _log = logging.getLogger("settings.dialog")
+        _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
         if self.has_changes():
-            # Shared helper to reliably dismiss the dialog
-            def _dismiss_dlg():
-                confirm_dlg.open = False
-                try:
-                    self._page.overlay.remove(confirm_dlg)
-                except (ValueError, AttributeError):
-                    pass
-                self._page.update()
-
             def close_dlg(e):
-                _dismiss_dlg()
-            
+                _log.warning(">>> CANCEL button clicked!")
+                self._page.close(confirm_dlg)
+
             def discard_and_close(e):
+                _log.warning(">>> DISCARD button clicked!")
+                self._page.close(confirm_dlg)
                 # Revert theme to original if it was changed
                 if self._selected_theme != self._original_theme:
                     apply_theme(self._original_theme)
@@ -2103,19 +2100,20 @@ class SettingsView(ft.Container):
                     set_page_theme(self._page)
                     if self._on_theme_preview:
                         self._on_theme_preview()
-                _dismiss_dlg()
                 self._on_close_cb()
+                _log.warning("  discard done")
 
             def save_and_close(e):
-                _dismiss_dlg()
+                _log.warning(">>> SAVE button clicked!")
+                self._page.close(confirm_dlg)
                 # Schedule async save + close via run_task
                 async def _do_save_close():
+                    _log.warning("  _do_save_close running...")
                     await self._save(e)
                     self._on_close_cb()
                 self._page.run_task(_do_save_close)
 
             confirm_dlg = ft.AlertDialog(
-                modal=True,
                 title=ft.Row(controls=[
                     ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=20, color=C.WARNING),
                     ft.Text("Chưa lưu cài đặt", size=16, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
@@ -2127,17 +2125,15 @@ class SettingsView(ft.Container):
                                   style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
                     ft.TextButton("Bỏ thay đổi", on_click=discard_and_close,
                                   style=ft.ButtonStyle(color=C.CRITICAL)),
-                    ft.Button("Lưu", on_click=save_and_close,
-                                      bgcolor=C.ACCENT, color=ft.Colors.WHITE),
+                    ft.TextButton("Lưu", on_click=save_and_close,
+                                  style=ft.ButtonStyle(color=C.ACCENT)),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
                 shape=ft.RoundedRectangleBorder(radius=12),
                 bgcolor=C.BG,
-                on_dismiss=lambda e: _dismiss_dlg(),
             )
-            self._page.overlay.append(confirm_dlg)
-            confirm_dlg.open = True
-            self._page.update()
+            self._page.open(confirm_dlg)
+            _log.warning("Dialog opened via page.open()")
         else:
             self._on_close_cb()
 
