@@ -1419,29 +1419,34 @@ class SettingsView(ft.Container):
 
 
 
+    def _safe_update(self, *controls):
+        """Update controls only if they are already attached to the page."""
+        for c in controls:
+            try:
+                c.update()
+            except (RuntimeError, Exception):
+                pass  # Control not on page yet — will render on next page.update()
+
     def _toggle_integration_ui(self):
         self._gmail_addr_field.visible = self._sw_email.value
         self._gmail_pw_field.visible = self._sw_email.value
         self._discord_wh_field.visible = self._sw_discord.value
-        self._gmail_addr_field.update()
-        self._gmail_pw_field.update()
-        self._discord_wh_field.update()
+        self._safe_update(self._gmail_addr_field, self._gmail_pw_field, self._discord_wh_field)
 
     def _toggle_telegram_ui(self):
         v = self._sw_telegram.value
         self._tel_token_field.visible = v
         self._tel_chat_field.visible = v
-        self._tel_token_field.update()
-        self._tel_chat_field.update()
+        self._safe_update(self._tel_token_field, self._tel_chat_field)
 
     def _toggle_bg_check_ui(self):
         v = self._sw_bg_check.value
         self._bg_interval_field.visible = v
-        self._bg_interval_field.update()
+        self._safe_update(self._bg_interval_field)
 
     def _toggle_debug_ui(self):
         self._test_panel.visible = self._sw_debug.value
-        self._test_panel.update()
+        self._safe_update(self._test_panel)
         
     def _do_test_tray(self):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
