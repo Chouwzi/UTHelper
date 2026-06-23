@@ -288,6 +288,34 @@ class AppController:
             on_click=lambda e: self.page.run_task(self._show_settings),
         )
 
+        # Notification badge
+        self._notification_badge_text = ft.Text("0", size=8, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
+        self._notification_badge = ft.Container(
+            content=self._notification_badge_text,
+            bgcolor=ft.Colors.RED,
+            border_radius=8,
+            width=16, height=16,
+            alignment=ft.alignment.center,
+            visible=False,  # Hidden when count=0
+        )
+        self._notification_icon = ft.Stack(
+            controls=[
+                ft.IconButton(
+                    icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                    icon_color=C.TEXT_SECONDARY,
+                    icon_size=20,
+                    tooltip="Thông báo",
+                    on_click=self._on_notification_click,
+                ),
+                ft.Container(
+                    content=self._notification_badge,
+                    alignment=ft.alignment.top_right,
+                    right=2, top=2,
+                ),
+            ],
+            width=40, height=40,
+        )
+
         header = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
@@ -300,7 +328,7 @@ class AppController:
                             border_radius=4,
                         ),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.refresh_btn, self.settings_btn], spacing=0),
+                    ft.Row(controls=[self.calendar_btn, self._notification_icon, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
                 self.loading_bar,
@@ -948,9 +976,13 @@ class AppController:
                 prefetch_copy = list(self.all_data)
             self.page.run_task(self._prefetch_details_async, prefetch_copy)
 
+
             # Start auto-poll if not already running
             if not hasattr(self, '_auto_poll_task') or self._auto_poll_task is None:
                 self._auto_poll_task = self.page.run_task(self._auto_poll_loop)
+
+            # Update notification badge
+            self.page.run_task(self._update_notification_badge)
         except Exception as exc:
             logger.exception(f"[Load] Lỗi: {exc}")
             with self._data_lock:
@@ -1554,6 +1586,30 @@ class AppController:
             logger.info("Android background scheduler started (every %d min)", interval)
         except Exception as e:
             logger.warning("Failed to start background scheduler: %s", e)
+
+    async def _update_notification_badge(self):
+        """Fetch unread notification count and update badge."""
+        try:
+            from core import ws_functions
+            userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
+            if userid is None:
+                info = ws_functions.get_site_info(self.orchestrator.client.call_ws_api)
+                if info:
+                    userid = info.get('userid')
+            if userid:
+                count = ws_functions.get_unread_notification_count(
+                    self.orchestrator.client.call_ws_api, userid
+                )
+                self._notification_badge_text.value = str(count) if count <= 9 else "9+"
+                self._notification_badge.visible = count > 0
+                self.page.update()
+        except Exception as e:
+            logger.debug("Badge update failed: %s", e)
+
+    async def _on_notification_click(self, e):
+        """Open Moodle notifications in browser."""
+        import webbrowser
+        webbrowser.open("https://courses.ut.edu.vn/message/index.php")
 
     def _on_disconnect(self, e):
         self._page_alive.clear()
