@@ -314,13 +314,14 @@ class DetailView(ft.Container):
         )
 
         # ── Upload mode selector ──
-        self._upload_mode_overwrite = True  # default: overwrite
+        self._upload_mode_overwrite = False  # default: append (safer for students)
         self._mode_overwrite_btn = ft.Container(
             content=ft.Row([
-                ft.Icon(ft.Icons.SWAP_HORIZ_ROUNDED, size=14, color=ft.Colors.WHITE),
-                ft.Text("Ghi đè", size=11, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                ft.Icon(ft.Icons.SWAP_HORIZ_ROUNDED, size=14, color=C.TEXT_SECONDARY),
+                ft.Text("Ghi đè", size=11, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
             ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
-            bgcolor=C.ACCENT,
+            bgcolor=C.BG,
+            border=ft.Border.all(1, C.BORDER),
             border_radius=6,
             padding=ft.Padding.symmetric(vertical=6, horizontal=12),
             on_click=lambda _: self._set_upload_mode(True),
@@ -329,20 +330,20 @@ class DetailView(ft.Container):
         )
         self._mode_append_btn = ft.Container(
             content=ft.Row([
-                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=C.TEXT_SECONDARY),
-                ft.Text("Thêm file", size=11, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500),
+                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=ft.Colors.WHITE),
+                ft.Text("Thêm file", size=11, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
             ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
-            bgcolor=C.BG,
-            border=ft.Border.all(1, C.BORDER),
+            bgcolor=C.ACCENT,
             border_radius=6,
             padding=ft.Padding.symmetric(vertical=6, horizontal=12),
             on_click=lambda _: self._set_upload_mode(False),
             ink=True,
             expand=True,
         )
-        self._upload_mode_warning_icon = ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=12, color=C.WARNING)
+        self._upload_mode_warning_icon = ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=12, color=C.WARNING)
         self._upload_mode_warning_text = ft.Text(
-            "Sẽ ghi đè toàn bộ file đã nộp trước đó.",
+            "Sẽ tải lại file cũ trước khi nộp. "
+            "Có thể lâu nếu file nặng.",
             size=10, color=C.WARNING, italic=True, expand=True,
         )
         self._upload_mode_warning = ft.Container(
@@ -350,7 +351,7 @@ class DetailView(ft.Container):
                 self._upload_mode_warning_icon,
                 self._upload_mode_warning_text,
             ], spacing=4),
-            visible=True,  # always show when mode row is visible
+            visible=True,
         )
         self._upload_mode_row = ft.Column(
             controls=[
@@ -1346,14 +1347,52 @@ class DetailView(ft.Container):
         self._page.update()
 
     async def _do_confirmed_delete(self):
-        """Thực hiện xóa sau khi người dùng xác nhận."""
+        """Xóa file với undo buffer 3 giây: hiện snackbar → chờ → xóa thật."""
         self._delete_confirm_dialog.open = False
         self._page.update()
         indices = self._pending_delete_indices
         self._pending_delete_indices = []
         if not indices:
             return
-        # Xóa nhiều file: giữ lại những file KHÔNG nằm trong indices
+
+        removed_names = [
+            self._submitted_files[i].get('name', '')
+            for i in indices if 0 <= i < len(self._submitted_files)
+        ]
+        count = len(removed_names)
+        label = f"'{removed_names[0]}'" if count == 1 else f"{count} file"
+
+        # Flag to cancel deletion if Undo is pressed
+        self._undo_cancel_flag = False
+
+        def _undo_clicked(e):
+            self._undo_cancel_flag = True
+            self._page.snack_bar.open = False
+            self._show_upload_status(f"Đã hoàn tác xóa {label}", C.SAFE)
+            self._page.update()
+
+        snack = ft.SnackBar(
+            content=ft.Row([
+                ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, size=16, color=ft.Colors.WHITE),
+                ft.Text(f"Đang xóa {label}...", color=ft.Colors.WHITE, size=13, expand=True),
+            ], spacing=8),
+            action="Hoàn tác",
+            action_color=ft.Colors.YELLOW_200,
+            on_action=_undo_clicked,
+            duration=3000,
+            bgcolor="#333333",
+        )
+        self._page.snack_bar = snack
+        snack.open = True
+        self._page.update()
+
+        # Wait 3.5 seconds (slightly more than snackbar duration)
+        await asyncio.sleep(3.5)
+
+        if self._undo_cancel_flag:
+            return  # User pressed Undo
+
+        # Proceed with actual deletion
         await self._on_remove_submitted_files(indices)
 
     # ── Multi-select Mode ────────────────────────────────────

@@ -202,12 +202,13 @@ class Settings(BaseModel):
     NOTIFY_MINUTES_BEFORE: int  = Field(default=30, description="Thông báo trước X phút khi deadline gần")
 
     # Nhóm cài đặt cho tính năng UTHelper
+    NOTIFICATION_PROFILE: str = Field(default="balanced", description="Chế độ thông báo: quiet, balanced, exam_week")
     NOTIFY_MILESTONES: list = Field(default_factory=lambda: [72, 24, 3], description="Nhắc nhở trước X giờ")
     NOTIFY_MUTED_COURSES: list = Field(default_factory=list, description="Danh sách các môn bị tắt thông báo")
     NOTIFY_TYPES: list = Field(default_factory=lambda: ["quiz", "assignment", "attendance"], description="Các loại bài tập sẽ gửi cảnh báo")
     NOTIFY_DND_ENABLE: bool = Field(default=False, description="Bật chế độ không làm phiền")
-    NOTIFY_DND_START: int = Field(default=23, description="Giờ bắt đầu im lặng (0-23)")
-    NOTIFY_DND_END: int = Field(default=6, description="Giờ kết thúc im lặng (0-23)")
+    NOTIFY_DND_START: int = Field(default=22, description="Giờ bắt đầu im lặng (0-23)")
+    NOTIFY_DND_END: int = Field(default=7, description="Giờ kết thúc im lặng (0-23)")
     NOTIFY_IGNORE_SUBMITTED: bool = Field(default=True, description="Im lặng với các bài đã nộp/có điểm")
 
     # Cài đặt hiệu năng
