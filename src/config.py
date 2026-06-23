@@ -309,7 +309,12 @@ def save_settings():
             except Exception as e:
                 _logger.warning(f"Failed to write {attr} to secure storage: {e}")
     else:
-        _logger.debug("No secure backend available, secrets saved in JSON only")
+        _logger.warning(
+            "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure backend (keyring/SecureStorage). "
+            "Mật khẩu và token đang được lưu dạng plaintext trong %s. "
+            "Cài đặt 'keyring' hoặc chạy trong Flet app để bảo mật hơn.",
+            CONFIG_FILE,
+        )
 
     # --- Step 3: Cleanup legacy secrets from JSON file ---
     if json_ok and has_secure:

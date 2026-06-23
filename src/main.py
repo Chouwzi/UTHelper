@@ -171,7 +171,12 @@ def main():
     
     # Support web mode for testing: set FLET_WEB=1 or pass --web
     web_mode = os.environ.get("FLET_WEB") == "1" or "--web" in sys.argv
-    web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
+    try:
+        web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
+        if not (1 <= web_port <= 65535):
+            raise ValueError(f"Port {web_port} out of valid range 1-65535")
+    except (ValueError, TypeError):
+        web_port = 8561
     
     run_kwargs = dict(main=_app_target, assets_dir=_assets)
     if web_mode:
