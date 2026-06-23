@@ -84,6 +84,7 @@ class DetailView(ft.Container):
         self._countdown_txt = ft.Text("", size=13, weight=ft.FontWeight.W_600)
         self._deadline_txt  = ft.Text("", size=13, color=C.TEXT_PRIMARY)
         self._opentime_txt  = ft.Text("", size=13, color=C.TEXT_PRIMARY)
+        self._cutoff_txt    = ft.Text("", size=13, color=C.WARNING)
         self._loading_bar   = ft.ProgressBar(color=C.ACCENT, bgcolor=C.BORDER,
                                              visible=False)
         self._error_banner = ft.Container(
@@ -423,6 +424,13 @@ class DetailView(ft.Container):
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
         self._opentime_row.visible = False
 
+        self._cutoff_row = ft.Row(controls=[
+                    ft.Text("⏰ Hạn nộp muộn", size=11, color=C.WARNING,
+                            weight=ft.FontWeight.W_500),
+                    self._cutoff_txt,
+                ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+        self._cutoff_row.visible = False
+
         info_box = ft.Container(
             content=ft.Column(controls=[
                 self._opentime_row,
@@ -436,6 +444,7 @@ class DetailView(ft.Container):
                             weight=ft.FontWeight.W_500),
                     self._countdown_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                self._cutoff_row,
             ], spacing=10),
             bgcolor=C.SURFACE,
             padding=ft.Padding.all(14),
@@ -536,6 +545,28 @@ class DetailView(ft.Container):
             
         self._deadline_txt.value = format_deadline(deadline_str)
 
+        # Cutoff date display
+        cutoff_ts = data.get('cutoff_date', 0)
+        duedate_str = data.get('deadline', '')
+        if cutoff_ts and cutoff_ts > 0:
+            from datetime import datetime as _dt
+            try:
+                cutoff_dt = _dt.fromtimestamp(cutoff_ts)
+                self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
+                # Only show if cutoff differs from deadline
+                deadline_dt = None
+                if duedate_str:
+                    from core.time_utils import parse_datetime
+                    deadline_dt = parse_datetime(duedate_str)
+                if deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60:
+                    self._cutoff_row.visible = True
+                else:
+                    self._cutoff_row.visible = False
+            except (OSError, ValueError):
+                self._cutoff_row.visible = False
+        else:
+            self._cutoff_row.visible = False
+
         self.visible = True
         # Hàm gọi chịu trách nhiệm page.update() tránh việc gọi thừa
 
@@ -627,6 +658,27 @@ class DetailView(ft.Container):
         else:
             self._opentime_txt.value = "Không giới hạn"
         self._opentime_row.visible = True
+
+        # Cutoff date display in detail panel
+        cutoff_ts = data.get('cutoff_date', 0)
+        deadline_str_raw = data.get('deadline', '')
+        if cutoff_ts and cutoff_ts > 0:
+            from datetime import datetime as _dt
+            try:
+                cutoff_dt = _dt.fromtimestamp(cutoff_ts)
+                self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
+                deadline_dt = None
+                if deadline_str_raw:
+                    from core.time_utils import parse_datetime
+                    deadline_dt = parse_datetime(deadline_str_raw)
+                if deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60:
+                    self._cutoff_row.visible = True
+                else:
+                    self._cutoff_row.visible = False
+            except (OSError, ValueError):
+                self._cutoff_row.visible = False
+        else:
+            self._cutoff_row.visible = False
 
         # Trích xuất thông tin Tên môn học
         full_name = details.get("course_full_name", "")
@@ -1598,4 +1650,4 @@ class DetailView(ft.Container):
             grading_ok = submit_for_grading(client.call_ws_api, assign_id)
             if not grading_ok:
                 logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
-        return save_ok
+        return save_ok
