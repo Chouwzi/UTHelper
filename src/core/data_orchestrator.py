@@ -89,8 +89,9 @@ class DataOrchestrator:
         if timestamp <= 0:
             return None  # No previous fetch, must do full fetch
         try:
+            # BUG-02 fix: get_enrolled_courses takes classification, not userid
             courses = ws_functions.get_enrolled_courses(
-                self.client.call_ws_api, self._get_userid()
+                self.client.call_ws_api
             )
             if not courses:
                 return None
@@ -183,7 +184,8 @@ class DataOrchestrator:
                 logger.debug("Merge assignments failed (non-critical): %s", e)
             
             if not results:
-                return None
+                logger.info("WS API trả về 0 activities (hợp lệ — có thể không có bài tập).")
+                return results  # BUG-10 fix: return [] not None for valid empty result
             
             logger.info("WS API trả về %d activities (merged).", len(results))
             self.is_logged_in = True  # WS token works = we're authenticated
@@ -343,7 +345,8 @@ class DataOrchestrator:
                 
                 assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
                 
-                deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
+                # BUG-12 fix: standardize to ISO format for consistent sorting
+                deadline_str = datetime.fromtimestamp(duedate).strftime('%Y-%m-%d %H:%M:%S')
                 remaining = duedate - now_ts
                 if remaining < 0:
                     urgency = 'overdue'
