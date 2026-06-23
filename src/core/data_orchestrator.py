@@ -1,3 +1,4 @@
+import html
 import logging
 import threading
 import time
@@ -226,7 +227,7 @@ class DataOrchestrator:
         for course_data in all_assigns:
             if not isinstance(course_data, dict):
                 continue
-            course_name = course_data.get('fullname', '')
+            course_name = html.unescape(course_data.get('fullname', ''))
             course_id = course_data.get('id', '')
             
             for assign in course_data.get('assignments', []):
@@ -253,7 +254,7 @@ class DataOrchestrator:
                 
                 calendar_results.append({
                     'id': f"assign_{assign.get('id', cmid)}",
-                    'title': assign.get('name', 'Không tên'),
+                    'title': html.unescape(assign.get('name', 'Không tên')),
                     'course_name': course_name,
                     'course': course_name,
                     'course_id': course_id,
