@@ -279,13 +279,16 @@ class DataOrchestrator:
         if not all_assigns:
             return calendar_results
         
-        # Build set cmids đã có từ calendar events
+        # Build lookup: cmid → index in calendar_results (for cutoff enrichment)
         existing_cmids = set()
-        for item in calendar_results:
+        cmid_to_index: dict[int, int] = {}
+        for idx, item in enumerate(calendar_results):
             url = item.get('url', '')
             if 'id=' in url:
                 try:
-                    existing_cmids.add(int(url.split('id=')[-1].split('&')[0]))
+                    _cmid = int(url.split('id=')[-1].split('&')[0])
+                    existing_cmids.add(_cmid)
+                    cmid_to_index[_cmid] = idx
                 except (ValueError, IndexError):
                     pass
         
@@ -301,12 +304,42 @@ class DataOrchestrator:
             
             for assign in course_data.get('assignments', []):
                 cmid = assign.get('cmid')
+                
+                # Enrich existing calendar items with cutoff data
                 if cmid and cmid in existing_cmids:
+                    _idx = cmid_to_index.get(cmid)
+                    if _idx is not None and _idx < len(calendar_results):
+                        _existing = calendar_results[_idx]
+                        _cutoff = assign.get('cutoffdate', 0)
+                        _due = assign.get('duedate', 0)
+                        if _cutoff > 0 and _cutoff != _due:
+                            if now_ts > _due and now_ts < _cutoff:
+                                _existing['late_status'] = 'late_allowed'
+                            elif now_ts >= _cutoff:
+                                _existing['late_status'] = 'closed'
+                            else:
+                                _existing['late_status'] = 'open'
+                        else:
+                            _existing['late_status'] = 'open' if now_ts < _due else 'closed'
+                        _existing['cutoff_date'] = _cutoff
                     continue
                 
                 duedate = assign.get('duedate', 0)
                 if not duedate or duedate < min_ts or duedate > max_ts:
                     continue
+                
+                cutoffdate = assign.get('cutoffdate', 0)
+                
+                # Compute late_status based on cutoffdate vs duedate
+                if cutoffdate > 0 and cutoffdate != duedate:
+                    if now_ts > duedate and now_ts < cutoffdate:
+                        late_status = 'late_allowed'
+                    elif now_ts >= cutoffdate:
+                        late_status = 'closed'
+                    else:
+                        late_status = 'open'
+                else:
+                    late_status = 'open' if now_ts < duedate else 'closed'
                 
                 assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
                 
@@ -336,6 +369,8 @@ class DataOrchestrator:
                     'submission_status': 'unknown',
                     'details': {},
                     'is_open': False,
+                    'cutoff_date': cutoffdate,
+                    'late_status': late_status,
                 })
                 merged_count += 1
         

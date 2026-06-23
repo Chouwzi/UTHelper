@@ -1,5 +1,6 @@
 import flet as ft
 from gui.core.theme import C
+from datetime import datetime
 from gui.core.utils import get_urgency_color, get_countdown_color, get_type_label, get_type_color, clean_course_name, format_deadline, get_countdown, get_progress_value, urgency_str, get_urgency_badge, get_status_tag, get_submission_badge
 
 class ActivityCard(ft.Container):
@@ -172,6 +173,42 @@ class ActivityCard(ft.Container):
                     content=ft.Text(sub_label, size=10, color=sub_color, weight=ft.FontWeight.W_500),
                     padding=ft.Padding.symmetric(horizontal=7, vertical=2),
                     border=ft.Border.all(1, sub_color),
+                    border_radius=4,
+                )
+            )
+        
+        # Late submission warning badge
+        late_status = data.get('late_status', '')
+        cutoff_ts = data.get('cutoff_date', 0)
+        if late_status == 'late_allowed' and cutoff_ts:
+            now_ts = int(datetime.now().timestamp())
+            remaining_s = cutoff_ts - now_ts
+            if remaining_s > 0:
+                hours_left = remaining_s // 3600
+                mins_left = (remaining_s % 3600) // 60
+                if hours_left > 24:
+                    days_left = hours_left // 24
+                    cutoff_text = f"Trễ hạn — còn {days_left} ngày nộp muộn"
+                elif hours_left > 0:
+                    cutoff_text = f"Trễ hạn — còn {hours_left}h{mins_left:02d} nộp muộn"
+                else:
+                    cutoff_text = f"Trễ hạn — còn {mins_left} phút nộp muộn"
+            else:
+                cutoff_text = "Trễ hạn — còn nộp muộn"
+            self._optional_rows.controls.append(
+                ft.Container(
+                    content=ft.Text(cutoff_text, size=10, color=C.WARNING, weight=ft.FontWeight.W_500),
+                    padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                    border=ft.Border.all(1, C.WARNING),
+                    border_radius=4,
+                )
+            )
+        elif late_status == 'closed' and cutoff_ts and cutoff_ts > 0:
+            self._optional_rows.controls.append(
+                ft.Container(
+                    content=ft.Text("Hết hạn nộp", size=10, color=C.CRITICAL, weight=ft.FontWeight.W_500),
+                    padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                    border=ft.Border.all(1, C.CRITICAL),
                     border_radius=4,
                 )
             )
