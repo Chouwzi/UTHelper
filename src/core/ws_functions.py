@@ -7,6 +7,7 @@ Endpoints:
   - Token:  /login/token.php
   - API:    /webservice/rest/server.php
 """
+import html
 import logging
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
@@ -300,7 +301,7 @@ def _fill_course_name(call_api: Callable, course_id: int, details: Dict[str, Any
             if isinstance(courses, list):
                 for c in courses:
                     if c.get('id') == course_id:
-                        details['course_full_name'] = c.get('fullname', '')
+                        details['course_full_name'] = html.unescape(c.get('fullname', ''))
                         break
     except Exception:
         pass
@@ -317,7 +318,7 @@ def _get_assign_detail(
     assign_data = None
     assign_id = None
     for course in courses:
-        details['course_full_name'] = course.get('fullname', '')
+        details['course_full_name'] = html.unescape(course.get('fullname', ''))
         for assign in course.get('assignments', []):
             if assign.get('cmid') == cmid:
                 assign_data = assign
@@ -662,7 +663,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             course_data = evt.get('course') or {}
             if not isinstance(course_data, dict):
                 course_data = {}
-            course_fullname = course_data.get('fullname', '') or ''
+            course_fullname = html.unescape(course_data.get('fullname', '') or '')
 
             # --- Build id ---
             evt_id = evt.get('id', '') or ''
@@ -672,7 +673,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             # --- Build dict ---
             assignment: Dict[str, Any] = {
                 'id': str(evt_id),
-                'title': evt.get('name') or 'Không tên',
+                'title': html.unescape(evt.get('name') or 'Không tên'),
                 'course_name': course_fullname,
                 'course': course_fullname,
                 'course_id': course_data.get('id', ''),
