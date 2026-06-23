@@ -9,6 +9,7 @@ Endpoints:
 """
 import html
 import logging
+import threading
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Cache cho site_info/courses — tránh gọi API lặp lại
 _cache: Dict[str, Any] = {}
+_cache_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -295,18 +297,30 @@ def get_assign_details_via_ws(
         return details
 
 
-def _fill_course_name(call_api: Callable, course_id: int, details: Dict[str, Any], *, _cache=_cache):
-    """Điền tên môn học từ enrolled courses (có cache)."""
+def _fill_course_name(call_api: Callable, course_id: int, details: Dict[str, Any]):
+    """Điền tên môn học từ enrolled courses (có cache, thread-safe)."""
     try:
-        if 'courses' not in _cache:
-            info = get_site_info(call_api)
-            if not info:
-                return
-            userid = info.get('userid')
-            courses = get_enrolled_courses(call_api, userid) or []
-            _cache['courses'] = {c['id']: c.get('fullname', '') for c in courses}
+        with _cache_lock:
+            if 'courses' not in _cache:
+                info = get_site_info(call_api)
+                if not info:
+                    return
+                userid = info.get('userid')
+                if not userid:
+                    return
+                # BUG-02 fix: dùng core_enrol_get_users_courses (nhận userid)
+                # thay vì get_enrolled_courses (nhận classification str)
+                courses = call_api('core_enrol_get_users_courses', userid=userid) or []
+                if not isinstance(courses, list):
+                    courses = []
+                # BUG-06 fix: dùng c.get('id') thay vì c['id'] để tránh KeyError
+                _cache['courses'] = {
+                    c.get('id'): c.get('fullname', '')
+                    for c in courses
+                    if isinstance(c, dict) and c.get('id') is not None
+                }
 
-        course_map = _cache['courses']
+            course_map = _cache['courses']
         name = course_map.get(course_id, '')
         if name:
             details['course_full_name'] = html.unescape(name)
@@ -739,7 +753,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             cm_id = evt.get('instance', '')
             if not url:
                 course_data = evt.get('course') or {}
-                course_data.get('id', '') if isinstance(course_data, dict) else ''
+                course_id = course_data.get('id', '') if isinstance(course_data, dict) else ''
                 if modulename and cm_id:
                     url = (
                         f"{settings.MOODLE_BASE_URL}/mod/{modulename}"

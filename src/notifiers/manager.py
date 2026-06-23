@@ -166,8 +166,11 @@ class NotificationManager:
             logger.info("Do Not Disturb is on. Skipping notifications.")
             return
 
+        # BUG-09 fix: Load cache once for the entire dispatch cycle
+        cache = self._load_cache()
+
         # Lọc lại xem cái nào thực sự cần bắn thông báo
-        to_notify_items = self._filter_assignments(assignments)
+        to_notify_items = self._filter_assignments(assignments, cache)
 
         if not to_notify_items:
             return
@@ -187,17 +190,18 @@ class NotificationManager:
 
         # CHỈ đánh dấu đã gửi khi ít nhất 1 channel thành công
         if any_success:
-            self._mark_assignments_notified(to_notify_items)
+            self._mark_assignments_notified(to_notify_items, cache)
             # Ghi lịch sử thông báo
             success_channels = [n.__class__.__name__ for n in self.notifiers]
             self._history.add(notify_assignments, success_channels)
         else:
             logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
 
-    def _filter_assignments(self, assignments: List[Any]) -> List[Dict]:
+    def _filter_assignments(self, assignments: List[Any], cache: Dict = None) -> List[Dict]:
         """Filter assignments that need notification based on milestones and cache."""
         filtered = []
-        cache = self._load_cache()
+        if cache is None:
+            cache = self._load_cache()
         now = datetime.now()
         notify_minutes = getattr(config, 'NOTIFY_MINUTES_BEFORE', 0)
 
@@ -222,6 +226,10 @@ class NotificationManager:
                 deadline_str = a.get("deadline")
                 deadline = parse_datetime(deadline_str) if deadline_str else None
             if not deadline:
+                continue
+
+            # BUG-05 fix: ensure deadline is a datetime, not a string
+            if not isinstance(deadline, datetime):
                 continue
 
             time_left = deadline - now
@@ -268,9 +276,10 @@ class NotificationManager:
 
         return filtered
 
-    def _mark_assignments_notified(self, items: List[Dict]):
+    def _mark_assignments_notified(self, items: List[Dict], cache: Dict = None):
         """Mark assignments as notified in cache."""
-        cache = self._load_cache()
+        if cache is None:
+            cache = self._load_cache()
         updated = False
         for item in items:
             url = item["url"]
@@ -312,6 +321,15 @@ class NotificationManager:
             logger.info("DND active, skipping grade alerts.")
             return
 
+        # BUG-14 fix: define helper class once, outside the loop
+        class _GradeNotif:
+            def __init__(self, t, b, cn):
+                self.title = t
+                self.body = b
+                self.course_name = cn
+                self.url = ""
+                self.deadline_str = ""
+
         # Build notification text
         for change in grade_changes:
             title = f"📊 Điểm mới: {change.item_name}"
@@ -320,15 +338,6 @@ class NotificationManager:
                 body_parts.append(f"Điểm cũ: {change.old_grade}")
             body_parts.append(f"Điểm mới: {change.new_grade}")
             body = "\n".join(body_parts)
-
-            # Create a minimal "assignment-like" object for notifiers
-            class _GradeNotif:
-                def __init__(self, t, b, cn):
-                    self.title = t
-                    self.body = b
-                    self.course_name = cn
-                    self.url = ""
-                    self.deadline_str = ""
 
             grade_notif = _GradeNotif(title, body, change.course_name)
 

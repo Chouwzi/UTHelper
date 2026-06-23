@@ -88,15 +88,21 @@ class GradeMonitor:
                 return changes
 
             for course_grade in courses_grades:
-                course_id = str(course_grade.get('courseid', ''))
+                try:
+                    course_id = int(course_grade.get('courseid', 0))
+                except (ValueError, TypeError):
+                    continue
+                if not course_id:
+                    continue
+                course_id_str = str(course_id)  # JSON keys are strings
                 course_name = course_grade.get('coursename', f'Course {course_id}')
                 grade_str = course_grade.get('grade', '')
 
-                if not course_id or not grade_str or grade_str == '-':
+                if not grade_str or grade_str == '-':
                     continue
 
                 # Check if course-level grade changed
-                old_course = self._snapshot.get(course_id, {})
+                old_course = self._snapshot.get(course_id_str, {})
                 old_overall = old_course.get('_overall', '')
 
                 if grade_str != old_overall and old_overall != '':
@@ -130,16 +136,17 @@ class GradeMonitor:
                                 ))
 
                             # Update snapshot for this item
-                            if course_id not in self._snapshot:
-                                self._snapshot[course_id] = {}
-                            self._snapshot[course_id][item_name] = item_grade
+                            if course_id_str not in self._snapshot:
+                                self._snapshot[course_id_str] = {}
+                            self._snapshot[course_id_str][item_name] = item_grade
                 except Exception as e:
                     logger.debug("Grade items fetch failed for course %s: %s", course_id, e)
 
-                # Update overall course grade in snapshot
-                if course_id not in self._snapshot:
-                    self._snapshot[course_id] = {}
-                self._snapshot[course_id]['_overall'] = grade_str
+                # Update overall course grade in snapshot (only valid grades)
+                if grade_str and grade_str != '-':
+                    if course_id_str not in self._snapshot:
+                        self._snapshot[course_id_str] = {}
+                    self._snapshot[course_id_str]['_overall'] = grade_str
 
             # Persist updated snapshot
             self._save_snapshot()

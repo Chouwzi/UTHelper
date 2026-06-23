@@ -3,6 +3,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from typing import Optional
 from config import settings
 import logging
@@ -71,7 +72,11 @@ class MoodleClient:
         req.add_header('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8')
         
         self._throttle()
-        resp = _urlopen(req, timeout=timeout)
+        try:
+            resp = _urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            logger.warning("HTTP %d from POST %s", e.code, url.split('?')[0])
+            return e.code, None
         body = resp.read()
         try:
             return resp.status, json.loads(body)
@@ -87,7 +92,11 @@ class MoodleClient:
         req.add_header('Accept', 'application/json')
         
         self._throttle()
-        resp = _urlopen(req, timeout=timeout)
+        try:
+            resp = _urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            logger.warning("HTTP %d from POST-JSON %s", e.code, url.split('?')[0])
+            return e.code, None
         resp_body = resp.read()
         try:
             return resp.status, json.loads(resp_body)
@@ -145,7 +154,11 @@ class MoodleClient:
         req = urllib.request.Request(url)
         req.add_header('User-Agent', _DEFAULT_UA)
         
-        resp = _urlopen(req, timeout=timeout)
+        try:
+            resp = _urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            logger.warning("HTTP %d from GET %s", e.code, url.split('?')[0])
+            return e.code, None
         return resp.status, resp.read()
 
 
