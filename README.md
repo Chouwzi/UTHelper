@@ -25,7 +25,7 @@
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/flet-0.85+-7C4DFF?style=flat-square" alt="Flet" />
   <img src="https://img.shields.io/badge/tests-314%20passed-22C55E?style=flat-square" alt="Tests" />
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20Web-E8710A?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS%20%7C%20Web-E8710A?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20NC-red?style=flat-square" alt="License: PolyForm Noncommercial" /></a>
 </p>
 
