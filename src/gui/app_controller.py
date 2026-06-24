@@ -3,7 +3,8 @@ from datetime import datetime
 from core.time_utils import parse_datetime
 import asyncio
 import logging
-from platform_utils import IS_MOBILE, detect_platform
+import platform_utils
+from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
 
@@ -65,7 +66,7 @@ class AppController:
         self.page.on_keyboard_event = self._on_keyboard_event
         
         # Android back button — intercept to navigate within app instead of exiting
-        if IS_MOBILE:
+        if platform_utils.IS_MOBILE:
             self.page.on_view_pop = self._on_back_button
         self.page.run_task(self._pulse_loop_async)
         self.page.run_task(self._countdown_loop_async)
@@ -77,7 +78,7 @@ class AppController:
         check_for_update_async(APP_VERSION, self._on_update_check)
         
         # Android: Start background scheduler for deadline checks via AlarmManager
-        if IS_MOBILE and settings.BACKGROUND_CHECK_ANDROID:
+        if platform_utils.IS_MOBILE and settings.BACKGROUND_CHECK_ANDROID:
             self.page.run_task(self._start_background_scheduler)
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
@@ -144,7 +145,7 @@ class AppController:
 
     async def _on_window_event(self, e):
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
-        if IS_MOBILE:
+        if platform_utils.IS_MOBILE:
             return
         if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
             if settings.MINIMIZE_TO_TRAY:
@@ -470,7 +471,7 @@ class AppController:
 
         # UX: SafeArea for iOS notch/Dynamic Island & Android status bar
         main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
-        if IS_MOBILE:
+        if platform_utils.IS_MOBILE:
             self.page.add(ft.SafeArea(content=main_stack, expand=True))
         else:
             self.page.add(main_stack)

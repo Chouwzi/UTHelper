@@ -3,7 +3,7 @@ import asyncio
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
-from platform_utils import IS_MOBILE as _IS_MOBILE
+import platform_utils as _pu  # use _pu.IS_MOBILE for live platform detection
 
 class SettingsView(ft.Container):
     def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
@@ -306,7 +306,7 @@ class SettingsView(ft.Container):
         _tray_btn = ft.Button("Windows Tray", icon=ft.Icons.DESKTOP_WINDOWS_ROUNDED, on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
         _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
         _notif_buttons = ft.Row([
-            *([_tray_btn] if not _IS_MOBILE else [_mobile_btn]),
+            *([_tray_btn] if not _pu.IS_MOBILE else [_mobile_btn]),
             ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
             ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
             ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
@@ -391,7 +391,7 @@ class SettingsView(ft.Container):
         ]
 
         # Android-only: background scheduler controls
-        if _IS_MOBILE:
+        if _pu.IS_MOBILE:
             _debug_sections.extend([
                 ft.Divider(height=1, color=C.BORDER),
                 _bg_section_label,
@@ -818,7 +818,7 @@ class SettingsView(ft.Container):
                     "Hiển thị",
                     "Cách hiển thị trên màn hình",
                     [self._sw_submitted, self._sw_graded] + (
-                        [self._sw_always_on_top] if not _IS_MOBILE else []
+                        [self._sw_always_on_top] if not _pu.IS_MOBILE else []
                     ),
                     icon=ft.Icons.VISIBILITY_OUTLINED,
                 ),
@@ -838,7 +838,7 @@ class SettingsView(ft.Container):
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
-                )] if not _IS_MOBILE else [_setting_group(
+                )] if not _pu.IS_MOBILE else [_setting_group(
                     "Cập nhật",
                     "Tần suất kiểm tra",
                     [
@@ -1729,12 +1729,12 @@ class SettingsView(ft.Container):
         """Send mock notification to ALL registered channels simultaneously."""
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         sent = []
-        if self._on_test_tray and not _IS_MOBILE:
+        if self._on_test_tray and not _pu.IS_MOBILE:
             try:
                 self._on_test_tray(t); sent.append("Windows Tray")
             except Exception:
                 pass
-        if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _IS_MOBILE:
+        if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _pu.IS_MOBILE:
             try:
                 self._on_test_mobile(t); sent.append("Mobile")
             except Exception:
@@ -1967,12 +1967,14 @@ class SettingsView(ft.Container):
 
         self._username_field.value = settings.UTH_USERNAME
         self._password_field.value = settings.UTH_PASSWORD
-        self._sw_always_on_top.value = settings.ALWAYS_ON_TOP
+        if not _pu.IS_MOBILE:
+            self._sw_always_on_top.value = settings.ALWAYS_ON_TOP
         self._sw_submitted.value = settings.INCLUDE_SUBMITTED
         self._sw_graded.value = settings.INCLUDE_GRADED
-        self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
-        self._sw_start_minimized.value = settings.START_MINIMIZED
-        self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
+        if not _pu.IS_MOBILE:
+            self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
+            self._sw_start_minimized.value = settings.START_MINIMIZED
+            self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
         self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
         self._bg_interval_field.value = str(settings.BACKGROUND_CHECK_INTERVAL)
         self._toggle_bg_check_ui()
@@ -2063,12 +2065,14 @@ class SettingsView(ft.Container):
         if self._selected_theme != getattr(settings, 'THEME', 'midnight_blue'): return True
         if self._username_field.value != settings.UTH_USERNAME: return True
         if self._password_field.value != settings.UTH_PASSWORD: return True
-        if self._sw_always_on_top.value != settings.ALWAYS_ON_TOP: return True
+        if not _pu.IS_MOBILE:
+            if self._sw_always_on_top.value != settings.ALWAYS_ON_TOP: return True
         if self._sw_submitted.value != settings.INCLUDE_SUBMITTED: return True
         if self._sw_graded.value != settings.INCLUDE_GRADED: return True
-        if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
-        if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
-        if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
+        if not _pu.IS_MOBILE:
+            if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
+            if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
+            if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
         if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
         if self._bg_interval_field.value != str(settings.BACKGROUND_CHECK_INTERVAL): return True
         if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
@@ -2173,7 +2177,8 @@ class SettingsView(ft.Container):
             settings.COLOR_OTHER             = getattr(self, '_c_tb_other', ft.TextField(value='#6B7280')).value
             settings.UTH_USERNAME            = self._username_field.value
             settings.UTH_PASSWORD            = self._password_field.value
-            settings.ALWAYS_ON_TOP           = self._sw_always_on_top.value
+            if not _pu.IS_MOBILE:
+                settings.ALWAYS_ON_TOP           = self._sw_always_on_top.value
             settings.INCLUDE_SUBMITTED       = self._sw_submitted.value
             settings.INCLUDE_GRADED          = self._sw_graded.value
             settings.CHECK_INTERVAL_MINUTES  = max(0, int(self._interval_field.value or "60"))
@@ -2188,7 +2193,7 @@ class SettingsView(ft.Container):
             self._workers_field.value        = str(settings.PREFETCH_WORKERS)
             
             # Desktop-only settings (autostart, tray, always on top)
-            if not _IS_MOBILE:
+            if not _pu.IS_MOBILE:
                 if settings.START_WITH_WINDOWS != self._sw_start_with_windows.value:
                     try:
                         import core.autostart as autostart
@@ -2236,7 +2241,7 @@ class SettingsView(ft.Container):
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
             
-            if not _IS_MOBILE:
+            if not _pu.IS_MOBILE:
                 self._page.window.always_on_top = settings.ALWAYS_ON_TOP
             self.update()
 
