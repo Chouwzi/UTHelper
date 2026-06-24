@@ -5,7 +5,16 @@ import sys
 import json
 import logging
 
-# ── Conditional keyring import (Windows-only) ──
+# ── Secure storage import chain ──
+# Tier 1: flet-secure-storage (cross-platform, native keystores)
+# Tier 2: keyring (Windows Credential Manager legacy fallback)
+# Tier 3: plaintext JSON (last resort, not recommended)
+try:
+    import flet_secure_storage as fss
+    _HAS_SECURE_STORAGE = True
+except ImportError:
+    _HAS_SECURE_STORAGE = False
+
 try:
     import keyring
     _HAS_KEYRING = True
@@ -44,6 +53,83 @@ CONFIG_FILE = _USER_DATA_DIR / "settings.json"
 
 KEYRING_SERVICE_NAME = "UTHElearningAlert"
 
+# ── Secret field mapping (attr_name → storage_key) ──
+_SECRET_FIELDS = {
+    'UTH_PASSWORD': 'password',
+    'MOODLE_SESSION': 'moodle_session',
+    'MOODLE_WS_TOKEN': 'ws_token',
+    'GMAIL_APP_PASSWORD': 'gmail_app_password',
+    'DISCORD_WEBHOOK_URL': 'discord_webhook',
+    'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
+}
+
+# ── Lazy-init SecureStorage instance ──
+_secure_storage: 'fss.SecureStorage | None' = None
+
+def _get_secure_storage() -> 'fss.SecureStorage | None':
+    """Khởi tạo SecureStorage instance (lazy, singleton)."""
+    global _secure_storage
+    if _secure_storage is not None:
+        return _secure_storage
+    if not _HAS_SECURE_STORAGE:
+        return None
+    try:
+        _secure_storage = fss.SecureStorage()
+        return _secure_storage
+    except Exception:
+        return None
+
+def _read_secret(key: str) -> str:
+    """Đọc secret từ secure storage (tier 1 → tier 2 fallback)."""
+    # Tier 1: flet-secure-storage
+    ss = _get_secure_storage()
+    if ss is not None:
+        try:
+            val = ss.read(key=key)
+            if val:
+                return val
+        except Exception:
+            pass
+    # Tier 2: keyring
+    if _HAS_KEYRING:
+        try:
+            val = keyring.get_password(KEYRING_SERVICE_NAME, key)
+            if val:
+                return val
+        except Exception:
+            pass
+    return ""
+
+def _write_secret(key: str, value: str):
+    """Ghi secret vào secure storage (tier 1 → tier 2 fallback)."""
+    _logger = logging.getLogger(__name__)
+    # Tier 1: flet-secure-storage
+    ss = _get_secure_storage()
+    if ss is not None:
+        try:
+            if value:
+                ss.write(key=key, value=value)
+            else:
+                try:
+                    ss.delete(key=key)
+                except Exception:
+                    pass
+            return
+        except Exception as e:
+            _logger.warning(f"SecureStorage write failed for {key}: {e}")
+    # Tier 2: keyring
+    if _HAS_KEYRING:
+        try:
+            if value:
+                keyring.set_password(KEYRING_SERVICE_NAME, key, value)
+            return
+        except Exception as e:
+            _logger.warning(f"Keyring write failed for {key}: {e}")
+
+def _has_any_secure_backend() -> bool:
+    """Kiểm tra có backend nào an toàn hay không."""
+    return _get_secure_storage() is not None or _HAS_KEYRING
+
 class Settings(BaseModel):
     """
     Nơi chứa toàn bộ cấu hình của app. 
@@ -55,8 +141,6 @@ class Settings(BaseModel):
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
-    USE_WS_API: bool = Field(default=True, description="Ưu tiên dùng WS API thay vì HTML scraping")
-    ALLOW_SESSION_LOGIN: bool = Field(default=False, description="Cho phép session login (sẽ kick browser nếu trường giới hạn 1 session)")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
@@ -66,6 +150,8 @@ class Settings(BaseModel):
     # Cài đặt chung của ứng dụng
     THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất kiểm tra thông báo tự động (phút)")
+    POLL_INTERVAL_MINUTES: int = Field(default=15, description="Tần suất kiểm tra tự động (phút)")
+    SMART_POLL_ENABLED: bool = Field(default=True, description="Bật chế độ poll thông minh (chỉ fetch khi có thay đổi)")
     FETCH_MONTHS: int = Field(default=1, description="Số tháng lấy sự kiện từ lịch (1-3 tháng)")
 
     # Bộ lọc hiển thị cho danh sách bài tập
@@ -77,6 +163,10 @@ class Settings(BaseModel):
     START_WITH_WINDOWS: bool = Field(default=False, description="Tự động chạy khi mở máy")
     START_MINIMIZED: bool = Field(default=True, description="Chạy ngầm khi khởi động")
     MINIMIZE_TO_TRAY: bool = Field(default=True, description="Thu nhỏ xuống khay hệ thống (System Tray)")
+
+    # Android background notifications (AlarmManager)
+    BACKGROUND_CHECK_ANDROID: bool = Field(default=True, description="Kiểm tra deadline nền trên Android (AlarmManager)")
+    BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="Tần suất kiểm tra nền (phút, tối thiểu 5)")
 
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")
@@ -114,12 +204,13 @@ class Settings(BaseModel):
     NOTIFY_MINUTES_BEFORE: int  = Field(default=30, description="Thông báo trước X phút khi deadline gần")
 
     # Nhóm cài đặt cho tính năng UTHelper
+    NOTIFICATION_PROFILE: str = Field(default="balanced", description="Chế độ thông báo: quiet, balanced, exam_week")
     NOTIFY_MILESTONES: list = Field(default_factory=lambda: [72, 24, 3], description="Nhắc nhở trước X giờ")
     NOTIFY_MUTED_COURSES: list = Field(default_factory=list, description="Danh sách các môn bị tắt thông báo")
     NOTIFY_TYPES: list = Field(default_factory=lambda: ["quiz", "assignment", "attendance"], description="Các loại bài tập sẽ gửi cảnh báo")
     NOTIFY_DND_ENABLE: bool = Field(default=False, description="Bật chế độ không làm phiền")
-    NOTIFY_DND_START: int = Field(default=23, description="Giờ bắt đầu im lặng (0-23)")
-    NOTIFY_DND_END: int = Field(default=6, description="Giờ kết thúc im lặng (0-23)")
+    NOTIFY_DND_START: int = Field(default=22, description="Giờ bắt đầu im lặng (0-23)")
+    NOTIFY_DND_END: int = Field(default=7, description="Giờ kết thúc im lặng (0-23)")
     NOTIFY_IGNORE_SUBMITTED: bool = Field(default=True, description="Im lặng với các bài đã nộp/có điểm")
 
     # Cài đặt hiệu năng
@@ -129,60 +220,56 @@ class Settings(BaseModel):
 
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:
+    _logger = logging.getLogger(__name__)
     s = Settings()
+    json_secrets: dict[str, str] = {}
+
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             # Extract secrets from JSON data before Pydantic validation
             # (Pydantic's exclude=True prevents them from being set via **data)
-            _SECRET_FIELDS = {
-                'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
-                'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN',
-            }
-            secret_values = {}
             for key in _SECRET_FIELDS:
                 val = data.pop(key, None)
                 if val and isinstance(val, str):
-                    secret_values[key] = val
+                    json_secrets[key] = val
             s = Settings(**data)
-            # On mobile (no keyring), restore secrets from JSON
-            if not _HAS_KEYRING:
-                for key, val in secret_values.items():
-                    setattr(s, key, val)
-            # Legacy: also restore UTH_PASSWORD from JSON if present
-            elif 'UTH_PASSWORD' in secret_values:
-                s.UTH_PASSWORD = secret_values['UTH_PASSWORD']
         except Exception as e:
-            logging.getLogger(__name__).warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
-            
-    # Khôi phục tất cả secrets từ keyring (chỉ trên platforms có keyring)
-    _SECRETS = {
-        'UTH_PASSWORD': 'password',
-        'MOODLE_SESSION': 'moodle_session',
-        'MOODLE_WS_TOKEN': 'ws_token',
-        'GMAIL_APP_PASSWORD': 'gmail_app_password',
-        'DISCORD_WEBHOOK_URL': 'discord_webhook',
-        'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
-    }
-    if _HAS_KEYRING:
-        for attr, key_suffix in _SECRETS.items():
-            try:
-                val = keyring.get_password(KEYRING_SERVICE_NAME, key_suffix)
-                if val:
-                    setattr(s, attr, val)
-            except Exception as e:
-                logging.getLogger(__name__).warning(f"Keyring read failed for {attr}: {e}")
-    
-    # Legacy: migrate password from old key format
+            _logger.warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
+
+    # Khôi phục secrets từ secure storage (tier 1 → tier 2 → tier 3 JSON)
+    for attr, key_suffix in _SECRET_FIELDS.items():
+        val = _read_secret(key_suffix)
+        if val:
+            setattr(s, attr, val)
+
+    # Tier 3 fallback: restore secrets from JSON if no secure backend found them
+    if not _has_any_secure_backend():
+        for attr, val in json_secrets.items():
+            if not getattr(s, attr, ''):
+                setattr(s, attr, val)
+
+    # One-time migration: move secrets from JSON/keyring → SecureStorage
+    if _get_secure_storage() is not None and json_secrets:
+        migrated = False
+        for attr, key_suffix in _SECRET_FIELDS.items():
+            if attr in json_secrets:
+                _write_secret(key_suffix, json_secrets[attr])
+                migrated = True
+        if migrated:
+            _logger.info("Migrated secrets from JSON → SecureStorage")
+
+    # Legacy: migrate password from old keyring key format
     if _HAS_KEYRING and s.UTH_USERNAME and not s.UTH_PASSWORD:
         try:
             kp = keyring.get_password(KEYRING_SERVICE_NAME, s.UTH_USERNAME)
             if kp:
                 s.UTH_PASSWORD = kp
+                _write_secret('password', kp)
         except Exception:
             pass
-            
+
     return s
 
 settings = load_settings()
@@ -190,26 +277,19 @@ settings = load_settings()
 def save_settings():
     """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng."""
     _logger = logging.getLogger(__name__)
+    has_secure = _has_any_secure_backend()
 
-    # --- Step 1: Save settings to JSON ---
-    # On mobile (no keyring), include secrets in JSON since
-    # Android's app-private storage is already sandboxed.
+    # --- Step 1: Save non-secret settings to JSON ---
+    # Secrets are NEVER written to JSON when a secure backend is available.
     json_ok = False
     try:
-        if _HAS_KEYRING:
-            # Desktop: exclude secrets from JSON (saved to keyring in Step 2)
-            data = settings.model_dump()
-        else:
-            # Mobile: include ALL fields including secrets
-            data = settings.model_dump()
-            _SECRET_FIELDS = {
-                'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
-                'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN',
-            }
-            for field_name in _SECRET_FIELDS:
-                val = getattr(settings, field_name, '')
+        data = settings.model_dump()  # exclude=True hides secrets
+        if not has_secure:
+            # Tier 3 fallback: no secure backend, include secrets in JSON
+            for attr in _SECRET_FIELDS:
+                val = getattr(settings, attr, '')
                 if val:
-                    data[field_name] = val
+                    data[attr] = val
         tmp = CONFIG_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
@@ -220,37 +300,28 @@ def save_settings():
     except Exception as e:
         _logger.error(f"Failed to save settings to {CONFIG_FILE}: {e}")
 
-    # --- Step 2: Save all secrets to keyring (independent of JSON success) ---
-    _SECRETS = {
-        'UTH_PASSWORD': 'password',
-        'MOODLE_SESSION': 'moodle_session',
-        'MOODLE_WS_TOKEN': 'ws_token',
-        'GMAIL_APP_PASSWORD': 'gmail_app_password',
-        'DISCORD_WEBHOOK_URL': 'discord_webhook',
-        'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
-    }
-    if _HAS_KEYRING:
-        for attr, key_suffix in _SECRETS.items():
+    # --- Step 2: Save all secrets to secure storage ---
+    if has_secure:
+        for attr, key_suffix in _SECRET_FIELDS.items():
             try:
                 val = getattr(settings, attr, '')
-                if val:
-                    keyring.set_password(KEYRING_SERVICE_NAME, key_suffix, val)
+                _write_secret(key_suffix, val)
             except Exception as e:
-                _logger.warning(f"Failed to write {attr} to keyring: {e}")
+                _logger.warning(f"Failed to write {attr} to secure storage: {e}")
     else:
-        _logger.debug("Keyring not available, secrets only saved if included in JSON export")
+        _logger.warning(
+            "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure backend (keyring/SecureStorage). "
+            "Mật khẩu và token đang được lưu dạng plaintext trong %s. "
+            "Cài đặt 'keyring' hoặc chạy trong Flet app để bảo mật hơn.",
+            CONFIG_FILE,
+        )
 
-    # --- Step 3: Cleanup legacy password from JSON file ---
-    # Only strip secrets from JSON if keyring is available (Windows).
-    # On mobile, keep secrets in JSON since Android's app-private storage
-    # is already sandboxed and encrypted.
-    if json_ok and _HAS_KEYRING:
-        _SECRET_KEYS = {'UTH_PASSWORD', 'MOODLE_SESSION', 'MOODLE_WS_TOKEN',
-                        'GMAIL_APP_PASSWORD', 'DISCORD_WEBHOOK_URL', 'TELEGRAM_BOT_TOKEN'}
+    # --- Step 3: Cleanup legacy secrets from JSON file ---
+    if json_ok and has_secure:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            stripped = {k: v for k, v in data.items() if k not in _SECRET_KEYS}
+            stripped = {k: v for k, v in data.items() if k not in _SECRET_FIELDS}
             if len(stripped) < len(data):
                 tmp = CONFIG_FILE.with_suffix(".tmp")
                 with open(tmp, "w", encoding="utf-8") as f:

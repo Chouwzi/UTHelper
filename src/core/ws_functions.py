@@ -7,11 +7,17 @@ Endpoints:
   - Token:  /login/token.php
   - API:    /webservice/rest/server.php
 """
+import html
 import logging
+import threading
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# Cache cho site_info/courses — tránh gọi API lặp lại
+_cache: Dict[str, Any] = {}
+_cache_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -292,16 +298,32 @@ def get_assign_details_via_ws(
 
 
 def _fill_course_name(call_api: Callable, course_id: int, details: Dict[str, Any]):
-    """Điền tên môn học từ enrolled courses."""
+    """Điền tên môn học từ enrolled courses (có cache, thread-safe)."""
     try:
-        result = call_api('core_webservice_get_site_info')
-        if result and 'userid' in result:
-            courses = call_api('core_enrol_get_users_courses', userid=result['userid'])
-            if isinstance(courses, list):
-                for c in courses:
-                    if c.get('id') == course_id:
-                        details['course_full_name'] = c.get('fullname', '')
-                        break
+        with _cache_lock:
+            if 'courses' not in _cache:
+                info = get_site_info(call_api)
+                if not info:
+                    return
+                userid = info.get('userid')
+                if not userid:
+                    return
+                # BUG-02 fix: dùng core_enrol_get_users_courses (nhận userid)
+                # thay vì get_enrolled_courses (nhận classification str)
+                courses = call_api('core_enrol_get_users_courses', userid=userid) or []
+                if not isinstance(courses, list):
+                    courses = []
+                # BUG-06 fix: dùng c.get('id') thay vì c['id'] để tránh KeyError
+                _cache['courses'] = {
+                    c.get('id'): c.get('fullname', '')
+                    for c in courses
+                    if isinstance(c, dict) and c.get('id') is not None
+                }
+
+            course_map = _cache['courses']
+        name = course_map.get(course_id, '')
+        if name:
+            details['course_full_name'] = html.unescape(name)
     except Exception:
         pass
 
@@ -317,7 +339,7 @@ def _get_assign_detail(
     assign_data = None
     assign_id = None
     for course in courses:
-        details['course_full_name'] = course.get('fullname', '')
+        details['course_full_name'] = html.unescape(course.get('fullname', ''))
         for assign in course.get('assignments', []):
             if assign.get('cmid') == cmid:
                 assign_data = assign
@@ -573,6 +595,132 @@ def save_assignment_submission(
     return True
 
 
+def submit_for_grading(call_api: Callable, assign_id: int) -> bool:
+    """mod_assign_submit_for_grading — chính thức nộp bài sau khi save.
+
+    Moodle requires this call AFTER save_submission to officially submit.
+    Without it, the submission stays as 'draft' and may NOT be graded.
+    """
+    try:
+        result = call_api(
+            'mod_assign_submit_for_grading',
+            assignmentid=assign_id,
+            acceptsubmissionstatement=1,
+        )
+    except Exception as e:
+        logger.error("Submit for grading failed (assign_id=%d): %s", assign_id, e)
+        return False
+
+    if result is None:
+        return False
+    # Returns [] on success
+    if isinstance(result, list) and len(result) == 0:
+        logger.info("Submit for grading thành công (assign_id=%d)", assign_id)
+        return True
+    if isinstance(result, dict) and 'exception' in result:
+        logger.warning("Submit for grading error: %s", result.get('message', ''))
+        return False
+    logger.info("Submit for grading response (assign_id=%d): %s", assign_id, result)
+    return True
+
+
+def get_course_grades(call_api: Callable, userid: int) -> Optional[List[Dict[str, Any]]]:
+    """gradereport_overview_get_course_grades — điểm tổng quan tất cả môn."""
+    try:
+        result = call_api('gradereport_overview_get_course_grades', userid=userid)
+        if isinstance(result, dict):
+            grades = result.get('grades', [])
+            # Moodle API không trả về coursename — enrich từ enrolled courses
+            if grades:
+                _enrich_grade_course_names(call_api, userid, grades)
+            return grades
+        return None
+    except Exception as e:
+        logger.error("Lỗi get_course_grades: %s", e)
+        return None
+
+
+def _enrich_grade_course_names(call_api: Callable, userid: int, grades: List[Dict]):
+    """Bổ sung coursename vào kết quả grade từ enrolled courses cache.
+
+    gradereport_overview_get_course_grades chỉ trả {courseid, grade, rawgrade}
+    nên cần map courseid -> fullname qua core_enrol_get_users_courses.
+    """
+    try:
+        with _cache_lock:
+            if 'courses' not in _cache:
+                courses = call_api('core_enrol_get_users_courses', userid=userid) or []
+                if not isinstance(courses, list):
+                    courses = []
+                _cache['courses'] = {
+                    c.get('id'): c.get('fullname', '')
+                    for c in courses
+                    if isinstance(c, dict) and c.get('id') is not None
+                }
+            course_map = _cache['courses']
+
+        for g in grades:
+            cid = g.get('courseid')
+            if cid and 'coursename' not in g:
+                name = course_map.get(cid, '')
+                if name:
+                    g['coursename'] = html.unescape(name)
+    except Exception:
+        pass
+
+
+
+
+def get_grade_items(call_api: Callable, courseid: int, userid: int) -> Optional[List[Dict[str, Any]]]:
+    """gradereport_user_get_grade_items — chi tiết điểm từng thành phần."""
+    try:
+        result = call_api('gradereport_user_get_grade_items', courseid=courseid, userid=userid)
+        if isinstance(result, dict):
+            items = result.get('usergrades', [])
+            if items and isinstance(items, list):
+                return items[0].get('gradeitems', [])
+        return None
+    except Exception as e:
+        logger.error("Lỗi get_grade_items (course=%d): %s", courseid, e)
+        return None
+
+
+def get_unread_notification_count(call_api: Callable, userid: int) -> int:
+    """message_popup_get_unread_popup_notification_count — số thông báo chưa đọc."""
+    try:
+        result = call_api('message_popup_get_unread_popup_notification_count', useridto=userid)
+        if isinstance(result, int):
+            return result
+        return 0
+    except Exception as e:
+        logger.error("Lỗi get_unread_notification_count: %s", e)
+        return 0
+
+
+def get_course_updates_since(call_api: Callable, courseid: int, since: int) -> Optional[List[Dict[str, Any]]]:
+    """core_course_get_updates_since — modules thay đổi từ timestamp."""
+    try:
+        result = call_api('core_course_get_updates_since', courseid=courseid, since=since)
+        if isinstance(result, dict):
+            return result.get('instances', [])
+        return None
+    except Exception as e:
+        logger.error("Lỗi get_course_updates_since (course=%d): %s", courseid, e)
+        return None
+
+
+def get_course_contents(call_api: Callable, courseid: int) -> Optional[List[Dict[str, Any]]]:
+    """core_course_get_contents — sections và modules (tài liệu) của môn học."""
+    try:
+        result = call_api('core_course_get_contents', courseid=courseid)
+        if isinstance(result, list):
+            return result
+        return None
+    except Exception as e:
+        logger.error("Lỗi get_course_contents (course=%d): %s", courseid, e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Event → Assignment converter
 # ---------------------------------------------------------------------------
@@ -640,7 +788,6 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             cm_id = evt.get('instance', '')
             if not url:
                 course_data = evt.get('course') or {}
-                course_data.get('id', '') if isinstance(course_data, dict) else ''
                 if modulename and cm_id:
                     url = (
                         f"{settings.MOODLE_BASE_URL}/mod/{modulename}"
@@ -662,7 +809,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             course_data = evt.get('course') or {}
             if not isinstance(course_data, dict):
                 course_data = {}
-            course_fullname = course_data.get('fullname', '') or ''
+            course_fullname = html.unescape(course_data.get('fullname', '') or '')
 
             # --- Build id ---
             evt_id = evt.get('id', '') or ''
@@ -672,7 +819,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             # --- Build dict ---
             assignment: Dict[str, Any] = {
                 'id': str(evt_id),
-                'title': evt.get('name') or 'Không tên',
+                'title': html.unescape(evt.get('name') or 'Không tên'),
                 'course_name': course_fullname,
                 'course': course_fullname,
                 'course_id': course_data.get('id', ''),

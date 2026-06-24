@@ -109,9 +109,9 @@ def get_urgency_badge(urgency) -> tuple:
     """Return (label, color)."""
     u = urgency_str(urgency)
     if u == "critical":
-        return "CẤP BÁCH", C.CRITICAL
+        return "KHẨN CẤP", C.CRITICAL
     if u == "warning":
-        return "SẮP TỚI", C.WARNING
+        return "SẮP HẠN", C.WARNING
     return "AN TOÀN", C.SAFE
 
 def get_status_tag(data: dict) -> tuple:

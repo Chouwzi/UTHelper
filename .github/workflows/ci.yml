@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13']
+        python-version: ['3.12', '3.13', '3.14']
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +63,9 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml:../coverage.xml \
             -x
+
+      - name: Compile check (syntax)
+        run: python -m py_compile src/main.py && python -c "import py_compile, pathlib; [py_compile.compile(str(f), doraise=True) for f in pathlib.Path('src').rglob('*.py')]"
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'

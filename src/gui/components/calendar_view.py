@@ -481,14 +481,13 @@ class CalendarView(ft.Container):
 
     def show(self):
         self.visible = True
-        # P4: Always anchor to today when opening — reduces cognitive orientation time
+        # Always anchor to today when opening — reduces cognitive orientation time
         today = date.today()
-        if self._selected_date != today:
-            self._year = today.year
-            self._month = today.month
-            self._selected_day = today.day
-            self._selected_date = today
-            self._week_start = today - timedelta(days=today.weekday())
+        self._year = today.year
+        self._month = today.month
+        self._selected_day = today.day
+        self._selected_date = today
+        self._week_start = today - timedelta(days=today.weekday())
         if self._view_mode == "month":
             self._render_month()
         else:

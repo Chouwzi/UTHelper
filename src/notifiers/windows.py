@@ -8,6 +8,7 @@ from models import Assignment
 from config import BASE_DIR
 from core.time_utils import format_remaining_time
 from core.display_utils import get_type_display, get_urgency_display, urgency_str, clean_course_name
+from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ def _get(obj, key, default=''):
     return getattr(obj, key, default)
 
 
-class WindowsNotifier:
+class WindowsNotifier(BaseNotifier):
     def __init__(self, tray_app=None):
         self.tray_app = tray_app
         self.app_id = "UTHelper"

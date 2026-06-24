@@ -16,6 +16,7 @@ from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
+from gui.components.grade_overview_view import GradeOverviewView
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,10 @@ class AppController:
         # Check update in background
         from core.update_checker import check_for_update_async
         check_for_update_async(APP_VERSION, self._on_update_check)
+        
+        # Android: Start background scheduler for deadline checks via AlarmManager
+        if IS_MOBILE and settings.BACKGROUND_CHECK_ANDROID:
+            self.page.run_task(self._start_background_scheduler)
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self.page.run_task(self._show_login_dialog)
@@ -283,6 +288,40 @@ class AppController:
             tooltip="Cài đặt",
             on_click=lambda e: self.page.run_task(self._show_settings),
         )
+        self.grades_btn = ft.IconButton(
+            ft.Icons.INSIGHTS_ROUNDED,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
+            tooltip="Bảng điểm",
+            on_click=lambda e: self.page.run_task(self._toggle_grades),
+        )
+
+        # Notification badge
+        self._notification_badge_text = ft.Text("0", size=8, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
+        self._notification_badge = ft.Container(
+            content=self._notification_badge_text,
+            bgcolor=ft.Colors.RED,
+            border_radius=8,
+            width=16, height=16,
+            alignment=ft.Alignment(0, 0),
+            visible=False,  # Hidden when count=0
+        )
+        self._notification_icon = ft.Stack(
+            controls=[
+                ft.IconButton(
+                    icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                    icon_color=C.TEXT_SECONDARY,
+                    icon_size=20,
+                    tooltip="Thông báo",
+                    on_click=lambda e: self.page.run_task(self._on_notification_click, e),
+                ),
+                ft.Container(
+                    content=self._notification_badge,
+                    alignment=ft.Alignment(1, -1),
+                    right=2, top=2,
+                ),
+            ],
+            width=40, height=40,
+        )
 
         header = ft.Container(
             content=ft.Column(controls=[
@@ -296,7 +335,7 @@ class AppController:
                             border_radius=4,
                         ),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.refresh_btn, self.settings_btn], spacing=0),
+                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self._notification_icon, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
                 self.loading_bar,
@@ -306,16 +345,24 @@ class AppController:
         )
 
         # Update banner (ẩn mặc định)
+        self._update_icon = ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color="#FCD34D")
+        self._update_text = ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", weight=ft.FontWeight.W_500, expand=True)
+        self._update_progress = ft.ProgressBar(value=0, width=0, height=3, color="#FCD34D", bgcolor="#FCD34D20", visible=False)
+        self._update_btn = ft.TextButton(
+            "Cập nhật",
+            icon=ft.Icons.DOWNLOAD_ROUNDED,
+            style=ft.ButtonStyle(color="#FCD34D"),
+            on_click=self._open_update_url,
+        )
         self._update_banner = ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.Icons.SYSTEM_UPDATE, size=14, color="#FCD34D"),
-                ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", expand=True),
-                ft.TextButton("Tải về", style=ft.ButtonStyle(color="#FCD34D"), on_click=self._open_update_url),
-            ], spacing=6),
+            content=ft.Column([
+                ft.Row([self._update_icon, self._update_text, self._update_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self._update_progress,
+            ], spacing=2, tight=True),
             bgcolor="#1C1917",
-            border=ft.Border.all(1, "#FCD34D40"),
-            border_radius=8,
-            padding=ft.Padding(left=10, right=6, top=4, bottom=4),
+            border=ft.Border.all(1, "#FCD34D30"),
+            border_radius=10,
+            padding=ft.Padding(left=12, right=8, top=8, bottom=8),
             margin=ft.Margin(left=14, right=14, top=0, bottom=0),
             visible=False,
         )
@@ -405,20 +452,24 @@ class AppController:
             on_close=lambda: self.page.run_task(self._close_settings),
             on_saved=self._on_settings_saved,
             on_test_tray=self._on_test_tray,
+            on_test_mobile=self._on_test_mobile,
             on_test_tele=self._on_test_tele,
             on_test_discord=self._on_test_discord,
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
         )
+        self.grade_overview_view = GradeOverviewView(
+            on_close=lambda: self.page.run_task(self._close_grades),
+        )
 
         # UX: Slide-in transitions for views
-        for _view in (self.detail_view, self.settings_view, self.calendar_view):
+        for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
             _view.offset = ft.Offset(1, 0)  # start off-screen right
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
         # UX: SafeArea for iOS notch/Dynamic Island & Android status bar
-        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.detail_view, self.settings_view], expand=True)
+        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
         if IS_MOBILE:
             self.page.add(ft.SafeArea(content=main_stack, expand=True))
         else:
@@ -760,6 +811,26 @@ class AppController:
             self._render_cards_only()
         self._search_task = self.page.run_task(_delayed_render)
 
+    async def _check_grades_background(self):
+        """PERF-OPT: Check grade changes in background (non-blocking)."""
+        try:
+            grade_changes = await asyncio.to_thread(self.orchestrator.check_grade_changes)
+            if grade_changes and hasattr(self, 'notifier') and self.notifier:
+                self.notifier.dispatch_grade_alert(grade_changes)
+                msg = f"\U0001f4ca {len(grade_changes)} \u0111i\u1ec3m m\u1edbi: "
+                msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
+                if len(grade_changes) > 3:
+                    msg += f" +{len(grade_changes) - 3} kh\u00e1c"
+                self.page.snack_bar = ft.SnackBar(
+                    content=ft.Text(msg, color=ft.Colors.WHITE),
+                    bgcolor="#22C55E",
+                    duration=5000,
+                )
+                self.page.snack_bar.open = True
+                self.page.update()
+        except Exception as e:
+            logger.debug("Grade check background failed (non-critical): %s", e)
+
     async def _prefetch_details_async(self, activities: list):
         len(activities)
         workers = max(1, min(settings.PREFETCH_WORKERS, 10))
@@ -908,12 +979,23 @@ class AppController:
                 except Exception as e:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
+                # PERF-OPT: Grade check moved to background task to not block main data display
+                self.page.run_task(self._check_grades_background)
+
             self._update_footer()
             
             self._prefetch_cancel_event.clear()
             with self._data_lock:
                 prefetch_copy = list(self.all_data)
             self.page.run_task(self._prefetch_details_async, prefetch_copy)
+
+
+            # Start auto-poll if not already running
+            if not hasattr(self, '_auto_poll_task') or self._auto_poll_task is None:
+                self._auto_poll_task = self.page.run_task(self._auto_poll_loop)
+
+            # Update notification badge
+            self.page.run_task(self._update_notification_badge)
         except Exception as exc:
             logger.exception(f"[Load] Lỗi: {exc}")
             with self._data_lock:
@@ -936,6 +1018,34 @@ class AppController:
             self.refresh_btn.disabled = False
             self._is_loading          = False
             self.page.update()
+
+    async def _auto_poll_loop(self):
+        """Background loop that periodically refreshes data based on POLL_INTERVAL_MINUTES."""
+        logger.info("[AutoPoll] Started with interval=%d min", getattr(settings, 'POLL_INTERVAL_MINUTES', 15))
+        while self._page_alive.is_set():
+            interval = getattr(settings, 'POLL_INTERVAL_MINUTES', 15) * 60
+            await asyncio.sleep(interval)
+            if not self._page_alive.is_set():
+                break
+            if self._is_loading:
+                logger.debug("[AutoPoll] Skipping — another load in progress")
+                continue
+            logger.info("[AutoPoll] Running periodic refresh...")
+            try:
+                # Smart poll: check if anything changed first
+                if getattr(settings, 'SMART_POLL_ENABLED', True):
+                    changed = self.orchestrator.get_updates_since(
+                        self.orchestrator._last_fetch_ts
+                    )
+                    if changed is not None and len(changed) == 0:
+                        logger.info("[AutoPoll] No changes detected, skipping full fetch")
+                        continue
+                    if changed:
+                        logger.info("[AutoPoll] %d courses changed, doing full fetch", len(changed))
+                await self._load_data_async()
+            except Exception as e:
+                logger.error("[AutoPoll] Error: %s", e)
+        logger.info("[AutoPoll] Loop ended")
 
     async def _close_detail(self):
         self.detail_view.offset = ft.Offset(1, 0)  # slide out
@@ -991,6 +1101,62 @@ class AppController:
         self.settings_view.visible = True
         self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
+        self.page.update()
+
+    async def _toggle_grades(self):
+        """Toggle the grade overview panel."""
+        if self.grade_overview_view.visible:
+            await self._close_grades()
+        else:
+            await self._show_grades()
+
+    async def _show_grades(self):
+        """Show grade overview panel and fetch data."""
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.detail_view.visible = False
+        self.grade_overview_view.show_loading()
+        self.grades_btn.icon_color = C.ACCENT
+        self.page.update()
+
+        # Fetch grades in background
+        try:
+            from core import ws_functions
+            userid = self.orchestrator._get_userid()
+            if userid:
+                courses_grades = ws_functions.get_course_grades(
+                    self.orchestrator.client.call_ws_api, userid
+                )
+                grade_items = {}
+                if courses_grades:
+                    for cg in courses_grades:
+                        cid = str(cg.get('courseid', ''))
+                        if cid:
+                            try:
+                                items = ws_functions.get_grade_items(
+                                    self.orchestrator.client.call_ws_api, cid, userid
+                                )
+                                if items:
+                                    grade_items[cid] = items
+                            except Exception as ex:
+                                logger.debug("Grade items unavailable for course %s: %s", cid, ex)
+                self.grade_overview_view.update_grades(courses_grades or [], grade_items)
+            else:
+                self.grade_overview_view.update_grades([], {})
+        except Exception as e:
+            logger.error("Grade fetch failed: %s", e)
+            self.grade_overview_view.update_grades([], {})
+        self.page.update()
+
+    async def _close_grades(self):
+        """Close grade overview and return to dashboard."""
+        self.grade_overview_view.hide()
+        self.page.update()
+        await asyncio.sleep(0.25)
+        self.grade_overview_view.visible = False
+        self.dashboard.opacity = 1.0
+        self.dashboard.visible = True
+        self.grades_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     def _rebuild_colors(self):
@@ -1065,7 +1231,7 @@ class AppController:
                     card._progress_ctrl.bgcolor = _C.BORDER
 
         # ── Icon buttons ──
-        for btn in (self.calendar_btn, self.refresh_btn, self.settings_btn):
+        for btn in (self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn):
             btn.icon_color = _C.TEXT_SECONDARY
 
         # ── Loading bar ──
@@ -1191,6 +1357,11 @@ class AppController:
         from notifiers.windows import WindowsNotifier
         WindowsNotifier().notify([dummy])
 
+    def _on_test_mobile(self, mock_type="critical"):
+        dummy = self._test_notification_base(mock_type)
+        from notifiers.mobile import MobileNotifier
+        MobileNotifier().notify([dummy])
+
     def _on_test_tele(self, mock_type="critical"):
         dummy = self._test_notification_base(mock_type)
         from notifiers.telegram import TelegramNotifier
@@ -1206,13 +1377,22 @@ class AppController:
         from notifiers.email import EmailNotifier
         EmailNotifier().notify([dummy])
 
-    def _on_update_check(self, has_update: bool, version: str, url: str):
+    def _on_update_check(self, has_update: bool, version: str, release_url: str, asset_url: str = None):
         """Callback từ background thread khi kiểm tra update xong."""
         if has_update and version:
             async def _update_ui():
-                self._update_url = url or ""
+                self._update_asset_url = asset_url or ""
+                self._update_release_url = release_url or ""
+                self._update_url = asset_url or release_url or ""
+                self._update_version = version
+                self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
+                self._update_icon.color = "#FCD34D"
+                self._update_text.value = f"Phiên bản mới v{version} đã sẵn sàng!"
+                self._update_btn.visible = True
+                self._update_btn.text = "Cập nhật"
+                self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
+                self._update_progress.visible = False
                 self._update_banner.visible = True
-                self._update_banner.content.controls[1].value = f"Phiên bản mới v{version} đã sẵn sàng!"
                 self.page.update()
             try:
                 self.page.run_task(_update_ui)
@@ -1220,9 +1400,136 @@ class AppController:
                 pass
 
     async def _open_update_url(self, e):
-        """Mở trang tải bản cập nhật trên trình duyệt."""
-        if self._update_url:
-            await ft.UrlLauncher().launch_url(self._update_url)
+        """Smart update: auto-download trên Windows/Android, browser trên iOS/other."""
+        from core.update_checker import _is_windows, _is_android
+
+        asset_url = getattr(self, "_update_asset_url", "")
+        release_url = getattr(self, "_update_release_url", "")
+
+        # ── Windows: download .zip → batch updater → restart ──
+        if _is_windows() and asset_url and asset_url.endswith(".zip"):
+            await self._do_auto_update_windows(asset_url)
+            return
+
+        # ── Android: download .apk → install intent ──
+        if _is_android() and asset_url and asset_url.endswith(".apk"):
+            await self._do_auto_update_android(asset_url)
+            return
+
+        # ── Fallback: open browser ──
+        url = asset_url or release_url
+        if url:
+            try:
+                self.page.launch_url(url)
+            except Exception:
+                import webbrowser; webbrowser.open(url)
+
+    async def _do_auto_update_windows(self, url: str):
+        """Download .zip and apply via batch updater (Windows)."""
+        import sys
+        import asyncio
+        from core.update_checker import download_update, apply_update_windows
+
+        # Switch banner to download state
+        self._update_icon.name = ft.Icons.DOWNLOADING_ROUNDED
+        self._update_icon.color = "#60A5FA"
+        self._update_text.value = "Đang tải xuống... 0%"
+        self._update_btn.visible = False
+        self._update_progress.visible = True
+        self._update_progress.value = 0
+        self.page.update()
+
+        def _progress(pct):
+            async def _upd():
+                self._update_text.value = f"Đang tải xuống... {int(pct * 100)}%"
+                self._update_progress.value = pct
+                self.page.update()
+            try: self.page.run_task(_upd)
+            except Exception: pass
+
+        zip_path = await asyncio.to_thread(download_update, url, _progress)
+
+        if zip_path:
+            self._update_icon.name = ft.Icons.INSTALL_DESKTOP_ROUNDED
+            self._update_icon.color = C.SAFE
+            self._update_text.value = "Đang cài đặt... Ứng dụng sẽ khởi động lại."
+            self._update_progress.value = 1.0
+            self.page.update()
+            await asyncio.sleep(0.5)
+
+            success = apply_update_windows(zip_path)
+            if success:
+                sys.exit(0)
+            else:
+                self._update_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                self._update_icon.color = C.CRITICAL
+                self._update_text.value = "Cập nhật thất bại. Vui lòng tải thủ công."
+                self._update_btn.visible = True
+                self._update_btn.text = "Tải thủ công"
+                self._update_btn.icon = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+                self._update_progress.visible = False
+                self.page.update()
+        else:
+            self._update_icon.name = ft.Icons.CLOUD_OFF_ROUNDED
+            self._update_icon.color = C.CRITICAL
+            self._update_text.value = "Tải xuống thất bại."
+            self._update_btn.visible = True
+            self._update_btn.text = "Thử lại"
+            self._update_btn.icon = ft.Icons.REFRESH_ROUNDED
+            self._update_progress.visible = False
+            self.page.update()
+
+    async def _do_auto_update_android(self, url: str):
+        """Download .apk and trigger install intent (Android)."""
+        import asyncio
+        from core.update_checker import download_update, apply_update_android
+
+        # Switch banner to download state
+        self._update_icon.name = ft.Icons.DOWNLOADING_ROUNDED
+        self._update_icon.color = "#60A5FA"
+        self._update_text.value = "Đang tải APK... 0%"
+        self._update_btn.visible = False
+        self._update_progress.visible = True
+        self._update_progress.value = 0
+        self.page.update()
+
+        def _progress(pct):
+            async def _upd():
+                self._update_text.value = f"Đang tải APK... {int(pct * 100)}%"
+                self._update_progress.value = pct
+                self.page.update()
+            try: self.page.run_task(_upd)
+            except Exception: pass
+
+        apk_path = await asyncio.to_thread(download_update, url, _progress)
+
+        if apk_path:
+            self._update_icon.name = ft.Icons.INSTALL_MOBILE_ROUNDED
+            self._update_icon.color = C.SAFE
+            self._update_text.value = "Đang mở trình cài đặt..."
+            self._update_progress.value = 1.0
+            self.page.update()
+            await asyncio.sleep(0.3)
+
+            success = apply_update_android(apk_path)
+            if not success:
+                self._update_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+                self._update_icon.color = C.WARNING
+                self._update_text.value = "Mở trình duyệt để tải..."
+                self._update_progress.visible = False
+                self.page.update()
+                try: self.page.launch_url(url)
+                except Exception: pass
+        else:
+            self._update_icon.name = ft.Icons.CLOUD_OFF_ROUNDED
+            self._update_icon.color = C.CRITICAL
+            self._update_text.value = "Tải APK thất bại."
+            self._update_btn.visible = True
+            self._update_btn.text = "Thử lại"
+            self._update_btn.icon = ft.Icons.REFRESH_ROUNDED
+            self._update_progress.visible = False
+            self.page.update()
+
 
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
@@ -1332,6 +1639,46 @@ class AppController:
                 await self._load_data_async()
             except Exception:
                 pass
+
+    async def _start_background_scheduler(self):
+        """Initialize Android background scheduler for periodic deadline checks."""
+        try:
+            from core.background_scheduler import get_scheduler
+            scheduler = get_scheduler()
+            if not scheduler.is_available:
+                logger.debug("Background scheduler not available on this platform")
+                return
+
+            await scheduler.request_permissions()
+            interval = max(5, settings.BACKGROUND_CHECK_INTERVAL)
+            await scheduler.start_periodic_check(interval_minutes=interval)
+            logger.info("Android background scheduler started (every %d min)", interval)
+        except Exception as e:
+            logger.warning("Failed to start background scheduler: %s", e)
+
+    async def _update_notification_badge(self):
+        """Fetch unread notification count and update badge."""
+        try:
+            from core import ws_functions
+            userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
+            if userid is None:
+                info = ws_functions.get_site_info(self.orchestrator.client.call_ws_api)
+                if info:
+                    userid = info.get('userid')
+            if userid:
+                count = ws_functions.get_unread_notification_count(
+                    self.orchestrator.client.call_ws_api, userid
+                )
+                self._notification_badge_text.value = str(count) if count <= 9 else "9+"
+                self._notification_badge.visible = count > 0
+                self.page.update()
+        except Exception as e:
+            logger.debug("Badge update failed: %s", e)
+
+    async def _on_notification_click(self, e):
+        """Open Moodle notifications in browser."""
+        import webbrowser
+        webbrowser.open("https://courses.ut.edu.vn/message/index.php")
 
     def _on_disconnect(self, e):
         self._page_alive.clear()

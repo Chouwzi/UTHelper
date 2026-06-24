@@ -1,7 +1,9 @@
 import json
 import os
+import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from typing import Optional
 from config import settings
 import logging
@@ -39,9 +41,21 @@ class MoodleClient:
     Chạy trên Desktop, iOS, Android mà không cần cài thêm gì.
     """
     
+    # ── Client-side rate limiting (Moodle has NO server-side throttle) ──
+    _MIN_INTERVAL = 0.05  # 50ms = max 20 req/s (was 200ms — caused 1.6s waste per cycle)
+
     def __init__(self):
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT from portal API — valid ~30 days
+        self._last_call_time: float = 0.0  # monotonic timestamp
+
+    def _throttle(self):
+        """Ensure minimum interval between API calls."""
+        now = time.monotonic()
+        elapsed = now - self._last_call_time
+        if elapsed < self._MIN_INTERVAL:
+            time.sleep(self._MIN_INTERVAL - elapsed)
+        self._last_call_time = time.monotonic()
 
     def close(self):
         """Không cần cleanup — urllib không dùng connection pool."""
@@ -57,7 +71,12 @@ class MoodleClient:
         req.add_header('Accept', 'application/json, */*')
         req.add_header('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8')
         
-        resp = _urlopen(req, timeout=timeout)
+        self._throttle()
+        try:
+            resp = _urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            logger.warning("HTTP %d from POST %s", e.code, url.split('?')[0])
+            return e.code, None
         body = resp.read()
         try:
             return resp.status, json.loads(body)
@@ -72,7 +91,12 @@ class MoodleClient:
         req.add_header('Content-Type', 'application/json')
         req.add_header('Accept', 'application/json')
         
-        resp = _urlopen(req, timeout=timeout)
+        self._throttle()
+        try:
+            resp = _urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            logger.warning("HTTP %d from POST-JSON %s", e.code, url.split('?')[0])
+            return e.code, None
         resp_body = resp.read()
         try:
             return resp.status, json.loads(resp_body)
@@ -130,7 +154,11 @@ class MoodleClient:
         req = urllib.request.Request(url)
         req.add_header('User-Agent', _DEFAULT_UA)
         
-        resp = _urlopen(req, timeout=timeout)
+        try:
+            resp = _urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            logger.warning("HTTP %d from GET %s", e.code, url.split('?')[0])
+            return e.code, None
         return resp.status, resp.read()
 
 
@@ -249,7 +277,13 @@ class MoodleClient:
             
             # Check for other errors
             if isinstance(result, dict) and 'exception' in result:
-                logger.error(f"WS API error [{function}]: {result.get('message', result.get('error', 'Unknown'))}")
+                errorcode = result.get('errorcode', '')
+                message = result.get('message', result.get('error', 'Unknown'))
+                # Server-side data validation errors are non-retryable
+                if errorcode == 'invalidresponse':
+                    logger.warning(f"WS API [{function}]: Server data validation (non-retryable): {message}")
+                else:
+                    logger.error(f"WS API error [{function}] ({errorcode}): {message}")
                 return None
             
             return result

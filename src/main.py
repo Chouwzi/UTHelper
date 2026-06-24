@@ -86,9 +86,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-logging.getLogger("flet_core").setLevel(logging.INFO)
-logging.getLogger("flet").setLevel(logging.INFO)
+logging.getLogger("flet_core").setLevel(logging.WARNING)
+logging.getLogger("flet").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# Suppress known harmless Flet web session teardown errors
+# (NoneType.put_nowait race condition during disconnect)
+logging.getLogger("flet_core.session").setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +174,12 @@ def main():
     
     # Support web mode for testing: set FLET_WEB=1 or pass --web
     web_mode = os.environ.get("FLET_WEB") == "1" or "--web" in sys.argv
-    web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
+    try:
+        web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
+        if not (1 <= web_port <= 65535):
+            raise ValueError(f"Port {web_port} out of valid range 1-65535")
+    except (ValueError, TypeError):
+        web_port = 8561
     
     run_kwargs = dict(main=_app_target, assets_dir=_assets)
     if web_mode:

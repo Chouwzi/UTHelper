@@ -6,13 +6,14 @@ from config import save_settings
 from platform_utils import IS_MOBILE as _IS_MOBILE
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
         super().__init__()
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
         self._on_saved = on_saved
         self._on_test_tray = on_test_tray
+        self._on_test_mobile = on_test_mobile
         self._on_test_tele = on_test_tele
         self._on_test_discord = on_test_discord
         self._on_test_mail = on_test_mail
@@ -205,6 +206,23 @@ class SettingsView(ft.Container):
             label="Thu nhỏ vào khay hệ thống"
         )
 
+        # Android background check switch
+        self._sw_bg_check = ft.Switch(
+            value=settings.BACKGROUND_CHECK_ANDROID, active_color=C.ACCENT,
+            label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+            label="Kiểm tra deadline khi thu nhỏ (Android)",
+            on_change=lambda e: self._toggle_bg_check_ui()
+        )
+        self._bg_interval_field = ft.TextField(
+            value=str(settings.BACKGROUND_CHECK_INTERVAL),
+            label="Tần suất kiểm tra nền (phút)",
+            text_size=13,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            width=200,
+            visible=settings.BACKGROUND_CHECK_ANDROID,
+        )
 
         self._sw_email = ft.Switch(
             value=settings.ENABLE_GMAIL, active_color=C.ACCENT,
@@ -282,26 +300,120 @@ class SettingsView(ft.Container):
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=8,
             text_size=13
         )
-        
-        # Debug test panel — hide Windows-only buttons on mobile
-        _tray_btn = ft.Button("Windows Tray", on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
-        _debug_buttons_row1 = ft.Row([
-            *([_tray_btn] if not _IS_MOBILE else []),
-            ft.Button("Telegram", on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
-        ], wrap=True)
-        
+        # ── Debug panel: Comprehensive test tools ──
+        # Section 1: Notification channel tests (platform-aware)
+        _notif_section_label = ft.Text("Kiểm thử kênh thông báo", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _tray_btn = ft.Button("Windows Tray", icon=ft.Icons.DESKTOP_WINDOWS_ROUNDED, on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
+        _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
+        _notif_buttons = ft.Row([
+            *([_tray_btn] if not _IS_MOBILE else [_mobile_btn]),
+            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
+            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
+            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+            ft.Button("Gửi tất cả", icon=ft.Icons.CAMPAIGN_ROUNDED, on_click=lambda e: self._do_test_broadcast(), bgcolor=C.SURFACE, color=C.CRITICAL),
+        ], wrap=True, spacing=6)
+
+        # Section 2: System diagnostics
+        _sys_section_label = ft.Text("Chẩn đoán hệ thống", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_info_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _sys_buttons = ft.Row([
+            ft.Button("Thông tin thiết bị", icon=ft.Icons.INFO_OUTLINE_ROUNDED, on_click=lambda e: self._do_show_device_info(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Kết nối Moodle", icon=ft.Icons.CLOUD_SYNC_ROUNDED, on_click=lambda e: self._do_test_moodle_connection(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Ping Moodle", icon=ft.Icons.SPEED_ROUNDED, on_click=lambda e: self._do_test_latency(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Notifiers", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=lambda e: self._do_show_notifiers(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("DND Status", icon=ft.Icons.DO_NOT_DISTURB_ROUNDED, on_click=lambda e: self._do_check_dnd(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+        ], wrap=True, spacing=6)
+
+        # Section 3: Cache & data management
+        _cache_section_label = ft.Text("Bộ nhớ đệm & dữ liệu", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_cache_stats = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True)
+        _cache_buttons = ft.Row([
+            ft.Button("Thống kê cache", icon=ft.Icons.ANALYTICS_ROUNDED, on_click=lambda e: self._do_show_cache_stats(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Xóa cache thông báo", icon=ft.Icons.NOTIFICATIONS_OFF_ROUNDED, on_click=lambda e: self._do_clear_notif_cache(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa lịch sử", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa cache offline", icon=ft.Icons.CACHED_ROUNDED, on_click=lambda e: self._do_clear_data_cache(), bgcolor=C.SURFACE, color=C.WARNING),
+        ], wrap=True, spacing=6)
+
+        # Section 3b: Notification history viewer
+        _history_section_label = ft.Text("Lịch sử thông báo đã gửi", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_history_text = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True, max_lines=15)
+        _history_buttons = ft.Row([
+            ft.Button("Xem gần đây", icon=ft.Icons.HISTORY_ROUNDED, on_click=lambda e: self._do_show_notif_history(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+        ], wrap=True, spacing=6)
+
+        # Section 4: Background scheduler (Android only)
+        _bg_section_label = ft.Text("Background Scheduler (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_scheduler_status = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _bg_buttons = ft.Row([
+            ft.Button("Trạng thái", icon=ft.Icons.QUERY_STATS_ROUNDED, on_click=lambda e: self._do_show_scheduler_status(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Start Foreground", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, on_click=lambda e: self._do_start_foreground(), bgcolor=C.SURFACE, color=C.SAFE),
+            ft.Button("Stop Foreground", icon=ft.Icons.STOP_CIRCLE_OUTLINED, on_click=lambda e: self._do_stop_foreground(), bgcolor=C.SURFACE, color=C.CRITICAL),
+            ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        # Section 5: Update checker
+        _update_section_label = ft.Text("Kiểm tra cập nhật", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_update_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _update_buttons = ft.Row([
+            ft.Button("Force check update", icon=ft.Icons.SYSTEM_UPDATE_ROUNDED, on_click=lambda e: self._do_force_check_update(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        # Section 6: Data & actions
+        _action_section_label = ft.Text("Hành động nhanh", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _action_buttons = ft.Row([
+            ft.Button("Force Refresh", icon=ft.Icons.REFRESH_ROUNDED, on_click=lambda e: self._do_force_refresh(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Reset Settings", icon=ft.Icons.RESTART_ALT_ROUNDED, on_click=lambda e: self._do_reset_settings(), bgcolor=C.SURFACE, color=C.CRITICAL),
+        ], wrap=True, spacing=6)
+
+        # Assemble debug panel with platform-aware sections
+        _debug_sections = [
+            ft.Text("Công cụ gỡ lỗi nâng cao", color=C.CRITICAL, weight=ft.FontWeight.BOLD, size=14),
+            ft.Divider(height=1, color=C.BORDER),
+            # Notification tests
+            _notif_section_label,
+            self._mock_type_drp,
+            _notif_buttons,
+            ft.Divider(height=1, color=C.BORDER),
+            # System diagnostics
+            _sys_section_label,
+            _sys_buttons,
+            self._debug_info_text,
+            ft.Divider(height=1, color=C.BORDER),
+            # Cache management
+            _cache_section_label,
+            _cache_buttons,
+            self._debug_cache_stats,
+            ft.Divider(height=1, color=C.BORDER),
+            # Notification history
+            _history_section_label,
+            _history_buttons,
+            self._debug_history_text,
+        ]
+
+        # Android-only: background scheduler controls
+        if _IS_MOBILE:
+            _debug_sections.extend([
+                ft.Divider(height=1, color=C.BORDER),
+                _bg_section_label,
+                _bg_buttons,
+                self._debug_scheduler_status,
+            ])
+
+        # Update checker + quick actions (all platforms)
+        _debug_sections.extend([
+            ft.Divider(height=1, color=C.BORDER),
+            _update_section_label,
+            _update_buttons,
+            self._debug_update_text,
+            ft.Divider(height=1, color=C.BORDER),
+            _action_section_label,
+            _action_buttons,
+        ])
+
         self._test_panel = ft.Container(
-            content=ft.Column([
-                ft.Text("Công cụ kiểm thử (Debug / Mock)", color=C.CRITICAL, weight=ft.FontWeight.BOLD),
-                self._mock_type_drp,
-                _debug_buttons_row1,
-                ft.Row([
-                    ft.Button("Discord", on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
-                    ft.Button("Gmail", on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
-                ], wrap=True),
-            ]),
+            content=ft.Column(_debug_sections, spacing=8, scroll=ft.ScrollMode.AUTO),
             visible=settings.DEBUG_MODE,
-            padding=10, border=ft.Border.all(1, C.CRITICAL), border_radius=8, margin=ft.Margin.only(top=10)
+            padding=12, border=ft.Border.all(1, C.CRITICAL), border_radius=10, margin=ft.Margin.only(top=10)
         )
         
         self._interval_field = ft.TextField(
@@ -311,6 +423,21 @@ class SettingsView(ft.Container):
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY,
             bgcolor=C.BG, border_radius=10,
+        )
+        self._dd_poll_interval = ft.Dropdown(
+            label="Tần suất kiểm tra tự động",
+            value=str(getattr(settings, 'POLL_INTERVAL_MINUTES', 15)),
+            options=[
+                ft.dropdown.Option("5", "5 phút"),
+                ft.dropdown.Option("10", "10 phút"),
+                ft.dropdown.Option("15", "15 phút (mặc định)"),
+                ft.dropdown.Option("30", "30 phút"),
+                ft.dropdown.Option("60", "1 giờ"),
+            ],
+            text_size=13, color=C.TEXT_PRIMARY,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            bgcolor=C.BG, border_radius=10,
+            width=250,
         )
         self._fetch_months_field = ft.TextField(
             value=str(settings.FETCH_MONTHS),
@@ -361,36 +488,179 @@ class SettingsView(ft.Container):
             bgcolor=C.BG, border_radius=10,
         )
 
-        # Thêm nhóm tính năng báo thức (UTHelper Phase 3)
+        # ── Notification Profile Presets ──
+        _PROFILES = {
+            "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
+            "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
+            "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [72, 24, 6, 1], "dnd": False, "dnd_start": 22, "dnd_end": 7, "min_before": 15},
+        }
+        self._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
+        self._profile_cards = {}
+        self._profile_summary = ft.Text("", size=12, color=C.TEXT_SECONDARY, italic=True)
+
+        def _on_profile_select(profile_key):
+            def handler(e):
+                self._current_profile = profile_key
+                prof = _PROFILES[profile_key]
+                # Auto-apply profile settings
+                self._sw_dnd_enable.value = prof["dnd"]
+                self._dnd_start_field.value = str(prof["dnd_start"])
+                self._dnd_end_field.value = str(prof["dnd_end"])
+                self._notify_min_field.value = str(prof["min_before"])
+                # Update milestone chips
+                for h, chip in self._milestone_chips.items():
+                    chip.selected = h in prof["milestones"]
+                self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
+                # Update card styles
+                for k, card in self._profile_cards.items():
+                    is_sel = (k == profile_key)
+                    card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+                    card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+                self._update_profile_summary()
+                self._update_dnd_summary()
+                self.update()
+            return handler
+
+        for pkey, pval in _PROFILES.items():
+            is_sel = (pkey == self._current_profile)
+            card = ft.Container(
+                content=ft.Column([
+                    ft.Icon(pval["icon"], size=24, color=C.ACCENT if is_sel else C.TEXT_SECONDARY),
+                    ft.Text(pval["label"], size=13, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER),
+                    ft.Text(pval["desc"], size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER),
+                ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                width=110, padding=12, border_radius=12,
+                bgcolor=C.ACCENT + "15" if is_sel else C.SURFACE,
+                border=ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER),
+                on_click=_on_profile_select(pkey),
+                ink=True,
+            )
+            self._profile_cards[pkey] = card
+
+        self._profile_row = ft.Row(
+            controls=list(self._profile_cards.values()),
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+        )
+
+        # ── DND (Không làm phiền) — Visual Time Cards ──
         self._sw_dnd_enable = ft.Switch(
             value=getattr(settings, 'NOTIFY_DND_ENABLE', False), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Kích hoạt chế độ Không làm phiền (DND)"
+            label="Không làm phiền",
+            on_change=lambda e: self._update_dnd_summary()
         )
         self._dnd_start_field = ft.TextField(
-            value=str(getattr(settings, 'NOTIFY_DND_START', 23)),
-            label="Bắt đầu im lặng (giờ)",
+            value=str(getattr(settings, 'NOTIFY_DND_START', 22)),
+            label="Từ (giờ)",
             keyboard_type=ft.KeyboardType.NUMBER,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            width=100, text_align=ft.TextAlign.CENTER,
+            prefix_icon=ft.Icons.DARK_MODE_OUTLINED,
+            on_change=lambda e: self._update_dnd_summary()
         )
         self._dnd_end_field = ft.TextField(
-            value=str(getattr(settings, 'NOTIFY_DND_END', 6)),
-            label="Kết thúc im lặng (giờ)",
+            value=str(getattr(settings, 'NOTIFY_DND_END', 7)),
+            label="Đến (giờ)",
             keyboard_type=ft.KeyboardType.NUMBER,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            width=100, text_align=ft.TextAlign.CENTER,
+            prefix_icon=ft.Icons.LIGHT_MODE_OUTLINED,
+            on_change=lambda e: self._update_dnd_summary()
         )
+        self._dnd_summary = ft.Text("", size=12, color=C.TEXT_SECONDARY, italic=True)
+        self._dnd_time_row = ft.Row(
+            controls=[
+                self._dnd_start_field,
+                ft.Text("—", size=16, color=C.TEXT_SECONDARY, weight=ft.FontWeight.BOLD),
+                self._dnd_end_field,
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=8,
+        )
+
+        # ── Bỏ qua bài đã nộp ──
         self._sw_ignore_sub = ft.Switch(
             value=getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-            label="Bỏ qua bài tập đã nộp/chấm điểm"
+            label="Bỏ qua bài đã nộp"
         )
+
+        # ── NOTIFY_TYPES: checkboxes cho từng loại hoạt động ──
+        _current_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
+        self._notify_type_checks = {}
+        _type_options = [
+            ("quiz",       "Trắc nghiệm"),
+            ("assignment", "Bài tập"),
+            ("attendance", "Điểm danh"),
+            ("forum",      "Thảo luận"),
+            ("resource",   "Tài liệu"),
+            ("choice",     "Khảo sát"),
+        ]
+        for key, label in _type_options:
+            self._notify_type_checks[key] = ft.Checkbox(
+                label=label,
+                value=(key in _current_types),
+                fill_color={ft.ControlState.SELECTED: C.ACCENT},
+                check_color=C.BG,
+                label_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+            )
+        self._notify_types_row = ft.Row(
+            controls=list(self._notify_type_checks.values()),
+            wrap=True,
+            spacing=4,
+            run_spacing=0,
+        )
+
+        # ── Milestone Chips (thay thế TextField raw) ──
+        _current_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
+        self._milestone_chips = {}
+        _milestone_options = [
+            (168, "1 tuần"),
+            (72, "3 ngày"),
+            (24, "1 ngày"),
+            (6, "6 giờ"),
+            (3, "3 giờ"),
+            (1, "1 giờ"),
+        ]
+
+        def _on_milestone_toggle(hours):
+            def handler(e):
+                chip = self._milestone_chips[hours]
+                chip.selected = not chip.selected
+                # Sync to hidden field
+                active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
+                self._milestones_field.value = ", ".join(str(h) for h in active)
+                self._milestone_summary.value = f"Bạn sẽ nhận {len(active)} lần nhắc cho mỗi deadline" if active else "Không có mốc nhắc nhở nào"
+                self.update()
+            return handler
+
+        for hours, label in _milestone_options:
+            self._milestone_chips[hours] = ft.Chip(
+                label=ft.Text(label, size=12),
+                selected=(hours in _current_milestones),
+                show_checkmark=True,
+                selected_color=C.ACCENT,
+                bgcolor=C.SURFACE,
+                on_select=_on_milestone_toggle(hours),
+            )
+        self._milestone_chips_row = ft.Row(
+            controls=list(self._milestone_chips.values()),
+            wrap=True,
+            spacing=6,
+            run_spacing=4,
+        )
+        _active_count = sum(1 for h in _current_milestones if h in self._milestone_chips)
+        self._milestone_summary = ft.Text(
+            f"Bạn sẽ nhận {_active_count} lần nhắc cho mỗi deadline" if _active_count else "Không có mốc nhắc nhở nào",
+            size=12, color=C.TEXT_SECONDARY, italic=True
+        )
+        # Hidden field to store raw milestone values (for save compatibility)
         self._milestones_field = ft.TextField(
-            value=", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3]))),
-            label="Số giờ nhắc nhở (VD: 72, 24, 3)",
-            border_color=C.BORDER, focused_border_color=C.ACCENT,
-            color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+            value=", ".join(map(str, _current_milestones)),
+            visible=False,
         )
         
         self._muted_courses_list = ft.Column(spacing=2)
@@ -562,6 +832,8 @@ class SettingsView(ft.Container):
                         ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                         self._interval_field,
                           _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                          self._dd_poll_interval,
+                          _hint("Tần suất kiểm tra tự động dữ liệu mới."),
                           self._fetch_months_field,
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
                     ],
@@ -572,8 +844,14 @@ class SettingsView(ft.Container):
                     [
                         self._interval_field,
                           _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                          self._dd_poll_interval,
+                          _hint("Tần suất kiểm tra tự động dữ liệu mới."),
                           self._fetch_months_field,
-                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
+                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
+                          ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                          self._sw_bg_check,
+                          self._bg_interval_field,
+                          _hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 5 phút). Dưới 15 phút có thể bị delay bởi chế độ tiết kiệm pin."),
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
                 )]),
@@ -611,27 +889,43 @@ class SettingsView(ft.Container):
                     icon=ft.Icons.PALETTE_OUTLINED,
                 ),
                 _setting_group(
-                    "Cảnh báo thông minh",
-                    "Tùy chỉnh đối tượng và thời gian",
+                    "Thông báo",
+                    "Chế độ và thời gian nhắc nhở",
                     [
-                        self._sw_ignore_sub,
+                        self._make_themed_label("Chế độ thông báo"),
+                        self._profile_row,
+                        self._profile_summary,
                         ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Các mốc nhắc nhở (giờ)"),
+                        self._sw_dnd_enable,
+                        self._dnd_time_row,
+                        self._dnd_summary,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._sw_ignore_sub,
+                    ],
+                    icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                    default_open=True,
+                ),
+                _setting_group(
+                    "Tùy chỉnh nâng cao",
+                    "Mốc nhắc, loại bài, tắt theo môn",
+                    [
+                        self._make_themed_label("Nhắc trước deadline"),
+                        self._milestone_chips_row,
+                        self._milestone_summary,
                         self._milestones_field,
                         ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Không làm phiền (Im lặng)"),
-                        self._sw_dnd_enable,
-                        self._dnd_start_field,
-                        self._dnd_end_field,
+                        self._make_themed_label("Nhắc phút cuối"),
+                        self._notify_min_field,
+                        _hint("Gửi thêm 1 lần nhắc khi chỉ còn X phút. Đặt 0 để tắt."),
                         ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Bỏ qua môn học"),
+                        self._make_themed_label("Loại hoạt động"),
+                        self._notify_types_row,
+                        ft.Divider(height=10, color=C.BORDER),
+                        self._make_themed_label("Tắt thông báo theo môn"),
                         self._muted_courses_drp,
                         self._muted_courses_field,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Thông báo nhắc nhở cơ bản"),
-                        self._notify_min_field,
                     ],
-                    icon=ft.Icons.SMART_TOY_OUTLINED,
+                    icon=ft.Icons.TUNE_OUTLINED,
                 ),
 
                 _setting_group(
@@ -710,6 +1004,39 @@ class SettingsView(ft.Container):
         t = ft.Text(text, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY, size=13)
         self._themed_texts.append(t)
         return t
+
+    # ── Notification Profile & DND Summary Helpers ────────────────────
+
+    def _update_profile_summary(self):
+        """Update the profile summary text based on current profile selection."""
+        _labels = {"quiet": "Yên tĩnh", "balanced": "Cân bằng", "exam_week": "Tuần thi"}
+        _descs = {
+            "quiet": "Chỉ nhắc deadline gấp (1 ngày và 1 giờ trước)",
+            "balanced": "Nhắc 3 ngày, 1 ngày và 3 giờ trước deadline",
+            "exam_week": "Nhắc liên tục, không bỏ lỡ bất kỳ deadline nào",
+        }
+        profile = getattr(self, '_current_profile', 'balanced')
+        self._profile_summary.value = _descs.get(profile, "")
+
+    def _update_dnd_summary(self):
+        """Update DND summary text based on current toggle and time values."""
+        try:
+            enabled = self._sw_dnd_enable.value
+            start = int(self._dnd_start_field.value or "22")
+            end = int(self._dnd_end_field.value or "7")
+            if not enabled:
+                self._dnd_summary.value = "Thông báo hoạt động 24/7"
+            else:
+                # Calculate quiet hours
+                if start > end:
+                    hours = (24 - start) + end
+                elif start < end:
+                    hours = end - start
+                else:
+                    hours = 24
+                self._dnd_summary.value = f"Yên tĩnh {hours} tiếng mỗi đêm (từ {start}:00 đến {end}:00)"
+        except (ValueError, AttributeError):
+            self._dnd_summary.value = ""
 
     # ── Theme Selector Builder ────────────────────────────────────────
 
@@ -982,6 +1309,28 @@ class SettingsView(ft.Container):
         for _container, txt in getattr(self, '_hint_containers', []):
             txt.color = C.TEXT_SECONDARY
 
+        # ── Profile cards (notification presets) ──
+        for k, card in getattr(self, '_profile_cards', {}).items():
+            is_sel = (k == getattr(self, '_current_profile', 'balanced'))
+            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            col = card.content
+            if col and hasattr(col, 'controls') and len(col.controls) >= 3:
+                col.controls[0].color = C.ACCENT if is_sel else C.TEXT_SECONDARY  # icon
+                col.controls[1].color = C.TEXT_PRIMARY  # label
+                col.controls[2].color = C.TEXT_SECONDARY  # desc
+
+        # ── Milestone chips ──
+        for h, chip in getattr(self, '_milestone_chips', {}).items():
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = C.SURFACE
+
+        # ── Summary texts (profile, DND, milestone) ──
+        for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):
+            txt = getattr(self, attr, None)
+            if txt:
+                txt.color = C.TEXT_SECONDARY
+
         # ── Expansion tile title + subtitle texts (deep access) ──
         for tile in getattr(self, '_tiles', []):
             if tile.title and hasattr(tile.title, 'color'):
@@ -1028,6 +1377,25 @@ class SettingsView(ft.Container):
         self._fetch_months_field.value = "1"
         self._notify_min_field.value = "30"
         
+        # Reset notification profile to balanced
+        self._current_profile = "balanced"
+        for k, card in self._profile_cards.items():
+            is_sel = (k == "balanced")
+            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+        # Reset milestone chips to defaults [72, 24, 3]
+        _default_milestones = [72, 24, 3]
+        for h, chip in self._milestone_chips.items():
+            chip.selected = h in _default_milestones
+        self._milestones_field.value = "72, 24, 3"
+        self._milestone_summary.value = "Bạn sẽ nhận 3 lần nhắc cho mỗi deadline"
+        # Reset DND
+        self._sw_dnd_enable.value = False
+        self._dnd_start_field.value = "22"
+        self._dnd_end_field.value = "7"
+        self._update_profile_summary()
+        self._update_dnd_summary()
+        
         self.update()
 
     async def _handle_test_login(self, e):
@@ -1070,28 +1438,42 @@ class SettingsView(ft.Container):
 
 
 
+    def _safe_update(self, *controls):
+        """Update controls only if they are already attached to the page."""
+        for c in controls:
+            try:
+                c.update()
+            except (RuntimeError, Exception):
+                pass  # Control not on page yet — will render on next page.update()
+
     def _toggle_integration_ui(self):
         self._gmail_addr_field.visible = self._sw_email.value
         self._gmail_pw_field.visible = self._sw_email.value
         self._discord_wh_field.visible = self._sw_discord.value
-        self._gmail_addr_field.update()
-        self._gmail_pw_field.update()
-        self._discord_wh_field.update()
+        self._safe_update(self._gmail_addr_field, self._gmail_pw_field, self._discord_wh_field)
 
     def _toggle_telegram_ui(self):
         v = self._sw_telegram.value
         self._tel_token_field.visible = v
         self._tel_chat_field.visible = v
-        self._tel_token_field.update()
-        self._tel_chat_field.update()
+        self._safe_update(self._tel_token_field, self._tel_chat_field)
+
+    def _toggle_bg_check_ui(self):
+        v = self._sw_bg_check.value
+        self._bg_interval_field.visible = v
+        self._safe_update(self._bg_interval_field)
 
     def _toggle_debug_ui(self):
         self._test_panel.visible = self._sw_debug.value
-        self._test_panel.update()
+        self._safe_update(self._test_panel)
         
     def _do_test_tray(self):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if self._on_test_tray: self._on_test_tray(t)
+
+    def _do_test_mobile(self):
+        t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
+        if hasattr(self, '_on_test_mobile') and self._on_test_mobile: self._on_test_mobile(t)
 
     def _do_test_tele(self):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
@@ -1105,6 +1487,455 @@ class SettingsView(ft.Container):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mail') and self._on_test_mail: self._on_test_mail(t)
 
+    # ── System diagnostics ──
+    def _do_show_device_info(self):
+        """Show device/platform info for debugging."""
+        import sys
+        import platform as pf
+        from platform_utils import IS_ANDROID, IS_IOS, IS_MOBILE, IS_WINDOWS
+        try:
+            import flet as ft_info
+            flet_ver = getattr(ft_info, '__version__', 'unknown')
+        except Exception:
+            flet_ver = 'unknown'
+
+        from config import settings as cfg
+        lines = [
+            f"Python: {sys.version.split()[0]}",
+            f"Platform: {pf.system()} {pf.release()} ({pf.machine()})",
+            f"Flet: {flet_ver}",
+            f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
+            f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
+            f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
+            f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.BACKGROUND_CHECK_INTERVAL}m)",
+            f"DND: {'ON' if cfg.NOTIFY_DND_ENABLE else 'OFF'} ({cfg.NOTIFY_DND_START}h-{cfg.NOTIFY_DND_END}h)",
+        ]
+        self._debug_info_text.value = "\n".join(lines)
+        self._debug_info_text.update()
+
+    def _do_test_moodle_connection(self):
+        """Quick Moodle API connectivity test."""
+        import threading
+        self._debug_info_text.value = "Đang kiểm tra kết nối Moodle..."
+        self._debug_info_text.color = C.TEXT_SECONDARY
+        self._debug_info_text.update()
+
+        def _worker():
+            try:
+                ok = self._orchestrator.client.login(
+                    username=settings.UTH_USERNAME,
+                    password=settings.UTH_PASSWORD,
+                    force=True,
+                )
+                if ok:
+                    token = self._orchestrator.client.token or "?"
+                    masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
+                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {self._orchestrator.client.user_id}"
+                    color = C.SAFE
+                else:
+                    result = "Đăng nhập Moodle thất bại!"
+                    color = C.CRITICAL
+            except Exception as ex:
+                result = f"Lỗi kết nối: {ex}"
+                color = C.CRITICAL
+
+            self._debug_info_text.value = result
+            self._debug_info_text.color = color
+            try:
+                self._debug_info_text.update()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ── Cache management ──
+    def _do_clear_notif_cache(self):
+        """Clear notification milestone cache (forces re-notification)."""
+        try:
+            from config import _USER_DATA_DIR
+            import os
+            cache_path = _USER_DATA_DIR / "notifications_cache.json"
+            if cache_path.exists():
+                os.remove(str(cache_path))
+            self._debug_info_text.value = "Cache thông báo đã xóa. Tất cả milestones sẽ được gửi lại."
+            self._debug_info_text.color = C.SAFE
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi xóa cache: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    def _do_clear_notif_history(self):
+        """Clear notification history log."""
+        try:
+            from core.notification_history import NotificationHistory
+            history = NotificationHistory()
+            count = len(history.get_all())
+            history.clear()
+            self._debug_info_text.value = f"Đã xóa {count} mục lịch sử thông báo."
+            self._debug_info_text.color = C.SAFE
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi xóa lịch sử: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    def _do_clear_data_cache(self):
+        """Clear offline activities data cache."""
+        try:
+            from core.data_cache import DataCache
+            cache = DataCache()
+            cache.clear()
+            self._debug_info_text.value = "Cache offline đã xóa. Dữ liệu sẽ được tải lại từ Moodle."
+            self._debug_info_text.color = C.SAFE
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi xóa data cache: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    def _do_show_notif_history(self):
+        """Show recent notification history entries."""
+        try:
+            from core.notification_history import NotificationHistory
+            history = NotificationHistory()
+            entries = history.get_all()
+            if not entries:
+                self._debug_history_text.value = "Chưa có thông báo nào được gửi."
+                self._debug_history_text.color = C.TEXT_SECONDARY
+            else:
+                lines = []
+                for i, e in enumerate(entries[:10]):  # Show last 10
+                    sent = e.get("sent_at", "?")[:16].replace("T", " ")
+                    title = e.get("title", "?")[:40]
+                    channels = ", ".join(e.get("channels", []))
+                    lines.append(f"{i+1}. [{sent}] {title}\n   Qua: {channels}")
+                self._debug_history_text.value = "\n".join(lines)
+                if len(entries) > 10:
+                    self._debug_history_text.value += f"\n... và {len(entries) - 10} mục khác"
+                self._debug_history_text.color = C.TEXT_PRIMARY
+        except Exception as ex:
+            self._debug_history_text.value = f"Lỗi đọc lịch sử: {ex}"
+            self._debug_history_text.color = C.CRITICAL
+        self._debug_history_text.update()
+
+    def _do_show_scheduler_status(self):
+        """Show background scheduler status (Android)."""
+        try:
+            from core.background_scheduler import get_scheduler
+            scheduler = get_scheduler()
+            lines = [
+                f"Available: {'Yes' if scheduler.is_available else 'No'}",
+                f"Active: {'Yes' if scheduler._is_active else 'No'}",
+                f"Backend: {'flet-android-notifications' if scheduler._android_notif else 'None'}",
+                f"Interval: {settings.BACKGROUND_CHECK_INTERVAL} min",
+                f"Enabled: {'Yes' if settings.BACKGROUND_CHECK_ANDROID else 'No'}",
+            ]
+            self._debug_scheduler_status.value = "\n".join(lines)
+            self._debug_scheduler_status.color = C.SAFE if scheduler._is_active else C.TEXT_SECONDARY
+        except Exception as ex:
+            self._debug_scheduler_status.value = f"Lỗi: {ex}"
+            self._debug_scheduler_status.color = C.CRITICAL
+        self._debug_scheduler_status.update()
+
+    # ── Background scheduler (Android) ──
+    def _do_start_foreground(self):
+        """Start Android foreground service for persistent background."""
+        async def _start():
+            try:
+                from core.background_scheduler import get_scheduler
+                scheduler = get_scheduler()
+                if not scheduler.is_available:
+                    self._debug_info_text.value = "Background scheduler không khả dụng trên nền tảng này."
+                    self._debug_info_text.color = C.WARNING
+                else:
+                    await scheduler.start_foreground_service()
+                    self._debug_info_text.value = "Foreground service đã khởi động. App sẽ chạy ngầm liên tục."
+                    self._debug_info_text.color = C.SAFE
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi foreground: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_start)
+
+    def _do_stop_foreground(self):
+        """Stop Android foreground service."""
+        async def _stop():
+            try:
+                from core.background_scheduler import get_scheduler
+                scheduler = get_scheduler()
+                await scheduler.stop_foreground_service()
+                self._debug_info_text.value = "Foreground service đã dừng."
+                self._debug_info_text.color = C.TEXT_SECONDARY
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi stop foreground: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_stop)
+
+    def _do_test_immediate_notif(self):
+        """Send an immediate test notification via background scheduler."""
+        async def _send():
+            try:
+                from core.background_scheduler import get_scheduler
+                scheduler = get_scheduler()
+                if not scheduler.is_available:
+                    self._debug_info_text.value = "Scheduler không khả dụng."
+                    self._debug_info_text.color = C.WARNING
+                else:
+                    await scheduler.send_immediate(
+                        title="UTHelper Test",
+                        body="Thông báo test từ Background Scheduler"
+                    )
+                    self._debug_info_text.value = "Đã gửi immediate notification qua scheduler."
+                    self._debug_info_text.color = C.SAFE
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi immediate: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_send)
+
+    # ── Update checker ──
+    def _do_force_check_update(self):
+        """Force check for app updates."""
+        import threading
+        self._debug_update_text.value = "Đang kiểm tra cập nhật..."
+        self._debug_update_text.color = C.TEXT_SECONDARY
+        self._debug_update_text.update()
+
+        def _worker():
+            try:
+                from core.update_checker import check_for_update
+                from gui.app_controller import APP_VERSION
+                has_update, version, url, asset = check_for_update(APP_VERSION)
+                if has_update:
+                    result = f"Phiên bản mới: v{version}\nURL: {url}\nAsset: {asset or 'N/A'}"
+                    color = C.ACCENT
+                else:
+                    result = f"Đang dùng phiên bản mới nhất (v{APP_VERSION})."
+                    color = C.SAFE
+            except Exception as ex:
+                result = f"Lỗi kiểm tra: {ex}"
+                color = C.CRITICAL
+
+            self._debug_update_text.value = result
+            self._debug_update_text.color = color
+            try:
+                self._debug_update_text.update()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="debug-update").start()
+
+    # ── Broadcast all channels ──
+    def _do_test_broadcast(self):
+        """Send mock notification to ALL registered channels simultaneously."""
+        t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
+        sent = []
+        if self._on_test_tray and not _IS_MOBILE:
+            try:
+                self._on_test_tray(t); sent.append("Windows Tray")
+            except Exception:
+                pass
+        if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _IS_MOBILE:
+            try:
+                self._on_test_mobile(t); sent.append("Mobile")
+            except Exception:
+                pass
+        for name, cb in [("Telegram", "_on_test_tele"), ("Discord", "_on_test_discord"), ("Gmail", "_on_test_mail")]:
+            fn = getattr(self, cb, None)
+            if fn:
+                try:
+                    fn(t); sent.append(name)
+                except Exception:
+                    pass
+        self._debug_info_text.value = f"Broadcast [{t}] tới: {', '.join(sent) or 'Không có kênh nào'}"
+        self._debug_info_text.color = C.SAFE if sent else C.WARNING
+        self._debug_info_text.update()
+
+    # ── Network latency test ──
+    def _do_test_latency(self):
+        """Ping Moodle server and measure response time."""
+        import threading
+        self._debug_info_text.value = "Đang ping Moodle..."
+        self._debug_info_text.color = C.TEXT_SECONDARY
+        self._debug_info_text.update()
+
+        def _ping():
+            import time, urllib.request
+            url = settings.MOODLE_BASE_URL.rstrip("/")
+            results = []
+            for _ in range(3):
+                try:
+                    start = time.perf_counter()
+                    req = urllib.request.Request(url, method="HEAD")
+                    req.add_header("User-Agent", "UTHelper/ping")
+                    urllib.request.urlopen(req, timeout=10)
+                    results.append((time.perf_counter() - start) * 1000)
+                except Exception:
+                    results.append(None)
+
+            valid = [r for r in results if r is not None]
+            if valid:
+                avg = sum(valid) / len(valid)
+                detail = " | ".join([f"{r:.0f}ms" if r else "FAIL" for r in results])
+                result = f"Ping {url}\n{detail}\nTB: {avg:.0f}ms ({len(valid)}/3 OK)"
+                color = C.SAFE if avg < 1000 else C.WARNING
+            else:
+                result = f"Không thể kết nối {url}"
+                color = C.CRITICAL
+            self._debug_info_text.value = result
+            self._debug_info_text.color = color
+            try: self._debug_info_text.update()
+            except Exception: pass
+
+        threading.Thread(target=_ping, daemon=True, name="debug-ping").start()
+
+    # ── Show registered notifiers ──
+    def _do_show_notifiers(self):
+        """Show all registered notification channels and their status."""
+        try:
+            mgr = getattr(self._orchestrator, 'notifier', None)
+            if not mgr or not hasattr(mgr, 'notifiers'):
+                self._debug_info_text.value = "NotificationManager chưa khởi tạo."
+                self._debug_info_text.color = C.WARNING
+            else:
+                ns = mgr.notifiers
+                if not ns:
+                    lines = ["Không có notifier nào đăng ký."]
+                else:
+                    lines = [f"{len(ns)} kênh đã đăng ký:"]
+                    for i, n in enumerate(ns, 1):
+                        cls = n.__class__.__name__
+                        extra = f" ({n.backend_name})" if hasattr(n, 'backend_name') else ""
+                        lines.append(f"  {i}. {cls}{extra}")
+                self._debug_info_text.value = "\n".join(lines)
+                self._debug_info_text.color = C.SAFE if ns else C.WARNING
+        except Exception as ex:
+            self._debug_info_text.value = f"Lỗi: {ex}"
+            self._debug_info_text.color = C.CRITICAL
+        self._debug_info_text.update()
+
+    # ── DND status check ──
+    def _do_check_dnd(self):
+        """Check current Do Not Disturb status."""
+        from datetime import datetime
+        now = datetime.now()
+        enabled = settings.NOTIFY_DND_ENABLE
+        s, e = settings.NOTIFY_DND_START, settings.NOTIFY_DND_END
+        h = now.hour
+        if not enabled:
+            is_active = False
+        elif s == e:
+            is_active = True
+        elif s > e:
+            is_active = h >= s or h < e
+        else:
+            is_active = s <= h < e
+
+        lines = [
+            f"DND: {'BẬT' if enabled else 'TẮT'}",
+            f"Khung giờ: {s}:00 – {e}:00",
+            f"Hiện tại: {now.strftime('%H:%M')}",
+            f"Trạng thái: {'ĐANG IM LẶNG' if (enabled and is_active) else 'Bình thường'}",
+        ]
+        self._debug_info_text.value = "\n".join(lines)
+        self._debug_info_text.color = C.WARNING if (enabled and is_active) else C.SAFE
+        self._debug_info_text.update()
+
+    # ── Cache statistics ──
+    def _do_show_cache_stats(self):
+        """Show cache sizes and statistics."""
+        import os, json
+        from config import _USER_DATA_DIR
+        stats = []
+        for label, fname in [("Cache thông báo", "notifications_cache.json"),
+                              ("Lịch sử thông báo", "notification_history.json"),
+                              ("Cache offline", "activities_cache.json")]:
+            path = _USER_DATA_DIR / fname
+            if path.exists():
+                size = os.path.getsize(str(path))
+                try:
+                    with open(str(path), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    count = len(data) if isinstance(data, (list, dict)) else "?"
+                    stats.append(f"{label}: {count} mục ({size:,} B)")
+                except Exception:
+                    stats.append(f"{label}: {size:,} B")
+            else:
+                stats.append(f"{label}: trống")
+
+        detail = self._orchestrator.get_cached_details_snapshot() if hasattr(self._orchestrator, 'get_cached_details_snapshot') else {}
+        stats.append(f"Detail cache (RAM): {len(detail)} mục")
+        sp = _USER_DATA_DIR / "settings.json"
+        if sp.exists():
+            stats.append(f"Settings: {os.path.getsize(str(sp)):,} B")
+        self._debug_cache_stats.value = "\n".join(stats)
+        self._debug_cache_stats.color = C.TEXT_PRIMARY
+        self._debug_cache_stats.update()
+
+    # ── Force data refresh ──
+    def _do_force_refresh(self):
+        """Trigger immediate data reload from Moodle."""
+        async def _refresh():
+            self._debug_info_text.value = "Đang tải lại dữ liệu..."
+            self._debug_info_text.color = C.TEXT_SECONDARY
+            self._debug_info_text.update()
+            try:
+                import time
+                start = time.perf_counter()
+                acts = await self._orchestrator.get_latest_activities_async()
+                elapsed = time.perf_counter() - start
+                self._debug_info_text.value = f"Tải xong {len(acts) if acts else 0} hoạt động trong {elapsed:.1f}s"
+                self._debug_info_text.color = C.SAFE
+            except Exception as ex:
+                self._debug_info_text.value = f"Lỗi: {ex}"
+                self._debug_info_text.color = C.CRITICAL
+            self._debug_info_text.update()
+        self._page.run_task(_refresh)
+
+    # ── Reset settings ──
+    def _do_reset_settings(self):
+        """Reset all settings to factory defaults (with confirmation dialog)."""
+        async def _confirm():
+            confirmed = [False]
+            def _yes(e):
+                confirmed[0] = True; dlg.open = False; self._page.update()
+            def _no(e):
+                dlg.open = False; self._page.update()
+
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Xác nhận Reset"),
+                content=ft.Text("Đặt lại TẤT CẢ cài đặt về mặc định?\nThao tác không thể hoàn tác."),
+                actions=[
+                    ft.TextButton("Hủy", on_click=_no),
+                    ft.TextButton("Reset", on_click=_yes, style=ft.ButtonStyle(color=C.CRITICAL)),
+                ],
+            )
+            self._page.overlay.append(dlg)
+            dlg.open = True
+            self._page.update()
+
+            import asyncio
+            for _ in range(300):
+                await asyncio.sleep(0.1)
+                if not dlg.open:
+                    break
+            if dlg in self._page.overlay:
+                self._page.overlay.remove(dlg)
+
+            if confirmed[0]:
+                try:
+                    from config import _USER_DATA_DIR
+                    import os
+                    sp = _USER_DATA_DIR / "settings.json"
+                    if sp.exists():
+                        os.remove(str(sp))
+                    self._debug_info_text.value = "Settings đã reset. Khởi động lại app để áp dụng."
+                    self._debug_info_text.color = C.SAFE
+                except Exception as ex:
+                    self._debug_info_text.value = f"Lỗi reset: {ex}"
+                    self._debug_info_text.color = C.CRITICAL
+                self._debug_info_text.update()
+        self._page.run_task(_confirm)
 
     def load_current_settings(self):
         for tile in getattr(self, '_tiles', []):
@@ -1142,6 +1973,9 @@ class SettingsView(ft.Container):
         self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
         self._sw_start_minimized.value = settings.START_MINIMIZED
         self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
+        self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
+        self._bg_interval_field.value = str(settings.BACKGROUND_CHECK_INTERVAL)
+        self._toggle_bg_check_ui()
         self._sw_email.value = settings.ENABLE_GMAIL
         self._sw_discord.value = getattr(settings, 'ENABLE_DISCORD', False)
         self._gmail_addr_field.value = getattr(settings, 'GMAIL_ADDRESS', '')
@@ -1153,6 +1987,7 @@ class SettingsView(ft.Container):
         self._tel_chat_field.value = settings.TELEGRAM_CHAT_ID
         self._toggle_telegram_ui()
         self._interval_field.value = str(settings.CHECK_INTERVAL_MINUTES)
+        self._dd_poll_interval.value = str(getattr(settings, 'POLL_INTERVAL_MINUTES', 15))
         self._fetch_months_field.value = str(settings.FETCH_MONTHS)
         self._critical_hours_field.value = str(settings.URGENCY_CRITICAL_HOURS)
         self._warning_hours_field.value = str(settings.URGENCY_WARNING_HOURS)
@@ -1161,10 +1996,27 @@ class SettingsView(ft.Container):
         self._workers_field.value = str(settings.PREFETCH_WORKERS)
         
         self._sw_dnd_enable.value = getattr(settings, 'NOTIFY_DND_ENABLE', False)
-        self._dnd_start_field.value = str(getattr(settings, 'NOTIFY_DND_START', 23))
-        self._dnd_end_field.value = str(getattr(settings, 'NOTIFY_DND_END', 6))
+        self._dnd_start_field.value = str(getattr(settings, 'NOTIFY_DND_START', 22))
+        self._dnd_end_field.value = str(getattr(settings, 'NOTIFY_DND_END', 7))
         self._sw_ignore_sub.value = getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True)
-        self._milestones_field.value = ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])))
+        _saved_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
+        for key, cb in self._notify_type_checks.items():
+            cb.value = (key in _saved_types)
+        _saved_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
+        self._milestones_field.value = ", ".join(map(str, _saved_milestones))
+        # Sync milestone chips
+        for h, chip in self._milestone_chips.items():
+            chip.selected = h in _saved_milestones
+        _active_count = sum(1 for h in _saved_milestones if h in self._milestone_chips)
+        self._milestone_summary.value = f"Bạn sẽ nhận {_active_count} lần nhắc cho mỗi deadline" if _active_count else "Không có mốc nhắc nhở nào"
+        # Sync profile cards
+        self._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
+        for k, card in self._profile_cards.items():
+            is_sel = (k == self._current_profile)
+            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+        self._update_profile_summary()
+        self._update_dnd_summary()
         self._muted_courses_field.value = ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', []))
 
         # Cập nhật danh sách môn học cho ExpansionTile
@@ -1217,6 +2069,8 @@ class SettingsView(ft.Container):
         if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
         if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
         if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
+        if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
+        if self._bg_interval_field.value != str(settings.BACKGROUND_CHECK_INTERVAL): return True
         if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
         if self._sw_discord.value != getattr(settings, 'ENABLE_DISCORD', False): return True
         if getattr(self, '_gmail_addr_field', None) and self._gmail_addr_field.value != getattr(settings, 'GMAIL_ADDRESS', ''): return True
@@ -1235,30 +2089,31 @@ class SettingsView(ft.Container):
         if self._workers_field.value != str(settings.PREFETCH_WORKERS): return True
         
         if self._sw_dnd_enable.value != getattr(settings, 'NOTIFY_DND_ENABLE', False): return True
-        if self._dnd_start_field.value != str(getattr(settings, 'NOTIFY_DND_START', 23)): return True
-        if self._dnd_end_field.value != str(getattr(settings, 'NOTIFY_DND_END', 6)): return True
+        if self._dnd_start_field.value != str(getattr(settings, 'NOTIFY_DND_START', 22)): return True
+        if self._dnd_end_field.value != str(getattr(settings, 'NOTIFY_DND_END', 7)): return True
         if self._sw_ignore_sub.value != getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True): return True
+        if getattr(self, '_current_profile', 'balanced') != getattr(settings, 'NOTIFICATION_PROFILE', 'balanced'): return True
+        _saved_types = set(getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"]))
+        _current_types = set(k for k, cb in self._notify_type_checks.items() if cb.value)
+        if _saved_types != _current_types: return True
         if self._milestones_field.value != ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3]))): return True
         if self._muted_courses_field.value != ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', [])): return True
         
         return False
 
     async def _handle_back(self, e):
+        import logging
+        _log = logging.getLogger("settings.dialog")
+        _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
         if self.has_changes():
             def close_dlg(e):
-                confirm_dlg.open = False
-                try:
-                    self._page.overlay.remove(confirm_dlg)
-                except (ValueError, AttributeError):
-                    pass
+                _log.warning(">>> CANCEL button clicked!")
+                self._page.pop_dialog()
                 self._page.update()
-            
+
             def discard_and_close(e):
-                confirm_dlg.open = False
-                try:
-                    self._page.overlay.remove(confirm_dlg)
-                except (ValueError, AttributeError):
-                    pass
+                _log.warning(">>> DISCARD button clicked!")
+                self._page.pop_dialog()
                 # Revert theme to original if it was changed
                 if self._selected_theme != self._original_theme:
                     apply_theme(self._original_theme)
@@ -1266,18 +2121,19 @@ class SettingsView(ft.Container):
                     set_page_theme(self._page)
                     if self._on_theme_preview:
                         self._on_theme_preview()
-                self._page.update()
                 self._on_close_cb()
+                _log.warning("  discard done")
 
-            async def save_and_close(e):
-                confirm_dlg.open = False
-                try:
-                    self._page.overlay.remove(confirm_dlg)
-                except (ValueError, AttributeError):
-                    pass
-                self._page.update()
-                await self._save(e)
-                self._on_close_cb()
+            def save_and_close(e):
+                _log.warning(">>> SAVE button clicked!")
+                self._page.pop_dialog()
+                # Schedule async save + close via run_task
+                async def _do_save_close():
+                    _log.warning("  _do_save_close running...")
+                    await self._save(e)
+                    self._on_close_cb()
+                    _log.warning("  save+close done")
+                self._page.run_task(_do_save_close)
 
             confirm_dlg = ft.AlertDialog(
                 title=ft.Row(controls=[
@@ -1291,16 +2147,15 @@ class SettingsView(ft.Container):
                                   style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
                     ft.TextButton("Bỏ thay đổi", on_click=discard_and_close,
                                   style=ft.ButtonStyle(color=C.CRITICAL)),
-                    ft.Button("Lưu", on_click=save_and_close,
-                                      bgcolor=C.ACCENT, color=ft.Colors.WHITE),
+                    ft.TextButton("Lưu", on_click=save_and_close,
+                                  style=ft.ButtonStyle(color=C.ACCENT)),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
                 shape=ft.RoundedRectangleBorder(radius=12),
                 bgcolor=C.BG,
             )
-            self._page.overlay.append(confirm_dlg)
-            confirm_dlg.open = True
-            self._page.update()
+            self._page.show_dialog(confirm_dlg)
+            _log.warning("Dialog opened via page.show_dialog()")
         else:
             self._on_close_cb()
 
@@ -1322,6 +2177,7 @@ class SettingsView(ft.Container):
             settings.INCLUDE_SUBMITTED       = self._sw_submitted.value
             settings.INCLUDE_GRADED          = self._sw_graded.value
             settings.CHECK_INTERVAL_MINUTES  = max(0, int(self._interval_field.value or "60"))
+            settings.POLL_INTERVAL_MINUTES   = max(5, int(self._dd_poll_interval.value or "15"))
             settings.FETCH_MONTHS            = max(1, min(int(self._fetch_months_field.value or "1"), 3))
             settings.URGENCY_CRITICAL_HOURS  = max(1, int(self._critical_hours_field.value or "24"))
             settings.URGENCY_WARNING_HOURS   = max(1, int(self._warning_hours_field.value or "72"))
@@ -1351,12 +2207,17 @@ class SettingsView(ft.Container):
                 settings.START_MINIMIZED = self._sw_start_minimized.value
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
 
+            settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
+            settings.BACKGROUND_CHECK_INTERVAL = max(5, int(self._bg_interval_field.value or "30"))
+
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
             settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
-            settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "23")))
-            settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "6")))
+            settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "22")))
+            settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "7")))
             settings.NOTIFY_IGNORE_SUBMITTED = self._sw_ignore_sub.value
+            settings.NOTIFICATION_PROFILE    = getattr(self, '_current_profile', 'balanced')
+            settings.NOTIFY_TYPES = [k for k, cb in self._notify_type_checks.items() if cb.value]
             
             try:
                 settings.NOTIFY_MILESTONES = [int(x.strip()) for x in self._milestones_field.value.split(",") if x.strip()]

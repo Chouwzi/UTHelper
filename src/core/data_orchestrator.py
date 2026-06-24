@@ -1,3 +1,4 @@
+import html
 import logging
 import threading
 import time
@@ -5,6 +6,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
+from core.grade_monitor import GradeMonitor
 from config import settings
 from models import Assignment
 from core import ws_functions
@@ -26,6 +28,13 @@ class DataOrchestrator:
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
         self._detail_lock = threading.Lock()
+        # Smart polling state
+        self._last_fetch_ts: int = 0
+        self._userid_cache: Optional[int] = None
+        # Cycle-level caches (cleared each refresh, avoids redundant API calls)
+        self._courses_cache: Optional[List[Dict]] = None
+        # Grade monitoring
+        self.grade_monitor = GradeMonitor()
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -58,6 +67,55 @@ class DataOrchestrator:
         with self._detail_lock:
             return dict(self._detail_cache)
 
+    def _get_userid(self) -> Optional[int]:
+        """Get cached userid or fetch from site_info."""
+        if self._userid_cache is not None:
+            return self._userid_cache
+        try:
+            info = ws_functions.get_site_info(self.client.call_ws_api)
+            if info and 'userid' in info:
+                self._userid_cache = info['userid']
+                return self._userid_cache
+        except Exception as e:
+            logger.debug("Failed to get userid: %s", e)
+        return None
+
+    def get_updates_since(self, timestamp: int) -> Optional[List[int]]:
+        """Check for course updates since last fetch using core_course_get_updates_since.
+
+        Returns:
+            list of changed course IDs if changes detected,
+            empty list if no changes,
+            None if error (caller should do full fetch).
+        """
+        if timestamp <= 0:
+            return None  # No previous fetch, must do full fetch
+        try:
+            # BUG-02 fix: get_enrolled_courses takes classification, not userid
+            courses = ws_functions.get_enrolled_courses(
+                self.client.call_ws_api
+            )
+            if not courses:
+                return None
+            changed_courses = []
+            for course in courses:
+                cid = course.get('id')
+                if not cid:
+                    continue
+                updates = ws_functions.get_course_updates_since(
+                    self.client.call_ws_api, cid, timestamp
+                )
+                if updates:  # Non-empty = something changed
+                    changed_courses.append(cid)
+            if changed_courses:
+                logger.info("Smart poll: %d courses changed since %d", len(changed_courses), timestamp)
+            else:
+                logger.debug("Smart poll: no changes since %d", timestamp)
+            return changed_courses
+        except Exception as e:
+            logger.warning("Smart poll failed, falling back to full fetch: %s", e)
+            return None
+
     def login(self) -> bool:
         """Đăng nhập bằng WS token (stateless, không kick browser)."""
         if self.is_logged_in:
@@ -82,10 +140,24 @@ class DataOrchestrator:
             return ws_result
         logger.error("Không thể lấy dữ liệu từ WS API.")
         return []
+
+    def check_grade_changes(self) -> List:
+        """Check for grade changes using GradeMonitor.
+
+        Returns:
+            List of GradeChange objects if changes detected, empty list otherwise.
+        """
+        userid = self._get_userid()
+        if userid is None:
+            return []
+        return self.grade_monitor.check_for_changes(
+            self.client.call_ws_api, userid
+        )
     
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).
         
+        PERF-OPT: Parallel API calls + eliminated redundant fetches.
         Kết hợp 2 nguồn:
         1. calendar action events (bài chưa nộp, có deadline tương lai)
         2. mod_assign_get_assignments (TẤT CẢ bài tập kể cả đã nộp)
@@ -94,76 +166,92 @@ class DataOrchestrator:
         try:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
-            result = self.client.call_ws_api(
-                'core_calendar_get_action_events_by_timesort',
-                timesortfrom=now_ts,
-                timesortto=now_ts + (90 * 24 * 3600),
-                limitnum=50,  # Moodle max is 50
-            )
+            
+            # ── PERF: Clear cycle caches at start of each refresh ──
+            self._courses_cache = None
+            
+            # ── PERF: Step 1 — Get userid (needed for courses) ──
+            userid = self._get_userid()
+            
+            # ── PERF: Step 2 — Parallel fetch: calendar + courses ──
+            calendar_result = None
+            courses_result = None
+            
+            def _fetch_calendar():
+                return self.client.call_ws_api(
+                    'core_calendar_get_action_events_by_timesort',
+                    timesortfrom=now_ts,
+                    timesortto=now_ts + (90 * 24 * 3600),
+                    limitnum=50,
+                )
+            
+            def _fetch_courses():
+                if not userid:
+                    return None
+                return self.client.call_ws_api(
+                    'core_enrol_get_users_courses', userid=userid
+                )
+            
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_cal = pool.submit(_fetch_calendar)
+                f_courses = pool.submit(_fetch_courses)
+                calendar_result = f_cal.result(timeout=25)
+                courses_result = f_courses.result(timeout=25)
+            
+            # Cache courses for reuse by grade_check/notification
+            if courses_result and isinstance(courses_result, list):
+                self._courses_cache = courses_result
             
             events = []
-            if result and isinstance(result, dict):
-                events = result.get('events', [])
+            if calendar_result and isinstance(calendar_result, dict):
+                events = calendar_result.get('events', [])
             
             # Convert WS events to UTHelper format
             results = ws_functions.ws_events_to_assignments(events) if events else []
             
-            # Bổ sung bài tập đã nộp từ mod_assign_get_assignments
+            # ── PERF: Step 3 — Merge assignments using PRE-FETCHED data ──
+            course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
             try:
-                results = self._merge_all_assignments(results)
+                results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
             except Exception as e:
                 logger.debug("Merge assignments failed (non-critical): %s", e)
             
             if not results:
-                return None
+                logger.info("WS API trả về 0 activities (hợp lệ — có thể không có bài tập).")
+                return results  # BUG-10 fix: return [] not None for valid empty result
             
             logger.info("WS API trả về %d activities (merged).", len(results))
             self.is_logged_in = True  # WS token works = we're authenticated
+            self._last_fetch_ts = int(datetime.now().timestamp())  # Smart poll: mark last fetch
             return results
         except Exception as e:
             logger.warning("WS API fetch thất bại: %s", e)
             return None
     
     async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
-        """Lấy activities bằng WS API bất đồng bộ (httpx, non-blocking).
+        """Lấy activities bằng WS API bất đồng bộ (non-blocking).
         
-        Kết hợp calendar events + mod_assign_get_assignments.
+        PERF-OPT: Delegates to parallel _fetch_via_ws_api in thread.
         """
         try:
-            from datetime import datetime
-            now_ts = int(datetime.now().timestamp())
-            result = await self.client.call_ws_api_async(
-                'core_calendar_get_action_events_by_timesort',
-                timesortfrom=now_ts,
-                timesortto=now_ts + (90 * 24 * 3600),
-                limitnum=50,  # Moodle max is 50
-            )
-            
-            events = []
-            if result and isinstance(result, dict):
-                events = result.get('events', [])
-            
-            results = ws_functions.ws_events_to_assignments(events) if events else []
-            
-            # Bổ sung bài tập đã nộp từ mod_assign_get_assignments (blocking in thread)
-            try:
-                import asyncio
-                results = await asyncio.to_thread(self._merge_all_assignments, results)
-            except Exception as e:
-                logger.debug("Merge assignments async failed (non-critical): %s", e)
-            
-            if not results:
-                return None
-            
-            logger.info("WS API async trả về %d activities (merged).", len(results))
-            self.is_logged_in = True
-            return results
+            import asyncio
+            result = await asyncio.to_thread(self._fetch_via_ws_api)
+            return result
         except Exception as e:
             logger.warning("WS API async fetch thất bại: %s", e)
             return None
 
-    def _merge_all_assignments(self, calendar_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge_all_assignments(
+        self,
+        calendar_results: List[Dict[str, Any]],
+        userid: Optional[int] = None,
+        course_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
         """Bổ sung bài tập đã nộp vào danh sách calendar events.
+        
+        PERF-OPT: Accepts pre-fetched userid and course_ids to avoid
+        redundant API calls (previously called site_info + enrolled_courses
+        again — wasting ~1.4s).
         
         Moodle calendar API loại bỏ events khi bài đã nộp (no action needed).
         Lấy tất cả assignments từ enrolled courses, chỉ giữ bài có deadline
@@ -183,24 +271,25 @@ class DataOrchestrator:
         future_month = ((future_month - 1) % 12) + 1
         max_ts = int(datetime(future_year, future_month, 1).timestamp())
         
-        # Lấy userid + tất cả enrolled courses
-        try:
-            site_info = self.client.call_ws_api('core_webservice_get_site_info')
-            if not site_info or not isinstance(site_info, dict):
+        # ── PERF: Use pre-fetched data instead of re-calling APIs ──
+        if not course_ids:
+            # Fallback: fetch if caller didn't provide (backward compat)
+            try:
+                if userid is None:
+                    userid = self._get_userid()
+                if not userid:
+                    return calendar_results
+                courses_result = self._courses_cache
+                if not courses_result:
+                    courses_result = self.client.call_ws_api(
+                        'core_enrol_get_users_courses', userid=userid
+                    )
+                if not courses_result or not isinstance(courses_result, list):
+                    return calendar_results
+                course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
+            except Exception:
                 return calendar_results
-            userid = site_info.get('userid')
-            if not userid:
-                return calendar_results
-            
-            courses_result = self.client.call_ws_api(
-                'core_enrol_get_users_courses', userid=userid
-            )
-            if not courses_result or not isinstance(courses_result, list):
-                return calendar_results
-        except Exception:
-            return calendar_results
         
-        course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
         if not course_ids:
             return calendar_results
         
@@ -209,13 +298,16 @@ class DataOrchestrator:
         if not all_assigns:
             return calendar_results
         
-        # Build set cmids đã có từ calendar events
+        # Build lookup: cmid → index in calendar_results (for cutoff enrichment)
         existing_cmids = set()
-        for item in calendar_results:
+        cmid_to_index: dict[int, int] = {}
+        for idx, item in enumerate(calendar_results):
             url = item.get('url', '')
             if 'id=' in url:
                 try:
-                    existing_cmids.add(int(url.split('id=')[-1].split('&')[0]))
+                    _cmid = int(url.split('id=')[-1].split('&')[0])
+                    existing_cmids.add(_cmid)
+                    cmid_to_index[_cmid] = idx
                 except (ValueError, IndexError):
                     pass
         
@@ -226,21 +318,52 @@ class DataOrchestrator:
         for course_data in all_assigns:
             if not isinstance(course_data, dict):
                 continue
-            course_name = course_data.get('fullname', '')
+            course_name = html.unescape(course_data.get('fullname', ''))
             course_id = course_data.get('id', '')
             
             for assign in course_data.get('assignments', []):
                 cmid = assign.get('cmid')
+                
+                # Enrich existing calendar items with cutoff data
                 if cmid and cmid in existing_cmids:
+                    _idx = cmid_to_index.get(cmid)
+                    if _idx is not None and _idx < len(calendar_results):
+                        _existing = calendar_results[_idx]
+                        _cutoff = assign.get('cutoffdate', 0)
+                        _due = assign.get('duedate', 0)
+                        if _cutoff > 0 and _cutoff != _due:
+                            if now_ts > _due and now_ts < _cutoff:
+                                _existing['late_status'] = 'late_allowed'
+                            elif now_ts >= _cutoff:
+                                _existing['late_status'] = 'closed'
+                            else:
+                                _existing['late_status'] = 'open'
+                        else:
+                            _existing['late_status'] = 'open' if now_ts < _due else 'closed'
+                        _existing['cutoff_date'] = _cutoff
                     continue
                 
                 duedate = assign.get('duedate', 0)
                 if not duedate or duedate < min_ts or duedate > max_ts:
                     continue
                 
+                cutoffdate = assign.get('cutoffdate', 0)
+                
+                # Compute late_status based on cutoffdate vs duedate
+                if cutoffdate > 0 and cutoffdate != duedate:
+                    if now_ts > duedate and now_ts < cutoffdate:
+                        late_status = 'late_allowed'
+                    elif now_ts >= cutoffdate:
+                        late_status = 'closed'
+                    else:
+                        late_status = 'open'
+                else:
+                    late_status = 'open' if now_ts < duedate else 'closed'
+                
                 assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
                 
-                deadline_str = datetime.fromtimestamp(duedate).strftime('%d/%m/%Y %H:%M')
+                # BUG-12 fix: standardize to ISO format for consistent sorting
+                deadline_str = datetime.fromtimestamp(duedate).strftime('%Y-%m-%d %H:%M:%S')
                 remaining = duedate - now_ts
                 if remaining < 0:
                     urgency = 'overdue'
@@ -253,7 +376,7 @@ class DataOrchestrator:
                 
                 calendar_results.append({
                     'id': f"assign_{assign.get('id', cmid)}",
-                    'title': assign.get('name', 'Không tên'),
+                    'title': html.unescape(assign.get('name', 'Không tên')),
                     'course_name': course_name,
                     'course': course_name,
                     'course_id': course_id,
@@ -266,6 +389,8 @@ class DataOrchestrator:
                     'submission_status': 'unknown',
                     'details': {},
                     'is_open': False,
+                    'cutoff_date': cutoffdate,
+                    'late_status': late_status,
                 })
                 merged_count += 1
         
