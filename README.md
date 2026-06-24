@@ -15,34 +15,35 @@
   <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/build-android.yml">
     <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/build-android.yml/badge.svg" alt="Android Build" />
   </a>
-  <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/build-ios.yml">
-    <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/build-ios.yml/badge.svg" alt="iOS Build" />
-  </a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.1.0-blue?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/flet-0.82+-7C4DFF?style=flat-square" alt="Flet" />
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS-E8710A?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/flet-0.85+-7C4DFF?style=flat-square" alt="Flet" />
+  <img src="https://img.shields.io/badge/tests-314%20passed-22C55E?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20Web-E8710A?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20NC-red?style=flat-square" alt="License: PolyForm Noncommercial" /></a>
 </p>
 
 ---
 
-## ✨ Tính năng chính
+## ✨ Tính năng
 
 | Tính năng | Mô tả |
 |-----------|-------|
-| 📋 **Theo dõi deadline** | Tự động lấy tất cả bài tập, quiz, điểm danh từ Moodle |
-| 🔔 **Cảnh báo thông minh** | Phân loại theo mức khẩn cấp: `Critical` · `Warning` · `Safe` |
-| ⚡ **Moodle WS API** | Truy vấn trực tiếp qua Web Services API (~0.2s/lần) |
-| 📱 **Đa nền tảng** | Windows desktop · Android · iOS (Flet) |
+| 📋 **Theo dõi deadline** | Tự động lấy bài tập, quiz, điểm danh từ Moodle WS API |
+| 📊 **Theo dõi điểm** | Giám sát thay đổi điểm theo thời gian thực, thông báo khi có điểm mới |
+| 🔔 **Cảnh báo thông minh** | Phân loại `Khẩn cấp` · `Sắp hạn` · `An toàn` · `Quá hạn` |
+| 📅 **Lịch học** | Xem lịch học theo tuần với deadline trực quan |
+| ⚡ **Hiệu suất cao** | Startup ~4s, parallel API, grade N+1 optimization |
+| 📱 **Đa nền tảng** | Windows desktop · Android APK · Web browser |
 | 🎨 **6 Theme** | Midnight Blue · Ocean Teal · Sakura Pink · Nord Frost · Monokai Pro · Solarized Dark |
 | 📣 **Đa kênh thông báo** | Windows Toast · Discord · Telegram · Email |
 | 🔐 **Bảo mật** | Mật khẩu lưu trong Credential Manager / Keychain |
 | 🖥️ **System Tray** | Chạy nền, tự động cập nhật theo lịch |
-| 🔍 **Bộ lọc nâng cao** | Lọc theo môn, loại hoạt động, mức cấp bách, tag |
+| 🔍 **Bộ lọc nâng cao** | Lọc theo môn, loại, mức cấp bách, tìm kiếm full-text |
+| 🔄 **Smart Polling** | Tự động làm mới với interval tùy chỉnh |
 
 ## 📸 Screenshots
 
@@ -52,8 +53,8 @@
 
 ### Yêu cầu hệ thống
 
-- **Python** 3.11+ 
-- **Windows** 10/11 (desktop) hoặc **Android** 8+ / **iOS** 15+
+- **Python** 3.11+ (hỗ trợ đến 3.14)
+- **Windows** 10/11 (desktop) hoặc **Android** 8+
 
 ### Cài đặt từ source
 
@@ -65,7 +66,6 @@ cd UTHelper
 # Tạo virtual environment (khuyến nghị)
 python -m venv .venv
 .venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # macOS/Linux
 
 # Cài dependencies
 pip install -e ".[windows]"  # Windows (đầy đủ)
@@ -75,7 +75,7 @@ pip install -e .             # Cross-platform (core only)
 python src/main.py
 ```
 
-### Chạy chế độ web (cho test)
+### Chạy chế độ web (cho test/debug)
 
 ```bash
 python src/main.py --web
@@ -101,15 +101,7 @@ flet build apk
 
 ```bash
 $env:PYTHONIOENCODING = 'utf-8'
-
-# Build executable
 flet build windows
-
-# Cleanup bundle (giảm kích thước)
-python scripts/post_build_cleanup.py
-
-# Package portable folder
-powershell scripts/package_flet_windows_bundle.ps1
 ```
 
 ### Yêu cầu build
@@ -119,16 +111,6 @@ powershell scripts/package_flet_windows_bundle.ps1
 | Flutter SDK | Core engine | Tự động cài bởi Flet CLI |
 | VS Build Tools 2022+ | Windows build | Cần C++ Desktop workload |
 | Android SDK | Android build | Tự động qua Flutter |
-| CMake | Native compilation | Đi kèm VS Build Tools |
-
-### Troubleshooting
-
-| Lỗi | Giải pháp |
-|------|-----------|
-| `UnicodeEncodeError: cp1252` | Set `$env:PYTHONIOENCODING = 'utf-8'` |
-| `MSBuild not found` | Cài VS Build Tools với C++ Desktop workload |
-| Bundle quá lớn | Chạy `python scripts/post_build_cleanup.py` |
-| Port bị chiếm | Kill process: `Get-NetTCPConnection -LocalPort 8561` |
 
 ## 🏛️ Kiến trúc
 
@@ -139,24 +121,32 @@ src/
 ├── models.py                    # Data models (Activity, Course)
 │
 ├── core/                        # Business logic
-│   ├── client.py                # MoodleClient (urllib + WS API)
-│   ├── data_orchestrator.py     # Pipeline: WS API → activities
-│   ├── ws_functions.py          # Moodle WS API wrappers
-│   ├── parser.py                # HTML parser (fallback)
-│   ├── security.py              # HTML sanitizer
+│   ├── client.py                # MoodleClient (urllib + Cloudflare bypass)
+│   ├── data_orchestrator.py     # Pipeline: WS API → activities (parallel fetch)
+│   ├── ws_functions.py          # 30+ Moodle WS API wrappers
+│   ├── grade_monitor.py         # Grade change detection (N+1 optimized)
+│   ├── data_cache.py            # Thread-safe data cache
 │   ├── filter_service.py        # Smart filtering engine
-│   └── display_utils.py         # Display helpers
+│   ├── time_utils.py            # Timezone-aware time helpers
+│   ├── display_utils.py         # Display formatters
+│   ├── security.py              # HTML sanitizer
+│   ├── network_utils.py         # Network connectivity check
+│   ├── notification_history.py  # Notification dedup + history
+│   ├── update_checker.py        # GitHub release auto-update
+│   └── background_scheduler.py  # Periodic background tasks
 │
-├── gui/                         # UI layer (Flet)
+├── gui/                         # UI layer (Flet 0.85+)
 │   ├── app_controller.py        # Main controller + navigation
 │   ├── compact_desktop.py       # Desktop layout orchestrator
 │   ├── tray.py                  # System tray (Windows)
-│   ├── components/              # UI components
+│   ├── components/
 │   │   ├── activity_card.py     # Activity card widget
 │   │   ├── detail_view.py       # Detail view + file manager
+│   │   ├── calendar_view.py     # Calendar view (weekly)
+│   │   ├── grade_overview_view.py # Grade overview panel
 │   │   ├── login_dialog.py      # Login dialog
-│   │   └── settings_view.py     # Settings (6 themes + colors)
-│   └── core/                    # UI foundations
+│   │   └── settings_view.py     # Settings (6 themes + integrations)
+│   └── core/
 │       ├── theme.py             # 6 theme presets + color system
 │       └── utils.py             # UI utilities
 │
@@ -165,7 +155,8 @@ src/
 │   ├── windows.py               # Windows Toast notifications
 │   ├── discord.py               # Discord webhook
 │   ├── email.py                 # Email (SMTP/Gmail)
-│   └── telegram.py              # Telegram bot
+│   ├── telegram.py              # Telegram bot
+│   └── mobile.py                # Android/iOS push notifications
 │
 └── platform_utils/              # Platform abstraction
     ├── android.py               # Android-specific (storage, etc.)
@@ -178,70 +169,73 @@ src/
 - ✅ HTML content từ Moodle được **sanitize** trước khi hiển thị
 - ✅ SSL verification luôn bật, timeout trên mọi request
 - ✅ Zero dependency HTTP client (stdlib `urllib.request`)
-
-### Credentials
-
-| Key | Mô tả |
-|-----|-------|
-| `UTH_PASSWORD` | Mật khẩu đăng nhập Moodle |
-| `MOODLE_WS_TOKEN` | WS API token (tự động lấy) |
-| `GMAIL_APP_PASSWORD` | App password Gmail |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `DISCORD_WEBHOOK_URL` | Discord webhook URL |
+- ✅ Không lưu credentials trong source code
 
 ## 🧪 Testing
 
 ```bash
 # Chạy unit tests
-python -m pytest tests/ -q
+cd src && python -m pytest ../tests/ -q
 
 # Với coverage
-python -m pytest tests/ --cov=src --cov-report=html
+python -m pytest ../tests/ --cov=. --cov-report=html
 
-# 44 tests covering:
+# 314 tests covering:
+#   ├── Core modules (client, orchestrator, ws_functions)
+#   ├── Grade monitoring & change detection
+#   ├── Filter service & data cache
+#   ├── Display utils & time utils
+#   ├── Notification manager & history
 #   ├── HTML parsing & sanitization
-#   ├── Data orchestration
-#   ├── WS API integration
-#   ├── Filter service
-#   ├── Notification manager
 #   └── Credential security
 ```
 
+### CI/CD
+
+| Workflow | Trigger | Jobs |
+|----------|---------|------|
+| **CI** (`ci.yml`) | Push/PR to `develop`, `main` | 🔍 Lint (Ruff) · 🧪 Test (3.12/3.13/3.14) · 🔒 Security (pip-audit) |
+| **Build Android** (`build-android.yml`) | Push to `main`, tags `v*` | 📱 Build APK/AAB · 📤 Upload artifact · 🏷️ Release |
+
 ## 🌿 Git Workflow
 
-Project sử dụng **Gitflow** workflow:
+Gitflow workflow:
 
 ```
 main          ← Production releases (tagged)
   └─ develop  ← Integration branch
        ├─ feature/*   ← New features
        ├─ bugfix/*    ← Bug fixes
-       └─ hotfix/*    ← Critical production fixes (branch from main)
+       └─ hotfix/*    ← Critical production fixes
 ```
 
 ### Quy ước commit
 
-Sử dụng [Conventional Commits](https://www.conventionalcommits.org/):
+[Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
 feat(gui): add theme switching with live preview
-fix(client): handle timeout on slow connections  
+fix(client): handle timeout on slow connections
+perf(grade): optimize N+1 API calls (37 → 0-2 per cycle)
 docs: update README with build instructions
-refactor(core): simplify WS API response parsing
-perf(parser): reduce memory usage in HTML parsing
 ```
 
 ## 🛣️ Roadmap
 
-- [x] Moodle WS API integration
+- [x] Moodle WS API integration (30+ endpoints)
 - [x] 6 theme presets + custom colors
-- [x] Multi-channel notifications
+- [x] Multi-channel notifications (Toast/Discord/Telegram/Email)
 - [x] Android APK build
+- [x] Grade monitoring & change alerts
+- [x] Calendar view (weekly schedule)
+- [x] Smart polling with configurable interval
+- [x] Notification badge with unread count
+- [x] Performance optimization (startup 15s → 4s)
+- [x] CI/CD pipeline (lint + test + security)
 - [ ] iOS TestFlight build
-- [ ] Tappable footer urgency counters
-- [ ] Calendar view
 - [ ] File download & re-upload workflow
 - [ ] Welcome screen for first-time users
+- [ ] Offline mode with local cache
 
 ## 📄 License
 
@@ -249,6 +243,8 @@ perf(parser): reduce memory usage in HTML parsing
 
 > ⚠️ **Mã nguồn mở nhưng CẤM sử dụng thương mại.**
 > Bạn được phép xem, sử dụng, sửa đổi cho mục đích cá nhân, học tập, nghiên cứu.
-> **Không được** sao chép ý tưởng, bán, hoặc dùng cho mục đích thương mại mà không có sự đồng ý bằng văn bản của tác giả.
+> **Không được** sao chép, bán, hoặc dùng cho mục đích thương mại mà không có sự đồng ý bằng văn bản của tác giả.
+
+---
 
 Made with ❤️ for UTH students by [@Chouwzi](https://github.com/Chouwzi).
