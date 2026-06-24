@@ -302,7 +302,7 @@ class AppController:
             bgcolor=ft.Colors.RED,
             border_radius=8,
             width=16, height=16,
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
             visible=False,  # Hidden when count=0
         )
         self._notification_icon = ft.Stack(
@@ -316,7 +316,7 @@ class AppController:
                 ),
                 ft.Container(
                     content=self._notification_badge,
-                    alignment=ft.alignment.top_right,
+                    alignment=ft.Alignment(1, -1),
                     right=2, top=2,
                 ),
             ],

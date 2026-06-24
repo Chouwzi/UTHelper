@@ -52,7 +52,7 @@ class GradeOverviewView(ft.Container):
         )
         self._empty_state = ft.Container(
             content=self._empty_text,
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
             padding=40,
             visible=False,
         )
