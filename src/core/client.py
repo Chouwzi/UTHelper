@@ -42,7 +42,7 @@ class MoodleClient:
     """
     
     # ── Client-side rate limiting (Moodle has NO server-side throttle) ──
-    _MIN_INTERVAL = 0.2  # 200ms = max 5 req/s
+    _MIN_INTERVAL = 0.05  # 50ms = max 20 req/s (was 200ms — caused 1.6s waste per cycle)
 
     def __init__(self):
         self._last_login_error = ""

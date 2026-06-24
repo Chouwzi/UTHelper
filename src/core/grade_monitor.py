@@ -115,32 +115,36 @@ class GradeMonitor:
                         timestamp=datetime.now().isoformat(),
                     ))
 
-                # Try to get detailed grade items for this course
-                try:
-                    items = ws_functions.get_grade_items(call_api, course_id, userid)
-                    if items:
-                        for item in items:
-                            item_name = item.get('itemname', '')
-                            item_grade = item.get('gradeformatted', '')
-                            if not item_name or not item_grade or item_grade == '-':
-                                continue
+                # PERF-OPT: Only fetch detailed grade items when overall course grade
+                # actually changed. Previously fetched for ALL 37 courses (N+1 pattern,
+                # ~4 seconds wasted). Now only 0-2 courses typically need detail fetch.
+                overall_changed = (grade_str != old_overall and old_overall != '')
+                if overall_changed:
+                    try:
+                        items = ws_functions.get_grade_items(call_api, course_id, userid)
+                        if items:
+                            for item in items:
+                                item_name = item.get('itemname', '')
+                                item_grade = item.get('gradeformatted', '')
+                                if not item_name or not item_grade or item_grade == '-':
+                                    continue
 
-                            old_item_grade = old_course.get(item_name, '')
-                            if item_grade != old_item_grade and old_item_grade != '':
-                                changes.append(GradeChange(
-                                    course_name=course_name,
-                                    item_name=item_name,
-                                    old_grade=old_item_grade if old_item_grade else None,
-                                    new_grade=item_grade,
-                                    timestamp=datetime.now().isoformat(),
-                                ))
+                                old_item_grade = old_course.get(item_name, '')
+                                if item_grade != old_item_grade and old_item_grade != '':
+                                    changes.append(GradeChange(
+                                        course_name=course_name,
+                                        item_name=item_name,
+                                        old_grade=old_item_grade if old_item_grade else None,
+                                        new_grade=item_grade,
+                                        timestamp=datetime.now().isoformat(),
+                                    ))
 
-                            # Update snapshot for this item
-                            if course_id_str not in self._snapshot:
-                                self._snapshot[course_id_str] = {}
-                            self._snapshot[course_id_str][item_name] = item_grade
-                except Exception as e:
-                    logger.debug("Grade items fetch failed for course %s: %s", course_id, e)
+                                # Update snapshot for this item
+                                if course_id_str not in self._snapshot:
+                                    self._snapshot[course_id_str] = {}
+                                self._snapshot[course_id_str][item_name] = item_grade
+                    except Exception as e:
+                        logger.debug("Grade items fetch failed for course %s: %s", course_id, e)
 
                 # Update overall course grade in snapshot (only valid grades)
                 if grade_str and grade_str != '-':

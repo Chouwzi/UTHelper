@@ -31,6 +31,8 @@ class DataOrchestrator:
         # Smart polling state
         self._last_fetch_ts: int = 0
         self._userid_cache: Optional[int] = None
+        # Cycle-level caches (cleared each refresh, avoids redundant API calls)
+        self._courses_cache: Optional[List[Dict]] = None
         # Grade monitoring
         self.grade_monitor = GradeMonitor()
 
@@ -155,6 +157,7 @@ class DataOrchestrator:
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).
         
+        PERF-OPT: Parallel API calls + eliminated redundant fetches.
         Kết hợp 2 nguồn:
         1. calendar action events (bài chưa nộp, có deadline tương lai)
         2. mod_assign_get_assignments (TẤT CẢ bài tập kể cả đã nộp)
@@ -163,23 +166,53 @@ class DataOrchestrator:
         try:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
-            result = self.client.call_ws_api(
-                'core_calendar_get_action_events_by_timesort',
-                timesortfrom=now_ts,
-                timesortto=now_ts + (90 * 24 * 3600),
-                limitnum=50,  # Moodle max is 50
-            )
+            
+            # ── PERF: Clear cycle caches at start of each refresh ──
+            self._courses_cache = None
+            
+            # ── PERF: Step 1 — Get userid (needed for courses) ──
+            userid = self._get_userid()
+            
+            # ── PERF: Step 2 — Parallel fetch: calendar + courses ──
+            calendar_result = None
+            courses_result = None
+            
+            def _fetch_calendar():
+                return self.client.call_ws_api(
+                    'core_calendar_get_action_events_by_timesort',
+                    timesortfrom=now_ts,
+                    timesortto=now_ts + (90 * 24 * 3600),
+                    limitnum=50,
+                )
+            
+            def _fetch_courses():
+                if not userid:
+                    return None
+                return self.client.call_ws_api(
+                    'core_enrol_get_users_courses', userid=userid
+                )
+            
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_cal = pool.submit(_fetch_calendar)
+                f_courses = pool.submit(_fetch_courses)
+                calendar_result = f_cal.result(timeout=25)
+                courses_result = f_courses.result(timeout=25)
+            
+            # Cache courses for reuse by grade_check/notification
+            if courses_result and isinstance(courses_result, list):
+                self._courses_cache = courses_result
             
             events = []
-            if result and isinstance(result, dict):
-                events = result.get('events', [])
+            if calendar_result and isinstance(calendar_result, dict):
+                events = calendar_result.get('events', [])
             
             # Convert WS events to UTHelper format
             results = ws_functions.ws_events_to_assignments(events) if events else []
             
-            # Bổ sung bài tập đã nộp từ mod_assign_get_assignments
+            # ── PERF: Step 3 — Merge assignments using PRE-FETCHED data ──
+            course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
             try:
-                results = self._merge_all_assignments(results)
+                results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
             except Exception as e:
                 logger.debug("Merge assignments failed (non-critical): %s", e)
             
@@ -196,46 +229,29 @@ class DataOrchestrator:
             return None
     
     async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
-        """Lấy activities bằng WS API bất đồng bộ (httpx, non-blocking).
+        """Lấy activities bằng WS API bất đồng bộ (non-blocking).
         
-        Kết hợp calendar events + mod_assign_get_assignments.
+        PERF-OPT: Delegates to parallel _fetch_via_ws_api in thread.
         """
         try:
-            from datetime import datetime
-            now_ts = int(datetime.now().timestamp())
-            result = await self.client.call_ws_api_async(
-                'core_calendar_get_action_events_by_timesort',
-                timesortfrom=now_ts,
-                timesortto=now_ts + (90 * 24 * 3600),
-                limitnum=50,  # Moodle max is 50
-            )
-            
-            events = []
-            if result and isinstance(result, dict):
-                events = result.get('events', [])
-            
-            results = ws_functions.ws_events_to_assignments(events) if events else []
-            
-            # Bổ sung bài tập đã nộp từ mod_assign_get_assignments (blocking in thread)
-            try:
-                import asyncio
-                results = await asyncio.to_thread(self._merge_all_assignments, results)
-            except Exception as e:
-                logger.debug("Merge assignments async failed (non-critical): %s", e)
-            
-            if not results:
-                return None
-            
-            logger.info("WS API async trả về %d activities (merged).", len(results))
-            self.is_logged_in = True
-            self._last_fetch_ts = int(datetime.now().timestamp())  # Smart poll: mark last fetch
-            return results
+            import asyncio
+            result = await asyncio.to_thread(self._fetch_via_ws_api)
+            return result
         except Exception as e:
             logger.warning("WS API async fetch thất bại: %s", e)
             return None
 
-    def _merge_all_assignments(self, calendar_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge_all_assignments(
+        self,
+        calendar_results: List[Dict[str, Any]],
+        userid: Optional[int] = None,
+        course_ids: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
         """Bổ sung bài tập đã nộp vào danh sách calendar events.
+        
+        PERF-OPT: Accepts pre-fetched userid and course_ids to avoid
+        redundant API calls (previously called site_info + enrolled_courses
+        again — wasting ~1.4s).
         
         Moodle calendar API loại bỏ events khi bài đã nộp (no action needed).
         Lấy tất cả assignments từ enrolled courses, chỉ giữ bài có deadline
@@ -255,24 +271,25 @@ class DataOrchestrator:
         future_month = ((future_month - 1) % 12) + 1
         max_ts = int(datetime(future_year, future_month, 1).timestamp())
         
-        # Lấy userid + tất cả enrolled courses
-        try:
-            site_info = self.client.call_ws_api('core_webservice_get_site_info')
-            if not site_info or not isinstance(site_info, dict):
+        # ── PERF: Use pre-fetched data instead of re-calling APIs ──
+        if not course_ids:
+            # Fallback: fetch if caller didn't provide (backward compat)
+            try:
+                if userid is None:
+                    userid = self._get_userid()
+                if not userid:
+                    return calendar_results
+                courses_result = self._courses_cache
+                if not courses_result:
+                    courses_result = self.client.call_ws_api(
+                        'core_enrol_get_users_courses', userid=userid
+                    )
+                if not courses_result or not isinstance(courses_result, list):
+                    return calendar_results
+                course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
+            except Exception:
                 return calendar_results
-            userid = site_info.get('userid')
-            if not userid:
-                return calendar_results
-            
-            courses_result = self.client.call_ws_api(
-                'core_enrol_get_users_courses', userid=userid
-            )
-            if not courses_result or not isinstance(courses_result, list):
-                return calendar_results
-        except Exception:
-            return calendar_results
         
-        course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
         if not course_ids:
             return calendar_results
         

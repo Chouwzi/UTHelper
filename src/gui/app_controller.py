@@ -811,6 +811,26 @@ class AppController:
             self._render_cards_only()
         self._search_task = self.page.run_task(_delayed_render)
 
+    async def _check_grades_background(self):
+        """PERF-OPT: Check grade changes in background (non-blocking)."""
+        try:
+            grade_changes = await asyncio.to_thread(self.orchestrator.check_grade_changes)
+            if grade_changes and hasattr(self, 'notifier') and self.notifier:
+                self.notifier.dispatch_grade_alert(grade_changes)
+                msg = f"\U0001f4ca {len(grade_changes)} \u0111i\u1ec3m m\u1edbi: "
+                msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
+                if len(grade_changes) > 3:
+                    msg += f" +{len(grade_changes) - 3} kh\u00e1c"
+                self.page.snack_bar = ft.SnackBar(
+                    content=ft.Text(msg, color=ft.Colors.WHITE),
+                    bgcolor="#22C55E",
+                    duration=5000,
+                )
+                self.page.snack_bar.open = True
+                self.page.update()
+        except Exception as e:
+            logger.debug("Grade check background failed (non-critical): %s", e)
+
     async def _prefetch_details_async(self, activities: list):
         len(activities)
         workers = max(1, min(settings.PREFETCH_WORKERS, 10))
@@ -959,25 +979,8 @@ class AppController:
                 except Exception as e:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
-                # Check for grade changes
-                try:
-                    grade_changes = self.orchestrator.check_grade_changes()
-                    if grade_changes:
-                        self.notifier.dispatch_grade_alert(grade_changes)
-                        # Show in-app snackbar
-                        msg = f"📊 {len(grade_changes)} điểm mới: "
-                        msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
-                        if len(grade_changes) > 3:
-                            msg += f" +{len(grade_changes) - 3} khác"
-                        self.page.snack_bar = ft.SnackBar(
-                            content=ft.Text(msg, color=ft.Colors.WHITE),
-                            bgcolor="#22C55E",
-                            duration=5000,
-                        )
-                        self.page.snack_bar.open = True
-                        self.page.update()
-                except Exception as e:
-                    logger.debug("Grade check failed (non-critical): %s", e)
+                # PERF-OPT: Grade check moved to background task to not block main data display
+                self.page.run_task(self._check_grades_background)
 
             self._update_footer()
             
