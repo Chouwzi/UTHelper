@@ -277,7 +277,13 @@ class MoodleClient:
             
             # Check for other errors
             if isinstance(result, dict) and 'exception' in result:
-                logger.error(f"WS API error [{function}]: {result.get('message', result.get('error', 'Unknown'))}")
+                errorcode = result.get('errorcode', '')
+                message = result.get('message', result.get('error', 'Unknown'))
+                # Server-side data validation errors are non-retryable
+                if errorcode == 'invalidresponse':
+                    logger.warning(f"WS API [{function}]: Server data validation (non-retryable): {message}")
+                else:
+                    logger.error(f"WS API error [{function}] ({errorcode}): {message}")
                 return None
             
             return result

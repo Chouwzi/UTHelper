@@ -1135,8 +1135,8 @@ class AppController:
                                 )
                                 if items:
                                     grade_items[cid] = items
-                            except Exception:
-                                pass
+                            except Exception as ex:
+                                logger.debug("Grade items unavailable for course %s: %s", cid, ex)
                 self.grade_overview_view.update_grades(courses_grades or [], grade_items)
             else:
                 self.grade_overview_view.update_grades([], {})

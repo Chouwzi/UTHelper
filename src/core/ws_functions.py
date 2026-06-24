@@ -629,11 +629,46 @@ def get_course_grades(call_api: Callable, userid: int) -> Optional[List[Dict[str
     try:
         result = call_api('gradereport_overview_get_course_grades', userid=userid)
         if isinstance(result, dict):
-            return result.get('grades', [])
+            grades = result.get('grades', [])
+            # Moodle API không trả về coursename — enrich từ enrolled courses
+            if grades:
+                _enrich_grade_course_names(call_api, userid, grades)
+            return grades
         return None
     except Exception as e:
         logger.error("Lỗi get_course_grades: %s", e)
         return None
+
+
+def _enrich_grade_course_names(call_api: Callable, userid: int, grades: List[Dict]):
+    """Bổ sung coursename vào kết quả grade từ enrolled courses cache.
+
+    gradereport_overview_get_course_grades chỉ trả {courseid, grade, rawgrade}
+    nên cần map courseid -> fullname qua core_enrol_get_users_courses.
+    """
+    try:
+        with _cache_lock:
+            if 'courses' not in _cache:
+                courses = call_api('core_enrol_get_users_courses', userid=userid) or []
+                if not isinstance(courses, list):
+                    courses = []
+                _cache['courses'] = {
+                    c.get('id'): c.get('fullname', '')
+                    for c in courses
+                    if isinstance(c, dict) and c.get('id') is not None
+                }
+            course_map = _cache['courses']
+
+        for g in grades:
+            cid = g.get('courseid')
+            if cid and 'coursename' not in g:
+                name = course_map.get(cid, '')
+                if name:
+                    g['coursename'] = html.unescape(name)
+    except Exception:
+        pass
+
+
 
 
 def get_grade_items(call_api: Callable, courseid: int, userid: int) -> Optional[List[Dict[str, Any]]]:

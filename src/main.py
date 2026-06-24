@@ -89,6 +89,9 @@ logging.basicConfig(
 logging.getLogger("flet_core").setLevel(logging.WARNING)
 logging.getLogger("flet").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# Suppress known harmless Flet web session teardown errors
+# (NoneType.put_nowait race condition during disconnect)
+logging.getLogger("flet_core.session").setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
