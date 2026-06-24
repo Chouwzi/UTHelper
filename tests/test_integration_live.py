@@ -2,6 +2,7 @@
 
 Verifies the real data flow: login → token → WS API → data parsing → notification logic.
 This is NOT a unit test — it calls the actual Moodle server.
+These tests are skipped in CI (GitHub Actions) since Cloudflare blocks runner IPs.
 
 Usage:
     python -m pytest tests/test_integration_live.py -v --tb=short -x -s
@@ -13,12 +14,18 @@ import pytest
 from datetime import datetime
 from pathlib import Path
 
+# Skip entire module in CI environments
+pytestmark = pytest.mark.skipif(
+    os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true",
+    reason="Live integration tests skipped in CI (Cloudflare blocks runner IPs)"
+)
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-# ── Test credentials ──
-_USERNAME = "STUDENT_ID"
-_PASSWORD = "YOUR_PASSWORD"
+# ── Test credentials (only used for local testing) ──
+_USERNAME = os.environ.get("UTH_TEST_USER", "STUDENT_ID")
+_PASSWORD = os.environ.get("UTH_TEST_PASS", "YOUR_PASSWORD")
 
 # ── Shared state across test classes (populated progressively) ──
 _state = {}
