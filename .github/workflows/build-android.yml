@@ -51,98 +51,33 @@ jobs:
           BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
           echo "Building $BUILD_TYPE..."
 
-          # First run: generates Flutter project but may fail due to desugaring
-          yes | flet build $BUILD_TYPE --verbose 2>&1 || true
+          # Install Gradle init script for core library desugaring
+          # This applies to ALL Android subprojects automatically,
+          # without needing to patch any build.gradle.kts file
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/desugaring.gradle << 'INIT_GRADLE'
+          allprojects {
+              afterEvaluate {
+                  if (project.hasProperty('android')) {
+                      android {
+                          compileOptions {
+                              coreLibraryDesugaringEnabled true
+                          }
+                          defaultConfig {
+                              multiDexEnabled true
+                          }
+                      }
+                      dependencies {
+                          coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+                      }
+                  }
+              }
+          }
+          INIT_GRADLE
+          echo "✅ Installed Gradle init script for desugaring"
 
-          # Find the app-level build file
-          BUILD_GRADLE=$(find build/ -name "build.gradle.kts" -path "*/app/*" -type f | head -1)
-          if [ -z "$BUILD_GRADLE" ]; then
-            BUILD_GRADLE=$(find build/ -name "build.gradle" -path "*/app/*" -type f | head -1)
-          fi
-
-          if [ -z "$BUILD_GRADLE" ]; then
-            echo "❌ No build.gradle found"
-            find build/ -name "*.gradle*" -type f 2>/dev/null
-            exit 1
-          fi
-
-          echo "✅ Found: $BUILD_GRADLE"
-
-          # Patch using python for reliable file manipulation
-          export BUILD_GRADLE_PATH="$BUILD_GRADLE"
-          python3 << 'PATCH_SCRIPT'
-          import os
-
-          path = os.environ['BUILD_GRADLE_PATH']
-          with open(path, 'r') as f:
-              content = f.read()
-
-          modified = False
-          is_kts = path.endswith('.kts')
-
-          # 1. Enable coreLibraryDesugaring in compileOptions
-          if 'isCoreLibraryDesugaringEnabled' not in content:
-              if is_kts:
-                  content = content.replace(
-                      'compileOptions {',
-                      'compileOptions {\n        isCoreLibraryDesugaringEnabled = true'
-                  )
-              else:
-                  content = content.replace(
-                      'compileOptions {',
-                      'compileOptions {\n        isCoreLibraryDesugaringEnabled true'
-                  )
-              modified = True
-              print("✅ Added isCoreLibraryDesugaringEnabled")
-
-          # 2. Enable multiDex in defaultConfig
-          if 'multiDexEnabled' not in content:
-              if is_kts:
-                  content = content.replace(
-                      'defaultConfig {',
-                      'defaultConfig {\n        multiDexEnabled = true'
-                  )
-              else:
-                  content = content.replace(
-                      'defaultConfig {',
-                      'defaultConfig {\n        multiDexEnabled true'
-                  )
-              modified = True
-              print("✅ Added multiDexEnabled")
-
-          # 3. Add desugaring dependency at end of file (avoids Kotlin DSL ambiguity)
-          if 'desugar_jdk_libs' not in content:
-              if is_kts:
-                  content += '\ndependencies {\n    add("coreLibraryDesugaring", "com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
-              else:
-                  content += '\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"\n}\n'
-              modified = True
-              print("✅ Added desugar_jdk_libs dependency")
-
-          if modified:
-              with open(path, 'w') as f:
-                  f.write(content)
-              print(f"✅ Patched {path}")
-          else:
-              print("ℹ️ No changes needed")
-          PATCH_SCRIPT
-
-          # Find flet's internal Flutter SDK
-          FLUTTER_BIN=$(find "$HOME" /opt -name "flutter" -path "*/bin/flutter" -type f 2>/dev/null | head -1)
-          if [ -z "$FLUTTER_BIN" ]; then
-            FLUTTER_BIN=$(find build/ -name "flutter" -path "*/bin/flutter" -type f 2>/dev/null | head -1)
-          fi
-
-          if [ -n "$FLUTTER_BIN" ]; then
-            echo "✅ Found Flutter at: $FLUTTER_BIN"
-            FLUTTER_PROJECT=$(dirname "$BUILD_GRADLE" | sed 's|/app$||' | sed 's|/android$||')
-            echo "Flutter project: $FLUTTER_PROJECT"
-            cd "$FLUTTER_PROJECT"
-            "$FLUTTER_BIN" build $BUILD_TYPE --release
-          else
-            echo "❌ Flutter SDK not found"
-            exit 1
-          fi
+          # Build with flet (handles SERIOUS_PYTHON_SITE_PACKAGES and other env vars)
+          yes | flet build $BUILD_TYPE --verbose
 
       - name: 📋 List build outputs
         if: always()
