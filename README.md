@@ -15,6 +15,9 @@
   <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/build-android.yml">
     <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/build-android.yml/badge.svg" alt="Android Build" />
   </a>
+  <a href="https://github.com/Chouwzi/UTHelper/actions/workflows/build-ios.yml">
+    <img src="https://github.com/Chouwzi/UTHelper/actions/workflows/build-ios.yml/badge.svg" alt="iOS Build" />
+  </a>
 </p>
 
 <p align="center">
