@@ -46,11 +46,35 @@ jobs:
           pip install flet
           flet --version
 
+      - name: 📋 Accept Android licenses
+        run: yes | flutter doctor --android-licenses || true
+
       - name: 🔨 Build APK
         run: |
           BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
           echo "Building $BUILD_TYPE..."
-          yes | flet build $BUILD_TYPE --verbose
+
+          # First run flet build to generate Flutter project, allow it to fail
+          yes | flet build $BUILD_TYPE --verbose 2>&1 || true
+
+          # Enable core library desugaring (required by flutter_local_notifications)
+          BUILD_GRADLE="build/flutter/build/app/build.gradle"
+          if [ -f "$BUILD_GRADLE" ]; then
+            echo "Patching build.gradle for coreLibraryDesugaring..."
+            # Add isCoreLibraryDesugaringEnabled if not present
+            if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
+              sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled true' "$BUILD_GRADLE"
+            fi
+            # Add desugaring dependency if not present
+            if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
+              sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"' "$BUILD_GRADLE"
+            fi
+            echo "build.gradle patched successfully"
+          fi
+
+          # Retry the build with patched gradle
+          cd build/flutter
+          flutter build $BUILD_TYPE --release
 
       - name: 📋 List build outputs
         if: always()
@@ -67,6 +91,8 @@ jobs:
           path: |
             build/apk/*.apk
             build/aab/*.aab
+            build/flutter/build/app/outputs/**/*.apk
+            build/flutter/build/app/outputs/**/*.aab
           retention-days: 30
           if-no-files-found: warn
 
@@ -76,5 +102,6 @@ jobs:
         with:
           files: |
             build/apk/*.apk
+            build/flutter/build/app/outputs/**/*.apk
           draft: true
           generate_release_notes: true
