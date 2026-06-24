@@ -54,60 +54,85 @@ jobs:
           # First run: generates Flutter project but may fail due to desugaring
           yes | flet build $BUILD_TYPE --verbose 2>&1 || true
 
-          # Find the app-level build file (Kotlin DSL or Groovy)
-          echo "=== Searching for build files ==="
-          find build/ -name "build.gradle*" -path "*/app/*" -type f 2>/dev/null
-          
+          # Find the app-level build file
           BUILD_GRADLE=$(find build/ -name "build.gradle.kts" -path "*/app/*" -type f | head -1)
           if [ -z "$BUILD_GRADLE" ]; then
             BUILD_GRADLE=$(find build/ -name "build.gradle" -path "*/app/*" -type f | head -1)
           fi
 
-          if [ -n "$BUILD_GRADLE" ]; then
-            echo "✅ Found: $BUILD_GRADLE"
-            
-            # Detect syntax (Kotlin DSL vs Groovy)
-            if [[ "$BUILD_GRADLE" == *.kts ]]; then
-              echo "Using Kotlin DSL syntax..."
-              # Add isCoreLibraryDesugaringEnabled
-              if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
-                sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' "$BUILD_GRADLE"
-              fi
-              # Add desugaring dependency
-              if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
-                sed -i '/dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' "$BUILD_GRADLE"
-              fi
-              # Add multiDexEnabled
-              if ! grep -q "multiDexEnabled" "$BUILD_GRADLE"; then
-                sed -i '/defaultConfig {/a\        multiDexEnabled = true' "$BUILD_GRADLE"
-              fi
-            else
-              echo "Using Groovy syntax..."
-              if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
-                sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled true' "$BUILD_GRADLE"
-              fi
-              if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
-                sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"' "$BUILD_GRADLE"
-              fi
-              if ! grep -q "multiDexEnabled" "$BUILD_GRADLE"; then
-                sed -i '/defaultConfig {/a\        multiDexEnabled true' "$BUILD_GRADLE"
-              fi
-            fi
-
-            echo "✅ Patched successfully"
-            grep -n "desugaring\|desugar\|multiDex" "$BUILD_GRADLE" || true
-          else
-            echo "❌ No build.gradle found, listing all gradle files:"
+          if [ -z "$BUILD_GRADLE" ]; then
+            echo "❌ No build.gradle found"
             find build/ -name "*.gradle*" -type f 2>/dev/null
             exit 1
           fi
 
-          # Find flet's internal Flutter SDK and use it directly
+          echo "✅ Found: $BUILD_GRADLE"
+
+          # Patch using python for reliable file manipulation
+          export BUILD_GRADLE_PATH="$BUILD_GRADLE"
+          python3 << 'PATCH_SCRIPT'
+          import os
+
+          path = os.environ['BUILD_GRADLE_PATH']
+          with open(path, 'r') as f:
+              content = f.read()
+
+          modified = False
+          is_kts = path.endswith('.kts')
+
+          # 1. Enable coreLibraryDesugaring in compileOptions
+          if 'isCoreLibraryDesugaringEnabled' not in content:
+              if is_kts:
+                  content = content.replace(
+                      'compileOptions {',
+                      'compileOptions {\n        isCoreLibraryDesugaringEnabled = true'
+                  )
+              else:
+                  content = content.replace(
+                      'compileOptions {',
+                      'compileOptions {\n        isCoreLibraryDesugaringEnabled true'
+                  )
+              modified = True
+              print("✅ Added isCoreLibraryDesugaringEnabled")
+
+          # 2. Enable multiDex in defaultConfig
+          if 'multiDexEnabled' not in content:
+              if is_kts:
+                  content = content.replace(
+                      'defaultConfig {',
+                      'defaultConfig {\n        multiDexEnabled = true'
+                  )
+              else:
+                  content = content.replace(
+                      'defaultConfig {',
+                      'defaultConfig {\n        multiDexEnabled true'
+                  )
+              modified = True
+              print("✅ Added multiDexEnabled")
+
+          # 3. Add desugaring dependency at end of file (avoids Kotlin DSL ambiguity)
+          if 'desugar_jdk_libs' not in content:
+              if is_kts:
+                  content += '\ndependencies {\n    add("coreLibraryDesugaring", "com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+              else:
+                  content += '\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"\n}\n'
+              modified = True
+              print("✅ Added desugar_jdk_libs dependency")
+
+          if modified:
+              with open(path, 'w') as f:
+                  f.write(content)
+              print(f"✅ Patched {path}")
+          else:
+              print("ℹ️ No changes needed")
+          PATCH_SCRIPT
+
+          # Find flet's internal Flutter SDK
           FLUTTER_BIN=$(find "$HOME" /opt -name "flutter" -path "*/bin/flutter" -type f 2>/dev/null | head -1)
           if [ -z "$FLUTTER_BIN" ]; then
             FLUTTER_BIN=$(find build/ -name "flutter" -path "*/bin/flutter" -type f 2>/dev/null | head -1)
           fi
-          
+
           if [ -n "$FLUTTER_BIN" ]; then
             echo "✅ Found Flutter at: $FLUTTER_BIN"
             FLUTTER_PROJECT=$(dirname "$BUILD_GRADLE" | sed 's|/app$||' | sed 's|/android$||')
@@ -115,8 +140,8 @@ jobs:
             cd "$FLUTTER_PROJECT"
             "$FLUTTER_BIN" build $BUILD_TYPE --release
           else
-            echo "⚠️ Flutter not found, retrying with flet build..."
-            yes | flet build $BUILD_TYPE --verbose
+            echo "❌ Flutter SDK not found"
+            exit 1
           fi
 
       - name: 📋 List build outputs
