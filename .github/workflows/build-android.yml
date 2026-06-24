@@ -46,35 +46,46 @@ jobs:
           pip install flet
           flet --version
 
-      - name: 📋 Accept Android licenses
-        run: yes | flutter doctor --android-licenses || true
-
       - name: 🔨 Build APK
         run: |
           BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
           echo "Building $BUILD_TYPE..."
 
-          # First run flet build to generate Flutter project, allow it to fail
+          # First run: generates Flutter project but may fail due to desugaring
           yes | flet build $BUILD_TYPE --verbose 2>&1 || true
 
-          # Enable core library desugaring (required by flutter_local_notifications)
-          BUILD_GRADLE="build/flutter/build/app/build.gradle"
-          if [ -f "$BUILD_GRADLE" ]; then
-            echo "Patching build.gradle for coreLibraryDesugaring..."
-            # Add isCoreLibraryDesugaringEnabled if not present
+          # Patch build.gradle for core library desugaring
+          # (required by flutter_local_notifications)
+          BUILD_GRADLE=$(find build/ -path "*/app/build.gradle" -type f | head -1)
+          if [ -n "$BUILD_GRADLE" ]; then
+            echo "Found build.gradle: $BUILD_GRADLE"
+            echo "Patching for coreLibraryDesugaring..."
+
+            # Add isCoreLibraryDesugaringEnabled in compileOptions
             if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
               sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled true' "$BUILD_GRADLE"
             fi
-            # Add desugaring dependency if not present
+
+            # Add desugaring dependency
             if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
               sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"' "$BUILD_GRADLE"
             fi
-            echo "build.gradle patched successfully"
+
+            # Add multiDexEnabled
+            if ! grep -q "multiDexEnabled" "$BUILD_GRADLE"; then
+              sed -i '/defaultConfig {/a\        multiDexEnabled true' "$BUILD_GRADLE"
+            fi
+
+            echo "✅ Patched build.gradle"
+            cat "$BUILD_GRADLE" | head -80
+          else
+            echo "⚠️ build.gradle not found, listing build dir..."
+            find build/ -name "*.gradle" -type f 2>/dev/null
           fi
 
-          # Retry the build with patched gradle
-          cd build/flutter
-          flutter build $BUILD_TYPE --release
+          # Second run: flet build with patched gradle (uses its own Flutter)
+          echo "Re-running flet build with patched gradle..."
+          yes | flet build $BUILD_TYPE --verbose
 
       - name: 📋 List build outputs
         if: always()
