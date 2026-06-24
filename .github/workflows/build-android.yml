@@ -23,7 +23,7 @@ jobs:
   build:
     name: Build Android
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: 📥 Checkout
@@ -54,38 +54,70 @@ jobs:
           # First run: generates Flutter project but may fail due to desugaring
           yes | flet build $BUILD_TYPE --verbose 2>&1 || true
 
-          # Patch build.gradle for core library desugaring
-          # (required by flutter_local_notifications)
-          BUILD_GRADLE=$(find build/ -path "*/app/build.gradle" -type f | head -1)
-          if [ -n "$BUILD_GRADLE" ]; then
-            echo "Found build.gradle: $BUILD_GRADLE"
-            echo "Patching for coreLibraryDesugaring..."
-
-            # Add isCoreLibraryDesugaringEnabled in compileOptions
-            if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
-              sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled true' "$BUILD_GRADLE"
-            fi
-
-            # Add desugaring dependency
-            if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
-              sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"' "$BUILD_GRADLE"
-            fi
-
-            # Add multiDexEnabled
-            if ! grep -q "multiDexEnabled" "$BUILD_GRADLE"; then
-              sed -i '/defaultConfig {/a\        multiDexEnabled true' "$BUILD_GRADLE"
-            fi
-
-            echo "✅ Patched build.gradle"
-            cat "$BUILD_GRADLE" | head -80
-          else
-            echo "⚠️ build.gradle not found, listing build dir..."
-            find build/ -name "*.gradle" -type f 2>/dev/null
+          # Find the app-level build file (Kotlin DSL or Groovy)
+          echo "=== Searching for build files ==="
+          find build/ -name "build.gradle*" -path "*/app/*" -type f 2>/dev/null
+          
+          BUILD_GRADLE=$(find build/ -name "build.gradle.kts" -path "*/app/*" -type f | head -1)
+          if [ -z "$BUILD_GRADLE" ]; then
+            BUILD_GRADLE=$(find build/ -name "build.gradle" -path "*/app/*" -type f | head -1)
           fi
 
-          # Second run: flet build with patched gradle (uses its own Flutter)
-          echo "Re-running flet build with patched gradle..."
-          yes | flet build $BUILD_TYPE --verbose
+          if [ -n "$BUILD_GRADLE" ]; then
+            echo "✅ Found: $BUILD_GRADLE"
+            
+            # Detect syntax (Kotlin DSL vs Groovy)
+            if [[ "$BUILD_GRADLE" == *.kts ]]; then
+              echo "Using Kotlin DSL syntax..."
+              # Add isCoreLibraryDesugaringEnabled
+              if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
+                sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' "$BUILD_GRADLE"
+              fi
+              # Add desugaring dependency
+              if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
+                sed -i '/dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' "$BUILD_GRADLE"
+              fi
+              # Add multiDexEnabled
+              if ! grep -q "multiDexEnabled" "$BUILD_GRADLE"; then
+                sed -i '/defaultConfig {/a\        multiDexEnabled = true' "$BUILD_GRADLE"
+              fi
+            else
+              echo "Using Groovy syntax..."
+              if ! grep -q "isCoreLibraryDesugaringEnabled" "$BUILD_GRADLE"; then
+                sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled true' "$BUILD_GRADLE"
+              fi
+              if ! grep -q "desugar_jdk_libs" "$BUILD_GRADLE"; then
+                sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"' "$BUILD_GRADLE"
+              fi
+              if ! grep -q "multiDexEnabled" "$BUILD_GRADLE"; then
+                sed -i '/defaultConfig {/a\        multiDexEnabled true' "$BUILD_GRADLE"
+              fi
+            fi
+
+            echo "✅ Patched successfully"
+            grep -n "desugaring\|desugar\|multiDex" "$BUILD_GRADLE" || true
+          else
+            echo "❌ No build.gradle found, listing all gradle files:"
+            find build/ -name "*.gradle*" -type f 2>/dev/null
+            exit 1
+          fi
+
+          # Find flet's internal Flutter SDK and use it directly
+          FLUTTER_BIN=$(find "$HOME" /opt -name "flutter" -path "*/bin/flutter" -type f 2>/dev/null | head -1)
+          if [ -z "$FLUTTER_BIN" ]; then
+            FLUTTER_BIN=$(find build/ -name "flutter" -path "*/bin/flutter" -type f 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$FLUTTER_BIN" ]; then
+            echo "✅ Found Flutter at: $FLUTTER_BIN"
+            FLUTTER_PROJECT=$(dirname "$BUILD_GRADLE" | sed 's|/app$||' | sed 's|/android$||')
+            echo "Flutter project: $FLUTTER_PROJECT"
+            cd "$FLUTTER_PROJECT"
+            "$FLUTTER_BIN" build $BUILD_TYPE --release
+          else
+            echo "⚠️ Flutter not found, retrying with flet build..."
+            yes | flet build $BUILD_TYPE --verbose
+          fi
 
       - name: 📋 List build outputs
         if: always()
