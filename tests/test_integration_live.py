@@ -24,8 +24,14 @@ pytestmark = pytest.mark.skipif(
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # ── Test credentials (only used for local testing) ──
-_USERNAME = os.environ.get("UTH_TEST_USER", "STUDENT_ID")
-_PASSWORD = os.environ.get("UTH_TEST_PASS", "YOUR_PASSWORD")
+_USERNAME = os.environ.get("UTH_TEST_USER", "")
+_PASSWORD = os.environ.get("UTH_TEST_PASS", "")
+
+# Skip if credentials are not provided via environment variables
+if not _USERNAME or not _PASSWORD:
+    pytestmark = [pytestmark, pytest.mark.skip(
+        reason="UTH_TEST_USER and UTH_TEST_PASS env vars required for live integration tests"
+    )]
 
 # ── Shared state across test classes (populated progressively) ──
 _state = {}

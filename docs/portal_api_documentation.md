@@ -58,7 +58,7 @@ Referer: https://portal.ut.edu.vn/
   "status": 200,
   "message": "Đăng nhập thành công",
   "body": "sv",
-  "token": "eyJhbGciOiJIUzI1NiJ9...",
+  "token": "eyJ...REDACTED",
   "timestamp": "2026-06-22T08:45:09.027+00:00"
 }
 ```
