@@ -3,7 +3,7 @@ import asyncio
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
-from platform_utils import IS_MOBILE as _IS_MOBILE
+import platform_utils as _pu  # use _pu.IS_MOBILE for live platform detection
 
 class SettingsView(ft.Container):
     def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
@@ -306,7 +306,7 @@ class SettingsView(ft.Container):
         _tray_btn = ft.Button("Windows Tray", icon=ft.Icons.DESKTOP_WINDOWS_ROUNDED, on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
         _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
         _notif_buttons = ft.Row([
-            *([_tray_btn] if not _IS_MOBILE else [_mobile_btn]),
+            *([_tray_btn] if not _pu.IS_MOBILE else [_mobile_btn]),
             ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
             ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
             ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
@@ -351,6 +351,22 @@ class SettingsView(ft.Container):
             ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
         ], wrap=True, spacing=6)
 
+        # Section 4b: Mobile-specific tests (Android/iOS)
+        _mobile_section_label = ft.Text("Kiểm thử Mobile", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_mobile_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _mobile_test_buttons = ft.Row([
+            ft.Button("Quyền thông báo", icon=ft.Icons.NOTIFICATIONS_ACTIVE_ROUNDED, on_click=lambda e: self._do_check_notif_permission(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Notif Critical", icon=ft.Icons.ERROR_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("critical"), bgcolor=C.SURFACE, color=C.CRITICAL),
+            ft.Button("Notif Warning", icon=ft.Icons.WARNING_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("warning"), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Notif Safe", icon=ft.Icons.CHECK_CIRCLE_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("safe"), bgcolor=C.SURFACE, color=C.SAFE),
+        ], wrap=True, spacing=6)
+        _mobile_test_buttons2 = ft.Row([
+            ft.Button("Backend Info", icon=ft.Icons.INFO_ROUNDED, on_click=lambda e: self._do_show_mobile_backend(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Rung thiết bị", icon=ft.Icons.VIBRATION_ROUNDED, on_click=lambda e: self._do_test_vibration(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Pin & tối ưu", icon=ft.Icons.BATTERY_SAVER_ROUNDED, on_click=lambda e: self._do_check_battery_opt(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Multi Notif (x3)", icon=ft.Icons.DYNAMIC_FEED_ROUNDED, on_click=lambda e: self._do_mock_multi_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
         # Section 5: Update checker
         _update_section_label = ft.Text("Kiểm tra cập nhật", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
         self._debug_update_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
@@ -391,12 +407,17 @@ class SettingsView(ft.Container):
         ]
 
         # Android-only: background scheduler controls
-        if _IS_MOBILE:
+        if _pu.IS_MOBILE:
             _debug_sections.extend([
                 ft.Divider(height=1, color=C.BORDER),
                 _bg_section_label,
                 _bg_buttons,
                 self._debug_scheduler_status,
+                ft.Divider(height=1, color=C.BORDER),
+                _mobile_section_label,
+                _mobile_test_buttons,
+                _mobile_test_buttons2,
+                self._debug_mobile_text,
             ])
 
         # Update checker + quick actions (all platforms)
@@ -818,7 +839,7 @@ class SettingsView(ft.Container):
                     "Hiển thị",
                     "Cách hiển thị trên màn hình",
                     [self._sw_submitted, self._sw_graded] + (
-                        [self._sw_always_on_top] if not _IS_MOBILE else []
+                        [self._sw_always_on_top] if not _pu.IS_MOBILE else []
                     ),
                     icon=ft.Icons.VISIBILITY_OUTLINED,
                 ),
@@ -838,7 +859,7 @@ class SettingsView(ft.Container):
                           _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
                     ],
                     icon=ft.Icons.SETTINGS_OUTLINED,
-                )] if not _IS_MOBILE else [_setting_group(
+                )] if not _pu.IS_MOBILE else [_setting_group(
                     "Cập nhật",
                     "Tần suất kiểm tra",
                     [
@@ -1692,6 +1713,255 @@ class SettingsView(ft.Container):
             self._debug_info_text.update()
         self._page.run_task(_send)
 
+    # ── Mobile-specific test handlers ──
+    def _do_check_notif_permission(self):
+        """Check notification permission status on mobile."""
+        async def _check():
+            try:
+                import platform_utils as pu
+                lines = [f"Platform: {'Android' if pu.IS_ANDROID else 'iOS' if pu.IS_IOS else 'Desktop'}"]
+
+                # Try to get notifier and check permission
+                notifier = getattr(self._orchestrator, 'notifier', None)
+                if notifier:
+                    mgr = notifier
+                    mobile_n = None
+                    for n in getattr(mgr, 'notifiers', []):
+                        if hasattr(n, 'backend_name'):
+                            mobile_n = n
+                            break
+                    if mobile_n:
+                        lines.append(f"Backend: {mobile_n.backend_name}")
+                        if hasattr(mobile_n, '_android_notif') and mobile_n._android_notif:
+                            lines.append("✅ Android notification backend active")
+                            if hasattr(mobile_n._android_notif, 'are_notifications_enabled'):
+                                enabled = mobile_n._android_notif.are_notifications_enabled()
+                                lines.append(f"Notifications enabled: {'✅ YES' if enabled else '❌ NO'}")
+                        elif hasattr(mobile_n, '_notifier') and mobile_n._notifier:
+                            lines.append("✅ flet_notifications backend active")
+                        else:
+                            lines.append("⚠️ No notification backend available (log-only mode)")
+                    else:
+                        lines.append("⚠️ No MobileNotifier found in registered notifiers")
+                else:
+                    lines.append("❌ NotificationManager not available")
+
+                self._debug_mobile_text.value = "\n".join(lines)
+                self._debug_mobile_text.color = C.SAFE if "✅" in lines[-1] else C.WARNING
+            except Exception as ex:
+                self._debug_mobile_text.value = f"Lỗi kiểm tra quyền: {ex}"
+                self._debug_mobile_text.color = C.CRITICAL
+            self._debug_mobile_text.update()
+        self._page.run_task(_check)
+
+    def _do_mock_mobile_notif(self, urgency="critical"):
+        """Send a mock mobile notification with specified urgency."""
+        titles = {
+            "critical": "⚠️ BÀI TẬP SẮP HẾT HẠN",
+            "warning": "📋 Nhắc nhở deadline",
+            "safe": "✅ Kiểm tra hoàn tất",
+        }
+        bodies = {
+            "critical": "Lập trình Python — Còn 2 giờ | Test mock notification",
+            "warning": "Cơ sở dữ liệu — Còn 48 giờ | Test mock notification",
+            "safe": "Tất cả bài tập đều đã nộp đúng hạn | Test mock notification",
+        }
+        title = titles.get(urgency, titles["critical"])
+        body = bodies.get(urgency, bodies["critical"])
+
+        try:
+            notifier = getattr(self._orchestrator, 'notifier', None)
+            if notifier:
+                mobile_n = None
+                for n in getattr(notifier, 'notifiers', []):
+                    if hasattr(n, 'backend_name'):
+                        mobile_n = n
+                        break
+                if mobile_n:
+                    # Create mock assignment data
+                    mock = [{"title": title, "course_name": body, "remaining": ""}]
+                    result = mobile_n.notify(mock)
+                    self._debug_mobile_text.value = f"Mock [{urgency}] → {'✅ Đã gửi' if result else '❌ Thất bại'}\n{title}\n{body}"
+                    self._debug_mobile_text.color = C.SAFE if result else C.CRITICAL
+                else:
+                    self._debug_mobile_text.value = "⚠️ Không tìm thấy MobileNotifier"
+                    self._debug_mobile_text.color = C.WARNING
+            else:
+                self._debug_mobile_text.value = "❌ NotificationManager not available"
+                self._debug_mobile_text.color = C.CRITICAL
+        except Exception as ex:
+            self._debug_mobile_text.value = f"Lỗi gửi mock: {ex}"
+            self._debug_mobile_text.color = C.CRITICAL
+        self._debug_mobile_text.update()
+
+    def _do_show_mobile_backend(self):
+        """Show detailed mobile notification backend info."""
+        try:
+            import platform_utils as pu
+            import sys
+            lines = [
+                f"Platform: {'Android' if pu.IS_ANDROID else 'iOS' if pu.IS_IOS else 'Other'}",
+                f"sys.platform: {sys.platform}",
+                f"IS_MOBILE: {pu.IS_MOBILE}",
+                f"IS_ANDROID: {pu.IS_ANDROID}",
+                f"IS_IOS: {pu.IS_IOS}",
+            ]
+
+            # Check available packages
+            for pkg in ['flet_android_notifications', 'flet_notifications']:
+                try:
+                    mod = __import__(pkg)
+                    ver = getattr(mod, '__version__', 'installed')
+                    lines.append(f"📦 {pkg}: {ver}")
+                except ImportError:
+                    lines.append(f"❌ {pkg}: not installed")
+
+            # Scheduler info
+            try:
+                from core.background_scheduler import get_scheduler
+                sched = get_scheduler()
+                lines.append(f"Scheduler: {'✅ active' if sched.is_available else '❌ unavailable'}")
+            except Exception:
+                lines.append("Scheduler: not loaded")
+
+            # Notifier info
+            notifier = getattr(self._orchestrator, 'notifier', None)
+            if notifier:
+                for n in getattr(notifier, 'notifiers', []):
+                    cls_name = type(n).__name__
+                    backend = getattr(n, 'backend_name', 'N/A')
+                    lines.append(f"Notifier: {cls_name} (backend={backend})")
+
+            self._debug_mobile_text.value = "\n".join(lines)
+            self._debug_mobile_text.color = C.TEXT_PRIMARY
+        except Exception as ex:
+            self._debug_mobile_text.value = f"Lỗi: {ex}"
+            self._debug_mobile_text.color = C.CRITICAL
+        self._debug_mobile_text.update()
+
+    def _do_test_vibration(self):
+        """Test device vibration (Android only)."""
+        try:
+            import platform_utils as pu
+            if pu.IS_ANDROID:
+                try:
+                    from jnius import autoclass
+                    Context = autoclass('android.content.Context')
+                    PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                    vibrator = PythonActivity.mActivity.getSystemService(Context.VIBRATOR_SERVICE)
+                    if vibrator and vibrator.hasVibrator():
+                        vibrator.vibrate(500)  # 500ms
+                        self._debug_mobile_text.value = "✅ Đã rung thiết bị (500ms)"
+                        self._debug_mobile_text.color = C.SAFE
+                    else:
+                        self._debug_mobile_text.value = "⚠️ Thiết bị không hỗ trợ rung"
+                        self._debug_mobile_text.color = C.WARNING
+                except ImportError:
+                    # Try Flet's haptic feedback
+                    try:
+                        from flet import HapticFeedback
+                        self._page.run_task(lambda: self._page.haptic_feedback(HapticFeedback.MEDIUM_IMPACT))
+                        self._debug_mobile_text.value = "✅ Đã gửi haptic feedback (Flet)"
+                        self._debug_mobile_text.color = C.SAFE
+                    except Exception:
+                        self._debug_mobile_text.value = "⚠️ Không thể rung (thiếu jnius và Flet haptic)"
+                        self._debug_mobile_text.color = C.WARNING
+            elif pu.IS_IOS:
+                try:
+                    self._page.haptic_feedback("medium")
+                    self._debug_mobile_text.value = "✅ Đã gửi haptic feedback (iOS)"
+                    self._debug_mobile_text.color = C.SAFE
+                except Exception:
+                    self._debug_mobile_text.value = "⚠️ Haptic feedback không khả dụng trên iOS"
+                    self._debug_mobile_text.color = C.WARNING
+            else:
+                self._debug_mobile_text.value = "ℹ️ Vibration chỉ hỗ trợ trên Android/iOS"
+                self._debug_mobile_text.color = C.TEXT_SECONDARY
+        except Exception as ex:
+            self._debug_mobile_text.value = f"Lỗi vibration: {ex}"
+            self._debug_mobile_text.color = C.CRITICAL
+        self._debug_mobile_text.update()
+
+    def _do_check_battery_opt(self):
+        """Check battery optimization / power saving status (Android)."""
+        try:
+            import platform_utils as pu
+            lines = []
+
+            if pu.IS_ANDROID:
+                try:
+                    from jnius import autoclass
+                    Context = autoclass('android.content.Context')
+                    PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                    pm = PythonActivity.mActivity.getSystemService(Context.POWER_SERVICE)
+                    pkg = PythonActivity.mActivity.getPackageName()
+                    ignored = pm.isIgnoringBatteryOptimizations(pkg)
+                    lines.append(f"Package: {pkg}")
+                    lines.append(f"Battery optimization: {'❌ BẬT (app bị giới hạn)' if not ignored else '✅ TẮT (app không bị giới hạn)'}")
+                    if not ignored:
+                        lines.append("⚠️ Background check có thể bị delay bởi Doze mode")
+                        lines.append("Vào: Cài đặt → Pin → Tối ưu pin → UTHelper → Không tối ưu")
+                except ImportError:
+                    lines.append("⚠️ Không thể kiểm tra (thiếu jnius)")
+                    lines.append("Background check dựa vào AlarmManager")
+            elif pu.IS_IOS:
+                lines.append("iOS: Không có battery optimization API")
+                lines.append("Background App Refresh cần được bật trong Settings")
+            else:
+                lines.append("Desktop: Không áp dụng battery optimization")
+
+            # Show scheduler status
+            try:
+                from config import settings as cfg
+                lines.append(f"\nBackground check: {'BẬT' if cfg.BACKGROUND_CHECK_ANDROID else 'TẮT'}")
+                lines.append(f"Interval: {cfg.BACKGROUND_CHECK_INTERVAL} phút")
+            except Exception:
+                pass
+
+            self._debug_mobile_text.value = "\n".join(lines)
+            self._debug_mobile_text.color = C.TEXT_PRIMARY
+        except Exception as ex:
+            self._debug_mobile_text.value = f"Lỗi kiểm tra pin: {ex}"
+            self._debug_mobile_text.color = C.CRITICAL
+        self._debug_mobile_text.update()
+
+    def _do_mock_multi_notif(self):
+        """Send 3 mock notifications in sequence to test batching."""
+        try:
+            notifier = getattr(self._orchestrator, 'notifier', None)
+            if not notifier:
+                self._debug_mobile_text.value = "❌ NotificationManager not available"
+                self._debug_mobile_text.color = C.CRITICAL
+                self._debug_mobile_text.update()
+                return
+
+            mobile_n = None
+            for n in getattr(notifier, 'notifiers', []):
+                if hasattr(n, 'backend_name'):
+                    mobile_n = n
+                    break
+
+            if not mobile_n:
+                self._debug_mobile_text.value = "⚠️ Không tìm thấy MobileNotifier"
+                self._debug_mobile_text.color = C.WARNING
+                self._debug_mobile_text.update()
+                return
+
+            mock_data = [
+                {"title": "📝 Bài tập Lập trình", "course_name": "Lập trình Python", "remaining": "2 giờ"},
+                {"title": "📋 Quiz Cơ sở dữ liệu", "course_name": "Cơ sở dữ liệu", "remaining": "1 ngày"},
+                {"title": "✋ Điểm danh Toán rời rạc", "course_name": "Toán rời rạc", "remaining": "30 phút"},
+            ]
+            result = mobile_n.notify(mock_data)
+            self._debug_mobile_text.value = f"Multi-notif (x3): {'✅ Đã gửi' if result else '❌ Thất bại'}\n" + "\n".join(
+                [f"  • {m['title']} — Còn {m['remaining']}" for m in mock_data]
+            )
+            self._debug_mobile_text.color = C.SAFE if result else C.CRITICAL
+        except Exception as ex:
+            self._debug_mobile_text.value = f"Lỗi multi-notif: {ex}"
+            self._debug_mobile_text.color = C.CRITICAL
+        self._debug_mobile_text.update()
+
     # ── Update checker ──
     def _do_force_check_update(self):
         """Force check for app updates."""
@@ -1729,12 +1999,12 @@ class SettingsView(ft.Container):
         """Send mock notification to ALL registered channels simultaneously."""
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         sent = []
-        if self._on_test_tray and not _IS_MOBILE:
+        if self._on_test_tray and not _pu.IS_MOBILE:
             try:
                 self._on_test_tray(t); sent.append("Windows Tray")
             except Exception:
                 pass
-        if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _IS_MOBILE:
+        if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _pu.IS_MOBILE:
             try:
                 self._on_test_mobile(t); sent.append("Mobile")
             except Exception:
@@ -1967,12 +2237,14 @@ class SettingsView(ft.Container):
 
         self._username_field.value = settings.UTH_USERNAME
         self._password_field.value = settings.UTH_PASSWORD
-        self._sw_always_on_top.value = settings.ALWAYS_ON_TOP
+        if not _pu.IS_MOBILE:
+            self._sw_always_on_top.value = settings.ALWAYS_ON_TOP
         self._sw_submitted.value = settings.INCLUDE_SUBMITTED
         self._sw_graded.value = settings.INCLUDE_GRADED
-        self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
-        self._sw_start_minimized.value = settings.START_MINIMIZED
-        self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
+        if not _pu.IS_MOBILE:
+            self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
+            self._sw_start_minimized.value = settings.START_MINIMIZED
+            self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
         self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
         self._bg_interval_field.value = str(settings.BACKGROUND_CHECK_INTERVAL)
         self._toggle_bg_check_ui()
@@ -2063,12 +2335,14 @@ class SettingsView(ft.Container):
         if self._selected_theme != getattr(settings, 'THEME', 'midnight_blue'): return True
         if self._username_field.value != settings.UTH_USERNAME: return True
         if self._password_field.value != settings.UTH_PASSWORD: return True
-        if self._sw_always_on_top.value != settings.ALWAYS_ON_TOP: return True
+        if not _pu.IS_MOBILE:
+            if self._sw_always_on_top.value != settings.ALWAYS_ON_TOP: return True
         if self._sw_submitted.value != settings.INCLUDE_SUBMITTED: return True
         if self._sw_graded.value != settings.INCLUDE_GRADED: return True
-        if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
-        if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
-        if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
+        if not _pu.IS_MOBILE:
+            if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
+            if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
+            if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
         if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
         if self._bg_interval_field.value != str(settings.BACKGROUND_CHECK_INTERVAL): return True
         if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
@@ -2173,7 +2447,8 @@ class SettingsView(ft.Container):
             settings.COLOR_OTHER             = getattr(self, '_c_tb_other', ft.TextField(value='#6B7280')).value
             settings.UTH_USERNAME            = self._username_field.value
             settings.UTH_PASSWORD            = self._password_field.value
-            settings.ALWAYS_ON_TOP           = self._sw_always_on_top.value
+            if not _pu.IS_MOBILE:
+                settings.ALWAYS_ON_TOP           = self._sw_always_on_top.value
             settings.INCLUDE_SUBMITTED       = self._sw_submitted.value
             settings.INCLUDE_GRADED          = self._sw_graded.value
             settings.CHECK_INTERVAL_MINUTES  = max(0, int(self._interval_field.value or "60"))
@@ -2188,7 +2463,7 @@ class SettingsView(ft.Container):
             self._workers_field.value        = str(settings.PREFETCH_WORKERS)
             
             # Desktop-only settings (autostart, tray, always on top)
-            if not _IS_MOBILE:
+            if not _pu.IS_MOBILE:
                 if settings.START_WITH_WINDOWS != self._sw_start_with_windows.value:
                     try:
                         import core.autostart as autostart
@@ -2236,7 +2511,7 @@ class SettingsView(ft.Container):
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
             
-            if not _IS_MOBILE:
+            if not _pu.IS_MOBILE:
                 self._page.window.always_on_top = settings.ALWAYS_ON_TOP
             self.update()
 
