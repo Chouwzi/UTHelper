@@ -6,9 +6,9 @@ Snapshot is stored as JSON in the user data directory.
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 

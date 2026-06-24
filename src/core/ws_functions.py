@@ -788,7 +788,6 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
             cm_id = evt.get('instance', '')
             if not url:
                 course_data = evt.get('course') or {}
-                course_id = course_data.get('id', '') if isinstance(course_data, dict) else ''
                 if modulename and cm_id:
                     url = (
                         f"{settings.MOODLE_BASE_URL}/mod/{modulename}"

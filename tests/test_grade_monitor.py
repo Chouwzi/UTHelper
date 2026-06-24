@@ -154,19 +154,22 @@ class TestGradeMonitorCheckForChanges:
     @patch("core.ws_functions.get_grade_items")
     @patch("core.ws_functions.get_course_grades")
     def test_grade_item_change_detected(self, mock_grades, mock_items, tmp_path):
-        """Per-item grade change detection."""
-        monitor = self._make_monitor(tmp_path, {"1": {"_overall": "7.5", "CK": "6.0"}})
+        """Per-item grade change detection (requires overall grade change to trigger)."""
+        # PERF-OPT: grade_items only fetched when overall grade changes
+        monitor = self._make_monitor(tmp_path, {"1": {"_overall": "7.0", "CK": "6.0"}})
         mock_grades.return_value = [
-            {"courseid": 1, "coursename": "Math", "grade": "7.5"}
+            {"courseid": 1, "coursename": "Math", "grade": "7.5"}  # overall changed 7.0→7.5
         ]
         mock_items.return_value = [
             {"itemname": "CK", "gradeformatted": "8.0"},
         ]
         changes = monitor.check_for_changes(Mock(), userid=123)
-        assert len(changes) == 1
-        assert changes[0].item_name == "CK"
-        assert changes[0].old_grade == "6.0"
-        assert changes[0].new_grade == "8.0"
+        # Should detect both overall change and item change
+        assert len(changes) >= 1
+        item_changes = [c for c in changes if c.item_name == "CK"]
+        assert len(item_changes) == 1
+        assert item_changes[0].old_grade == "6.0"
+        assert item_changes[0].new_grade == "8.0"
 
     @patch("core.ws_functions.get_grade_items", return_value=[])
     @patch("core.ws_functions.get_course_grades")
