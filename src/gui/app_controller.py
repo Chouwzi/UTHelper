@@ -1569,8 +1569,18 @@ class AppController:
         self.page.update()
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
+        # Dynamically build pulse shadow using the current theme's C.CRITICAL color
+        crit_hex = C.CRITICAL.lstrip("#")
+        alpha = "40" if pulse_high else "15"
+        blur = 16 if pulse_high else 8
+        spread = 1.5 if pulse_high else 0.5
+        shadow = [ft.BoxShadow(
+            spread_radius=spread,
+            blur_radius=blur,
+            color=f"#{alpha}{crit_hex}",
+            offset=ft.Offset(0, 0)
+        )]
         changed = False
-        shadow = ActivityCard._PULSE_SHADOW_HIGH if pulse_high else ActivityCard._PULSE_SHADOW_LOW
         for card in cards_snapshot:
             if getattr(card, "_is_critical_active", False):
                 card.shadow = shadow
