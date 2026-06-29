@@ -906,6 +906,8 @@ class AppController:
         
         # Clear persistent detail cache to force fresh data fetch on manual refresh
         try:
+            from core import ws_functions
+            ws_functions.clear_all_caches()
             self.orchestrator.clear_detail_cache()
         except Exception:
             pass
@@ -1137,6 +1139,40 @@ class AppController:
         else:
             await self._show_grades()
 
+    def _fetch_all_grades_sync(self, userid: int) -> tuple[list, dict]:
+        """Tải điểm các khóa học song song bằng ThreadPoolExecutor (tránh chặn UI)."""
+        from core import ws_functions
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        client = self.orchestrator.client
+        courses_grades = ws_functions.get_course_grades(client.call_ws_api, userid)
+        grade_items = {}
+        
+        if not courses_grades:
+            return [], {}
+            
+        def fetch_single_course_grades(cg):
+            cid = str(cg.get('courseid', ''))
+            if not cid:
+                return None
+            try:
+                items = ws_functions.get_grade_items(client.call_ws_api, cid, userid)
+                return cid, items
+            except Exception as ex:
+                logger.debug("Grade items unavailable for course %s: %s", cid, ex)
+                return None
+
+        # Fetch in parallel with up to 10 threads
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(fetch_single_course_grades, cg) for cg in courses_grades]
+            for fut in as_completed(futures):
+                res = fut.result()
+                if res:
+                    cid, items = res
+                    grade_items[cid] = items
+                    
+        return courses_grades, grade_items
+
     async def _show_grades(self):
         """Show grade overview panel and fetch data."""
         self.dashboard.visible = False
@@ -1146,27 +1182,13 @@ class AppController:
         self.grades_btn.icon_color = C.ACCENT
         self.page.update()
 
-        # Fetch grades in background
+        # Fetch grades in background thread to avoid freezing UI
         try:
-            from core import ws_functions
             userid = self.orchestrator._get_userid()
             if userid:
-                courses_grades = ws_functions.get_course_grades(
-                    self.orchestrator.client.call_ws_api, userid
+                courses_grades, grade_items = await asyncio.to_thread(
+                    self._fetch_all_grades_sync, userid
                 )
-                grade_items = {}
-                if courses_grades:
-                    for cg in courses_grades:
-                        cid = str(cg.get('courseid', ''))
-                        if cid:
-                            try:
-                                items = ws_functions.get_grade_items(
-                                    self.orchestrator.client.call_ws_api, cid, userid
-                                )
-                                if items:
-                                    grade_items[cid] = items
-                            except Exception as ex:
-                                logger.debug("Grade items unavailable for course %s: %s", cid, ex)
                 self.grade_overview_view.update_grades(courses_grades or [], grade_items)
             else:
                 self.grade_overview_view.update_grades([], {})
@@ -1560,6 +1582,17 @@ class AppController:
 
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
+        from core import ws_functions
+        
+        # Clear all caches to avoid using stale tokens/data from previous credentials
+        try:
+            ws_functions.clear_all_caches()
+            self.orchestrator.clear_detail_cache()
+            self.orchestrator._userid_cache = None
+            self.orchestrator.is_logged_in = False
+        except Exception:
+            pass
+
         load_theme_from_settings()
         set_page_theme(self.page)
         self._rebuild_colors()
@@ -1569,16 +1602,28 @@ class AppController:
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
         updated = False
         with self._data_lock:
+            new_data = []
             for item in self.all_data:
                 if item.get("url") == url:
                     if item.get("submission_status") != new_status:
-                        item["submission_status"] = new_status
-                        # Cập nhật cả trong details
-                        details = item.setdefault("details", {})
-                        status_data = details.setdefault("status_data", {})
+                        new_item = dict(item)
+                        new_item["submission_status"] = new_status
+                        
+                        details = dict(new_item.get("details", {}))
+                        status_data = dict(details.get("status_data", {}))
                         status_data["Trạng thái nộp bài"] = new_status
+                        details["status_data"] = status_data
+                        new_item["details"] = details
+                        
+                        new_data.append(new_item)
                         updated = True
-                    break
+                    else:
+                        new_data.append(item)
+                else:
+                    new_data.append(item)
+            
+            if updated:
+                self.all_data = new_data
             data_copy = list(self.all_data)
 
         if updated:

@@ -159,6 +159,7 @@ def get_submission_status(
 def get_submitted_files(
     call_api: Callable,
     assign_id: int,
+    status: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Lấy danh sách file đã nộp từ submission status.
     
@@ -168,7 +169,8 @@ def get_submitted_files(
     Returns:
         List of dicts: [{name, size, url, timemodified, timecreated, mimetype, filepath}, ...]
     """
-    status = get_submission_status(call_api, assign_id)
+    if status is None:
+        status = get_submission_status(call_api, assign_id)
     if not status:
         return []
     
@@ -236,7 +238,17 @@ def get_quiz_attempts(
     return None
 
 
+_cmid_cache_lock = threading.Lock()
 _cmid_assign_id_cache = {}
+
+
+def clear_all_caches():
+    """Xóa sạch bộ nhớ đệm trong ws_functions (site info, courses, cmid mapping)."""
+    with _cache_lock:
+        _cache.clear()
+    with _cmid_cache_lock:
+        _cmid_assign_id_cache.clear()
+    logger.debug("Đã dọn dẹp sạch toàn bộ cache API của ws_functions.")
 
 
 def resolve_cmid_to_assign_id(
@@ -250,8 +262,9 @@ def resolve_cmid_to_assign_id(
     cần assign ID thật. Phải gọi mod_assign_get_assignments cho course để tìm mapping.
     """
     cache_key = (cmid, course_id)
-    if cache_key in _cmid_assign_id_cache:
-        return _cmid_assign_id_cache[cache_key]
+    with _cmid_cache_lock:
+        if cache_key in _cmid_assign_id_cache:
+            return _cmid_assign_id_cache[cache_key]
 
     courses = get_assignments(call_api, course_ids=[course_id])
     if not courses:
@@ -261,7 +274,10 @@ def resolve_cmid_to_assign_id(
         for assign in course.get('assignments', []):
             if assign.get('cmid') == cmid:
                 aid = assign.get('id')
-                _cmid_assign_id_cache[cache_key] = aid
+                with _cmid_cache_lock:
+                    if len(_cmid_assign_id_cache) >= 200:
+                        _cmid_assign_id_cache.clear()  # Tránh rò rỉ RAM
+                    _cmid_assign_id_cache[cache_key] = aid
                 return aid
     
     return None
@@ -376,6 +392,7 @@ def _get_assign_detail(
     if assign_id:
         sub_status = get_submission_status(call_api, assign_id)
         if sub_status:
+            details['raw_submission_status'] = sub_status
             la = sub_status.get('lastattempt', {})
             if la:
                 submission = la.get('submission', {})

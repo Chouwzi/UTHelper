@@ -65,11 +65,14 @@ class MoodleClient:
 
     def _post(self, url: str, data: dict, timeout: float = 15) -> tuple:
         """POST form-encoded data. Returns (status, parsed_json_or_None)."""
+        import gzip
+        import random
         encoded = urllib.parse.urlencode(data).encode('utf-8')
         req = urllib.request.Request(url, data=encoded, method='POST')
         req.add_header('User-Agent', _DEFAULT_UA)
         req.add_header('Accept', 'application/json, */*')
         req.add_header('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8')
+        req.add_header('Accept-Encoding', 'gzip')
         
         max_attempts = 3
         for attempt in range(max_attempts):
@@ -77,21 +80,32 @@ class MoodleClient:
             try:
                 resp = _urlopen(req, timeout=timeout)
                 body = resp.read()
+                if resp.info().get('Content-Encoding') == 'gzip':
+                    body = gzip.decompress(body)
                 try:
                     return resp.status, json.loads(body)
                 except (json.JSONDecodeError, ValueError):
                     return resp.status, None
             except urllib.error.HTTPError as e:
+                if e.code >= 500 and attempt < max_attempts - 1:
+                    backoff = random.uniform(0, min(15.0, 0.5 * (2 ** attempt)))
+                    logger.warning(
+                        "POST %s trả về HTTP %d. Đang thử lại sau %.2fs...",
+                        url.split('?')[0], e.code, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
                 logger.warning("HTTP %d từ POST %s", e.code, url.split('?')[0])
                 return e.code, None
             except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
                 is_timeout = isinstance(e, TimeoutError) or "time" in str(e).lower()
                 if attempt < max_attempts - 1:
+                    backoff = random.uniform(0, min(15.0, 0.5 * (2 ** attempt)))
                     logger.warning(
-                        "POST %s thất bại ở lần thử %d (%s): %s. Đang thử lại...",
-                        url.split('?')[0], attempt + 1, "Timeout" if is_timeout else "NetworkError", e
+                        "POST %s thất bại ở lần thử %d (%s): %s. Đang thử lại sau %.2fs...",
+                        url.split('?')[0], attempt + 1, "Timeout" if is_timeout else "NetworkError", e, backoff
                     )
-                    time.sleep(1.5 * (attempt + 1))  # exponential backoff
+                    time.sleep(backoff)
                     continue
                 else:
                     logger.error("POST %s thất bại sau %d lần thử: %s", url.split('?')[0], max_attempts, e)
@@ -99,27 +113,48 @@ class MoodleClient:
 
     def _post_json(self, url: str, data: dict, timeout: float = 15) -> tuple:
         """POST JSON body. Returns (status, parsed_json_or_None)."""
+        import gzip
+        import random
         body = json.dumps(data).encode('utf-8')
         req = urllib.request.Request(url, data=body, method='POST')
         req.add_header('User-Agent', _DEFAULT_UA)
         req.add_header('Content-Type', 'application/json')
         req.add_header('Accept', 'application/json')
+        req.add_header('Accept-Encoding', 'gzip')
         
-        self._throttle()
-        try:
-            resp = _urlopen(req, timeout=timeout)
-        except urllib.error.HTTPError as e:
-            logger.warning("HTTP %d from POST-JSON %s", e.code, url.split('?')[0])
-            return e.code, None
-        resp_body = resp.read()
-        try:
-            return resp.status, json.loads(resp_body)
-        except (json.JSONDecodeError, ValueError):
-            return resp.status, None
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            self._throttle()
+            try:
+                resp = _urlopen(req, timeout=timeout)
+                resp_body = resp.read()
+                if resp.info().get('Content-Encoding') == 'gzip':
+                    resp_body = gzip.decompress(resp_body)
+                try:
+                    return resp.status, json.loads(resp_body)
+                except (json.JSONDecodeError, ValueError):
+                    return resp.status, None
+            except urllib.error.HTTPError as e:
+                if e.code >= 500 and attempt < max_attempts - 1:
+                    backoff = random.uniform(0, min(15.0, 0.5 * (2 ** attempt)))
+                    time.sleep(backoff)
+                    continue
+                logger.warning("HTTP %d from POST-JSON %s", e.code, url.split('?')[0])
+                return e.code, None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if attempt < max_attempts - 1:
+                    backoff = random.uniform(0, min(15.0, 0.5 * (2 ** attempt)))
+                    time.sleep(backoff)
+                    continue
+                else:
+                    logger.error("POST-JSON %s failed: %s", url.split('?')[0], e)
+                    raise e
 
     def _post_multipart(self, url: str, fields: dict, files: dict, timeout: float = 60) -> tuple:
         """POST multipart/form-data (cho upload file). Returns (status, parsed_json_or_None)."""
         import uuid
+        import gzip
+        import random
         boundary = uuid.uuid4().hex
         
         body_parts = []
@@ -137,7 +172,6 @@ class MoodleClient:
                 f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
                 f'Content-Type: application/octet-stream\r\n\r\n'
             )
-            # File bytes added separately (not string)
         body_parts.append(f'--{boundary}--\r\n')
         
         # Build binary body
@@ -155,25 +189,52 @@ class MoodleClient:
         req = urllib.request.Request(url, data=body, method='POST')
         req.add_header('User-Agent', _DEFAULT_UA)
         req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
+        req.add_header('Accept-Encoding', 'gzip')
         
-        resp = _urlopen(req, timeout=timeout)
-        resp_body = resp.read()
-        try:
-            return resp.status, json.loads(resp_body)
-        except (json.JSONDecodeError, ValueError):
-            return resp.status, None
+        max_attempts = 2  # files are large, retry less
+        for attempt in range(max_attempts):
+            self._throttle()
+            try:
+                resp = _urlopen(req, timeout=timeout)
+                resp_body = resp.read()
+                if resp.info().get('Content-Encoding') == 'gzip':
+                    resp_body = gzip.decompress(resp_body)
+                try:
+                    return resp.status, json.loads(resp_body)
+                except (json.JSONDecodeError, ValueError):
+                    return resp.status, None
+            except urllib.error.HTTPError as e:
+                if e.code >= 500 and attempt < max_attempts - 1:
+                    backoff = random.uniform(0, min(10.0, 1.0 * (2 ** attempt)))
+                    time.sleep(backoff)
+                    continue
+                logger.warning("HTTP %d from POST-MP %s", e.code, url.split('?')[0])
+                return e.code, None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if attempt < max_attempts - 1:
+                    backoff = random.uniform(0, min(10.0, 1.0 * (2 ** attempt)))
+                    time.sleep(backoff)
+                    continue
+                else:
+                    logger.error("POST-MP %s failed: %s", url.split('?')[0], e)
+                    raise e
 
     def _get(self, url: str, timeout: float = 15) -> tuple:
         """GET request. Returns (status, raw_bytes)."""
+        import gzip
         req = urllib.request.Request(url)
         req.add_header('User-Agent', _DEFAULT_UA)
+        req.add_header('Accept-Encoding', 'gzip')
         
         try:
             resp = _urlopen(req, timeout=timeout)
+            body = resp.read()
+            if resp.info().get('Content-Encoding') == 'gzip':
+                body = gzip.decompress(body)
+            return resp.status, body
         except urllib.error.HTTPError as e:
             logger.warning("HTTP %d from GET %s", e.code, url.split('?')[0])
             return e.code, None
-        return resp.status, resp.read()
 
 
     # ─── Web Services API (Token-based, stateless) ───────────────────

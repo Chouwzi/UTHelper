@@ -647,8 +647,9 @@ class DetailView(ft.Container):
                 except Exception:
                     pass
                 if client:
+                    prefetched = data.get("details", {}).get("raw_submission_status")
                     asyncio.ensure_future(
-                        self._async_load_submitted_files(client, url, int(course_id))
+                        self._async_load_submitted_files(client, url, int(course_id), prefetched_status=prefetched)
                     )
         else:
             self._submission_area.visible = False
@@ -1097,12 +1098,12 @@ class DetailView(ft.Container):
         self._upload_status.color = color
         self._upload_status.visible = True
 
-    async def _async_load_submitted_files(self, client, url: str, course_id: int):
+    async def _async_load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
         """Async wrapper: load submitted files in bg thread, then update UI."""
         try:
             self._last_server_status = None
             await asyncio.to_thread(
-                self._load_submitted_files, client, url, course_id
+                self._load_submitted_files, client, url, course_id, prefetched_status
             )
             
             # Cập nhật trạng thái nộp bài thông qua callback để đồng bộ các Activity Cards ở dashboard
@@ -1115,7 +1116,7 @@ class DetailView(ft.Container):
         except Exception as ex:
             logger.debug("Load submitted files error: %s", ex)
 
-    def _load_submitted_files(self, client, url: str, course_id: int):
+    def _load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
         """Load danh sách file đã nộp từ server (chạy trong thread)."""
         from core.ws_functions import resolve_cmid_to_assign_id, get_submitted_files, get_submission_status
 
@@ -1132,10 +1133,16 @@ class DetailView(ft.Container):
         if not assign_id:
             return
 
-        # Lấy trạng thái nộp bài chính xác từ server Moodle
-        try:
-            status = get_submission_status(client.call_ws_api, assign_id)
-            if status:
+        # Lấy hoặc tái sử dụng trạng thái nộp bài
+        status = prefetched_status
+        if status is None:
+            try:
+                status = get_submission_status(client.call_ws_api, assign_id)
+            except Exception:
+                status = None
+
+        if status:
+            try:
                 last_attempt = status.get('lastattempt', {})
                 submission = last_attempt.get('submission', {})
                 raw_status = submission.get('status', '')
@@ -1146,12 +1153,12 @@ class DetailView(ft.Container):
                     'reopened': 'Được mở lại',
                 }
                 self._last_server_status = status_map.get(raw_status, 'Chưa nộp')
-            else:
+            except Exception:
                 self._last_server_status = None
-        except Exception:
+        else:
             self._last_server_status = None
 
-        self._submitted_files = get_submitted_files(client.call_ws_api, assign_id)
+        self._submitted_files = get_submitted_files(client.call_ws_api, assign_id, status=status)
 
     def _build_submitted_files_ui(self):
         """Xây dựng UI hiển thị file đã nộp trên server."""
