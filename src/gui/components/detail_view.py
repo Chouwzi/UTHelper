@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import Optional, List, Dict, Any
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
