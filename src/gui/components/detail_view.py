@@ -73,7 +73,7 @@ _LICENSE_OPTIONS = [
 ]
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None):
+    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None):
         super().__init__()
         self._page          = page
         self.visible        = False
@@ -82,6 +82,7 @@ class DetailView(ft.Container):
         self._current_url   = ""
         self._current_data  = {}
         self._get_client    = get_client   # hàm lấy MoodleClient để truy xuất đường dẫn đăng nhập
+        self._on_status_changed = on_status_changed
         self._selected_files = []          # list of FilePickerFile objects
         self._is_uploading  = False
 
@@ -1099,9 +1100,16 @@ class DetailView(ft.Container):
     async def _async_load_submitted_files(self, client, url: str, course_id: int):
         """Async wrapper: load submitted files in bg thread, then update UI."""
         try:
+            self._last_server_status = None
             await asyncio.to_thread(
                 self._load_submitted_files, client, url, course_id
             )
+            
+            # Cập nhật trạng thái nộp bài thông qua callback để đồng bộ các Activity Cards ở dashboard
+            if self._last_server_status and self._on_status_changed and self._current_url:
+                self._current_data["submission_status"] = self._last_server_status
+                self._on_status_changed(self._current_url, self._last_server_status)
+                
             self._build_submitted_files_ui()
             self._page.update()
         except Exception as ex:
@@ -1109,7 +1117,7 @@ class DetailView(ft.Container):
 
     def _load_submitted_files(self, client, url: str, course_id: int):
         """Load danh sách file đã nộp từ server (chạy trong thread)."""
-        from core.ws_functions import resolve_cmid_to_assign_id, get_submitted_files
+        from core.ws_functions import resolve_cmid_to_assign_id, get_submitted_files, get_submission_status
 
         cmid = None
         if "id=" in url:
@@ -1123,6 +1131,25 @@ class DetailView(ft.Container):
         assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
         if not assign_id:
             return
+
+        # Lấy trạng thái nộp bài chính xác từ server Moodle
+        try:
+            status = get_submission_status(client.call_ws_api, assign_id)
+            if status:
+                last_attempt = status.get('lastattempt', {})
+                submission = last_attempt.get('submission', {})
+                raw_status = submission.get('status', '')
+                status_map = {
+                    'submitted': 'Đã nộp',
+                    'new': 'Chưa nộp',
+                    'draft': 'Bản nháp',
+                    'reopened': 'Được mở lại',
+                }
+                self._last_server_status = status_map.get(raw_status, 'Chưa nộp')
+            else:
+                self._last_server_status = None
+        except Exception:
+            self._last_server_status = None
 
         self._submitted_files = get_submitted_files(client.call_ws_api, assign_id)
 

@@ -460,7 +460,7 @@ class AppController:
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
-        self.detail_view   = DetailView(self.page, on_close=lambda: self.page.run_task(self._close_detail), get_client=lambda: self.orchestrator.client)
+        self.detail_view   = DetailView(self.page, on_close=lambda: self.page.run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed)
         self.calendar_view = CalendarView(
             self.page,
             on_close=lambda: self.page.run_task(self._close_calendar),
@@ -903,6 +903,12 @@ class AppController:
         if self._is_loading: return
         self._is_loading = True
         self._prefetch_cancel_event.set()
+        
+        # Clear persistent detail cache to force fresh data fetch on manual refresh
+        try:
+            self.orchestrator.clear_detail_cache()
+        except Exception:
+            pass
 
         self.refresh_btn.disabled = True
         self.status_text.value    = "Đang cập nhật dữ liệu..."
@@ -1559,6 +1565,38 @@ class AppController:
         self._rebuild_colors()
         self._needs_reload = True
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
+    def _on_activity_status_changed(self, url: str, new_status: str):
+        """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
+        updated = False
+        with self._data_lock:
+            for item in self.all_data:
+                if item.get("url") == url:
+                    if item.get("submission_status") != new_status:
+                        item["submission_status"] = new_status
+                        # Cập nhật cả trong details
+                        details = item.setdefault("details", {})
+                        status_data = details.setdefault("status_data", {})
+                        status_data["Trạng thái nộp bài"] = new_status
+                        updated = True
+                    break
+            data_copy = list(self.all_data)
+
+        if updated:
+            # 1. Cập nhật chi tiết cache trong orchestrator
+            try:
+                self.orchestrator.update_cached_submission_status(url, new_status)
+            except Exception:
+                pass
+            
+            # 2. Lưu cache đĩa để không bị mất khi restart app
+            try:
+                self._data_cache.save(data_copy)
+            except Exception:
+                pass
+            
+            # 3. Làm mới UI của dashboard (cập nhật card status badge, đếm số bài đã nộp...)
+            self._update_footer()
+
     def _show_detail(self, data: dict):
         self.page.run_task(self._show_detail_async, data)
 

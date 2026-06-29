@@ -67,6 +67,26 @@ class DataOrchestrator:
         with self._detail_lock:
             return dict(self._detail_cache)
 
+    def clear_detail_cache(self):
+        """Xóa sạch bộ nhớ đệm chi tiết (dùng khi refresh thủ công)."""
+        with self._detail_lock:
+            self._detail_cache.clear()
+            self._detail_cache_saved_at.clear()
+            self._detail_cache_lru.clear()
+        logger.debug("Đã xóa sạch bộ nhớ đệm chi tiết bài tập/quiz.")
+
+    def update_cached_submission_status(self, url: str, new_status: str):
+        """Cập nhật trạng thái nộp bài trực tiếp trong cache để đồng bộ giao diện."""
+        with self._detail_lock:
+            cached = self._detail_cache.get(url)
+            if cached:
+                cached["submission_status"] = new_status
+                details = cached.get("details", {})
+                if isinstance(details, dict):
+                    status_data = details.get("status_data", {})
+                    if isinstance(status_data, dict):
+                        status_data["Trạng thái nộp bài"] = new_status
+
     def _get_userid(self) -> Optional[int]:
         """Get cached userid or fetch from site_info."""
         if self._userid_cache is not None:
