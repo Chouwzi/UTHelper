@@ -1,3 +1,11 @@
+import os
+import sys
+
+# Patch path for direct execution / Flet preview compatibility
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import flet as ft
 import asyncio
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
@@ -1002,7 +1010,7 @@ class SettingsView(ft.Container):
                 ft.Container(
                     content=ft.Row(controls=[self._back_btn],
                                    alignment=ft.MainAxisAlignment.START),
-                    padding=ft.Padding.only(left=8, top=16, bottom=4),
+                    padding=ft.Padding.only(left=8, top=25, bottom=4),
                 ),
                 # Scrollable content
                 ft.Container(
@@ -2525,3 +2533,17 @@ class SettingsView(ft.Container):
             self._save_status.value = f"Lỗi không xác định: {str(e_err)}"
             self._save_status.color = C.CRITICAL
             self.update()
+
+def main(page: ft.Page):
+    """Stub main function to support Flet Preview on this file directly."""
+    # Apply compatibility shims if running directly
+    try:
+        from gui.flet_compat import patch_flet
+        patch_flet()
+    except Exception:
+        pass
+    from gui.app_controller import AppController
+    AppController(page)
+
+if __name__ == "__main__":
+    ft.run(main=main, assets_dir=os.path.join(_project_root, "assets"))

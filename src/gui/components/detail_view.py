@@ -1,3 +1,11 @@
+import os
+import sys
+
+# Patch path for direct execution / Flet preview compatibility
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import flet as ft
 import asyncio
 import logging
@@ -160,7 +168,7 @@ class DetailView(ft.Container):
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_edit_dialog,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
-                ft.ElevatedButton(
+                ft.Button(
                     "Cập nhật",
                     icon=ft.Icons.SAVE_ROUNDED,
                     on_click=lambda _: asyncio.ensure_future(self._on_update_file_metadata()),
@@ -184,7 +192,7 @@ class DetailView(ft.Container):
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_delete_confirm,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
-                ft.ElevatedButton(
+                ft.Button(
                     "Xóa",
                     icon=ft.Icons.DELETE_ROUNDED,
                     on_click=lambda _: asyncio.ensure_future(self._do_confirmed_delete()),
@@ -465,7 +473,7 @@ class DetailView(ft.Container):
                 ft.Container(
                     content=ft.Row(controls=[back_btn, self._header_open_btn],
                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=ft.Padding.only(left=8, right=8, top=16, bottom=8),
+                    padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
                 ),
                 self._loading_bar,
                 self._error_banner,
@@ -1651,3 +1659,17 @@ class DetailView(ft.Container):
             if not grading_ok:
                 logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
         return save_ok
+
+def main(page: ft.Page):
+    """Stub main function to support Flet Preview on this file directly."""
+    # Apply compatibility shims if running directly
+    try:
+        from gui.flet_compat import patch_flet
+        patch_flet()
+    except Exception:
+        pass
+    from gui.app_controller import AppController
+    AppController(page)
+
+if __name__ == "__main__":
+    ft.run(main=main, assets_dir=os.path.join(_project_root, "assets"))

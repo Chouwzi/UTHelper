@@ -114,6 +114,7 @@ class ActivityCard(ft.Container):
             if old_id == new_id:
                 if on_tap:
                     self.on_tap_cb = on_tap
+                self.update_countdown()
                 return
         self.data = data
         if on_tap:

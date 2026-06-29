@@ -3,6 +3,14 @@
 Accessible via the 📊 icon in the header. Displays a summary of grades
 for all enrolled courses with detail expansion per course.
 """
+import os
+import sys
+
+# Patch path for direct execution / Flet preview compatibility
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import flet as ft
 import logging
 from typing import List, Dict, Any, Optional, Callable
@@ -199,3 +207,17 @@ class GradeOverviewView(ft.Container):
         """Hide the view with animation."""
         self.offset = ft.Offset(1, 0)
         self.opacity = 0.0
+
+def main(page: ft.Page):
+    """Stub main function to support Flet Preview on this file directly."""
+    # Apply compatibility shims if running directly
+    try:
+        from gui.flet_compat import patch_flet
+        patch_flet()
+    except Exception:
+        pass
+    from gui.app_controller import AppController
+    AppController(page)
+
+if __name__ == "__main__":
+    ft.run(main=main, assets_dir=os.path.join(_project_root, "assets"))

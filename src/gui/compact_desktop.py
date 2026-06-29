@@ -12,4 +12,4 @@ def main(page: ft.Page):
     AppController(page)
 
 if __name__ == "__main__":
-    ft.app(target=main, assets_dir=os.path.join(project_root, "assets"))
+    ft.run(main=main, assets_dir=os.path.join(project_root, "assets"))

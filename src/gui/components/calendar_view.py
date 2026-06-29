@@ -10,6 +10,14 @@ UX Audit Fixes Applied:
 - CV-07: Days with deadlines have subtle bg hint
 - CV-08: Color bar full height
 """
+import os
+import sys
+
+# Patch path for direct execution / Flet preview compatibility
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import calendar
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
@@ -117,7 +125,7 @@ class CalendarView(ft.Container):
                 ],
                 spacing=0,
             ),
-            padding=ft.Padding.only(left=4, right=4, top=12, bottom=0),
+            padding=ft.Padding.only(left=4, right=4, top=20, bottom=0),
             bgcolor=C.BG,
         )
 
@@ -985,3 +993,17 @@ class CalendarView(ft.Container):
         """Handle click on a mini card — open detail view."""
         if self._on_open_detail:
             self._on_open_detail(act)
+
+def main(page: ft.Page):
+    """Stub main function to support Flet Preview on this file directly."""
+    # Apply compatibility shims if running directly
+    try:
+        from gui.flet_compat import patch_flet
+        patch_flet()
+    except Exception:
+        pass
+    from gui.app_controller import AppController
+    AppController(page)
+
+if __name__ == "__main__":
+    ft.run(main=main, assets_dir=os.path.join(_project_root, "assets"))

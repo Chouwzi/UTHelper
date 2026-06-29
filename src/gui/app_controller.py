@@ -1,3 +1,11 @@
+import os
+import sys
+
+# Patch path for direct execution / Flet preview compatibility
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import flet as ft
 from datetime import datetime
 from core.time_utils import parse_datetime
@@ -235,7 +243,7 @@ class AppController:
         self.course_popup = ft.PopupMenuButton(
             content=ft.Container(
                 content=ft.Row([
-                    ft.Container(content=self.course_btn_label, width=80, alignment=ft.Alignment(-1, 0)),
+                    ft.Container(content=self.course_btn_label, width=50, height=20, alignment=ft.Alignment(-1, 0)),
                     ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)
                 ], spacing=2, tight=True),
                 bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=8, vertical=8),
@@ -341,7 +349,7 @@ class AppController:
                 self.status_text,
                 self.loading_bar,
             ], spacing=4),
-            padding=ft.Padding.only(left=16, right=8, top=20, bottom=4),
+            padding=ft.Padding.only(left=16, right=8, top=25, bottom=4),
             bgcolor=C.BG,
         )
 
@@ -1688,4 +1696,17 @@ class AppController:
             self.orchestrator.client.close()
         except Exception:
             pass
+
+def main(page: ft.Page):
+    """Stub main function to support Flet Preview on this file directly."""
+    # Apply compatibility shims if running directly
+    try:
+        from gui.flet_compat import patch_flet
+        patch_flet()
+    except Exception:
+        pass
+    AppController(page)
+
+if __name__ == "__main__":
+    ft.run(main=main, assets_dir=os.path.join(_project_root, "assets"))
 
