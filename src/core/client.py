@@ -71,17 +71,31 @@ class MoodleClient:
         req.add_header('Accept', 'application/json, */*')
         req.add_header('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8')
         
-        self._throttle()
-        try:
-            resp = _urlopen(req, timeout=timeout)
-        except urllib.error.HTTPError as e:
-            logger.warning("HTTP %d from POST %s", e.code, url.split('?')[0])
-            return e.code, None
-        body = resp.read()
-        try:
-            return resp.status, json.loads(body)
-        except (json.JSONDecodeError, ValueError):
-            return resp.status, None
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            self._throttle()
+            try:
+                resp = _urlopen(req, timeout=timeout)
+                body = resp.read()
+                try:
+                    return resp.status, json.loads(body)
+                except (json.JSONDecodeError, ValueError):
+                    return resp.status, None
+            except urllib.error.HTTPError as e:
+                logger.warning("HTTP %d từ POST %s", e.code, url.split('?')[0])
+                return e.code, None
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                is_timeout = isinstance(e, TimeoutError) or "time" in str(e).lower()
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "POST %s thất bại ở lần thử %d (%s): %s. Đang thử lại...",
+                        url.split('?')[0], attempt + 1, "Timeout" if is_timeout else "NetworkError", e
+                    )
+                    time.sleep(1.5 * (attempt + 1))  # exponential backoff
+                    continue
+                else:
+                    logger.error("POST %s thất bại sau %d lần thử: %s", url.split('?')[0], max_attempts, e)
+                    raise e
 
     def _post_json(self, url: str, data: dict, timeout: float = 15) -> tuple:
         """POST JSON body. Returns (status, parsed_json_or_None)."""

@@ -197,6 +197,10 @@ class TestGetQuizAttempts:
 class TestResolveCmidToAssignId:
     """resolve_cmid_to_assign_id() tests."""
 
+    @pytest.fixture(autouse=True)
+    def clear_cache(self):
+        ws_functions._cmid_assign_id_cache.clear()
+
     def test_found(self):
         mock_api = Mock(return_value={
             "courses": [

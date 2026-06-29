@@ -236,6 +236,9 @@ def get_quiz_attempts(
     return None
 
 
+_cmid_assign_id_cache = {}
+
+
 def resolve_cmid_to_assign_id(
     call_api: Callable,
     cmid: int,
@@ -246,6 +249,10 @@ def resolve_cmid_to_assign_id(
     Calendar events trả về `instance` = cmid, nhưng mod_assign_get_submission_status
     cần assign ID thật. Phải gọi mod_assign_get_assignments cho course để tìm mapping.
     """
+    cache_key = (cmid, course_id)
+    if cache_key in _cmid_assign_id_cache:
+        return _cmid_assign_id_cache[cache_key]
+
     courses = get_assignments(call_api, course_ids=[course_id])
     if not courses:
         return None
@@ -253,7 +260,9 @@ def resolve_cmid_to_assign_id(
     for course in courses:
         for assign in course.get('assignments', []):
             if assign.get('cmid') == cmid:
-                return assign.get('id')
+                aid = assign.get('id')
+                _cmid_assign_id_cache[cache_key] = aid
+                return aid
     
     return None
 
