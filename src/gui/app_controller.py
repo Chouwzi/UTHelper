@@ -64,7 +64,12 @@ class AppController:
         self.active_search = ""
         self._is_loading = False
         
+        # Lưu vết các thay đổi thủ công từ người dùng để tránh Race Condition với prefetch ngầm
+        # Cấu trúc: {url: (timestamp_mili, new_status)}
+        self._pending_updates = {}
+        
         self._prefetch_cancel_event = threading.Event()
+
 
         self._init_window()
         self._init_ui()
@@ -939,6 +944,9 @@ class AppController:
                 self.page.update()
 
         try:
+            import time
+            fetch_start_time = time.time()
+            
             # Ưu tiên async WS API (non-blocking), fallback sync in thread
             if hasattr(self.orchestrator, 'get_latest_activities_async'):
                 result = await self.orchestrator.get_latest_activities_async()
@@ -950,8 +958,18 @@ class AppController:
             cache = self.orchestrator.get_cached_details_snapshot()
             with self._data_lock:
                 data_copy = list(self.all_data)
+            
+            # Áp dụng Local Overrides Smart Merge
+            now = time.time()
+            # Dọn dẹp pending updates cũ (> 5 phút) để tránh rò rỉ bộ nhớ
+            self._pending_updates = {
+                k: v for k, v in self._pending_updates.items() if now - v[0] < 300
+            }
+            
             for i, item in enumerate(data_copy):
                 url = item.get("url")
+                
+                # Trích xuất thông tin cache chi tiết trước
                 if url and url in cache:
                     enriched = cache[url]
                     data_copy[i] = {
@@ -964,7 +982,20 @@ class AppController:
                         "is_open": enriched.get("is_open", item.get("is_open")),
                         "urgency": enriched.get("urgency", item.get("urgency")),
                     }
-                    
+                
+                # Thực hiện Smart Merge với các thay đổi thủ công đang chờ của người dùng
+                if url and url in self._pending_updates:
+                    action_time, new_status = self._pending_updates[url]
+                    if action_time > fetch_start_time:
+                        # Thao tác nộp bài diễn ra SAU khi bắt đầu fetch, ưu tiên bảo toàn trạng thái UI mới
+                        data_copy[i]["submission_status"] = new_status
+                        
+                        details = dict(data_copy[i].get("details", {}))
+                        status_data = dict(details.get("status_data", {}))
+                        status_data["Trạng thái nộp bài"] = new_status
+                        details["status_data"] = status_data
+                        data_copy[i]["details"] = details
+                        logger.info(f"[SmartMerge] Đã bảo toàn trạng thái '{new_status}' của {url}")
             
             # Determine data source for status display
             sum(1 for x in data_copy if x.get('source') == 'ws_api')
@@ -983,6 +1014,7 @@ class AppController:
                     item["_course_lower"] = str(item.get("course", "")).lower()
             with self._data_lock:
                 self.all_data = data_copy
+
             # Lưu cache offline
             self._data_cache.save(data_copy)
             # P3: Tính tiến độ nộp bài — positive reinforcement
@@ -1601,7 +1633,11 @@ class AppController:
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
         updated = False
+        import time
         with self._data_lock:
+            # Ghi nhận thay đổi thủ công của người dùng kèm timestamp
+            self._pending_updates[url] = (time.time(), new_status)
+            
             new_data = []
             for item in self.all_data:
                 if item.get("url") == url:
@@ -1638,6 +1674,7 @@ class AppController:
                 self._data_cache.save(data_copy)
             except Exception:
                 pass
+
             
             # 3. Làm mới UI của dashboard (cập nhật card status badge, đếm số bài đã nộp...)
             self._update_footer()

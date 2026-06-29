@@ -647,16 +647,32 @@ def save_assignment_submission(
             logger.info("Nộp bài thành công (assign_id=%d, draft=%d)", assign_id, draft_itemid)
             return True
         else:
+            is_empty_warning = False
             for w in result:
-                logger.warning("Submission warning: %s", w.get('message', w))
+                msg = w.get('message', w) if isinstance(w, dict) else str(w)
+                code = w.get('warningcode', '') if isinstance(w, dict) else ''
+                logger.warning("Submission warning: %s (code=%s)", msg, code)
+                if code == 'couldnotsavesubmission':
+                    is_empty_warning = True
+            if is_empty_warning:
+                logger.info("Empty submission saved successfully despite Moodle warning")
+                return True
             return False
     
     # Trả về dict với warnings
     if isinstance(result, dict):
         warnings = result.get('warnings', [])
         if warnings:
+            is_empty_warning = False
             for w in warnings:
-                logger.warning("Submission warning: %s", w.get('message', w))
+                msg = w.get('message', w) if isinstance(w, dict) else str(w)
+                code = w.get('warningcode', '') if isinstance(w, dict) else ''
+                logger.warning("Submission warning: %s (code=%s)", msg, code)
+                if code == 'couldnotsavesubmission':
+                    is_empty_warning = True
+            if is_empty_warning:
+                logger.info("Empty submission saved successfully despite Moodle warning")
+                return True
             return False
         # Không có warnings → coi như thành công
         return True

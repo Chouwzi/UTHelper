@@ -77,9 +77,9 @@ class NotificationManager:
         if not os.path.exists(self._cache_path):
             return {}
         try:
-            with self._cache_lock:
-                with open(self._cache_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
+            from core.safe_file_io import SafeFileIO
+            from pathlib import Path
+            raw = SafeFileIO.read_json_safe(Path(self._cache_path), dict)
         except Exception as e:
             logger.warning(f"Cannot load notification cache: {e}")
             return {}
@@ -103,15 +103,12 @@ class NotificationManager:
         # Evict stale entries before writing
         self._evict_stale_entries(data)
         try:
-            tmp = f"{self._cache_path}.tmp"
-            with self._cache_lock:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, self._cache_path)
+            from core.safe_file_io import SafeFileIO
+            from pathlib import Path
+            SafeFileIO.write_json_atomic(Path(self._cache_path), data)
         except Exception as e:
             logger.error(f"Cannot save notification cache: {e}")
+
 
     def _evict_stale_entries(self, data: Dict):
         """Remove cache entries older than _CACHE_TTL_DAYS."""

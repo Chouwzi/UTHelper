@@ -173,7 +173,7 @@ class DetailView(ft.Container):
                 ft.Button(
                     "Cập nhật",
                     icon=ft.Icons.SAVE_ROUNDED,
-                    on_click=lambda _: asyncio.ensure_future(self._on_update_file_metadata()),
+                    on_click=self._on_update_file_metadata,
                     bgcolor=C.ACCENT, color=ft.Colors.WHITE,
                 ),
             ],
@@ -197,7 +197,7 @@ class DetailView(ft.Container):
                 ft.Button(
                     "Xóa",
                     icon=ft.Icons.DELETE_ROUNDED,
-                    on_click=lambda _: asyncio.ensure_future(self._do_confirmed_delete()),
+                    on_click=self._do_confirmed_delete,
                     bgcolor=C.CRITICAL, color=ft.Colors.WHITE,
                 ),
             ],
@@ -649,8 +649,9 @@ class DetailView(ft.Container):
                     pass
                 if client:
                     prefetched = data.get("details", {}).get("raw_submission_status")
-                    asyncio.ensure_future(
-                        self._async_load_submitted_files(client, url, int(course_id), prefetched_status=prefetched)
+                    self._page.run_task(
+                        self._async_load_submitted_files,
+                        client, url, int(course_id), prefetched
                     )
         else:
             self._submission_area.visible = False
@@ -1328,53 +1329,47 @@ class DetailView(ft.Container):
             except (ValueError, IndexError):
                 pass
         if not cmid:
-            return False
+            raise ValueError("Không xác định được ID hoạt động từ URL bài tập.")
 
         assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
         if not assign_id:
-            return False
+            raise ValueError("Không tìm thấy ID bài nộp (Assignment ID) tương ứng.")
 
         if not files_to_keep:
-            # Xóa hết file → lấy draft area rỗng hợp lệ từ API
-            try:
-                draft_result = client.call_ws_api('core_files_get_unused_draft_itemid')
-                if draft_result and isinstance(draft_result, dict):
-                    draft_itemid = draft_result.get('itemid', 0)
-                else:
-                    draft_itemid = 0
-            except Exception:
-                draft_itemid = 0
-            if not draft_itemid:
-                logger.error("Không lấy được draft area rỗng")
-                return False
-        else:
-            # Download và re-upload các file cần giữ
-            draft_itemid = 0
-            for f in files_to_keep:
-                file_url = f.get('url', '')
-                if not file_url:
-                    logger.error("File '%s' không có URL", f.get('name'))
-                    return False
-                
-                file_bytes = client.download_file(file_url)
-                if not file_bytes:
-                    logger.error("Không tải được file '%s'", f.get('name'))
-                    return False
-                
-                result_id = client.upload_draft_file(
-                    f.get('name', 'file'), file_bytes, itemid=draft_itemid
-                )
-                if result_id is None:
-                    logger.error("Re-upload thất bại cho file '%s'", f.get('name'))
-                    return False
-                draft_itemid = result_id
+            raise ValueError(
+                "Bài tập này không hỗ trợ xóa thông qua app.\n"
+                "Vui lòng click 'Mở trình duyệt' và chọn 'Remove submission' để xóa bài làm."
+            )
+
+        # Download và re-upload các file cần giữ
+        draft_itemid = 0
+        for f in files_to_keep:
+            file_url = f.get('url', '')
+            if not file_url:
+                logger.error("File '%s' không có URL", f.get('name'))
+                raise ValueError(f"File '{f.get('name')}' không có URL hợp lệ.")
+            
+            file_bytes = client.download_file(file_url)
+            if not file_bytes:
+                logger.error("Không tải được file '%s'", f.get('name'))
+                raise ValueError(f"Không tải được file '{f.get('name')}' từ máy chủ.")
+            
+            result_id = client.upload_draft_file(
+                f.get('name', 'file'), file_bytes, itemid=draft_itemid
+            )
+            if result_id is None:
+                logger.error("Re-upload thất bại cho file '%s'", f.get('name'))
+                raise ValueError(f"Không upload được file '{f.get('name')}' lên vùng nháp.")
+            draft_itemid = result_id
 
         save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
-        if save_ok:
-            grading_ok = submit_for_grading(client.call_ws_api, assign_id)
-            if not grading_ok:
-                logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
-        return save_ok
+        if not save_ok:
+            raise ValueError("Moodle từ chối lưu bài nộp. Thử lại hoặc mở trình duyệt.")
+                
+        grading_ok = submit_for_grading(client.call_ws_api, assign_id)
+        if not grading_ok:
+            logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
+        return True
 
     async def _on_edit_submitted(self, e):
         """Mở trình duyệt để chỉnh sửa bài nộp."""
@@ -1461,53 +1456,14 @@ class DetailView(ft.Container):
         self._pending_delete_indices = []
         self._page.update()
 
-    async def _do_confirmed_delete(self):
-        """Xóa file với undo buffer 3 giây: hiện snackbar → chờ → xóa thật."""
+    async def _do_confirmed_delete(self, e=None):
+        """Thực hiện xóa sau khi người dùng xác nhận."""
         self._delete_confirm_dialog.open = False
         self._page.update()
         indices = self._pending_delete_indices
         self._pending_delete_indices = []
         if not indices:
             return
-
-        removed_names = [
-            self._submitted_files[i].get('name', '')
-            for i in indices if 0 <= i < len(self._submitted_files)
-        ]
-        count = len(removed_names)
-        label = f"'{removed_names[0]}'" if count == 1 else f"{count} file"
-
-        # Flag to cancel deletion if Undo is pressed
-        self._undo_cancel_flag = False
-
-        def _undo_clicked(e):
-            self._undo_cancel_flag = True
-            self._page.snack_bar.open = False
-            self._show_upload_status(f"Đã hoàn tác xóa {label}", C.SAFE)
-            self._page.update()
-
-        snack = ft.SnackBar(
-            content=ft.Row([
-                ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, size=16, color=ft.Colors.WHITE),
-                ft.Text(f"Đang xóa {label}...", color=ft.Colors.WHITE, size=13, expand=True),
-            ], spacing=8),
-            action="Hoàn tác",
-            action_color=ft.Colors.YELLOW_200,
-            on_action=_undo_clicked,
-            duration=3000,
-            bgcolor="#333333",
-        )
-        self._page.snack_bar = snack
-        snack.open = True
-        self._page.update()
-
-        # Wait 3.5 seconds (slightly more than snackbar duration)
-        await asyncio.sleep(3.5)
-
-        if self._undo_cancel_flag:
-            return  # User pressed Undo
-
-        # Proceed with actual deletion
         await self._on_remove_submitted_files(indices)
 
     # ── Multi-select Mode ────────────────────────────────────
@@ -1554,7 +1510,7 @@ class DetailView(ft.Container):
         btn_row.controls[1].value = f"Xóa đã chọn ({count})" if count > 0 else "Xóa đã chọn"
         self._page.update()
 
-    async def _on_update_file_metadata(self):
+    async def _on_update_file_metadata(self, e=None):
         """Xử lý cập nhật thông tin file: đổi tên, author, license, filepath."""
         idx = self._editing_file_index
         if idx < 0 or idx >= len(self._submitted_files):

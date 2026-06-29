@@ -45,8 +45,9 @@ class GradeMonitor:
         if not os.path.exists(self._snapshot_path):
             return {}
         try:
-            with open(self._snapshot_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            from core.safe_file_io import SafeFileIO
+            from pathlib import Path
+            return SafeFileIO.read_json_safe(Path(self._snapshot_path), dict)
         except Exception as e:
             logger.warning("Cannot load grade snapshot: %s", e)
             return {}
@@ -54,14 +55,12 @@ class GradeMonitor:
     def _save_snapshot(self) -> None:
         """Persist the grade snapshot to disk."""
         try:
-            tmp = f"{self._snapshot_path}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._snapshot, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self._snapshot_path)
+            from core.safe_file_io import SafeFileIO
+            from pathlib import Path
+            SafeFileIO.write_json_atomic(Path(self._snapshot_path), self._snapshot)
         except Exception as e:
             logger.error("Cannot save grade snapshot: %s", e)
+
 
     def check_for_changes(
         self,

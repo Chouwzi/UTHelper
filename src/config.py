@@ -37,10 +37,17 @@ def _get_user_data_dir() -> Path:
     """Trả về thư mục lưu trữ dữ liệu phù hợp với nền tảng."""
     if sys.platform == 'win32':
         return Path(os.getenv('APPDATA', BASE_DIR)) / "UTHElearningAlert"
+    
     # Mobile (Android/iOS): Flet sets FLET_APP_STORAGE_DATA env var
     flet_data = os.environ.get('FLET_APP_STORAGE_DATA')
     if flet_data:
         return Path(flet_data) / "UTHElearningAlert"
+        
+    # Fallback an toàn cho Mobile khi chạy ngầm không có biến môi trường
+    if hasattr(sys, '_ANDROID_') or 'android' in sys.platform.lower() or hasattr(sys, '_IOS_'):
+        import tempfile
+        return Path(tempfile.gettempdir()) / "UTHElearningAlert"
+
     # macOS/iOS native fallback (Application Support)
     if sys.platform == 'darwin':
         return Path.home() / "Library" / "Application Support" / "UTHElearningAlert"
@@ -224,19 +231,19 @@ def load_settings() -> Settings:
     s = Settings()
     json_secrets: dict[str, str] = {}
 
-    if CONFIG_FILE.exists():
+    from core.safe_file_io import SafeFileIO
+    data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
+    
+    if data:
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # Extract secrets from JSON data before Pydantic validation
-            # (Pydantic's exclude=True prevents them from being set via **data)
+            # Trích xuất secrets trước khi xác thực Pydantic
             for key in _SECRET_FIELDS:
                 val = data.pop(key, None)
                 if val and isinstance(val, str):
                     json_secrets[key] = val
             s = Settings(**data)
         except Exception as e:
-            _logger.warning(f"Failed to load settings from {CONFIG_FILE}: {e}")
+            _logger.warning(f"Failed to parse settings values: {e}")
 
     # Khôi phục secrets từ secure storage (tier 1 → tier 2 → tier 3 JSON)
     for attr, key_suffix in _SECRET_FIELDS.items():
@@ -244,13 +251,13 @@ def load_settings() -> Settings:
         if val:
             setattr(s, attr, val)
 
-    # Tier 3 fallback: restore secrets from JSON if no secure backend found them
+    # Tier 3 fallback: restore secrets từ JSON
     if not _has_any_secure_backend():
         for attr, val in json_secrets.items():
             if not getattr(s, attr, ''):
                 setattr(s, attr, val)
 
-    # One-time migration: move secrets from JSON/keyring → SecureStorage
+    # Một lần migration
     if _get_secure_storage() is not None and json_secrets:
         migrated = False
         for attr, key_suffix in _SECRET_FIELDS.items():
@@ -260,7 +267,7 @@ def load_settings() -> Settings:
         if migrated:
             _logger.info("Migrated secrets from JSON → SecureStorage")
 
-    # Legacy: migrate password from old keyring key format
+    # Legacy migration
     if _HAS_KEYRING and s.UTH_USERNAME and not s.UTH_PASSWORD:
         try:
             kp = keyring.get_password(KEYRING_SERVICE_NAME, s.UTH_USERNAME)
@@ -275,30 +282,26 @@ def load_settings() -> Settings:
 settings = load_settings()
 
 def save_settings():
-    """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng."""
+    """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng an toàn."""
     _logger = logging.getLogger(__name__)
     has_secure = _has_any_secure_backend()
 
     # --- Step 1: Save non-secret settings to JSON ---
-    # Secrets are NEVER written to JSON when a secure backend is available.
     json_ok = False
     try:
-        data = settings.model_dump()  # exclude=True hides secrets
-        if not has_secure:
-            # Tier 3 fallback: no secure backend, include secrets in JSON
-            for attr in _SECRET_FIELDS:
-                val = getattr(settings, attr, '')
-                if val:
-                    data[attr] = val
-        tmp = CONFIG_FILE.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(str(tmp), str(CONFIG_FILE))
-        json_ok = True
+        def get_data_to_write():
+            data = settings.model_dump()
+            if not has_secure:
+                for attr in _SECRET_FIELDS:
+                    val = getattr(settings, attr, '')
+                    if val:
+                        data[attr] = val
+            return data
+            
+        from core.safe_file_io import SafeFileIO
+        json_ok = SafeFileIO.write_json_atomic(CONFIG_FILE, get_data_to_write())
     except Exception as e:
-        _logger.error(f"Failed to save settings to {CONFIG_FILE}: {e}")
+        _logger.error(f"Failed to save settings: {e}")
 
     # --- Step 2: Save all secrets to secure storage ---
     if has_secure:
@@ -310,26 +313,19 @@ def save_settings():
                 _logger.warning(f"Failed to write {attr} to secure storage: {e}")
     else:
         _logger.warning(
-            "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure backend (keyring/SecureStorage). "
-            "Mật khẩu và token đang được lưu dạng plaintext trong %s. "
-            "Cài đặt 'keyring' hoặc chạy trong Flet app để bảo mật hơn.",
-            CONFIG_FILE,
+            "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
         )
 
     # --- Step 3: Cleanup legacy secrets from JSON file ---
     if json_ok and has_secure:
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            from core.safe_file_io import SafeFileIO
+            data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
             stripped = {k: v for k, v in data.items() if k not in _SECRET_FIELDS}
             if len(stripped) < len(data):
-                tmp = CONFIG_FILE.with_suffix(".tmp")
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(stripped, f, indent=4, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(str(tmp), str(CONFIG_FILE))
+                SafeFileIO.write_json_atomic(CONFIG_FILE, stripped)
                 _logger.info("Cleaned legacy secrets from settings JSON file")
         except Exception as e:
             _logger.warning(f"Failed to clean legacy secrets from JSON: {e}")
+
 

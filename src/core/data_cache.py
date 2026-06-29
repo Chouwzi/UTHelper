@@ -28,13 +28,8 @@ class DataCache:
                 "count": len(activities),
                 "activities": activities,
             }
-            tmp = f"{self._cache_path}.tmp"
-            with self._lock:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, default=str)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, str(self._cache_path))
+            from core.safe_file_io import SafeFileIO
+            SafeFileIO.write_json_atomic(self._cache_path, payload)
             logger.debug("Đã lưu cache %d activities", len(activities))
         except Exception as e:
             logger.warning("Không thể lưu data cache: %s", e)
@@ -44,9 +39,8 @@ class DataCache:
         if not self._cache_path.exists():
             return [], None
         try:
-            with self._lock:
-                with open(str(self._cache_path), "r", encoding="utf-8") as f:
-                    payload = json.load(f)
+            from core.safe_file_io import SafeFileIO
+            payload = SafeFileIO.read_json_safe(self._cache_path, dict)
             activities = payload.get("activities", [])
             saved_at = payload.get("saved_at")
             logger.info("Đã tải cache %d activities (lưu lúc %s)", len(activities), saved_at)
@@ -57,8 +51,19 @@ class DataCache:
 
     def clear(self) -> None:
         """Xóa cache file."""
+        from core.safe_file_io import SafeFileIO
+        lock = SafeFileIO.get_file_lock(self._cache_path)
         try:
-            if self._cache_path.exists():
-                self._cache_path.unlink()
+            with lock.acquire(timeout=2):
+                if self._cache_path.exists():
+                    self._cache_path.unlink()
+                # Xóa cả file lock nếu có thể
+                lock_file = self._cache_path.with_suffix(".lock")
+                if lock_file.exists():
+                    try:
+                        lock_file.unlink()
+                    except OSError:
+                        pass
         except Exception:
             pass
+

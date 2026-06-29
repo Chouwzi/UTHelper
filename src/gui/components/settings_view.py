@@ -2121,8 +2121,9 @@ class SettingsView(ft.Container):
     # ── Cache statistics ──
     def _do_show_cache_stats(self):
         """Show cache sizes and statistics."""
-        import os, json
+        import os
         from config import _USER_DATA_DIR
+        from core.safe_file_io import SafeFileIO
         stats = []
         for label, fname in [("Cache thông báo", "notifications_cache.json"),
                               ("Lịch sử thông báo", "notification_history.json"),
@@ -2131,14 +2132,14 @@ class SettingsView(ft.Container):
             if path.exists():
                 size = os.path.getsize(str(path))
                 try:
-                    with open(str(path), "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    data = SafeFileIO.read_json_safe(path, dict)
                     count = len(data) if isinstance(data, (list, dict)) else "?"
                     stats.append(f"{label}: {count} mục ({size:,} B)")
                 except Exception:
                     stats.append(f"{label}: {size:,} B")
             else:
                 stats.append(f"{label}: trống")
+
 
         detail = self._orchestrator.get_cached_details_snapshot() if hasattr(self._orchestrator, 'get_cached_details_snapshot') else {}
         stats.append(f"Detail cache (RAM): {len(detail)} mục")
