@@ -332,7 +332,7 @@ class AppController:
             width=40, height=40,
         )
 
-        header = ft.Container(
+        header_container = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
                     ft.Row(controls=[
@@ -347,10 +347,21 @@ class AppController:
                     ft.Row(controls=[self.calendar_btn, self.grades_btn, self._notification_icon, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
-                self.loading_bar,
             ], spacing=4),
-            padding=ft.Padding.only(left=16, right=8, top=25, bottom=4),
+            padding=ft.Padding.only(left=16, right=8, top=25, bottom=8),
             bgcolor=C.BG,
+        )
+
+        header = ft.Stack(
+            controls=[
+                header_container,
+                ft.Container(
+                    content=self.loading_bar,
+                    bottom=0,
+                    left=0,
+                    right=0,
+                )
+            ]
         )
 
         # Update banner (ẩn mặc định)
@@ -431,7 +442,7 @@ class AppController:
             content=ft.Stack(controls=[
                 ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
             ], expand=True),
-            padding=ft.Padding.only(left=14, right=14, bottom=8),
+            padding=ft.Padding.only(left=4, right=4, bottom=8),
             expand=True, clip_behavior=ft.ClipBehavior.NONE,
         )
 
@@ -526,6 +537,7 @@ class AppController:
             bgcolor=C.SURFACE,
             border_radius=10,
             border=ft.Border.all(1, C.BORDER),
+            margin=ft.Margin(left=10, right=10, top=0, bottom=0),
             # UX-4: Shimmer pulse animation
             opacity=0.4,
             animate_opacity=ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT),

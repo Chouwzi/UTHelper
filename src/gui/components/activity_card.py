@@ -76,9 +76,9 @@ class ActivityCard(ft.Container):
         self.content = ft.Row([self._bar_widget, body], spacing=0)
         self.bgcolor = C.SURFACE
         self.border_radius = 10
+        self.margin = ft.Margin(left=10, right=10, top=0, bottom=0)
         self.ink = True
         self.mouse_cursor = ft.MouseCursor.CLICK
-        
         self._animate_reveal = animate
         self.animate = ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT) if animate else None
         self.on_click = lambda _: self.on_tap_cb(self.data)
@@ -221,9 +221,9 @@ class ActivityCard(ft.Container):
             self.border = ft.Border.all(1, C.CRITICAL)
             # Create a nice starting glow shadow dynamically based on current C.CRITICAL
             crit_hex = C.CRITICAL.lstrip("#")
-            self.shadow = [ft.BoxShadow(spread_radius=1.5, blur_radius=16, color=f"#40{crit_hex}", offset=ft.Offset(0, 0))]
+            self.shadow = [ft.BoxShadow(spread_radius=0.5, blur_radius=10, color=f"#{crit_hex}", offset=ft.Offset(0, 0))]
             self._is_critical_active = True
-            self.animate = ft.Animation(1500, ft.AnimationCurve.EASE_IN_OUT)
+            self.animate = ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT)
         else:
             _card_border_color = C.SAFE if _is_submitted else C.BORDER
             self.border = ft.Border.all(1, _card_border_color)

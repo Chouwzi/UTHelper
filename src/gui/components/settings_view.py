@@ -585,7 +585,7 @@ class SettingsView(ft.Container):
             keyboard_type=ft.KeyboardType.NUMBER,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
-            width=100, text_align=ft.TextAlign.CENTER,
+            width=150, text_align=ft.TextAlign.CENTER,
             prefix_icon=ft.Icons.DARK_MODE_OUTLINED,
             on_change=lambda e: self._update_dnd_summary()
         )
@@ -595,7 +595,7 @@ class SettingsView(ft.Container):
             keyboard_type=ft.KeyboardType.NUMBER,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
-            width=100, text_align=ft.TextAlign.CENTER,
+            width=150, text_align=ft.TextAlign.CENTER,
             prefix_icon=ft.Icons.LIGHT_MODE_OUTLINED,
             on_change=lambda e: self._update_dnd_summary()
         )
