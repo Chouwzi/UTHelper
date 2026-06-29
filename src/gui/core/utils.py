@@ -318,65 +318,75 @@ def ensure_image_in_assets(cache_file_path: Path) -> str:
 
 def cleanup_image_cache():
     """
-    Dọn dẹp thư mục lưu trữ cache hình ảnh cục bộ để giữ dung lượng dưới giới hạn (50MB).
-    Sử dụng thuật toán LRU (Least Recently Used) để xoá tệp cũ nhất.
+    Dọn dẹp thư mục lưu trữ cache hình ảnh cục bộ dựa trên thời hạn lưu trữ (TTL)
+    và giới hạn dung lượng đĩa tối đa (50MB).
+    - Bước 1: Xoá tất cả các tệp cache đã tồn tại quá 14 ngày (TTL).
+    - Bước 2: Nếu dung lượng vẫn vượt quá 50MB, xoá các tệp cũ nhất (LRU/MRU) cho tới khi về mức an toàn.
     """
     try:
+        import time
         from config import _USER_DATA_DIR
         cache_dir = _USER_DATA_DIR / "cache" / "images"
         if not cache_dir.exists():
             return
             
-        # Giới hạn 50 MB
+        # Cấu hình thời hạn tối đa: 14 ngày (14 * 24 * 3600 giây)
+        MAX_AGE_SECONDS = 14 * 24 * 3600
+        # Giới hạn dung lượng tối đa: 50 MB
         MAX_SIZE = 50 * 1024 * 1024
         
+        now = time.time()
         files = [cache_dir / f for f in os.listdir(cache_dir)]
         if not files:
             return
             
-        file_infos = []
+        assets_dir = get_active_assets_dir()
+        assets_cache_dir = assets_dir / "cache" / "images"
+        
+        # Bước 1: Dọn dẹp theo thời hạn lưu trữ (TTL)
+        remaining_files = []
         for f in files:
             if f.is_file():
                 try:
                     stat = f.stat()
-                    # Lấy access time (atime) làm tiêu chí LRU
-                    file_infos.append((f, stat.st_size, stat.st_atime))
-                except Exception:
-                    pass
+                    # Sử dụng mtime (thời gian ghi nhận/chỉnh sửa) vì atime có thể không được cập nhật trên một số HĐH di động
+                    age = now - stat.st_mtime
+                    if age > MAX_AGE_SECONDS:
+                        f.unlink()
+                        if assets_cache_dir.exists():
+                            mirrored_file = assets_cache_dir / f.name
+                            if mirrored_file.exists():
+                                mirrored_file.unlink()
+                        logger.info(f"Đã xoá ảnh cache hết hạn (tồn tại > 14 ngày): {f.name}")
+                    else:
+                        remaining_files.append((f, stat.st_size, stat.st_mtime))
+                except Exception as e:
+                    logger.warning(f"Lỗi khi kiểm tra tệp cache {f.name}: {e}")
                     
-        # Sắp xếp theo thời gian truy cập (cũ nhất trước)
-        file_infos.sort(key=lambda x: x[2])
-        total_size = sum(x[1] for x in file_infos)
+        # Bước 2: Dọn dẹp theo dung lượng tối đa (nếu vẫn vượt quá 50MB)
+        remaining_files.sort(key=lambda x: x[2]) # Sắp xếp tệp cũ nhất lên trước
+        total_size = sum(x[1] for x in remaining_files)
         
         if total_size <= MAX_SIZE:
             return
             
-        logger.info(f"Dung lượng cache ảnh ({total_size} bytes) vượt quá giới hạn ({MAX_SIZE} bytes). Tiến hành dọn dẹp...")
-        
-        # Thư mục active assets cache để xoá tệp mirrored tương ứng
-        assets_dir = get_active_assets_dir()
-        assets_cache_dir = assets_dir / "cache" / "images"
-        
-        for f, size, _ in file_infos:
+        logger.info(f"Dung lượng cache ảnh ({total_size} bytes) vẫn vượt giới hạn {MAX_SIZE} bytes. Tiến hành dọn dẹp thêm...")
+        for f, size, _ in remaining_files:
             try:
-                # Xoá ở persistent cache
                 f.unlink()
-                
-                # Xoá ở assets cache
                 if assets_cache_dir.exists():
                     mirrored_file = assets_cache_dir / f.name
                     if mirrored_file.exists():
                         mirrored_file.unlink()
                         
                 total_size -= size
-                logger.info(f"Đã xoá ảnh cache cũ: {f.name}")
-                # Dừng khi dung lượng đã giảm xuống dưới 80% giới hạn
+                logger.info(f"Đã xoá ảnh cache cũ (vượt dung lượng): {f.name}")
                 if total_size <= MAX_SIZE * 0.8:
                     break
             except Exception as e:
                 logger.warning(f"Không thể xoá tệp cache {f.name}: {e}")
     except Exception as e:
-        logger.warning(f"Lỗi khi dọn dẹp cache ảnh: {e}")
+        logger.warning(f"Lỗi khi chạy dọn dẹp cache ảnh: {e}")
 
 
 def pre_cache_description_images(html_content: str) -> str:
