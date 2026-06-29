@@ -1582,9 +1582,9 @@ class AppController:
             data_copy = list(self.all_data)
 
         if updated:
-            # 1. Cập nhật chi tiết cache trong orchestrator
+            # 1. Invalidate cache chi tiết trong orchestrator để bắt buộc tải lại đầy đủ khi mở lại
             try:
-                self.orchestrator.update_cached_submission_status(url, new_status)
+                self.orchestrator.invalidate_detail_cache(url)
             except Exception:
                 pass
             

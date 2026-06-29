@@ -87,6 +87,14 @@ class DataOrchestrator:
                     if isinstance(status_data, dict):
                         status_data["Trạng thái nộp bài"] = new_status
 
+    def invalidate_detail_cache(self, url: str):
+        """Xóa cache chi tiết của một URL cụ thể (khi có tác vụ ghi như nộp/xóa bài)."""
+        with self._detail_lock:
+            self._detail_cache.pop(url, None)
+            self._detail_cache_saved_at.pop(url, None)
+            self._detail_cache_lru.pop(url, None)
+        logger.debug("Đã invalidate cache chi tiết cho URL: %s", url)
+
     def _get_userid(self) -> Optional[int]:
         """Get cached userid or fetch from site_info."""
         if self._userid_cache is not None:
