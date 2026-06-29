@@ -249,3 +249,129 @@ def get_submission_badge(data: dict):
         if any(x in submission.lower() for x in ["not submitted", "chưa nộp", "no submissions"]):
             return ("Chưa nộp" if act_type != "quiz" else "Chưa làm"), C.TEXT_SECONDARY
     return None
+
+
+import hashlib
+import os
+import re
+import urllib.parse
+import urllib.request
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+def pre_cache_description_images(html_content: str) -> str:
+    """
+    Downloads and caches images from description_html to local disk,
+    replacing network URLs with local file:/// absolute paths.
+    """
+    if not html_content:
+        return html_content
+
+    img_tags = re.findall(r'<img[^>]+>', html_content)
+    if not img_tags:
+        return html_content
+
+    from config import _USER_DATA_DIR, settings
+    cache_dir = _USER_DATA_DIR / "cache" / "images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    token = settings.MOODLE_WS_TOKEN
+    base_url = settings.MOODLE_BASE_URL or "https://courses.ut.edu.vn"
+    base_domain = base_url.replace("https://", "").replace("http://", "")
+
+    for tag in img_tags:
+        src_match = re.search(r'src="([^"]+)"', tag)
+        if not src_match:
+            continue
+        
+        orig_url = src_match.group(1)
+        if "pluginfile.php" not in orig_url or base_domain not in orig_url:
+            continue
+
+        parsed_url = urllib.parse.urlparse(orig_url)
+        path = parsed_url.path
+        
+        if not path.startswith("/webservice/"):
+            path = path.replace("/pluginfile.php", "/webservice/pluginfile.php")
+            
+        auth_url = f"{parsed_url.scheme}://{parsed_url.netloc}{path}"
+        if token:
+            auth_url += f"?token={token}"
+            
+        url_hash = hashlib.sha256(parsed_url.path.encode('utf-8')).hexdigest()
+        ext = os.path.splitext(parsed_url.path)[1]
+        if not ext or len(ext) > 5:
+            ext = ".png"
+        
+        cache_filename = f"{url_hash}{ext}"
+        cache_file_path = cache_dir / cache_filename
+
+        downloaded = True
+        if not cache_file_path.exists():
+            try:
+                logger.info(f"Downloading Moodle image: {orig_url}")
+                req = urllib.request.Request(auth_url)
+                req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    if resp.status == 200:
+                        with open(cache_file_path, 'wb') as f:
+                            f.write(resp.read())
+                        logger.info(f"Successfully cached image to {cache_file_path}")
+                    else:
+                        downloaded = False
+            except Exception as e:
+                logger.warning(f"Failed to cache image {orig_url}: {e}")
+                downloaded = False
+
+        if downloaded and cache_file_path.exists():
+            local_path = cache_file_path.as_uri()
+            new_tag = tag.replace(orig_url, local_path)
+            html_content = html_content.replace(tag, new_tag)
+        else:
+            new_tag = tag.replace(orig_url, auth_url)
+            html_content = html_content.replace(tag, new_tag)
+
+    return html_content
+
+
+def html_to_markdown(html_content: str) -> str:
+    """
+    Converts basic HTML tags commonly found in Moodle descriptions
+    to Markdown syntax.
+    """
+    if not html_content:
+        return ""
+
+    text = re.sub(r'<br\s*/?>', '\n', html_content)
+    text = re.sub(r'<p[^>]*>', '\n\n', text)
+    text = re.sub(r'</p>', '\n\n', text)
+
+    text = re.sub(r'<(b|strong)[^>]*>(.*?)</\1>', r'**\2**', text, flags=re.IGNORECASE)
+    text = re.sub(r'<(i|em)[^>]*>(.*?)</\1>', r'*\2*', text, flags=re.IGNORECASE)
+
+    text = re.sub(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', r'[\2](\1)', text, flags=re.IGNORECASE)
+
+    def _img_repl(match):
+        tag = match.group(0)
+        src_match = re.search(r'src="([^"]+)"', tag)
+        if not src_match:
+            return ""
+        src = src_match.group(1)
+        alt_match = re.search(r'alt="([^"]+)"', tag)
+        alt = alt_match.group(1) if alt_match else "Hình ảnh"
+        return f"\n\n![{alt}]({src})\n\n"
+        
+    text = re.sub(r'<img[^>]+>', _img_repl, text)
+
+    text = re.sub(r'<ul[^>]*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</ul>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<ol[^>]*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</ol>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>(.*?)</li>', r'\n- \1', text, flags=re.IGNORECASE)
+
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    return text.strip()

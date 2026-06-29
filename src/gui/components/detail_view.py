@@ -807,11 +807,18 @@ class DetailView(ft.Container):
             self._content_col.controls.append(self._section("Điểm danh", att_rows))
 
         # ── Mô tả ──
-        desc = clean_html(details.get("description_html", ""))
-        if desc:
+        desc_html = details.get("description_html", "")
+        if desc_html:
+            from gui.core.utils import html_to_markdown
+            desc_md = html_to_markdown(desc_html)
             self._content_col.controls.append(self._section("Mô tả", [
                 ft.Container(
-                    content=ft.Text(desc, size=12, color=C.TEXT_SECONDARY),
+                    content=ft.Markdown(
+                        desc_md,
+                        selectable=True,
+                        extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                        on_tap_link=lambda e: ft.UrlLauncher().launch_url(e.data),
+                    ),
                     bgcolor=C.SURFACE, border_radius=8,
                     padding=ft.Padding.all(12),
                 )

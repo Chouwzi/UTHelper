@@ -1574,6 +1574,11 @@ class AppController:
         self.page.update()
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
+            if full_data and "details" in full_data:
+                desc_html = full_data["details"].get("description_html", "")
+                if desc_html:
+                    from gui.core.utils import pre_cache_description_images
+                    full_data["details"]["description_html"] = pre_cache_description_images(desc_html)
             self.detail_view.update_detail(full_data)
         except Exception:
             self.detail_view.update_detail(data)
