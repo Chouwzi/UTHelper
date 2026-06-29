@@ -254,6 +254,7 @@ def get_submission_badge(data: dict):
 import hashlib
 import os
 import re
+import shutil
 import urllib.parse
 import urllib.request
 import logging
@@ -261,10 +262,120 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+def get_active_assets_dir() -> Path:
+    """Trả về thư mục assets đang hoạt động ở runtime."""
+    flet_assets = os.environ.get("FLET_ASSETS_DIR")
+    if flet_assets:
+        return Path(flet_assets)
+        
+    # Relative fallback to src/assets
+    utils_dir = Path(__file__).resolve().parent
+    src_dir = utils_dir.parent.parent
+    assets_dir = src_dir / "assets"
+    if assets_dir.exists():
+        return assets_dir
+        
+    from config import _USER_DATA_DIR
+    return _USER_DATA_DIR
+
+
+def ensure_image_in_assets(cache_file_path: Path) -> str:
+    """
+    Đảm bảo tệp hình ảnh đã cache tồn tại trong thư mục assets đang hoạt động
+    để Flet có thể load được trong cả chế độ Web và Desktop.
+    Trả về đường dẫn tương đối (ví dụ: 'cache/images/hash.png').
+    """
+    try:
+        if not cache_file_path.exists():
+            return ""
+            
+        assets_dir = get_active_assets_dir()
+        if assets_dir == cache_file_path.parent.parent.parent:
+            # Nếu thư mục assets trùng với USER_DATA_DIR
+            return f"cache/images/{cache_file_path.name}"
+            
+        dest_dir = assets_dir / "cache" / "images"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = dest_dir / cache_file_path.name
+        
+        # Sao chép tệp nếu chưa có hoặc kích thước khác nhau
+        if not dest_file.exists() or dest_file.stat().st_size != cache_file_path.stat().st_size:
+            shutil.copy2(cache_file_path, dest_file)
+            logger.info(f"Đã sao chép ảnh cache vào assets: {dest_file}")
+            
+        return f"cache/images/{cache_file_path.name}"
+    except Exception as e:
+        logger.warning(f"Lỗi khi sao chép ảnh vào assets: {e}")
+        return cache_file_path.as_uri()
+
+
+def cleanup_image_cache():
+    """
+    Dọn dẹp thư mục lưu trữ cache hình ảnh cục bộ để giữ dung lượng dưới giới hạn (50MB).
+    Sử dụng thuật toán LRU (Least Recently Used) để xoá tệp cũ nhất.
+    """
+    try:
+        from config import _USER_DATA_DIR
+        cache_dir = _USER_DATA_DIR / "cache" / "images"
+        if not cache_dir.exists():
+            return
+            
+        # Giới hạn 50 MB
+        MAX_SIZE = 50 * 1024 * 1024
+        
+        files = [cache_dir / f for f in os.listdir(cache_dir)]
+        if not files:
+            return
+            
+        file_infos = []
+        for f in files:
+            if f.is_file():
+                try:
+                    stat = f.stat()
+                    # Lấy access time (atime) làm tiêu chí LRU
+                    file_infos.append((f, stat.st_size, stat.st_atime))
+                except Exception:
+                    pass
+                    
+        # Sắp xếp theo thời gian truy cập (cũ nhất trước)
+        file_infos.sort(key=lambda x: x[2])
+        total_size = sum(x[1] for x in file_infos)
+        
+        if total_size <= MAX_SIZE:
+            return
+            
+        logger.info(f"Dung lượng cache ảnh ({total_size} bytes) vượt quá giới hạn ({MAX_SIZE} bytes). Tiến hành dọn dẹp...")
+        
+        # Thư mục active assets cache để xoá tệp mirrored tương ứng
+        assets_dir = get_active_assets_dir()
+        assets_cache_dir = assets_dir / "cache" / "images"
+        
+        for f, size, _ in file_infos:
+            try:
+                # Xoá ở persistent cache
+                f.unlink()
+                
+                # Xoá ở assets cache
+                if assets_cache_dir.exists():
+                    mirrored_file = assets_cache_dir / f.name
+                    if mirrored_file.exists():
+                        mirrored_file.unlink()
+                        
+                total_size -= size
+                logger.info(f"Đã xoá ảnh cache cũ: {f.name}")
+                # Dừng khi dung lượng đã giảm xuống dưới 80% giới hạn
+                if total_size <= MAX_SIZE * 0.8:
+                    break
+            except Exception as e:
+                logger.warning(f"Không thể xoá tệp cache {f.name}: {e}")
+    except Exception as e:
+        logger.warning(f"Lỗi khi dọn dẹp cache ảnh: {e}")
+
+
 def pre_cache_description_images(html_content: str) -> str:
     """
-    Downloads and caches images from description_html to local disk,
-    replacing network URLs with local file:/// absolute paths.
+    Tải xuống và cache toàn bộ ảnh từ description_html vào ổ đĩa local,
+    thay thế URL mạng bằng đường dẫn tương đối để Flet hiển thị.
     """
     if not html_content:
         return html_content
@@ -293,6 +404,7 @@ def pre_cache_description_images(html_content: str) -> str:
         parsed_url = urllib.parse.urlparse(orig_url)
         path = parsed_url.path
         
+        # Chuẩn hoá sang webservice/pluginfile.php
         if not path.startswith("/webservice/"):
             path = path.replace("/pluginfile.php", "/webservice/pluginfile.php")
             
@@ -326,20 +438,24 @@ def pre_cache_description_images(html_content: str) -> str:
                 downloaded = False
 
         if downloaded and cache_file_path.exists():
-            local_path = cache_file_path.as_uri()
-            new_tag = tag.replace(orig_url, local_path)
+            # Mirror sang active assets và lấy đường dẫn tương đối
+            assets_rel_path = ensure_image_in_assets(cache_file_path)
+            new_tag = tag.replace(orig_url, assets_rel_path)
             html_content = html_content.replace(tag, new_tag)
         else:
+            # Fallback sang link web service trực tuyến có kèm token
             new_tag = tag.replace(orig_url, auth_url)
             html_content = html_content.replace(tag, new_tag)
+
+    # Chạy dọn dẹp cache sau mỗi lần tải ảnh mới
+    cleanup_image_cache()
 
     return html_content
 
 
 def html_to_markdown(html_content: str) -> str:
     """
-    Converts basic HTML tags commonly found in Moodle descriptions
-    to Markdown syntax.
+    Chuyển đổi các thẻ HTML cơ bản từ Moodle sang cú pháp Markdown.
     """
     if not html_content:
         return ""

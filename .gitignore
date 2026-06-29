@@ -120,3 +120,6 @@ Output/
 coverage/
 .nyc_output/
 test-results/
+
+# ── Dynamic cache ──
+src/assets/cache/
