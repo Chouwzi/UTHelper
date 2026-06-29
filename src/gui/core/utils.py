@@ -270,7 +270,7 @@ def get_active_assets_dir() -> Path:
         
     # Relative fallback to src/assets
     utils_dir = Path(__file__).resolve().parent
-    src_dir = utils_dir.parent.parent
+    src_dir = utils_dir.parent.parent.parent
     assets_dir = src_dir / "assets"
     if assets_dir.exists():
         return assets_dir
@@ -283,7 +283,8 @@ def ensure_image_in_assets(cache_file_path: Path) -> str:
     """
     Đảm bảo tệp hình ảnh đã cache tồn tại trong thư mục assets đang hoạt động
     để Flet có thể load được trong cả chế độ Web và Desktop.
-    Trả về đường dẫn tương đối (ví dụ: 'cache/images/hash.png').
+    Nếu chạy trên nền tảng di động (Android/iOS) nơi thư mục assets là read-only,
+    hàm sẽ trả về đường dẫn tuyệt đối thô (raw absolute path) để tải trực tiếp từ persistent cache.
     """
     try:
         if not cache_file_path.exists():
@@ -295,6 +296,8 @@ def ensure_image_in_assets(cache_file_path: Path) -> str:
             return f"cache/images/{cache_file_path.name}"
             
         dest_dir = assets_dir / "cache" / "images"
+        
+        # Thử tạo thư mục (ném lỗi OSError nếu assets là read-only trên Mobile)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_file = dest_dir / cache_file_path.name
         
@@ -304,9 +307,13 @@ def ensure_image_in_assets(cache_file_path: Path) -> str:
             logger.info(f"Đã sao chép ảnh cache vào assets: {dest_file}")
             
         return f"cache/images/{cache_file_path.name}"
+    except OSError as e:
+        # Trường hợp không ghi được vào assets (ví dụ: Read-only file system trên Android/iOS)
+        logger.info(f"Thư mục assets không thể ghi (có thể đang ở Mobile). Sử dụng đường dẫn tuyệt đối: {e}")
+        return str(cache_file_path)
     except Exception as e:
         logger.warning(f"Lỗi khi sao chép ảnh vào assets: {e}")
-        return cache_file_path.as_uri()
+        return str(cache_file_path)
 
 
 def cleanup_image_cache():
