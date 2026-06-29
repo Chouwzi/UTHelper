@@ -701,17 +701,33 @@ class DetailView(ft.Container):
             "Time remaining", "Thời gian còn lại",  # Already shown in info box above
         }
         if status_data:
-            rows = [
-                ft.Row(controls=[
-                    ft.Text(_translate_key(k), size=12, color=C.TEXT_SECONDARY, width=130),
-                    ft.Text(_translate_status(str(v)), size=12, color=C.TEXT_PRIMARY, expand=True),
-                ], spacing=8)
-                for k, v in status_data.items()
-                if k not in _SKIP_KEYS
-                and v
-                and str(v).strip() not in ("-", "")
-                and "___" not in str(v)   # Strip leaked Moodle HTML templates
-            ]
+            rows = []
+            for k, v in status_data.items():
+                if (k not in _SKIP_KEYS 
+                    and v 
+                    and str(v).strip() not in ("-", "") 
+                    and "___" not in str(v)):
+                    
+                    translated_key = _translate_key(k)
+                    translated_val = _translate_status(str(v))
+                    val_color = C.TEXT_PRIMARY
+                    
+                    if k in ("Submission status", "Trạng thái nộp bài") or translated_key == "Trạng thái nộp bài":
+                        val_str = str(v).lower()
+                        is_submitted = (
+                            "submit" in val_str or 
+                            "finish" in val_str or 
+                            "nộp" in translated_val.lower() or 
+                            "hoàn thành" in translated_val.lower()
+                        ) and "chưa" not in translated_val.lower() and "no" not in val_str
+                        val_color = C.SAFE if is_submitted else C.CRITICAL
+                        
+                    rows.append(
+                        ft.Row(controls=[
+                            ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
+                            ft.Text(translated_val, size=12, color=val_color, expand=True, weight=ft.FontWeight.W_600 if val_color in (C.SAFE, C.CRITICAL) else ft.FontWeight.NORMAL),
+                        ], spacing=8)
+                    )
             if rows:
                 self._content_col.controls.append(self._section("Trạng thái", rows))
 
@@ -825,18 +841,9 @@ class DetailView(ft.Container):
         if not self._current_url:
             return
 
-        client = None
-        try:
-            client = self._get_client() if self._get_client else None
-        except Exception:
-            pass
-
-        url_to_open = self._current_url
-        if client:
-            # Sử dụng autologin URL thông qua Moodle login endpoint
-            url_to_open = client.build_autologin_url(self._current_url)
-
-        await ft.UrlLauncher().launch_url(url_to_open)
+        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
+        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
+        await ft.UrlLauncher().launch_url(self._current_url)
 
     # ── In-App Submission ──────────────────────────────────────────────
 
@@ -1331,15 +1338,9 @@ class DetailView(ft.Container):
         """Mở trình duyệt để chỉnh sửa bài nộp."""
         if not self._current_url:
             return
-        client = None
-        try:
-            client = self._get_client() if self._get_client else None
-        except Exception:
-            pass
-        url = self._current_url
-        if client:
-            url = client.build_autologin_url(self._current_url)
-        await ft.UrlLauncher().launch_url(url)
+        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
+        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
+        await ft.UrlLauncher().launch_url(self._current_url)
 
     # ── File Edit Dialog ──────────────────────────────────────
 
