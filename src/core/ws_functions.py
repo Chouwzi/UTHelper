@@ -552,7 +552,8 @@ def save_assignment_submission(
 ) -> bool:
     """Nộp bài assignment với file từ draft area.
     
-    Gọi mod_assign_save_submission để lưu bài nộp.
+    Gọi mod_assign_save_submission để lưu bài nộp. Tự động bảo toàn và gửi kèm
+    onlinetext nếu bài tập yêu cầu để tránh lỗi dmlwriteexception từ Moodle database.
     
     Args:
         call_api: WS API caller.
@@ -562,12 +563,51 @@ def save_assignment_submission(
     Returns:
         True nếu nộp thành công, False nếu lỗi.
     """
+    params = {
+        'assignmentid': assign_id,
+        'plugindata[files_filemanager]': draft_itemid,
+    }
+    
     try:
-        result = call_api(
-            'mod_assign_save_submission',
-            assignmentid=assign_id,
-            **{'plugindata[files_filemanager]': draft_itemid},
-        )
+        # Lấy trạng thái hiện tại để kiểm tra xem có onlinetext plugin không
+        status = call_api('mod_assign_get_submission_status', assignid=assign_id)
+        if status and isinstance(status, dict):
+            last_attempt = status.get('lastattempt', {})
+            submission = last_attempt.get('submission', {})
+            plugins = submission.get('plugins', [])
+            
+            has_onlinetext = False
+            onlinetext_val = ""
+            onlinetext_format = 1
+            
+            for plugin in plugins:
+                if plugin.get('type') == 'onlinetext':
+                    has_onlinetext = True
+                    editorfields = plugin.get('editorfields', [])
+                    if editorfields:
+                        onlinetext_val = editorfields[0].get('text', '')
+                        onlinetext_format = editorfields[0].get('format', 1)
+                    break
+            
+            if has_onlinetext:
+                # Đưa onlinetext vào params để tránh Moodle xóa text hoặc báo dmlwriteexception
+                params['plugindata[onlinetext_editor][text]'] = onlinetext_val
+                params['plugindata[onlinetext_editor][format]'] = onlinetext_format
+                
+                # Cần draft itemid riêng cho text editor để không làm trống files_filemanager
+                text_draft_id = 0
+                try:
+                    text_draft_res = call_api('core_files_get_unused_draft_itemid')
+                    if text_draft_res and isinstance(text_draft_res, dict):
+                        text_draft_id = text_draft_res.get('itemid', 0)
+                except Exception:
+                    pass
+                params['plugindata[onlinetext_editor][itemid]'] = text_draft_id
+    except Exception as e:
+        logger.warning("Không kiểm tra được onlinetext status: %s. Sẽ fallback nộp file thông thường.", e)
+
+    try:
+        result = call_api('mod_assign_save_submission', **params)
     except Exception as e:
         logger.error("Lỗi khi nộp bài (assign_id=%d): %s", assign_id, e)
         return False
@@ -576,9 +616,14 @@ def save_assignment_submission(
         return False
     
     # mod_assign_save_submission trả về [] (empty list) khi thành công
-    if isinstance(result, list) and len(result) == 0:
-        logger.info("Nộp bài thành công (assign_id=%d, draft=%d)", assign_id, draft_itemid)
-        return True
+    if isinstance(result, list):
+        if len(result) == 0:
+            logger.info("Nộp bài thành công (assign_id=%d, draft=%d)", assign_id, draft_itemid)
+            return True
+        else:
+            for w in result:
+                logger.warning("Submission warning: %s", w.get('message', w))
+            return False
     
     # Trả về dict với warnings
     if isinstance(result, dict):
