@@ -138,13 +138,19 @@ def set_page_theme(page) -> None:
     Giúp các thuộc tính như ft.Colors.PRIMARY, ft.Colors.SURFACE đồng bộ với theme tùy chỉnh.
     """
     import flet as ft
+    from config import settings
+    from gui.core.theme_presets import THEME_PRESETS
+    
+    theme_name = getattr(settings, 'THEME', 'midnight_blue')
+    preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
+    is_light = preset.get("mode", "dark") == "light"
 
-    page.theme = ft.Theme(
+    theme_obj = ft.Theme(
         color_scheme=ft.ColorScheme(
             primary=C.ACCENT,
-            on_primary="#FFFFFF",
+            on_primary="#FFFFFF" if not is_light else "#0F172A",
             secondary=C.TEXT_SECONDARY,
-            on_secondary="#FFFFFF",
+            on_secondary="#FFFFFF" if not is_light else "#0F172A",
             surface=C.SURFACE,
             on_surface=C.TEXT_PRIMARY,
             on_surface_variant=C.TEXT_SECONDARY,
@@ -154,5 +160,14 @@ def set_page_theme(page) -> None:
             on_error="#FFFFFF",
         ),
     )
-    page.dark_theme = page.theme
+    
+    if is_light:
+        page.theme_mode = ft.ThemeMode.LIGHT
+        page.theme = theme_obj
+        page.dark_theme = None
+    else:
+        page.theme_mode = ft.ThemeMode.DARK
+        page.theme = theme_obj
+        page.dark_theme = theme_obj
+        
     page.bgcolor = C.BG
