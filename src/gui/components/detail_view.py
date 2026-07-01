@@ -76,17 +76,23 @@ _LICENSE_OPTIONS = [
 class DetailView(ft.Container):
     def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None):
         super().__init__()
+        self._init_variables(page, get_client, on_status_changed)
+        self._init_controls()
+        self._init_layout(on_close)
+
+    def _init_variables(self, page: ft.Page, get_client, on_status_changed):
         self._page          = page
         self.visible        = False
         self.expand         = True
         self.bgcolor        = C.BG
         self._current_url   = ""
         self._current_data  = {}
-        self._get_client    = get_client   # hàm lấy MoodleClient để truy xuất đường dẫn đăng nhập
+        self._get_client    = get_client   
         self._on_status_changed = on_status_changed
-        self._selected_files = []          # list of FilePickerFile objects
+        self._selected_files = []          
         self._is_uploading  = False
 
+    def _init_controls(self):
         self._title_text    = ft.Text("", size=18, weight=ft.FontWeight.BOLD,
                                       color=C.TEXT_PRIMARY, max_lines=3)
         self._course_text   = ft.Text("", size=12, color=C.ACCENT)
@@ -110,22 +116,15 @@ class DetailView(ft.Container):
         )
         self._content_col   = ft.Column(spacing=12)
 
-        # ── FilePicker for in-app submission ──
-        # FilePicker is a Service in Flet 0.82+ (not a Control)
-        # Do NOT add to page.overlay — just instantiate and call methods
-
-        # ── File preview area (files to upload) ──
         self._file_list_col = ft.Column(spacing=4, visible=False)
         self._upload_progress = ft.ProgressBar(color=C.SAFE, bgcolor=C.BORDER, visible=False)
         self._upload_status = ft.Text("", size=12, color=C.TEXT_SECONDARY, visible=False)
 
-        # ── Submitted files area (files already on server) ──
-        self._submitted_files: list = []  # [{name, size, url, timemodified}]
-        self._editing_file_index: int = -1  # index of file being edited
-        self._selected_file_indices: set = set()  # indices selected for batch delete
-        self._is_multiselect_mode: bool = False
+        self._submitted_files = []  
+        self._editing_file_index = -1  
+        self._selected_file_indices = set()  
+        self._is_multiselect_mode = False
 
-        # ── File edit dialog fields ──
         self._edit_filename = ft.TextField(
             label="Tên", text_size=13, dense=True,
             border_color=C.BORDER, focused_border_color=C.ACCENT,
@@ -180,7 +179,6 @@ class DetailView(ft.Container):
             actions_alignment=ft.MainAxisAlignment.END,
         )
 
-        # ── Delete confirmation dialog ──
         self._delete_confirm_text = ft.Text("", size=13, color=C.TEXT_PRIMARY)
         self._delete_confirm_dialog = ft.AlertDialog(
             modal=True,
@@ -203,11 +201,10 @@ class DetailView(ft.Container):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        self._pending_delete_indices: list = []  # indices to delete after confirm
+        self._pending_delete_indices = []
 
         self._submitted_files_col = ft.Column(spacing=4, visible=False)
 
-        # ── Batch delete button (visible in multi-select mode) ──
         self._batch_delete_btn = ft.Container(
             content=ft.Row(
                 controls=[
@@ -227,7 +224,6 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        # ── Multi-select toggle button ──
         self._multiselect_btn = ft.Container(
             content=ft.Row(
                 controls=[
@@ -286,7 +282,6 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        # ── Pick file button ──
         self._pick_btn = ft.Container(
             content=ft.Row(
                 controls=[
@@ -305,7 +300,6 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        # ── Submit button (for in-app submission) ──
         self._submit_btn = ft.Container(
             content=ft.Row(
                 controls=[
@@ -324,8 +318,7 @@ class DetailView(ft.Container):
             expand=True,
         )
 
-        # ── Upload mode selector ──
-        self._upload_mode_overwrite = False  # default: append (safer for students)
+        self._upload_mode_overwrite = False  
         self._mode_overwrite_btn = ft.Container(
             content=ft.Row([
                 ft.Icon(ft.Icons.SWAP_HORIZ_ROUNDED, size=14, color=C.TEXT_SECONDARY),
@@ -353,8 +346,7 @@ class DetailView(ft.Container):
         )
         self._upload_mode_warning_icon = ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=12, color=C.WARNING)
         self._upload_mode_warning_text = ft.Text(
-            "Sẽ tải lại file cũ trước khi nộp. "
-            "Có thể lâu nếu file nặng.",
+            "Sẽ tải lại file cũ trước khi nộp. Có thể lâu nếu file nặng.",
             size=10, color=C.WARNING, italic=True, expand=True,
         )
         self._upload_mode_warning = ft.Container(
@@ -373,10 +365,9 @@ class DetailView(ft.Container):
                 self._upload_mode_warning,
             ],
             spacing=4,
-            visible=False,  # only show when there are existing files
+            visible=False,  
         )
 
-        # ── Submission area container ──
         self._submission_area = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
@@ -400,7 +391,6 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        # UX-8: Dynamic CTA — changes based on submission status
         self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=ft.Colors.WHITE)
         self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=ft.Colors.WHITE,
                             weight=ft.FontWeight.W_600)
@@ -418,15 +408,6 @@ class DetailView(ft.Container):
             alignment=ft.Alignment(0, 0),
         )
 
-        back_btn = ft.TextButton(
-            content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
-                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
-            ], spacing=4, tight=True),
-            on_click=lambda _: on_close(),
-            style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
-        )
-
         self._opentime_row = ft.Row(controls=[
                     ft.Text("Mở từ", size=11, color=C.TEXT_SECONDARY,
                             weight=ft.FontWeight.W_500),
@@ -440,6 +421,23 @@ class DetailView(ft.Container):
                     self._cutoff_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
         self._cutoff_row.visible = False
+
+        self._header_open_btn = ft.IconButton(
+            ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+            icon_color=C.ACCENT, icon_size=20,
+            tooltip="Mở trong trình duyệt",
+            on_click=self._open_browser,
+        )
+
+    def _init_layout(self, on_close):
+        back_btn = ft.TextButton(
+            content=ft.Row(controls=[
+                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
+                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
+            ], spacing=4, tight=True),
+            on_click=lambda _: on_close(),
+            style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
+        )
 
         info_box = ft.Container(
             content=ft.Column(controls=[
@@ -460,14 +458,6 @@ class DetailView(ft.Container):
             padding=ft.Padding.all(14),
             border_radius=8,
             border=ft.Border.all(1, C.BORDER),
-        )
-
-        # UX: Compact open-in-browser button in header for quick access
-        self._header_open_btn = ft.IconButton(
-            ft.Icons.OPEN_IN_BROWSER_ROUNDED,
-            icon_color=C.ACCENT, icon_size=20,
-            tooltip="Mở trong trình duyệt",
-            on_click=self._open_browser,
         )
 
         self.content = ft.Column(

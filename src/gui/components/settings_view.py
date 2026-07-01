@@ -12,10 +12,17 @@ from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
 import platform_utils as _pu  # use _pu.IS_MOBILE for live platform detection
+from gui.components.color_picker import open_color_picker
 
 class SettingsView(ft.Container):
     def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
         super().__init__()
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview)
+        self._init_controls()
+        self._init_debug_panel()
+        self._init_layout()
+
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -32,7 +39,11 @@ class SettingsView(ft.Container):
         self._selected_theme = getattr(settings, 'THEME', 'midnight_blue')
         self._original_theme = self._selected_theme  # For revert on discard
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
+        self._hint_containers = []
+        self._tiles = []
+        self._section_containers = []
 
+    def _init_controls(self):
         self._username_field = ft.TextField(
             value=settings.UTH_USERNAME,
             label="Mã số sinh viên (MSSV)",
@@ -70,7 +81,6 @@ class SettingsView(ft.Container):
         self._test_login_status = ft.Text("", size=12, text_align=ft.TextAlign.CENTER)
 
         self._sw_always_on_top = ft.Switch(
-
             value=settings.ALWAYS_ON_TOP, active_color=C.ACCENT,
             label="Luôn ở trên cùng",
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -92,117 +102,6 @@ class SettingsView(ft.Container):
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
             label="Khởi động cùng Windows"
         )
-
-        def open_color_picker(e, container_box, label, tb_field):
-            def _update_from_sliders(e):
-                hex_val = f"#{int(r_sl.value):02X}{int(g_sl.value):02X}{int(b_sl.value):02X}"
-                prv.bgcolor = hex_val
-                prv.update()
-                hex_inp.value = hex_val
-                hex_inp.update()
-                
-            def _update_from_hex(e):
-                try:
-                    val = hex_inp.value.strip().lstrip('#')
-                    if len(val) == 6:
-                        r, g, b = int(val[0:2], 16), int(val[2:4], 16), int(val[4:6], 16)
-                        r_sl.value, g_sl.value, b_sl.value = r, g, b
-                        r_sl.update(); g_sl.update(); b_sl.update()
-                        prv.bgcolor = f"#{val}"
-                        prv.update()
-                except:
-                    pass
-
-            curr = tb_field.value.lstrip('#')
-            try: r_v, g_v, b_v = int(curr[0:2], 16), int(curr[2:4], 16), int(curr[4:6], 16)
-            except: r_v, g_v, b_v = 0, 0, 0
-
-            r_sl = ft.Slider(min=0, max=255, value=r_v, active_color=ft.Colors.RED_400, on_change=_update_from_sliders, expand=True)
-            g_sl = ft.Slider(min=0, max=255, value=g_v, active_color=ft.Colors.GREEN_400, on_change=_update_from_sliders, expand=True)
-            b_sl = ft.Slider(min=0, max=255, value=b_v, active_color=ft.Colors.BLUE_400, on_change=_update_from_sliders, expand=True)
-            
-            hex_inp = ft.TextField(value=tb_field.value, on_change=_update_from_hex, text_align=ft.TextAlign.CENTER, border_radius=8, content_padding=5, text_size=13, width=100)
-            prv = ft.Container(width=100, height=40, bgcolor=tb_field.value, border_radius=8, border=ft.Border.all(1, C.BORDER))
-
-            def _apply(e):
-                container_box.bgcolor = hex_inp.value
-                tb_field.value = hex_inp.value
-                container_box.update()
-                tb_field.update()
-                dlg.open = False
-                try:
-                    self._page.overlay.remove(dlg)
-                except (ValueError, AttributeError):
-                    pass
-                self._page.update()
-
-            def _cancel(e):
-                dlg.open = False
-                try:
-                    self._page.overlay.remove(dlg)
-                except (ValueError, AttributeError):
-                    pass
-                self._page.update()
-
-            dlg = ft.AlertDialog(
-                title=ft.Text(f"Chọn màu: {label}", size=16, weight=ft.FontWeight.BOLD),
-                content=ft.Container(
-                    width=300,
-                    content=ft.Column([
-                        ft.Row([prv, hex_inp], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        ft.Container(height=10),
-                        ft.Row([ft.Text("R", color=ft.Colors.RED_400, weight=ft.FontWeight.BOLD, width=20), r_sl]),
-                        ft.Row([ft.Text("G", color=ft.Colors.GREEN_400, weight=ft.FontWeight.BOLD, width=20), g_sl]),
-                        ft.Row([ft.Text("B", color=ft.Colors.BLUE_400, weight=ft.FontWeight.BOLD, width=20), b_sl]),
-                    ], tight=True)
-                ),
-                actions=[
-                    ft.TextButton("Hủy", on_click=_cancel),
-                    ft.Button("Áp dụng", on_click=_apply, bgcolor=C.ACCENT, color=ft.Colors.WHITE),
-                ],
-                shape=ft.RoundedRectangleBorder(radius=12)
-            )
-            self._page.overlay.append(dlg)
-            dlg.open = True
-            self._page.update()
-
-        def _color_field(label_text, default_color):
-            tb = ft.TextField(value=default_color, width=90, text_size=12, height=36, border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, content_padding=6)
-            box = ft.Container(width=24, height=24, bgcolor=default_color, border_radius=4, border=ft.Border.all(1, "#333333"), ink=True)
-            
-            # Click event for the box
-            def _on_box_click(e):
-                open_color_picker(e, box, label_text, tb)
-                
-            # Allow click wrapping
-            box_click = ft.GestureDetector(
-                content=box,
-                on_tap=_on_box_click,
-                mouse_cursor=ft.MouseCursor.CLICK
-            )
-
-            def _on_change(e):
-                box.bgcolor = tb.value
-                box.update()
-            tb.on_change = _on_change
-            label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
-            self._themed_texts.append(label_txt)
-            return tb, ft.Row([label_txt, box_click, tb], spacing=10, tight=True)
-
-        self._c_tb_critical, row_cri = _color_field("Cấp bách / Quá hạn", getattr(settings, 'COLOR_CRITICAL', '#EF4444'))
-        self._c_tb_warning, row_warn = _color_field("Sắp tới", getattr(settings, 'COLOR_WARNING', '#F59E0B'))
-        self._c_tb_safe, row_safe = _color_field("An toàn / Thường", getattr(settings, 'COLOR_SAFE', '#10B981'))
-        self._c_tb_quiz, row_quiz = _color_field("Tag Quiz", getattr(settings, 'COLOR_QUIZ', '#7C3AED'))
-        self._c_tb_ass, row_ass = _color_field("Tag Bài tập", getattr(settings, 'COLOR_ASSIGNMENT', '#2563EB'))
-        self._c_tb_att, row_att = _color_field("Tag Điểm danh", getattr(settings, 'COLOR_ATTENDANCE', '#D97706'))
-        self._c_tb_open, row_open = _color_field("Tag Sắp mở", getattr(settings, 'COLOR_OPEN', '#0891B2'))
-        self._c_tb_other, row_other = _color_field("Tag Sự kiện", getattr(settings, 'COLOR_OTHER', '#6B7280'))
-        
-        # ── Theme Selector ──
-        self._theme_cards_row = self._build_theme_selector()
-
-        self.btn_reset = ft.OutlinedButton("Khôi phục mặc định", width=400, on_click=self._handle_reset_defaults, style=ft.ButtonStyle(color=C.TEXT_SECONDARY))
-
         self._sw_start_minimized = ft.Switch(
             value=settings.START_MINIMIZED, active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -308,142 +207,6 @@ class SettingsView(ft.Container):
             color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=8,
             text_size=13
         )
-        # ── Debug panel: Comprehensive test tools ──
-        # Section 1: Notification channel tests (platform-aware)
-        _notif_section_label = ft.Text("Kiểm thử kênh thông báo", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        _tray_btn = ft.Button("Windows Tray", icon=ft.Icons.DESKTOP_WINDOWS_ROUNDED, on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
-        _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
-        _notif_buttons = ft.Row([
-            *([_tray_btn] if not _pu.IS_MOBILE else [_mobile_btn]),
-            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
-            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
-            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
-            ft.Button("Gửi tất cả", icon=ft.Icons.CAMPAIGN_ROUNDED, on_click=lambda e: self._do_test_broadcast(), bgcolor=C.SURFACE, color=C.CRITICAL),
-        ], wrap=True, spacing=6)
-
-        # Section 2: System diagnostics
-        _sys_section_label = ft.Text("Chẩn đoán hệ thống", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        self._debug_info_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
-        _sys_buttons = ft.Row([
-            ft.Button("Thông tin thiết bị", icon=ft.Icons.INFO_OUTLINE_ROUNDED, on_click=lambda e: self._do_show_device_info(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("Kết nối Moodle", icon=ft.Icons.CLOUD_SYNC_ROUNDED, on_click=lambda e: self._do_test_moodle_connection(), bgcolor=C.SURFACE, color=C.ACCENT),
-            ft.Button("Ping Moodle", icon=ft.Icons.SPEED_ROUNDED, on_click=lambda e: self._do_test_latency(), bgcolor=C.SURFACE, color=C.ACCENT),
-            ft.Button("Notifiers", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=lambda e: self._do_show_notifiers(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("DND Status", icon=ft.Icons.DO_NOT_DISTURB_ROUNDED, on_click=lambda e: self._do_check_dnd(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-        ], wrap=True, spacing=6)
-
-        # Section 3: Cache & data management
-        _cache_section_label = ft.Text("Bộ nhớ đệm & dữ liệu", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        self._debug_cache_stats = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True)
-        _cache_buttons = ft.Row([
-            ft.Button("Thống kê cache", icon=ft.Icons.ANALYTICS_ROUNDED, on_click=lambda e: self._do_show_cache_stats(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("Xóa cache thông báo", icon=ft.Icons.NOTIFICATIONS_OFF_ROUNDED, on_click=lambda e: self._do_clear_notif_cache(), bgcolor=C.SURFACE, color=C.WARNING),
-            ft.Button("Xóa lịch sử", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
-            ft.Button("Xóa cache offline", icon=ft.Icons.CACHED_ROUNDED, on_click=lambda e: self._do_clear_data_cache(), bgcolor=C.SURFACE, color=C.WARNING),
-        ], wrap=True, spacing=6)
-
-        # Section 3b: Notification history viewer
-        _history_section_label = ft.Text("Lịch sử thông báo đã gửi", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        self._debug_history_text = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True, max_lines=15)
-        _history_buttons = ft.Row([
-            ft.Button("Xem gần đây", icon=ft.Icons.HISTORY_ROUNDED, on_click=lambda e: self._do_show_notif_history(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-        ], wrap=True, spacing=6)
-
-        # Section 4: Background scheduler (Android only)
-        _bg_section_label = ft.Text("Background Scheduler (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        self._debug_scheduler_status = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
-        _bg_buttons = ft.Row([
-            ft.Button("Trạng thái", icon=ft.Icons.QUERY_STATS_ROUNDED, on_click=lambda e: self._do_show_scheduler_status(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("Start Foreground", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, on_click=lambda e: self._do_start_foreground(), bgcolor=C.SURFACE, color=C.SAFE),
-            ft.Button("Stop Foreground", icon=ft.Icons.STOP_CIRCLE_OUTLINED, on_click=lambda e: self._do_stop_foreground(), bgcolor=C.SURFACE, color=C.CRITICAL),
-            ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
-        ], wrap=True, spacing=6)
-
-        # Section 4b: Mobile-specific tests (Android/iOS)
-        _mobile_section_label = ft.Text("Kiểm thử Mobile", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        self._debug_mobile_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
-        _mobile_test_buttons = ft.Row([
-            ft.Button("Quyền thông báo", icon=ft.Icons.NOTIFICATIONS_ACTIVE_ROUNDED, on_click=lambda e: self._do_check_notif_permission(), bgcolor=C.SURFACE, color=C.ACCENT),
-            ft.Button("Notif Critical", icon=ft.Icons.ERROR_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("critical"), bgcolor=C.SURFACE, color=C.CRITICAL),
-            ft.Button("Notif Warning", icon=ft.Icons.WARNING_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("warning"), bgcolor=C.SURFACE, color=C.WARNING),
-            ft.Button("Notif Safe", icon=ft.Icons.CHECK_CIRCLE_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("safe"), bgcolor=C.SURFACE, color=C.SAFE),
-        ], wrap=True, spacing=6)
-        _mobile_test_buttons2 = ft.Row([
-            ft.Button("Backend Info", icon=ft.Icons.INFO_ROUNDED, on_click=lambda e: self._do_show_mobile_backend(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("Rung thiết bị", icon=ft.Icons.VIBRATION_ROUNDED, on_click=lambda e: self._do_test_vibration(), bgcolor=C.SURFACE, color=C.ACCENT),
-            ft.Button("Pin & tối ưu", icon=ft.Icons.BATTERY_SAVER_ROUNDED, on_click=lambda e: self._do_check_battery_opt(), bgcolor=C.SURFACE, color=C.WARNING),
-            ft.Button("Multi Notif (x3)", icon=ft.Icons.DYNAMIC_FEED_ROUNDED, on_click=lambda e: self._do_mock_multi_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
-        ], wrap=True, spacing=6)
-
-        # Section 5: Update checker
-        _update_section_label = ft.Text("Kiểm tra cập nhật", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        self._debug_update_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
-        _update_buttons = ft.Row([
-            ft.Button("Force check update", icon=ft.Icons.SYSTEM_UPDATE_ROUNDED, on_click=lambda e: self._do_force_check_update(), bgcolor=C.SURFACE, color=C.ACCENT),
-        ], wrap=True, spacing=6)
-
-        # Section 6: Data & actions
-        _action_section_label = ft.Text("Hành động nhanh", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
-        _action_buttons = ft.Row([
-            ft.Button("Force Refresh", icon=ft.Icons.REFRESH_ROUNDED, on_click=lambda e: self._do_force_refresh(), bgcolor=C.SURFACE, color=C.ACCENT),
-            ft.Button("Reset Settings", icon=ft.Icons.RESTART_ALT_ROUNDED, on_click=lambda e: self._do_reset_settings(), bgcolor=C.SURFACE, color=C.CRITICAL),
-        ], wrap=True, spacing=6)
-
-        # Assemble debug panel with platform-aware sections
-        _debug_sections = [
-            ft.Text("Công cụ gỡ lỗi nâng cao", color=C.CRITICAL, weight=ft.FontWeight.BOLD, size=14),
-            ft.Divider(height=1, color=C.BORDER),
-            # Notification tests
-            _notif_section_label,
-            self._mock_type_drp,
-            _notif_buttons,
-            ft.Divider(height=1, color=C.BORDER),
-            # System diagnostics
-            _sys_section_label,
-            _sys_buttons,
-            self._debug_info_text,
-            ft.Divider(height=1, color=C.BORDER),
-            # Cache management
-            _cache_section_label,
-            _cache_buttons,
-            self._debug_cache_stats,
-            ft.Divider(height=1, color=C.BORDER),
-            # Notification history
-            _history_section_label,
-            _history_buttons,
-            self._debug_history_text,
-        ]
-
-        # Android-only: background scheduler controls
-        if _pu.IS_MOBILE:
-            _debug_sections.extend([
-                ft.Divider(height=1, color=C.BORDER),
-                _bg_section_label,
-                _bg_buttons,
-                self._debug_scheduler_status,
-                ft.Divider(height=1, color=C.BORDER),
-                _mobile_section_label,
-                _mobile_test_buttons,
-                _mobile_test_buttons2,
-                self._debug_mobile_text,
-            ])
-
-        # Update checker + quick actions (all platforms)
-        _debug_sections.extend([
-            ft.Divider(height=1, color=C.BORDER),
-            _update_section_label,
-            _update_buttons,
-            self._debug_update_text,
-            ft.Divider(height=1, color=C.BORDER),
-            _action_section_label,
-            _action_buttons,
-        ])
-
-        self._test_panel = ft.Container(
-            content=ft.Column(_debug_sections, spacing=8, scroll=ft.ScrollMode.AUTO),
-            visible=settings.DEBUG_MODE,
-            padding=12, border=ft.Border.all(1, C.CRITICAL), border_radius=10, margin=ft.Margin.only(top=10)
-        )
         
         self._interval_field = ft.TextField(
             value=str(settings.CHECK_INTERVAL_MINUTES),
@@ -517,7 +280,6 @@ class SettingsView(ft.Container):
             bgcolor=C.BG, border_radius=10,
         )
 
-        # ── Notification Profile Presets ──
         _PROFILES = {
             "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
             "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
@@ -526,29 +288,6 @@ class SettingsView(ft.Container):
         self._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
         self._profile_cards = {}
         self._profile_summary = ft.Text("", size=12, color=C.TEXT_SECONDARY, italic=True)
-
-        def _on_profile_select(profile_key):
-            def handler(e):
-                self._current_profile = profile_key
-                prof = _PROFILES[profile_key]
-                # Auto-apply profile settings
-                self._sw_dnd_enable.value = prof["dnd"]
-                self._dnd_start_field.value = str(prof["dnd_start"])
-                self._dnd_end_field.value = str(prof["dnd_end"])
-                self._notify_min_field.value = str(prof["min_before"])
-                # Update milestone chips
-                for h, chip in self._milestone_chips.items():
-                    chip.selected = h in prof["milestones"]
-                self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
-                # Update card styles
-                for k, card in self._profile_cards.items():
-                    is_sel = (k == profile_key)
-                    card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-                    card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
-                self._update_profile_summary()
-                self._update_dnd_summary()
-                self.update()
-            return handler
 
         for pkey, pval in _PROFILES.items():
             is_sel = (pkey == self._current_profile)
@@ -561,7 +300,7 @@ class SettingsView(ft.Container):
                 width=110, padding=12, border_radius=12,
                 bgcolor=C.ACCENT + "15" if is_sel else C.SURFACE,
                 border=ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER),
-                on_click=_on_profile_select(pkey),
+                on_click=self._handle_profile_select(pkey),
                 ink=True,
             )
             self._profile_cards[pkey] = card
@@ -572,7 +311,6 @@ class SettingsView(ft.Container):
             spacing=10,
         )
 
-        # ── DND (Không làm phiền) — Visual Time Cards ──
         self._sw_dnd_enable = ft.Switch(
             value=getattr(settings, 'NOTIFY_DND_ENABLE', False), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -610,14 +348,12 @@ class SettingsView(ft.Container):
             spacing=8,
         )
 
-        # ── Bỏ qua bài đã nộp ──
         self._sw_ignore_sub = ft.Switch(
             value=getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True), active_color=C.ACCENT,
             label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
             label="Bỏ qua bài đã nộp"
         )
 
-        # ── NOTIFY_TYPES: checkboxes cho từng loại hoạt động ──
         _current_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
         self._notify_type_checks = {}
         _type_options = [
@@ -643,7 +379,6 @@ class SettingsView(ft.Container):
             run_spacing=0,
         )
 
-        # ── Milestone Chips (thay thế TextField raw) ──
         _current_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
         self._milestone_chips = {}
         _milestone_options = [
@@ -655,17 +390,6 @@ class SettingsView(ft.Container):
             (1, "1 giờ"),
         ]
 
-        def _on_milestone_toggle(hours):
-            def handler(e):
-                chip = self._milestone_chips[hours]
-                chip.selected = not chip.selected
-                # Sync to hidden field
-                active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
-                self._milestones_field.value = ", ".join(str(h) for h in active)
-                self._milestone_summary.value = f"Bạn sẽ nhận {len(active)} lần nhắc cho mỗi deadline" if active else "Không có mốc nhắc nhở nào"
-                self.update()
-            return handler
-
         for hours, label in _milestone_options:
             self._milestone_chips[hours] = ft.Chip(
                 label=ft.Text(label, size=12),
@@ -673,7 +397,7 @@ class SettingsView(ft.Container):
                 show_checkmark=True,
                 selected_color=C.ACCENT,
                 bgcolor=C.SURFACE,
-                on_select=_on_milestone_toggle(hours),
+                on_select=self._handle_milestone_toggle(hours),
             )
         self._milestone_chips_row = ft.Row(
             controls=list(self._milestone_chips.values()),
@@ -686,7 +410,6 @@ class SettingsView(ft.Container):
             f"Bạn sẽ nhận {_active_count} lần nhắc cho mỗi deadline" if _active_count else "Không có mốc nhắc nhở nào",
             size=12, color=C.TEXT_SECONDARY, italic=True
         )
-        # Hidden field to store raw milestone values (for save compatibility)
         self._milestones_field = ft.TextField(
             value=", ".join(map(str, _current_milestones)),
             visible=False,
@@ -709,25 +432,6 @@ class SettingsView(ft.Container):
             text_color=C.ACCENT
         )
 
-        def _update_drp_options():
-            if not getattr(self, "_known_courses", None): return
-            current = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
-            
-            def make_toggle(course):
-                def _on_check(e):
-                    curr = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
-                    if e.control.value and course not in curr:
-                        curr.append(course)
-                    elif not e.control.value and course in curr:
-                        curr.remove(course)
-                    self._muted_courses_field.value = ", ".join(curr)
-                    self._muted_courses_field.update()
-                return ft.Checkbox(label=course, value=(course in current), on_change=_on_check, fill_color=C.ACCENT)
-            
-            self._muted_courses_list.controls = [make_toggle(c) for c in sorted(list(self._known_courses))]
-            if hasattr(self._muted_courses_list, "page") and self._muted_courses_list.page:
-                self._muted_courses_list.update()
-
         self._muted_courses_field = ft.TextField(
             value=", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', [])),
             label="Môn học tắt thông báo (cách nhau dấu phẩy)",
@@ -737,16 +441,14 @@ class SettingsView(ft.Container):
             text_size=13,
             multiline=True,
             max_lines=3,
-            visible=False # Ẩn textfield đi cho đẹp, chỉ dựa vào dropdown
+            visible=False 
         )
 
         self._save_status = ft.Text("", size=12, color=C.SAFE)
-
         self._unsaved_dot = ft.Container(
             width=8, height=8, border_radius=4,
             bgcolor=C.CRITICAL, visible=False,
         )
-        # Store refs for live theme refresh
         self._back_icon = ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY)
         self._back_text = ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY)
         self._back_btn = ft.TextButton(
@@ -780,55 +482,303 @@ class SettingsView(ft.Container):
             alignment=ft.Alignment(0, 0),
         )
 
-        # Track all hint containers for live theme refresh
-        self._hint_containers = []
+        self._c_tb_critical, self._row_cri = self._build_color_field("Cấp bách / Quá hạn", getattr(settings, 'COLOR_CRITICAL', '#EF4444'))
+        self._c_tb_warning, self._row_warn = self._build_color_field("Sắp tới", getattr(settings, 'COLOR_WARNING', '#F59E0B'))
+        self._c_tb_safe, self._row_safe = self._build_color_field("An toàn / Thường", getattr(settings, 'COLOR_SAFE', '#10B981'))
+        self._c_tb_quiz, self._row_quiz = self._build_color_field("Tag Quiz", getattr(settings, 'COLOR_QUIZ', '#7C3AED'))
+        self._c_tb_ass, self._row_ass = self._build_color_field("Tag Bài tập", getattr(settings, 'COLOR_ASSIGNMENT', '#2563EB'))
+        self._c_tb_att, self._row_att = self._build_color_field("Tag Điểm danh", getattr(settings, 'COLOR_ATTENDANCE', '#D97706'))
+        self._c_tb_open, self._row_open = self._build_color_field("Tag Sắp mở", getattr(settings, 'COLOR_OPEN', '#0891B2'))
+        self._c_tb_other, self._row_other = self._build_color_field("Tag Sự kiện", getattr(settings, 'COLOR_OTHER', '#6B7280'))
+        
+        self._theme_cards_row = self._build_theme_selector()
 
-        def _hint(text):
-            txt = ft.Text(text, size=11, color=C.TEXT_SECONDARY)
-            c = ft.Container(content=txt, padding=ft.Padding.only(left=4))
-            self._hint_containers.append((c, txt))
-            return c
+        self.btn_reset = ft.OutlinedButton("Khôi phục mặc định", width=400, on_click=self._handle_reset_defaults, style=ft.ButtonStyle(color=C.TEXT_SECONDARY))
 
-        self._tiles = []
-        self._section_containers = []  # Track for live theme refresh
+    def _init_debug_panel(self):
+        _notif_section_label = ft.Text("Kiểm thử kênh thông báo", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _tray_btn = ft.Button("Windows Tray", icon=ft.Icons.DESKTOP_WINDOWS_ROUNDED, on_click=lambda e: self._do_test_tray(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY)
+        _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
+        _notif_buttons = ft.Row([
+            *([_tray_btn] if not _pu.IS_MOBILE else [_mobile_btn]),
+            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
+            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
+            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+            ft.Button("Gửi tất cả", icon=ft.Icons.CAMPAIGN_ROUNDED, on_click=lambda e: self._do_test_broadcast(), bgcolor=C.SURFACE, color=C.CRITICAL),
+        ], wrap=True, spacing=6)
 
-        def _setting_group(title, subtitle, controls, default_open=False, icon=None):
-            leading_icon = ft.Icon(icon, size=20, color=C.ACCENT) if icon else None
-            tile = ft.ExpansionTile(
-                title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-                subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
-                leading=leading_icon,
-                affinity=ft.Theme.color_scheme,
-                controls=[
-                    ft.Container(content=ft.Column(controls, horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=10)
-                ],
-                collapsed_text_color=C.TEXT_PRIMARY,
-                text_color=C.ACCENT,
-                shape=ft.RoundedRectangleBorder(radius=10),
-                collapsed_shape=ft.RoundedRectangleBorder(radius=10),
-                expanded=default_open,
-            )
-            self._tiles.append(tile)
-            container = ft.Container(
-                content=tile,
-                bgcolor=C.SURFACE,
-                border_radius=10,
-                border=ft.Border.all(1, C.BORDER),
-                padding=0,
-                margin=ft.Margin.only(bottom=3),
-                clip_behavior=ft.ClipBehavior.HARD_EDGE
-            )
-            self._section_containers.append(container)
-            return container
+        _sys_section_label = ft.Text("Chẩn đoán hệ thống", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_info_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _sys_buttons = ft.Row([
+            ft.Button("Thông tin thiết bị", icon=ft.Icons.INFO_OUTLINE_ROUNDED, on_click=lambda e: self._do_show_device_info(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Kết nối Moodle", icon=ft.Icons.CLOUD_SYNC_ROUNDED, on_click=lambda e: self._do_test_moodle_connection(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Ping Moodle", icon=ft.Icons.SPEED_ROUNDED, on_click=lambda e: self._do_test_latency(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Notifiers", icon=ft.Icons.LIST_ALT_ROUNDED, on_click=lambda e: self._do_show_notifiers(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("DND Status", icon=ft.Icons.DO_NOT_DISTURB_ROUNDED, on_click=lambda e: self._do_check_dnd(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+        ], wrap=True, spacing=6)
 
-        # --- Scrollable content (settings groups) ---
+        _cache_section_label = ft.Text("Bộ nhớ đệm & dữ liệu", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_cache_stats = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True)
+        _cache_buttons = ft.Row([
+            ft.Button("Thống kê cache", icon=ft.Icons.ANALYTICS_ROUNDED, on_click=lambda e: self._do_show_cache_stats(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Xóa cache thông báo", icon=ft.Icons.NOTIFICATIONS_OFF_ROUNDED, on_click=lambda e: self._do_clear_notif_cache(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa lịch sử", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: self._do_clear_notif_history(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Xóa cache offline", icon=ft.Icons.CACHED_ROUNDED, on_click=lambda e: self._do_clear_data_cache(), bgcolor=C.SURFACE, color=C.WARNING),
+        ], wrap=True, spacing=6)
+
+        _history_section_label = ft.Text("Lịch sử thông báo đã gửi", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_history_text = ft.Text("", size=10, color=C.TEXT_SECONDARY, selectable=True, max_lines=15)
+        _history_buttons = ft.Row([
+            ft.Button("Xem gần đây", icon=ft.Icons.HISTORY_ROUNDED, on_click=lambda e: self._do_show_notif_history(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+        ], wrap=True, spacing=6)
+
+        _bg_section_label = ft.Text("Background Scheduler (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_scheduler_status = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _bg_buttons = ft.Row([
+            ft.Button("Trạng thái", icon=ft.Icons.QUERY_STATS_ROUNDED, on_click=lambda e: self._do_show_scheduler_status(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Start Foreground", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, on_click=lambda e: self._do_start_foreground(), bgcolor=C.SURFACE, color=C.SAFE),
+            ft.Button("Stop Foreground", icon=ft.Icons.STOP_CIRCLE_OUTLINED, on_click=lambda e: self._do_stop_foreground(), bgcolor=C.SURFACE, color=C.CRITICAL),
+            ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        _mobile_section_label = ft.Text("Kiểm thử Mobile", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_mobile_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _mobile_test_buttons = ft.Row([
+            ft.Button("Quyền thông báo", icon=ft.Icons.NOTIFICATIONS_ACTIVE_ROUNDED, on_click=lambda e: self._do_check_notif_permission(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Notif Critical", icon=ft.Icons.ERROR_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("critical"), bgcolor=C.SURFACE, color=C.CRITICAL),
+            ft.Button("Notif Warning", icon=ft.Icons.WARNING_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("warning"), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Notif Safe", icon=ft.Icons.CHECK_CIRCLE_ROUNDED, on_click=lambda e: self._do_mock_mobile_notif("safe"), bgcolor=C.SURFACE, color=C.SAFE),
+        ], wrap=True, spacing=6)
+        _mobile_test_buttons2 = ft.Row([
+            ft.Button("Backend Info", icon=ft.Icons.INFO_ROUNDED, on_click=lambda e: self._do_show_mobile_backend(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Rung thiết bị", icon=ft.Icons.VIBRATION_ROUNDED, on_click=lambda e: self._do_test_vibration(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Pin & tối ưu", icon=ft.Icons.BATTERY_SAVER_ROUNDED, on_click=lambda e: self._do_check_battery_opt(), bgcolor=C.SURFACE, color=C.WARNING),
+            ft.Button("Multi Notif (x3)", icon=ft.Icons.DYNAMIC_FEED_ROUNDED, on_click=lambda e: self._do_mock_multi_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        _update_section_label = ft.Text("Kiểm tra cập nhật", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        self._debug_update_text = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
+        _update_buttons = ft.Row([
+            ft.Button("Force check update", icon=ft.Icons.SYSTEM_UPDATE_ROUNDED, on_click=lambda e: self._do_force_check_update(), bgcolor=C.SURFACE, color=C.ACCENT),
+        ], wrap=True, spacing=6)
+
+        _action_section_label = ft.Text("Hành động nhanh", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _action_buttons = ft.Row([
+            ft.Button("Force Refresh", icon=ft.Icons.REFRESH_ROUNDED, on_click=lambda e: self._do_force_refresh(), bgcolor=C.SURFACE, color=C.ACCENT),
+            ft.Button("Reset Settings", icon=ft.Icons.RESTART_ALT_ROUNDED, on_click=lambda e: self._do_reset_settings(), bgcolor=C.SURFACE, color=C.CRITICAL),
+        ], wrap=True, spacing=6)
+
+        _debug_sections = [
+            ft.Text("Công cụ gỡ lỗi nâng cao", color=C.CRITICAL, weight=ft.FontWeight.BOLD, size=14),
+            ft.Divider(height=1, color=C.BORDER),
+            _notif_section_label,
+            self._mock_type_drp,
+            _notif_buttons,
+            ft.Divider(height=1, color=C.BORDER),
+            _sys_section_label,
+            _sys_buttons,
+            self._debug_info_text,
+            ft.Divider(height=1, color=C.BORDER),
+            _cache_section_label,
+            _cache_buttons,
+            self._debug_cache_stats,
+            ft.Divider(height=1, color=C.BORDER),
+            _history_section_label,
+            _history_buttons,
+            self._debug_history_text,
+        ]
+
+        if _pu.IS_MOBILE:
+            _debug_sections.extend([
+                ft.Divider(height=1, color=C.BORDER),
+                _bg_section_label,
+                _bg_buttons,
+                self._debug_scheduler_status,
+                ft.Divider(height=1, color=C.BORDER),
+                _mobile_section_label,
+                _mobile_test_buttons,
+                _mobile_test_buttons2,
+                self._debug_mobile_text,
+            ])
+
+        _debug_sections.extend([
+            ft.Divider(height=1, color=C.BORDER),
+            _update_section_label,
+            _update_buttons,
+            self._debug_update_text,
+            ft.Divider(height=1, color=C.BORDER),
+            _action_section_label,
+            _action_buttons,
+        ])
+
+        self._test_panel = ft.Container(
+            content=ft.Column(_debug_sections, spacing=8, scroll=ft.ScrollMode.AUTO),
+            visible=settings.DEBUG_MODE,
+            padding=12, border=ft.Border.all(1, C.CRITICAL), border_radius=10, margin=ft.Margin.only(top=10)
+        )
+
+    def _init_layout(self):
         self._title_text = ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY)
         self._version_text = ft.Text(f"UTHelper v{__import__('main').__version__}", size=11, color=C.TEXT_SECONDARY)
         self._header_divider = ft.Divider(height=16, color=C.BORDER)
+        
+        sec_account = self._build_setting_group(
+            "Tài khoản UTH",
+            "Thông tin đăng nhập hệ thống elearning",
+            [self._username_field, self._password_field, self._test_loading_bar, self._test_login_status, self._test_login_btn],
+            icon=ft.Icons.PERSON_OUTLINE_ROUNDED,
+        )
+        sec_display = self._build_setting_group(
+            "Hiển thị",
+            "Cách hiển thị trên màn hình",
+            [self._sw_submitted, self._sw_graded] + (
+                [self._sw_always_on_top] if not _pu.IS_MOBILE else []
+            ),
+            icon=ft.Icons.VISIBILITY_OUTLINED,
+        )
+        
+        if not _pu.IS_MOBILE:
+            sec_system = self._build_setting_group(
+                "Hệ thống",
+                "Khởi động và tự động cập nhật",
+                [
+                    self._sw_start_with_windows, self._sw_start_minimized, self._sw_minimize_to_tray,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self._interval_field,
+                    self._build_hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                    self._dd_poll_interval,
+                    self._build_hint("Tần suất kiểm tra tự động dữ liệu mới."),
+                    self._fetch_months_field,
+                    self._build_hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
+                ],
+                icon=ft.Icons.SETTINGS_OUTLINED,
+            )
+        else:
+            sec_system = self._build_setting_group(
+                "Cập nhật",
+                "Tần suất kiểm tra",
+                [
+                    self._interval_field,
+                    self._build_hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
+                    self._dd_poll_interval,
+                    self._build_hint("Tần suất kiểm tra tự động dữ liệu mới."),
+                    self._fetch_months_field,
+                    self._build_hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self._sw_bg_check,
+                    self._bg_interval_field,
+                    self._build_hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 5 phút). Dưới 15 phút có thể bị delay bởi chế độ tiết kiệm pin."),
+                ],
+                icon=ft.Icons.SETTINGS_OUTLINED,
+            )
+
+        sec_urgency = self._build_setting_group(
+            "Cảnh báo",
+            "Ngưỡng thời gian màu sắc",
+            [
+                self._make_themed_label("Mức độ"),
+                self._critical_hours_field,
+                self._warning_hours_field,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                self._make_themed_label("Trạng thái"),
+                self._opening_soon_hours_field,
+                self._build_hint("Hoạt động sẽ được đánh dấu 'Sắp mở' khi thời gian mở nhỏ hơn mức này.")
+            ],
+            icon=ft.Icons.NOTIFICATIONS_ACTIVE_OUTLINED,
+        )
+
+        sec_theme = self._build_setting_group(
+            "Giao diện",
+            "Theme và tùy chỉnh màu sắc",
+            [
+                self._make_themed_label("Chọn Theme"),
+                self._theme_cards_row,
+                ft.Divider(height=10, color=C.BORDER),
+                self._make_themed_label("Tùy chỉnh màu"),
+                self._build_hint("Thay đổi màu riêng sẽ ghi đè preset theme."),
+                self._row_cri, self._row_warn, self._row_safe,
+                ft.Divider(height=10, color=C.BORDER),
+                self._row_quiz, self._row_ass, self._row_att, self._row_open, self._row_other,
+                ft.Divider(height=10, color=C.BORDER),
+                self.btn_reset,
+            ],
+            icon=ft.Icons.PALETTE_OUTLINED,
+        )
+
+        sec_notify = self._build_setting_group(
+            "Thông báo",
+            "Chế độ và thời gian nhắc nhở",
+            [
+                self._make_themed_label("Chế độ thông báo"),
+                self._profile_row,
+                self._profile_summary,
+                ft.Divider(height=10, color=C.BORDER),
+                self._sw_dnd_enable,
+                self._dnd_time_row,
+                self._dnd_summary,
+                ft.Divider(height=10, color=C.BORDER),
+                self._sw_ignore_sub,
+            ],
+            icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+            default_open=True,
+        )
+
+        sec_advanced = self._build_setting_group(
+            "Tùy chỉnh nâng cao",
+            "Mốc nhắc, loại bài, tắt theo môn",
+            [
+                self._make_themed_label("Nhắc trước deadline"),
+                self._milestone_chips_row,
+                self._milestone_summary,
+                self._milestones_field,
+                ft.Divider(height=10, color=C.BORDER),
+                self._make_themed_label("Nhắc phút cuối"),
+                self._notify_min_field,
+                self._build_hint("Gửi thêm 1 lần nhắc khi chỉ còn X phút. Đặt 0 để tắt."),
+                ft.Divider(height=10, color=C.BORDER),
+                self._make_themed_label("Loại hoạt động"),
+                self._notify_types_row,
+                ft.Divider(height=10, color=C.BORDER),
+                self._make_themed_label("Tắt thông báo theo môn"),
+                self._muted_courses_drp,
+                self._muted_courses_field,
+            ],
+            icon=ft.Icons.TUNE_OUTLINED,
+        )
+
+        sec_integration = self._build_setting_group(
+            "Tích hợp",
+            "Nhắn tin qua Bot & Email",
+            [
+                self._sw_email,
+                self._gmail_addr_field,
+                self._gmail_pw_field,
+                ft.Divider(height=10, color=C.BORDER),
+                self._sw_discord,
+                self._discord_wh_field,
+                ft.Divider(height=10, color=C.BORDER),
+                self._sw_telegram,
+                self._tel_token_field,
+                self._tel_chat_field,
+            ],
+            icon=ft.Icons.INTEGRATION_INSTRUCTIONS_OUTLINED,
+        )
+
+        sec_debug = self._build_setting_group(
+            "Nâng cao",
+            "Luồng tải, Log hệ thống",
+            [
+                self._workers_field,
+                self._build_hint("Tăng để tải chi tiết nhanh hơn. Nhỏ đi nếu bị block."),
+                self._sw_debug,
+                self._test_panel,
+            ],
+            icon=ft.Icons.BUILD_OUTLINED,
+        )
+
         _scroll_content = ft.Column(
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[
-                # Title row
                 ft.Row(controls=[
                     ft.Column(controls=[
                         self._title_text,
@@ -836,164 +786,21 @@ class SettingsView(ft.Container):
                     ], spacing=2),
                 ]),
                 self._header_divider,
-
-                _setting_group(
-                    "Tài khoản UTH",
-                    "Thông tin đăng nhập hệ thống elearning",
-                    [self._username_field, self._password_field, self._test_loading_bar, self._test_login_status, self._test_login_btn],
-                    icon=ft.Icons.PERSON_OUTLINE_ROUNDED,
-                ),
-                _setting_group(
-                    "Hiển thị",
-                    "Cách hiển thị trên màn hình",
-                    [self._sw_submitted, self._sw_graded] + (
-                        [self._sw_always_on_top] if not _pu.IS_MOBILE else []
-                    ),
-                    icon=ft.Icons.VISIBILITY_OUTLINED,
-                ),
-
-                # Desktop-only system settings (Windows: autostart, tray, etc.)
-                *([_setting_group(
-                    "Hệ thống",
-                    "Khởi động và tự động cập nhật",
-                    [
-                        self._sw_start_with_windows, self._sw_start_minimized, self._sw_minimize_to_tray,
-                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                        self._interval_field,
-                          _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
-                          self._dd_poll_interval,
-                          _hint("Tần suất kiểm tra tự động dữ liệu mới."),
-                          self._fetch_months_field,
-                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
-                    ],
-                    icon=ft.Icons.SETTINGS_OUTLINED,
-                )] if not _pu.IS_MOBILE else [_setting_group(
-                    "Cập nhật",
-                    "Tần suất kiểm tra",
-                    [
-                        self._interval_field,
-                          _hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
-                          self._dd_poll_interval,
-                          _hint("Tần suất kiểm tra tự động dữ liệu mới."),
-                          self._fetch_months_field,
-                          _hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
-                          ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                          self._sw_bg_check,
-                          self._bg_interval_field,
-                          _hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 5 phút). Dưới 15 phút có thể bị delay bởi chế độ tiết kiệm pin."),
-                    ],
-                    icon=ft.Icons.SETTINGS_OUTLINED,
-                )]),
-
-                _setting_group(
-                    "Cảnh báo",
-                    "Ngưỡng thời gian màu sắc",
-                    [
-                        self._make_themed_label("Mức độ"),
-                        self._critical_hours_field,
-                        self._warning_hours_field,
-                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                        self._make_themed_label("Trạng thái"),
-                        self._opening_soon_hours_field,
-                        _hint("Hoạt động sẽ được đánh dấu 'Sắp mở' khi thời gian mở nhỏ hơn mức này.")
-                    ],
-                    icon=ft.Icons.NOTIFICATIONS_ACTIVE_OUTLINED,
-                ),
-
-                _setting_group(
-                    "Giao diện",
-                    "Theme và tùy chỉnh màu sắc",
-                    [
-                        self._make_themed_label("Chọn Theme"),
-                        self._theme_cards_row,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Tùy chỉnh màu"),
-                        _hint("Thay đổi màu riêng sẽ ghi đè preset theme."),
-                        row_cri, row_warn, row_safe,
-                        ft.Divider(height=10, color=C.BORDER),
-                        row_quiz, row_ass, row_att, row_open, row_other,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self.btn_reset,
-                    ],
-                    icon=ft.Icons.PALETTE_OUTLINED,
-                ),
-                _setting_group(
-                    "Thông báo",
-                    "Chế độ và thời gian nhắc nhở",
-                    [
-                        self._make_themed_label("Chế độ thông báo"),
-                        self._profile_row,
-                        self._profile_summary,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._sw_dnd_enable,
-                        self._dnd_time_row,
-                        self._dnd_summary,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._sw_ignore_sub,
-                    ],
-                    icon=ft.Icons.NOTIFICATIONS_OUTLINED,
-                    default_open=True,
-                ),
-                _setting_group(
-                    "Tùy chỉnh nâng cao",
-                    "Mốc nhắc, loại bài, tắt theo môn",
-                    [
-                        self._make_themed_label("Nhắc trước deadline"),
-                        self._milestone_chips_row,
-                        self._milestone_summary,
-                        self._milestones_field,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Nhắc phút cuối"),
-                        self._notify_min_field,
-                        _hint("Gửi thêm 1 lần nhắc khi chỉ còn X phút. Đặt 0 để tắt."),
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Loại hoạt động"),
-                        self._notify_types_row,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._make_themed_label("Tắt thông báo theo môn"),
-                        self._muted_courses_drp,
-                        self._muted_courses_field,
-                    ],
-                    icon=ft.Icons.TUNE_OUTLINED,
-                ),
-
-                _setting_group(
-                    "Tích hợp",
-                    "Nhắn tin qua Bot & Email",
-                    [
-                        self._sw_email,
-                        self._gmail_addr_field,
-                        self._gmail_pw_field,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._sw_discord,
-                        self._discord_wh_field,
-                        ft.Divider(height=10, color=C.BORDER),
-                        self._sw_telegram,
-                        self._tel_token_field,
-                        self._tel_chat_field,
-                    ],
-                    icon=ft.Icons.INTEGRATION_INSTRUCTIONS_OUTLINED,
-                ),
-
-                _setting_group(
-                    "Nâng cao",
-                    "Luồng tải, Log hệ thống",
-                    [
-                        self._workers_field,
-                        _hint("Tăng để tải chi tiết nhanh hơn. Nhỏ đi nếu bị block."),
-                        self._sw_debug,
-                        self._test_panel,
-                    ],
-                    icon=ft.Icons.BUILD_OUTLINED,
-                ),
-
+                sec_account,
+                sec_display,
+                sec_system,
+                sec_urgency,
+                sec_theme,
+                sec_notify,
+                sec_advanced,
+                sec_integration,
+                sec_debug,
                 ft.Container(height=16),
             ],
             spacing=10,
             scroll=ft.ScrollMode.AUTO,
         )
 
-        # --- Sticky footer (save button) ---
         self._sticky_footer = ft.Container(
             content=ft.Column(controls=[
                 self._save_btn,
@@ -1006,10 +813,8 @@ class SettingsView(ft.Container):
 
         self.content = ft.Column(
             controls=[
-                # Back button header
                 ft.Container(
-                    content=ft.Row(controls=[self._back_btn],
-                                   alignment=ft.MainAxisAlignment.START),
+                    content=ft.Row(controls=[self._back_btn], alignment=ft.MainAxisAlignment.START),
                     padding=ft.Padding.only(left=8, top=25, bottom=4),
                 ),
                 # Scrollable content
@@ -1025,6 +830,143 @@ class SettingsView(ft.Container):
             expand=True,
         )
 
+    def _build_hint(self, text: str) -> ft.Container:
+        txt = ft.Text(text, size=11, color=C.TEXT_SECONDARY)
+        c = ft.Container(content=txt, padding=ft.Padding.only(left=4))
+        self._hint_containers.append((c, txt))
+        return c
+
+    def _build_setting_group(self, title: str, subtitle: str, controls: list, default_open: bool = False, icon = None) -> ft.Container:
+        leading_icon = ft.Icon(icon, size=20, color=C.ACCENT) if icon else None
+        tile = ft.ExpansionTile(
+            title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
+            subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
+            leading=leading_icon,
+            affinity=ft.Theme.color_scheme,
+            controls=[
+                ft.Container(content=ft.Column(controls, horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=10)
+            ],
+            collapsed_text_color=C.TEXT_PRIMARY,
+            text_color=C.ACCENT,
+            shape=ft.RoundedRectangleBorder(radius=10),
+            collapsed_shape=ft.RoundedRectangleBorder(radius=10),
+            expanded=default_open,
+        )
+        self._tiles.append(tile)
+        container = ft.Container(
+            content=tile,
+            bgcolor=C.SURFACE,
+            border_radius=10,
+            border=ft.Border.all(1, C.BORDER),
+            padding=0,
+            margin=ft.Margin.only(bottom=3),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE
+        )
+        self._section_containers.append(container)
+        return container
+
+    def _build_color_field(self, label_text: str, default_color: str):
+        tb = ft.TextField(
+            value=default_color, width=90, text_size=12, height=36,
+            border_color=C.BORDER, focused_border_color=C.ACCENT,
+            color=C.TEXT_PRIMARY, bgcolor=C.BG, content_padding=6
+        )
+        box = ft.Container(
+            width=24, height=24, bgcolor=default_color, border_radius=4,
+            border=ft.Border.all(1, "#333333"), ink=True
+        )
+        
+        def _on_box_click(e):
+            open_color_picker(self._page, box, label_text, tb)
+            
+        box_click = ft.GestureDetector(
+            content=box,
+            on_tap=_on_box_click,
+            mouse_cursor=ft.MouseCursor.CLICK
+        )
+
+        def _on_change(e):
+            box.bgcolor = tb.value
+            box.update()
+        tb.on_change = _on_change
+        label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
+        self._themed_texts.append(label_txt)
+        return tb, ft.Row([label_txt, box_click, tb], spacing=10, tight=True)
+
+    def _handle_profile_select(self, profile_key: str):
+        def handler(e):
+            _PROFILES = {
+                "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
+                "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
+                "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [72, 24, 6, 1], "dnd": False, "dnd_start": 22, "dnd_end": 7, "min_before": 15},
+            }
+            self._current_profile = profile_key
+            prof = _PROFILES[profile_key]
+            # Auto-apply profile settings
+            self._sw_dnd_enable.value = prof["dnd"]
+            self._dnd_start_field.value = str(prof["dnd_start"])
+            self._dnd_end_field.value = str(prof["dnd_end"])
+            self._notify_min_field.value = str(prof["min_before"])
+            # Update milestone chips
+            for h, chip in self._milestone_chips.items():
+                chip.selected = h in prof["milestones"]
+            self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
+            # Update card styles
+            for k, card in self._profile_cards.items():
+                is_sel = (k == profile_key)
+                card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
+                card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            self._update_profile_summary()
+            self._update_dnd_summary()
+            self.update()
+        return handler
+
+    def _handle_milestone_toggle(self, hours: int):
+        def handler(e):
+            chip = self._milestone_chips[hours]
+            chip.selected = not chip.selected
+            # Sync to hidden field
+            active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
+            self._milestones_field.value = ", ".join(str(h) for h in active)
+            self._milestone_summary.value = f"Bạn sẽ nhận {len(active)} lần nhắc cho mỗi deadline" if active else "Không có mốc nhắc nhở nào"
+            self.update()
+        return handler
+
+    def _update_drp_options(self):
+        self._known_courses = set()
+        if hasattr(self, '_orchestrator'):
+            cache = (
+                self._orchestrator.get_cached_details_snapshot()
+                if hasattr(self._orchestrator, "get_cached_details_snapshot")
+                else getattr(self._orchestrator, "_detail_cache", {})
+            )
+            for cached in cache.values():
+                c = cached.get('course')
+                if c:
+                    from gui.core.utils import clean_course_name
+                    c_name = clean_course_name(c)
+                    if c_name: self._known_courses.add(c_name)
+
+        if getattr(self, '_known_courses', None):
+            current = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
+            
+            def make_toggle(course):
+                def _on_check(e):
+                    curr = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
+                    if e.control.value and course not in curr:
+                        curr.append(course)
+                    elif not e.control.value and course in curr:
+                        curr.remove(course)
+                    self._muted_courses_field.value = ", ".join(curr)
+                    self._muted_courses_field.update()
+                return ft.Checkbox(label=course, value=(course in current), on_change=_on_check, fill_color=C.ACCENT)
+            
+            self._muted_courses_list.controls = [make_toggle(c) for c in sorted(list(self._known_courses))]
+            self._muted_courses_drp.visible = True
+            if hasattr(self._muted_courses_list, "page") and self._muted_courses_list.page:
+                self._muted_courses_list.update()
+        else:
+            self._muted_courses_drp.visible = False
 
     # ── Helper: themed label with tracked reference ─────────────────────
 

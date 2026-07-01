@@ -207,10 +207,14 @@ class AppController:
         return False
 
     def _init_ui(self):
-        # Skeleton loading cards
         self._skeleton_visible = True
+        self._init_footer_and_filters()
+        self._init_header_controls()
+        self._init_banner_and_states()
+        self._init_views_and_transitions()
+        self._start_skeleton_shimmer()
 
-        # Footer components
+    def _init_footer_and_filters(self):
         self.status_text     = ft.Text("Đang khởi động...", size=11, color=C.TEXT_SECONDARY)
         self.footer_critical = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.footer_warning  = ft.Text("", size=11, color=C.WARNING,  weight=ft.FontWeight.W_600)
@@ -218,7 +222,6 @@ class AppController:
         self.footer_overdue  = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.loading_bar     = ft.ProgressBar(color=C.ACCENT, bgcolor=C.BORDER, visible=False)
 
-        # Filters
         _URGENCY_CFG = [
             ("all",      "Mức độ",   C.TEXT_PRIMARY),
             ("critical", "Cấp bách", C.CRITICAL),
@@ -242,7 +245,6 @@ class AppController:
         self.type_popup, self._update_type_counts = self._make_filter_popup(
             _TYPE_CFG, lambda key: self.page.run_task(self._set_type, key)
         )
-
 
         self.course_btn_label = ft.Text("Môn học", size=12, color=C.TEXT_PRIMARY, weight=ft.FontWeight.W_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
         self.course_popup = ft.PopupMenuButton(
@@ -283,7 +285,7 @@ class AppController:
             on_change=self._on_search,
         )
 
-        # Header
+    def _init_header_controls(self):
         self.calendar_btn = ft.IconButton(
             ft.Icons.CALENDAR_MONTH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
@@ -309,7 +311,6 @@ class AppController:
             on_click=lambda e: self.page.run_task(self._toggle_grades),
         )
 
-        # Notification badge
         self._notification_badge_text = ft.Text("0", size=8, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
         self._notification_badge = ft.Container(
             content=self._notification_badge_text,
@@ -317,7 +318,7 @@ class AppController:
             border_radius=8,
             width=16, height=16,
             alignment=ft.Alignment(0, 0),
-            visible=False,  # Hidden when count=0
+            visible=False,
         )
         self._notification_icon = ft.Stack(
             controls=[
@@ -337,39 +338,7 @@ class AppController:
             width=40, height=40,
         )
 
-        header_container = ft.Container(
-            content=ft.Column(controls=[
-                ft.Row(controls=[
-                    ft.Row(controls=[
-                        ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
-                        ft.Container(
-                            content=ft.Text(APP_VERSION, size=9, color=C.TEXT_SECONDARY),
-                            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                            border=ft.Border.all(1, C.BORDER),
-                            border_radius=4,
-                        ),
-                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self._notification_icon, self.refresh_btn, self.settings_btn], spacing=0),
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                self.status_text,
-            ], spacing=4),
-            padding=ft.Padding.only(left=16, right=8, top=25, bottom=8),
-            bgcolor=C.BG,
-        )
-
-        header = ft.Stack(
-            controls=[
-                header_container,
-                ft.Container(
-                    content=self.loading_bar,
-                    bottom=0,
-                    left=0,
-                    right=0,
-                )
-            ]
-        )
-
-        # Update banner (ẩn mặc định)
+    def _init_banner_and_states(self):
         self._update_icon = ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color="#FCD34D")
         self._update_text = ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", weight=ft.FontWeight.W_500, expand=True)
         self._update_progress = ft.ProgressBar(value=0, width=0, height=3, color="#FCD34D", bgcolor="#FCD34D20", visible=False)
@@ -393,22 +362,7 @@ class AppController:
         )
         self._update_url = ""
 
-        filter_container = ft.Container(
-            content=ft.Column(
-                controls=[
-                    ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
-                    ft.Container(
-                        content=ft.Row(controls=[self.urgency_popup, self.type_popup, self.course_popup, self._overdue_cb], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, scroll=ft.ScrollMode.AUTO),
-                        padding=ft.Padding.only(left=16, right=12),
-                    ),
-                ], spacing=4,
-            ),
-            padding=ft.Padding.only(left=0, right=0, top=4, bottom=10),
-            bgcolor=C.BG,
-        )
-
         self.cards_column = ft.ListView(spacing=8, expand=True)
-        # P2/P6: Dynamic empty state — changes based on context
         self._empty_icon = ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER)
         self._empty_title = ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500)
         self._empty_subtitle = ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER)
@@ -441,6 +395,53 @@ class AppController:
                 self._error_retry_btn,
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
+        )
+
+    def _init_views_and_transitions(self):
+        header_container = ft.Container(
+            content=ft.Column(controls=[
+                ft.Row(controls=[
+                    ft.Row(controls=[
+                        ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+                        ft.Container(
+                            content=ft.Text(APP_VERSION, size=9, color=C.TEXT_SECONDARY),
+                            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                            border=ft.Border.all(1, C.BORDER),
+                            border_radius=4,
+                        ),
+                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self._notification_icon, self.refresh_btn, self.settings_btn], spacing=0),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                self.status_text,
+            ], spacing=4),
+            padding=ft.Padding.only(left=16, right=8, top=25, bottom=8),
+            bgcolor=C.BG,
+        )
+
+        header = ft.Stack(
+            controls=[
+                header_container,
+                ft.Container(
+                    content=self.loading_bar,
+                    bottom=0,
+                    left=0,
+                    right=0,
+                )
+            ]
+        )
+
+        filter_container = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
+                    ft.Container(
+                        content=ft.Row(controls=[self.urgency_popup, self.type_popup, self.course_popup, self._overdue_cb], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, scroll=ft.ScrollMode.AUTO),
+                        padding=ft.Padding.only(left=16, right=12),
+                    ),
+                ], spacing=4,
+            ),
+            padding=ft.Padding.only(left=0, right=0, top=4, bottom=10),
+            bgcolor=C.BG,
         )
 
         content_area = ft.Container(
@@ -487,23 +488,20 @@ class AppController:
             on_close=lambda: self.page.run_task(self._close_grades),
         )
 
-        # UX: Slide-in transitions for views
         for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
-            _view.offset = ft.Offset(1, 0)  # start off-screen right
+            _view.offset = ft.Offset(1, 0)
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
-        # UX: SafeArea for iOS notch/Dynamic Island & Android status bar
         main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
         if platform_utils.IS_MOBILE:
             self.page.add(ft.SafeArea(content=main_stack, expand=True))
         else:
             self.page.add(main_stack)
 
-        # Show skeleton cards immediately while data loads
+    def _start_skeleton_shimmer(self):
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
 
-        # UX-4: Trigger shimmer pulse after initial render
         async def _pulse_skeletons():
             import asyncio
             while self._skeleton_visible:
