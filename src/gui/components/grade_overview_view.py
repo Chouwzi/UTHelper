@@ -208,6 +208,66 @@ class GradeOverviewView(ft.Container):
         self.offset = ft.Offset(1, 0)
         self.opacity = 0.0
 
+    def update_theme(self):
+        """Update colors of all grade overview controls dynamically on theme switch."""
+        from gui.core.theme import C
+        self.bgcolor = C.BG
+        
+        # Header title and close
+        self._title.color = C.TEXT_PRIMARY
+        self._close_btn.icon_color = C.TEXT_SECONDARY
+        
+        # Divider color in content
+        try:
+            self.content.controls[1].color = C.BORDER
+        except Exception:
+            pass
+            
+        # Loading controls
+        self._loading.color = C.ACCENT
+        try:
+            self._loading_row.controls[1].color = C.TEXT_SECONDARY
+        except Exception:
+            pass
+            
+        # Empty text
+        self._empty_text.color = C.TEXT_SECONDARY
+
+        # Update any rendered cards inside _grade_list
+        try:
+            for card in self._grade_list.controls:
+                card.bgcolor = C.SURFACE
+                card.border = ft.Border.all(1, C.BORDER)
+                
+                col = card.content
+                if not col:
+                    continue
+                # Header row
+                header_row = col.controls[0]
+                left_col = header_row.controls[0]
+                left_col.controls[0].color = C.TEXT_PRIMARY
+                left_col.controls[1].color = C.TEXT_SECONDARY
+                
+                grade_display = header_row.controls[1]
+                if hasattr(grade_display, 'value'):
+                    grade_display.color = self._grade_color(grade_display.value)
+                
+                if len(col.controls) > 2:
+                    divider = col.controls[1]
+                    divider.color = C.BORDER
+                    
+                    items_col = col.controls[2]
+                    for item_row in items_col.controls:
+                        item_row.controls[0].color = C.TEXT_SECONDARY
+                        item_row.controls[1].color = C.TEXT_PRIMARY
+        except Exception:
+            pass
+
+        try:
+            self.update()
+        except Exception:
+            pass
+
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
     # Apply compatibility shims if running directly

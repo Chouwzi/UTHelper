@@ -920,8 +920,7 @@ class AppController:
         
         # Clear persistent detail cache to force fresh data fetch on manual refresh
         try:
-            from core import ws_functions
-            ws_functions.clear_all_caches()
+            self.orchestrator.moodle_service.clear_all_caches()
             self.orchestrator.clear_detail_cache()
         except Exception:
             pass
@@ -1149,50 +1148,16 @@ class AppController:
         else:
             await self._show_grades()
 
-    def _fetch_all_grades_sync(self, userid: int) -> tuple[list, dict]:
-        """Tải điểm các khóa học song song bằng ThreadPoolExecutor (tránh chặn UI)."""
-        from core import ws_functions
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
-        client = self.orchestrator.client
-        courses_grades = ws_functions.get_course_grades(client.call_ws_api, userid)
-        grade_items = {}
-        
-        if not courses_grades:
-            return [], {}
-            
-        def fetch_single_course_grades(cg):
-            cid = str(cg.get('courseid', ''))
-            if not cid:
-                return None
-            try:
-                items = ws_functions.get_grade_items(client.call_ws_api, cid, userid)
-                return cid, items
-            except Exception as ex:
-                logger.debug("Grade items unavailable for course %s: %s", cid, ex)
-                return None
-
-        # Fetch in parallel with up to 10 threads
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(fetch_single_course_grades, cg) for cg in courses_grades]
-            for fut in as_completed(futures):
-                res = fut.result()
-                if res:
-                    cid, items = res
-                    grade_items[cid] = items
-                    
-        return courses_grades, grade_items
-
     async def _show_grades(self):
         """Show grade overview panel and fetch data."""
         self.view_manager.show_grades_loading()
 
         # Fetch grades in background thread to avoid freezing UI
         try:
-            userid = self.orchestrator._get_userid()
+            userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
             if userid:
                 courses_grades, grade_items = await asyncio.to_thread(
-                    self._fetch_all_grades_sync, userid
+                    self.orchestrator.moodle_service.fetch_all_grades, userid
                 )
                 self.view_manager.show_grades_data(courses_grades or [], grade_items)
             else:
@@ -1217,21 +1182,23 @@ class AppController:
         self.page.bgcolor = _C.BG
 
         # Header
-        header = self.dashboard.controls[0]  # ft.Container
-        header.bgcolor = _C.BG
-        # Walk header children: title text, version badge, status text
-        try:
-            header_col = header.content  # ft.Column
-            title_row = header_col.controls[0]  # ft.Row
-            left_row = title_row.controls[0]  # ft.Row with title + version
-            # "UTHelper" text
-            left_row.controls[0].color = _C.TEXT_PRIMARY
-            # Version badge container
-            ver_badge = left_row.controls[1]
-            ver_badge.content.color = _C.TEXT_SECONDARY
-            ver_badge.border = ft.Border.all(1, _C.BORDER)
-        except (IndexError, AttributeError):
-            pass
+        header_stack = self.dashboard.controls[0]  # ft.Stack
+        if len(header_stack.controls) > 0:
+            header_container = header_stack.controls[0]
+            header_container.bgcolor = _C.BG
+            # Walk header children: title text, version badge, status text
+            try:
+                header_col = header_container.content  # ft.Column
+                title_row = header_col.controls[0]  # ft.Row
+                left_row = title_row.controls[0]  # ft.Row with title + version
+                # "UTHelper" text
+                left_row.controls[0].color = _C.TEXT_PRIMARY
+                # Version badge container
+                ver_badge = left_row.controls[1]
+                ver_badge.content.color = _C.TEXT_SECONDARY
+                ver_badge.border = ft.Border.all(1, _C.BORDER)
+            except (IndexError, AttributeError):
+                pass
 
         # Status text
         self.status_text.color = _C.TEXT_SECONDARY
@@ -1244,6 +1211,85 @@ class AppController:
         self.search_field.focused_border_color = _C.ACCENT
         self.search_field.color = _C.TEXT_PRIMARY
 
+        # Filter popups and checkbuttons
+        try:
+            self.urgency_popup.content.bgcolor = _C.SURFACE
+            self.urgency_popup.content.border = ft.Border.all(1, _C.BORDER)
+            self.urgency_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
+
+            # Urgency Popup Items
+            self.urgency_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
+            self.urgency_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
+
+            # critical
+            self.urgency_popup.items[1].content.controls[0].color = _C.CRITICAL
+            self.urgency_popup.items[1].content.controls[1].color = _C.CRITICAL
+            self.urgency_popup.items[1].content.controls[3].color = _C.CRITICAL
+
+            # warning
+            self.urgency_popup.items[2].content.controls[0].color = _C.WARNING
+            self.urgency_popup.items[2].content.controls[1].color = _C.WARNING
+            self.urgency_popup.items[2].content.controls[3].color = _C.WARNING
+
+            # safe
+            self.urgency_popup.items[3].content.controls[0].color = _C.SAFE
+            self.urgency_popup.items[3].content.controls[1].color = _C.SAFE
+            self.urgency_popup.items[3].content.controls[3].color = _C.SAFE
+
+            # overdue
+            self.urgency_popup.items[4].content.controls[0].color = _C.CRITICAL
+            self.urgency_popup.items[4].content.controls[1].color = _C.CRITICAL
+            self.urgency_popup.items[4].content.controls[3].color = _C.CRITICAL
+        except Exception:
+            pass
+
+        try:
+            from gui.core.theme import _TYPE_COLORS
+            self.type_popup.content.bgcolor = _C.SURFACE
+            self.type_popup.content.border = ft.Border.all(1, _C.BORDER)
+            self.type_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
+
+            # Type Popup Items
+            self.type_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
+            self.type_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
+
+            self.type_popup.items[1].content.controls[0].color = _TYPE_COLORS["quiz"]
+            self.type_popup.items[1].content.controls[1].color = _TYPE_COLORS["quiz"]
+            self.type_popup.items[1].content.controls[3].color = _TYPE_COLORS["quiz"]
+
+            self.type_popup.items[2].content.controls[0].color = _TYPE_COLORS["assignment"]
+            self.type_popup.items[2].content.controls[1].color = _TYPE_COLORS["assignment"]
+            self.type_popup.items[2].content.controls[3].color = _TYPE_COLORS["assignment"]
+
+            self.type_popup.items[3].content.controls[0].color = _TYPE_COLORS["attendance"]
+            self.type_popup.items[3].content.controls[1].color = _TYPE_COLORS["attendance"]
+            self.type_popup.items[3].content.controls[3].color = _TYPE_COLORS["attendance"]
+
+            self.type_popup.items[4].content.controls[0].color = _TYPE_COLORS["open"]
+            self.type_popup.items[4].content.controls[1].color = _TYPE_COLORS["open"]
+            self.type_popup.items[4].content.controls[3].color = _TYPE_COLORS["open"]
+
+            self.type_popup.items[5].content.controls[0].color = _C.TEXT_SECONDARY
+            self.type_popup.items[5].content.controls[1].color = _C.TEXT_SECONDARY
+            self.type_popup.items[5].content.controls[3].color = _C.TEXT_SECONDARY
+        except Exception:
+            pass
+
+        try:
+            self.course_btn_label.color = _C.TEXT_PRIMARY
+            self.course_popup.content.bgcolor = _C.SURFACE
+            self.course_popup.content.border = ft.Border.all(1, _C.BORDER)
+            self.course_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
+        except Exception:
+            pass
+
+        try:
+            self._overdue_cb.label_style.color = _C.TEXT_SECONDARY
+            self._overdue_cb.check_color = _C.BG
+            self._overdue_cb.active_color = _C.CRITICAL
+        except Exception:
+            pass
+
         # Empty state
         if hasattr(self, '_empty_icon'):
             self._empty_icon.color = _C.BORDER
@@ -1251,6 +1297,17 @@ class AppController:
             self._empty_title.color = _C.TEXT_SECONDARY
         if hasattr(self, '_empty_subtitle'):
             self._empty_subtitle.color = _C.BORDER
+
+        # Error state
+        if hasattr(self, '_error_icon'):
+            self._error_icon.color = _C.WARNING
+        if hasattr(self, '_error_title'):
+            self._error_title.color = _C.TEXT_SECONDARY
+        if hasattr(self, 'error_text'):
+            self.error_text.color = _C.BORDER
+        if hasattr(self, '_error_retry_btn'):
+            self._error_retry_btn.bgcolor = _C.ACCENT
+            self._error_retry_btn.color = _C.TEXT_PRIMARY
 
         # Footer
         footer = self.dashboard.controls[-1]
@@ -1277,7 +1334,15 @@ class AppController:
                     card._progress_ctrl.bgcolor = _C.BORDER
 
         # Icon buttons
-        for btn in (self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn):
+        notif_btn = None
+        if hasattr(self, '_notification_icon') and len(self._notification_icon.controls) > 0:
+            notif_btn = self._notification_icon.controls[0]
+
+        buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
+        if notif_btn:
+            buttons_to_update.append(notif_btn)
+
+        for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
 
         # Loading bar
@@ -1286,6 +1351,16 @@ class AppController:
 
         # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
+
+        # Sub-views theme update propagation
+        for view_attr in ('calendar_view', 'detail_view', 'grade_overview_view'):
+            view_obj = getattr(self, view_attr, None)
+            if view_obj and hasattr(view_obj, 'update_theme'):
+                try:
+                    view_obj.update_theme()
+                except Exception as e:
+                    import logging
+                    logging.getLogger("UTHelper").error(f"Failed to update theme for {view_attr}: {e}", exc_info=True)
 
         self.page.update()
 
@@ -1573,11 +1648,10 @@ class AppController:
 
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
-        from core import ws_functions
         
         # Clear all caches to avoid using stale tokens/data from previous credentials
         try:
-            ws_functions.clear_all_caches()
+            self.orchestrator.moodle_service.clear_all_caches()
             self.orchestrator.clear_detail_cache()
             self.orchestrator._userid_cache = None
             self.orchestrator.is_logged_in = False
@@ -1766,16 +1840,11 @@ class AppController:
     async def _update_notification_badge(self):
         """Fetch unread notification count and update badge."""
         try:
-            from core import ws_functions
             userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
             if userid is None:
-                info = ws_functions.get_site_info(self.orchestrator.client.call_ws_api)
-                if info:
-                    userid = info.get('userid')
+                userid = self.orchestrator.moodle_service.get_current_user_id()
             if userid:
-                count = ws_functions.get_unread_notification_count(
-                    self.orchestrator.client.call_ws_api, userid
-                )
+                count = self.orchestrator.moodle_service.get_unread_notification_count(userid)
                 self._notification_badge_text.value = str(count) if count <= 9 else "9+"
                 self._notification_badge.visible = count > 0
                 self.page.update()

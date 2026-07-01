@@ -994,6 +994,88 @@ class CalendarView(ft.Container):
         if self._on_open_detail:
             self._on_open_detail(act)
 
+    def update_theme(self):
+        """Update colors of all calendar controls dynamically on theme switch."""
+        from gui.core.theme import C
+        self.bgcolor = C.BG
+        self._header.bgcolor = C.BG
+        
+        # Header Controls
+        try:
+            header_col = self._header.content
+            row1 = header_col.controls[0]
+            
+            # Back button
+            row1.controls[0].icon_color = C.TEXT_SECONDARY
+            
+            # Month nav row: chevron_left, month_label, chevron_right
+            month_nav = row1.controls[1]
+            month_nav.controls[0].icon_color = C.TEXT_SECONDARY
+            month_nav.controls[1].color = C.TEXT_PRIMARY
+            month_nav.controls[2].icon_color = C.TEXT_SECONDARY
+            
+            # Today button
+            row1.controls[2].icon_color = C.ACCENT
+            
+            # Month summary
+            month_summary = header_col.controls[1].content
+            month_summary.color = C.TEXT_SECONDARY
+        except Exception:
+            pass
+
+        # Weekdays Row Controls
+        try:
+            for wd_c in self._weekday_row.controls:
+                txt = wd_c.content
+                txt.color = C.CRITICAL if txt.value == "CN" else C.TEXT_SECONDARY
+        except Exception:
+            pass
+
+        # Mode Toggle Colors
+        try:
+            self._mode_toggle.bgcolor = C.SURFACE
+            self._mode_toggle.border = ft.Border.all(1, C.BORDER)
+            
+            self._mode_month_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
+            self._mode_month_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
+            if self._view_mode == "month":
+                self._mode_month_btn.bgcolor = C.ACCENT + "30"
+                self._mode_week_btn.bgcolor = "transparent"
+            else:
+                self._mode_month_btn.bgcolor = "transparent"
+                self._mode_week_btn.bgcolor = C.ACCENT + "30"
+                
+            self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+        except Exception:
+            pass
+
+        # Day Panel Static Info
+        self._day_title.color = C.TEXT_PRIMARY
+        self._day_count.color = C.TEXT_SECONDARY
+        
+        # Day Empty State
+        try:
+            self._day_empty.content.controls[0].color = C.BORDER
+            self._day_empty.content.controls[1].color = C.TEXT_SECONDARY
+            self._day_empty.content.controls[2].color = C.BORDER
+        except Exception:
+            pass
+
+        # Re-render Cells (applies new colors to grid cells)
+        if self._view_mode == "month":
+            self._render_month()
+        else:
+            self._render_week()
+
+        # Re-render selected day details list (re-creates mini-cards with correct theme)
+        self._update_day_panel()
+
+        try:
+            self.update()
+        except Exception:
+            pass
+
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
     # Apply compatibility shims if running directly

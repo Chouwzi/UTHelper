@@ -13,6 +13,12 @@ import logging
 from gui.core.theme import C
 from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
+from core.use_cases.submission_workflow import (
+    FileMetadataUpdate,
+    SelectedSubmissionFile,
+    SubmittedFile,
+    SubmissionTarget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +81,13 @@ _LICENSE_OPTIONS = [
 ]
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None):
+    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None):
         super().__init__()
-        self._init_variables(page, get_client, on_status_changed)
+        self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
         self._init_controls()
         self._init_layout(on_close)
 
-    def _init_variables(self, page: ft.Page, get_client, on_status_changed):
+    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
         self._page          = page
         self.visible        = False
         self.expand         = True
@@ -90,8 +96,46 @@ class DetailView(ft.Container):
         self._current_data  = {}
         self._get_client    = get_client   
         self._on_status_changed = on_status_changed
+        self._submission_workflow_factory = submission_workflow_factory
         self._selected_files = []          
         self._is_uploading  = False
+
+    def _submission_workflow(self, client):
+        if self._submission_workflow_factory:
+            return self._submission_workflow_factory(client)
+        raise RuntimeError("Submission workflow factory is not configured.")
+
+    def _submission_target(self, url: str, course_id: int) -> SubmissionTarget:
+        return SubmissionTarget(url=url, course_id=course_id)
+
+    def _selected_submission_files(self) -> list[SelectedSubmissionFile]:
+        return [
+            SelectedSubmissionFile(
+                name=getattr(file_item, "name", "file"),
+                bytes=getattr(file_item, "bytes", b""),
+            )
+            for file_item in self._selected_files
+        ]
+
+    def _submitted_file_dtos(self, files: list[dict]) -> list[SubmittedFile]:
+        return [
+            SubmittedFile(
+                name=file_item.get("name", "file"),
+                url=file_item.get("url", ""),
+                filepath=file_item.get("filepath", "/"),
+            )
+            for file_item in files
+        ]
+
+    def _submitted_file_dicts(self, files: list[SubmittedFile]) -> list[dict]:
+        return [
+            {
+                "name": file_item.name,
+                "url": file_item.url,
+                "filepath": file_item.filepath,
+            }
+            for file_item in files
+        ]
 
     def _init_controls(self):
         self._title_text    = ft.Text("", size=18, weight=ft.FontWeight.BOLD,
@@ -417,7 +461,7 @@ class DetailView(ft.Container):
         self._opentime_row.visible = False
 
         self._cutoff_row = ft.Row(controls=[
-                    ft.Text("⏰ Hạn nộp muộn", size=11, color=C.WARNING,
+                    ft.Text("Hạn nộp muộn", size=11, color=C.WARNING,
                             weight=ft.FontWeight.W_500),
                     self._cutoff_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
@@ -1016,74 +1060,12 @@ class DetailView(ft.Container):
 
     def _do_submit_sync(self, client, url: str, course_id: int) -> bool:
         """Thực hiện upload + submit đồng bộ (chạy trong thread)."""
-        from core.ws_functions import (
-            resolve_cmid_to_assign_id,
-            save_assignment_submission,
-            submit_for_grading,
+        return self._submission_workflow(client).submit_files(
+            target=self._submission_target(url, course_id),
+            selected_files=self._selected_submission_files(),
+            submitted_files=self._submitted_file_dtos(self._submitted_files),
+            overwrite=self._upload_mode_overwrite,
         )
-
-        # 1. Extract cmid từ URL
-        cmid = None
-        if "id=" in url:
-            try:
-                cmid = int(url.split("id=")[-1].split("&")[0])
-            except (ValueError, IndexError):
-                pass
-        if not cmid:
-            logger.error("Không extract được cmid từ URL: %s", url)
-            return False
-
-        # 2. Resolve cmid → assign_id
-        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
-        if not assign_id:
-            logger.error("Không resolve được assign_id từ cmid=%d, course=%d", cmid, course_id)
-            return False
-
-        # 3. Re-upload các file đã nộp trước đó (chỉ khi chế độ "Thêm file")
-        draft_itemid = 0
-        if not self._upload_mode_overwrite and self._submitted_files:
-            for f in self._submitted_files:
-                file_url = f.get('url', '')
-                if not file_url:
-                    continue
-                existing_bytes = client.download_file(file_url)
-                if not existing_bytes:
-                    logger.warning("Không tải được file cũ '%s', bỏ qua", f.get('name'))
-                    continue
-                result_id = client.upload_draft_file(
-                    f.get('name', 'file'), existing_bytes, itemid=draft_itemid
-                )
-                if result_id is None:
-                    logger.error("Re-upload thất bại cho file cũ '%s'", f.get('name'))
-                    return False
-                draft_itemid = result_id
-
-        # 4. Upload các file mới được chọn
-        for f in self._selected_files:
-            file_bytes = f.bytes
-            if not file_bytes:
-                logger.warning("File '%s' không có dữ liệu, bỏ qua.", f.name)
-                continue
-            result_id = client.upload_draft_file(
-                f.name, file_bytes, itemid=draft_itemid
-            )
-            if result_id is None:
-                logger.error("Upload thất bại cho file '%s'", f.name)
-                return False
-            draft_itemid = result_id  # dùng lại cho file tiếp theo
-
-        if draft_itemid == 0:
-            logger.error("Không có file nào được upload thành công")
-            return False
-
-        # 5. Save submission
-        save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
-        if save_ok:
-            # 6. Submit for grading (chính thức nộp)
-            grading_ok = submit_for_grading(client.call_ws_api, assign_id)
-            if not grading_ok:
-                logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
-        return save_ok
 
     def _show_upload_status(self, text: str, color: str):
         """Hiện thông báo trạng thái upload."""
@@ -1111,47 +1093,12 @@ class DetailView(ft.Container):
 
     def _load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
         """Load danh sách file đã nộp từ server (chạy trong thread)."""
-        from core.ws_functions import resolve_cmid_to_assign_id, get_submitted_files, get_submission_status
-
-        cmid = None
-        if "id=" in url:
-            try:
-                cmid = int(url.split("id=")[-1].split("&")[0])
-            except (ValueError, IndexError):
-                pass
-        if not cmid:
-            return
-
-        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
-        if not assign_id:
-            return
-
-        # Lấy hoặc tái sử dụng trạng thái nộp bài
-        status = prefetched_status
-        if status is None:
-            try:
-                status = get_submission_status(client.call_ws_api, assign_id)
-            except Exception:
-                status = None
-
-        if status:
-            try:
-                last_attempt = status.get('lastattempt', {})
-                submission = last_attempt.get('submission', {})
-                raw_status = submission.get('status', '')
-                status_map = {
-                    'submitted': 'Đã nộp',
-                    'new': 'Chưa nộp',
-                    'draft': 'Bản nháp',
-                    'reopened': 'Được mở lại',
-                }
-                self._last_server_status = status_map.get(raw_status, 'Chưa nộp')
-            except Exception:
-                self._last_server_status = None
-        else:
-            self._last_server_status = None
-
-        self._submitted_files = get_submitted_files(client.call_ws_api, assign_id, status=status)
+        result = self._submission_workflow(client).load_submitted_files(
+            target=self._submission_target(url, course_id),
+            prefetched_status=prefetched_status,
+        )
+        self._last_server_status = result.last_server_status
+        self._submitted_files = self._submitted_file_dicts(result.files)
 
     def _build_submitted_files_ui(self):
         build_submitted_files_ui(self)
@@ -1220,56 +1167,10 @@ class DetailView(ft.Container):
     def _do_remove_file_sync(self, client, url: str, course_id: int,
                              files_to_keep: list) -> bool:
         """Re-upload các file cần giữ rồi re-submit (chạy trong thread)."""
-        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission, submit_for_grading
-
-        cmid = None
-        if "id=" in url:
-            try:
-                cmid = int(url.split("id=")[-1].split("&")[0])
-            except (ValueError, IndexError):
-                pass
-        if not cmid:
-            raise ValueError("Không xác định được ID hoạt động từ URL bài tập.")
-
-        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
-        if not assign_id:
-            raise ValueError("Không tìm thấy ID bài nộp (Assignment ID) tương ứng.")
-
-        if not files_to_keep:
-            raise ValueError(
-                "Bài tập này không hỗ trợ xóa thông qua app.\n"
-                "Vui lòng click 'Mở trình duyệt' và chọn 'Remove submission' để xóa bài làm."
-            )
-
-        # Download và re-upload các file cần giữ
-        draft_itemid = 0
-        for f in files_to_keep:
-            file_url = f.get('url', '')
-            if not file_url:
-                logger.error("File '%s' không có URL", f.get('name'))
-                raise ValueError(f"File '{f.get('name')}' không có URL hợp lệ.")
-            
-            file_bytes = client.download_file(file_url)
-            if not file_bytes:
-                logger.error("Không tải được file '%s'", f.get('name'))
-                raise ValueError(f"Không tải được file '{f.get('name')}' từ máy chủ.")
-            
-            result_id = client.upload_draft_file(
-                f.get('name', 'file'), file_bytes, itemid=draft_itemid
-            )
-            if result_id is None:
-                logger.error("Re-upload thất bại cho file '%s'", f.get('name'))
-                raise ValueError(f"Không upload được file '{f.get('name')}' lên vùng nháp.")
-            draft_itemid = result_id
-
-        save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
-        if not save_ok:
-            raise ValueError("Moodle từ chối lưu bài nộp. Thử lại hoặc mở trình duyệt.")
-                
-        grading_ok = submit_for_grading(client.call_ws_api, assign_id)
-        if not grading_ok:
-            logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
-        return True
+        return self._submission_workflow(client).remove_files(
+            target=self._submission_target(url, course_id),
+            files_to_keep=self._submitted_file_dtos(files_to_keep),
+        )
 
     async def _on_edit_submitted(self, e):
         """Mở trình duyệt để chỉnh sửa bài nộp."""
@@ -1508,56 +1409,170 @@ class DetailView(ft.Container):
         2. Upload lại vào draft area mới, file target dùng tên/metadata mới
         3. mod_assign_save_submission
         """
-        from core.ws_functions import resolve_cmid_to_assign_id, save_assignment_submission, submit_for_grading
+        return self._submission_workflow(client).update_file_metadata(
+            target=self._submission_target(url, course_id),
+            submitted_files=self._submitted_file_dtos(self._submitted_files),
+            target_idx=target_idx,
+            meta=FileMetadataUpdate(
+                new_name=meta["new_name"],
+                author=meta.get("author", ""),
+                license=meta.get("license", "unknown"),
+                filepath=meta.get("filepath", "/"),
+            ),
+        )
 
-        cmid = None
-        if "id=" in url:
-            try:
-                cmid = int(url.split("id=")[-1].split("&")[0])
-            except (ValueError, IndexError):
-                pass
-        if not cmid:
-            return False
+    def update_theme(self):
+        """Update colors of all detail view controls dynamically on theme switch."""
+        from gui.core.theme import C
+        self.bgcolor = C.BG
+        
+        # Static Text & Control Colors
+        self._title_text.color = C.TEXT_PRIMARY
+        self._course_text.color = C.ACCENT
+        self._deadline_txt.color = C.TEXT_PRIMARY
+        self._opentime_txt.color = C.TEXT_PRIMARY
+        self._cutoff_txt.color = C.WARNING
+        
+        # Loading and status
+        self._loading_bar.color = C.ACCENT
+        self._loading_bar.bgcolor = C.BORDER
+        self._upload_progress.color = C.SAFE
+        self._upload_progress.bgcolor = C.BORDER
+        self._upload_status.color = C.TEXT_SECONDARY
 
-        assign_id = resolve_cmid_to_assign_id(client.call_ws_api, cmid, course_id)
-        if not assign_id:
-            return False
+        # Error Banner
+        try:
+            self._error_banner.bgcolor = C.SURFACE
+            self._error_banner.border = ft.Border.all(1, C.WARNING)
+            self._error_banner.content.controls[0].color = C.WARNING
+            self._error_banner.content.controls[1].color = C.WARNING
+        except Exception:
+            pass
 
-        draft_itemid = 0
-        for i, f in enumerate(self._submitted_files):
-            file_url = f.get('url', '')
-            if not file_url:
-                return False
+        # Text Fields & Dropdowns (Edit metadata dialog)
+        _edit_fields = [
+            self._edit_filename, self._edit_author,
+            self._edit_license, self._edit_filepath
+        ]
+        for f in _edit_fields:
+            if f:
+                f.border_color = C.BORDER
+                f.focused_border_color = C.ACCENT
+                f.color = C.TEXT_PRIMARY
+                if hasattr(f, 'label_style') and f.label_style:
+                    f.label_style.color = C.TEXT_SECONDARY
+                f.bgcolor = C.BG
+                if hasattr(f, 'fill_color') and f.fill_color:
+                    f.fill_color = C.BG
 
-            file_bytes = client.download_file(file_url)
-            if not file_bytes:
-                return False
+        # Edit Dialog
+        try:
+            self._file_edit_dialog.title.color = C.TEXT_PRIMARY
+            self._file_edit_dialog.bgcolor = C.SURFACE
+            # Cancel Button
+            self._file_edit_dialog.actions[0].style.color = C.TEXT_SECONDARY
+            # Update Button
+            self._file_edit_dialog.actions[1].bgcolor = C.ACCENT
+        except Exception:
+            pass
 
-            if i == target_idx:
-                # Upload with new metadata
-                result_id = client.upload_draft_file(
-                    meta['new_name'], file_bytes,
-                    itemid=draft_itemid,
-                    author=meta.get('author', ''),
-                    license_key=meta.get('license', 'unknown'),
-                )
-            else:
-                # Giữ nguyên file khác, không thay đổi metadata
-                result_id = client.upload_draft_file(
-                    f.get('name', 'file'), file_bytes,
-                    itemid=draft_itemid,
-                )
+        # Delete Dialog
+        try:
+            self._delete_confirm_text.color = C.TEXT_PRIMARY
+            self._delete_confirm_dialog.title.color = C.CRITICAL
+            self._delete_confirm_dialog.bgcolor = C.SURFACE
+            # Cancel Button
+            self._delete_confirm_dialog.actions[0].style.color = C.TEXT_SECONDARY
+            # Delete Button
+            self._delete_confirm_dialog.actions[1].bgcolor = C.CRITICAL
+        except Exception:
+            pass
 
-            if result_id is None:
-                return False
-            draft_itemid = result_id
+        # Buttons (Batch delete, multiselect, edit submitted)
+        try:
+            # Batch delete button
+            self._batch_delete_btn.bgcolor = C.SURFACE
+            self._batch_delete_btn.border = ft.Border.all(1, C.CRITICAL)
+            self._batch_delete_btn.content.controls[0].color = C.CRITICAL
+            self._batch_delete_btn.content.controls[1].color = C.CRITICAL
+            
+            # Multiselect button
+            self._multiselect_btn.bgcolor = C.SURFACE
+            self._multiselect_btn.border = ft.Border.all(1, C.BORDER)
+            self._multiselect_btn.content.controls[0].color = C.TEXT_SECONDARY
+            self._multiselect_btn.content.controls[1].color = C.TEXT_SECONDARY
+            
+            # Edit submitted button
+            self._edit_submitted_btn.bgcolor = C.SURFACE
+            self._edit_submitted_btn.border = ft.Border.all(1, C.WARNING)
+            self._edit_submitted_btn.content.controls[0].color = C.WARNING
+            self._edit_submitted_btn.content.controls[1].color = C.WARNING
+        except Exception:
+            pass
 
-        save_ok = save_assignment_submission(client.call_ws_api, assign_id, draft_itemid)
-        if save_ok:
-            grading_ok = submit_for_grading(client.call_ws_api, assign_id)
-            if not grading_ok:
-                logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
-        return save_ok
+        # Areas (submitted, submission, pick, submit, upload modes)
+        try:
+            self._submitted_area.bgcolor = C.SURFACE
+            self._submitted_area.border = ft.Border.all(1, C.SAFE + "40")
+            self._submitted_area.content.controls[0].controls[0].color = C.TEXT_SECONDARY
+            self._submitted_area.content.controls[0].controls[1].color = C.TEXT_SECONDARY
+            
+            self._pick_btn.bgcolor = C.SURFACE
+            self._pick_btn.border = ft.Border.all(1, C.ACCENT)
+            self._pick_btn.content.controls[0].color = C.ACCENT
+            self._pick_btn.content.controls[1].color = C.ACCENT
+            
+            self._submit_btn.bgcolor = C.SAFE
+            
+            self._mode_overwrite_btn.bgcolor = C.BG
+            self._mode_overwrite_btn.border = ft.Border.all(1, C.BORDER)
+            self._mode_overwrite_btn.content.controls[0].color = C.TEXT_SECONDARY
+            self._mode_overwrite_btn.content.controls[1].color = C.TEXT_SECONDARY
+            
+            self._mode_append_btn.bgcolor = C.ACCENT
+            self._upload_mode_warning_icon.color = C.WARNING
+            self._upload_mode_warning_text.color = C.WARNING
+            
+            self._submission_area.bgcolor = C.SURFACE
+            self._submission_area.border = ft.Border.all(1, C.BORDER)
+            self._submission_area.content.controls[0].controls[0].color = C.TEXT_SECONDARY
+            self._submission_area.content.controls[0].controls[1].color = C.TEXT_SECONDARY
+            
+            self._open_btn.bgcolor = C.ACCENT
+            
+            self._opentime_row.controls[0].color = C.TEXT_SECONDARY
+            self._cutoff_row.controls[0].color = C.WARNING
+            self._header_open_btn.icon_color = C.ACCENT
+        except Exception:
+            pass
+
+        # Layout elements
+        try:
+            back_row = self.content.controls[0].content.controls[0].content
+            back_row.controls[0].color = C.TEXT_SECONDARY
+            back_row.controls[1].color = C.TEXT_SECONDARY
+            
+            detail_col = self.content.controls[2].content.controls[0].content
+            detail_col.controls[3].color = C.BORDER
+            
+            info_box = detail_col.controls[4]
+            info_box.bgcolor = C.SURFACE
+            info_box.border = ft.Border.all(1, C.BORDER)
+            info_box.content.controls[0].controls[0].color = C.TEXT_SECONDARY
+            info_box.content.controls[1].controls[0].color = C.TEXT_SECONDARY
+            info_box.content.controls[2].controls[0].color = C.TEXT_SECONDARY
+            info_box.content.controls[3].controls[0].color = C.WARNING
+        except Exception:
+            pass
+
+        # If data is currently shown, refresh dynamic content
+        if self._current_data:
+            self.update_detail(self._current_data)
+
+        try:
+            self.update()
+        except Exception:
+            pass
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
