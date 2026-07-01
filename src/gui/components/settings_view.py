@@ -785,9 +785,44 @@ class SettingsView(ft.Container):
         self._c_tb_other.value = preset["other"]
 
     def _rebuild_theme_cards(self):
-        """Rebuild theme cards row to reflect new selection."""
-        new_row = self._build_theme_selector()
-        self._theme_cards_row.content = new_row.content
+        """Rebuild theme cards row to reflect new selection in place."""
+        row_ctrl = self._theme_cards_row.content
+        if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) == len(THEME_ORDER):
+            for i, key in enumerate(THEME_ORDER):
+                preset = THEME_PRESETS[key]
+                selected = (key == self._selected_theme)
+                card = row_ctrl.controls[i]
+                
+                # Update border
+                border_col = preset["accent"] if selected else (preset["border"] + "80")
+                border_w = 2.5 if selected else 1
+                card.border = ft.Border.all(border_w, border_col)
+                
+                # Update check icon
+                try:
+                    check_icon = card.content.controls[0].controls[0]
+                    check_icon.visible = selected
+                except Exception:
+                    pass
+                
+                # Update label font weight
+                try:
+                    label = card.content.controls[3]
+                    label.weight = ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL
+                except Exception:
+                    pass
+            try:
+                row_ctrl.update()
+            except Exception:
+                pass
+        else:
+            # Fallback if row or length mismatch
+            new_row = self._build_theme_selector()
+            self._theme_cards_row.content = new_row.content
+            try:
+                self._theme_cards_row.update()
+            except Exception:
+                pass
 
 
     async def _handle_reset_defaults(self, e):
