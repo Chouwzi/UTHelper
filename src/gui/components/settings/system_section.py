@@ -4,6 +4,8 @@ from config import settings
 import platform_utils as _pu
 
 def init_system_controls(view):
+    """Khởi tạo các control cấu hình vòng đời ứng dụng và tần suất đồng bộ trên hệ điều hành."""
+    # ── Thiết lập riêng trên Desktop (Windows) ──
     view._sw_start_with_windows = ft.Switch(
         value=settings.START_WITH_WINDOWS, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -19,6 +21,8 @@ def init_system_controls(view):
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
         label="Thu nhỏ vào khay hệ thống"
     )
+    
+    # ── Thiết lập riêng trên Mobile (Android) ──
     view._sw_bg_check = ft.Switch(
         value=settings.BACKGROUND_CHECK_ANDROID, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -35,6 +39,8 @@ def init_system_controls(view):
         width=200,
         visible=settings.BACKGROUND_CHECK_ANDROID,
     )
+    
+    # ── Đồng bộ hóa dữ liệu Moodle chung ──
     view._interval_field = ft.TextField(
         value=str(settings.CHECK_INTERVAL_MINUTES),
         label="Cập nhật mỗi X phút (0 để tắt)",
@@ -58,6 +64,7 @@ def init_system_controls(view):
         bgcolor=C.BG, border_radius=10,
         width=250,
     )
+    # Cấu hình số lượng tháng lịch cần quét sự kiện
     view._fetch_months_field = ft.TextField(
         value=str(settings.FETCH_MONTHS),
         label="Số tháng lấy sự kiện (1-3)",
@@ -68,6 +75,7 @@ def init_system_controls(view):
     )
 
 def build_system_section(view) -> ft.Container:
+    """Xây dựng Container nhóm cấu hình hệ thống phù hợp với từng nền tảng Desktop/Mobile."""
     if not _pu.IS_MOBILE:
         controls = [
             view._sw_start_with_windows, view._sw_start_minimized, view._sw_minimize_to_tray,

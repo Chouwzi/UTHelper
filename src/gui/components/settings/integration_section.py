@@ -3,6 +3,8 @@ from gui.core.theme import C
 from config import settings
 
 def init_integration_controls(view):
+    """Khởi tạo các control thiết lập kênh thông báo tích hợp bên ngoài (Gmail, Discord, Telegram)."""
+    # ── Tích hợp Gmail ──
     view._sw_email = ft.Switch(
         value=settings.ENABLE_GMAIL, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -23,6 +25,7 @@ def init_integration_controls(view):
         border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
     )
 
+    # ── Tích hợp Discord ──
     view._sw_discord = ft.Switch(
         value=settings.ENABLE_DISCORD, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -36,6 +39,7 @@ def init_integration_controls(view):
         border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
     )
 
+    # ── Tích hợp Telegram ──
     view._sw_telegram = ft.Switch(
         value=settings.ENABLE_TELEGRAM, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -60,6 +64,7 @@ def init_integration_controls(view):
     )
 
 def build_integration_section(view) -> ft.Container:
+    """Xây dựng Container chứa toàn bộ các control tích hợp thông báo bên ngoài."""
     return view._build_setting_group(
         "Tích hợp",
         "Nhắn tin qua Bot & Email",

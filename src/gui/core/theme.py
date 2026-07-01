@@ -1,16 +1,16 @@
-"""UTHelper Theme System — Curated theme presets & dynamic application."""
+"""Hệ thống Theme của UTHelper — Các preset màu sắc chọn lọc & cơ chế áp dụng linh hoạt."""
 
 
-# ── Theme Preset Definitions ─────────────────────────────────────────
-# Mỗi preset là dict đầy đủ: base UI colors + urgency + type badge colors.
-# Key = tên theme (snake_case), dùng làm giá trị settings.THEME.
+# ── Định nghĩa các Preset Theme ─────────────────────────────────────────
+# Mỗi preset là một dict đầy đủ gồm: các màu UI cơ bản + màu mức độ khẩn cấp + màu badge loại hoạt động.
+# Key = tên theme (snake_case), được lưu trong cấu hình settings.THEME.
 
 from gui.core.theme_presets import THEME_PRESETS, THEME_ORDER
 
 
-# ── Active Theme Constants ────────────────────────────────────────────
-# Tất cả GUI files đọc C.BG, C.ACCENT … qua reference.
-# apply_theme() cập nhật giá trị class-level → hiệu lực toàn cục.
+# ── Các Hằng số Theme đang Hoạt động ────────────────────────────────────
+# Tất cả các file GUI đọc màu sắc C.BG, C.ACCENT … qua các tham chiếu này.
+# apply_theme() sẽ cập nhật các giá trị ở mức class-level → có hiệu lực toàn cục ngay lập tức.
 
 class C:
     BG             = "#0B0F1A"
@@ -25,7 +25,7 @@ class C:
     BORDER         = "#1E293B"
 
 
-# ── Labels & mappings ─────────────────────────────────────────────────
+# ── Nhãn & Ánh xạ loại hoạt động ─────────────────────────────────────────
 
 _TYPE_LABELS = {
     "quiz":       "QUIZ",
@@ -49,18 +49,18 @@ _TYPE_COLORS = {
 }
 
 
-# ── Theme Application ─────────────────────────────────────────────────
+# ── Cơ chế Áp dụng Theme ─────────────────────────────────────────────────
 
 def apply_theme(theme_name: str) -> None:
-    """Apply a theme preset to the global C class and _TYPE_COLORS dict.
+    """Áp dụng một theme preset vào các hằng số giao diện toàn cục C và từ điển _TYPE_COLORS.
 
     Args:
-        theme_name: Key trong THEME_PRESETS (ví dụ "midnight_blue").
-                    Nếu key không hợp lệ, fallback về midnight_blue.
+        theme_name: Khóa (key) trong THEME_PRESETS (ví dụ "midnight_blue").
+                    Nếu khóa không hợp lệ, sẽ tự động rollback về "midnight_blue".
     """
     preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
 
-    # ── Base UI ──
+    # ── Các màu UI cơ sở ──
     C.BG             = preset["bg"]
     C.SURFACE        = preset["surface"]
     C.SURFACE_HOVER  = preset["surface_hover"]
@@ -69,31 +69,31 @@ def apply_theme(theme_name: str) -> None:
     C.TEXT_SECONDARY = preset["text_secondary"]
     C.BORDER         = preset["border"]
 
-    # ── Urgency ──
+    # ── Mức độ khẩn cấp ──
     C.CRITICAL = preset["critical"]
     C.WARNING  = preset["warning"]
     C.SAFE     = preset["safe"]
 
-    # ── Type badge colors ──
+    # ── Màu sắc của các badge loại hoạt động ──
     _TYPE_COLORS["quiz"]       = preset["quiz"]
     _TYPE_COLORS["assignment"] = preset["assignment"]
-    _TYPE_COLORS["deadline"]   = preset["assignment"]  # same as assignment
+    _TYPE_COLORS["deadline"]   = preset["assignment"]  # Đồng bộ cùng màu với bài tập
     _TYPE_COLORS["attendance"] = preset["attendance"]
     _TYPE_COLORS["open"]       = preset["open"]
     _TYPE_COLORS["other"]      = preset["other"]
 
 
 def load_theme_from_settings():
-    """Load theme from settings.json — called at import time and on save."""
+    """Tải cấu hình theme từ settings.json — được gọi tự động khi import và khi người dùng lưu thiết lập."""
     try:
         from config import settings
 
-        # 1. Apply preset first (sets ALL colors)
+        # 1. Áp dụng preset trước (thiết lập toàn bộ màu sắc nền tảng)
         theme_name = getattr(settings, 'THEME', 'midnight_blue')
         apply_theme(theme_name)
 
-        # 2. Override with custom colors if user has changed them
-        #    (settings.COLOR_* khác default preset = user đã custom)
+        # 2. Ghi đè bằng các màu sắc tùy chỉnh riêng lẻ nếu người dùng đã chỉnh sửa
+        #    (các giá trị settings.COLOR_* khác biệt so với mặc định của preset)
         preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
 
         custom_map = {
@@ -123,10 +123,10 @@ load_theme_from_settings()
 
 
 def set_page_theme(page) -> None:
-    """Sync current C values into page.theme so Flet semantic colors work.
+    """Đồng bộ các giá trị màu C hiện tại vào page.theme ColorScheme để các màu sắc ngữ nghĩa (semantic colors) của Flet hoạt động chính xác.
 
-    Call after apply_theme() to update page.theme ColorScheme.
-    This makes ft.Colors.PRIMARY, ft.Colors.SURFACE, etc. match our C values.
+    Cần gọi hàm này sau khi thực hiện apply_theme() để cập nhật lại ColorScheme của page.
+    Giúp các thuộc tính như ft.Colors.PRIMARY, ft.Colors.SURFACE đồng bộ với theme tùy chỉnh.
     """
     import flet as ft
 

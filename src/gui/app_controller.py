@@ -109,14 +109,14 @@ class AppController:
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
     def _init_window(self):
-        # Runtime platform detection for accurate mobile/desktop flags
+        # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
         detect_platform(self.page)
-        # Re-read flags after runtime detection (they may have changed)
+        # Đọc lại các cờ sau khi phát hiện lúc runtime (chúng có thể đã thay đổi)
         import platform_utils
         _is_mobile = platform_utils.IS_MOBILE
         _is_windows = platform_utils.IS_WINDOWS
         
-        # ── Desktop-only: Fixed-size window with tray support ──
+        # ── Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống ──
         if not _is_mobile:
             self.page.window.width        = 420
             self.page.window.height       = 720
@@ -134,11 +134,11 @@ class AppController:
         self.page.spacing             = 0
         self.page.theme_mode          = ft.ThemeMode.DARK
 
-        # Sync Flet's page.theme ColorScheme with our C values
+        # Đồng bộ ColorScheme theme của Flet page với các giá trị C của chúng ta
         from gui.core.theme import set_page_theme
         set_page_theme(self.page)
         
-        # ── Tray & Notifications (platform-aware) ──
+        # ── Khay hệ thống & Thông báo (tự động nhận biết nền tảng) ──
         if _is_windows:
             from gui.tray import TrayApp
             self.tray = TrayApp(self.page)
@@ -1642,7 +1642,7 @@ class AppController:
         self.page.run_task(self._show_detail_async, data)
 
     async def _show_detail_async(self, data: dict):
-        # Track if detail was opened from calendar for back-navigation
+        # Ghi nhận nếu màn hình chi tiết được mở từ Lịch để phục vụ quay lại (back-navigation)
         self._detail_from_calendar = self.calendar_view.visible
         self.view_manager.show_detail_loading(data)
         try:
@@ -1657,7 +1657,7 @@ class AppController:
             self.view_manager.show_detail_error(data)
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
-        # Dynamically build pulse shadow using the current theme's C.CRITICAL color
+        # Tự động tạo bóng đổ nhấp nháy (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
         crit_hex = C.CRITICAL.lstrip("#")
         alpha = "40" if pulse_high else "15"
         blur = 16 if pulse_high else 8

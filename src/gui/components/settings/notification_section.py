@@ -3,6 +3,8 @@ from gui.core.theme import C
 from config import settings
 
 def init_notification_controls(view):
+    """Khởi tạo các control thiết lập cấu hình thông báo và chế độ Do Not Disturb (DND)."""
+    # Định nghĩa cấu hình có sẵn của các Notification Profile
     _PROFILES = {
         "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
         "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
@@ -12,6 +14,7 @@ def init_notification_controls(view):
     view._profile_cards = {}
     view._profile_summary = ft.Text("", size=12, color=C.TEXT_SECONDARY, italic=True)
 
+    # Dựng các thẻ lựa chọn profile cấu hình thông báo nhanh
     for pkey, pval in _PROFILES.items():
         is_sel = (pkey == view._current_profile)
         card = ft.Container(
@@ -34,12 +37,14 @@ def init_notification_controls(view):
         spacing=10,
     )
 
+    # Switch bật/tắt chế độ DND (Không làm phiền)
     view._sw_dnd_enable = ft.Switch(
         value=getattr(settings, 'NOTIFY_DND_ENABLE', False), active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
         label="Không làm phiền",
         on_change=lambda e: view._update_dnd_summary()
     )
+    # Khung nhập giờ bắt đầu DND
     view._dnd_start_field = ft.TextField(
         value=str(getattr(settings, 'NOTIFY_DND_START', 22)),
         label="Từ (giờ)",
@@ -50,6 +55,7 @@ def init_notification_controls(view):
         prefix_icon=ft.Icons.DARK_MODE_OUTLINED,
         on_change=lambda e: view._update_dnd_summary()
     )
+    # Khung nhập giờ kết thúc DND
     view._dnd_end_field = ft.TextField(
         value=str(getattr(settings, 'NOTIFY_DND_END', 7)),
         label="Đến (giờ)",
@@ -71,12 +77,14 @@ def init_notification_controls(view):
         spacing=8,
     )
 
+    # Switch tắt thông báo đối với các hoạt động đã hoàn tất nộp bài
     view._sw_ignore_sub = ft.Switch(
         value=getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True), active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
         label="Bỏ qua bài đã nộp"
     )
 
+    # Danh sách các loại hoạt động Moodle được nhắc thông báo
     _current_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
     view._notify_type_checks = {}
     _type_options = [
@@ -102,6 +110,7 @@ def init_notification_controls(view):
         run_spacing=0,
     )
 
+    # Các mốc thời gian nhắc nhở (milestones) trước deadline
     _current_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
     view._milestone_chips = {}
     _milestone_options = [
@@ -138,6 +147,7 @@ def init_notification_controls(view):
         visible=False,
     )
     
+    # Khu vực cấu hình môn học tắt thông báo (Muted Courses)
     view._muted_courses_list = ft.Column(spacing=2)
     view._muted_courses_drp = ft.ExpansionTile(
         title=ft.Text("Nhấn để mở danh sách chọn môn bỏ qua", size=13, color=C.TEXT_SECONDARY),
@@ -167,6 +177,7 @@ def init_notification_controls(view):
         visible=False 
     )
 
+    # Nhắc nhở khẩn cấp phút cuối (X phút trước deadline)
     view._notify_min_field = ft.TextField( 
         value=str(settings.NOTIFY_MINUTES_BEFORE),
         label="Thông báo trước deadline (Phút)",
@@ -177,6 +188,7 @@ def init_notification_controls(view):
     )
 
 def build_notification_section(view) -> ft.Container:
+    """Xây dựng Container nhóm các thiết lập cấu hình thông báo cơ bản."""
     return view._build_setting_group(
         "Thông báo",
         "Chế độ và thời gian nhắc nhở",
@@ -196,6 +208,7 @@ def build_notification_section(view) -> ft.Container:
     )
 
 def build_advanced_section(view) -> ft.Container:
+    """Xây dựng Container nhóm các cấu hình nhắc nhở nâng cao và lọc môn học."""
     return view._build_setting_group(
         "Tùy chỉnh nâng cao",
         "Mốc nhắc, loại bài, tắt theo môn",

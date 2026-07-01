@@ -3,6 +3,8 @@ from gui.core.theme import C
 from config import settings
 
 def init_account_controls(view):
+    """Khởi tạo các control nhập liệu và trạng thái cho phần tài khoản UTH."""
+    # Trường nhập mã số sinh viên (MSSV)
     view._username_field = ft.TextField(
         value=settings.UTH_USERNAME,
         label="Mã số sinh viên (MSSV)",
@@ -10,8 +12,9 @@ def init_account_controls(view):
         border_color=C.BORDER, focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY,
         bgcolor=C.BG, border_radius=10,
-        on_submit=lambda e: view._password_field.focus()
+        on_submit=lambda e: view._password_field.focus() # Chuyển focus sang trường mật khẩu khi nhấn Enter
     )
+    # Trường nhập mật khẩu
     view._password_field = ft.TextField(
         label="Mật khẩu",
         value=settings.UTH_PASSWORD,
@@ -20,8 +23,9 @@ def init_account_controls(view):
         border_color=C.BORDER, focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY,
         bgcolor=C.BG, border_radius=10,
-        on_submit=view._handle_test_login
+        on_submit=view._handle_test_login # Thực hiện test login khi nhấn Enter
     )
+    # Nút bấm kiểm tra thông tin đăng nhập
     view._test_login_btn = ft.Button(
         "Kiểm tra kết nối",
         icon=ft.Icons.WIFI_FIND_ROUNDED,
@@ -35,10 +39,13 @@ def init_account_controls(view):
         ),
         height=44
     )
+    # Thanh ProgressBar hiển thị trạng thái đang kiểm tra (mặc định ẩn)
     view._test_loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)
+    # Văn bản thông báo kết quả kiểm tra đăng nhập
     view._test_login_status = ft.Text("", size=12, text_align=ft.TextAlign.CENTER)
 
 def build_account_section(view) -> ft.Container:
+    """Xây dựng Container nhóm các control thiết lập tài khoản UTH."""
     return view._build_setting_group(
         "Tài khoản UTH",
         "Thông tin đăng nhập hệ thống elearning",

@@ -3,29 +3,31 @@ from gui.core.theme import C
 from datetime import datetime
 
 def build_submitted_files_ui(view):
-    """Xây dựng UI hiển thị file đã nộp trên server."""
+    """Xây dựng giao diện hiển thị danh sách các file đã nộp trên server."""
     view._submitted_files_col.controls.clear()
     view._selected_file_indices.clear()
     view._is_multiselect_mode = False
 
+    # Nếu không có file nào được nộp thì ẩn vùng thông tin file nộp
     if not view._submitted_files:
         view._submitted_area.visible = False
         view._multiselect_btn.visible = False
         view._batch_delete_btn.visible = False
         return
 
+    # Duyệt qua từng file đã nộp để dựng dòng giao diện tương ứng
     for i, f in enumerate(view._submitted_files):
         size_b = f.get('size', 0)
         size_kb = size_b / 1024
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
 
-        # Format dates
+        # Định dạng thời gian
         tmod = f.get('timemodified', 0)
         tcreated = f.get('timecreated', 0)
         mod_str = datetime.fromtimestamp(tmod).strftime('%d/%m/%Y %H:%M') if tmod else '—'
         created_str = datetime.fromtimestamp(tcreated).strftime('%d/%m/%Y %H:%M') if tcreated else '—'
 
-        # Metadata lines
+        # Cột chứa các thông tin metadata bổ trợ của file
         meta_col = ft.Column(controls=[
             ft.Row([
                 ft.Text("Lần sửa đổi cuối", size=10, color=C.TEXT_SECONDARY, width=120),
@@ -41,12 +43,12 @@ def build_submitted_files_ui(view):
             ], spacing=4),
         ], spacing=2)
 
-        # Checkbox for multi-select (hidden by default)
+        # Hộp kiểm checkbox phục vụ chế độ chọn xóa nhiều file (mặc định ẩn)
         cb = ft.Checkbox(
             value=False,
             on_change=lambda e, idx=i: view._on_file_checkbox_changed(idx, e.control.value),
             active_color=C.CRITICAL,
-            visible=False,  # hidden until multiselect mode
+            visible=False,  # Sẽ được hiển thị khi kích hoạt chế độ multiselect
         )
 
         row = ft.Container(
@@ -91,6 +93,6 @@ def build_submitted_files_ui(view):
     view._submitted_files_col.visible = True
     view._submitted_area.visible = True
     view._edit_submitted_btn.visible = True
-    # Show multi-select button only when >1 file
+    # Chỉ hiển thị nút chọn nhiều khi danh sách có từ 2 file trở lên
     view._multiselect_btn.visible = len(view._submitted_files) > 1
     view._batch_delete_btn.visible = False
