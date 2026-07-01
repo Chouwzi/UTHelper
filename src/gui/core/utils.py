@@ -253,7 +253,6 @@ def get_submission_badge(data: dict):
 
 import hashlib
 import os
-import re
 import shutil
 import urllib.parse
 import urllib.request

@@ -3,7 +3,6 @@
 Compares current grades against a persisted snapshot to detect changes.
 Snapshot is stored as JSON in the user data directory.
 """
-import json
 import logging
 import os
 from dataclasses import dataclass

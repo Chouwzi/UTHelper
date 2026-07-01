@@ -11,7 +11,7 @@ import sys as _sys
 
 logger = logging.getLogger(__name__)
 
-# Platform detection
+# Phát hiện hệ điều hành/nền tảng
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
 _is_ios = _sys.platform == 'ios' or (
     _sys.platform == 'darwin' and os.environ.get('FLET_APP_STORAGE_DATA', '') != ''
@@ -41,13 +41,13 @@ class MoodleClient:
     Chạy trên Desktop, iOS, Android mà không cần cài thêm gì.
     """
     
-    # Client-side rate limiting (Moodle has NO server-side throttle)
-    _MIN_INTERVAL = 0.05  # 50ms = max 20 req/s (was 200ms — caused 1.6s waste per cycle)
+    # Giới hạn tần suất gọi API ở phía Client (Moodle không tự động bóp băng thông từ server-side)
+    _MIN_INTERVAL = 0.05  # 50ms = tối đa 20 req/s (trước đây là 200ms — gây lãng phí 1.6s cho mỗi chu kỳ quét)
 
     def __init__(self):
         self._last_login_error = ""
-        self._portal_token: str = ""   # JWT from portal API — valid ~30 days
-        self._last_call_time: float = 0.0  # monotonic timestamp
+        self._portal_token: str = ""   # JWT lấy từ portal API — thời hạn khoảng 30 ngày
+        self._last_call_time: float = 0.0  # Nhãn thời gian đơn điệu (monotonic)
 
     def _throttle(self):
         """Ensure minimum interval between API calls."""
@@ -158,14 +158,14 @@ class MoodleClient:
         boundary = uuid.uuid4().hex
         
         body_parts = []
-        # Form fields
+        # Các trường biểu mẫu (form fields)
         for key, val in fields.items():
             body_parts.append(
                 f'--{boundary}\r\n'
                 f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
                 f'{val}\r\n'
             )
-        # File fields
+        # Các trường tệp tin (file fields)
         for field_name, (filename, file_bytes) in files.items():
             body_parts.append(
                 f'--{boundary}\r\n'
@@ -174,13 +174,13 @@ class MoodleClient:
             )
         body_parts.append(f'--{boundary}--\r\n')
         
-        # Build binary body
+        # Dựng thân yêu cầu dạng nhị phân (binary body)
         body = b''
         file_items = list(files.items())
         file_idx = 0
         for i, part in enumerate(body_parts):
             body += part.encode('utf-8')
-            # Insert file bytes after the header of each file part
+            # Chèn dữ liệu byte của tệp ngay sau phần đầu (header) của mỗi phần tệp
             if i < len(body_parts) - 1 and 'filename=' in part:
                 _, (_, file_bytes) = file_items[file_idx]
                 body += file_bytes + b'\r\n'
@@ -191,7 +191,7 @@ class MoodleClient:
         req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
         req.add_header('Accept-Encoding', 'gzip')
         
-        max_attempts = 2  # files are large, retry less
+        max_attempts = 2  # Kích thước tệp lớn, giảm số lần thử lại (retry)
         for attempt in range(max_attempts):
             self._throttle()
             try:
@@ -237,7 +237,7 @@ class MoodleClient:
             return e.code, None
 
 
-    # Web Services API (Token-based, stateless)
+    # Web Services API (Dựa trên Token, không lưu trạng thái/stateless)
 
     def _get_ws_token(self, username: str = None, password: str = None, force: bool = False) -> str:
         """Lấy Web Services token từ Moodle.
@@ -245,7 +245,7 @@ class MoodleClient:
         Token này stateless, không ảnh hưởng browser session.
         Valid rất lâu (~30 ngày), cache trong settings.
         """
-        # Return cached token nếu có
+        # Trả về cached token nếu có
         if not force and settings.MOODLE_WS_TOKEN:
             return settings.MOODLE_WS_TOKEN
         
@@ -331,10 +331,10 @@ class MoodleClient:
                 logger.error(f"WS API [{function}] trả về response không phải JSON (status={status}).")
                 return None
             
-            # Check for token expiry or invalid token
+            # Kiểm tra xem token hết hạn hoặc không hợp lệ
             if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
                 logger.warning(f"WS token hết hạn hoặc không hợp lệ: {result.get('error', '')}")
-                # Token expired → force refresh
+                # Token đã hết hạn → bắt buộc làm mới (force refresh)
                 settings.MOODLE_WS_TOKEN = ""
                 token = self._get_ws_token(force=True)
                 if token:
@@ -350,11 +350,11 @@ class MoodleClient:
                 else:
                     return None
             
-            # Check for other errors
+            # Kiểm tra các lỗi khác từ phía hệ thống
             if isinstance(result, dict) and 'exception' in result:
                 errorcode = result.get('errorcode', '')
                 message = result.get('message', result.get('error', 'Unknown'))
-                # Server-side data validation errors are non-retryable
+                # Các lỗi xác thực dữ liệu phía server (data validation) không thể thực hiện lại (non-retryable)
                 if errorcode == 'invalidresponse':
                     logger.warning(f"WS API [{function}]: Server data validation (non-retryable): {message}")
                 else:
@@ -368,7 +368,7 @@ class MoodleClient:
 
 
 
-    # Async Web Services API (non-blocking)
+    # Async Web Services API (Bất đồng bộ/non-blocking)
 
     async def call_ws_api_async(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle WS API bất đồng bộ.

@@ -35,11 +35,11 @@ def test_dnd_logic(manager, mock_config, monkeypatch):
             return mock_now
             
     monkeypatch.setattr(notifiers.manager, "datetime", MockDatetime)
-    assert manager._is_in_dnd() == True
+    assert manager._is_in_dnd() is True
 
     mock_now = datetime(2025, 1, 1, 10, 30, 0)
     MockDatetime.now = classmethod(lambda cls: datetime(2025, 1, 1, 10, 30, 0))
-    assert manager._is_in_dnd() == False
+    assert manager._is_in_dnd() is False
 
 def test_milestone_filtering(manager, mock_config):
     now = datetime.now()

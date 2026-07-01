@@ -45,3 +45,30 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-07-01 | `feature/refactor-clean` | Giai đoạn 4 | Phân chia các Tab cài đặt của `SettingsView` thành các file độc lập trong thư mục `settings/` | Đạt 296/296 |
 | 2026-07-01 | `feature/refactor-clean` | Giai đoạn 5 | Trích xuất `theme_presets.py` và triển khai `ViewManager` để giảm ghép cặp cho `AppController` | Đạt 296/296 |
 | 2026-07-01 | `feature/refactor-clean` | Giai đoạn 6 | Trích xuất bảng danh sách file đã nộp (`SubmittedFilesTable`) của `DetailView` thành component riêng | Đạt 296/296 |
+| 2026-07-01 | workspace hiện tại | Audit senior | Nghiên cứu Clean Code/SOLID/OOP/Architecture, tạo `docs/CODEBASE_ARCHITECTURE_REVIEW_PLAN.md`, cập nhật `.agents/AGENTS.md` làm rule nguồn trong repo | Test đạt 296 passed, 22 skipped; `ruff check src` còn 13 lỗi |
+
+---
+
+## 3. Baseline Kiến trúc Sau Audit 2026-07-01
+
+### Kết quả kiểm chứng
+
+*   `python -m pytest tests -q --tb=short`: **296 passed, 22 skipped, 5 warnings**.
+*   `ruff check src`: **13 lỗi**, chủ yếu unused imports và unused local variable.
+*   `src`: 59 file Python, 14.621 dòng.
+*   `tests`: 29 file Python, 3.930 dòng.
+
+### Phát hiện chính
+
+1.  `AppController`, `SettingsView`, `DetailView` vẫn là các điểm tập trung trách nhiệm lớn nhất.
+2.  `DetailView` còn trực tiếp xử lý workflow Moodle submit/upload/re-upload/delete metadata; nên trích sang use case/service.
+3.  `MoodleService` đã tồn tại nhưng chưa thành boundary chính; nhiều nơi vẫn gọi `core.ws_functions` trực tiếp.
+4.  `models.py` còn phụ thuộc `config.settings` để tính urgency; nên chuyển sang policy inject được.
+5.  `.agents/AGENTS.md` cũ trỏ tới đường dẫn ngoài repo; đã cập nhật để dùng `docs/CODEBASE_ARCHITECTURE_REVIEW_PLAN.md` làm nguồn sự thật.
+
+### Ưu tiên refactor tiếp theo
+
+1.  Phase 0: sửa Ruff baseline, cập nhật README badge/test count, tạo ADR đầu tiên.
+2.  Phase 1: trích `SubmissionWorkflow` khỏi `DetailView`.
+3.  Phase 2: tách `RefreshCoordinator`, `AppState`, `UpdateController` khỏi `AppController`.
+4.  Phase 3: biến `MoodleService` thành facade/use-case boundary thật sự.

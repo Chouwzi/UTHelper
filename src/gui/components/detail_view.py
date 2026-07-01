@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Optional, List, Dict, Any
+from typing import Optional
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -11,7 +11,7 @@ import flet as ft
 import asyncio
 import logging
 from gui.core.theme import C
-from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown, clean_html
+from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
 
 logger = logging.getLogger(__name__)

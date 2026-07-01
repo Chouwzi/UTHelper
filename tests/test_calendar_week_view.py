@@ -40,8 +40,6 @@ class TestCalendarWeekState:
 
     def test_go_today_sets_both_states(self):
         today = date.today()
-        year = today.year
-        month = today.month
         selected_day = today.day
         selected_date = today
         week_start = today - timedelta(days=today.weekday())

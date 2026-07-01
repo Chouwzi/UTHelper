@@ -121,7 +121,6 @@ class SafeFileIO:
                         return True
                 except Exception as e:
                     # Cho phép retry trên cả Windows và thiết bị di động
-                    is_lock_exception = True
                     if attempt < max_retries - 1:
                         logger.warning(
                             f"Lỗi truy cập file {filepath.name} (lần thử {attempt+1}): {e}. "
@@ -154,4 +153,3 @@ class SafeFileIO:
             except Exception as e:
                 logger.error(f"Đọc file {filepath.name} thất bại: {e}")
                 return default_factory()
-

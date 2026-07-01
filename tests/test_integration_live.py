@@ -340,7 +340,7 @@ class TestPhase4GradeMonitor:
             changes2 = monitor.check_for_changes(client.call_ws_api, userid)
             assert len(changes2) == 0, \
                 f"Second run without real grade changes should be 0, got {len(changes2)}"
-            print(f"  [OK] Second run: 0 changes (consistent)")
+            print("  [OK] Second run: 0 changes (consistent)")
         finally:
             if os.path.exists(snap_path):
                 os.unlink(snap_path)
@@ -440,7 +440,7 @@ class TestPhase6BugFixRegression:
         cid = courses[0].get('id')
         # Pass as string (the bug scenario) — should still work after fix
         str_cid = str(cid)
-        items = ws_functions.get_grade_items(client.call_ws_api, str_cid, userid)
+        ws_functions.get_grade_items(client.call_ws_api, str_cid, userid)
         # Should not crash — BUG-03 fix casts to int internally
         print(f"\n  [OK] BUG-03: str course_id '{str_cid}' handled without crash")
 

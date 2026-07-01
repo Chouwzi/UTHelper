@@ -7,6 +7,15 @@
 
 from gui.core.theme_presets import THEME_PRESETS, THEME_ORDER
 
+__all__ = [
+    "C",
+    "THEME_PRESETS",
+    "THEME_ORDER",
+    "apply_theme",
+    "load_theme_from_settings",
+    "set_page_theme",
+]
+
 
 # Các Hằng số Theme đang Hoạt động
 # Tất cả các file GUI đọc màu sắc C.BG, C.ACCENT … qua các tham chiếu này.

@@ -22,18 +22,18 @@ class DataOrchestrator:
     def __init__(self):
         self.client = MoodleClient()
         self.is_logged_in = False
-        self._detail_cache: dict = {}  # url → full activity dict
+        self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
         self._detail_cache_saved_at: dict[str, float] = {}
         self._detail_cache_lru: OrderedDict[str, None] = OrderedDict()
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
         self._detail_lock = threading.Lock()
-        # Smart polling state
+        # Trạng thái cơ chế Smart polling
         self._last_fetch_ts: int = 0
         self._userid_cache: Optional[int] = None
-        # Cycle-level caches (cleared each refresh, avoids redundant API calls)
+        # Bộ nhớ cache ở cấp độ chu kỳ quét (được xóa sau mỗi lần refresh, tránh gọi API trùng lặp)
         self._courses_cache: Optional[List[Dict]] = None
-        # Grade monitoring
+        # Giám sát điểm số (Grade monitoring)
         self.grade_monitor = GradeMonitor()
 
     def _get_cached_detail(self, url: str):
@@ -109,17 +109,17 @@ class DataOrchestrator:
         return None
 
     def get_updates_since(self, timestamp: int) -> Optional[List[int]]:
-        """Check for course updates since last fetch using core_course_get_updates_since.
+        """Kiểm tra các cập nhật môn học kể từ lần tải cuối bằng hàm core_course_get_updates_since.
 
         Returns:
-            list of changed course IDs if changes detected,
-            empty list if no changes,
-            None if error (caller should do full fetch).
+            Danh sách ID môn học đã thay đổi nếu phát hiện thay đổi,
+            Danh sách rỗng nếu không có thay đổi nào,
+            None nếu xảy ra lỗi (bên gọi nên chuyển sang tải toàn bộ dữ liệu).
         """
         if timestamp <= 0:
-            return None  # No previous fetch, must do full fetch
+            return None  # Chưa có dữ liệu của lần tải trước, bắt buộc tải đầy đủ
         try:
-            # BUG-02 fix: get_enrolled_courses takes classification, not userid
+            # Sửa lỗi BUG-02: get_enrolled_courses nhận tham số phân loại chứ không nhận userid
             courses = ws_functions.get_enrolled_courses(
                 self.client.call_ws_api
             )
@@ -133,7 +133,7 @@ class DataOrchestrator:
                 updates = ws_functions.get_course_updates_since(
                     self.client.call_ws_api, cid, timestamp
                 )
-                if updates:  # Non-empty = something changed
+                if updates:  # Không rỗng = có sự thay đổi dữ liệu
                     changed_courses.append(cid)
             if changed_courses:
                 logger.info("Smart poll: %d courses changed since %d", len(changed_courses), timestamp)
@@ -195,13 +195,13 @@ class DataOrchestrator:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
             
-            # PERF: Clear cycle caches at start of each refresh
+            # Tối ưu PERF: Xóa cache chu kỳ khi bắt đầu mỗi lần refresh
             self._courses_cache = None
             
-            # PERF: Step 1 — Get userid (needed for courses)
+            # Tối ưu PERF: Bước 1 — Lấy userid (cần thiết cho danh sách môn học)
             userid = self._get_userid()
             
-            # PERF: Step 2 — Parallel fetch: calendar + courses
+            # Tối ưu PERF: Bước 2 — Tải song song: Lịch và danh sách môn học
             calendar_result = None
             courses_result = None
             
@@ -226,7 +226,7 @@ class DataOrchestrator:
                 calendar_result = f_cal.result(timeout=25)
                 courses_result = f_courses.result(timeout=25)
             
-            # Cache courses for reuse by grade_check/notification
+            # Lưu cache danh sách môn học để tái sử dụng cho tiến trình kiểm tra điểm và thông báo
             if courses_result and isinstance(courses_result, list):
                 self._courses_cache = courses_result
             
@@ -234,10 +234,10 @@ class DataOrchestrator:
             if calendar_result and isinstance(calendar_result, dict):
                 events = calendar_result.get('events', [])
             
-            # Convert WS events to UTHelper format
+            # Chuyển đổi các sự kiện Web Service sang định dạng của UTHelper
             results = ws_functions.ws_events_to_assignments(events) if events else []
             
-            # PERF: Step 3 — Merge assignments using PRE-FETCHED data
+            # Tối ưu PERF: Bước 3 — Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
             try:
                 results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
@@ -246,11 +246,11 @@ class DataOrchestrator:
             
             if not results:
                 logger.info("WS API trả về 0 activities (hợp lệ — có thể không có bài tập).")
-                return results  # BUG-10 fix: return [] not None for valid empty result
+                return results  # Sửa lỗi BUG-10: Trả về [] thay vì None cho kết quả rỗng hợp lệ
             
             logger.info("WS API trả về %d activities (merged).", len(results))
-            self.is_logged_in = True  # WS token works = we're authenticated
-            self._last_fetch_ts = int(datetime.now().timestamp())  # Smart poll: mark last fetch
+            self.is_logged_in = True  # Token Web Service hoạt động = đã xác thực thành công
+            self._last_fetch_ts = int(datetime.now().timestamp())  # Cơ chế Smart poll: Đánh dấu thời gian lần tải cuối
             return results
         except Exception as e:
             logger.warning("WS API fetch thất bại: %s", e)
@@ -299,9 +299,9 @@ class DataOrchestrator:
         future_month = ((future_month - 1) % 12) + 1
         max_ts = int(datetime(future_year, future_month, 1).timestamp())
         
-        # PERF: Use pre-fetched data instead of re-calling APIs
+        # Tối ưu PERF: Sử dụng dữ liệu đã tải trước thay vì gọi lại các API
         if not course_ids:
-            # Fallback: fetch if caller didn't provide (backward compat)
+            # Fallback: Tự động tải nếu bên gọi không cung cấp dữ liệu (tương thích ngược)
             try:
                 if userid is None:
                     userid = self._get_userid()
@@ -326,7 +326,7 @@ class DataOrchestrator:
         if not all_assigns:
             return calendar_results
         
-        # Build lookup: cmid → index in calendar_results (for cutoff enrichment)
+        # Xây dựng bảng tra cứu: cmid → chỉ mục trong calendar_results (để bổ sung thông tin cutoffdate)
         existing_cmids = set()
         cmid_to_index: dict[int, int] = {}
         for idx, item in enumerate(calendar_results):
@@ -352,7 +352,7 @@ class DataOrchestrator:
             for assign in course_data.get('assignments', []):
                 cmid = assign.get('cmid')
                 
-                # Enrich existing calendar items with cutoff data
+                # Bổ sung thông tin cutoffdate vào các mục lịch hiện có
                 if cmid and cmid in existing_cmids:
                     _idx = cmid_to_index.get(cmid)
                     if _idx is not None and _idx < len(calendar_results):
@@ -377,7 +377,7 @@ class DataOrchestrator:
                 
                 cutoffdate = assign.get('cutoffdate', 0)
                 
-                # Compute late_status based on cutoffdate vs duedate
+                # Tính toán trạng thái nộp trễ (late_status) dựa trên ngày cutoff và ngày đến hạn duedate
                 if cutoffdate > 0 and cutoffdate != duedate:
                     if now_ts > duedate and now_ts < cutoffdate:
                         late_status = 'late_allowed'
@@ -390,7 +390,7 @@ class DataOrchestrator:
                 
                 assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
                 
-                # BUG-12 fix: standardize to ISO format for consistent sorting
+                # Sửa lỗi BUG-12: Chuẩn hóa sang định dạng ISO để phục vụ việc sắp xếp nhất quán
                 deadline_str = datetime.fromtimestamp(duedate).strftime('%Y-%m-%d %H:%M:%S')
                 remaining = duedate - now_ts
                 if remaining < 0:
