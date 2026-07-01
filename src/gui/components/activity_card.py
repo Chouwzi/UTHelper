@@ -154,14 +154,20 @@ class ActivityCard(ft.Container):
         self._urgency_text.color = urgency_color
         self._urgency_container.border = ft.Border.all(1, urgency_color)
 
+        self.bgcolor = C.SURFACE
+
         self._course_text.value = course_clean
+        self._course_text.color = C.ACCENT
         self._title_text.value = data.get("title", "Không có tiêu đề")
+        self._title_text.color = C.TEXT_PRIMARY
         self._deadline_text.value = formatted_dl
+        self._deadline_text.color = C.TEXT_SECONDARY
 
         self._countdown_ctrl.value = cd_text
         self._countdown_ctrl.color = cd_color
         self._progress_ctrl.value = progress_val
         self._progress_ctrl.color = bar_color
+        self._progress_ctrl.bgcolor = C.BORDER
 
         self._optional_rows.controls.clear()
         if submission:
