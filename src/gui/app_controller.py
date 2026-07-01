@@ -26,6 +26,7 @@ from gui.components.detail_view import DetailView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.view_manager import ViewManager
 
 logger = logging.getLogger(__name__)
 
@@ -492,6 +493,16 @@ class AppController:
             _view.offset = ft.Offset(1, 0)
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
+
+        self.view_manager = ViewManager(
+            self.page,
+            self.dashboard,
+            self.detail_view,
+            self.settings_view,
+            self.calendar_view,
+            self.grade_overview_view,
+            self
+        )
 
         main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
         if platform_utils.IS_MOBILE:
@@ -1107,19 +1118,9 @@ class AppController:
         logger.info("[AutoPoll] Loop ended")
 
     async def _close_detail(self):
-        self.detail_view.offset = ft.Offset(1, 0)  # slide out
-        self.detail_view.opacity = 0.0
-        self.page.update()
-        await asyncio.sleep(0.25)  # wait for animation
-        self.detail_view.visible = False
-        # Return to calendar if it was the source, otherwise dashboard
-        if getattr(self, '_detail_from_calendar', False):
-            self._detail_from_calendar = False
-            self.calendar_view.visible = True
-        else:
-            self.dashboard.opacity = 1.0
-            self.dashboard.visible = True
-        self.page.update()
+        from_calendar = getattr(self, '_detail_from_calendar', False)
+        self._detail_from_calendar = False
+        await self.view_manager.close_detail(from_calendar)
 
     async def _toggle_calendar(self):
         """Toggle between dashboard list view and calendar view."""
@@ -1130,37 +1131,16 @@ class AppController:
 
     async def _show_calendar(self):
         """Show calendar view with current data."""
-        self.dashboard.visible = False
-        self.detail_view.visible = False
-        self.settings_view.visible = False
         with self._data_lock:
             data_snapshot = list(self.all_data)
-        self.calendar_view.update_data(data_snapshot)
-        self.calendar_view.show()
-        self.calendar_view.offset = ft.Offset(0, 0)
-        self.calendar_view.opacity = 1.0
-        self.calendar_btn.icon_color = C.ACCENT
-        self.page.update()
+        self.view_manager.show_calendar(data_snapshot)
 
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
-        self.calendar_view.offset = ft.Offset(1, 0)
-        self.calendar_view.opacity = 0.0
-        self.page.update()
-        await asyncio.sleep(0.25)
-        self.calendar_view.hide()
-        self.dashboard.opacity = 1.0
-        self.dashboard.visible = True
-        self.calendar_btn.icon_color = C.TEXT_SECONDARY
-        self.page.update()
+        await self.view_manager.close_calendar()
 
     async def _show_settings(self):
-        self.dashboard.visible = False
-        self.settings_view.load_current_settings()
-        self.settings_view.visible = True
-        self.settings_view.offset = ft.Offset(0, 0)
-        self.settings_view.opacity = 1.0
-        self.page.update()
+        self.view_manager.show_settings()
 
     async def _toggle_grades(self):
         """Toggle the grade overview panel."""
@@ -1205,12 +1185,7 @@ class AppController:
 
     async def _show_grades(self):
         """Show grade overview panel and fetch data."""
-        self.dashboard.visible = False
-        self.calendar_view.visible = False
-        self.detail_view.visible = False
-        self.grade_overview_view.show_loading()
-        self.grades_btn.icon_color = C.ACCENT
-        self.page.update()
+        self.view_manager.show_grades_loading()
 
         # Fetch grades in background thread to avoid freezing UI
         try:
@@ -1219,24 +1194,16 @@ class AppController:
                 courses_grades, grade_items = await asyncio.to_thread(
                     self._fetch_all_grades_sync, userid
                 )
-                self.grade_overview_view.update_grades(courses_grades or [], grade_items)
+                self.view_manager.show_grades_data(courses_grades or [], grade_items)
             else:
-                self.grade_overview_view.update_grades([], {})
+                self.view_manager.show_grades_data([], {})
         except Exception as e:
             logger.error("Grade fetch failed: %s", e)
-            self.grade_overview_view.update_grades([], {})
-        self.page.update()
+            self.view_manager.show_grades_data([], {})
 
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
-        self.grade_overview_view.hide()
-        self.page.update()
-        await asyncio.sleep(0.25)
-        self.grade_overview_view.visible = False
-        self.dashboard.opacity = 1.0
-        self.dashboard.visible = True
-        self.grades_btn.icon_color = C.TEXT_SECONDARY
-        self.page.update()
+        await self.view_manager.close_grades()
 
     def _rebuild_colors(self):
         """Repaint ALL existing controls with current C values for live theme switching.
@@ -1353,13 +1320,7 @@ class AppController:
             self.all_data = data_copy
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
-        self.settings_view.offset = ft.Offset(1, 0)
-        self.settings_view.opacity = 0.0
-        self.page.update()
-        await asyncio.sleep(0.25)
-        self.settings_view.visible = False
-        self.dashboard.opacity = 1.0
-        self.dashboard.visible = True
+        await self.view_manager.close_settings()
         
         self._update_footer()
         
@@ -1683,13 +1644,7 @@ class AppController:
     async def _show_detail_async(self, data: dict):
         # Track if detail was opened from calendar for back-navigation
         self._detail_from_calendar = self.calendar_view.visible
-        self.dashboard.visible = False
-        self.calendar_view.visible = False
-        self.settings_view.visible = False
-        self.detail_view.offset = ft.Offset(0, 0)  # slide in
-        self.detail_view.opacity = 1.0
-        self.detail_view.show_loading(data)
-        self.page.update()
+        self.view_manager.show_detail_loading(data)
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
             if full_data and "details" in full_data:
@@ -1697,11 +1652,9 @@ class AppController:
                 if desc_html:
                     from gui.core.utils import pre_cache_description_images
                     full_data["details"]["description_html"] = pre_cache_description_images(desc_html)
-            self.detail_view.update_detail(full_data)
+            self.view_manager.show_detail_data(full_data)
         except Exception:
-            self.detail_view.update_detail(data)
-            self.detail_view.show_error_banner()
-        self.page.update()
+            self.view_manager.show_detail_error(data)
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
         # Dynamically build pulse shadow using the current theme's C.CRITICAL color
