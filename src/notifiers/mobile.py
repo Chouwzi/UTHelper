@@ -89,7 +89,7 @@ class MobileNotifier(BaseNotifier):
             notif_title = title
             notif_body = course
             if remaining:
-                notif_body += f" — Còn {remaining}"
+                notif_body += f" - Còn {remaining}"
 
             if self._android_notif:
                 try:
@@ -111,7 +111,7 @@ class MobileNotifier(BaseNotifier):
                 except Exception as e:
                     logger.warning("Mobile notification failed: %s", e)
             else:
-                logger.info("MOBILE (log-only): %s — %s", notif_title, notif_body)
+                logger.info("MOBILE (log-only): %s - %s", notif_title, notif_body)
                 success = True
 
         return success

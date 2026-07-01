@@ -171,7 +171,7 @@ class NotificationManager:
         if not to_notify_items:
             return
 
-        # Pass real Assignment objects directly — no more DummyAssign wrapper
+        # Pass real Assignment objects directly - no more DummyAssign wrapper
         notify_assignments = [item["assignment"] for item in to_notify_items]
 
         any_success = False

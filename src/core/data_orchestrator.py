@@ -198,10 +198,10 @@ class DataOrchestrator:
             # Tối ưu PERF: Xóa cache chu kỳ khi bắt đầu mỗi lần refresh
             self._courses_cache = None
             
-            # Tối ưu PERF: Bước 1 — Lấy userid (cần thiết cho danh sách môn học)
+            # Tối ưu PERF: Bước 1 - Lấy userid (cần thiết cho danh sách môn học)
             userid = self._get_userid()
             
-            # Tối ưu PERF: Bước 2 — Tải song song: Lịch và danh sách môn học
+            # Tối ưu PERF: Bước 2 - Tải song song: Lịch và danh sách môn học
             calendar_result = None
             courses_result = None
             
@@ -237,7 +237,7 @@ class DataOrchestrator:
             # Chuyển đổi các sự kiện Web Service sang định dạng của UTHelper
             results = ws_functions.ws_events_to_assignments(events) if events else []
             
-            # Tối ưu PERF: Bước 3 — Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
+            # Tối ưu PERF: Bước 3 - Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
             try:
                 results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
@@ -245,7 +245,7 @@ class DataOrchestrator:
                 logger.debug("Merge assignments failed (non-critical): %s", e)
             
             if not results:
-                logger.info("WS API trả về 0 activities (hợp lệ — có thể không có bài tập).")
+                logger.info("WS API trả về 0 activities (hợp lệ - có thể không có bài tập).")
                 return results  # Sửa lỗi BUG-10: Trả về [] thay vì None cho kết quả rỗng hợp lệ
             
             logger.info("WS API trả về %d activities (merged).", len(results))
@@ -279,7 +279,7 @@ class DataOrchestrator:
         
         PERF-OPT: Accepts pre-fetched userid and course_ids to avoid
         redundant API calls (previously called site_info + enrolled_courses
-        again — wasting ~1.4s).
+        again - wasting ~1.4s).
         
         Moodle calendar API loại bỏ events khi bài đã nộp (no action needed).
         Lấy tất cả assignments từ enrolled courses, chỉ giữ bài có deadline
@@ -429,7 +429,7 @@ class DataOrchestrator:
         return calendar_results
     
     async def get_latest_activities_async(self) -> List[Dict[str, Any]]:
-        """Phiên bản async của get_latest_activities — dùng trực tiếp trong event loop."""
+        """Phiên bản async của get_latest_activities - dùng trực tiếp trong event loop."""
         ws_result = await self._fetch_via_ws_api_async()
         if ws_result is not None:
             return ws_result
@@ -462,7 +462,7 @@ class DataOrchestrator:
         return activity_data
     
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Lấy chi tiết bài tập qua WS API — không cần session, không kick browser."""
+        """Lấy chi tiết bài tập qua WS API - không cần session, không kick browser."""
         from core.ws_functions import get_assign_details_via_ws
         
         # Xác định cmid và course_id từ activity_data
@@ -480,7 +480,7 @@ class DataOrchestrator:
         if not cmid:
             return None
         
-        # Extract course_id — có thể trong activity_data hoặc cần tìm
+        # Extract course_id - có thể trong activity_data hoặc cần tìm
         course_id = activity_data.get("course_id")
         if not course_id:
             # Thử parse từ URL nếu có courseid param

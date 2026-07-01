@@ -56,7 +56,7 @@ class BackgroundScheduler:
         """Schedule a repeating notification/check via AlarmManager.
 
         This survives app minimize and even Doze windows (with SCHEDULE_EXACT_ALARM).
-        The notification acts as a reminder — when tapped, it opens the app.
+        The notification acts as a reminder - when tapped, it opens the app.
         """
         if not self._android_notif:
             logger.debug("BackgroundScheduler: no backend, skip start")
@@ -86,7 +86,7 @@ class BackgroundScheduler:
     async def start_foreground_service(self):
         """Start a foreground service to keep the app alive in background.
 
-        Shows a persistent notification. Use sparingly — drains battery.
+        Shows a persistent notification. Use sparingly - drains battery.
         """
         if not self._android_notif:
             return

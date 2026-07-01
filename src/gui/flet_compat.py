@@ -10,17 +10,17 @@ Call ``patch_flet()`` once during startup, **before** any GUI modules
 are imported.
 
 Patched APIs (exhaustive list based on codebase audit):
-- ft.border.all(width, color)         — module-level helper
-- ft.border.only(left, top, ...)      — module-level helper
-- ft.Border.only(left, top, ...)      — class method
-- ft.Padding.symmetric(h, v)          — class method
-- ft.Padding.only(left, top, ...)     — class method
-- ft.padding.symmetric(h, v)          — module-level helper
-- ft.padding.all(value)               — module-level helper
-- ft.padding.only(left, top, ...)     — module-level helper
-- ft.margin.only(left, top, ...)      — module-level helper
-- ft.margin.all(value)                — module-level helper
-- ft.BorderRadius.only(tl, tr, ...)   — class method
+- ft.border.all(width, color)         - module-level helper
+- ft.border.only(left, top, ...)      - module-level helper
+- ft.Border.only(left, top, ...)      - class method
+- ft.Padding.symmetric(h, v)          - class method
+- ft.Padding.only(left, top, ...)     - class method
+- ft.padding.symmetric(h, v)          - module-level helper
+- ft.padding.all(value)               - module-level helper
+- ft.padding.only(left, top, ...)     - module-level helper
+- ft.margin.only(left, top, ...)      - module-level helper
+- ft.margin.all(value)                - module-level helper
+- ft.BorderRadius.only(tl, tr, ...)   - class method
 """
 
 import flet as ft

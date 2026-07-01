@@ -76,7 +76,7 @@ class TrayApp:
                 logger.error(f"Error destroying window: {e}")
         if self._icon:
             self._icon.stop()
-        # Clean shutdown — sys.exit runs atexit handlers and flushes files
+        # Clean shutdown - sys.exit runs atexit handlers and flushes files
         import sys
         sys.exit(0)
 
@@ -90,4 +90,4 @@ class TrayApp:
                 self._icon.notify(message, title)
         except Exception as exc:
             logger.warning("Tray notification failed, falling back to log: %s", exc)
-            logger.info("NOTIFICATION: %s — %s", title, message)
+            logger.info("NOTIFICATION: %s - %s", title, message)

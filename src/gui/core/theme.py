@@ -1,4 +1,4 @@
-"""Hệ thống Theme của UTHelper — Các preset màu sắc chọn lọc & cơ chế áp dụng linh hoạt."""
+"""Hệ thống Theme của UTHelper - Các preset màu sắc chọn lọc & cơ chế áp dụng linh hoạt."""
 
 
 # Định nghĩa các Preset Theme
@@ -93,7 +93,7 @@ def apply_theme(theme_name: str) -> None:
 
 
 def load_theme_from_settings():
-    """Tải cấu hình theme từ settings.json — được gọi tự động khi import và khi người dùng lưu thiết lập."""
+    """Tải cấu hình theme từ settings.json - được gọi tự động khi import và khi người dùng lưu thiết lập."""
     try:
         from config import settings
 

@@ -1,4 +1,4 @@
-"""Grade Overview View — shows all course grades in a dedicated panel.
+"""Grade Overview View - shows all course grades in a dedicated panel.
 
 Accessible via the 📊 icon in the header. Displays a summary of grades
 for all enrolled courses with detail expansion per course.
@@ -129,7 +129,7 @@ class GradeOverviewView(ft.Container):
             # Course header card
             grade_color = self._grade_color(overall_grade)
             grade_display = ft.Text(
-                overall_grade if overall_grade and overall_grade != '-' else '—',
+                overall_grade if overall_grade and overall_grade != '-' else '-',
                 size=20, weight=ft.FontWeight.W_700,
                 color=grade_color,
             )

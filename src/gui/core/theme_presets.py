@@ -1,9 +1,9 @@
-"""UTHelper Theme Presets — Configured palettes for visual options."""
+"""UTHelper Theme Presets - Configured palettes for visual options."""
 
 THEME_PRESETS = {
     "midnight_blue": {
         "label": "Midnight Blue",
-        "description": "Deep navy — mặc định",
+        "description": "Deep navy - mặc định",
         "bg":             "#0B0F1A",
         "surface":        "#141B2D",
         "surface_hover":  "#1A2340",
@@ -22,7 +22,7 @@ THEME_PRESETS = {
     },
     "ocean_teal": {
         "label": "Ocean Teal",
-        "description": "Calm cyan — education",
+        "description": "Calm cyan - education",
         "bg":             "#0A1628",
         "surface":        "#122035",
         "surface_hover":  "#1A2D45",
@@ -41,7 +41,7 @@ THEME_PRESETS = {
     },
     "sakura_pink": {
         "label": "Sakura Pink",
-        "description": "Vibrant — youthful",
+        "description": "Vibrant - youthful",
         "bg":             "#1A0F1C",
         "surface":        "#251828",
         "surface_hover":  "#312035",
@@ -60,7 +60,7 @@ THEME_PRESETS = {
     },
     "nord_frost": {
         "label": "Nord Frost",
-        "description": "Arctic — minimalist",
+        "description": "Arctic - minimalist",
         "bg":             "#2E3440",
         "surface":        "#3B4252",
         "surface_hover":  "#434C5E",
@@ -79,7 +79,7 @@ THEME_PRESETS = {
     },
     "monokai_pro": {
         "label": "Monokai Pro",
-        "description": "Warm dark — developer",
+        "description": "Warm dark - developer",
         "bg":             "#2D2A2E",
         "surface":        "#403E41",
         "surface_hover":  "#4A474B",
@@ -98,7 +98,7 @@ THEME_PRESETS = {
     },
     "solarized_dark": {
         "label": "Solarized Dark",
-        "description": "Proven — readability",
+        "description": "Proven - readability",
         "bg":             "#002B36",
         "surface":        "#073642",
         "surface_hover":  "#0D4150",

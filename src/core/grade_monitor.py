@@ -1,4 +1,4 @@
-"""Grade change monitor — detects new/changed grades across courses.
+"""Grade change monitor - detects new/changed grades across courses.
 
 Compares current grades against a persisted snapshot to detect changes.
 Snapshot is stored as JSON in the user data directory.

@@ -79,7 +79,7 @@ class AppController:
         self.page.on_disconnect = self._on_disconnect
         self.page.on_keyboard_event = self._on_keyboard_event
         
-        # Android back button — intercept to navigate within app instead of exiting
+        # Android back button - intercept to navigate within app instead of exiting
         if platform_utils.IS_MOBILE:
             self.page.on_view_pop = self._on_back_button
         self.page.run_task(self._pulse_loop_async)
@@ -185,10 +185,10 @@ class AppController:
             await self._navigate_back()
 
     async def _on_back_button(self, e):
-        """Android back button handler — navigate within app instead of exiting."""
+        """Android back button handler - navigate within app instead of exiting."""
         handled = await self._navigate_back()
         if not handled:
-            # On dashboard with nothing to go back to — minimize app (don't exit)
+            # On dashboard with nothing to go back to - minimize app (don't exit)
             try:
                 self.page.window.close()
             except (AttributeError, TypeError):
@@ -649,7 +649,7 @@ class AppController:
                 on_click=lambda e, name=c: _on_course_select(e, name)
             ))
         self.course_popup.items = c_items
-        # UX-3: Natural language order — "N label" instead of "Label · N"
+        # UX-3: Natural language order - "N label" instead of "Label · N"
         self.footer_critical.value = f"{n_critical} khẩn cấp" if n_critical else "0 khẩn cấp"
         self.footer_critical.color = C.CRITICAL if n_critical else C.BORDER
         self.footer_warning.value  = f"{n_warning} sắp hạn" if n_warning else "0 sắp hạn"
@@ -688,13 +688,13 @@ class AppController:
             ) if not has_filter else False
 
             if all_submitted:
-                # P6: Victory state — positive reinforcement
+                # P6: Victory state - positive reinforcement
                 self._empty_icon.name = ft.Icons.EMOJI_EVENTS_ROUNDED
                 self._empty_icon.color = C.SAFE
                 self._empty_title.value = "Tuyệt vời! Đã nộp tất cả"
                 self._empty_subtitle.value = "Bạn đã hoàn thành mọi bài tập. Nghỉ ngơi thôi!"
             elif has_filter:
-                # Filter active — guide user to adjust
+                # Filter active - guide user to adjust
                 self._empty_icon.name = ft.Icons.FILTER_ALT_OFF_ROUNDED
                 self._empty_icon.color = C.BORDER
                 self._empty_title.value = "Không tìm thấy kết quả"
@@ -740,11 +740,11 @@ class AppController:
         self._refresh_ui()
 
     def _render_cards(self):
-        """Full UI refresh — rebuilds filters + cards."""
+        """Full UI refresh - rebuilds filters + cards."""
         self._refresh_ui()
 
     def _render_cards_only(self):
-        """Lightweight render — only re-filter and update card list, skip popup rebuild."""
+        """Lightweight render - only re-filter and update card list, skip popup rebuild."""
         with self._data_lock:
             data_snapshot = list(self.all_data)
         base = self._apply_settings_filter(data_snapshot)
@@ -838,7 +838,7 @@ class AppController:
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
-        # Debounce: 150ms — fast enough to feel instant, prevents excessive renders
+        # Debounce: 150ms - fast enough to feel instant, prevents excessive renders
         if hasattr(self, '_search_task') and self._search_task:
             self._search_task.cancel()
         async def _delayed_render():
@@ -1026,7 +1026,7 @@ class AppController:
 
             # Lưu cache offline
             self._data_cache.save(data_copy)
-            # P3: Tính tiến độ nộp bài — positive reinforcement
+            # P3: Tính tiến độ nộp bài - positive reinforcement
             submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
             total_count = len(data_copy)
             submitted_count = sum(1 for x in data_copy if x.get("submission_status", "") in submitted_statuses)
@@ -1098,7 +1098,7 @@ class AppController:
             if not self._page_alive.is_set():
                 break
             if self._is_loading:
-                logger.debug("[AutoPoll] Skipping — another load in progress")
+                logger.debug("[AutoPoll] Skipping - another load in progress")
                 continue
             logger.info("[AutoPoll] Running periodic refresh...")
             try:

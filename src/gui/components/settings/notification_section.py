@@ -70,7 +70,7 @@ def init_notification_controls(view):
     view._dnd_time_row = ft.Row(
         controls=[
             view._dnd_start_field,
-            ft.Text("—", size=16, color=C.TEXT_SECONDARY, weight=ft.FontWeight.BOLD),
+            ft.Text("-", size=16, color=C.TEXT_SECONDARY, weight=ft.FontWeight.BOLD),
             view._dnd_end_field,
         ],
         alignment=ft.MainAxisAlignment.CENTER,

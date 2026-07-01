@@ -132,7 +132,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             page.update()
             await asyncio.sleep(0.7)
 
-            # Dismiss dialog — Flet 0.82+: page.pop_dialog()
+            # Dismiss dialog - Flet 0.82+: page.pop_dialog()
             try:
                 page.pop_dialog()
             except (AttributeError, TypeError):
@@ -192,7 +192,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         content=ft.Container(
             width=min(360, page.width - 32) if (page.width and page.width > 200) else 360,
             content=ft.Column([
-                # Header — Icon + Title
+                # Header - Icon + Title
                 ft.Container(
                     content=ft.Icon(ft.Icons.SCHOOL_ROUNDED, size=44, color=C.ACCENT),
                     alignment=ft.Alignment(0, 0),
@@ -240,7 +240,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         content_padding=24,
     )
 
-    # Open dialog — Flet 0.82+: page.show_dialog()
+    # Open dialog - Flet 0.82+: page.show_dialog()
     try:
         page.show_dialog(dlg)
     except (AttributeError, TypeError):

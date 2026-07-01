@@ -24,8 +24,8 @@ def build_submitted_files_ui(view):
         # Định dạng thời gian
         tmod = f.get('timemodified', 0)
         tcreated = f.get('timecreated', 0)
-        mod_str = datetime.fromtimestamp(tmod).strftime('%d/%m/%Y %H:%M') if tmod else '—'
-        created_str = datetime.fromtimestamp(tcreated).strftime('%d/%m/%Y %H:%M') if tcreated else '—'
+        mod_str = datetime.fromtimestamp(tmod).strftime('%d/%m/%Y %H:%M') if tmod else '-'
+        created_str = datetime.fromtimestamp(tcreated).strftime('%d/%m/%Y %H:%M') if tcreated else '-'
 
         # Cột chứa các thông tin metadata bổ trợ của file
         meta_col = ft.Column(controls=[

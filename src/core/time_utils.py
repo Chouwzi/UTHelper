@@ -5,7 +5,7 @@ from dateutil import parser as _dateutil_parser
 
 logger = logging.getLogger(__name__)
 
-# F19: Cache local timezone — avoid recomputing on every parse call
+# F19: Cache local timezone - avoid recomputing on every parse call
 _LOCAL_TZ = datetime.now().astimezone().tzinfo
 
 

@@ -7,7 +7,7 @@ import html
 import re
 from functools import lru_cache
 
-# Pre-compiled regex patterns — avoid re-compiling on every call
+# Pre-compiled regex patterns - avoid re-compiling on every call
 _RE_HKII = re.compile(r'^\[.*?\]_HKII\d{4}-\d{4}_')
 _RE_TRAILING_ID = re.compile(r'_\d{9,}$')
 _RE_DASH_FORMAT = re.compile(r'^\[.*?\]\s*-\s*(.+?)\s*-\s*[\dA-Z]{6,}$')
@@ -37,7 +37,7 @@ def urgency_str(urgency) -> str:
     return "safe"
 
 
-# Type filter mapping — used by FilterService and GUI dropdowns
+# Type filter mapping - used by FilterService and GUI dropdowns
 _TYPE_FILTER_MAP = {
     "quiz":       {"quiz"},
     "assignment": {"assignment", "deadline"},
@@ -46,7 +46,7 @@ _TYPE_FILTER_MAP = {
     "other":      {"other"},
 }
 
-# Type display mapping — used by all notifiers
+# Type display mapping - used by all notifiers
 _TYPE_DISPLAY_MAP = {
     "quiz":       ("❓", "Trắc nghiệm"),
     "assign":     ("📝", "Bài tập"),
@@ -60,7 +60,7 @@ _TYPE_DISPLAY_MAP = {
     "open":       ("📂", "Đang mở"),
 }
 
-# Urgency display mapping — used by all notifiers
+# Urgency display mapping - used by all notifiers
 _URGENCY_DISPLAY_MAP = {
     "critical": ("🔴", "Khẩn cấp"),
     "warning":  ("🟠", "Sắp tới hạn"),

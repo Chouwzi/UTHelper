@@ -30,23 +30,23 @@ else:
 
 
 def _urlopen(req, timeout=15):
-    """urlopen wrapper — dùng urllib default SSL."""
+    """urlopen wrapper - dùng urllib default SSL."""
     return urllib.request.urlopen(req, timeout=timeout)
 
 
 class MoodleClient:
-    """HTTP client dùng urllib.request (stdlib) — zero dependency, mọi platform.
+    """HTTP client dùng urllib.request (stdlib) - zero dependency, mọi platform.
     
     Cloudflare KHÔNG chặn urllib (đã test).
     Chạy trên Desktop, iOS, Android mà không cần cài thêm gì.
     """
     
     # Giới hạn tần suất gọi API ở phía Client (Moodle không tự động bóp băng thông từ server-side)
-    _MIN_INTERVAL = 0.05  # 50ms = tối đa 20 req/s (trước đây là 200ms — gây lãng phí 1.6s cho mỗi chu kỳ quét)
+    _MIN_INTERVAL = 0.05  # 50ms = tối đa 20 req/s (trước đây là 200ms - gây lãng phí 1.6s cho mỗi chu kỳ quét)
 
     def __init__(self):
         self._last_login_error = ""
-        self._portal_token: str = ""   # JWT lấy từ portal API — thời hạn khoảng 30 ngày
+        self._portal_token: str = ""   # JWT lấy từ portal API - thời hạn khoảng 30 ngày
         self._last_call_time: float = 0.0  # Nhãn thời gian đơn điệu (monotonic)
 
     def _throttle(self):
@@ -58,7 +58,7 @@ class MoodleClient:
         self._last_call_time = time.monotonic()
 
     def close(self):
-        """Không cần cleanup — urllib không dùng connection pool."""
+        """Không cần cleanup - urllib không dùng connection pool."""
         pass
 
     # Low-level HTTP helpers
@@ -289,7 +289,7 @@ class MoodleClient:
             return ""
     
     def login(self, username: str = None, password: str = None, force: bool = False) -> bool:
-        """Đăng nhập bằng WS token — KHÔNG tạo session, KHÔNG kick browser.
+        """Đăng nhập bằng WS token - KHÔNG tạo session, KHÔNG kick browser.
         
         Đây là phương thức login duy nhất. Sử dụng Moodle WS API,
         hoạt động trên mọi nền tảng (iOS, Android, Desktop).

@@ -228,7 +228,7 @@ exit
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
             close_fds=True,
         )
-        logger.info("Windows updater launched — exiting for update.")
+        logger.info("Windows updater launched - exiting for update.")
         return True
 
     except Exception as e:
@@ -285,7 +285,7 @@ def apply_update_android(apk_path: Path) -> bool:
         return True
 
     except ImportError:
-        logger.warning("pyjnius not available — cannot install APK programmatically.")
+        logger.warning("pyjnius not available - cannot install APK programmatically.")
         return False
     except Exception as e:
         logger.error("Android install failed: %s", e)

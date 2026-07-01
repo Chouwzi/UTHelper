@@ -186,13 +186,13 @@ class ActivityCard(ft.Container):
                 mins_left = (remaining_s % 3600) // 60
                 if hours_left > 24:
                     days_left = hours_left // 24
-                    cutoff_text = f"Trễ hạn — còn {days_left} ngày nộp muộn"
+                    cutoff_text = f"Trễ hạn - còn {days_left} ngày nộp muộn"
                 elif hours_left > 0:
-                    cutoff_text = f"Trễ hạn — còn {hours_left}h{mins_left:02d} nộp muộn"
+                    cutoff_text = f"Trễ hạn - còn {hours_left}h{mins_left:02d} nộp muộn"
                 else:
-                    cutoff_text = f"Trễ hạn — còn {mins_left} phút nộp muộn"
+                    cutoff_text = f"Trễ hạn - còn {mins_left} phút nộp muộn"
             else:
-                cutoff_text = "Trễ hạn — còn nộp muộn"
+                cutoff_text = "Trễ hạn - còn nộp muộn"
             self._optional_rows.controls.append(
                 ft.Container(
                     content=ft.Text(cutoff_text, size=10, color=C.WARNING, weight=ft.FontWeight.W_500),

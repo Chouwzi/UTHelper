@@ -15,7 +15,7 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Cache cho site_info/courses — tránh gọi API lặp lại
+# Cache cho site_info/courses - tránh gọi API lặp lại
 _cache: Dict[str, Any] = {}
 _cache_lock = threading.Lock()
 
@@ -25,7 +25,7 @@ _cache_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def get_site_info(call_api: Callable) -> Optional[Dict[str, Any]]:
-    """core_webservice_get_site_info — xác thực token và lấy thông tin user/site."""
+    """core_webservice_get_site_info - xác thực token và lấy thông tin user/site."""
     try:
         return call_api('core_webservice_get_site_info')
     except Exception as e:
@@ -39,7 +39,7 @@ def get_calendar_action_events(
     timesort_to: Optional[int] = None,
     limit: int = 50,
 ) -> Optional[List[Dict[str, Any]]]:
-    """core_calendar_get_action_events_by_timesort — lấy events (assignments, quizzes).
+    """core_calendar_get_action_events_by_timesort - lấy events (assignments, quizzes).
 
     Args:
         call_api: Callable gọi WS API.
@@ -92,7 +92,7 @@ def get_assignments(
     call_api: Callable,
     course_ids: Optional[List[int]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
-    """mod_assign_get_assignments — chi tiết assignments theo course."""
+    """mod_assign_get_assignments - chi tiết assignments theo course."""
     params: Dict[str, Any] = {}
     if course_ids:
         for i, cid in enumerate(course_ids):
@@ -114,7 +114,7 @@ def get_calendar_events(
     time_start: Optional[int] = None,
     time_end: Optional[int] = None,
 ) -> Optional[List[Dict[str, Any]]]:
-    """core_calendar_get_calendar_events — legacy calendar events."""
+    """core_calendar_get_calendar_events - legacy calendar events."""
     params: Dict[str, Any] = {}
     if time_start is not None:
         params['options[timestart]'] = time_start
@@ -136,7 +136,7 @@ def get_submission_status(
     call_api: Callable,
     assign_id: int,
 ) -> Optional[Dict[str, Any]]:
-    """mod_assign_get_submission_status — trạng thái nộp bài của user.
+    """mod_assign_get_submission_status - trạng thái nộp bài của user.
     
     LƯU Ý: assign_id là ID thật của assignment (từ mod_assign_get_assignments),
     KHÔNG PHẢI cmid (course module ID) từ calendar events.
@@ -205,7 +205,7 @@ def get_quizzes_by_courses(
     call_api: Callable,
     course_ids: List[int],
 ) -> Optional[List[Dict[str, Any]]]:
-    """mod_quiz_get_quizzes_by_courses — thông tin quiz theo course."""
+    """mod_quiz_get_quizzes_by_courses - thông tin quiz theo course."""
     params: Dict[str, Any] = {}
     for i, cid in enumerate(course_ids):
         params[f'courseids[{i}]'] = cid
@@ -226,7 +226,7 @@ def get_quiz_attempts(
     quiz_id: int,
     status: str = 'all',
 ) -> Optional[List[Dict[str, Any]]]:
-    """mod_quiz_get_user_attempts — lịch sử làm quiz của user."""
+    """mod_quiz_get_user_attempts - lịch sử làm quiz của user."""
     try:
         result = call_api('mod_quiz_get_user_attempts', quizid=quiz_id, status=status)
     except Exception as e:
@@ -289,7 +289,7 @@ def get_assign_details_via_ws(
     course_id: int,
     modulename: str = 'assign',
 ) -> Optional[Dict[str, Any]]:
-    """Lấy full chi tiết bài tập qua WS API — thay thế HTML scraping.
+    """Lấy full chi tiết bài tập qua WS API - thay thế HTML scraping.
     
     Trả về dict tương thích với ActivityDetail format:
     {
@@ -317,7 +317,7 @@ def get_assign_details_via_ws(
     elif modulename == 'quiz':
         return _get_quiz_detail(call_api, cmid, course_id, details)
     else:
-        # Cho các module khác (groupselect, etc.) — chỉ lấy course name
+        # Cho các module khác (groupselect, etc.) - chỉ lấy course name
         _fill_course_name(call_api, course_id, details)
         return details
 
@@ -506,7 +506,7 @@ def _get_quiz_detail(
                 attempt_num = att.get('attempt', '?')
                 info = f"Lần {attempt_num}: {state_map.get(state, state)}"
                 if grade:
-                    info += f" — Điểm: {grade}"
+                    info += f" - Điểm: {grade}"
                 details['quiz_info'].append(info)
             
             # Status data
@@ -683,7 +683,7 @@ def save_assignment_submission(
 
 
 def submit_for_grading(call_api: Callable, assign_id: int) -> bool:
-    """mod_assign_submit_for_grading — chính thức nộp bài sau khi save.
+    """mod_assign_submit_for_grading - chính thức nộp bài sau khi save.
 
     Moodle requires this call AFTER save_submission to officially submit.
     Without it, the submission stays as 'draft' and may NOT be graded.
@@ -712,12 +712,12 @@ def submit_for_grading(call_api: Callable, assign_id: int) -> bool:
 
 
 def get_course_grades(call_api: Callable, userid: int) -> Optional[List[Dict[str, Any]]]:
-    """gradereport_overview_get_course_grades — điểm tổng quan tất cả môn."""
+    """gradereport_overview_get_course_grades - điểm tổng quan tất cả môn."""
     try:
         result = call_api('gradereport_overview_get_course_grades', userid=userid)
         if isinstance(result, dict):
             grades = result.get('grades', [])
-            # Moodle API không trả về coursename — enrich từ enrolled courses
+            # Moodle API không trả về coursename - enrich từ enrolled courses
             if grades:
                 _enrich_grade_course_names(call_api, userid, grades)
             return grades
@@ -759,7 +759,7 @@ def _enrich_grade_course_names(call_api: Callable, userid: int, grades: List[Dic
 
 
 def get_grade_items(call_api: Callable, courseid: int, userid: int) -> Optional[List[Dict[str, Any]]]:
-    """gradereport_user_get_grade_items — chi tiết điểm từng thành phần."""
+    """gradereport_user_get_grade_items - chi tiết điểm từng thành phần."""
     try:
         result = call_api('gradereport_user_get_grade_items', courseid=courseid, userid=userid)
         if isinstance(result, dict):
@@ -773,7 +773,7 @@ def get_grade_items(call_api: Callable, courseid: int, userid: int) -> Optional[
 
 
 def get_unread_notification_count(call_api: Callable, userid: int) -> int:
-    """message_popup_get_unread_popup_notification_count — số thông báo chưa đọc."""
+    """message_popup_get_unread_popup_notification_count - số thông báo chưa đọc."""
     try:
         result = call_api('message_popup_get_unread_popup_notification_count', useridto=userid)
         if isinstance(result, int):
@@ -785,7 +785,7 @@ def get_unread_notification_count(call_api: Callable, userid: int) -> int:
 
 
 def get_course_updates_since(call_api: Callable, courseid: int, since: int) -> Optional[List[Dict[str, Any]]]:
-    """core_course_get_updates_since — modules thay đổi từ timestamp."""
+    """core_course_get_updates_since - modules thay đổi từ timestamp."""
     try:
         result = call_api('core_course_get_updates_since', courseid=courseid, since=since)
         if isinstance(result, dict):
@@ -797,7 +797,7 @@ def get_course_updates_since(call_api: Callable, courseid: int, since: int) -> O
 
 
 def get_course_contents(call_api: Callable, courseid: int) -> Optional[List[Dict[str, Any]]]:
-    """core_course_get_contents — sections và modules (tài liệu) của môn học."""
+    """core_course_get_contents - sections và modules (tài liệu) của môn học."""
     try:
         result = call_api('core_course_get_contents', courseid=courseid)
         if isinstance(result, list):

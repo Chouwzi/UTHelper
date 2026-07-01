@@ -100,10 +100,10 @@ def get_countdown_color(deadline_str: str) -> str:
     if diff_seconds <= 0:
         return C.CRITICAL      # Overdue
     if diff_seconds < 86400:     # < 24 hours
-        return C.CRITICAL      # Red — urgent
+        return C.CRITICAL      # Red - urgent
     if diff_seconds < 259200:    # < 3 days (72h)
-        return C.WARNING       # Orange — approaching
-    return C.SAFE              # Green — safe
+        return C.WARNING       # Orange - approaching
+    return C.SAFE              # Green - safe
 
 def get_urgency_badge(urgency) -> tuple:
     """Return (label, color)."""

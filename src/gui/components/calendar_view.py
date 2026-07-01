@@ -1,4 +1,4 @@
-"""CalendarView — Monthly calendar grid showing activity deadlines.
+"""CalendarView - Monthly calendar grid showing activity deadlines.
 
 UX Audit Fixes Applied:
 - CV-01: Denser grid (44px cells, 2px spacing)
@@ -182,7 +182,7 @@ class CalendarView(ft.Container):
             margin=ft.Margin(left=60, right=60, top=4, bottom=6),
         )
 
-        # Calendar grid (6 rows × 7 cols) — CV-01: denser
+        # Calendar grid (6 rows × 7 cols) - CV-01: denser
         self._grid_rows: List[ft.Row] = []
         self._day_cells: List[List[ft.Container]] = []
         for _ in range(6):
@@ -279,7 +279,7 @@ class CalendarView(ft.Container):
     def _make_day_cell(self) -> ft.Container:
         """Create a single day cell with today indicator dot."""
         day_num = ft.Text("", size=12, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER)
-        # Today indicator — small accent dot under the number (always visible for today)
+        # Today indicator - small accent dot under the number (always visible for today)
         today_dot = ft.Container(
             width=5, height=5, border_radius=3, bgcolor=C.ACCENT, visible=False,
         )
@@ -304,7 +304,7 @@ class CalendarView(ft.Container):
         return cell
 
     def _make_week_cell(self, col_index: int) -> ft.Container:
-        """Create a single week view cell — taller and wider than month cells."""
+        """Create a single week view cell - taller and wider than month cells."""
         weekday_labels = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
         wd_color = C.CRITICAL if col_index == 6 else C.TEXT_SECONDARY
 
@@ -489,7 +489,7 @@ class CalendarView(ft.Container):
 
     def show(self):
         self.visible = True
-        # Always anchor to today when opening — reduces cognitive orientation time
+        # Always anchor to today when opening - reduces cognitive orientation time
         today = date.today()
         self._year = today.year
         self._month = today.month
@@ -655,7 +655,7 @@ class CalendarView(ft.Container):
             pass
 
     def _restyle_cell(self, cell, day: int, col: int, today):
-        """Restyle a single cell — extracted for targeted updates."""
+        """Restyle a single cell - extracted for targeted updates."""
         day_text: ft.Text = cell.data["day_text"]
         dots_row: ft.Row = cell.data["dots_row"]
 
@@ -841,7 +841,7 @@ class CalendarView(ft.Container):
             pass
 
     def _update_day_panel(self):
-        """Update bottom panel — CV-06: better microcopy."""
+        """Update bottom panel - CV-06: better microcopy."""
         self._day_list.controls.clear()
 
         if self._selected_day is None:
@@ -876,7 +876,7 @@ class CalendarView(ft.Container):
             self._day_list.controls.append(card)
 
     def _make_mini_card(self, act: Dict[str, Any]) -> ft.Container:
-        """Create a compact activity card — CV-04, CV-08 fixes."""
+        """Create a compact activity card - CV-04, CV-08 fixes."""
         title = act.get("title", "Không rõ")
         course = act.get("course", "")
         act_type = act.get("type", "other")
@@ -904,7 +904,7 @@ class CalendarView(ft.Container):
             else:
                 clean_course = clean_course.strip("[]")
 
-        # Submission badge — persuasion: ✓ prefix for completion signal
+        # Submission badge - persuasion: ✓ prefix for completion signal
         sub_controls = []
         if submission in ("submitted", "Đã nộp"):
             sub_controls.append(
@@ -990,7 +990,7 @@ class CalendarView(ft.Container):
         return card
 
     def _on_card_click(self, act: Dict[str, Any]):
-        """Handle click on a mini card — open detail view."""
+        """Handle click on a mini card - open detail view."""
         if self._on_open_detail:
             self._on_open_detail(act)
 

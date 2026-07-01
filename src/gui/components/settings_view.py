@@ -569,7 +569,7 @@ class SettingsView(ft.Container):
         )
 
     def _on_theme_select(self, theme_key: str):
-        """Handle theme card selection — applies IMMEDIATELY for live preview."""
+        """Handle theme card selection - applies IMMEDIATELY for live preview."""
         import logging
         log = logging.getLogger("UTHelper.settings")
         log.info(f"[THEME] _on_theme_select called: {theme_key}")
@@ -629,7 +629,7 @@ class SettingsView(ft.Container):
             except Exception:
                 pass
 
-        # ALL text fields — update border, focus, text, bg colors
+        # ALL text fields - update border, focus, text, bg colors
         _all_fields = [
             '_username_field', '_password_field',
             '_interval_field', '_fetch_months_field',
@@ -658,7 +658,7 @@ class SettingsView(ft.Container):
             self._mock_type_drp.color = C.TEXT_PRIMARY
             self._mock_type_drp.bgcolor = C.BG
 
-        # ALL switches — update active_color + label text style
+        # ALL switches - update active_color + label text style
         _all_switches = [
             '_sw_always_on_top', '_sw_submitted', '_sw_graded',
             '_sw_start_with_windows', '_sw_start_minimized', '_sw_minimize_to_tray',
@@ -878,7 +878,7 @@ class SettingsView(ft.Container):
             try:
                 c.update()
             except (RuntimeError, Exception):
-                pass  # Control not on page yet — will render on next page.update()
+                pass  # Control not on page yet - will render on next page.update()
 
     def _toggle_integration_ui(self):
         self._gmail_addr_field.visible = self._sw_email.value
@@ -1175,8 +1175,8 @@ class SettingsView(ft.Container):
             "safe": "✅ Kiểm tra hoàn tất",
         }
         bodies = {
-            "critical": "Lập trình Python — Còn 2 giờ | Test mock notification",
-            "warning": "Cơ sở dữ liệu — Còn 48 giờ | Test mock notification",
+            "critical": "Lập trình Python - Còn 2 giờ | Test mock notification",
+            "warning": "Cơ sở dữ liệu - Còn 48 giờ | Test mock notification",
             "safe": "Tất cả bài tập đều đã nộp đúng hạn | Test mock notification",
         }
         title = titles.get(urgency, titles["critical"])
@@ -1367,7 +1367,7 @@ class SettingsView(ft.Container):
             ]
             result = mobile_n.notify(mock_data)
             self._debug_mobile_text.value = f"Multi-notif (x3): {'✅ Đã gửi' if result else '❌ Thất bại'}\n" + "\n".join(
-                [f"  • {m['title']} — Còn {m['remaining']}" for m in mock_data]
+                [f"  • {m['title']} - Còn {m['remaining']}" for m in mock_data]
             )
             self._debug_mobile_text.color = C.SAFE if result else C.CRITICAL
         except Exception as ex:

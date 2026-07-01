@@ -171,7 +171,7 @@ class EmailNotifier(BaseNotifier):
         html_content += """
                 </div>
                 <div class="footer">
-                    Bạn nhận email này từ UTHelper — hệ thống nhắc nhở deadline tự động.<br>
+                    Bạn nhận email này từ UTHelper - hệ thống nhắc nhở deadline tự động.<br>
                     Chỉnh cài đặt thông báo trong ứng dụng UTHelper.
                 </div>
             </div>
@@ -188,7 +188,7 @@ class EmailNotifier(BaseNotifier):
             plain_lines.append(f"• {t_title}")
             plain_lines.append(f"  Môn: {t_course} · Còn: {t_remaining}")
             plain_lines.append("")
-        plain_lines.append("—— UTHelper")
+        plain_lines.append("-- UTHelper")
 
         msg.set_content("\n".join(plain_lines))
         msg.add_alternative(html_content, subtype='html')
