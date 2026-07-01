@@ -195,13 +195,13 @@ class DataOrchestrator:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
             
-            # ── PERF: Clear cycle caches at start of each refresh ──
+            # PERF: Clear cycle caches at start of each refresh
             self._courses_cache = None
             
-            # ── PERF: Step 1 — Get userid (needed for courses) ──
+            # PERF: Step 1 — Get userid (needed for courses)
             userid = self._get_userid()
             
-            # ── PERF: Step 2 — Parallel fetch: calendar + courses ──
+            # PERF: Step 2 — Parallel fetch: calendar + courses
             calendar_result = None
             courses_result = None
             
@@ -237,7 +237,7 @@ class DataOrchestrator:
             # Convert WS events to UTHelper format
             results = ws_functions.ws_events_to_assignments(events) if events else []
             
-            # ── PERF: Step 3 — Merge assignments using PRE-FETCHED data ──
+            # PERF: Step 3 — Merge assignments using PRE-FETCHED data
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
             try:
                 results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
@@ -299,7 +299,7 @@ class DataOrchestrator:
         future_month = ((future_month - 1) % 12) + 1
         max_ts = int(datetime(future_year, future_month, 1).timestamp())
         
-        # ── PERF: Use pre-fetched data instead of re-calling APIs ──
+        # PERF: Use pre-fetched data instead of re-calling APIs
         if not course_ids:
             # Fallback: fetch if caller didn't provide (backward compat)
             try:
@@ -451,7 +451,7 @@ class DataOrchestrator:
             if cached is not None:
                 return cached
         
-        # ── WS API (stateless, không kick browser) ──
+        # WS API (stateless, không kick browser)
         if settings.MOODLE_WS_TOKEN:
             ws_result = self._fetch_detail_via_ws(activity_data)
             if ws_result:

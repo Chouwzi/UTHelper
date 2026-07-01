@@ -431,7 +431,7 @@ class SettingsView(ft.Container):
         else:
             self._muted_courses_drp.visible = False
 
-    # ── Helper: themed label with tracked reference ─────────────────────
+    # Helper: themed label with tracked reference
 
     def _make_themed_label(self, text: str) -> "ft.Text":
         """Create a themed label text and track it for live refresh."""
@@ -439,7 +439,7 @@ class SettingsView(ft.Container):
         self._themed_texts.append(t)
         return t
 
-    # ── Notification Profile & DND Summary Helpers ────────────────────
+    # Notification Profile & DND Summary Helpers
 
     def _update_profile_summary(self):
         """Update the profile summary text based on current profile selection."""
@@ -472,7 +472,7 @@ class SettingsView(ft.Container):
         except (ValueError, AttributeError):
             self._dnd_summary.value = ""
 
-    # ── Theme Selector Builder ────────────────────────────────────────
+    # Theme Selector Builder
 
     def _build_theme_selector(self):
         """Build a scrollable row of theme preview cards."""
@@ -607,7 +607,7 @@ class SettingsView(ft.Container):
         Covers: section containers, expansion tiles, text fields, switches,
         save button, sticky footer, back button, test login, etc.
         """
-        # ── Section containers (bg + border) ──
+        # Section containers (bg + border)
         for container in getattr(self, '_section_containers', []):
             container.bgcolor = C.SURFACE
             container.border = ft.Border.all(1, C.BORDER)
@@ -616,7 +616,7 @@ class SettingsView(ft.Container):
             except Exception:
                 pass
 
-        # ── Expansion tiles (title text + icon colors) ──
+        # Expansion tiles (title text + icon colors)
         for tile in getattr(self, '_tiles', []):
             tile.collapsed_text_color = C.TEXT_PRIMARY
             tile.text_color = C.ACCENT
@@ -629,7 +629,7 @@ class SettingsView(ft.Container):
             except Exception:
                 pass
 
-        # ── ALL text fields — update border, focus, text, bg colors ──
+        # ALL text fields — update border, focus, text, bg colors
         _all_fields = [
             '_username_field', '_password_field',
             '_interval_field', '_fetch_months_field',
@@ -651,14 +651,14 @@ class SettingsView(ft.Container):
                 field.bgcolor = C.BG
                 field.label_style = ft.TextStyle(size=13, color=C.TEXT_SECONDARY)
 
-        # ── Dropdown ──
+        # Dropdown
         if hasattr(self, '_mock_type_drp'):
             self._mock_type_drp.border_color = C.BORDER
             self._mock_type_drp.focused_border_color = C.ACCENT
             self._mock_type_drp.color = C.TEXT_PRIMARY
             self._mock_type_drp.bgcolor = C.BG
 
-        # ── ALL switches — update active_color + label text style ──
+        # ALL switches — update active_color + label text style
         _all_switches = [
             '_sw_always_on_top', '_sw_submitted', '_sw_graded',
             '_sw_start_with_windows', '_sw_start_minimized', '_sw_minimize_to_tray',
@@ -673,7 +673,7 @@ class SettingsView(ft.Container):
                     sw.active_color = C.ACCENT
                 sw.label_text_style = ft.TextStyle(color=C.TEXT_PRIMARY, size=13)
 
-        # ── Save button ──
+        # Save button
         if hasattr(self, '_save_btn'):
             self._save_btn.bgcolor = C.ACCENT
             try:
@@ -681,7 +681,7 @@ class SettingsView(ft.Container):
             except Exception:
                 pass
 
-        # ── Sticky footer ──
+        # Sticky footer
         if hasattr(self, '_sticky_footer'):
             self._sticky_footer.bgcolor = C.BG
             self._sticky_footer.border = ft.Border.only(
@@ -692,7 +692,7 @@ class SettingsView(ft.Container):
             except Exception:
                 pass
 
-        # ── Test login button ──
+        # Test login button
         if hasattr(self, '_test_login_btn'):
             self._test_login_btn.style = ft.ButtonStyle(
                 color=ft.Colors.WHITE,
@@ -702,16 +702,16 @@ class SettingsView(ft.Container):
                 animation_duration=300,
             )
 
-        # ── Loading bar ──
+        # Loading bar
         if hasattr(self, '_test_loading_bar'):
             self._test_loading_bar.color = C.ACCENT
             self._test_loading_bar.bgcolor = C.SURFACE
 
-        # ── Reset button ──
+        # Reset button
         if hasattr(self, 'btn_reset'):
             self.btn_reset.style = ft.ButtonStyle(color=C.TEXT_SECONDARY)
 
-        # ── Back button (icon + text + style) ──
+        # Back button (icon + text + style)
         if hasattr(self, '_back_icon'):
             self._back_icon.color = C.TEXT_SECONDARY
         if hasattr(self, '_back_text'):
@@ -723,7 +723,7 @@ class SettingsView(ft.Container):
                 padding=ft.Padding.symmetric(horizontal=8, vertical=10),
             )
 
-        # ── Header texts ──
+        # Header texts
         if hasattr(self, '_title_text'):
             self._title_text.color = C.TEXT_PRIMARY
         if hasattr(self, '_version_text'):
@@ -731,19 +731,19 @@ class SettingsView(ft.Container):
         if hasattr(self, '_header_divider'):
             self._header_divider.color = C.BORDER
 
-        # ── Unsaved dot ──
+        # Unsaved dot
         if hasattr(self, '_unsaved_dot'):
             self._unsaved_dot.bgcolor = C.CRITICAL
 
-        # ── All themed sub-labels (section titles like "Mức độ", "Chọn Theme") ──
+        # All themed sub-labels (section titles like "Mức độ", "Chọn Theme")
         for txt in getattr(self, '_themed_texts', []):
             txt.color = C.TEXT_PRIMARY
 
-        # ── All hint containers (description texts) ──
+        # All hint containers (description texts)
         for _container, txt in getattr(self, '_hint_containers', []):
             txt.color = C.TEXT_SECONDARY
 
-        # ── Profile cards (notification presets) ──
+        # Profile cards (notification presets)
         for k, card in getattr(self, '_profile_cards', {}).items():
             is_sel = (k == getattr(self, '_current_profile', 'balanced'))
             card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
@@ -754,18 +754,18 @@ class SettingsView(ft.Container):
                 col.controls[1].color = C.TEXT_PRIMARY  # label
                 col.controls[2].color = C.TEXT_SECONDARY  # desc
 
-        # ── Milestone chips ──
+        # Milestone chips
         for h, chip in getattr(self, '_milestone_chips', {}).items():
             chip.selected_color = C.ACCENT
             chip.bgcolor = C.SURFACE
 
-        # ── Summary texts (profile, DND, milestone) ──
+        # Summary texts (profile, DND, milestone)
         for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):
             txt = getattr(self, attr, None)
             if txt:
                 txt.color = C.TEXT_SECONDARY
 
-        # ── Expansion tile title + subtitle texts (deep access) ──
+        # Expansion tile title + subtitle texts (deep access)
         for tile in getattr(self, '_tiles', []):
             if tile.title and hasattr(tile.title, 'color'):
                 tile.title.color = C.TEXT_PRIMARY
@@ -921,7 +921,7 @@ class SettingsView(ft.Container):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mail') and self._on_test_mail: self._on_test_mail(t)
 
-    # ── System diagnostics ──
+    # System diagnostics
     def _do_show_device_info(self):
         """Show device/platform info for debugging."""
         import sys
@@ -982,7 +982,7 @@ class SettingsView(ft.Container):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    # ── Cache management ──
+    # Cache management
     def _do_clear_notif_cache(self):
         """Clear notification milestone cache (forces re-notification)."""
         try:
@@ -1069,7 +1069,7 @@ class SettingsView(ft.Container):
             self._debug_scheduler_status.color = C.CRITICAL
         self._debug_scheduler_status.update()
 
-    # ── Background scheduler (Android) ──
+    # Background scheduler (Android)
     def _do_start_foreground(self):
         """Start Android foreground service for persistent background."""
         async def _start():
@@ -1126,7 +1126,7 @@ class SettingsView(ft.Container):
             self._debug_info_text.update()
         self._page.run_task(_send)
 
-    # ── Mobile-specific test handlers ──
+    # Mobile-specific test handlers
     def _do_check_notif_permission(self):
         """Check notification permission status on mobile."""
         async def _check():
@@ -1375,7 +1375,7 @@ class SettingsView(ft.Container):
             self._debug_mobile_text.color = C.CRITICAL
         self._debug_mobile_text.update()
 
-    # ── Update checker ──
+    # Update checker
     def _do_force_check_update(self):
         """Force check for app updates."""
         import threading
@@ -1407,7 +1407,7 @@ class SettingsView(ft.Container):
 
         threading.Thread(target=_worker, daemon=True, name="debug-update").start()
 
-    # ── Broadcast all channels ──
+    # Broadcast all channels
     def _do_test_broadcast(self):
         """Send mock notification to ALL registered channels simultaneously."""
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
@@ -1433,7 +1433,7 @@ class SettingsView(ft.Container):
         self._debug_info_text.color = C.SAFE if sent else C.WARNING
         self._debug_info_text.update()
 
-    # ── Network latency test ──
+    # Network latency test
     def _do_test_latency(self):
         """Ping Moodle server and measure response time."""
         import threading
@@ -1471,7 +1471,7 @@ class SettingsView(ft.Container):
 
         threading.Thread(target=_ping, daemon=True, name="debug-ping").start()
 
-    # ── Show registered notifiers ──
+    # Show registered notifiers
     def _do_show_notifiers(self):
         """Show all registered notification channels and their status."""
         try:
@@ -1496,7 +1496,7 @@ class SettingsView(ft.Container):
             self._debug_info_text.color = C.CRITICAL
         self._debug_info_text.update()
 
-    # ── DND status check ──
+    # DND status check
     def _do_check_dnd(self):
         """Check current Do Not Disturb status."""
         from datetime import datetime
@@ -1523,7 +1523,7 @@ class SettingsView(ft.Container):
         self._debug_info_text.color = C.WARNING if (enabled and is_active) else C.SAFE
         self._debug_info_text.update()
 
-    # ── Cache statistics ──
+    # Cache statistics
     def _do_show_cache_stats(self):
         """Show cache sizes and statistics."""
         import os
@@ -1555,7 +1555,7 @@ class SettingsView(ft.Container):
         self._debug_cache_stats.color = C.TEXT_PRIMARY
         self._debug_cache_stats.update()
 
-    # ── Force data refresh ──
+    # Force data refresh
     def _do_force_refresh(self):
         """Trigger immediate data reload from Moodle."""
         async def _refresh():
@@ -1575,7 +1575,7 @@ class SettingsView(ft.Container):
             self._debug_info_text.update()
         self._page.run_task(_refresh)
 
-    # ── Reset settings ──
+    # Reset settings
     def _do_reset_settings(self):
         """Reset all settings to factory defaults (with confirmation dialog)."""
         async def _confirm():

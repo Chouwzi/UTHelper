@@ -1,14 +1,14 @@
 """Hệ thống Theme của UTHelper — Các preset màu sắc chọn lọc & cơ chế áp dụng linh hoạt."""
 
 
-# ── Định nghĩa các Preset Theme ─────────────────────────────────────────
+# Định nghĩa các Preset Theme
 # Mỗi preset là một dict đầy đủ gồm: các màu UI cơ bản + màu mức độ khẩn cấp + màu badge loại hoạt động.
 # Key = tên theme (snake_case), được lưu trong cấu hình settings.THEME.
 
 from gui.core.theme_presets import THEME_PRESETS, THEME_ORDER
 
 
-# ── Các Hằng số Theme đang Hoạt động ────────────────────────────────────
+# Các Hằng số Theme đang Hoạt động
 # Tất cả các file GUI đọc màu sắc C.BG, C.ACCENT … qua các tham chiếu này.
 # apply_theme() sẽ cập nhật các giá trị ở mức class-level → có hiệu lực toàn cục ngay lập tức.
 
@@ -25,7 +25,7 @@ class C:
     BORDER         = "#1E293B"
 
 
-# ── Nhãn & Ánh xạ loại hoạt động ─────────────────────────────────────────
+# Nhãn & Ánh xạ loại hoạt động
 
 _TYPE_LABELS = {
     "quiz":       "QUIZ",
@@ -49,7 +49,7 @@ _TYPE_COLORS = {
 }
 
 
-# ── Cơ chế Áp dụng Theme ─────────────────────────────────────────────────
+# Cơ chế Áp dụng Theme
 
 def apply_theme(theme_name: str) -> None:
     """Áp dụng một theme preset vào các hằng số giao diện toàn cục C và từ điển _TYPE_COLORS.
@@ -60,7 +60,7 @@ def apply_theme(theme_name: str) -> None:
     """
     preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
 
-    # ── Các màu UI cơ sở ──
+    # Các màu UI cơ sở
     C.BG             = preset["bg"]
     C.SURFACE        = preset["surface"]
     C.SURFACE_HOVER  = preset["surface_hover"]
@@ -69,12 +69,12 @@ def apply_theme(theme_name: str) -> None:
     C.TEXT_SECONDARY = preset["text_secondary"]
     C.BORDER         = preset["border"]
 
-    # ── Mức độ khẩn cấp ──
+    # Mức độ khẩn cấp
     C.CRITICAL = preset["critical"]
     C.WARNING  = preset["warning"]
     C.SAFE     = preset["safe"]
 
-    # ── Màu sắc của các badge loại hoạt động ──
+    # Màu sắc của các badge loại hoạt động
     _TYPE_COLORS["quiz"]       = preset["quiz"]
     _TYPE_COLORS["assignment"] = preset["assignment"]
     _TYPE_COLORS["deadline"]   = preset["assignment"]  # Đồng bộ cùng màu với bài tập

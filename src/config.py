@@ -5,7 +5,7 @@ import sys
 import json
 import logging
 
-# ── Secure storage import chain ──
+# Secure storage import chain
 # Tier 1: flet-secure-storage (cross-platform, native keystores)
 # Tier 2: keyring (Windows Credential Manager legacy fallback)
 # Tier 3: plaintext JSON (last resort, not recommended)
@@ -32,7 +32,7 @@ else:
 # Fix specifically for Flet build missing standard directories sometimes when using --add-data "assets;assets"
 
 
-# ── Platform-aware data directory ──
+# Platform-aware data directory
 def _get_user_data_dir() -> Path:
     """Trả về thư mục lưu trữ dữ liệu phù hợp với nền tảng."""
     if sys.platform == 'win32':
@@ -60,7 +60,7 @@ CONFIG_FILE = _USER_DATA_DIR / "settings.json"
 
 KEYRING_SERVICE_NAME = "UTHElearningAlert"
 
-# ── Secret field mapping (attr_name → storage_key) ──
+# Secret field mapping (attr_name → storage_key)
 _SECRET_FIELDS = {
     'UTH_PASSWORD': 'password',
     'MOODLE_SESSION': 'moodle_session',
@@ -70,7 +70,7 @@ _SECRET_FIELDS = {
     'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
 }
 
-# ── Lazy-init SecureStorage instance ──
+# Lazy-init SecureStorage instance
 _secure_storage: 'fss.SecureStorage | None' = None
 
 def _get_secure_storage() -> 'fss.SecureStorage | None':

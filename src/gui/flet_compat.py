@@ -37,7 +37,7 @@ def patch_flet():
     #  BORDER
     # ══════════════════════════════════════════════════════════════
 
-    # ── ft.border module ──────────────────────────────────────────
+    # ft.border module
     border_mod = getattr(ft, "border", None)
     if border_mod is None:
         import types
@@ -63,7 +63,7 @@ def patch_flet():
         border_mod.only = _border_only
         _patched.append("ft.border.only")
 
-    # ── ft.Border.only (class method) ─────────────────────────────
+    # ft.Border.only (class method)
     _Border = getattr(ft, "Border", None)
     if _Border is not None and not hasattr(_Border, "only"):
         @classmethod
@@ -98,7 +98,7 @@ def patch_flet():
     #  PADDING (both class ft.Padding and module ft.padding)
     # ══════════════════════════════════════════════════════════════
 
-    # ── ft.Padding class methods ──────────────────────────────────
+    # ft.Padding class methods
     _Padding = getattr(ft, "Padding", None)
     if _Padding is not None:
         if not hasattr(_Padding, "symmetric"):
@@ -115,7 +115,7 @@ def patch_flet():
             _Padding.only = _pad_only
             _patched.append("ft.Padding.only")
 
-    # ── ft.padding module helpers ─────────────────────────────────
+    # ft.padding module helpers
     padding_mod = getattr(ft, "padding", None)
     if padding_mod is None:
         import types

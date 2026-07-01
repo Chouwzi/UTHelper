@@ -5,7 +5,7 @@ import platform_utils as _pu
 
 def init_system_controls(view):
     """Khởi tạo các control cấu hình vòng đời ứng dụng và tần suất đồng bộ trên hệ điều hành."""
-    # ── Thiết lập riêng trên Desktop (Windows) ──
+    # Thiết lập riêng trên Desktop (Windows)
     view._sw_start_with_windows = ft.Switch(
         value=settings.START_WITH_WINDOWS, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -22,7 +22,7 @@ def init_system_controls(view):
         label="Thu nhỏ vào khay hệ thống"
     )
     
-    # ── Thiết lập riêng trên Mobile (Android) ──
+    # Thiết lập riêng trên Mobile (Android)
     view._sw_bg_check = ft.Switch(
         value=settings.BACKGROUND_CHECK_ANDROID, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -40,7 +40,7 @@ def init_system_controls(view):
         visible=settings.BACKGROUND_CHECK_ANDROID,
     )
     
-    # ── Đồng bộ hóa dữ liệu Moodle chung ──
+    # Đồng bộ hóa dữ liệu Moodle chung
     view._interval_field = ft.TextField(
         value=str(settings.CHECK_INTERVAL_MINUTES),
         label="Cập nhật mỗi X phút (0 để tắt)",

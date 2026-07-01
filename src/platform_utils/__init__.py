@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Static detection (available at import time) ─────────────────────────
+# Static detection (available at import time)
 IS_WINDOWS = sys.platform == 'win32'
 IS_ANDROID = hasattr(sys, '_ANDROID_') or 'android' in sys.platform.lower()
 IS_IOS = hasattr(sys, '_IOS_')

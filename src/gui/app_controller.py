@@ -116,7 +116,7 @@ class AppController:
         _is_mobile = platform_utils.IS_MOBILE
         _is_windows = platform_utils.IS_WINDOWS
         
-        # ── Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống ──
+        # Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống
         if not _is_mobile:
             self.page.window.width        = 420
             self.page.window.height       = 720
@@ -138,7 +138,7 @@ class AppController:
         from gui.core.theme import set_page_theme
         set_page_theme(self.page)
         
-        # ── Khay hệ thống & Thông báo (tự động nhận biết nền tảng) ──
+        # Khay hệ thống & Thông báo (tự động nhận biết nền tảng)
         if _is_windows:
             from gui.tray import TrayApp
             self.tray = TrayApp(self.page)
@@ -1213,10 +1213,10 @@ class AppController:
         """
         from gui.core.theme import C as _C
 
-        # ── Page ──
+        # Page
         self.page.bgcolor = _C.BG
 
-        # ── Header ──
+        # Header
         header = self.dashboard.controls[0]  # ft.Container
         header.bgcolor = _C.BG
         # Walk header children: title text, version badge, status text
@@ -1236,7 +1236,7 @@ class AppController:
         # Status text
         self.status_text.color = _C.TEXT_SECONDARY
 
-        # ── Filter area ──
+        # Filter area
         filter_container = self.dashboard.controls[2]
         filter_container.bgcolor = _C.BG
         self.search_field.bgcolor = _C.SURFACE
@@ -1244,7 +1244,7 @@ class AppController:
         self.search_field.focused_border_color = _C.ACCENT
         self.search_field.color = _C.TEXT_PRIMARY
 
-        # ── Empty state ──
+        # Empty state
         if hasattr(self, '_empty_icon'):
             self._empty_icon.color = _C.BORDER
         if hasattr(self, '_empty_title'):
@@ -1252,7 +1252,7 @@ class AppController:
         if hasattr(self, '_empty_subtitle'):
             self._empty_subtitle.color = _C.BORDER
 
-        # ── Footer ──
+        # Footer
         footer = self.dashboard.controls[-1]
         footer.bgcolor = _C.SURFACE
         footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
@@ -1263,7 +1263,7 @@ class AppController:
         self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
         self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
 
-        # ── Cards ── Re-color all existing recycled cards
+        # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):
             for card in self._reusable_cards:
                 card.bgcolor = _C.SURFACE
@@ -1276,15 +1276,15 @@ class AppController:
                 if hasattr(card, '_progress_ctrl'):
                     card._progress_ctrl.bgcolor = _C.BORDER
 
-        # ── Icon buttons ──
+        # Icon buttons
         for btn in (self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn):
             btn.icon_color = _C.TEXT_SECONDARY
 
-        # ── Loading bar ──
+        # Loading bar
         self.loading_bar.color = _C.ACCENT
         self.loading_bar.bgcolor = _C.BORDER
 
-        # ── Settings view bgcolor ──
+        # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
 
         self.page.update()
@@ -1446,17 +1446,17 @@ class AppController:
         asset_url = getattr(self, "_update_asset_url", "")
         release_url = getattr(self, "_update_release_url", "")
 
-        # ── Windows: download .zip → batch updater → restart ──
+        # Windows: download .zip → batch updater → restart
         if _is_windows() and asset_url and asset_url.endswith(".zip"):
             await self._do_auto_update_windows(asset_url)
             return
 
-        # ── Android: download .apk → install intent ──
+        # Android: download .apk → install intent
         if _is_android() and asset_url and asset_url.endswith(".apk"):
             await self._do_auto_update_android(asset_url)
             return
 
-        # ── Fallback: open browser ──
+        # Fallback: open browser
         url = asset_url or release_url
         if url:
             try:

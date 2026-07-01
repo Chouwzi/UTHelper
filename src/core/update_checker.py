@@ -24,14 +24,14 @@ from platform_utils import IS_ANDROID, IS_WINDOWS, IS_IOS
 
 logger = logging.getLogger(__name__)
 
-# ── GitHub repo ──────────────────────────────────────────
+# GitHub repo
 _GITHUB_OWNER = "Chouwzi"
 _GITHUB_REPO = "UTHelper"
 _RELEASES_URL = f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/releases/latest"
 _UA = "UTHelper-UpdateChecker/2.0"
 
 
-# ── Helpers ──────────────────────────────────────────────
+# Helpers
 
 def _version_tuple(v: str) -> tuple:
     """Convert '2.1.0' → (2, 1, 0)."""
@@ -48,7 +48,7 @@ def _get_update_temp_dir() -> Path:
     return d
 
 
-# ── Check ────────────────────────────────────────────────
+# Check
 
 def check_for_update(current_version: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
     """Check GitHub Releases for newer version.
@@ -107,7 +107,7 @@ def _find_platform_asset(assets: list) -> Optional[str]:
     return assets[0].get("browser_download_url", "") if assets else None
 
 
-# ── Download ─────────────────────────────────────────────
+# Download
 
 def download_update(url: str, progress_cb: Callable[[float], None] = None) -> Optional[Path]:
     """Download update file to temp dir with progress.
@@ -148,7 +148,7 @@ def download_update(url: str, progress_cb: Callable[[float], None] = None) -> Op
         return None
 
 
-# ── Apply (Windows) ──────────────────────────────────────
+# Apply (Windows)
 
 def apply_update_windows(zip_path: Path) -> bool:
     """Extract .zip and launch batch updater that replaces files after app exits.
@@ -236,7 +236,7 @@ exit
         return False
 
 
-# ── Apply (Android) ──────────────────────────────────────
+# Apply (Android)
 
 def apply_update_android(apk_path: Path) -> bool:
     """Trigger Android PackageInstaller intent for the downloaded APK.
@@ -292,7 +292,7 @@ def apply_update_android(apk_path: Path) -> bool:
         return False
 
 
-# ── Async wrappers ───────────────────────────────────────
+# Async wrappers
 
 def check_for_update_async(current_version: str, callback):
     """Check update in background. callback(has_update, version, release_url, asset_url)."""

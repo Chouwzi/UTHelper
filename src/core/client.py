@@ -11,7 +11,7 @@ import sys as _sys
 
 logger = logging.getLogger(__name__)
 
-# ── Platform detection ──
+# Platform detection
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
 _is_ios = _sys.platform == 'ios' or (
     _sys.platform == 'darwin' and os.environ.get('FLET_APP_STORAGE_DATA', '') != ''
@@ -24,7 +24,7 @@ elif _is_ios:
 else:
     _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-# ── SSL: dùng urllib default trên MỌI platform ──
+# SSL: dùng urllib default trên MỌI platform
 # Custom ssl.create_default_context() bị Cloudflare chặn (403).
 # urllib default SSL không bị chặn. Nếu iOS gặp cert error → thêm certifi sau.
 
@@ -41,7 +41,7 @@ class MoodleClient:
     Chạy trên Desktop, iOS, Android mà không cần cài thêm gì.
     """
     
-    # ── Client-side rate limiting (Moodle has NO server-side throttle) ──
+    # Client-side rate limiting (Moodle has NO server-side throttle)
     _MIN_INTERVAL = 0.05  # 50ms = max 20 req/s (was 200ms — caused 1.6s waste per cycle)
 
     def __init__(self):
@@ -61,7 +61,7 @@ class MoodleClient:
         """Không cần cleanup — urllib không dùng connection pool."""
         pass
 
-    # ─── Low-level HTTP helpers ──────────────────────────────
+    # Low-level HTTP helpers
 
     def _post(self, url: str, data: dict, timeout: float = 15) -> tuple:
         """POST form-encoded data. Returns (status, parsed_json_or_None)."""
@@ -237,7 +237,7 @@ class MoodleClient:
             return e.code, None
 
 
-    # ─── Web Services API (Token-based, stateless) ───────────────────
+    # Web Services API (Token-based, stateless)
 
     def _get_ws_token(self, username: str = None, password: str = None, force: bool = False) -> str:
         """Lấy Web Services token từ Moodle.
@@ -368,7 +368,7 @@ class MoodleClient:
 
 
 
-    # ─── Async Web Services API (non-blocking) ───────────
+    # Async Web Services API (non-blocking)
 
     async def call_ws_api_async(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle WS API bất đồng bộ.

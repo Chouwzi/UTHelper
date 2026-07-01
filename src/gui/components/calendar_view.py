@@ -66,7 +66,7 @@ class CalendarView(ft.Container):
 
         self._build_ui()
 
-    # ── Build UI ────────────────────────────────────────────────────────
+    # Build UI
     def _build_ui(self):
         # Month navigation header
         self._month_label = ft.Text(
@@ -146,7 +146,7 @@ class CalendarView(ft.Container):
             alignment=ft.MainAxisAlignment.CENTER,
         )
 
-        # ── Mode toggle (Month / Week) ──
+        # Mode toggle (Month / Week)
         self._mode_month_btn = ft.Container(
             content=ft.Row(controls=[
                 ft.Icon(ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY),
@@ -202,7 +202,7 @@ class CalendarView(ft.Container):
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        # ── Week strip (7 day-columns) ──
+        # Week strip (7 day-columns)
         self._week_cells: List[ft.Container] = []
         week_cell_controls = []
         for i in range(7):
@@ -477,7 +477,7 @@ class CalendarView(ft.Container):
         except Exception:
             pass
 
-    # ── Public API ──────────────────────────────────────────────────────
+    # Public API
     def update_data(self, activities: List[Dict[str, Any]]):
         """Update calendar with new activity data and refresh grid."""
         self._all_data = activities
@@ -504,7 +504,7 @@ class CalendarView(ft.Container):
     def hide(self):
         self.visible = False
 
-    # ── Internal Logic ──────────────────────────────────────────────────
+    # Internal Logic
     def _build_deadline_map(self):
         """Group activities by deadline date string."""
         self._deadline_map.clear()
@@ -581,7 +581,7 @@ class CalendarView(ft.Container):
                     sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
                     most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
 
-                # ── Cell styling ──
+                # Cell styling
                 # Today  = accent dot indicator (always visible, unique landmark)
                 # Selected = white/silver border (navigation state)
                 # Today+Selected = both combined

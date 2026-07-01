@@ -4,7 +4,7 @@ import sys
 import traceback
 from pathlib import Path
 
-# ── iOS/mobile SSL fix: must be set BEFORE any httpx/ssl import ──
+# iOS/mobile SSL fix: must be set BEFORE any httpx/ssl import
 # Python in sandboxed iOS/Android apps cannot locate system CA certificates.
 # Setting these env vars ensures SSL verification works everywhere.
 try:
@@ -16,7 +16,7 @@ except ImportError:
 
 __version__ = "2.1.0"
 
-# ── Crash-safe startup logging ──
+# Crash-safe startup logging
 # This MUST run before ANY project imports to capture import crashes.
 _BOOT_LOG = []
 
@@ -32,7 +32,7 @@ _boot_log(f"Python {sys.version}")
 _boot_log(f"Platform: {sys.platform}")
 _boot_log(f"Android: {hasattr(sys, '_ANDROID_')}")
 
-# ── Platform-aware data directories ──
+# Platform-aware data directories
 try:
     if sys.platform == 'win32':
         _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
@@ -52,7 +52,7 @@ except Exception as exc:
     _boot_log(f"Data dir init failed: {exc}")
     _APPDATA_DIR = Path.home()
 
-# ── Setup logging to file BEFORE imports ──
+# Setup logging to file BEFORE imports
 try:
     _LOG_DIR = _APPDATA_DIR / "logs"
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,7 +74,7 @@ try:
 except Exception as exc:
     _boot_log(f"Log setup failed: {exc}")
 
-# ── Console encoding fix (Windows-only, harmless on other platforms) ──
+# Console encoding fix (Windows-only, harmless on other platforms)
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -143,7 +143,7 @@ def main():
         try:
             logger.info("Starting app imports...")
             
-            # ── Flet compatibility shim (MUST run before any GUI imports) ──
+            # Flet compatibility shim (MUST run before any GUI imports)
             from gui.flet_compat import patch_flet
             patch_flet()
             logger.info("Flet compat patched OK")

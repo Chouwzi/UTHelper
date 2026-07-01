@@ -511,7 +511,7 @@ class DetailView(ft.Container):
             expand=True,
         )
 
-    # ── Hàm công khai ──
+    # Hàm công khai
     def show_loading(self, data: dict):
         self._title_text.value  = data.get("title", "Đang tải...")
         self._course_text.value = clean_course_name(data.get("course", ""))
@@ -687,7 +687,7 @@ class DetailView(ft.Container):
         full_name = details.get("course_full_name", "")
         self._course_text.value = clean_course_name(full_name or data.get("course", ""))
 
-        # ── Trạng thái nộp bài ──
+        # Trạng thái nộp bài
         status_data = details.get("status_data", {})
         # Keys to skip: raw HTML fields, duplicates (time shown in info box), comment templates
         _SKIP_KEYS = {
@@ -726,7 +726,7 @@ class DetailView(ft.Container):
             if rows:
                 self._content_col.controls.append(self._section("Trạng thái", rows))
 
-        # ── Thông tin Quiz ──
+        # Thông tin Quiz
         quiz_rows = []
         attempts   = details.get("attempts_allowed")
         time_limit = details.get("time_limit")
@@ -746,7 +746,7 @@ class DetailView(ft.Container):
         if quiz_rows:
             self._content_col.controls.append(self._section("Thông tin Quiz", quiz_rows))
 
-        # ── Thông tin Điểm danh ──
+        # Thông tin Điểm danh
         att_records = details.get("attendance_records", [])
         # Các cột phổ biến, dùng layout đặc biệt
         _ATT_SKIP = {"Description", "Status", "Points", "Ngày", "Ngay", "Date"}
@@ -801,7 +801,7 @@ class DetailView(ft.Container):
                 )
             self._content_col.controls.append(self._section("Điểm danh", att_rows))
 
-        # ── Mô tả ──
+        # Mô tả
         desc_html = details.get("description_html", "")
         if desc_html:
             from gui.core.utils import html_to_markdown
@@ -824,7 +824,7 @@ class DetailView(ft.Container):
     def show_error_banner(self):
         self._error_banner.visible = True
 
-    # ── Hàm nội bộ (Private) ──
+    # Hàm nội bộ (Private)
     def _section(self, title: str, controls: list) -> ft.Container:
         return ft.Container(
             content=ft.Column(controls=[
@@ -847,7 +847,7 @@ class DetailView(ft.Container):
         # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
         await ft.UrlLauncher().launch_url(self._current_url)
 
-    # ── In-App Submission ──────────────────────────────────────────────
+    # In-App Submission
 
     async def _on_pick_files(self, e):
         """Mở file picker để chọn file nộp bài."""
@@ -1279,7 +1279,7 @@ class DetailView(ft.Container):
         # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
         await ft.UrlLauncher().launch_url(self._current_url)
 
-    # ── File Edit Dialog ──────────────────────────────────────
+    # File Edit Dialog
 
     def _show_file_edit_dialog(self, index: int):
         """Mở popup chỉnh sửa thông tin file đã nộp."""
@@ -1317,7 +1317,7 @@ class DetailView(ft.Container):
         self._file_edit_dialog.open = False
         self._page.update()
 
-    # ── Delete Confirmation ──────────────────────────────────
+    # Delete Confirmation
 
     def _confirm_single_delete(self, index: int):
         """Hiện popup xác nhận xóa 1 file."""
@@ -1366,7 +1366,7 @@ class DetailView(ft.Container):
             return
         await self._on_remove_submitted_files(indices)
 
-    # ── Multi-select Mode ────────────────────────────────────
+    # Multi-select Mode
 
     def _toggle_multiselect(self):
         """Bật/tắt chế độ chọn nhiều file."""
