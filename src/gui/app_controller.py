@@ -568,9 +568,24 @@ class AppController:
         count_refs = {}
         check_refs = {}
 
-        def _on_item(key: str, label: str, color: str):
+        def _on_item(key: str, label: str, config_color: str):
             btn_label.value = label
-            btn_label.color = color
+            from gui.core.theme import C, _TYPE_COLORS
+            if key == "all":
+                resolved_color = C.TEXT_PRIMARY
+            elif key in ("critical", "overdue"):
+                resolved_color = C.CRITICAL
+            elif key == "warning":
+                resolved_color = C.WARNING
+            elif key == "safe":
+                resolved_color = C.SAFE
+            elif key in _TYPE_COLORS:
+                resolved_color = _TYPE_COLORS[key]
+            elif key == "other":
+                resolved_color = C.TEXT_SECONDARY
+            else:
+                resolved_color = C.TEXT_PRIMARY
+            btn_label.color = resolved_color
             btn_label.update()
             for k, icon in check_refs.items():
                 icon.visible = (k == key)
@@ -1217,6 +1232,15 @@ class AppController:
             self.urgency_popup.content.border = ft.Border.all(1, _C.BORDER)
             self.urgency_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
 
+            urgency_colors = {
+                "all": _C.TEXT_PRIMARY,
+                "critical": _C.CRITICAL,
+                "warning": _C.WARNING,
+                "safe": _C.SAFE,
+                "overdue": _C.CRITICAL
+            }
+            self.urgency_popup.content.content.controls[0].color = urgency_colors.get(self.active_urgency, _C.TEXT_PRIMARY)
+
             # Urgency Popup Items
             self.urgency_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
             self.urgency_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
@@ -1248,6 +1272,16 @@ class AppController:
             self.type_popup.content.bgcolor = _C.SURFACE
             self.type_popup.content.border = ft.Border.all(1, _C.BORDER)
             self.type_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
+
+            type_colors = {
+                "all": _C.TEXT_PRIMARY,
+                "quiz": _TYPE_COLORS["quiz"],
+                "assignment": _TYPE_COLORS["assignment"],
+                "attendance": _TYPE_COLORS["attendance"],
+                "open": _TYPE_COLORS["open"],
+                "other": _C.TEXT_SECONDARY
+            }
+            self.type_popup.content.content.controls[0].color = type_colors.get(self.active_type, _C.TEXT_PRIMARY)
 
             # Type Popup Items
             self.type_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
