@@ -1638,6 +1638,8 @@ class SettingsView(ft.Container):
         self._selected_theme = getattr(settings, 'THEME', 'midnight_blue')
         self._original_theme = self._selected_theme
         self._rebuild_theme_cards()
+        # Repaint all section UI controls with current theme colors
+        self._refresh_section_colors()
 
         if hasattr(self, '_c_tb_critical'):
             self._c_tb_critical.value = getattr(settings, 'COLOR_CRITICAL', '#EF4444')
@@ -1809,6 +1811,8 @@ class SettingsView(ft.Container):
                     set_page_theme(self._page)
                     if self._on_theme_preview:
                         self._on_theme_preview()
+                # Reset internal state so next open sees the original theme
+                self._selected_theme = self._original_theme
                 self._on_close_cb()
                 _log.warning("  discard done")
 
