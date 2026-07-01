@@ -1354,18 +1354,21 @@ class AppController:
         self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
         self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
 
+        # Content area bgcolor
+        try:
+            content_area = self.dashboard.controls[3]
+            content_area.bgcolor = _C.BG
+        except Exception:
+            pass
+
         # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):
             for card in self._reusable_cards:
                 card.bgcolor = _C.SURFACE
-                if hasattr(card, '_title_text'):
-                    card._title_text.color = _C.TEXT_PRIMARY
-                if hasattr(card, '_course_text'):
-                    card._course_text.color = _C.ACCENT
-                if hasattr(card, '_deadline_text'):
-                    card._deadline_text.color = _C.TEXT_SECONDARY
-                if hasattr(card, '_progress_ctrl'):
-                    card._progress_ctrl.bgcolor = _C.BORDER
+                try:
+                    card.update_data(card.data, force=True)
+                except Exception:
+                    pass
 
         # Icon buttons
         notif_btn = None
