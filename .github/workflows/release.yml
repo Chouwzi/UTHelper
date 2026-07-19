@@ -62,6 +62,12 @@ jobs:
           grep -q "ScheduledNotificationReceiver" "$MANIFEST"
           grep -q "ScheduledNotificationBootReceiver" "$MANIFEST"
           grep -q "ActionBroadcastReceiver" "$MANIFEST"
+          grep -q "DeadlineAlarmReceiver" "$MANIFEST"
+          grep -q "RescheduleReceiver" "$MANIFEST"
+          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
+            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.room:room-runtime:2.8.4" \
+            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
       - name: Sign release APK
         shell: bash
         env:

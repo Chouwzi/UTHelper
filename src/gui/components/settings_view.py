@@ -975,6 +975,23 @@ class SettingsView(ft.Container):
             f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.CHECK_INTERVAL_MINUTES}m)",
             f"DND: {'ON' if cfg.NOTIFY_DND_ENABLE else 'OFF'} ({cfg.NOTIFY_DND_START}h-{cfg.NOTIFY_DND_END}h)",
         ]
+        android_diag = getattr(
+            self._orchestrator, "android_background_diagnostics", None
+        )
+        if isinstance(android_diag, dict):
+            lines.extend(
+                [
+                    f"Worker: {android_diag.get('worker_backend', 'unknown')}",
+                    f"Worker state: {android_diag.get('worker_state', 'unknown')}",
+                    f"Stop reason: {android_diag.get('worker_stop_reason', '0')}",
+                    f"Last sync: {android_diag.get('last_success_at', 'never')}",
+                    f"Activities: {android_diag.get('activity_count', '0')}",
+                    f"Pending reminders: {android_diag.get('pending_reminders', '0')}",
+                    f"Exact alarm: {'YES' if android_diag.get('exact_alarm_allowed') else 'NO'}",
+                    f"Token: {android_diag.get('token_status', 'unknown')}",
+                    f"Worker error: {android_diag.get('last_error', '') or 'none'}",
+                ]
+            )
         self._debug_info_text.value = "\n".join(lines)
         self._debug_info_text.update()
 

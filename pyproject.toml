@@ -50,6 +50,10 @@ module = "main"
 # ── Android-specific configuration ──
 [tool.flet.android]
 adaptive_icon_background = "#0F172A"
+dependencies = ["flet-uth-background-sync==0.1.0"]
+
+[tool.flet.android.dev_packages]
+flet-uth-background-sync = "extensions/flet_uth_background_sync"
 
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true

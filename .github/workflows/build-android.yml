@@ -93,6 +93,12 @@ jobs:
           grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
           grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml
           grep -q "ActionBroadcastReceiver" final-android-manifest.xml
+          grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
+          grep -q "RescheduleReceiver" final-android-manifest.xml
+          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
+            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.room:room-runtime:2.8.4" \
+            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
 
       - name: 📋 List build outputs
         if: always()

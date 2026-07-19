@@ -64,6 +64,7 @@ def test_manifest_selects_exact_platform_asset_and_semver():
     assert info.asset and info.asset.platform == "android"
     assert info.asset.architecture == "universal"
     assert info.asset.sha256 == "b" * 64
+    assert update_checker.get_update_asset(info.asset.url) == info.asset
 
 
 def test_draft_and_prerelease_are_not_offered():

@@ -57,8 +57,16 @@ class AppController:
         
         self.orchestrator = DataOrchestrator()
         from core.data_cache import DataCache
-        self._data_cache = DataCache(namespace=settings.UTH_USERNAME or None)
+        cache_namespace = (
+            f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}"
+            if settings.UTH_USERNAME
+            else None
+        )
+        self._data_cache = DataCache(namespace=cache_namespace)
         self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        self._notification_milestones_snapshot = tuple(
+            settings.NOTIFY_MILESTONES_MINUTES or []
+        )
         self._last_successful_sync_at = None
         self._time_policy = ActivityTimePolicy(
             settings.URGENCY_CRITICAL_HOURS,
@@ -78,7 +86,7 @@ class AppController:
         self._pending_updates = {}
         
         self._prefetch_cancel_event = threading.Event()
-
+        self._android_background = None
 
         self._init_window()
         self._init_ui()
@@ -99,6 +107,8 @@ class AppController:
         self.page.run_task(self._pulse_loop_async)
         self.page.run_task(self._countdown_loop_async)
         self.page.run_task(self._sync_coordinator.run)
+        if self._android_background and self._android_background.available:
+            self.page.run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
         
         # Check update in background
@@ -125,6 +135,11 @@ class AppController:
         import platform_utils
         _is_mobile = platform_utils.IS_MOBILE
         _is_windows = platform_utils.IS_WINDOWS
+
+        if platform_utils.IS_ANDROID:
+            from platform_utils.background_sync import create_android_background_bridge
+
+            self._android_background = create_android_background_bridge(self.page)
         
         # Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống
         if not _is_mobile:
@@ -966,6 +981,34 @@ class AppController:
         self.loading_bar.visible = False
         self._update_footer()
         self.page.update()
+
+    async def _initialize_android_background(self):
+        """Attach native worker settings and prefer its cache after app restart."""
+        bridge = self._android_background
+        if not bridge or not bridge.available:
+            return
+        try:
+            token = (
+                getattr(self.orchestrator.client, "token", "")
+                or getattr(settings, "MOODLE_WS_TOKEN", "")
+            )
+            await bridge.configure(token)
+            native_data = await bridge.cached_activities()
+            if native_data:
+                diagnostics = await bridge.diagnostics()
+                self.orchestrator.android_background_diagnostics = diagnostics
+                native_sync = float(diagnostics.get("last_success_at", 0) or 0)
+                if not self.all_data or native_sync >= (self._last_successful_sync_at or 0):
+                    with self._data_lock:
+                        self.all_data = native_data
+                    self._refresh_activity_time_state()
+                    self.status_text.value = (
+                        f"Dữ liệu nền đã lưu · {len(native_data)} hoạt động"
+                    )
+                    self._update_footer()
+                    self.page.update()
+        except Exception as exc:
+            logger.warning("Cannot initialize Android background sync: %s", exc)
         return True
 
     async def _load_data_async(self):
@@ -1099,6 +1142,23 @@ class AppController:
                 parse_timestamp(saved_snapshot.last_successful_sync_at)
                 or time.time()
             )
+            native_schedule_result = None
+            if self._android_background and self._android_background.available:
+                try:
+                    token = (
+                        getattr(self.orchestrator.client, "token", "")
+                        or getattr(settings, "MOODLE_WS_TOKEN", "")
+                    )
+                    await self._android_background.configure(token)
+                    native_schedule_result = await self._android_background.import_activities(
+                        data_copy,
+                        authoritative=True,
+                    )
+                    self.orchestrator.android_background_diagnostics = (
+                        await self._android_background.diagnostics()
+                    )
+                except Exception as exc:
+                    logger.warning("Android native snapshot import failed: %s", exc)
             # P3: Tính tiến độ nộp bài - positive reinforcement
             submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
             total_count = len(data_copy)
@@ -1118,10 +1178,26 @@ class AppController:
                 try:
                     with self._data_lock:
                         dispatch_copy = list(self.all_data)
-                    dispatch_result = await self.notifier.dispatch(dispatch_copy)
-                    schedule_result = await self.notifier.reconcile_schedules(
-                        dispatch_copy
-                    )
+                    if native_schedule_result is None:
+                        dispatch_result = await self.notifier.dispatch(dispatch_copy)
+                        schedule_result = await self.notifier.reconcile_schedules(
+                            dispatch_copy
+                        )
+                    else:
+                        from core.notification_types import DispatchResult, ScheduleResult
+
+                        dispatch_result = DispatchResult(
+                            attempted=len(dispatch_copy),
+                            delivered=int(native_schedule_result.get("delivered", 0) or 0),
+                            successful_channels=["android_native"]
+                            if native_schedule_result.get("delivered")
+                            else [],
+                        )
+                        schedule_result = ScheduleResult(
+                            desired=int(native_schedule_result.get("scheduled", 0) or 0),
+                            scheduled=int(native_schedule_result.get("scheduled", 0) or 0),
+                            cancelled=int(native_schedule_result.get("cancelled", 0) or 0),
+                        )
                     logger.info(
                         "[Notifications] delivered=%d filtered=%d scheduled=%d "
                         "cancelled=%d failed=%d",
@@ -1598,6 +1674,51 @@ class AppController:
         asset_url = getattr(self, "_update_asset_url", "")
         release_url = getattr(self, "_update_release_url", "")
         url = asset_url or release_url
+        if (
+            platform_utils.IS_ANDROID
+            and asset_url
+            and self._android_background
+            and self._android_background.available
+        ):
+            from core.update_checker import get_update_asset
+
+            metadata = get_update_asset(asset_url)
+            if not metadata or not metadata.sha256:
+                self._show_snackbar(
+                    "Bản cập nhật thiếu checksum hợp lệ",
+                    ft.Icons.ERROR_OUTLINE_ROUNDED,
+                    C.CRITICAL,
+                )
+                return
+            self._update_btn.disabled = True
+            self._update_btn.text = "Đang tải và xác minh..."
+            self.page.update()
+            try:
+                result = await self._android_background.install_update(
+                    asset_url,
+                    metadata.sha256,
+                    metadata.size,
+                )
+                if result.get("status") == "permission_required":
+                    self._show_snackbar(
+                        "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
+                        ft.Icons.SECURITY_ROUNDED,
+                        C.WARNING,
+                    )
+                elif result.get("status") != "installer_opened":
+                    raise RuntimeError(str(result.get("status", "update failed")))
+            except Exception as exc:
+                logger.error("Android update failed: %s", exc)
+                self._show_snackbar(
+                    "Không thể tải hoặc xác minh bản cập nhật",
+                    ft.Icons.ERROR_OUTLINE_ROUNDED,
+                    C.CRITICAL,
+                )
+            finally:
+                self._update_btn.disabled = False
+                self._update_btn.text = "Cập nhật"
+                self.page.update()
+            return
         if url:
             try:
                 self.page.launch_url(url)
@@ -1610,6 +1731,9 @@ class AppController:
 
         new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         credentials_changed = new_identity != self._settings_identity
+        new_milestones = tuple(settings.NOTIFY_MILESTONES_MINUTES or [])
+        milestones_changed = new_milestones != self._notification_milestones_snapshot
+        self._notification_milestones_snapshot = new_milestones
         if credentials_changed:
             # Credentials are the only settings change that requires immediate
             # network reload and an account-specific cache namespace.
@@ -1622,7 +1746,12 @@ class AppController:
                 pass
             from core.data_cache import DataCache
 
-            self._data_cache = DataCache(namespace=settings.UTH_USERNAME or None)
+            cache_namespace = (
+                f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}"
+                if settings.UTH_USERNAME
+                else None
+            )
+            self._data_cache = DataCache(namespace=cache_namespace)
             self._settings_identity = new_identity
 
         load_theme_from_settings()
@@ -1632,6 +1761,27 @@ class AppController:
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.wake()
+        if self._android_background and self._android_background.available:
+            if credentials_changed:
+                # Prevent the previous account token/Room snapshot from being
+                # used while the new credentials have not logged in yet.
+                self.page.run_task(self._android_background.logout)
+            else:
+                async def _apply_android_settings():
+                    await self._android_background.configure(
+                        getattr(self.orchestrator.client, "token", "")
+                        or getattr(settings, "MOODLE_WS_TOKEN", ""),
+                    )
+                    if milestones_changed and any(
+                        int(value) <= 60
+                        for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
+                    ):
+                        diagnostics = await self._android_background.diagnostics()
+                        self.orchestrator.android_background_diagnostics = diagnostics
+                        if not bool(diagnostics.get("exact_alarm_allowed", False)):
+                            await self._android_background.request_exact_alarm_access()
+
+                self.page.run_task(_apply_android_settings)
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""

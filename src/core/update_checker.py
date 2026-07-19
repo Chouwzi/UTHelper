@@ -52,6 +52,11 @@ class UpdateInfo:
 _ASSET_METADATA: dict[str, UpdateAsset] = {}
 
 
+def get_update_asset(url: str) -> UpdateAsset | None:
+    """Return verified release metadata retained by the latest update check."""
+    return _ASSET_METADATA.get(url)
+
+
 def _platform_name() -> str:
     if platform_utils.IS_ANDROID:
         return "android"
