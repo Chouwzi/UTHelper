@@ -9,6 +9,7 @@ Tests cover:
 - history property
 """
 import json
+import asyncio
 import os
 import sys
 import pytest
@@ -235,7 +236,7 @@ class TestDispatch:
         mgr = _make_manager(tmp_path, dnd=True)
         mock_notifier = Mock()
         mgr.notifiers = [mock_notifier]
-        mgr.dispatch([Mock()])
+        asyncio.run(mgr.dispatch([Mock()]))
         mock_notifier.notify.assert_not_called()
 
     @patch("notifiers.manager.config")
@@ -253,7 +254,7 @@ class TestDispatch:
         a.event_type = "assignment"
         a.url = "http://x.com"
         a.deadline = None  # No deadline → skipped
-        mgr.dispatch([a])
+        asyncio.run(mgr.dispatch([a]))
 
     @patch("notifiers.manager.config")
     def test_dispatch_success_marks_and_records_history(self, mock_config, tmp_path):
@@ -276,10 +277,11 @@ class TestDispatch:
         a.url = "http://test.com/assign/1"
         a.deadline = datetime.now() + timedelta(hours=5)
 
-        mgr.dispatch([a])
+        result = asyncio.run(mgr.dispatch([a]))
 
         # Notifier was called
         assert n.notify.call_count == 1
+        assert result.delivered == 1
         # Cache was updated (milestone marked)
         cache = mgr._load_cache()
         assert "http://test.com/assign/1" in cache
@@ -307,10 +309,11 @@ class TestDispatch:
         a.url = "http://test.com/assign/2"
         a.deadline = datetime.now() + timedelta(hours=5)
 
-        mgr.dispatch([a])
+        result = asyncio.run(mgr.dispatch([a]))
 
         # Notifier was called
         assert n.notify.call_count == 1
+        assert result.delivered == 0
         # Cache NOT updated (will retry next time)
         cache = mgr._load_cache()
         assert "http://test.com/assign/2" not in cache
@@ -336,7 +339,7 @@ class TestDispatch:
         a.url = "http://test.com/quiz/1"
         a.deadline = datetime.now() + timedelta(hours=5)
 
-        mgr.dispatch([a])  # Should not raise
+        asyncio.run(mgr.dispatch([a]))  # Should not raise
 
 
 class TestDispatchGradeAlert:
@@ -354,7 +357,7 @@ class TestDispatchGradeAlert:
             old_grade: str
             new_grade: str
 
-        mgr.dispatch_grade_alert([GC("Web", "CK", "7.0", "8.0")])
+        asyncio.run(mgr.dispatch_grade_alert([GC("Web", "CK", "7.0", "8.0")]))
         assert n.notify.call_count == 1
         call_args = n.notify.call_args[0][0]
         assert len(call_args) == 1
@@ -372,7 +375,7 @@ class TestDispatchGradeAlert:
             old_grade: str
             new_grade: str
 
-        mgr.dispatch_grade_alert([GC("Math", "GK", None, "9.0")])
+        asyncio.run(mgr.dispatch_grade_alert([GC("Math", "GK", None, "9.0")]))
         assert n.notify.call_count == 1
 
 

@@ -6,6 +6,7 @@ Tests verify:
 - dispatch_grade_alert handles empty list (no-op)
 - dispatch_grade_alert handles notifier errors gracefully
 """
+import asyncio
 import os
 import sys
 import pytest
@@ -40,7 +41,7 @@ class TestDispatchGradeAlert:
         mgr = self._make_manager()
         mock_notifier = Mock()
         mgr.notifiers.append(mock_notifier)
-        mgr.dispatch_grade_alert([])
+        asyncio.run(mgr.dispatch_grade_alert([]))
         mock_notifier.notify.assert_not_called()
 
     def test_sends_to_all_notifiers(self):
@@ -51,7 +52,7 @@ class TestDispatchGradeAlert:
         changes = [
             _FakeGradeChange("Web", "CK", "7.0", "8.0"),
         ]
-        mgr.dispatch_grade_alert(changes)
+        asyncio.run(mgr.dispatch_grade_alert(changes))
         assert n1.notify.call_count == 1
         assert n2.notify.call_count == 1
 
@@ -60,7 +61,7 @@ class TestDispatchGradeAlert:
         mock_notifier = Mock()
         mgr.notifiers.append(mock_notifier)
         changes = [_FakeGradeChange("Math", "GK", "5.0", "6.0")]
-        mgr.dispatch_grade_alert(changes)
+        asyncio.run(mgr.dispatch_grade_alert(changes))
         mock_notifier.notify.assert_not_called()
 
     def test_notifier_error_doesnt_crash(self):
@@ -70,7 +71,7 @@ class TestDispatchGradeAlert:
         mgr.notifiers = [bad_notifier]
         changes = [_FakeGradeChange("AI", "Lab", "3.0", "4.0")]
         # Should not raise
-        mgr.dispatch_grade_alert(changes)
+        asyncio.run(mgr.dispatch_grade_alert(changes))
 
     def test_multiple_changes_dispatch(self):
         mgr = self._make_manager()
@@ -80,6 +81,7 @@ class TestDispatchGradeAlert:
             _FakeGradeChange("Web", "CK", "7.0", "8.0"),
             _FakeGradeChange("Math", "GK", "5.0", "6.0"),
         ]
-        mgr.dispatch_grade_alert(changes)
-        # Each change dispatched separately
-        assert mock_notifier.notify.call_count == 2
+        asyncio.run(mgr.dispatch_grade_alert(changes))
+        # Grade changes are batched so each channel receives one I/O operation.
+        assert mock_notifier.notify.call_count == 1
+        assert len(mock_notifier.notify.call_args.args[0]) == 2

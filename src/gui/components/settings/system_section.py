@@ -26,12 +26,12 @@ def init_system_controls(view):
     view._sw_bg_check = ft.Switch(
         value=settings.BACKGROUND_CHECK_ANDROID, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-        label="Kiểm tra deadline khi thu nhỏ (Android)",
+        label="Đồng bộ hoạt động nền (Android, best-effort)",
         on_change=lambda e: view._toggle_bg_check_ui()
     )
     view._bg_interval_field = ft.TextField(
         value=str(settings.BACKGROUND_CHECK_INTERVAL),
-        label="Tần suất kiểm tra nền (phút)",
+        label="Tần suất đồng bộ nền (phút, tối thiểu 15)",
         text_size=13,
         keyboard_type=ft.KeyboardType.NUMBER,
         border_color=C.BORDER, focused_border_color=C.ACCENT,

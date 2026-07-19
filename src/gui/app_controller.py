@@ -91,10 +91,6 @@ class AppController:
         from core.update_checker import check_for_update_async
         check_for_update_async(APP_VERSION, self._on_update_check)
         
-        # Android: Start background scheduler for deadline checks via AlarmManager
-        if platform_utils.IS_MOBILE and settings.BACKGROUND_CHECK_ANDROID:
-            self.page.run_task(self._start_background_scheduler)
-        
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self.page.run_task(self._show_login_dialog)
         else:
@@ -147,6 +143,11 @@ class AppController:
         else:
             self.tray = None
             self.notifier = NotificationManager()
+        self.orchestrator.notifier = self.notifier
+
+        # Runtime permission requests and native service initialization must run
+        # on Flet's event loop, after accurate platform detection.
+        self.page.run_task(self.notifier.initialize, self.page)
         
         # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
         import sys
@@ -866,7 +867,7 @@ class AppController:
         try:
             grade_changes = await asyncio.to_thread(self.orchestrator.check_grade_changes)
             if grade_changes and hasattr(self, 'notifier') and self.notifier:
-                self.notifier.dispatch_grade_alert(grade_changes)
+                await self.notifier.dispatch_grade_alert(grade_changes)
                 msg = f"\U0001f4ca {len(grade_changes)} \u0111i\u1ec3m m\u1edbi: "
                 msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
                 if len(grade_changes) > 3:
@@ -1059,7 +1060,19 @@ class AppController:
                 try:
                     with self._data_lock:
                         dispatch_copy = list(self.all_data)
-                    self.notifier.dispatch(dispatch_copy)
+                    dispatch_result = await self.notifier.dispatch(dispatch_copy)
+                    schedule_result = await self.notifier.reconcile_schedules(
+                        dispatch_copy
+                    )
+                    logger.info(
+                        "[Notifications] delivered=%d filtered=%d scheduled=%d "
+                        "cancelled=%d failed=%d",
+                        dispatch_result.delivered,
+                        dispatch_result.filtered,
+                        schedule_result.scheduled,
+                        schedule_result.cancelled,
+                        schedule_result.failed,
+                    )
                 except Exception as e:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
@@ -1078,8 +1091,8 @@ class AppController:
             if not hasattr(self, '_auto_poll_task') or self._auto_poll_task is None:
                 self._auto_poll_task = self.page.run_task(self._auto_poll_loop)
 
-            # Update notification badge
-            self.page.run_task(self._update_notification_badge)
+            # Moodle's unread-notification feed is intentionally not part of
+            # the activity reminder pipeline. Activity data above is the source.
         except Exception as exc:
             logger.exception(f"[Load] Lỗi: {exc}")
             with self._data_lock:
@@ -1511,8 +1524,13 @@ class AppController:
 
     def _on_test_mobile(self, mock_type="critical"):
         dummy = self._test_notification_base(mock_type)
-        from notifiers.mobile import MobileNotifier
-        MobileNotifier().notify([dummy])
+        async def _send():
+            from notifiers.mobile import MobileNotifier
+            notifier = MobileNotifier()
+            await notifier.setup(self.page)
+            await notifier.notify([dummy])
+
+        self.page.run_task(_send)
 
     def _on_test_tele(self, mock_type="critical"):
         dummy = self._test_notification_base(mock_type)
@@ -1851,28 +1869,9 @@ class AppController:
                 continue
                 
             try:
-                # H2: Skip auto-refresh when user is in settings/detail/calendar
-                if not self.dashboard.visible:
-                    continue
                 await self._load_data_async()
             except Exception:
                 pass
-
-    async def _start_background_scheduler(self):
-        """Initialize Android background scheduler for periodic deadline checks."""
-        try:
-            from core.background_scheduler import get_scheduler
-            scheduler = get_scheduler()
-            if not scheduler.is_available:
-                logger.debug("Background scheduler not available on this platform")
-                return
-
-            await scheduler.request_permissions()
-            interval = max(5, settings.BACKGROUND_CHECK_INTERVAL)
-            await scheduler.start_periodic_check(interval_minutes=interval)
-            logger.info("Android background scheduler started (every %d min)", interval)
-        except Exception as e:
-            logger.warning("Failed to start background scheduler: %s", e)
 
     async def _update_notification_badge(self):
         """Fetch unread notification count and update badge."""

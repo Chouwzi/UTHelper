@@ -1086,19 +1086,23 @@ class SettingsView(ft.Container):
         self._debug_history_text.update()
 
     def _do_show_scheduler_status(self):
-        """Show background scheduler status (Android)."""
+        """Show activity-notification pipeline diagnostics."""
         try:
-            from core.background_scheduler import get_scheduler
-            scheduler = get_scheduler()
+            notifier = getattr(self._orchestrator, "notifier", None)
+            diagnostics = notifier.get_diagnostics() if notifier else None
+            backend_names = ", ".join(diagnostics.backend_names) if diagnostics else "None"
             lines = [
-                f"Available: {'Yes' if scheduler.is_available else 'No'}",
-                f"Active: {'Yes' if scheduler._is_active else 'No'}",
-                f"Backend: {'flet-android-notifications' if scheduler._android_notif else 'None'}",
-                f"Interval: {settings.BACKGROUND_CHECK_INTERVAL} min",
-                f"Enabled: {'Yes' if settings.BACKGROUND_CHECK_ANDROID else 'No'}",
+                f"Backends: {backend_names}",
+                f"Activity fetch cuối: {diagnostics.last_fetch_at or 'chưa có'}",
+                f"Đã đọc / phù hợp: {diagnostics.activities_seen} / {diagnostics.activities_matched}",
+                f"Đã gửi / bỏ qua: {diagnostics.delivered} / {diagnostics.skipped}",
+                f"Đã schedule / hủy: {diagnostics.scheduled} / {diagnostics.cancelled}",
+                f"Lỗi gần nhất: {diagnostics.last_error or 'không có'}",
             ]
             self._debug_scheduler_status.value = "\n".join(lines)
-            self._debug_scheduler_status.color = C.SAFE if scheduler._is_active else C.TEXT_SECONDARY
+            self._debug_scheduler_status.color = (
+                C.WARNING if diagnostics.last_error else C.SAFE
+            )
         except Exception as ex:
             self._debug_scheduler_status.value = f"Lỗi: {ex}"
             self._debug_scheduler_status.color = C.CRITICAL
@@ -1217,30 +1221,30 @@ class SettingsView(ft.Container):
         title = titles.get(urgency, titles["critical"])
         body = bodies.get(urgency, bodies["critical"])
 
-        try:
-            notifier = getattr(self._orchestrator, 'notifier', None)
-            if notifier:
-                mobile_n = None
-                for n in getattr(notifier, 'notifiers', []):
-                    if hasattr(n, 'backend_name'):
-                        mobile_n = n
-                        break
+        async def _send():
+            try:
+                notifier = getattr(self._orchestrator, 'notifier', None)
+                mobile_n = next(
+                    (
+                        n
+                        for n in getattr(notifier, 'notifiers', [])
+                        if hasattr(n, 'backend_name')
+                    ),
+                    None,
+                ) if notifier else None
                 if mobile_n:
-                    # Create mock assignment data
                     mock = [{"title": title, "course_name": body, "remaining": ""}]
-                    result = mobile_n.notify(mock)
+                    result = await mobile_n.notify(mock)
                     self._debug_mobile_text.value = f"Mock [{urgency}] → {'✅ Đã gửi' if result else '❌ Thất bại'}\n{title}\n{body}"
                     self._debug_mobile_text.color = C.SAFE if result else C.CRITICAL
                 else:
                     self._debug_mobile_text.value = "⚠️ Không tìm thấy MobileNotifier"
                     self._debug_mobile_text.color = C.WARNING
-            else:
-                self._debug_mobile_text.value = "❌ NotificationManager not available"
+            except Exception as ex:
+                self._debug_mobile_text.value = f"Lỗi gửi mock: {ex}"
                 self._debug_mobile_text.color = C.CRITICAL
-        except Exception as ex:
-            self._debug_mobile_text.value = f"Lỗi gửi mock: {ex}"
-            self._debug_mobile_text.color = C.CRITICAL
-        self._debug_mobile_text.update()
+            self._debug_mobile_text.update()
+        self._page.run_task(_send)
 
     def _do_show_mobile_backend(self):
         """Show detailed mobile notification backend info."""
@@ -1375,40 +1379,36 @@ class SettingsView(ft.Container):
 
     def _do_mock_multi_notif(self):
         """Send 3 mock notifications in sequence to test batching."""
-        try:
-            notifier = getattr(self._orchestrator, 'notifier', None)
-            if not notifier:
-                self._debug_mobile_text.value = "❌ NotificationManager not available"
+        async def _send():
+            try:
+                notifier = getattr(self._orchestrator, 'notifier', None)
+                mobile_n = next(
+                    (
+                        n
+                        for n in getattr(notifier, 'notifiers', [])
+                        if hasattr(n, 'backend_name')
+                    ),
+                    None,
+                ) if notifier else None
+                if not mobile_n:
+                    self._debug_mobile_text.value = "⚠️ Không tìm thấy MobileNotifier"
+                    self._debug_mobile_text.color = C.WARNING
+                else:
+                    mock_data = [
+                        {"title": "📝 Bài tập Lập trình", "course_name": "Lập trình Python", "remaining": "2 giờ"},
+                        {"title": "📋 Quiz Cơ sở dữ liệu", "course_name": "Cơ sở dữ liệu", "remaining": "1 ngày"},
+                        {"title": "✋ Điểm danh Toán rời rạc", "course_name": "Toán rời rạc", "remaining": "30 phút"},
+                    ]
+                    result = await mobile_n.notify(mock_data)
+                    self._debug_mobile_text.value = f"Multi-notif (x3): {'✅ Đã gửi' if result else '❌ Thất bại'}\n" + "\n".join(
+                        [f"  • {m['title']} - Còn {m['remaining']}" for m in mock_data]
+                    )
+                    self._debug_mobile_text.color = C.SAFE if result else C.CRITICAL
+            except Exception as ex:
+                self._debug_mobile_text.value = f"Lỗi multi-notif: {ex}"
                 self._debug_mobile_text.color = C.CRITICAL
-                self._debug_mobile_text.update()
-                return
-
-            mobile_n = None
-            for n in getattr(notifier, 'notifiers', []):
-                if hasattr(n, 'backend_name'):
-                    mobile_n = n
-                    break
-
-            if not mobile_n:
-                self._debug_mobile_text.value = "⚠️ Không tìm thấy MobileNotifier"
-                self._debug_mobile_text.color = C.WARNING
-                self._debug_mobile_text.update()
-                return
-
-            mock_data = [
-                {"title": "📝 Bài tập Lập trình", "course_name": "Lập trình Python", "remaining": "2 giờ"},
-                {"title": "📋 Quiz Cơ sở dữ liệu", "course_name": "Cơ sở dữ liệu", "remaining": "1 ngày"},
-                {"title": "✋ Điểm danh Toán rời rạc", "course_name": "Toán rời rạc", "remaining": "30 phút"},
-            ]
-            result = mobile_n.notify(mock_data)
-            self._debug_mobile_text.value = f"Multi-notif (x3): {'✅ Đã gửi' if result else '❌ Thất bại'}\n" + "\n".join(
-                [f"  • {m['title']} - Còn {m['remaining']}" for m in mock_data]
-            )
-            self._debug_mobile_text.color = C.SAFE if result else C.CRITICAL
-        except Exception as ex:
-            self._debug_mobile_text.value = f"Lỗi multi-notif: {ex}"
-            self._debug_mobile_text.color = C.CRITICAL
-        self._debug_mobile_text.update()
+            self._debug_mobile_text.update()
+        self._page.run_task(_send)
 
     # Update checker
     def _do_force_check_update(self):
@@ -1936,7 +1936,7 @@ class SettingsView(ft.Container):
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
 
             settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
-            settings.BACKGROUND_CHECK_INTERVAL = max(5, int(self._bg_interval_field.value or "30"))
+            settings.BACKGROUND_CHECK_INTERVAL = max(15, int(self._bg_interval_field.value or "30"))
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value

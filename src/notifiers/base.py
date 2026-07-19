@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from typing import Dict, List, TypedDict
 
 
@@ -24,5 +25,5 @@ class BaseNotifier(ABC):
     Abstract Base Class for all Notifiers (Clean Architecture).
     """
     @abstractmethod
-    def notify(self, tasks: List[Dict]) -> bool:
+    def notify(self, tasks: List[Dict]) -> bool | Awaitable[bool]:
         pass

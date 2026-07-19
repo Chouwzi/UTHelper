@@ -105,3 +105,18 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 1.  Phase 4: cleanup `SettingsView` và debug panel.
 2.  Phase 5: tách `DataOrchestrator._merge_all_assignments` thành mapper/policy test được.
 3.  Phase 6: tách `AppState`, `UpdateController` và background task lifecycle còn lại khỏi `AppController`.
+# 2026-07-19 - Activity notification core and Android scheduling
+
+- Added pure notification DTO/policy contracts for Moodle activities, stable
+  notification IDs, milestones, DND, submission filtering, and desired native
+  schedules.
+- Converted `NotificationManager.dispatch` and grade dispatch to async typed
+  results; synchronous Windows/integration channels now run off the Flet event
+  loop.
+- Fixed `flet-android-notifications` calls to use awaited APIs and
+  `notification_id`; pinned the Android extension to 0.9.0.
+- Added Android schedule reconciliation with persisted state, deadline-change
+  rescheduling, and removal cancellation.
+- Removed the Moodle unread badge call from the activity refresh path and made
+  background refresh independent of the visible dashboard.
+- Validation: `ruff check src tests` passed; 51 targeted tests passed.

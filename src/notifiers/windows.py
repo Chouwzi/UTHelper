@@ -25,6 +25,7 @@ class WindowsNotifier(BaseNotifier):
         self.tray_app = tray_app
         self.app_id = "UTHelper"
         self.aumid = "UTHelper.App"
+        self.last_error = ""
         self._icon_path = os.path.abspath(os.path.join(BASE_DIR, "src", "assets", "icon.ico"))
         if not os.path.exists(self._icon_path):
             self._icon_path = os.path.abspath(os.path.join(BASE_DIR, "assets", "icon.ico"))
@@ -121,9 +122,14 @@ class WindowsNotifier(BaseNotifier):
             
             toaster.show_toast(toast)
             logger.info(f"[Windows] Đã gửi thông báo: {msg}")
+            self.last_error = ""
+            return True
         except Exception as e:
+            self.last_error = str(e)
             logger.warning(f"windows-toasts lỗi, dùng tray mặc định: {e}")
             if self.tray_app:
                 self.tray_app.notify(title, msg)
+                return True
             else:
                 logger.info(f"THÔNG BÁO (Log): {title} - {msg}")
+                return False

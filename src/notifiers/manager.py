@@ -1,10 +1,21 @@
+import asyncio
+import inspect
 import logging
 import os
 import threading
 from datetime import datetime, timedelta
-from core.time_utils import parse_datetime
 from typing import List, Any, Dict
 
+from core.notification_policy import (
+    ActivityNotificationPolicy,
+    NotificationPolicyConfig,
+)
+from core.notification_types import (
+    ActivityNotification,
+    DispatchResult,
+    NotificationDiagnostics,
+    ScheduleResult,
+)
 from .base import BaseNotifier
 from notifiers.discord import DiscordNotifier
 from notifiers.email import EmailNotifier
@@ -29,6 +40,7 @@ class NotificationManager:
 
         from core.notification_history import NotificationHistory
         self._history = NotificationHistory()
+        self._diagnostics = NotificationDiagnostics()
 
         # Platform-aware notifier registration
         from platform_utils import IS_WINDOWS
@@ -71,6 +83,52 @@ class NotificationManager:
         
     def register(self, notifier: BaseNotifier):
         self.notifiers.append(notifier)
+
+    def _policy(self) -> ActivityNotificationPolicy:
+        return ActivityNotificationPolicy(
+            NotificationPolicyConfig(
+                notify_types=tuple(getattr(config, "NOTIFY_TYPES", ()) or ()),
+                muted_courses=tuple(
+                    getattr(config, "NOTIFY_MUTED_COURSES", ()) or ()
+                ),
+                ignore_submitted=bool(
+                    getattr(config, "NOTIFY_IGNORE_SUBMITTED", True)
+                ),
+                milestones=tuple(
+                    int(value)
+                    for value in (getattr(config, "NOTIFY_MILESTONES", ()) or ())
+                ),
+                minutes_before=max(
+                    0, int(getattr(config, "NOTIFY_MINUTES_BEFORE", 0) or 0)
+                ),
+                dnd_enabled=bool(getattr(config, "NOTIFY_DND_ENABLE", False)),
+                dnd_start=int(getattr(config, "NOTIFY_DND_START", 22)),
+                dnd_end=int(getattr(config, "NOTIFY_DND_END", 7)),
+            )
+        )
+
+    def _diagnostics_state(self) -> NotificationDiagnostics:
+        if not hasattr(self, "_diagnostics"):
+            self._diagnostics = NotificationDiagnostics()
+        return self._diagnostics
+
+    async def initialize(self, page=None) -> None:
+        """Initialize platform channels and request their runtime permissions."""
+        diagnostics = self._diagnostics_state()
+        diagnostics.backend_names = []
+        for notifier in self.notifiers:
+            backend = getattr(notifier, "backend_name", notifier.__class__.__name__)
+            diagnostics.backend_names.append(str(backend))
+            setup = getattr(notifier, "setup", None)
+            if not setup:
+                continue
+            try:
+                result = setup(page)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                diagnostics.last_error = f"{notifier.__class__.__name__}: {exc}"
+                logger.warning("Notifier initialization failed: %s", exc)
 
     def _load_cache(self) -> Dict:
         if not os.path.exists(self._cache_path):
@@ -133,65 +191,110 @@ class NotificationManager:
             logger.debug("Evicted %d stale notification cache entries", len(stale_keys))
 
     def _is_in_dnd(self) -> bool:
-        if not config.NOTIFY_DND_ENABLE:
-            return False
-            
-        now = datetime.now()
-        start = config.NOTIFY_DND_START
-        end = config.NOTIFY_DND_END
-        
-        current_hour = now.hour
-        
-        # Special case: start == end means 24-hour DND (always silent)
-        if start == end:
-            return True
-        
-        if start > end: # Trường hợp DND xuyên màn đêm (qua 12h sáng)
-            if current_hour >= start or current_hour < end:
-                return True
-        else:
-            if start <= current_hour < end:
-                return True
-                
-        return False
+        return self._policy().is_dnd(datetime.now())
 
-    def dispatch(self, assignments: List[Any]):
-        """Dispatch notifications for assignments that hit milestone thresholds."""
-        # Đang trong giờ nghỉ thì thôi, đừng làm phiền người ta
+    async def dispatch(self, assignments: List[Any]) -> DispatchResult:
+        """Dispatch due activity reminders without blocking the Flet event loop."""
+        result = DispatchResult()
+        diagnostics = self._diagnostics_state()
+        diagnostics.last_fetch_at = datetime.now().isoformat()
+        diagnostics.activities_seen = len(assignments)
+
         if self._is_in_dnd():
             logger.info("Do Not Disturb is on. Skipping notifications.")
-            return
+            result.dnd_active = True
+            result.filtered = len(assignments)
+            diagnostics.skipped += len(assignments)
+            return result
 
         # BUG-09 fix: Load cache once for the entire dispatch cycle
         cache = self._load_cache()
 
         # Lọc lại xem cái nào thực sự cần bắn thông báo
         to_notify_items = self._filter_assignments(assignments, cache)
+        result.filtered = len(assignments) - len(to_notify_items)
+        diagnostics.activities_matched = len(to_notify_items)
+        diagnostics.skipped += result.filtered
 
         if not to_notify_items:
-            return
+            return result
 
         # Pass real Assignment objects directly - no more DummyAssign wrapper
         notify_assignments = [item["assignment"] for item in to_notify_items]
 
-        any_success = False
+        result.attempted = len(notify_assignments)
         for notifier in self.notifiers:
+            channel = notifier.__class__.__name__
             try:
-                result = notifier.notify(notify_assignments)
-                # notify() trả về True khi gửi thành công
-                if result is not False:
-                    any_success = True
-            except Exception as e:
-                logger.error(f"Failed via channel {notifier.__class__.__name__}: {e}")
+                if inspect.iscoroutinefunction(notifier.notify):
+                    channel_result = await notifier.notify(notify_assignments)
+                else:
+                    channel_result = await asyncio.to_thread(
+                        notifier.notify, notify_assignments
+                    )
+                    if inspect.isawaitable(channel_result):
+                        channel_result = await channel_result
+                if channel_result is not False:
+                    result.successful_channels.append(channel)
+            except Exception as exc:
+                result.failed_channels[channel] = str(exc)
+                diagnostics.last_error = f"{channel}: {exc}"
+                logger.error("Failed via channel %s: %s", channel, exc)
 
-        # CHỈ đánh dấu đã gửi khi ít nhất 1 channel thành công
-        if any_success:
+        if result.successful_channels:
             self._mark_assignments_notified(to_notify_items, cache)
-            # Ghi lịch sử thông báo
-            success_channels = [n.__class__.__name__ for n in self.notifiers]
-            self._history.add(notify_assignments, success_channels)
+            self._history.add(notify_assignments, result.successful_channels)
+            result.delivered = len(notify_assignments)
+            result.milestones = [item["milestone"] for item in to_notify_items]
+            diagnostics.delivered += result.delivered
         else:
             logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
+        return result
+
+    async def reconcile_schedules(self, assignments: List[Any]) -> ScheduleResult:
+        """Reconcile platform-native reminders after a successful activity fetch."""
+        activities = [ActivityNotification.from_value(value) for value in assignments]
+        reminders = self._policy().desired_schedules(activities, datetime.now())
+        aggregate = ScheduleResult(desired=len(reminders))
+        diagnostics = self._diagnostics_state()
+        for notifier in self.notifiers:
+            reconcile = getattr(notifier, "reconcile_schedules", None)
+            if not reconcile:
+                continue
+            try:
+                channel_result = reconcile(reminders)
+                if inspect.isawaitable(channel_result):
+                    channel_result = await channel_result
+                if isinstance(channel_result, ScheduleResult):
+                    aggregate.scheduled += channel_result.scheduled
+                    aggregate.cancelled += channel_result.cancelled
+                    aggregate.failed += channel_result.failed
+                    aggregate.errors.extend(channel_result.errors)
+            except Exception as exc:
+                aggregate.failed += 1
+                aggregate.errors.append(str(exc))
+                diagnostics.last_error = str(exc)
+        diagnostics.scheduled += aggregate.scheduled
+        diagnostics.cancelled += aggregate.cancelled
+        return aggregate
+
+    async def cancel_activity(self, activity_id: str) -> int:
+        """Cancel all native reminders associated with a Moodle activity ID."""
+        cancelled = 0
+        for notifier in self.notifiers:
+            cancel = getattr(notifier, "cancel_activity", None)
+            if not cancel:
+                continue
+            value = cancel(activity_id)
+            if inspect.isawaitable(value):
+                value = await value
+            cancelled += int(value or 0)
+        self._diagnostics_state().cancelled += cancelled
+        return cancelled
+
+    def get_diagnostics(self) -> NotificationDiagnostics:
+        diagnostics = self._diagnostics_state()
+        return NotificationDiagnostics(**vars(diagnostics))
 
     def _filter_assignments(self, assignments: List[Any], cache: Dict = None) -> List[Dict]:
         """Filter assignments that need notification based on milestones and cache."""
@@ -199,76 +302,31 @@ class NotificationManager:
         if cache is None:
             cache = self._load_cache()
         now = datetime.now()
-        notify_minutes = getattr(config, 'NOTIFY_MINUTES_BEFORE', 0)
+        policy = self._policy()
 
         for a in assignments:
-            # Support both Assignment objects and dicts for backward compatibility
-            course = getattr(a, 'course_name', '') or (a.get('course_name', '') if isinstance(a, dict) else '')
-            if course in config.NOTIFY_MUTED_COURSES:
-                continue
-
-            status = getattr(a, 'submission_status', '') or (a.get('submission_status', '') if isinstance(a, dict) else '')
-            if config.NOTIFY_IGNORE_SUBMITTED and status in ["submitted", "graded"]:
-                continue
-
-            # Lọc theo loại hoạt động (assignment/quiz/attendance/...)
-            event_type = getattr(a, 'event_type', '') or (a.get('type', '') if isinstance(a, dict) else '')
-            notify_types = getattr(config, 'NOTIFY_TYPES', None)
-            if notify_types and event_type and event_type not in notify_types:
-                continue
-
-            deadline = getattr(a, 'deadline', None)
-            if deadline is None and isinstance(a, dict):
-                deadline_str = a.get("deadline")
-                deadline = parse_datetime(deadline_str) if deadline_str else None
-            if not deadline:
-                continue
-
-            # BUG-05 fix: ensure deadline is a datetime, not a string
-            if not isinstance(deadline, datetime):
-                continue
-
-            time_left = deadline - now
-            time_left_hours = time_left.total_seconds() / 3600.0
-
-            if time_left_hours < 0:
-                continue
-
-            url = getattr(a, 'url', '') or (a.get('url', '') if isinstance(a, dict) else '')
-            cache_entry = cache.get(url, {})
+            activity = ActivityNotification.from_value(a)
+            cache_key = activity.key
+            cache_entry = cache.get(cache_key)
+            # Migrate URL-keyed cache entries used by releases before 2.2.
+            if cache_entry is None and activity.url in cache:
+                cache_entry = cache.pop(activity.url)
+                cache[cache_key] = cache_entry
+            cache_entry = cache_entry or {}
             # Backward compat: old format was a list
             if isinstance(cache_entry, list):
                 task_milestones = cache_entry
             else:
                 task_milestones = cache_entry.get("milestones", [])
-
-            # --- Milestone matching ---
-            milestones = sorted(config.NOTIFY_MILESTONES)
-            matched_milestone = None
-
-            for ms in milestones:
-                if time_left_hours <= ms:
-                    matched_milestone = ms
-                    break
-
-            # --- NOTIFY_MINUTES_BEFORE: trigger when close to deadline ---
-            if notify_minutes > 0:
-                time_left_minutes = time_left.total_seconds() / 60.0
-                if time_left_minutes <= notify_minutes:
-                    # Use a special sentinel milestone to track "minutes_before" notifications
-                    sentinel = f"_min_{notify_minutes}"
-                    if sentinel not in task_milestones:
-                        matched_milestone = sentinel
-
-            if not matched_milestone:
-                continue
-
-            if matched_milestone not in task_milestones:
-                filtered.append({
-                    "assignment": a,
-                    "url": url,
-                    "milestone": matched_milestone
-                })
+            candidate = policy.due_candidate(activity, task_milestones, now)
+            if candidate:
+                filtered.append(
+                    {
+                        "assignment": a,
+                        "url": cache_key,
+                        "milestone": candidate.milestone,
+                    }
+                )
 
         return filtered
 
@@ -303,19 +361,21 @@ class NotificationManager:
         """Truy cập lịch sử thông báo."""
         return self._history
 
-    def dispatch_grade_alert(self, grade_changes: list):
+    async def dispatch_grade_alert(self, grade_changes: list) -> DispatchResult:
         """Send notifications for grade changes.
 
         Args:
             grade_changes: List of GradeChange objects from GradeMonitor.
         """
         if not grade_changes:
-            return
+            return DispatchResult()
 
         # Check DND
         if self._is_in_dnd():
             logger.info("DND active, skipping grade alerts.")
-            return
+            return DispatchResult(
+                filtered=len(grade_changes), dnd_active=True
+            )
 
         # BUG-14 fix: define helper class once, outside the loop
         class _GradeNotif:
@@ -326,7 +386,7 @@ class NotificationManager:
                 self.url = ""
                 self.deadline_str = ""
 
-        # Build notification text
+        notifications = []
         for change in grade_changes:
             title = f"📊 Điểm mới: {change.item_name}"
             body_parts = [f"Môn: {change.course_name}"]
@@ -335,12 +395,26 @@ class NotificationManager:
             body_parts.append(f"Điểm mới: {change.new_grade}")
             body = "\n".join(body_parts)
 
-            grade_notif = _GradeNotif(title, body, change.course_name)
+            notifications.append(_GradeNotif(title, body, change.course_name))
 
-            for notifier in self.notifiers:
-                try:
-                    notifier.notify([grade_notif])
-                except Exception as e:
-                    logger.error("Grade alert via %s failed: %s", notifier.__class__.__name__, e)
-
-        logger.info("Dispatched %d grade alerts", len(grade_changes))
+        result = DispatchResult(attempted=len(notifications))
+        for notifier in self.notifiers:
+            channel = notifier.__class__.__name__
+            try:
+                if inspect.iscoroutinefunction(notifier.notify):
+                    delivered = await notifier.notify(notifications)
+                else:
+                    delivered = await asyncio.to_thread(notifier.notify, notifications)
+                    if inspect.isawaitable(delivered):
+                        delivered = await delivered
+                if delivered is not False:
+                    result.successful_channels.append(channel)
+            except Exception as exc:
+                result.failed_channels[channel] = str(exc)
+                logger.error("Grade alert via %s failed: %s", channel, exc)
+        if result.successful_channels:
+            result.delivered = len(notifications)
+            if hasattr(self, "_history"):
+                self._history.add(notifications, result.successful_channels)
+        logger.info("Dispatched %d grade alerts", result.delivered)
+        return result
