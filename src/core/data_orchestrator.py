@@ -197,17 +197,45 @@ class DataOrchestrator:
             
             # Tối ưu PERF: Bước 1 - Lấy userid (cần thiết cho danh sách môn học)
             userid = self._get_userid()
+            if userid is None:
+                logger.warning("Không xác định được Moodle user id; snapshot không đầy đủ.")
+                return None
             
             # Tối ưu PERF: Bước 2 - Tải song song: Lịch và danh sách môn học
             calendar_result = None
             courses_result = None
             
             def _fetch_calendar():
-                return self.moodle_service.get_action_events_by_timesort(
-                    now_ts,
-                    now_ts + (90 * 24 * 3600),
-                    limit=50,
-                )
+                events = []
+                after_event_id = 0
+                for _page in range(10):
+                    response = self.moodle_service.get_action_events_by_timesort(
+                        now_ts,
+                        now_ts + (90 * 24 * 3600),
+                        limit=100,
+                        after_event_id=after_event_id,
+                    )
+                    if not isinstance(response, dict):
+                        return None
+                    page_events = response.get("events", [])
+                    if not isinstance(page_events, list):
+                        return None
+                    events.extend(page_events)
+                    more = bool(response.get("moreevents", len(page_events) >= 100))
+                    if not more:
+                        return {"events": events, "moreevents": False}
+                    last_id = response.get("lastid")
+                    if not last_id and page_events:
+                        last_id = page_events[-1].get("id")
+                    try:
+                        last_id = int(last_id)
+                    except (TypeError, ValueError):
+                        return None
+                    if last_id <= after_event_id:
+                        return None
+                    after_event_id = last_id
+                logger.warning("Calendar pagination vượt quá giới hạn an toàn.")
+                return None
             
             def _fetch_courses():
                 if not userid:
@@ -219,6 +247,10 @@ class DataOrchestrator:
                 f_courses = pool.submit(_fetch_courses)
                 calendar_result = f_cal.result(timeout=25)
                 courses_result = f_courses.result(timeout=25)
+
+            if not isinstance(calendar_result, dict) or not isinstance(courses_result, list):
+                logger.warning("Moodle trả snapshot calendar/course không đầy đủ.")
+                return None
             
             # Lưu cache danh sách môn học để tái sử dụng cho tiến trình kiểm tra điểm và thông báo
             if courses_result and isinstance(courses_result, list):
@@ -236,7 +268,8 @@ class DataOrchestrator:
             try:
                 results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
             except Exception as e:
-                logger.debug("Merge assignments failed (non-critical): %s", e)
+                logger.warning("Merge assignments failed; snapshot is partial: %s", e)
+                return None
             
             if not results:
                 logger.info("WS API trả về 0 activities (hợp lệ - có thể không có bài tập).")

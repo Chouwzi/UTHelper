@@ -6,6 +6,25 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 from core.moodle_service import MoodleService
 
 
+def test_action_event_pagination_passes_after_event_id():
+    calls = []
+    service = MoodleService(lambda function, **params: calls.append((function, params)) or {})
+
+    service.get_action_events_by_timesort(100, 200, limit=50, after_event_id=42)
+
+    assert calls == [
+        (
+            "core_calendar_get_action_events_by_timesort",
+            {
+                "timesortfrom": 100,
+                "timesortto": 200,
+                "limitnum": 50,
+                "aftereventid": 42,
+            },
+        )
+    ]
+
+
 def test_get_current_user_id_from_site_info(monkeypatch):
     service = MoodleService(lambda *args, **kwargs: None)
 

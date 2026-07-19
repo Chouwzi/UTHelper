@@ -31,13 +31,19 @@ class MoodleService:
         timesort_from: int,
         timesort_to: int,
         limit: int = 50,
+        after_event_id: int = 0,
     ) -> Optional[Dict[str, Any]]:
         """Lấy action events theo khoảng thời gian, giữ nguyên shape trả về của Moodle."""
+        params = {
+            "timesortfrom": timesort_from,
+            "timesortto": timesort_to,
+            "limitnum": limit,
+        }
+        if after_event_id > 0:
+            params["aftereventid"] = after_event_id
         return self.call_ws_api(
             "core_calendar_get_action_events_by_timesort",
-            timesortfrom=timesort_from,
-            timesortto=timesort_to,
-            limitnum=limit,
+            **params,
         )
 
     def get_enrolled_courses(self) -> Optional[List[Dict[str, Any]]]:
