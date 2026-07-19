@@ -95,25 +95,25 @@ class TestOrchestratorWSFallback:
     """Test orchestrator WS API → scraping fallback."""
     
     @patch('core.data_orchestrator.settings')
-    @patch('core.data_orchestrator.ws_functions')
-    def test_ws_api_success_skips_scraping(self, mock_ws, mock_settings):
+    def test_ws_api_success_skips_scraping(self, mock_settings):
         """WS API thành công → không gọi scraping."""
         mock_settings.USE_WS_API = True
         mock_settings.PREFETCH_WORKERS = 4
         mock_settings.DETAIL_CACHE_TTL_SECONDS = 1800
         mock_settings.DETAIL_CACHE_MAX_ENTRIES = 100
         
-        mock_ws.ws_events_to_assignments.return_value = [
-            {'title': 'Test', 'type': 'assignment', 'source': 'ws_api'}
-        ]
-        
         from core.data_orchestrator import DataOrchestrator
         orch = DataOrchestrator()
         orch.client = MagicMock()
-        # Mock call_ws_api to return events dict directly
-        orch.client.call_ws_api.return_value = {
-            'events': [{'name': 'Test', 'modulename': 'assign', 'timesort': 1234567890}]
+        orch.moodle_service = MagicMock()
+        orch.moodle_service.get_site_info.return_value = {"userid": 42}
+        orch.moodle_service.get_action_events_by_timesort.return_value = {
+            "events": [{"name": "Test", "modulename": "assign", "timesort": 1234567890}]
         }
+        orch.moodle_service.get_user_courses.return_value = []
+        orch.moodle_service.ws_events_to_assignments.return_value = [
+            {"title": "Test", "type": "assignment", "source": "ws_api"}
+        ]
         
         result = orch.get_latest_activities()
         assert len(result) == 1

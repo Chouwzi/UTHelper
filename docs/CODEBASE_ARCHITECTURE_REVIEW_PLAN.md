@@ -36,13 +36,47 @@ ruff check src
 ruff check src tests
 ```
 
-### Kết quả
+### Kết quả ban đầu
 
 - Test: `296 passed, 22 skipped, 5 warnings in 4.93s`.
 - Lint `src`: fail với 13 lỗi Ruff, chủ yếu unused imports và 1 unused local variable.
 - Lint `src tests`: fail với 19 lỗi; ngoài 13 lỗi trong `src`, test có một số F841/F541/E712.
 - Tổng source Python: `src` có 59 file / 14,621 dòng; `tests` có 29 file / 3,930 dòng.
 - README hiện ghi badge `314 passed`; baseline local hiện tại là 296 passed + 22 skipped. Cần cập nhật để tránh docs drift.
+
+### Kết quả sau khi thực hiện Phase 0
+
+- `ruff check src tests`: pass.
+- `python -m pytest tests -q --tb=short`: `300 passed, 22 skipped, 5 warnings in 6.36s`.
+- Đã thêm `tests/test_architecture_boundaries.py` để khóa các dependency debt hiện hữu và ngăn phát sinh vi phạm mới.
+- Đã thêm `docs/adr/0001-refactoring-boundaries.md`.
+- README đã được cập nhật test baseline mới.
+
+### Kết quả sau khi hoàn tất Phase 1
+
+- `DetailView` không còn import trực tiếp `core.ws_functions`.
+- Đã thêm `src/core/use_cases/submission_workflow.py` để gom workflow load submitted files, submit append/overwrite, remove files, update metadata.
+- Đã thêm DTO: `SubmissionTarget`, `SelectedSubmissionFile`, `SubmittedFile`, `FileMetadataUpdate`, `SubmittedFilesResult`.
+- `DetailView` nhận `submission_workflow_factory` từ `AppController`, không tự tạo implementation trong wrapper.
+- Đã thêm `tests/test_submission_workflow.py` với fake Moodle client.
+- `tests/test_architecture_boundaries.py` đã được siết allowlist: nợ `DetailView -> core.ws_functions` đã được xóa.
+- `ruff check src tests`: pass.
+- `python -m pytest tests -q --tb=short`: `311 passed, 22 skipped, 5 warnings`.
+
+### Kết quả sau khi hoàn tất Phase 2/3
+
+- Đã thêm `src/core/use_cases/grade_refresh.py` để tách workflow tải điểm/unread badge khỏi `AppController`.
+- `MoodleService` có thêm `get_current_user_id()` và `fetch_all_grades()`.
+- `AppController` không còn import `from core import ws_functions`; cache clearing, grade fetch, unread badge đi qua service/use case.
+- Đã thêm `tests/test_moodle_service.py` và `tests/test_grade_refresh_service.py`.
+- Đã thêm `src/gui/controllers/refresh_coordinator.py` để tách merge cache chi tiết, smart merge pending submission, sort, precompute hot fields, progress status khỏi `AppController`.
+- `AppController._load_data_async` còn 86 dòng; cache display, notifier dispatch, post-refresh scheduling đã tách thành method riêng.
+- `DataOrchestrator`, `GradeMonitor`, `SubmissionWorkflow` đã dùng `MoodleService` boundary thay vì import/call raw `ws_functions`.
+- Đã thêm `tests/test_refresh_coordinator.py`, `tests/test_data_orchestrator_service_boundary.py`, `tests/test_grade_monitor_service_boundary.py`.
+- `tests/test_architecture_boundaries.py` đã siết allowlist: không còn debt `gui -> core.ws_functions/core package import`.
+- `tests/test_architecture_boundaries.py` khóa thêm rule: chỉ `core.moodle_service` được import adapter `core.ws_functions`.
+- `ruff check src tests`: pass.
+- `python -m pytest tests -q --tb=short`: `322 passed, 22 skipped, 5 warnings`.
 
 ### File lớn nhất
 
@@ -112,10 +146,9 @@ flowchart LR
    - Components có import `gui.app_controller` ở demo/runtime helpers: `calendar_view.py:1005`, `detail_view.py:1570`, `settings_view.py:1389`, `settings_view.py:1951`, `grade_overview_view.py:219`.
    - Analyzer thấy SCC lớn: `main`, `compact_desktop`, `AppController`, và các view. Một phần có thể nằm trong demo blocks, nhưng vẫn nên tách demo khỏi production module.
 
-4. `MoodleService` chưa thành facade thật sự.
-   - File `src/core/moodle_service.py` đã tồn tại nhưng chỉ forward wrapper.
-   - `AppController`, `DetailView`, `GradeMonitor`, `DataOrchestrator` vẫn gọi `ws_functions` trực tiếp.
-   - Kết quả: boundary API không tập trung, khó mock workflow high-level.
+4. `MoodleService` đã thành facade chính sau Phase 2/3.
+   - `ws_functions` được giữ làm adapter thấp tầng phía sau service.
+   - `DataOrchestrator._merge_all_assignments` vẫn còn gom mapper/policy/domain DTO và nên tách tiếp ở Phase 5.
 
 5. Domain model đang phụ thuộc global settings.
    - `src/models.py:5` import `settings`; `Assignment.urgency` đọc global threshold tại `src/models.py:49`.
@@ -196,19 +229,19 @@ platform_utils -> no gui core import ngược nếu không cần
 
 ## 6. Kế hoạch refactor
 
-### Phase 0 - Guardrails và docs truth
+### Phase 0 - Ràng buộc và tài liệu nguồn sự thật
 
 Mục tiêu: không đổi behavior, chỉ làm cho repo có baseline rõ.
 
-- Sửa 13 lỗi Ruff trong `src`.
-- Quyết định có lint `tests` hay không. Nếu có, sửa thêm 6 lỗi test; nếu không, document lý do trong `ruff.toml`.
-- Cập nhật README test count từ `314 passed` sang baseline mới hoặc bỏ hard-coded badge.
-- Thêm ADR đầu tiên: `docs/adr/0001-refactoring-boundaries.md`.
-- Chốt rule agent trong `.agents/AGENTS.md`: mọi agent phải đọc plan này, `REFAC_KNOWLEDGE.md`, chạy test/lint baseline trước/sau refactor.
+- [x] Sửa 13 lỗi Ruff trong `src`.
+- [x] Sửa lỗi lint nhỏ trong `tests` để `ruff check src tests` pass.
+- [x] Cập nhật README test count từ `314 passed` sang baseline mới.
+- [x] Thêm ADR đầu tiên: `docs/adr/0001-refactoring-boundaries.md`.
+- [x] Chốt rule agent trong `.agents/AGENTS.md`: mọi agent phải đọc plan này, `REFAC_KNOWLEDGE.md`, chạy test/lint baseline trước/sau refactor.
 
 Điều kiện nghiệm thu:
 
-- `ruff check src` pass.
+- `ruff check src tests` pass.
 - `python -m pytest tests -q --tb=short` pass.
 - README/rules không trỏ tới path ngoài repo.
 
@@ -216,28 +249,29 @@ Mục tiêu: không đổi behavior, chỉ làm cho repo có baseline rõ.
 
 Mục tiêu: UI chỉ điều phối state và hiển thị; Moodle write workflow nằm trong service test được.
 
-- Tạo `src/core/use_cases/submission_workflow.py`.
-- Chuyển logic từ:
+- [x] Tạo `src/core/use_cases/submission_workflow.py`.
+- [x] Chuyển logic từ:
   - `DetailView._do_submit_sync`
   - `_load_submitted_files`
   - `_do_remove_file_sync`
-  - `_do_batch_remove_files_sync`
   - `_do_update_metadata_sync`
-- Dùng input/output DTO: `SubmissionTarget`, `SelectedFile`, `SubmittedFile`, `SubmissionResult`.
-- `DetailView` nhận service qua constructor hoặc callback từ `AppController`.
-- Viết unit tests service với fake Moodle client.
+- [x] Dùng input/output DTO: `SubmissionTarget`, `SelectedSubmissionFile`, `SubmittedFile`, `FileMetadataUpdate`, `SubmittedFilesResult`.
+- [x] `DetailView` nhận service qua constructor/callback từ `AppController` thay vì tạo service trong wrapper.
+- [x] Viết unit tests service với fake Moodle client.
 
 Điều kiện nghiệm thu:
 
 - `DetailView` không import `core.ws_functions`.
-- Submission workflow có test success/fail/metadata/batch delete.
+- Submission workflow có test success/fail/metadata/delete guard.
 - Race-condition test vẫn pass.
 
 ### Phase 2 - Rút gọn `AppController`
 
 Mục tiêu: `AppController` thành composition root và event wiring, không còn gom tất cả business flow.
 
-- Tạo `RefreshCoordinator` cho `_load_data_async`, `_prefetch_details_async`, `_auto_poll_loop`, `_check_grades_background`.
+- [x] Tạo `RefreshCoordinator` cho merge cache chi tiết, smart merge pending submission, sort urgency/deadline, precompute hot fields, dataset result, progress status.
+- [x] Tách cache display, notifier dispatch, post-refresh scheduling khỏi `_load_data_async`.
+- [ ] Tiếp tục mở rộng coordinator cho `_auto_poll_loop`, `_check_grades_background` ở phase AppState/background lifecycle sau.
 - Tạo `NavigationController` hoặc mở rộng `ViewManager` để không cần truyền toàn bộ `controller`.
 - Tạo `AppState` nhỏ gom filters, all_data, pending_updates, locks.
 - Chuyển update checking sang `UpdateController`.
@@ -245,19 +279,21 @@ Mục tiêu: `AppController` thành composition root và event wiring, không c�
 
 Điều kiện nghiệm thu:
 
-- `AppController._load_data_async` được thay bằng call đến coordinator.
+- `AppController._load_data_async` dưới 100 dòng và không còn chứa thuật toán merge/sort/precompute/status progress.
 - Không có method nào trong `AppController` > 100 dòng, trừ trường hợp có lý do ghi chú.
-- Existing AppController tests pass và thêm tests cho coordinator bằng fake page/state.
+- Existing AppController tests pass và đã thêm unit tests cho refresh coordinator thuần dữ liệu.
 
 ### Phase 3 - Làm `MoodleService` thành boundary chính
 
 Mục tiêu: một facade high-level cho Moodle, mock-friendly, không để presentation/core use cases gọi raw wrappers lung tung.
 
-- Đổi `core/moodle_service.py` thành service có workflow-level methods:
-  - `get_current_user_id`
+- [x] Thêm `get_current_user_id`.
+- [x] Thêm `fetch_all_grades`.
+- [x] Sửa `get_assign_details_via_ws` để nhận đủ `course_id` và `modulename`.
+- [x] Thêm boundary methods cho activity feed/detail/event mapping/submission workflow hiện tại.
+- [ ] Đổi tên/gom tiếp thành workflow-level methods rõ nghĩa hơn nếu Phase 5 tách mapper:
   - `fetch_activity_feed`
   - `fetch_activity_detail`
-  - `fetch_grades`
   - `submit_assignment_files`
   - `replace_submission_files`
 - Đổi `ws_functions.py` thành adapter thấp hơn, pure wrappers/transformers.
@@ -266,8 +302,8 @@ Mục tiêu: một facade high-level cho Moodle, mock-friendly, không để pre
 Điều kiện nghiệm thu:
 
 - `src/gui/**` không import `core.ws_functions`.
-- `DataOrchestrator` phụ thuộc vào `MoodleService`/Protocol thay vì concrete raw functions.
-- Fakes trong tests không cần mock global module.
+- `DataOrchestrator`, `GradeMonitor`, `SubmissionWorkflow` phụ thuộc vào `MoodleService`/service-like fake thay vì concrete raw functions.
+- Fakes trong tests mới không cần mock global module.
 
 ### Phase 4 - SettingsView cleanup
 
@@ -328,7 +364,7 @@ Mục tiêu: tránh tái phát architectural drift.
 
 ## 7. Việc nhỏ nên làm trước
 
-1. Fix Ruff unused imports/local var. Rủi ro cực thấp, giúp CI xanh.
+1. Sửa các unused imports/local var của Ruff. Rủi ro cực thấp, giúp CI xanh.
 2. Cập nhật `.agents/AGENTS.md` và README test badge/count.
 3. Xóa hoặc chuyển demo imports `from gui.app_controller import AppController` ra file example/smoke riêng.
 4. Tạo `SubmissionWorkflow` trước vì đây là vùng có risk cao nhất: file upload/delete/metadata + UI async.
@@ -349,7 +385,7 @@ Mục tiêu: tránh tái phát architectural drift.
 
 - Không đổi hành vi user-facing nếu phase là refactor.
 - `python -m pytest tests -q --tb=short` pass.
-- `ruff check src` pass.
+- `ruff check src tests` pass.
 - Nếu chạm UI: manual smoke `python src/main.py --web` hoặc desktop theo docs hiện hành.
 - Cập nhật `REFAC_KNOWLEDGE.md` với ngày, phase, files touched, test status.
 - Nếu thay đổi boundary: thêm/cập nhật ADR.

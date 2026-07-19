@@ -7,9 +7,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
 from core.grade_monitor import GradeMonitor
+from core.moodle_service import MoodleService
 from config import settings
 from models import Assignment
-from core import ws_functions
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ class DataOrchestrator:
     
     def __init__(self):
         self.client = MoodleClient()
+        self.moodle_service = MoodleService(self.client.call_ws_api)
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
         self._detail_cache_saved_at: dict[str, float] = {}
@@ -100,7 +101,7 @@ class DataOrchestrator:
         if self._userid_cache is not None:
             return self._userid_cache
         try:
-            info = ws_functions.get_site_info(self.client.call_ws_api)
+            info = self.moodle_service.get_site_info()
             if info and 'userid' in info:
                 self._userid_cache = info['userid']
                 return self._userid_cache
@@ -120,9 +121,7 @@ class DataOrchestrator:
             return None  # Chưa có dữ liệu của lần tải trước, bắt buộc tải đầy đủ
         try:
             # Sửa lỗi BUG-02: get_enrolled_courses nhận tham số phân loại chứ không nhận userid
-            courses = ws_functions.get_enrolled_courses(
-                self.client.call_ws_api
-            )
+            courses = self.moodle_service.get_enrolled_courses()
             if not courses:
                 return None
             changed_courses = []
@@ -130,9 +129,7 @@ class DataOrchestrator:
                 cid = course.get('id')
                 if not cid:
                     continue
-                updates = ws_functions.get_course_updates_since(
-                    self.client.call_ws_api, cid, timestamp
-                )
+                updates = self.moodle_service.get_course_updates_since(cid, timestamp)
                 if updates:  # Không rỗng = có sự thay đổi dữ liệu
                     changed_courses.append(cid)
             if changed_courses:
@@ -179,7 +176,7 @@ class DataOrchestrator:
         if userid is None:
             return []
         return self.grade_monitor.check_for_changes(
-            self.client.call_ws_api, userid
+            self.moodle_service, userid
         )
     
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
@@ -206,19 +203,16 @@ class DataOrchestrator:
             courses_result = None
             
             def _fetch_calendar():
-                return self.client.call_ws_api(
-                    'core_calendar_get_action_events_by_timesort',
-                    timesortfrom=now_ts,
-                    timesortto=now_ts + (90 * 24 * 3600),
-                    limitnum=50,
+                return self.moodle_service.get_action_events_by_timesort(
+                    now_ts,
+                    now_ts + (90 * 24 * 3600),
+                    limit=50,
                 )
             
             def _fetch_courses():
                 if not userid:
                     return None
-                return self.client.call_ws_api(
-                    'core_enrol_get_users_courses', userid=userid
-                )
+                return self.moodle_service.get_user_courses(userid)
             
             with ThreadPoolExecutor(max_workers=2) as pool:
                 f_cal = pool.submit(_fetch_calendar)
@@ -235,7 +229,7 @@ class DataOrchestrator:
                 events = calendar_result.get('events', [])
             
             # Chuyển đổi các sự kiện Web Service sang định dạng của UTHelper
-            results = ws_functions.ws_events_to_assignments(events) if events else []
+            results = self.moodle_service.ws_events_to_assignments(events) if events else []
             
             # Tối ưu PERF: Bước 3 - Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
@@ -309,9 +303,7 @@ class DataOrchestrator:
                     return calendar_results
                 courses_result = self._courses_cache
                 if not courses_result:
-                    courses_result = self.client.call_ws_api(
-                        'core_enrol_get_users_courses', userid=userid
-                    )
+                    courses_result = self.moodle_service.get_user_courses(userid)
                 if not courses_result or not isinstance(courses_result, list):
                     return calendar_results
                 course_ids = [c['id'] for c in courses_result if isinstance(c, dict) and 'id' in c]
@@ -322,7 +314,7 @@ class DataOrchestrator:
             return calendar_results
         
         # Lấy assignments
-        all_assigns = ws_functions.get_assignments(self.client.call_ws_api, course_ids)
+        all_assigns = self.moodle_service.get_assignments(course_ids)
         if not all_assigns:
             return calendar_results
         
@@ -463,8 +455,6 @@ class DataOrchestrator:
     
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Lấy chi tiết bài tập qua WS API - không cần session, không kick browser."""
-        from core.ws_functions import get_assign_details_via_ws
-        
         # Xác định cmid và course_id từ activity_data
         url = activity_data.get("url", "")
         activity_type = activity_data.get("type", "other")
@@ -515,8 +505,7 @@ class DataOrchestrator:
             return None
 
         try:
-            ws_details = get_assign_details_via_ws(
-                self.client.call_ws_api,
+            ws_details = self.moodle_service.get_assign_details_via_ws(
                 cmid=cmid,
                 course_id=cid,
                 modulename=modulename,

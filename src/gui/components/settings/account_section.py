@@ -27,7 +27,7 @@ def init_account_controls(view):
     )
     # Nút bấm kiểm tra thông tin đăng nhập
     view._test_login_btn = ft.Button(
-        "Kiểm tra kết nối",
+        "Đăng nhập",
         icon=ft.Icons.WIFI_FIND_ROUNDED,
         on_click=view._handle_test_login,
         style=ft.ButtonStyle(

@@ -7,7 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,25 +63,24 @@ class GradeMonitor:
 
     def check_for_changes(
         self,
-        call_api: Callable,
+        grade_source: Any,
         userid: int,
     ) -> List[GradeChange]:
         """Compare current grades against snapshot and return changes.
 
         Args:
-            call_api: WS API call function.
+            grade_source: MoodleService-like object, or legacy WS API call function.
             userid: Moodle user ID.
 
         Returns:
             List of GradeChange objects for grades that changed.
         """
-        from core import ws_functions
-
         changes: List[GradeChange] = []
+        service = self._grade_service(grade_source)
 
         try:
             # Get grade overview for all courses
-            courses_grades = ws_functions.get_course_grades(call_api, userid)
+            courses_grades = service.get_course_grades(userid)
             if not courses_grades:
                 return changes
 
@@ -119,7 +118,7 @@ class GradeMonitor:
                 overall_changed = (grade_str != old_overall and old_overall != '')
                 if overall_changed:
                     try:
-                        items = ws_functions.get_grade_items(call_api, course_id, userid)
+                        items = service.get_grade_items(course_id, userid)
                         if items:
                             for item in items:
                                 item_name = item.get('itemname', '')
@@ -159,3 +158,14 @@ class GradeMonitor:
         if changes:
             logger.info("Detected %d grade changes", len(changes))
         return changes
+
+    @staticmethod
+    def _grade_service(grade_source: Any):
+        from core.moodle_service import MoodleService
+
+        if callable(grade_source):
+            return MoodleService(grade_source)
+        if hasattr(grade_source, "get_course_grades") and hasattr(grade_source, "get_grade_items"):
+            return grade_source
+
+        raise TypeError("grade_source must be a MoodleService-like object or WS API callable")

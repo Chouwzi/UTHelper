@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional, Dict, Any, List
 from core import ws_functions
 
@@ -11,13 +12,41 @@ class MoodleService:
         """Lấy thông tin chung của tài khoản và cấu hình hệ thống e-learning."""
         return ws_functions.get_site_info(self.call_ws_api)
 
+    def get_current_user_id(self) -> Optional[int]:
+        """Lấy Moodle user id hiện tại từ site info."""
+        info = self.get_site_info()
+        if not info:
+            return None
+        try:
+            return int(info.get("userid"))
+        except (TypeError, ValueError):
+            return None
+
     def get_calendar_action_events(self, time_start: int = 0) -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách các sự kiện lịch cần xử lý (action events) kể từ mốc thời gian quy định."""
         return ws_functions.get_calendar_action_events(self.call_ws_api, time_start)
 
+    def get_action_events_by_timesort(
+        self,
+        timesort_from: int,
+        timesort_to: int,
+        limit: int = 50,
+    ) -> Optional[Dict[str, Any]]:
+        """Lấy action events theo khoảng thời gian, giữ nguyên shape trả về của Moodle."""
+        return self.call_ws_api(
+            "core_calendar_get_action_events_by_timesort",
+            timesortfrom=timesort_from,
+            timesortto=timesort_to,
+            limitnum=limit,
+        )
+
     def get_enrolled_courses(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách các môn học mà sinh viên đang đăng ký học."""
         return ws_functions.get_enrolled_courses(self.call_ws_api)
+
+    def get_user_courses(self, userid: int) -> Optional[List[Dict[str, Any]]]:
+        """Lấy danh sách môn học của một user cụ thể."""
+        return self.call_ws_api("core_enrol_get_users_courses", userid=userid)
 
     def get_assignments(self, course_ids: List[int]) -> Optional[Dict[str, Any]]:
         """Lấy danh sách tất cả các bài tập trong các môn học được cung cấp."""
@@ -31,9 +60,13 @@ class MoodleService:
         """Lấy trạng thái nộp bài chi tiết của sinh viên cho bài tập cụ thể."""
         return ws_functions.get_submission_status(self.call_ws_api, assign_id)
 
-    def get_submitted_files(self, assign_id: int) -> List[Dict[str, Any]]:
+    def get_submitted_files(
+        self,
+        assign_id: int,
+        status: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """Lấy danh sách các tệp tin sinh viên đã nộp lên hệ thống cho bài tập cụ thể."""
-        return ws_functions.get_submitted_files(self.call_ws_api, assign_id)
+        return ws_functions.get_submitted_files(self.call_ws_api, assign_id, status=status)
 
     def get_quizzes_by_courses(self, course_ids: List[int]) -> Optional[Dict[str, Any]]:
         """Lấy danh sách các hoạt động trắc nghiệm (quiz) của các môn học được chỉ định."""
@@ -47,13 +80,23 @@ class MoodleService:
         """Xóa toàn bộ bộ nhớ cache lưu tạm của các hàm Web Service."""
         ws_functions.clear_all_caches()
 
-    def resolve_cmid_to_assign_id(self, cmid: int) -> Optional[int]:
+    def resolve_cmid_to_assign_id(self, cmid: int, course_id: int) -> Optional[int]:
         """Chuyển đổi ID hoạt động (cmid) sang ID bài nộp (Assignment ID) tương ứng."""
-        return ws_functions.resolve_cmid_to_assign_id(self.call_ws_api, cmid)
+        return ws_functions.resolve_cmid_to_assign_id(self.call_ws_api, cmid, course_id)
 
-    def get_assign_details_via_ws(self, cmid: int) -> Optional[Dict[str, Any]]:
+    def get_assign_details_via_ws(
+        self,
+        cmid: int,
+        course_id: int,
+        modulename: str = "assign",
+    ) -> Optional[Dict[str, Any]]:
         """Lấy chi tiết cấu hình và mô tả của bài tập thông qua Web Service."""
-        return ws_functions.get_assign_details_via_ws(self.call_ws_api, cmid)
+        return ws_functions.get_assign_details_via_ws(
+            self.call_ws_api,
+            cmid,
+            course_id,
+            modulename,
+        )
 
     def upload_file_to_draft(self, file_path: str, draft_id: int = 0) -> int:
         """Tải một tệp tin lên vùng nháp (draft area) trên server Moodle."""
@@ -67,6 +110,10 @@ class MoodleService:
         """Xác nhận nộp bài chính thức để giảng viên chấm điểm (submit for grading)."""
         return ws_functions.submit_for_grading(self.call_ws_api, assign_id)
 
+    def ws_events_to_assignments(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Chuyển Moodle calendar events sang activity dictionaries của UTHelper."""
+        return ws_functions.ws_events_to_assignments(events)
+
     def get_course_grades(self, userid: int) -> Optional[List[Dict[str, Any]]]:
         """Lấy điểm tổng quan của sinh viên đối với các môn học tham gia."""
         return ws_functions.get_course_grades(self.call_ws_api, userid)
@@ -74,6 +121,34 @@ class MoodleService:
     def get_grade_items(self, courseid: int, userid: int) -> Optional[List[Dict[str, Any]]]:
         """Lấy chi tiết từng cột điểm và đánh giá cụ thể trong một môn học."""
         return ws_functions.get_grade_items(self.call_ws_api, courseid, userid)
+
+    def fetch_all_grades(self, userid: int, max_workers: int = 10) -> tuple[list, dict]:
+        """Tải điểm tổng quan và chi tiết từng môn song song."""
+        courses_grades = self.get_course_grades(userid)
+        grade_items = {}
+
+        if not courses_grades:
+            return [], {}
+
+        def fetch_single_course_grades(course_grade):
+            course_id = str(course_grade.get("courseid", ""))
+            if not course_id:
+                return None
+            try:
+                items = self.get_grade_items(course_id, userid)
+                return course_id, items
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_single_course_grades, cg) for cg in courses_grades]
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    course_id, items = result
+                    grade_items[course_id] = items
+
+        return courses_grades, grade_items
 
     def get_unread_notification_count(self, userid: int) -> int:
         """Lấy số lượng thông báo Moodle chưa đọc của sinh viên."""

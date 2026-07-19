@@ -117,7 +117,7 @@ THEME_PRESETS = {
     },
     "steel_light": {
         "label": "Steel Light",
-        "description": "Cool slate - dynamic blue (Nam)",
+        "description": "Cool slate - dynamic blue",
         "mode": "light",
         "bg":             "#F8FAFC",
         "surface":        "#FFFFFF",
@@ -137,7 +137,7 @@ THEME_PRESETS = {
     },
     "rose_light": {
         "label": "Pastel Rose",
-        "description": "Warm blush - soft rose (Nữ)",
+        "description": "Warm blush - soft rose",
         "mode": "light",
         "bg":             "#FFF5F6",
         "surface":        "#FFFFFF",
