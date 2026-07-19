@@ -147,3 +147,18 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Notification milestones are cached only when a notifier explicitly returns
   a successful delivery confirmation; log-only or partial-failure mobile runs
   no longer advance the cache.
+
+# 2026-07-19 - Windows reminder scheduler and release artifact gates
+
+- Added a durable tray/autostart-owned Windows reminder scheduler so known
+  milestones can fire without waiting for the next Moodle network poll.
+- Windows reconciliation now persists pending reminders, reschedules changed
+  deadlines, cancels removed activities, retries failed toast delivery, and
+  exposes pending/delivery/error diagnostics.
+- Release CI now rejects ambiguous APK outputs, verifies the final packaged
+  Android manifest/version/signing certificate, validates MSIX identity and
+  AppInstaller metadata, pins signing certificate fingerprints, and requires
+  RFC3161 timestamped Windows signatures.
+- Targeted validation: 10 scheduler/release/diagnostics tests passed; Ruff and
+  workflow YAML parsing passed. A pre-existing milestone expectation in the
+  wider manager test is being migrated concurrently from hours to minutes.

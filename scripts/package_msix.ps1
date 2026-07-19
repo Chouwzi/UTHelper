@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Publisher,
     [Parameter(Mandatory = $true)][string]$Output,
     [string]$CertificatePath = "",
-    [string]$CertificatePassword = ""
+    [string]$CertificatePassword = "",
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,37 @@ $workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 if (-not $resolvedBundle.StartsWith($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "BundleDir must be inside the workspace: $resolvedBundle"
+}
+if (-not $resolvedOutput.StartsWith($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Output must be inside the workspace: $resolvedOutput"
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+    throw "MSIX Version must contain four numeric components: $Version"
+}
+if ([string]::IsNullOrWhiteSpace($Publisher)) {
+    throw "Publisher cannot be empty"
+}
+
+$xmlPublisher = [Security.SecurityElement]::Escape($Publisher)
+$resolvedCertificate = ""
+if ($CertificatePath) {
+    $resolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath).Path
+    $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+    $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $resolvedCertificate,
+        $CertificatePassword,
+        $flags
+    )
+    if (-not $certificate.HasPrivateKey) {
+        throw "Windows signing certificate does not contain a private key"
+    }
+    if (-not [string]::Equals(
+        $certificate.Subject,
+        $Publisher,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "MSIX Publisher '$Publisher' does not match certificate subject '$($certificate.Subject)'"
+    }
 }
 
 $exe = Get-ChildItem -LiteralPath $resolvedBundle -Recurse -Filter "UTHelper.exe" |
@@ -42,7 +74,7 @@ $manifest = @"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap rescap">
-  <Identity Name="com.uthelper.UTHelper" Publisher="$Publisher" Version="$Version" ProcessorArchitecture="x64" />
+  <Identity Name="com.uthelper.UTHelper" Publisher="$xmlPublisher" Version="$Version" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>UTHelper</DisplayName>
     <PublisherDisplayName>UTHelper</PublisherDisplayName>
@@ -77,6 +109,8 @@ if ($null -eq $makeAppx) { throw "makeappx.exe was not found" }
 New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($resolvedOutput)) -Force | Out-Null
 & $makeAppx.FullName pack /d $stage /p $resolvedOutput /o
 if ($LASTEXITCODE -ne 0) { throw "makeappx failed with exit code $LASTEXITCODE" }
+& $makeAppx.FullName validate /p $resolvedOutput
+if ($LASTEXITCODE -ne 0) { throw "makeappx validation failed with exit code $LASTEXITCODE" }
 
 if ($CertificatePath) {
     $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
@@ -84,8 +118,11 @@ if ($CertificatePath) {
         Sort-Object FullName -Descending |
         Select-Object -First 1
     if ($null -eq $signTool) { throw "signtool.exe was not found" }
-    & $signTool.FullName sign /fd SHA256 /f $CertificatePath /p $CertificatePassword $resolvedOutput
+    & $signTool.FullName sign /fd SHA256 /tr $TimestampUrl /td SHA256 `
+        /f $resolvedCertificate /p $CertificatePassword $resolvedOutput
     if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+    & $signTool.FullName verify /pa /v $resolvedOutput
+    if ($LASTEXITCODE -ne 0) { throw "signtool verification failed with exit code $LASTEXITCODE" }
 }
 
 Write-Host "[UTHelper] MSIX created at $resolvedOutput"

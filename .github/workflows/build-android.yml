@@ -83,10 +83,16 @@ jobs:
 
       - name: 🔎 Verify notification manifest wiring
         run: |
-          MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
-          grep -q "ScheduledNotificationReceiver" "$MANIFEST"
-          grep -q "ScheduledNotificationBootReceiver" "$MANIFEST"
-          grep -q "ActionBroadcastReceiver" "$MANIFEST"
+          mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
+          test "${#APK_CANDIDATES[@]}" -eq 1
+          APK="${APK_CANDIDATES[0]}"
+          APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          test -x "$APKANALYZER"
+          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.UTHelper"
+          "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
+          grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
+          grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml
+          grep -q "ActionBroadcastReceiver" final-android-manifest.xml
 
       - name: 📋 List build outputs
         if: always()
