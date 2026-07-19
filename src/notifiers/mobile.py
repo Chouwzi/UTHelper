@@ -11,9 +11,17 @@ On iOS:
 """
 import logging
 import inspect
+import json
+from datetime import datetime
 from pathlib import Path
 
+from core.notification_policy import (
+    ActivityNotificationPolicy,
+    NotificationPolicyConfig,
+    stable_notification_id,
+)
 from core.notification_types import ScheduleResult, ScheduledReminder
+from core.notification_types import ActivityNotification
 from notifiers.base import BaseNotifier
 from platform_utils import IS_ANDROID
 from core.display_utils import clean_course_name
@@ -34,6 +42,7 @@ class MobileNotifier(BaseNotifier):
         self._backend = "none"
         self._notifications_enabled = False
         self._exact_alarm_enabled = False
+        self._page = None
         from config import _USER_DATA_DIR
         self._schedule_state_path = Path(_USER_DATA_DIR) / "notification_schedules.json"
 
@@ -41,7 +50,9 @@ class MobileNotifier(BaseNotifier):
         if IS_ANDROID:
             try:
                 from flet_android_notifications import FletAndroidNotifications
-                self._android_notif = FletAndroidNotifications()
+                self._android_notif = FletAndroidNotifications(
+                    on_notification_tap=self._on_notification_tap
+                )
                 self._backend = "flet-android-notifications"
                 logger.info("MobileNotifier: using flet-android-notifications (Android)")
             except ImportError:
@@ -70,6 +81,7 @@ class MobileNotifier(BaseNotifier):
 
     async def setup(self, page):
         """Request notification permissions on mobile."""
+        self._page = page
         if self._android_notif and hasattr(self._android_notif, 'request_permissions'):
             try:
                 self._notifications_enabled = bool(
@@ -105,8 +117,8 @@ class MobileNotifier(BaseNotifier):
         if not assignments:
             return True
 
-        success = False
-        for i, a in enumerate(assignments[:5]):  # Max 5 notifications
+        all_succeeded = True
+        for a in assignments:
             title = _get_str(a, 'title')
             course = clean_course_name(_get_str(a, 'course_name') or _get_str(a, 'course'))
             remaining = _get_str(a, 'remaining')
@@ -118,13 +130,15 @@ class MobileNotifier(BaseNotifier):
 
             if self._android_notif:
                 try:
+                    notification_id = self._notification_id(a)
                     await self._android_notif.show_notification(
-                        notification_id=5000 + i,
+                        notification_id=notification_id,
                         title=notif_title,
                         body=notif_body,
+                        payload=_get_str(a, "url"),
                     )
-                    success = True
                 except Exception as e:
+                    all_succeeded = False
                     logger.warning("Android notification failed: %s", e)
             elif self._notifier:
                 try:
@@ -134,14 +148,46 @@ class MobileNotifier(BaseNotifier):
                     )
                     if inspect.isawaitable(result):
                         await result
-                    success = True
                 except Exception as e:
+                    all_succeeded = False
                     logger.warning("Mobile notification failed: %s", e)
             else:
                 logger.info("MOBILE (log-only): %s - %s", notif_title, notif_body)
-                success = True
+                all_succeeded = False
 
-        return success
+        return all_succeeded
+
+    def _on_notification_tap(self, event) -> None:
+        """Open the Moodle activity carried by a native notification payload."""
+        try:
+            value = json.loads(getattr(event, "data", "{}") or "{}")
+            url = str(value.get("payload", ""))
+            if self._page and url.startswith(("https://", "http://")):
+                self._page.launch_url(url)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("Invalid Android notification payload: %s", exc)
+
+    @staticmethod
+    def _notification_id(value) -> int:
+        """Use the same stable activity+milestone ID for immediate delivery."""
+        from config import settings as config
+
+        activity = ActivityNotification.from_value(value)
+        policy = ActivityNotificationPolicy(
+            NotificationPolicyConfig(
+                milestones=tuple(
+                    int(item)
+                    for item in (getattr(config, "NOTIFY_MILESTONES", ()) or ())
+                ),
+                minutes_before=max(
+                    0, int(getattr(config, "NOTIFY_MINUTES_BEFORE", 0) or 0)
+                ),
+                ignore_submitted=False,
+            )
+        )
+        candidate = policy.due_candidate(activity, (), datetime.now())
+        milestone = candidate.milestone if candidate else "immediate"
+        return stable_notification_id(activity.key, milestone)
 
     async def reconcile_schedules(
         self, reminders: list[ScheduledReminder]

@@ -134,5 +134,16 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   notification that claimed to poll deadlines without fetching activity data.
 - Added ADR 0003 for the signing/update boundary and the explicit WorkManager
   capability gap.
-- Validation: `ruff check src tests` passed; full suite reached **336 passed,
+- Validation: `ruff check src tests` passed; full suite reached **338 passed,
   22 skipped**.
+
+# 2026-07-19 - Native notification delivery hardening
+
+- Immediate Android notifications now use the same stable
+  `activity + milestone` identifier as scheduled reminders and carry the
+  activity URL as their native tap payload.
+- Android notification taps and single-activity Windows toast clicks open the
+  exact Moodle activity URL.
+- Notification milestones are cached only when a notifier explicitly returns
+  a successful delivery confirmation; log-only or partial-failure mobile runs
+  no longer advance the cache.

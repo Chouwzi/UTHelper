@@ -234,8 +234,10 @@ class NotificationManager:
                     )
                     if inspect.isawaitable(channel_result):
                         channel_result = await channel_result
-                if channel_result is not False:
+                if channel_result is True:
                     result.successful_channels.append(channel)
+                else:
+                    result.failed_channels[channel] = "backend did not confirm delivery"
             except Exception as exc:
                 result.failed_channels[channel] = str(exc)
                 diagnostics.last_error = f"{channel}: {exc}"
@@ -407,8 +409,10 @@ class NotificationManager:
                     delivered = await asyncio.to_thread(notifier.notify, notifications)
                     if inspect.isawaitable(delivered):
                         delivered = await delivered
-                if delivered is not False:
+                if delivered is True:
                     result.successful_channels.append(channel)
+                else:
+                    result.failed_channels[channel] = "backend did not confirm delivery"
             except Exception as exc:
                 result.failed_channels[channel] = str(exc)
                 logger.error("Grade alert via %s failed: %s", channel, exc)

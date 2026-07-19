@@ -2,6 +2,8 @@ import asyncio
 import os
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -106,6 +108,10 @@ class _FakeAndroidNotifications:
     def __init__(self):
         self.scheduled = []
         self.cancelled = []
+        self.shown = []
+
+    async def show_notification(self, **kwargs):
+        self.shown.append(kwargs)
 
     async def schedule_notification(self, **kwargs):
         self.scheduled.append(kwargs)
@@ -171,3 +177,26 @@ def test_cancel_activity_only_removes_matching_native_schedules(tmp_path):
     asyncio.run(notifier.reconcile_schedules(reminders))
     assert asyncio.run(notifier.cancel_activity("42")) == 1
     assert backend.cancelled == [101]
+
+
+def test_immediate_android_notification_uses_stable_activity_milestone_id(tmp_path):
+    backend = _FakeAndroidNotifications()
+    notifier = _mobile_notifier(tmp_path, backend)
+    value = _activity(deadline=datetime.now() + timedelta(hours=2))
+
+    assert asyncio.run(notifier.notify([value])) is True
+    assert backend.shown[0]["notification_id"] == stable_notification_id(
+        value.key, 3
+    )
+    assert backend.shown[0]["payload"] == value.url
+
+
+def test_android_notification_tap_opens_activity_payload(tmp_path):
+    notifier = _mobile_notifier(tmp_path, _FakeAndroidNotifications())
+    notifier._page = MagicMock()
+    notifier._on_notification_tap(
+        SimpleNamespace(data='{"payload":"https://courses.example/activity/42"}')
+    )
+    notifier._page.launch_url.assert_called_once_with(
+        "https://courses.example/activity/42"
+    )
