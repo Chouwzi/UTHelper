@@ -30,4 +30,3 @@ asynchronous services.
 - Call sites and tests must await dispatch operations.
 - A future WorkManager worker can reuse the activity DTO/policy contract, but
   force-stop behavior remains controlled by Android.
-

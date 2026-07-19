@@ -27,4 +27,3 @@ $xml = @"
 </AppInstaller>
 "@
 Set-Content -LiteralPath $Output -Value $xml -Encoding UTF8
-

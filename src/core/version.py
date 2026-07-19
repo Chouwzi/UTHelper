@@ -21,4 +21,3 @@ def get_app_version() -> str:
 
 
 APP_VERSION = get_app_version()
-
