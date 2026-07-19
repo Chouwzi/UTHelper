@@ -93,6 +93,13 @@ class ActivityNotificationPolicy:
         activities: Iterable[ActivityNotification],
         now: datetime,
     ) -> list[ScheduledReminder]:
+        # Equal DND endpoints intentionally mean quiet for the full day.  There
+        # is no valid time to move a reminder to without violating that rule.
+        if (
+            self.config.dnd_enabled
+            and self.config.dnd_start == self.config.dnd_end
+        ):
+            return []
         reminders: list[ScheduledReminder] = []
         for activity in activities:
             if not self.accepts(activity) or not activity.deadline:
@@ -143,4 +150,3 @@ def stable_notification_id(activity_key: str, milestone: int | str) -> int:
     ).digest()
     value = int.from_bytes(digest, "big") & 0x7FFFFFFF
     return value or 1
-

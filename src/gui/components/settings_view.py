@@ -138,13 +138,10 @@ class SettingsView(ft.Container):
             ft.Button("Xem gần đây", icon=ft.Icons.HISTORY_ROUNDED, on_click=lambda e: self._do_show_notif_history(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
         ], wrap=True, spacing=6)
 
-        _bg_section_label = ft.Text("Background Scheduler (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
+        _bg_section_label = ft.Text("Lịch thông báo activity (Android)", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
         self._debug_scheduler_status = ft.Text("", size=11, color=C.TEXT_SECONDARY, selectable=True)
         _bg_buttons = ft.Row([
             ft.Button("Trạng thái", icon=ft.Icons.QUERY_STATS_ROUNDED, on_click=lambda e: self._do_show_scheduler_status(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
-            ft.Button("Start Foreground", icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, on_click=lambda e: self._do_start_foreground(), bgcolor=C.SURFACE, color=C.SAFE),
-            ft.Button("Stop Foreground", icon=ft.Icons.STOP_CIRCLE_OUTLINED, on_click=lambda e: self._do_stop_foreground(), bgcolor=C.SURFACE, color=C.CRITICAL),
-            ft.Button("Test Immediate", icon=ft.Icons.NOTIFICATION_ADD_ROUNDED, on_click=lambda e: self._do_test_immediate_notif(), bgcolor=C.SURFACE, color=C.ACCENT),
         ], wrap=True, spacing=6)
 
         _mobile_section_label = ft.Text("Kiểm thử Mobile", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY)
@@ -1108,63 +1105,6 @@ class SettingsView(ft.Container):
             self._debug_scheduler_status.color = C.CRITICAL
         self._debug_scheduler_status.update()
 
-    # Background scheduler (Android)
-    def _do_start_foreground(self):
-        """Start Android foreground service for persistent background."""
-        async def _start():
-            try:
-                from core.background_scheduler import get_scheduler
-                scheduler = get_scheduler()
-                if not scheduler.is_available:
-                    self._debug_info_text.value = "Background scheduler không khả dụng trên nền tảng này."
-                    self._debug_info_text.color = C.WARNING
-                else:
-                    await scheduler.start_foreground_service()
-                    self._debug_info_text.value = "Foreground service đã khởi động. App sẽ chạy ngầm liên tục."
-                    self._debug_info_text.color = C.SAFE
-            except Exception as ex:
-                self._debug_info_text.value = f"Lỗi foreground: {ex}"
-                self._debug_info_text.color = C.CRITICAL
-            self._debug_info_text.update()
-        self._page.run_task(_start)
-
-    def _do_stop_foreground(self):
-        """Stop Android foreground service."""
-        async def _stop():
-            try:
-                from core.background_scheduler import get_scheduler
-                scheduler = get_scheduler()
-                await scheduler.stop_foreground_service()
-                self._debug_info_text.value = "Foreground service đã dừng."
-                self._debug_info_text.color = C.TEXT_SECONDARY
-            except Exception as ex:
-                self._debug_info_text.value = f"Lỗi stop foreground: {ex}"
-                self._debug_info_text.color = C.CRITICAL
-            self._debug_info_text.update()
-        self._page.run_task(_stop)
-
-    def _do_test_immediate_notif(self):
-        """Send an immediate test notification via background scheduler."""
-        async def _send():
-            try:
-                from core.background_scheduler import get_scheduler
-                scheduler = get_scheduler()
-                if not scheduler.is_available:
-                    self._debug_info_text.value = "Scheduler không khả dụng."
-                    self._debug_info_text.color = C.WARNING
-                else:
-                    await scheduler.send_immediate(
-                        title="UTHelper Test",
-                        body="Thông báo test từ Background Scheduler"
-                    )
-                    self._debug_info_text.value = "Đã gửi immediate notification qua scheduler."
-                    self._debug_info_text.color = C.SAFE
-            except Exception as ex:
-                self._debug_info_text.value = f"Lỗi immediate: {ex}"
-                self._debug_info_text.color = C.CRITICAL
-            self._debug_info_text.update()
-        self._page.run_task(_send)
-
     # Mobile-specific test handlers
     def _do_check_notif_permission(self):
         """Check notification permission status on mobile."""
@@ -1267,14 +1207,6 @@ class SettingsView(ft.Container):
                     lines.append(f"📦 {pkg}: {ver}")
                 except ImportError:
                     lines.append(f"❌ {pkg}: not installed")
-
-            # Scheduler info
-            try:
-                from core.background_scheduler import get_scheduler
-                sched = get_scheduler()
-                lines.append(f"Scheduler: {'✅ active' if sched.is_available else '❌ unavailable'}")
-            except Exception:
-                lines.append("Scheduler: not loaded")
 
             # Notifier info
             notifier = getattr(self._orchestrator, 'notifier', None)

@@ -1,311 +1,275 @@
-"""Auto-update: check, download, and apply updates via GitHub Releases.
+"""Verified update discovery and download through published GitHub Releases."""
 
-Works with public/private repos.  Uses only stdlib (urllib, zipfile, subprocess).
-Platforms:
-  - Windows: download .zip → batch-script swap → restart
-  - Android: download .apk → delegate to apk_installer
-  - iOS/other: open browser to release page (fallback)
-"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import os
-import shutil
-import subprocess
-import sys
+from pathlib import Path
 import tempfile
 import threading
-import urllib.request
-import urllib.error
-import zipfile
-from pathlib import Path
 from typing import Callable, Optional, Tuple
+import urllib.error
+import urllib.request
 
-from platform_utils import IS_ANDROID, IS_WINDOWS, IS_IOS
+from packaging.version import InvalidVersion, Version
+
+import platform_utils
 
 logger = logging.getLogger(__name__)
 
-# GitHub repo
 _GITHUB_OWNER = "Chouwzi"
 _GITHUB_REPO = "UTHelper"
-_RELEASES_URL = f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/releases/latest"
-_UA = "UTHelper-UpdateChecker/2.0"
+_RELEASES_URL = (
+    f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/releases/latest"
+)
+_UA = "UTHelper-UpdateChecker/2.2"
+_MANIFEST_NAME = "release-manifest.json"
+_DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 
-# Helpers
+@dataclass(frozen=True)
+class UpdateAsset:
+    platform: str
+    architecture: str
+    name: str
+    url: str
+    sha256: str = ""
+    size: int = 0
 
-def _version_tuple(v: str) -> tuple:
-    """Convert '2.1.0' → (2, 1, 0)."""
-    try:
-        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
-    except (ValueError, AttributeError):
-        return (0,)
+
+@dataclass(frozen=True)
+class UpdateInfo:
+    has_update: bool
+    version: str | None = None
+    release_url: str | None = None
+    asset: UpdateAsset | None = None
+    minimum_supported_version: str | None = None
+
+
+_ASSET_METADATA: dict[str, UpdateAsset] = {}
+
+
+def _platform_name() -> str:
+    if platform_utils.IS_ANDROID:
+        return "android"
+    if platform_utils.IS_WINDOWS:
+        return "windows"
+    if platform_utils.IS_IOS:
+        return "ios"
+    return "other"
 
 
 def _get_update_temp_dir() -> Path:
-    """Temp directory for downloads."""
-    d = Path(tempfile.gettempdir()) / "uthelper_update"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    directory = Path(tempfile.gettempdir()) / "uthelper_update"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
-# Check
+def _request_json(url: str, timeout: int = 10) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": _UA,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        value = json.loads(response.read().decode("utf-8"))
+    return value if isinstance(value, dict) else {}
 
-def check_for_update(current_version: str) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
-    """Check GitHub Releases for newer version.
 
-    Returns (has_update, latest_version, release_page_url, asset_download_url).
-    """
+def _is_newer(latest: str, current: str) -> bool:
     try:
-        req = urllib.request.Request(_RELEASES_URL)
-        req.add_header("Accept", "application/vnd.github.v3+json")
-        req.add_header("User-Agent", _UA)
-
-        resp = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(resp.read().decode("utf-8"))
-
-        latest_tag = data.get("tag_name", "").lstrip("v")
-        current = current_version.lstrip("v")
-        if not latest_tag:
-            return False, None, None, None
-
-        has_update = _version_tuple(latest_tag) > _version_tuple(current)
-        html_url = data.get("html_url", "")
-        asset_url = _find_platform_asset(data.get("assets", []))
-        return has_update, latest_tag, html_url, asset_url
-
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            logger.debug("Update check HTTP error: %s", e)
-        return False, None, None, None
-    except Exception as e:
-        logger.debug("Update check failed: %s", e)
-        return False, None, None, None
+        return Version(latest.lstrip("v")) > Version(current.lstrip("v"))
+    except InvalidVersion:
+        logger.warning("Invalid release version: latest=%r current=%r", latest, current)
+        return False
 
 
-def _find_platform_asset(assets: list) -> Optional[str]:
-    """Find the best download asset for current platform."""
-    if not assets:
+def _asset_from_manifest(manifest: dict, platform_name: str) -> UpdateAsset | None:
+    assets = manifest.get("assets", {})
+    raw = assets.get(platform_name) if isinstance(assets, dict) else None
+    if not isinstance(raw, dict):
         return None
-
-    if IS_ANDROID:
-        preferred = [".apk"]
-    elif IS_WINDOWS:
-        # Prefer .zip for auto-extract, .exe as fallback
-        preferred = [".zip", ".exe"]
-    elif IS_IOS:
-        preferred = [".ipa"]
-    else:
-        preferred = [".apk", ".zip"]
-
-    for ext in preferred:
-        for asset in assets:
-            name = asset.get("name", "").lower()
-            if name.endswith(ext):
-                return asset.get("browser_download_url", "")
-
-    # Fallback: first asset
-    return assets[0].get("browser_download_url", "") if assets else None
+    url = str(raw.get("url", ""))
+    name = str(raw.get("name", ""))
+    checksum = str(raw.get("sha256", "")).lower()
+    if not url or not name or len(checksum) != 64:
+        return None
+    try:
+        size = int(raw.get("size", 0) or 0)
+    except (TypeError, ValueError):
+        size = 0
+    architecture = str(raw.get("architecture", ""))
+    if not architecture:
+        return None
+    return UpdateAsset(platform_name, architecture, name, url, checksum, size)
 
 
-# Download
+def _asset_from_release(release_assets: list, platform_name: str) -> UpdateAsset | None:
+    expected_suffixes = {
+        "android": (".apk",),
+        "windows": (".appinstaller", ".msix"),
+        "ios": (),
+    }.get(platform_name, ())
+    for suffix in expected_suffixes:
+        for raw in release_assets:
+            name = str(raw.get("name", ""))
+            if not name.lower().endswith(suffix):
+                continue
+            digest = str(raw.get("digest", ""))
+            checksum = digest.removeprefix("sha256:") if digest else ""
+            return UpdateAsset(
+                platform=platform_name,
+                architecture="universal" if platform_name == "android" else "x64",
+                name=name,
+                url=str(raw.get("browser_download_url", "")),
+                sha256=checksum if len(checksum) == 64 else "",
+                size=int(raw.get("size", 0) or 0),
+            )
+    return None
 
-def download_update(url: str, progress_cb: Callable[[float], None] = None) -> Optional[Path]:
-    """Download update file to temp dir with progress.
 
-    Returns path to downloaded file, or None on failure.
-    """
+def get_update_info(current_version: str) -> UpdateInfo:
+    """Return a typed update result for the current runtime platform."""
+    try:
+        release = _request_json(_RELEASES_URL)
+        if release.get("draft") or release.get("prerelease"):
+            return UpdateInfo(False)
+        latest = str(release.get("tag_name", "")).lstrip("v")
+        if not latest:
+            return UpdateInfo(False)
+
+        platform_name = _platform_name()
+        release_assets = release.get("assets", [])
+        manifest_asset = next(
+            (
+                item
+                for item in release_assets
+                if item.get("name") == _MANIFEST_NAME
+            ),
+            None,
+        )
+        manifest = {}
+        if manifest_asset:
+            manifest = _request_json(str(manifest_asset["browser_download_url"]))
+            manifest_version = str(manifest.get("version", "")).lstrip("v")
+            if manifest_version != latest:
+                logger.warning(
+                    "Ignoring release manifest with mismatched version %r", manifest_version
+                )
+                manifest = {}
+
+        asset = _asset_from_manifest(manifest, platform_name)
+        if asset is None:
+            asset = _asset_from_release(release_assets, platform_name)
+        if asset:
+            _ASSET_METADATA[asset.url] = asset
+
+        return UpdateInfo(
+            has_update=_is_newer(latest, current_version),
+            version=latest,
+            release_url=str(release.get("html_url", "")),
+            asset=asset,
+            minimum_supported_version=(
+                str(manifest.get("minimum_supported_version"))
+                if manifest.get("minimum_supported_version")
+                else None
+            ),
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            logger.warning("Update check HTTP error: %s", exc)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Update check failed: %s", exc)
+    return UpdateInfo(False)
+
+
+def check_for_update(
+    current_version: str,
+) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    """Backward-compatible tuple wrapper around :func:`get_update_info`."""
+    info = get_update_info(current_version)
+    return (
+        info.has_update,
+        info.version,
+        info.release_url,
+        info.asset.url if info.asset else None,
+    )
+
+
+def download_update(
+    url: str,
+    progress_cb: Callable[[float], None] | None = None,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+) -> Optional[Path]:
+    """Download atomically and reject assets that fail size/checksum validation."""
     if not url:
         return None
+    metadata = _ASSET_METADATA.get(url)
+    expected_sha256 = (expected_sha256 or (metadata.sha256 if metadata else "")).lower()
+    expected_size = expected_size or (metadata.size if metadata else 0)
+
     try:
-        temp_dir = _get_update_temp_dir()
         filename = url.split("/")[-1] or "update"
-        dest = temp_dir / filename
+        destination = _get_update_temp_dir() / filename
+        partial = destination.with_suffix(destination.suffix + ".part")
+        partial.unlink(missing_ok=True)
 
-        if dest.exists():
-            dest.unlink()
-
-        req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        resp = urllib.request.urlopen(req, timeout=120)
-
-        total_size = int(resp.headers.get("Content-Length", 0))
+        request = urllib.request.Request(url, headers={"User-Agent": _UA})
+        digest = hashlib.sha256()
         downloaded = 0
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_size = int(response.headers.get("Content-Length", 0) or 0)
+            total_size = expected_size or response_size
+            with partial.open("wb") as output:
+                while chunk := response.read(_DOWNLOAD_CHUNK_SIZE):
+                    output.write(chunk)
+                    digest.update(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb and total_size:
+                        progress_cb(min(1.0, downloaded / total_size))
 
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_cb and total_size > 0:
-                    progress_cb(downloaded / total_size)
+        if expected_size and downloaded != expected_size:
+            raise ValueError(
+                f"Update size mismatch: expected {expected_size}, got {downloaded}"
+            )
+        actual_sha256 = digest.hexdigest()
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise ValueError("Update SHA-256 mismatch")
 
-        logger.info("Downloaded update: %s (%d bytes)", dest.name, downloaded)
-        return dest
-
-    except Exception as e:
-        logger.error("Download failed: %s", e)
+        os.replace(partial, destination)
+        logger.info(
+            "Downloaded verified update: %s (%d bytes, sha256=%s)",
+            destination.name,
+            downloaded,
+            actual_sha256,
+        )
+        return destination
+    except Exception as exc:
+        logger.error("Download failed: %s", exc)
+        try:
+            partial.unlink(missing_ok=True)
+        except (OSError, UnboundLocalError):
+            pass
         return None
 
 
-# Apply (Windows)
-
-def apply_update_windows(zip_path: Path) -> bool:
-    """Extract .zip and launch batch updater that replaces files after app exits.
-
-    Returns True if updater was launched (caller should sys.exit).
-    """
-    if not zip_path or not zip_path.exists():
-        return False
-
-    try:
-        install_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
-        temp_dir = _get_update_temp_dir()
-        extract_dir = temp_dir / "extracted"
-
-        # Clean & extract
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        extract_dir.mkdir(parents=True, exist_ok=True)
-
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_dir)
-
-        # Handle single top-level directory in zip
-        contents = list(extract_dir.iterdir())
-        source_dir = contents[0] if len(contents) == 1 and contents[0].is_dir() else extract_dir
-
-        exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else "UTHelper.exe"
-        pid = os.getpid()
-
-        bat_content = f'''@echo off
-chcp 65001 >nul 2>&1
-title UTHelper Updater
-echo.
-echo   Dang cap nhat UTHelper...
-echo   Doi ung dung dong hoan toan...
-echo.
-
-:wait_loop
-tasklist /FI "PID eq {pid}" 2>nul | find /I "{pid}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait_loop
-)
-
-echo   Sao luu phien ban cu...
-if exist "{install_dir}\\__backup" rmdir /s /q "{install_dir}\\__backup"
-mkdir "{install_dir}\\__backup" 2>nul
-
-for %%f in ("{install_dir}\\*") do (
-    if /I not "%%~nxf"=="__backup" (
-        move /y "%%f" "{install_dir}\\__backup\\" >nul 2>&1
-    )
-)
-for /d %%d in ("{install_dir}\\*") do (
-    if /I not "%%~nxd"=="__backup" (
-        move /y "%%d" "{install_dir}\\__backup\\" >nul 2>&1
-    )
-)
-
-echo   Cai dat phien ban moi...
-xcopy /s /e /y /q "{source_dir}\\*" "{install_dir}\\" >nul
-
-echo   Khoi dong lai UTHelper...
-start "" "{install_dir}\\{exe_name}"
-
-timeout /t 3 /nobreak >nul
-rmdir /s /q "{install_dir}\\__backup" 2>nul
-rmdir /s /q "{temp_dir}" 2>nul
-exit
-'''
-        bat_path = temp_dir / "update.bat"
-        bat_path.write_text(bat_content, encoding="utf-8")
-
-        # Launch detached
-        subprocess.Popen(
-            ["cmd", "/c", str(bat_path)],
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-            close_fds=True,
-        )
-        logger.info("Windows updater launched - exiting for update.")
-        return True
-
-    except Exception as e:
-        logger.error("Windows apply_update failed: %s", e)
-        return False
-
-
-# Apply (Android)
-
-def apply_update_android(apk_path: Path) -> bool:
-    """Trigger Android PackageInstaller intent for the downloaded APK.
-
-    Uses pyjnius to call Android Java APIs.
-    Returns True if install intent was launched.
-    """
-    if not apk_path or not apk_path.exists():
-        return False
-
-    try:
-        from jnius import autoclass, cast  # type: ignore[import]
-
-        # Get Activity context
-        activity_class_name = os.environ.get("MAIN_ACTIVITY_HOST_CLASS_NAME")
-        if activity_class_name:
-            HostClass = autoclass(activity_class_name)
-            context = cast("android.app.Activity", HostClass.mActivity)
-        else:
-            # Fallback for Kivy-style
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            context = cast("android.app.Activity", PythonActivity.mActivity)
-
-        Intent = autoclass("android.content.Intent")
-        File = autoclass("java.io.File")
-        BuildVer = autoclass("android.os.Build$VERSION")
-
-        apk_file = File(str(apk_path))
-        intent = Intent(Intent.ACTION_VIEW)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-        if BuildVer.SDK_INT >= 24:
-            # Android 7+ requires FileProvider
-            FileProvider = autoclass("androidx.core.content.FileProvider")
-            authority = context.getPackageName() + ".fileprovider"
-            uri = FileProvider.getUriForFile(context, authority, apk_file)
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        else:
-            Uri = autoclass("android.net.Uri")
-            uri = Uri.fromFile(apk_file)
-
-        intent.setDataAndType(uri, "application/vnd.android.package-archive")
-        context.startActivity(intent)
-
-        logger.info("Android install intent launched for %s", apk_path.name)
-        return True
-
-    except ImportError:
-        logger.warning("pyjnius not available - cannot install APK programmatically.")
-        return False
-    except Exception as e:
-        logger.error("Android install failed: %s", e)
-        return False
-
-
-# Async wrappers
-
-def check_for_update_async(current_version: str, callback):
-    """Check update in background. callback(has_update, version, release_url, asset_url)."""
+def check_for_update_async(current_version: str, callback) -> None:
     def _worker():
-        result = check_for_update(current_version)
-        callback(*result)
+        callback(*check_for_update(current_version))
+
     threading.Thread(target=_worker, daemon=True, name="update-checker").start()
 
 
-def download_update_async(url: str, progress_cb=None, done_cb=None):
-    """Download in background. done_cb(Optional[Path])."""
+def download_update_async(url: str, progress_cb=None, done_cb=None) -> None:
     def _worker():
         result = download_update(url, progress_cb)
         if done_cb:
             done_cb(result)
+
     threading.Thread(target=_worker, daemon=True, name="update-downloader").start()

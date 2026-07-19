@@ -3,7 +3,6 @@ name: 📱 Build Android APK
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -41,9 +40,9 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 📦 Install Flet CLI
+      - name: 📦 Install project and Flet CLI
         run: |
-          pip install flet
+          pip install -e .
           flet --version
 
       - name: 🔨 Build APK
@@ -76,8 +75,18 @@ jobs:
           INIT_GRADLE
           echo "✅ Installed Gradle init script for desugaring"
 
-          # Build with flet (handles SERIOUS_PYTHON_SITE_PACKAGES and other env vars)
+          # First pass materializes Flet's Flutter project. The notification
+          # extension patcher then registers AlarmManager receivers/services.
+          yes | flet build $BUILD_TYPE --verbose || test -d build/flutter
+          flet-android-notifications-patch --project-root build/flutter
           yes | flet build $BUILD_TYPE --verbose
+
+      - name: 🔎 Verify notification manifest wiring
+        run: |
+          MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
+          grep -q "ScheduledNotificationReceiver" "$MANIFEST"
+          grep -q "ScheduledNotificationBootReceiver" "$MANIFEST"
+          grep -q "ActionBroadcastReceiver" "$MANIFEST"
 
       - name: 📋 List build outputs
         if: always()
@@ -98,13 +107,3 @@ jobs:
             build/flutter/build/app/outputs/**/*.aab
           retention-days: 30
           if-no-files-found: warn
-
-      - name: 🏷️ Release APK
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            build/apk/*.apk
-            build/flutter/build/app/outputs/**/*.apk
-          draft: true
-          generate_release_notes: true

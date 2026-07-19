@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import ctypes
 from typing import List
 from models import Assignment
 from config import BASE_DIR
@@ -11,6 +12,25 @@ from core.display_utils import get_type_display, get_urgency_display, urgency_st
 from .base import BaseNotifier
 
 logger = logging.getLogger(__name__)
+
+
+def _packaged_aumid() -> str:
+    """Resolve the current MSIX AUMID, or return an empty string if unpackaged."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        length = ctypes.c_uint32(0)
+        get_family = ctypes.windll.kernel32.GetCurrentPackageFamilyName
+        result = get_family(ctypes.byref(length), None)
+        # APPMODEL_ERROR_NO_PACKAGE
+        if result == 15700 or length.value == 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length.value)
+        if get_family(ctypes.byref(length), buffer) != 0:
+            return ""
+        return f"{buffer.value}!UTHelper"
+    except (AttributeError, OSError):
+        return ""
 
 
 def _get(obj, key, default=''):
@@ -24,7 +44,8 @@ class WindowsNotifier(BaseNotifier):
     def __init__(self, tray_app=None):
         self.tray_app = tray_app
         self.app_id = "UTHelper"
-        self.aumid = "UTHelper.App"
+        self.aumid = _packaged_aumid() or "UTHelper.App"
+        self.is_packaged = self.aumid != "UTHelper.App"
         self.last_error = ""
         self._icon_path = os.path.abspath(os.path.join(BASE_DIR, "src", "assets", "icon.ico"))
         if not os.path.exists(self._icon_path):
@@ -32,10 +53,11 @@ class WindowsNotifier(BaseNotifier):
             if not os.path.exists(self._icon_path):
                 self._icon_path = os.path.abspath(os.path.join(BASE_DIR, "src", "assets", "icon.png"))
 
-        try:
-            self._ensure_shortcut()
-        except Exception as exc:
-            logger.warning("Shortcut AUMID setup failed: %r", exc)
+        if not self.is_packaged:
+            try:
+                self._ensure_shortcut()
+            except Exception as exc:
+                logger.warning("Shortcut AUMID setup failed: %r", exc)
 
     def _ensure_shortcut(self):
         """
@@ -119,6 +141,10 @@ class WindowsNotifier(BaseNotifier):
             toaster = InteractableWindowsToaster(self.app_id, notifierAUMID=self.aumid)
             toast = Toast()
             toast.text_fields = [title, msg]
+            if len(assignments) == 1:
+                activity_url = str(_get(assignments[0], "url", "") or "")
+                if activity_url.startswith(("https://", "http://")):
+                    toast.launch_action = activity_url
             
             toaster.show_toast(toast)
             logger.info(f"[Windows] Đã gửi thông báo: {msg}")

@@ -31,10 +31,10 @@ from gui.view_manager import ViewManager
 logger = logging.getLogger(__name__)
 
 try:
-    from main import __version__
-    APP_VERSION = f"v{__version__}"
+    from core.version import APP_VERSION as _APP_VERSION
+    APP_VERSION = f"v{_APP_VERSION}"
 except ImportError:
-    APP_VERSION = "v2.1.0"
+    APP_VERSION = "v0.0.0"
 
 def _save_setting(key: str, value):
     try:
@@ -313,33 +313,6 @@ class AppController:
             on_click=lambda e: self.page.run_task(self._toggle_grades),
         )
 
-        self._notification_badge_text = ft.Text("0", size=8, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
-        self._notification_badge = ft.Container(
-            content=self._notification_badge_text,
-            bgcolor=ft.Colors.RED,
-            border_radius=8,
-            width=16, height=16,
-            alignment=ft.Alignment(0, 0),
-            visible=False,
-        )
-        self._notification_icon = ft.Stack(
-            controls=[
-                ft.IconButton(
-                    icon=ft.Icons.NOTIFICATIONS_OUTLINED,
-                    icon_color=C.TEXT_SECONDARY,
-                    icon_size=20,
-                    tooltip="Thông báo",
-                    on_click=lambda e: self.page.run_task(self._on_notification_click, e),
-                ),
-                ft.Container(
-                    content=self._notification_badge,
-                    alignment=ft.Alignment(1, -1),
-                    right=2, top=2,
-                ),
-            ],
-            width=40, height=40,
-        )
-
     def _init_banner_and_states(self):
         self._update_icon = ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color="#FCD34D")
         self._update_text = ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", weight=ft.FontWeight.W_500, expand=True)
@@ -412,7 +385,7 @@ class AppController:
                             border_radius=4,
                         ),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self._notification_icon, self.refresh_btn, self.settings_btn], spacing=0),
+                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.status_text,
             ], spacing=4),
@@ -1384,13 +1357,7 @@ class AppController:
                     pass
 
         # Icon buttons
-        notif_btn = None
-        if hasattr(self, '_notification_icon') and len(self._notification_icon.controls) > 0:
-            notif_btn = self._notification_icon.controls[0]
-
         buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
-        if notif_btn:
-            buttons_to_update.append(notif_btn)
 
         for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
@@ -1570,135 +1537,15 @@ class AppController:
                 pass
 
     async def _open_update_url(self, e):
-        """Smart update: auto-download trên Windows/Android, browser trên iOS/other."""
-        from core.update_checker import _is_windows, _is_android
-
+        """Open a platform installer from a verified published release."""
         asset_url = getattr(self, "_update_asset_url", "")
         release_url = getattr(self, "_update_release_url", "")
-
-        # Windows: download .zip → batch updater → restart
-        if _is_windows() and asset_url and asset_url.endswith(".zip"):
-            await self._do_auto_update_windows(asset_url)
-            return
-
-        # Android: download .apk → install intent
-        if _is_android() and asset_url and asset_url.endswith(".apk"):
-            await self._do_auto_update_android(asset_url)
-            return
-
-        # Fallback: open browser
         url = asset_url or release_url
         if url:
             try:
                 self.page.launch_url(url)
             except Exception:
                 import webbrowser; webbrowser.open(url)
-
-    async def _do_auto_update_windows(self, url: str):
-        """Download .zip and apply via batch updater (Windows)."""
-        import sys
-        import asyncio
-        from core.update_checker import download_update, apply_update_windows
-
-        # Switch banner to download state
-        self._update_icon.name = ft.Icons.DOWNLOADING_ROUNDED
-        self._update_icon.color = "#60A5FA"
-        self._update_text.value = "Đang tải xuống... 0%"
-        self._update_btn.visible = False
-        self._update_progress.visible = True
-        self._update_progress.value = 0
-        self.page.update()
-
-        def _progress(pct):
-            async def _upd():
-                self._update_text.value = f"Đang tải xuống... {int(pct * 100)}%"
-                self._update_progress.value = pct
-                self.page.update()
-            try: self.page.run_task(_upd)
-            except Exception: pass
-
-        zip_path = await asyncio.to_thread(download_update, url, _progress)
-
-        if zip_path:
-            self._update_icon.name = ft.Icons.INSTALL_DESKTOP_ROUNDED
-            self._update_icon.color = C.SAFE
-            self._update_text.value = "Đang cài đặt... Ứng dụng sẽ khởi động lại."
-            self._update_progress.value = 1.0
-            self.page.update()
-            await asyncio.sleep(0.5)
-
-            success = apply_update_windows(zip_path)
-            if success:
-                sys.exit(0)
-            else:
-                self._update_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
-                self._update_icon.color = C.CRITICAL
-                self._update_text.value = "Cập nhật thất bại. Vui lòng tải thủ công."
-                self._update_btn.visible = True
-                self._update_btn.text = "Tải thủ công"
-                self._update_btn.icon = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._update_progress.visible = False
-                self.page.update()
-        else:
-            self._update_icon.name = ft.Icons.CLOUD_OFF_ROUNDED
-            self._update_icon.color = C.CRITICAL
-            self._update_text.value = "Tải xuống thất bại."
-            self._update_btn.visible = True
-            self._update_btn.text = "Thử lại"
-            self._update_btn.icon = ft.Icons.REFRESH_ROUNDED
-            self._update_progress.visible = False
-            self.page.update()
-
-    async def _do_auto_update_android(self, url: str):
-        """Download .apk and trigger install intent (Android)."""
-        import asyncio
-        from core.update_checker import download_update, apply_update_android
-
-        # Switch banner to download state
-        self._update_icon.name = ft.Icons.DOWNLOADING_ROUNDED
-        self._update_icon.color = "#60A5FA"
-        self._update_text.value = "Đang tải APK... 0%"
-        self._update_btn.visible = False
-        self._update_progress.visible = True
-        self._update_progress.value = 0
-        self.page.update()
-
-        def _progress(pct):
-            async def _upd():
-                self._update_text.value = f"Đang tải APK... {int(pct * 100)}%"
-                self._update_progress.value = pct
-                self.page.update()
-            try: self.page.run_task(_upd)
-            except Exception: pass
-
-        apk_path = await asyncio.to_thread(download_update, url, _progress)
-
-        if apk_path:
-            self._update_icon.name = ft.Icons.INSTALL_MOBILE_ROUNDED
-            self._update_icon.color = C.SAFE
-            self._update_text.value = "Đang mở trình cài đặt..."
-            self._update_progress.value = 1.0
-            self.page.update()
-            await asyncio.sleep(0.3)
-
-            success = apply_update_android(apk_path)
-            if not success:
-                self._update_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._update_icon.color = C.WARNING
-                self._update_text.value = "Mở trình duyệt để tải..."
-                self._update_progress.visible = False
-                self.page.update()
-                try: self.page.launch_url(url)
-                except Exception: pass
-        else:
-            self._update_icon.name = ft.Icons.CLOUD_OFF_ROUNDED
-            self._update_icon.color = C.CRITICAL
-            self._update_text.value = "Tải APK thất bại."
-            self._update_btn.visible = True
-            self._update_btn.text = "Thử lại"
-            self._update_btn.icon = ft.Icons.REFRESH_ROUNDED
-            self._update_progress.visible = False
-            self.page.update()
 
 
     def _on_settings_saved(self):
@@ -1872,25 +1719,6 @@ class AppController:
                 await self._load_data_async()
             except Exception:
                 pass
-
-    async def _update_notification_badge(self):
-        """Fetch unread notification count and update badge."""
-        try:
-            userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
-            if userid is None:
-                userid = self.orchestrator.moodle_service.get_current_user_id()
-            if userid:
-                count = self.orchestrator.moodle_service.get_unread_notification_count(userid)
-                self._notification_badge_text.value = str(count) if count <= 9 else "9+"
-                self._notification_badge.visible = count > 0
-                self.page.update()
-        except Exception as e:
-            logger.debug("Badge update failed: %s", e)
-
-    async def _on_notification_click(self, e):
-        """Open Moodle notifications in browser."""
-        import webbrowser
-        webbrowser.open("https://courses.ut.edu.vn/message/index.php")
 
     def _on_disconnect(self, e):
         self._page_alive.clear()

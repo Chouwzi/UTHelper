@@ -120,3 +120,19 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Removed the Moodle unread badge call from the activity refresh path and made
   background refresh independent of the visible dashboard.
 - Validation: `ruff check src tests` passed; 51 targeted tests passed.
+
+# 2026-07-19 - Signed release updater and truthful background capability
+
+- Replaced extension-based GitHub asset selection with typed, platform-aware
+  release metadata and semantic version comparison.
+- Added atomic size/SHA-256 verification for update downloads and made
+  `pyproject.toml` the runtime version source.
+- Added a tag-only release pipeline for signed APK/MSIX artifacts, a generated
+  release manifest, and a stable Windows AppInstaller document on GitHub Pages.
+- Removed the ZIP/batch Windows updater and Python/pyjnius Android installer.
+- Removed the Moodle unread-notification badge and the Android periodic
+  notification that claimed to poll deadlines without fetching activity data.
+- Added ADR 0003 for the signing/update boundary and the explicit WorkManager
+  capability gap.
+- Validation: `ruff check src tests` passed; full suite reached **336 passed,
+  22 skipped**.

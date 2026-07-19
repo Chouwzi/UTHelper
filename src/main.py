@@ -14,7 +14,9 @@ try:
 except ImportError:
     pass  # certifi not available on desktop (uses system certs)
 
-__version__ = "2.1.0"
+from core.version import APP_VERSION
+
+__version__ = APP_VERSION
 
 # Crash-safe startup logging
 # This MUST run before ANY project imports to capture import crashes.

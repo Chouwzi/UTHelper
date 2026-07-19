@@ -71,6 +71,26 @@ def test_dnd_cross_midnight_and_schedule_moves_to_end():
     assert reminders == []
 
 
+def test_full_day_dnd_omits_all_native_schedules():
+    policy = ActivityNotificationPolicy(
+        NotificationPolicyConfig(
+            milestones=(24,), dnd_enabled=True, dnd_start=7, dnd_end=7
+        )
+    )
+    reminders = policy.desired_schedules(
+        [_activity()], now=datetime(2026, 7, 20, 10)
+    )
+    assert reminders == []
+
+
+def test_activity_pipeline_does_not_use_moodle_notification_feed():
+    from inspect import getsource
+
+    from notifiers.manager import NotificationManager
+
+    assert "get_unread_notification_count" not in getsource(NotificationManager)
+
+
 def test_due_candidate_uses_milestone_once():
     policy = ActivityNotificationPolicy(
         NotificationPolicyConfig(milestones=(72, 24, 3))
@@ -151,4 +171,3 @@ def test_cancel_activity_only_removes_matching_native_schedules(tmp_path):
     asyncio.run(notifier.reconcile_schedules(reminders))
     assert asyncio.run(notifier.cancel_activity("42")) == 1
     assert backend.cancelled == [101]
-
