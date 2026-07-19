@@ -155,8 +155,12 @@ class Settings(BaseModel):
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
-    CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất kiểm tra thông báo tự động (phút)")
-    POLL_INTERVAL_MINUTES: int = Field(default=15, description="Tần suất kiểm tra tự động (phút)")
+    SETTINGS_SCHEMA_VERSION: int = Field(default=2, description="Phiên bản schema cài đặt")
+    CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
+    # Deprecated compatibility fields. Runtime scheduling uses only
+    # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
+    # settings file can still be read without silently losing its values.
+    POLL_INTERVAL_MINUTES: int = Field(default=15, description="[Deprecated] Tần suất poll cũ (phút)")
     SMART_POLL_ENABLED: bool = Field(default=True, description="Bật chế độ poll thông minh (chỉ fetch khi có thay đổi)")
     FETCH_MONTHS: int = Field(default=1, description="Số tháng lấy sự kiện từ lịch (1-3 tháng)")
 
@@ -172,7 +176,7 @@ class Settings(BaseModel):
 
     # Android background notifications (AlarmManager)
     BACKGROUND_CHECK_ANDROID: bool = Field(default=True, description="Kiểm tra deadline nền trên Android (AlarmManager)")
-    BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="Tần suất đồng bộ activity nền (phút, tối thiểu 15)")
+    BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="[Deprecated] Tần suất Android cũ (phút)")
 
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")
@@ -224,6 +228,35 @@ class Settings(BaseModel):
     DETAIL_CACHE_TTL_SECONDS: int = Field(default=1800, description="Thời gian giữ cache chi tiết hoạt động (giây)")
     DETAIL_CACHE_MAX_ENTRIES: int = Field(default=100, description="Số hoạt động chi tiết tối đa giữ trong RAM")
 
+def migrate_settings_data(raw: dict) -> dict:
+    """Migrate legacy refresh settings to one canonical interval.
+
+    Explicit ``CHECK_INTERVAL_MINUTES`` always wins. Older installations that
+    predate it fall back to the poll interval and finally the Android interval.
+    Legacy keys are intentionally preserved during this compatibility window.
+    """
+    data = dict(raw or {})
+    if "CHECK_INTERVAL_MINUTES" not in data:
+        legacy_value = data.get("POLL_INTERVAL_MINUTES")
+        if legacy_value is None:
+            legacy_value = data.get("BACKGROUND_CHECK_INTERVAL", 60)
+        try:
+            data["CHECK_INTERVAL_MINUTES"] = max(0, int(legacy_value))
+        except (TypeError, ValueError):
+            data["CHECK_INTERVAL_MINUTES"] = 60
+    data["SETTINGS_SCHEMA_VERSION"] = 2
+    return data
+
+
+def get_sync_interval_minutes(value=None) -> int:
+    """Return the single effective interval used by every Python scheduler."""
+    candidate = settings.CHECK_INTERVAL_MINUTES if value is None else value
+    try:
+        return max(0, int(candidate))
+    except (TypeError, ValueError):
+        return 60
+
+
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:
     _logger = logging.getLogger(__name__)
@@ -240,7 +273,7 @@ def load_settings() -> Settings:
                 val = data.pop(key, None)
                 if val and isinstance(val, str):
                     json_secrets[key] = val
-            s = Settings(**data)
+            s = Settings(**migrate_settings_data(data))
         except Exception as e:
             _logger.warning(f"Failed to parse settings values: {e}")
 

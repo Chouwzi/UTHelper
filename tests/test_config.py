@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from config import Settings, _SECRET_FIELDS
+from config import Settings, _SECRET_FIELDS, migrate_settings_data
 
 
 class TestSettingsDefaults:
@@ -105,6 +105,19 @@ class TestSettingsSerialization:
         assert s.POLL_INTERVAL_MINUTES == 30
         assert s.SMART_POLL_ENABLED is False
         assert s.THEME == "ocean_teal"
+
+    def test_explicit_check_interval_wins_legacy_values(self):
+        migrated = migrate_settings_data({
+            "CHECK_INTERVAL_MINUTES": 180,
+            "POLL_INTERVAL_MINUTES": 15,
+            "BACKGROUND_CHECK_INTERVAL": 30,
+        })
+        assert migrated["CHECK_INTERVAL_MINUTES"] == 180
+
+    def test_legacy_poll_interval_migrates_when_check_missing(self):
+        migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
+        assert migrated["CHECK_INTERVAL_MINUTES"] == 360
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 2
 
 
 class TestSecretFieldsMapping:

@@ -17,7 +17,9 @@ from notifiers.manager import NotificationManager
 import threading
 
 from core.data_orchestrator import DataOrchestrator
-from config import settings
+from core.activity_time_policy import ActivityTimePolicy
+from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
+from config import get_sync_interval_minutes, settings
 
 from gui.core.theme import C
 from core.filter_service import FilterService
@@ -55,7 +57,13 @@ class AppController:
         
         self.orchestrator = DataOrchestrator()
         from core.data_cache import DataCache
-        self._data_cache = DataCache()
+        self._data_cache = DataCache(namespace=settings.UTH_USERNAME or None)
+        self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        self._last_successful_sync_at = None
+        self._time_policy = ActivityTimePolicy(
+            settings.URGENCY_CRITICAL_HOURS,
+            settings.URGENCY_WARNING_HOURS,
+        )
         
         self.all_data = []
         self.active_cards = []
@@ -74,6 +82,12 @@ class AppController:
 
         self._init_window()
         self._init_ui()
+        self._load_cached_snapshot()
+        self._sync_coordinator = ActivitySyncCoordinator(
+            self._perform_data_sync,
+            interval_provider=get_sync_interval_minutes,
+            last_success_provider=lambda: self._last_successful_sync_at,
+        )
         
         # Events
         self.page.on_disconnect = self._on_disconnect
@@ -84,7 +98,7 @@ class AppController:
             self.page.on_view_pop = self._on_back_button
         self.page.run_task(self._pulse_loop_async)
         self.page.run_task(self._countdown_loop_async)
-        self.page.run_task(self._auto_refresh_loop_async)
+        self.page.run_task(self._sync_coordinator.run)
         self._tray_balloon_shown = False  # H-01: only show once
         
         # Check update in background
@@ -93,8 +107,8 @@ class AppController:
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self.page.run_task(self._show_login_dialog)
-        else:
-            self.page.run_task(self._load_data_async)
+        # With credentials, the coordinator waits until cache age + the
+        # one-minute startup grace are due. Manual refresh remains immediate.
 
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
@@ -902,7 +916,66 @@ class AppController:
             self.loading_bar.visible = False
             self.page.update()
 
+    def _refresh_activity_time_state(self) -> bool:
+        """Recompute volatile urgency from absolute deadlines and current time."""
+        self._time_policy = ActivityTimePolicy(
+            settings.URGENCY_CRITICAL_HOURS,
+            settings.URGENCY_WARNING_HOURS,
+        )
+        changed = False
+        with self._data_lock:
+            refreshed = []
+            for item in self.all_data:
+                updated = self._time_policy.refresh(item)
+                changed = changed or updated.get("urgency") != item.get("urgency")
+                refreshed.append(updated)
+            if changed:
+                refreshed.sort(
+                    key=lambda item: (
+                        0
+                        if item.get("urgency") == "critical"
+                        else 1
+                        if item.get("urgency") == "warning"
+                        else 2,
+                        item.get("deadline", ""),
+                    )
+                )
+            self.all_data = refreshed
+        return changed
+
+    def _load_cached_snapshot(self) -> bool:
+        """Render local activities immediately without starting a Moodle call."""
+        snapshot = self._data_cache.load_snapshot()
+        self._last_successful_sync_at = parse_timestamp(
+            snapshot.last_successful_sync_at
+        )
+        if not snapshot.activities:
+            return False
+        with self._data_lock:
+            self.all_data = list(snapshot.activities)
+        self._refresh_activity_time_state()
+        for item in self.all_data:
+            deadline = item.get("deadline", "")
+            if deadline:
+                item["_deadline_dt"] = parse_datetime(deadline)
+            item["_title_lower"] = str(item.get("title", "")).lower()
+            item["_course_lower"] = str(item.get("course", "")).lower()
+        self.status_text.value = (
+            f"Dữ liệu đã lưu · {len(self.all_data)} hoạt động"
+        )
+        self.loading_bar.visible = False
+        self._update_footer()
+        self.page.update()
+        return True
+
     async def _load_data_async(self):
+        """Manual refresh entry point; concurrent callers share one fetch."""
+        coordinator = getattr(self, "_sync_coordinator", None)
+        if coordinator is None:
+            return await self._perform_data_sync("manual")
+        return await coordinator.request("manual", force=True)
+
+    async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading: return
         self._is_loading = True
         self._prefetch_cancel_event.set()
@@ -944,11 +1017,18 @@ class AppController:
             import time
             fetch_start_time = time.time()
             
-            # Ưu tiên async WS API (non-blocking), fallback sync in thread
-            if hasattr(self.orchestrator, 'get_latest_activities_async'):
+            # A failed or partial result must never replace the last good cache.
+            if hasattr(self.orchestrator, "fetch_activity_outcome_async"):
+                outcome = await self.orchestrator.fetch_activity_outcome_async()
+            elif hasattr(self.orchestrator, "get_latest_activities_async"):
                 result = await self.orchestrator.get_latest_activities_async()
+                outcome = FetchOutcome.complete(result or [])
             else:
                 result = await asyncio.to_thread(self.orchestrator.get_latest_activities)
+                outcome = FetchOutcome.complete(result or [])
+            if not outcome.can_commit:
+                raise RuntimeError(outcome.error or "Incomplete Moodle activity snapshot")
+            result = outcome.activities
             with self._data_lock:
                 self.all_data = result or []
             
@@ -1013,7 +1093,12 @@ class AppController:
                 self.all_data = data_copy
 
             # Lưu cache offline
-            self._data_cache.save(data_copy)
+            self._data_cache.save_server_snapshot(data_copy)
+            saved_snapshot = self._data_cache.load_snapshot()
+            self._last_successful_sync_at = (
+                parse_timestamp(saved_snapshot.last_successful_sync_at)
+                or time.time()
+            )
             # P3: Tính tiến độ nộp bài - positive reinforcement
             submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
             total_count = len(data_copy)
@@ -1058,16 +1143,14 @@ class AppController:
             with self._data_lock:
                 prefetch_copy = list(self.all_data)
             self.page.run_task(self._prefetch_details_async, prefetch_copy)
-
-
-            # Start auto-poll if not already running
-            if not hasattr(self, '_auto_poll_task') or self._auto_poll_task is None:
-                self._auto_poll_task = self.page.run_task(self._auto_poll_loop)
-
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
         except Exception as exc:
             logger.exception(f"[Load] Lỗi: {exc}")
+            try:
+                self._data_cache.record_failed_attempt(str(exc))
+            except Exception:
+                pass
             with self._data_lock:
                 self.all_data = []
             
@@ -1088,34 +1171,6 @@ class AppController:
             self.refresh_btn.disabled = False
             self._is_loading          = False
             self.page.update()
-
-    async def _auto_poll_loop(self):
-        """Background loop that periodically refreshes data based on POLL_INTERVAL_MINUTES."""
-        logger.info("[AutoPoll] Started with interval=%d min", getattr(settings, 'POLL_INTERVAL_MINUTES', 15))
-        while self._page_alive.is_set():
-            interval = getattr(settings, 'POLL_INTERVAL_MINUTES', 15) * 60
-            await asyncio.sleep(interval)
-            if not self._page_alive.is_set():
-                break
-            if self._is_loading:
-                logger.debug("[AutoPoll] Skipping - another load in progress")
-                continue
-            logger.info("[AutoPoll] Running periodic refresh...")
-            try:
-                # Smart poll: check if anything changed first
-                if getattr(settings, 'SMART_POLL_ENABLED', True):
-                    changed = self.orchestrator.get_updates_since(
-                        self.orchestrator._last_fetch_ts
-                    )
-                    if changed is not None and len(changed) == 0:
-                        logger.info("[AutoPoll] No changes detected, skipping full fetch")
-                        continue
-                    if changed:
-                        logger.info("[AutoPoll] %d courses changed, doing full fetch", len(changed))
-                await self._load_data_async()
-            except Exception as e:
-                logger.error("[AutoPoll] Error: %s", e)
-        logger.info("[AutoPoll] Loop ended")
 
     async def _close_detail(self):
         from_calendar = getattr(self, '_detail_from_calendar', False)
@@ -1436,9 +1491,11 @@ class AppController:
             self.page.show_dialog(sb)
         except (AttributeError, TypeError):
             # Fallback for older Flet
-            self.page.overlay.append(sb)
-            sb.open = True
-            self.page.update()
+            overlay = getattr(self.page, "overlay", None)
+            if overlay is not None:
+                overlay.append(sb)
+                sb.open = True
+                self.page.update()
 
     def _test_notification_base(self, mock_type="critical"):
         import random
@@ -1550,20 +1607,31 @@ class AppController:
 
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
-        
-        # Clear all caches to avoid using stale tokens/data from previous credentials
-        try:
-            self.orchestrator.moodle_service.clear_all_caches()
-            self.orchestrator.clear_detail_cache()
-            self.orchestrator._userid_cache = None
-            self.orchestrator.is_logged_in = False
-        except Exception:
-            pass
+
+        new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        credentials_changed = new_identity != self._settings_identity
+        if credentials_changed:
+            # Credentials are the only settings change that requires immediate
+            # network reload and an account-specific cache namespace.
+            try:
+                self.orchestrator.moodle_service.clear_all_caches()
+                self.orchestrator.clear_detail_cache()
+                self.orchestrator._userid_cache = None
+                self.orchestrator.is_logged_in = False
+            except Exception:
+                pass
+            from core.data_cache import DataCache
+
+            self._data_cache = DataCache(namespace=settings.UTH_USERNAME or None)
+            self._settings_identity = new_identity
 
         load_theme_from_settings()
         set_page_theme(self.page)
         self._rebuild_colors()
-        self._needs_reload = True
+        self._needs_reload = credentials_changed
+        coordinator = getattr(self, "_sync_coordinator", None)
+        if coordinator is not None:
+            coordinator.wake()
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
@@ -1606,7 +1674,7 @@ class AppController:
             
             # 2. Lưu cache đĩa để không bị mất khi restart app
             try:
-                self._data_cache.save(data_copy)
+                self._data_cache.save_local_activities(data_copy)
             except Exception:
                 pass
 
@@ -1697,32 +1765,21 @@ class AppController:
             if not self.dashboard.visible:
                 continue
             try:
+                if self._refresh_activity_time_state():
+                    self._render_cards_only()
+                    continue
                 with self._cards_lock:
                     cards_snapshot = list(self.active_cards)
                 self._countdown_cards_once(cards_snapshot)
             except Exception:
                 pass
 
-    async def _auto_refresh_loop_async(self):
-        while self._page_alive.is_set():
-            interval = settings.CHECK_INTERVAL_MINUTES
-            target_sleep = 60 if interval <= 0 else interval * 60
-            slept = 0
-            while slept < target_sleep and self._page_alive.is_set():
-                await asyncio.sleep(2)
-                slept += 2
-                
-            if not self._page_alive.is_set() or interval <= 0:
-                continue
-                
-            try:
-                await self._load_data_async()
-            except Exception:
-                pass
-
     def _on_disconnect(self, e):
         self._page_alive.clear()
         self._prefetch_cancel_event.set()
+        coordinator = getattr(self, "_sync_coordinator", None)
+        if coordinator is not None:
+            coordinator.close()
         try:
             self.orchestrator.client.close()
         except Exception:

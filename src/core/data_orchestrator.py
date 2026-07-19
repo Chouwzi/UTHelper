@@ -428,6 +428,18 @@ class DataOrchestrator:
         logger.error("Không thể lấy dữ liệu async từ WS API.")
         return []
 
+    async def fetch_activity_outcome_async(self):
+        """Return a typed result so failure cannot masquerade as an empty feed."""
+        from core.sync_coordinator import FetchOutcome
+
+        try:
+            ws_result = await self._fetch_via_ws_api_async()
+        except Exception as exc:
+            return FetchOutcome.failed(str(exc))
+        if ws_result is None:
+            return FetchOutcome.failed("Moodle activity fetch failed")
+        return FetchOutcome.complete(ws_result)
+
 
 
 

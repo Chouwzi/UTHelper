@@ -72,6 +72,12 @@ async def test_app_controller_submission_race_condition():
             ]
         
         controller.orchestrator.get_latest_activities_async = mock_get_latest
+        async def mock_outcome():
+            from core.sync_coordinator import FetchOutcome
+
+            return FetchOutcome.complete(await mock_get_latest())
+
+        controller.orchestrator.fetch_activity_outcome_async = mock_outcome
         
         # 1. Kích hoạt cập nhật ngầm (sẽ gọi mock_get_latest)
         refresh_task = asyncio.create_task(controller._load_data_async())

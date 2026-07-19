@@ -29,40 +29,26 @@ def init_system_controls(view):
         label="Đồng bộ hoạt động nền (Android, best-effort)",
         on_change=lambda e: view._toggle_bg_check_ui()
     )
-    view._bg_interval_field = ft.TextField(
-        value=str(settings.BACKGROUND_CHECK_INTERVAL),
-        label="Tần suất đồng bộ nền (phút, tối thiểu 15)",
-        text_size=13,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        border_color=C.BORDER, focused_border_color=C.ACCENT,
-        color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
-        width=200,
-        visible=settings.BACKGROUND_CHECK_ANDROID,
-    )
     
     # Đồng bộ hóa dữ liệu Moodle chung
-    view._interval_field = ft.TextField(
+    interval_options = [
+        ft.dropdown.Option("0", "Tắt tự động"),
+        ft.dropdown.Option("60", "Mỗi 1 giờ (mặc định)"),
+        ft.dropdown.Option("180", "Mỗi 3 giờ"),
+        ft.dropdown.Option("360", "Mỗi 6 giờ"),
+    ]
+    current_interval = str(settings.CHECK_INTERVAL_MINUTES)
+    if current_interval not in {"0", "60", "180", "360"}:
+        interval_options.append(
+            ft.dropdown.Option(current_interval, f"Tùy chỉnh cũ: {current_interval} phút")
+        )
+    view._interval_field = ft.Dropdown(
         value=str(settings.CHECK_INTERVAL_MINUTES),
-        label="Cập nhật mỗi X phút (0 để tắt)",
-        keyboard_type=ft.KeyboardType.NUMBER,
+        label="Tần suất đồng bộ hoạt động",
+        options=interval_options,
         border_color=C.BORDER, focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY,
         bgcolor=C.BG, border_radius=10,
-    )
-    view._dd_poll_interval = ft.Dropdown(
-        label="Tần suất kiểm tra tự động",
-        value=str(getattr(settings, 'POLL_INTERVAL_MINUTES', 15)),
-        options=[
-            ft.dropdown.Option("5", "5 phút"),
-            ft.dropdown.Option("10", "10 phút"),
-            ft.dropdown.Option("15", "15 phút (mặc định)"),
-            ft.dropdown.Option("30", "30 phút"),
-            ft.dropdown.Option("60", "1 giờ"),
-        ],
-        text_size=13, color=C.TEXT_PRIMARY,
-        border_color=C.BORDER, focused_border_color=C.ACCENT,
-        bgcolor=C.BG, border_radius=10,
-        width=250,
     )
     # Cấu hình số lượng tháng lịch cần quét sự kiện
     view._fetch_months_field = ft.TextField(
@@ -81,9 +67,7 @@ def build_system_section(view) -> ft.Container:
             view._sw_start_with_windows, view._sw_start_minimized, view._sw_minimize_to_tray,
             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._interval_field,
-            view._build_hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
-            view._dd_poll_interval,
-            view._build_hint("Tần suất kiểm tra tự động dữ liệu mới."),
+            view._build_hint("Dùng chung cho foreground, Windows tray và Android background."),
             view._fetch_months_field,
             view._build_hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
         ]
@@ -92,15 +76,12 @@ def build_system_section(view) -> ft.Container:
     else:
         controls = [
             view._interval_field,
-            view._build_hint("Đặt 0 để tắt tự động cập nhật. Mặc định: 60 phút."),
-            view._dd_poll_interval,
-            view._build_hint("Tần suất kiểm tra tự động dữ liệu mới."),
+            view._build_hint("Dùng cùng một chu kỳ khi app mở hoặc chạy nền."),
             view._fetch_months_field,
             view._build_hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)"),
             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._sw_bg_check,
-            view._bg_interval_field,
-            view._build_hint("Kiểm tra deadline nền qua AlarmManager (tối thiểu 5 phút). Dưới 15 phút có thể bị delay bởi chế độ tiết kiệm pin."),
+            view._build_hint("Android dùng chu kỳ đồng bộ ở trên khi worker native khả dụng."),
         ]
         title = "Cập nhật"
         subtitle = "Tần suất kiểm tra"

@@ -925,9 +925,9 @@ class SettingsView(ft.Container):
         self._safe_update(self._tel_token_field, self._tel_chat_field)
 
     def _toggle_bg_check_ui(self):
-        v = self._sw_bg_check.value
-        self._bg_interval_field.visible = v
-        self._safe_update(self._bg_interval_field)
+        # The Android capability toggle no longer owns a separate interval.
+        # CHECK_INTERVAL_MINUTES is the sole schedule source on every platform.
+        return None
 
     def _toggle_debug_ui(self):
         self._test_panel.visible = self._sw_debug.value
@@ -973,7 +973,7 @@ class SettingsView(ft.Container):
             f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
             f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
             f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
-            f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.BACKGROUND_CHECK_INTERVAL}m)",
+            f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.CHECK_INTERVAL_MINUTES}m)",
             f"DND: {'ON' if cfg.NOTIFY_DND_ENABLE else 'OFF'} ({cfg.NOTIFY_DND_START}h-{cfg.NOTIFY_DND_END}h)",
         ]
         self._debug_info_text.value = "\n".join(lines)
@@ -1094,6 +1094,10 @@ class SettingsView(ft.Container):
                 f"Đã đọc / phù hợp: {diagnostics.activities_seen} / {diagnostics.activities_matched}",
                 f"Đã gửi / bỏ qua: {diagnostics.delivered} / {diagnostics.skipped}",
                 f"Đã schedule / hủy: {diagnostics.scheduled} / {diagnostics.cancelled}",
+                f"Đang chờ native schedule: {diagnostics.pending_schedules}",
+                f"Native schedule đã phát: {diagnostics.scheduled_delivered}",
+                "Lần native schedule phát gần nhất: "
+                f"{diagnostics.last_scheduled_delivery_at or 'chưa có'}",
                 f"Lỗi gần nhất: {diagnostics.last_error or 'không có'}",
             ]
             self._debug_scheduler_status.value = "\n".join(lines)
@@ -1298,7 +1302,7 @@ class SettingsView(ft.Container):
             try:
                 from config import settings as cfg
                 lines.append(f"\nBackground check: {'BẬT' if cfg.BACKGROUND_CHECK_ANDROID else 'TẮT'}")
-                lines.append(f"Interval: {cfg.BACKGROUND_CHECK_INTERVAL} phút")
+                lines.append(f"Interval: {cfg.CHECK_INTERVAL_MINUTES} phút")
             except Exception:
                 pass
 
@@ -1629,7 +1633,6 @@ class SettingsView(ft.Container):
             self._sw_start_minimized.value = settings.START_MINIMIZED
             self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
         self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
-        self._bg_interval_field.value = str(settings.BACKGROUND_CHECK_INTERVAL)
         self._toggle_bg_check_ui()
         self._sw_email.value = settings.ENABLE_GMAIL
         self._sw_discord.value = getattr(settings, 'ENABLE_DISCORD', False)
@@ -1642,7 +1645,6 @@ class SettingsView(ft.Container):
         self._tel_chat_field.value = settings.TELEGRAM_CHAT_ID
         self._toggle_telegram_ui()
         self._interval_field.value = str(settings.CHECK_INTERVAL_MINUTES)
-        self._dd_poll_interval.value = str(getattr(settings, 'POLL_INTERVAL_MINUTES', 15))
         self._fetch_months_field.value = str(settings.FETCH_MONTHS)
         self._critical_hours_field.value = str(settings.URGENCY_CRITICAL_HOURS)
         self._warning_hours_field.value = str(settings.URGENCY_WARNING_HOURS)
@@ -1727,7 +1729,6 @@ class SettingsView(ft.Container):
             if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
             if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
         if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
-        if self._bg_interval_field.value != str(settings.BACKGROUND_CHECK_INTERVAL): return True
         if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
         if self._sw_discord.value != getattr(settings, 'ENABLE_DISCORD', False): return True
         if getattr(self, '_gmail_addr_field', None) and self._gmail_addr_field.value != getattr(settings, 'GMAIL_ADDRESS', ''): return True
@@ -1837,7 +1838,6 @@ class SettingsView(ft.Container):
             settings.INCLUDE_SUBMITTED       = self._sw_submitted.value
             settings.INCLUDE_GRADED          = self._sw_graded.value
             settings.CHECK_INTERVAL_MINUTES  = max(0, int(self._interval_field.value or "60"))
-            settings.POLL_INTERVAL_MINUTES   = max(5, int(self._dd_poll_interval.value or "15"))
             settings.FETCH_MONTHS            = max(1, min(int(self._fetch_months_field.value or "1"), 3))
             settings.URGENCY_CRITICAL_HOURS  = max(1, int(self._critical_hours_field.value or "24"))
             settings.URGENCY_WARNING_HOURS   = max(1, int(self._warning_hours_field.value or "72"))
@@ -1868,7 +1868,6 @@ class SettingsView(ft.Container):
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
 
             settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
-            settings.BACKGROUND_CHECK_INTERVAL = max(15, int(self._bg_interval_field.value or "30"))
 
             settings.ENABLE_GMAIL            = self._sw_email.value
             settings.ENABLE_DISCORD          = self._sw_discord.value
