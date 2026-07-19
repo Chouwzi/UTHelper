@@ -186,9 +186,26 @@ def test_immediate_android_notification_uses_stable_activity_milestone_id(tmp_pa
 
     assert asyncio.run(notifier.notify([value])) is True
     assert backend.shown[0]["notification_id"] == stable_notification_id(
-        value.key, 3
+        value.key, 180
     )
     assert backend.shown[0]["payload"] == value.url
+
+
+def test_canonical_minute_milestones_support_multiple_final_reminders():
+    policy = ActivityNotificationPolicy(
+        NotificationPolicyConfig(milestone_minutes=(60, 30, 5))
+    )
+    now = datetime(2026, 7, 20, 12)
+    activity = _activity(deadline=now + timedelta(hours=2))
+
+    reminders = policy.desired_schedules([activity], now)
+
+    assert [item.milestone for item in reminders] == [5, 30, 60]
+    assert [item.scheduled_at for item in reminders] == [
+        activity.deadline - timedelta(minutes=5),
+        activity.deadline - timedelta(minutes=30),
+        activity.deadline - timedelta(minutes=60),
+    ]
 
 
 def test_android_notification_tap_opens_activity_payload(tmp_path):

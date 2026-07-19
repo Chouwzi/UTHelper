@@ -94,6 +94,12 @@ class NotificationManager:
                 ignore_submitted=bool(
                     getattr(config, "NOTIFY_IGNORE_SUBMITTED", True)
                 ),
+                milestone_minutes=tuple(
+                    int(value)
+                    for value in (
+                        getattr(config, "NOTIFY_MILESTONES_MINUTES", ()) or ()
+                    )
+                ),
                 milestones=tuple(
                     int(value)
                     for value in (getattr(config, "NOTIFY_MILESTONES", ()) or ())
@@ -209,6 +215,7 @@ class NotificationManager:
 
         # BUG-09 fix: Load cache once for the entire dispatch cycle
         cache = self._load_cache()
+        await self._merge_native_receipts(cache)
 
         # Lọc lại xem cái nào thực sự cần bắn thông báo
         to_notify_items = self._filter_assignments(assignments, cache)
@@ -253,6 +260,43 @@ class NotificationManager:
             logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
         return result
 
+    async def _merge_native_receipts(self, cache: Dict) -> None:
+        """Merge receipts emitted while the foreground process was sleeping."""
+        changed = False
+        for notifier in self.notifiers:
+            consume = getattr(notifier, "consume_delivery_receipts", None)
+            if not consume:
+                continue
+            try:
+                receipts = consume()
+                if inspect.isawaitable(receipts):
+                    receipts = await receipts
+            except Exception as exc:
+                self._diagnostics_state().last_error = str(exc)
+                logger.warning("Cannot consume native notification receipts: %s", exc)
+                continue
+            if not isinstance(receipts, (list, tuple)):
+                continue
+            for receipt in receipts:
+                activity_key = str(receipt.get("activity_key", ""))
+                milestone = receipt.get("milestone")
+                if not activity_key or milestone is None:
+                    continue
+                entry = cache.setdefault(
+                    activity_key,
+                    {"milestones": [], "updated_at": datetime.now().isoformat()},
+                )
+                revision = str(receipt.get("deadline_revision", ""))
+                if entry.get("deadline_revision") not in (None, "", revision):
+                    entry["milestones"] = []
+                entry["deadline_revision"] = revision
+                if milestone not in entry.setdefault("milestones", []):
+                    entry["milestones"].append(milestone)
+                entry["updated_at"] = datetime.now().isoformat()
+                changed = True
+        if changed:
+            self._save_cache(cache)
+
     async def reconcile_schedules(self, assignments: List[Any]) -> ScheduleResult:
         """Reconcile platform-native reminders after a successful activity fetch."""
         activities = [ActivityNotification.from_value(value) for value in assignments]
@@ -296,7 +340,36 @@ class NotificationManager:
 
     def get_diagnostics(self) -> NotificationDiagnostics:
         diagnostics = self._diagnostics_state()
-        return NotificationDiagnostics(**vars(diagnostics))
+        snapshot = NotificationDiagnostics(**vars(diagnostics))
+        for notifier in self.notifiers:
+            adapter_diagnostics = getattr(notifier, "get_diagnostics", None)
+            if not adapter_diagnostics:
+                continue
+            try:
+                values = adapter_diagnostics()
+                if not isinstance(values, dict):
+                    continue
+                snapshot.pending_schedules += int(
+                    values.get("pending_schedules", 0) or 0
+                )
+                snapshot.scheduled_delivered += int(
+                    values.get("scheduled_delivered", 0) or 0
+                )
+                delivered_at = str(
+                    values.get("last_scheduled_delivery_at", "") or ""
+                )
+                if delivered_at > snapshot.last_scheduled_delivery_at:
+                    snapshot.last_scheduled_delivery_at = delivered_at
+                platform_error = str(
+                    values.get("last_schedule_error", "")
+                    or values.get("last_toast_error", "")
+                    or ""
+                )
+                if platform_error:
+                    snapshot.last_error = platform_error
+            except Exception as exc:
+                logger.debug("Cannot read notifier diagnostics: %s", exc)
+        return snapshot
 
     def _filter_assignments(self, assignments: List[Any], cache: Dict = None) -> List[Dict]:
         """Filter assignments that need notification based on milestones and cache."""
@@ -315,11 +388,27 @@ class NotificationManager:
                 cache_entry = cache.pop(activity.url)
                 cache[cache_key] = cache_entry
             cache_entry = cache_entry or {}
+            current_revision = activity.deadline_revision
+            cached_revision = (
+                cache_entry.get("deadline_revision", "")
+                if isinstance(cache_entry, dict)
+                else ""
+            )
             # Backward compat: old format was a list
             if isinstance(cache_entry, list):
                 task_milestones = cache_entry
             else:
                 task_milestones = cache_entry.get("milestones", [])
+            if cached_revision and cached_revision != current_revision:
+                task_milestones = []
+            # Convert delivery receipts written by the legacy hour-based
+            # policy to canonical minutes once the new setting is active.
+            if getattr(config, "NOTIFY_MILESTONES_MINUTES", None):
+                legacy_hours = set(getattr(config, "NOTIFY_MILESTONES", ()) or ())
+                task_milestones = [
+                    int(value) * 60 if isinstance(value, int) and value in legacy_hours else value
+                    for value in task_milestones
+                ]
             candidate = policy.due_candidate(activity, task_milestones, now)
             if candidate:
                 filtered.append(
@@ -327,6 +416,7 @@ class NotificationManager:
                         "assignment": a,
                         "url": cache_key,
                         "milestone": candidate.milestone,
+                        "deadline_revision": current_revision,
                     }
                 )
 
@@ -340,15 +430,24 @@ class NotificationManager:
         for item in items:
             url = item["url"]
             ms = item["milestone"]
+            deadline_revision = item.get("deadline_revision", "")
 
             if url not in cache:
-                cache[url] = {"milestones": [], "updated_at": datetime.now().isoformat()}
+                cache[url] = {
+                    "milestones": [],
+                    "deadline_revision": deadline_revision,
+                    "updated_at": datetime.now().isoformat(),
+                }
 
             entry = cache[url]
             # Backward compat: migrate list → dict in-place
             if isinstance(entry, list):
                 entry = {"milestones": entry, "updated_at": datetime.now().isoformat()}
                 cache[url] = entry
+
+            if entry.get("deadline_revision") not in (None, "", deadline_revision):
+                entry["milestones"] = []
+            entry["deadline_revision"] = deadline_revision
 
             if ms not in entry["milestones"]:
                 entry["milestones"].append(ms)

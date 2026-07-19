@@ -356,9 +356,9 @@ class SettingsView(ft.Container):
     def _handle_profile_select(self, profile_key: str):
         def handler(e):
             _PROFILES = {
-                "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
-                "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
-                "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [72, 24, 6, 1], "dnd": False, "dnd_start": 22, "dnd_end": 7, "min_before": 15},
+                "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [1440, 60], "dnd": True, "dnd_start": 22, "dnd_end": 8},
+                "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [4320, 1440, 180, 60, 30, 5], "dnd": True, "dnd_start": 22, "dnd_end": 7},
+                "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [4320, 1440, 360, 180, 60, 30, 5], "dnd": False, "dnd_start": 22, "dnd_end": 7},
             }
             self._current_profile = profile_key
             prof = _PROFILES[profile_key]
@@ -366,7 +366,6 @@ class SettingsView(ft.Container):
             self._sw_dnd_enable.value = prof["dnd"]
             self._dnd_start_field.value = str(prof["dnd_start"])
             self._dnd_end_field.value = str(prof["dnd_end"])
-            self._notify_min_field.value = str(prof["min_before"])
             # Update milestone chips
             for h, chip in self._milestone_chips.items():
                 chip.selected = h in prof["milestones"]
@@ -381,9 +380,9 @@ class SettingsView(ft.Container):
             self.update()
         return handler
 
-    def _handle_milestone_toggle(self, hours: int):
+    def _handle_milestone_toggle(self, minutes: int):
         def handler(e):
-            chip = self._milestone_chips[hours]
+            chip = self._milestone_chips[minutes]
             chip.selected = not chip.selected
             # Sync to hidden field
             active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
@@ -849,12 +848,12 @@ class SettingsView(ft.Container):
             is_sel = (k == "balanced")
             card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
             card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
-        # Reset milestone chips to defaults [72, 24, 3]
-        _default_milestones = [72, 24, 3]
+        # Reset milestone chips to canonical minute-based defaults.
+        _default_milestones = [4320, 1440, 180, 60, 30, 5]
         for h, chip in self._milestone_chips.items():
             chip.selected = h in _default_milestones
-        self._milestones_field.value = "72, 24, 3"
-        self._milestone_summary.value = "Bạn sẽ nhận 3 lần nhắc cho mỗi deadline"
+        self._milestones_field.value = "4320, 1440, 180, 60, 30, 5"
+        self._milestone_summary.value = "Bạn sẽ nhận 6 lần nhắc cho mỗi deadline"
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
@@ -1649,7 +1648,7 @@ class SettingsView(ft.Container):
         self._critical_hours_field.value = str(settings.URGENCY_CRITICAL_HOURS)
         self._warning_hours_field.value = str(settings.URGENCY_WARNING_HOURS)
         self._opening_soon_hours_field.value = str(settings.OPENING_SOON_HOURS)
-        self._notify_min_field.value = str(settings.NOTIFY_MINUTES_BEFORE)
+        self._notify_min_field.value = "0"
         self._workers_field.value = str(settings.PREFETCH_WORKERS)
         
         self._sw_dnd_enable.value = getattr(settings, 'NOTIFY_DND_ENABLE', False)
@@ -1659,7 +1658,7 @@ class SettingsView(ft.Container):
         _saved_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
         for key, cb in self._notify_type_checks.items():
             cb.value = (key in _saved_types)
-        _saved_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
+        _saved_milestones = getattr(settings, 'NOTIFY_MILESTONES_MINUTES', [4320, 1440, 180, 60, 30, 5])
         self._milestones_field.value = ", ".join(map(str, _saved_milestones))
         # Sync milestone chips
         for h, chip in self._milestone_chips.items():
@@ -1743,7 +1742,6 @@ class SettingsView(ft.Container):
         if self._critical_hours_field.value != str(settings.URGENCY_CRITICAL_HOURS): return True
         if self._warning_hours_field.value != str(settings.URGENCY_WARNING_HOURS): return True
         if self._opening_soon_hours_field.value != str(settings.OPENING_SOON_HOURS): return True
-        if self._notify_min_field.value != str(settings.NOTIFY_MINUTES_BEFORE): return True
         if self._workers_field.value != str(settings.PREFETCH_WORKERS): return True
         
         if self._sw_dnd_enable.value != getattr(settings, 'NOTIFY_DND_ENABLE', False): return True
@@ -1754,7 +1752,7 @@ class SettingsView(ft.Container):
         _saved_types = set(getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"]))
         _current_types = set(k for k, cb in self._notify_type_checks.items() if cb.value)
         if _saved_types != _current_types: return True
-        if self._milestones_field.value != ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3]))): return True
+        if self._milestones_field.value != ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES_MINUTES', [4320, 1440, 180, 60, 30, 5]))): return True
         if self._muted_courses_field.value != ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', [])): return True
         
         return False
@@ -1842,7 +1840,6 @@ class SettingsView(ft.Container):
             settings.URGENCY_CRITICAL_HOURS  = max(1, int(self._critical_hours_field.value or "24"))
             settings.URGENCY_WARNING_HOURS   = max(1, int(self._warning_hours_field.value or "72"))
             settings.OPENING_SOON_HOURS      = max(1, int(self._opening_soon_hours_field.value or "72"))
-            settings.NOTIFY_MINUTES_BEFORE   = max(0, int(self._notify_min_field.value or "30"))
             workers = int(self._workers_field.value or "4")
             settings.PREFETCH_WORKERS        = max(1, min(workers, 10))
             self._workers_field.value        = str(settings.PREFETCH_WORKERS)
@@ -1879,9 +1876,16 @@ class SettingsView(ft.Container):
             settings.NOTIFY_TYPES = [k for k, cb in self._notify_type_checks.items() if cb.value]
             
             try:
-                settings.NOTIFY_MILESTONES = [int(x.strip()) for x in self._milestones_field.value.split(",") if x.strip()]
+                settings.NOTIFY_MILESTONES_MINUTES = sorted(
+                    {
+                        int(x.strip())
+                        for x in self._milestones_field.value.split(",")
+                        if x.strip() and int(x.strip()) > 0
+                    },
+                    reverse=True,
+                )
             except ValueError:
-                settings.NOTIFY_MILESTONES = [72, 24, 3]
+                settings.NOTIFY_MILESTONES_MINUTES = [4320, 1440, 180, 60, 30, 5]
             
             settings.NOTIFY_MUTED_COURSES = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
 

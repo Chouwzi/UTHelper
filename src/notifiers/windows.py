@@ -58,6 +58,7 @@ class WindowsNotifier(BaseNotifier):
         self.last_scheduled_delivery_at = ""
         self.scheduled_delivered = 0
         self._schedule_state_path = Path(_USER_DATA_DIR) / "windows_notification_schedules.json"
+        self._receipt_path = Path(_USER_DATA_DIR) / "windows_notification_receipts.json"
         self._schedule_condition = threading.Condition(threading.RLock())
         self._schedule_state: dict[str, dict] = SafeFileIO.read_json_safe(
             self._schedule_state_path, dict
@@ -263,6 +264,15 @@ class WindowsNotifier(BaseNotifier):
                 "aumid": self.aumid,
             }
 
+    def consume_delivery_receipts(self) -> list[dict]:
+        """Return native scheduled-toast receipts exactly once."""
+        self._ensure_schedule_runtime()
+        with self._schedule_condition:
+            receipts = SafeFileIO.read_json_safe(self._receipt_path, list)
+            if receipts:
+                SafeFileIO.write_json_atomic(self._receipt_path, [])
+            return [item for item in receipts if isinstance(item, dict)]
+
     def close(self) -> None:
         """Stop the in-process scheduler during an orderly tray shutdown."""
         self._ensure_schedule_runtime()
@@ -281,6 +291,7 @@ class WindowsNotifier(BaseNotifier):
         self.last_scheduled_delivery_at = ""
         self.scheduled_delivered = 0
         self._schedule_state_path = Path(_USER_DATA_DIR) / "windows_notification_schedules.json"
+        self._receipt_path = Path(_USER_DATA_DIR) / "windows_notification_receipts.json"
         self._schedule_condition = threading.Condition(threading.RLock())
         self._schedule_state = SafeFileIO.read_json_safe(
             self._schedule_state_path, dict
@@ -370,6 +381,17 @@ class WindowsNotifier(BaseNotifier):
                 self.scheduled_delivered += 1
                 self.last_scheduled_delivery_at = now.isoformat()
                 self.last_schedule_error = ""
+                receipts = SafeFileIO.read_json_safe(self._receipt_path, list)
+                receipts.append(
+                    {
+                        "activity_key": value.get("activity_key", ""),
+                        "deadline_revision": value.get("deadline_revision", ""),
+                        "milestone": value.get("milestone"),
+                        "channel": "windows",
+                        "delivered_at": now.isoformat(),
+                    }
+                )
+                SafeFileIO.write_json_atomic(self._receipt_path, receipts[-500:])
             else:
                 retry_at = now + timedelta(minutes=self._SCHEDULE_RETRY_MINUTES)
                 if deadline is not None and retry_at >= deadline:
@@ -417,6 +439,7 @@ class WindowsNotifier(BaseNotifier):
             "milestone": reminder.milestone,
             "scheduled_at": reminder.scheduled_at.isoformat(),
             "revision": activity.revision,
+            "deadline_revision": activity.deadline_revision,
             "retry_at": "",
         }
 

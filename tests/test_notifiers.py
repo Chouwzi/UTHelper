@@ -11,6 +11,7 @@ from config import settings as config
 @pytest.fixture
 def mock_config(monkeypatch):
     monkeypatch.setattr(config, "NOTIFY_MILESTONES", [72, 24, 3])
+    monkeypatch.setattr(config, "NOTIFY_MILESTONES_MINUTES", [])
     monkeypatch.setattr(config, "NOTIFY_MUTED_COURSES", ["Xác suất thống kê"])
     monkeypatch.setattr(config, "NOTIFY_DND_ENABLE", True)
     monkeypatch.setattr(config, "NOTIFY_DND_START", 23)

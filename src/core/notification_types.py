@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 from typing import Any
 
 from core.time_utils import parse_datetime
@@ -44,17 +45,37 @@ class ActivityNotification:
     url: str
     submission_status: str
     revision: str = ""
+    site: str = ""
+    user_id: str = ""
+    source_kind: str = ""
+    module_id: str = ""
     source: Any = field(default=None, compare=False, repr=False)
 
     @property
     def key(self) -> str:
         """Stable cache key, preferring Moodle activity/event identifiers."""
+        namespace = ":".join(
+            value.strip().lower()
+            for value in (self.site, self.user_id)
+            if value and value.strip()
+        )
+        source_identity = self.module_id or self.activity_id
+        if namespace and source_identity:
+            kind = self.source_kind or self.event_type or "activity"
+            return f"{namespace}:{kind}:{source_identity}"
         if self.activity_id:
             return f"activity:{self.activity_id}"
         if self.url:
             # Preserve legacy URL cache keys while preferring activity IDs.
             return self.url
         return f"fallback:{self.course_id}:{self.event_type}:{self.title}"
+
+    @property
+    def deadline_revision(self) -> str:
+        """Revision used by delivery receipts when a deadline is moved."""
+        deadline_value = self.deadline.isoformat() if self.deadline else ""
+        raw = f"{self.revision}|{deadline_value}"
+        return hashlib.blake2s(raw.encode("utf-8"), digest_size=8).hexdigest()
 
     @classmethod
     def from_value(cls, value: Any) -> "ActivityNotification":
@@ -76,6 +97,10 @@ class ActivityNotification:
             revision=_as_text(
                 _read(value, "revision", "timemodified", "updated_at")
             ),
+            site=_as_text(_read(value, "site", "moodle_site", "base_url")),
+            user_id=_as_text(_read(value, "user_id", "userid")),
+            source_kind=_as_text(_read(value, "source_kind", "source_type")),
+            module_id=_as_text(_read(value, "cmid", "module_id", "instance")),
             source=value,
         )
 
@@ -96,6 +121,13 @@ class ScheduledReminder:
     @property
     def state_key(self) -> str:
         return str(self.notification_id)
+
+    @property
+    def delivery_key(self) -> str:
+        return (
+            f"{self.activity.key}|{self.activity.deadline_revision}|"
+            f"{self.milestone}"
+        )
 
 
 @dataclass
@@ -132,4 +164,7 @@ class NotificationDiagnostics:
     skipped: int = 0
     scheduled: int = 0
     cancelled: int = 0
+    pending_schedules: int = 0
+    scheduled_delivered: int = 0
+    last_scheduled_delivery_at: str = ""
     last_error: str = ""

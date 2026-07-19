@@ -33,6 +33,7 @@ def _scheduled_reminder(*, notification_id=42, scheduled_at=None, deadline=None)
 def _scheduler_notifier(tmp_path):
     notifier = WindowsNotifier(start_scheduler=False)
     notifier._schedule_state_path = tmp_path / "windows-schedules.json"
+    notifier._receipt_path = tmp_path / "windows-receipts.json"
     notifier._schedule_state = {}
     return notifier
 
@@ -111,6 +112,10 @@ def test_due_windows_schedule_records_delivery_and_removes_pending(tmp_path):
     assert diagnostics["pending_schedules"] == 0
     assert diagnostics["scheduled_delivered"] == 1
     assert diagnostics["last_scheduled_delivery_at"]
+    receipts = notifier.consume_delivery_receipts()
+    assert receipts[0]["activity_key"] == reminder.activity.key
+    assert receipts[0]["deadline_revision"] == reminder.activity.deadline_revision
+    assert notifier.consume_delivery_receipts() == []
     notifier.close()
 
 

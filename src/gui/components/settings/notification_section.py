@@ -6,9 +6,9 @@ def init_notification_controls(view):
     """Khởi tạo các control thiết lập cấu hình thông báo và chế độ Do Not Disturb (DND)."""
     # Định nghĩa cấu hình có sẵn của các Notification Profile
     _PROFILES = {
-        "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [24, 1], "dnd": True, "dnd_start": 22, "dnd_end": 8, "min_before": 0},
-        "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [72, 24, 3], "dnd": True, "dnd_start": 22, "dnd_end": 7, "min_before": 30},
-        "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [72, 24, 6, 1], "dnd": False, "dnd_start": 22, "dnd_end": 7, "min_before": 15},
+        "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [1440, 60], "dnd": True, "dnd_start": 22, "dnd_end": 8},
+        "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [4320, 1440, 180, 60, 30, 5], "dnd": True, "dnd_start": 22, "dnd_end": 7},
+        "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [4320, 1440, 360, 180, 60, 30, 5], "dnd": False, "dnd_start": 22, "dnd_end": 7},
     }
     view._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
     view._profile_cards = {}
@@ -111,25 +111,27 @@ def init_notification_controls(view):
     )
 
     # Các mốc thời gian nhắc nhở (milestones) trước deadline
-    _current_milestones = getattr(settings, 'NOTIFY_MILESTONES', [72, 24, 3])
+    _current_milestones = getattr(settings, 'NOTIFY_MILESTONES_MINUTES', [4320, 1440, 180, 60, 30, 5])
     view._milestone_chips = {}
     _milestone_options = [
-        (168, "1 tuần"),
-        (72, "3 ngày"),
-        (24, "1 ngày"),
-        (6, "6 giờ"),
-        (3, "3 giờ"),
-        (1, "1 giờ"),
+        (10080, "1 tuần"),
+        (4320, "3 ngày"),
+        (1440, "1 ngày"),
+        (360, "6 giờ"),
+        (180, "3 giờ"),
+        (60, "1 giờ"),
+        (30, "30 phút"),
+        (5, "5 phút"),
     ]
 
-    for hours, label in _milestone_options:
-        view._milestone_chips[hours] = ft.Chip(
+    for minutes, label in _milestone_options:
+        view._milestone_chips[minutes] = ft.Chip(
             label=ft.Text(label, size=12),
-            selected=(hours in _current_milestones),
+            selected=(minutes in _current_milestones),
             show_checkmark=True,
             selected_color=C.ACCENT,
             bgcolor=C.SURFACE,
-            on_select=view._handle_milestone_toggle(hours),
+            on_select=view._handle_milestone_toggle(minutes),
         )
     view._milestone_chips_row = ft.Row(
         controls=list(view._milestone_chips.values()),
@@ -179,12 +181,12 @@ def init_notification_controls(view):
 
     # Nhắc nhở khẩn cấp phút cuối (X phút trước deadline)
     view._notify_min_field = ft.TextField( 
-        value=str(settings.NOTIFY_MINUTES_BEFORE),
+        value="0",
         label="Thông báo trước deadline (Phút)",
         keyboard_type=ft.KeyboardType.NUMBER,
         border_color=C.BORDER, focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY, 
-        bgcolor=C.BG, border_radius=10,
+        bgcolor=C.BG, border_radius=10, visible=False,
     )
 
 def build_notification_section(view) -> ft.Container:
@@ -217,10 +219,6 @@ def build_advanced_section(view) -> ft.Container:
             view._milestone_chips_row,
             view._milestone_summary,
             view._milestones_field,
-            ft.Divider(height=10, color=C.BORDER),
-            view._make_themed_label("Nhắc phút cuối"),
-            view._notify_min_field,
-            view._build_hint("Gửi thêm 1 lần nhắc khi chỉ còn X phút. Đặt 0 để tắt."),
             ft.Divider(height=10, color=C.BORDER),
             view._make_themed_label("Loại hoạt động"),
             view._notify_types_row,

@@ -119,6 +119,16 @@ class TestSettingsSerialization:
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
         assert migrated["SETTINGS_SCHEMA_VERSION"] == 2
 
+    def test_legacy_notification_milestones_migrate_to_minutes(self):
+        migrated = migrate_settings_data({
+            "NOTIFY_MILESTONES": [72, 24, 3, 1],
+            "NOTIFY_MINUTES_BEFORE": 30,
+        })
+        assert migrated["NOTIFY_MILESTONES_MINUTES"] == [4320, 1440, 180, 60, 30]
+
+    def test_new_install_has_all_default_notification_milestones(self):
+        assert Settings().NOTIFY_MILESTONES_MINUTES == [4320, 1440, 180, 60, 30, 5]
+
 
 class TestSecretFieldsMapping:
     """_SECRET_FIELDS maps correct attributes."""

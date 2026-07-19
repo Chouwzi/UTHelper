@@ -204,6 +204,27 @@ class TestFilterAssignments:
         result = mgr._filter_assignments([a])
         assert len(result) == 0
 
+    @patch("notifiers.manager.config")
+    def test_deadline_revision_allows_same_milestone_after_move(self, mock_config, tmp_path):
+        mgr = _make_manager(tmp_path)
+        mock_config.NOTIFY_MUTED_COURSES = []
+        mock_config.NOTIFY_IGNORE_SUBMITTED = False
+        mock_config.NOTIFY_TYPES = None
+        mock_config.NOTIFY_MILESTONES_MINUTES = [60]
+        mock_config.NOTIFY_MILESTONES = []
+        mock_config.NOTIFY_MINUTES_BEFORE = 0
+
+        activity = self._make_assignment(deadline=datetime.now() + timedelta(minutes=30))
+        activity.id = "quiz-42"
+        first = mgr._filter_assignments([activity])
+        mgr._mark_assignments_notified(first)
+        assert mgr._filter_assignments([activity]) == []
+
+        activity.deadline = datetime.now() + timedelta(minutes=45)
+        moved = mgr._filter_assignments([activity])
+        assert len(moved) == 1
+        assert moved[0]["milestone"] == 60
+
 
 class TestMarkNotified:
     """_mark_assignments_notified() tests."""
@@ -386,3 +407,21 @@ class TestHistoryProperty:
         mgr = _make_manager(tmp_path)
         assert mgr.history is not None
         assert mgr.history.get_all() == []
+
+    def test_diagnostics_include_native_scheduler_state(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        notifier = Mock()
+        notifier.get_diagnostics.return_value = {
+            "pending_schedules": 3,
+            "scheduled_delivered": 2,
+            "last_scheduled_delivery_at": "2026-07-19T18:00:00",
+            "last_schedule_error": "",
+            "last_toast_error": "",
+        }
+        mgr.notifiers = [notifier]
+
+        diagnostics = mgr.get_diagnostics()
+
+        assert diagnostics.pending_schedules == 3
+        assert diagnostics.scheduled_delivered == 2
+        assert diagnostics.last_scheduled_delivery_at == "2026-07-19T18:00:00"

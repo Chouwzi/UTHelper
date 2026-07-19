@@ -92,12 +92,6 @@ class MobileNotifier(BaseNotifier):
                 )
                 if can_exact:
                     self._exact_alarm_enabled = bool(await can_exact())
-                if not self._exact_alarm_enabled:
-                    request_exact = getattr(
-                        self._android_notif, "request_exact_alarm_permission", None
-                    )
-                    if request_exact:
-                        self._exact_alarm_enabled = bool(await request_exact())
                 logger.info(
                     "Android permissions: notifications=%s exact_alarm=%s",
                     self._notifications_enabled,
@@ -175,6 +169,12 @@ class MobileNotifier(BaseNotifier):
         activity = ActivityNotification.from_value(value)
         policy = ActivityNotificationPolicy(
             NotificationPolicyConfig(
+                milestone_minutes=tuple(
+                    int(item)
+                    for item in (
+                        getattr(config, "NOTIFY_MILESTONES_MINUTES", ()) or ()
+                    )
+                ),
                 milestones=tuple(
                     int(item)
                     for item in (getattr(config, "NOTIFY_MILESTONES", ()) or ())
@@ -289,7 +289,12 @@ class MobileNotifier(BaseNotifier):
         if isinstance(reminder.milestone, str):
             value = reminder.milestone.removeprefix("_min_")
             return f"{course} - Còn {value} phút"
-        return f"{course} - Còn {reminder.milestone} giờ"
+        minutes = int(reminder.milestone)
+        if minutes % 1440 == 0:
+            return f"{course} - Còn {minutes // 1440} ngày"
+        if minutes % 60 == 0:
+            return f"{course} - Còn {minutes // 60} giờ"
+        return f"{course} - Còn {minutes} phút"
 
 
 def _get_str(obj, key, default='') -> str:

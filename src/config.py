@@ -211,11 +211,15 @@ class Settings(BaseModel):
     URGENCY_CRITICAL_HOURS: int = Field(default=24, description="Dưới X giờ → Cấp bách")
     URGENCY_WARNING_HOURS: int  = Field(default=72, description="Dưới X giờ → Sắp tới")
     OPENING_SOON_HOURS: int     = Field(default=72, description="Dưới X giờ (trước khi mở) → Sắp mở")
-    NOTIFY_MINUTES_BEFORE: int  = Field(default=30, description="Thông báo trước X phút khi deadline gần")
+    NOTIFY_MINUTES_BEFORE: int  = Field(default=30, description="[Deprecated] Mốc phút cuối cũ")
 
     # Nhóm cài đặt cho tính năng UTHelper
     NOTIFICATION_PROFILE: str = Field(default="balanced", description="Chế độ thông báo: quiet, balanced, exam_week")
-    NOTIFY_MILESTONES: list = Field(default_factory=lambda: [72, 24, 3], description="Nhắc nhở trước X giờ")
+    NOTIFY_MILESTONES: list = Field(default_factory=lambda: [72, 24, 3], description="[Deprecated] Các mốc giờ cũ")
+    NOTIFY_MILESTONES_MINUTES: list[int] = Field(
+        default_factory=lambda: [4320, 1440, 180, 60, 30, 5],
+        description="Các mốc nhắc trước deadline, tính bằng phút",
+    )
     NOTIFY_MUTED_COURSES: list = Field(default_factory=list, description="Danh sách các môn bị tắt thông báo")
     NOTIFY_TYPES: list = Field(default_factory=lambda: ["quiz", "assignment", "attendance"], description="Các loại bài tập sẽ gửi cảnh báo")
     NOTIFY_DND_ENABLE: bool = Field(default=False, description="Bật chế độ không làm phiền")
@@ -244,6 +248,25 @@ def migrate_settings_data(raw: dict) -> dict:
             data["CHECK_INTERVAL_MINUTES"] = max(0, int(legacy_value))
         except (TypeError, ValueError):
             data["CHECK_INTERVAL_MINUTES"] = 60
+    if "NOTIFY_MILESTONES_MINUTES" not in data:
+        legacy_hours = data.get("NOTIFY_MILESTONES")
+        legacy_minute = data.get("NOTIFY_MINUTES_BEFORE")
+        if legacy_hours is not None or legacy_minute is not None:
+            converted: set[int] = set()
+            for value in legacy_hours or []:
+                try:
+                    minutes = int(value) * 60
+                    if minutes > 0:
+                        converted.add(minutes)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                minute = int(legacy_minute or 0)
+                if minute > 0:
+                    converted.add(minute)
+            except (TypeError, ValueError):
+                pass
+            data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
     data["SETTINGS_SCHEMA_VERSION"] = 2
     return data
 
