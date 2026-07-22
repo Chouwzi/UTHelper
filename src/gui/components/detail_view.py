@@ -615,6 +615,22 @@ class DetailView(ft.Container):
         self.visible = True
         # Hàm gọi chịu trách nhiệm page.update() tránh việc gọi thừa
 
+    def refresh_countdown(self) -> bool:
+        """Re-evaluate volatile deadline text while the detail view stays open."""
+        data = self._current_data or {}
+        deadline_str = data.get("deadline", "")
+        if not deadline_str:
+            return False
+        countdown, overdue = get_countdown(deadline_str, data.get("type", ""))
+        color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
+        changed = (
+            self._countdown_txt.value != countdown
+            or self._countdown_txt.color != color
+        )
+        self._countdown_txt.value = countdown
+        self._countdown_txt.color = color
+        return changed
+
     def update_detail(self, data: dict):
         self._loading_bar.visible  = False
         self._error_banner.visible = False

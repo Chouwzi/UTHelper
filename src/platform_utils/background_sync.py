@@ -29,9 +29,10 @@ class AndroidBackgroundBridge:
     def settings_payload() -> dict[str, Any]:
         from config import get_sync_interval_minutes, settings
 
+        interval_minutes = get_sync_interval_minutes()
         return {
-            "enabled": bool(settings.BACKGROUND_CHECK_ANDROID),
-            "interval_minutes": get_sync_interval_minutes(),
+            "enabled": bool(settings.BACKGROUND_CHECK_ANDROID and interval_minutes > 0),
+            "interval_minutes": interval_minutes,
             "fetch_months": int(settings.FETCH_MONTHS),
             "notify_types": list(settings.NOTIFY_TYPES or []),
             "muted_courses": list(settings.NOTIFY_MUTED_COURSES or []),

@@ -13,12 +13,16 @@ class AlarmScheduler(private val context: Context) {
     fun schedule(reminder: ReminderEntity) {
         val operation = pendingIntent(reminder, PendingIntent.FLAG_UPDATE_CURRENT) ?: return
         val triggerAtMillis = reminder.scheduledAtEpochSeconds * 1000
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && manager.canScheduleExactAlarms()) {
-            manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (manager.canScheduleExactAlarms()) {
+                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+            } else {
+                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+            }
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+            manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
         } else {
-            manager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+            manager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
         }
     }
 

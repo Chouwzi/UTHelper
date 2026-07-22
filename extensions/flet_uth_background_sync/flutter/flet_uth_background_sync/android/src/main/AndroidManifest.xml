@@ -6,7 +6,7 @@
 
     <application>
         <provider
-            android:name="androidx.core.content.FileProvider"
+            android:name=".update.UthUpdateFileProvider"
             android:authorities="${applicationId}.uthupdates"
             android:exported="false"
             android:grantUriPermissions="true">

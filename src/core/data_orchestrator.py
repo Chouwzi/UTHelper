@@ -206,13 +206,14 @@ class DataOrchestrator:
             courses_result = None
             
             def _fetch_calendar():
+                page_size = 50  # Moodle validates limitnum in the inclusive range 1..50.
                 events = []
                 after_event_id = 0
                 for _page in range(10):
                     response = self.moodle_service.get_action_events_by_timesort(
                         now_ts,
                         now_ts + (90 * 24 * 3600),
-                        limit=100,
+                        limit=page_size,
                         after_event_id=after_event_id,
                     )
                     if not isinstance(response, dict):
@@ -221,7 +222,7 @@ class DataOrchestrator:
                     if not isinstance(page_events, list):
                         return None
                     events.extend(page_events)
-                    more = bool(response.get("moreevents", len(page_events) >= 100))
+                    more = bool(response.get("moreevents", len(page_events) >= page_size))
                     if not more:
                         return {"events": events, "moreevents": False}
                     last_id = response.get("lastid")

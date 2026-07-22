@@ -217,21 +217,31 @@ class NotificationManager:
         cache = self._load_cache()
         await self._merge_native_receipts(cache)
 
-        # Lọc lại xem cái nào thực sự cần bắn thông báo
-        to_notify_items = self._filter_assignments(assignments, cache)
-        result.filtered = len(assignments) - len(to_notify_items)
-        diagnostics.activities_matched = len(to_notify_items)
-        diagnostics.skipped += result.filtered
-
-        if not to_notify_items:
-            return result
-
-        # Pass real Assignment objects directly - no more DummyAssign wrapper
-        notify_assignments = [item["assignment"] for item in to_notify_items]
-
-        result.attempted = len(notify_assignments)
+        # A delivery receipt belongs to one channel. A successful desktop
+        # toast must not suppress retrying a failed Telegram/email delivery.
+        channel_items: list[tuple[Any, str, str, list[Dict]]] = []
+        matched_keys: set[tuple[str, int | str]] = set()
         for notifier in self.notifiers:
             channel = notifier.__class__.__name__
+            channel_key = self._channel_cache_key(notifier)
+            items = self._filter_assignments(assignments, cache, channel=channel_key)
+            channel_items.append((notifier, channel, channel_key, items))
+            matched_keys.update((item["url"], item["milestone"]) for item in items)
+
+        result.filtered = len(assignments) - len({key for key, _ in matched_keys})
+        diagnostics.activities_matched = len(matched_keys)
+        diagnostics.skipped += result.filtered
+
+        if not matched_keys:
+            return result
+
+        result.attempted = len(matched_keys)
+        delivered_keys: set[tuple[str, int | str]] = set()
+        delivered_milestones: set[int | str] = set()
+        for notifier, channel, channel_key, to_notify_items in channel_items:
+            if not to_notify_items:
+                continue
+            notify_assignments = [item["assignment"] for item in to_notify_items]
             try:
                 if inspect.iscoroutinefunction(notifier.notify):
                     channel_result = await notifier.notify(notify_assignments)
@@ -243,6 +253,16 @@ class NotificationManager:
                         channel_result = await channel_result
                 if channel_result is True:
                     result.successful_channels.append(channel)
+                    self._mark_assignments_notified(
+                        to_notify_items, cache, channel=channel_key
+                    )
+                    self._history.add(notify_assignments, [channel])
+                    delivered_keys.update(
+                        (item["url"], item["milestone"]) for item in to_notify_items
+                    )
+                    delivered_milestones.update(
+                        item["milestone"] for item in to_notify_items
+                    )
                 else:
                     result.failed_channels[channel] = "backend did not confirm delivery"
             except Exception as exc:
@@ -250,11 +270,9 @@ class NotificationManager:
                 diagnostics.last_error = f"{channel}: {exc}"
                 logger.error("Failed via channel %s: %s", channel, exc)
 
-        if result.successful_channels:
-            self._mark_assignments_notified(to_notify_items, cache)
-            self._history.add(notify_assignments, result.successful_channels)
-            result.delivered = len(notify_assignments)
-            result.milestones = [item["milestone"] for item in to_notify_items]
+        if delivered_keys:
+            result.delivered = len(delivered_keys)
+            result.milestones = list(delivered_milestones)
             diagnostics.delivered += result.delivered
         else:
             logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
@@ -289,9 +307,12 @@ class NotificationManager:
                 revision = str(receipt.get("deadline_revision", ""))
                 if entry.get("deadline_revision") not in (None, "", revision):
                     entry["milestones"] = []
+                    entry["channels"] = {}
                 entry["deadline_revision"] = revision
-                if milestone not in entry.setdefault("milestones", []):
-                    entry["milestones"].append(milestone)
+                channel = str(receipt.get("channel", "") or "native").lower()
+                delivered = entry.setdefault("channels", {}).setdefault(channel, [])
+                if milestone not in delivered:
+                    delivered.append(milestone)
                 entry["updated_at"] = datetime.now().isoformat()
                 changed = True
         if changed:
@@ -371,7 +392,21 @@ class NotificationManager:
                 logger.debug("Cannot read notifier diagnostics: %s", exc)
         return snapshot
 
-    def _filter_assignments(self, assignments: List[Any], cache: Dict = None) -> List[Dict]:
+    @staticmethod
+    def _channel_cache_key(notifier: Any) -> str:
+        explicit = str(getattr(notifier, "channel_name", "") or "").strip().lower()
+        if explicit:
+            return explicit
+        name = notifier.__class__.__name__.lower()
+        return name.removesuffix("notifier") or "unknown"
+
+    def _filter_assignments(
+        self,
+        assignments: List[Any],
+        cache: Dict = None,
+        *,
+        channel: str | None = None,
+    ) -> List[Dict]:
         """Filter assignments that need notification based on milestones and cache."""
         filtered = []
         if cache is None:
@@ -398,7 +433,13 @@ class NotificationManager:
             if isinstance(cache_entry, list):
                 task_milestones = cache_entry
             else:
-                task_milestones = cache_entry.get("milestones", [])
+                channels = cache_entry.get("channels", {})
+                if channel and isinstance(channels, dict) and channel in channels:
+                    task_milestones = channels.get(channel, [])
+                else:
+                    # Legacy global receipts apply to every channel. New
+                    # entries store channel-specific receipts in ``channels``.
+                    task_milestones = cache_entry.get("milestones", [])
             if cached_revision and cached_revision != current_revision:
                 task_milestones = []
             # Convert delivery receipts written by the legacy hour-based
@@ -422,7 +463,13 @@ class NotificationManager:
 
         return filtered
 
-    def _mark_assignments_notified(self, items: List[Dict], cache: Dict = None):
+    def _mark_assignments_notified(
+        self,
+        items: List[Dict],
+        cache: Dict = None,
+        *,
+        channel: str | None = None,
+    ):
         """Mark assignments as notified in cache."""
         if cache is None:
             cache = self._load_cache()
@@ -447,10 +494,16 @@ class NotificationManager:
 
             if entry.get("deadline_revision") not in (None, "", deadline_revision):
                 entry["milestones"] = []
+                entry["channels"] = {}
             entry["deadline_revision"] = deadline_revision
 
-            if ms not in entry["milestones"]:
-                entry["milestones"].append(ms)
+            delivered = (
+                entry.setdefault("channels", {}).setdefault(channel, [])
+                if channel
+                else entry.setdefault("milestones", [])
+            )
+            if ms not in delivered:
+                delivered.append(ms)
                 entry["updated_at"] = datetime.now().isoformat()
                 updated = True
 

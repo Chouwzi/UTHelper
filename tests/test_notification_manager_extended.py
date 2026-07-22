@@ -335,6 +335,50 @@ class TestDispatch:
         # Notifier was called
         assert n.notify.call_count == 1
         assert result.delivered == 0
+
+    @patch("notifiers.manager.config")
+    def test_failed_channel_retries_after_other_channel_succeeds(self, mock_config, tmp_path):
+        mgr = _make_manager(tmp_path)
+        mock_config.NOTIFY_MUTED_COURSES = []
+        mock_config.NOTIFY_IGNORE_SUBMITTED = False
+        mock_config.NOTIFY_TYPES = None
+        mock_config.NOTIFY_MILESTONES_MINUTES = [60]
+        mock_config.NOTIFY_MILESTONES = []
+        mock_config.NOTIFY_MINUTES_BEFORE = 0
+
+        class WindowsNotifier:
+            def __init__(self):
+                self.calls = 0
+
+            def notify(self, _items):
+                self.calls += 1
+                return True
+
+        class TelegramNotifier:
+            def __init__(self):
+                self.calls = 0
+
+            def notify(self, _items):
+                self.calls += 1
+                return False
+
+        windows = WindowsNotifier()
+        telegram = TelegramNotifier()
+        mgr.notifiers = [windows, telegram]
+        activity = Mock(
+            id="quiz-42",
+            course_name="Web",
+            submission_status="unknown",
+            event_type="quiz",
+            url="https://example.test/quiz/42",
+            deadline=datetime.now() + timedelta(minutes=30),
+        )
+
+        asyncio.run(mgr.dispatch([activity]))
+        asyncio.run(mgr.dispatch([activity]))
+
+        assert windows.calls == 1
+        assert telegram.calls == 2
         # Cache NOT updated (will retry next time)
         cache = mgr._load_cache()
         assert "http://test.com/assign/2" not in cache

@@ -166,3 +166,38 @@ class TestGetUserId:
         mock_site.side_effect = Exception("Error")
         result = orch._get_userid()
         assert result is None
+
+
+class TestCalendarPagination:
+    """Moodle caps action-event pages at 50 records."""
+
+    def _make_orchestrator(self):
+        with patch("core.data_orchestrator.MoodleClient"), \
+             patch("core.data_orchestrator.GradeMonitor"):
+            from core.data_orchestrator import DataOrchestrator
+            return DataOrchestrator()
+
+    def test_fetch_uses_moodle_supported_page_size_and_cursor(self):
+        orch = self._make_orchestrator()
+        orch._get_userid = Mock(return_value=42)
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_action_events_by_timesort.side_effect = [
+            {
+                "events": [{"id": value} for value in range(1, 51)],
+                "moreevents": True,
+                "lastid": 50,
+            },
+            {"events": [], "moreevents": False},
+        ]
+        orch.moodle_service.get_user_courses.return_value = []
+        orch.moodle_service.ws_events_to_assignments.return_value = []
+        orch._merge_all_assignments = Mock(return_value=[])
+
+        assert orch._fetch_via_ws_api() == []
+
+        calls = orch.moodle_service.get_action_events_by_timesort.call_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["limit"] == 50
+        assert calls[0].kwargs["after_event_id"] == 0
+        assert calls[1].kwargs["limit"] == 50
+        assert calls[1].kwargs["after_event_id"] == 50

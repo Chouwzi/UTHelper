@@ -21,8 +21,23 @@ def test_manifest_registers_alarm_lifecycle_receivers():
     assert "BOOT_COMPLETED" in manifest
     assert "TIMEZONE_CHANGED" in manifest
     assert "SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" in manifest
-    assert "androidx.core.content.FileProvider" in manifest
+    assert ".update.UthUpdateFileProvider" in manifest
     assert "@xml/uth_update_paths" in manifest
+
+
+def test_update_provider_is_unique_and_pre_s_alarms_remain_exact():
+    provider = (
+        ANDROID
+        / "src/main/kotlin/com/uthelper/backgroundsync/update/UthUpdateFileProvider.kt"
+    ).read_text(encoding="utf-8")
+    alarms = (
+        ANDROID
+        / "src/main/kotlin/com/uthelper/backgroundsync/notification/AlarmScheduler.kt"
+    ).read_text(encoding="utf-8")
+
+    assert "class UthUpdateFileProvider : FileProvider()" in provider
+    assert "Build.VERSION.SDK_INT < Build.VERSION_CODES.S" in alarms
+    assert "setExactAndAllowWhileIdle" in alarms
 
 
 def test_token_vault_uses_keystore_and_no_backup_storage():

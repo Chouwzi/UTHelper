@@ -382,8 +382,11 @@ class SettingsView(ft.Container):
 
     def _handle_milestone_toggle(self, minutes: int):
         def handler(e):
+            # Flet's Chip.on_select updates ``selected`` before this callback.
+            # Flipping it again makes the chip appear impossible to toggle.
             chip = self._milestone_chips[minutes]
-            chip.selected = not chip.selected
+            if getattr(e, "control", None) is not chip:
+                chip.selected = bool(getattr(getattr(e, "control", None), "selected", chip.selected))
             # Sync to hidden field
             active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
             self._milestones_field.value = ", ".join(str(h) for h in active)
@@ -442,8 +445,8 @@ class SettingsView(ft.Container):
         _labels = {"quiet": "Yên tĩnh", "balanced": "Cân bằng", "exam_week": "Tuần thi"}
         _descs = {
             "quiet": "Chỉ nhắc deadline gấp (1 ngày và 1 giờ trước)",
-            "balanced": "Nhắc 3 ngày, 1 ngày và 3 giờ trước deadline",
-            "exam_week": "Nhắc liên tục, không bỏ lỡ bất kỳ deadline nào",
+            "balanced": "Nhắc 3 ngày, 1 ngày, 3 giờ, 1 giờ, 30 phút và 5 phút trước deadline",
+            "exam_week": "Nhắc 3 ngày, 1 ngày, 6 giờ, 3 giờ, 1 giờ, 30 phút và 5 phút trước deadline",
         }
         profile = getattr(self, '_current_profile', 'balanced')
         self._profile_summary.value = _descs.get(profile, "")
@@ -1802,13 +1805,7 @@ class SettingsView(ft.Container):
             def save_and_close(e):
                 _log.warning(">>> SAVE button clicked!")
                 self._page.pop_dialog()
-                # Schedule async save + close via run_task
-                async def _do_save_close():
-                    _log.warning("  _do_save_close running...")
-                    await self._save(e)
-                    self._on_close_cb()
-                    _log.warning("  save+close done")
-                self._page.run_task(_do_save_close)
+                self._page.run_task(self._save_and_close_if_valid, e)
 
             confirm_dlg = ft.AlertDialog(
                 title=ft.Row(controls=[
@@ -1834,7 +1831,14 @@ class SettingsView(ft.Container):
         else:
             self._on_close_cb()
 
-    async def _save(self, e):
+    async def _save_and_close_if_valid(self, e) -> bool:
+        """Close Settings only after validation and persistence succeed."""
+        if not await self._save(e):
+            return False
+        self._on_close_cb()
+        return True
+
+    async def _save(self, e) -> bool:
         try:
             # Save theme preset
             settings.THEME                   = self._selected_theme
@@ -1922,14 +1926,17 @@ class SettingsView(ft.Container):
 
             if self._on_saved:
                 self._on_saved()
+            return True
         except ValueError:
             self._save_status.value = "Lỗi: Vui lòng nhập số hợp lệ!"
             self._save_status.color = C.CRITICAL
             self.update()
+            return False
         except Exception as e_err:
             self._save_status.value = f"Lỗi không xác định: {str(e_err)}"
             self._save_status.color = C.CRITICAL
             self.update()
+            return False
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""

@@ -1911,16 +1911,22 @@ class AppController:
                 await asyncio.sleep(1)
                 slept += 1
             if not self._page_alive.is_set(): break
-            # Skip when dashboard not visible
-            if not self.dashboard.visible:
-                continue
             try:
-                if self._refresh_activity_time_state():
-                    self._render_cards_only()
-                    continue
-                with self._cards_lock:
-                    cards_snapshot = list(self.active_cards)
-                self._countdown_cards_once(cards_snapshot)
+                changed = self._refresh_activity_time_state()
+                if self.dashboard.visible:
+                    if changed:
+                        self._render_cards_only()
+                        continue
+                    with self._cards_lock:
+                        cards_snapshot = list(self.active_cards)
+                    self._countdown_cards_once(cards_snapshot)
+                elif self.calendar_view.visible:
+                    with self._data_lock:
+                        calendar_snapshot = list(self.all_data)
+                    self.calendar_view.update_data(calendar_snapshot)
+                    self.page.update()
+                elif self.detail_view.visible and self.detail_view.refresh_countdown():
+                    self.page.update()
             except Exception:
                 pass
 
