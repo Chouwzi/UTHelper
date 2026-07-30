@@ -350,7 +350,8 @@ def _fill_course_name(call_api: Callable, course_id: int, details: Dict[str, Any
         if name:
             details['course_full_name'] = html.unescape(name)
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 
 def _get_assign_detail(
@@ -627,7 +628,8 @@ def save_assignment_submission(
                     if text_draft_res and isinstance(text_draft_res, dict):
                         text_draft_id = text_draft_res.get('itemid', 0)
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                 params['plugindata[onlinetext_editor][itemid]'] = text_draft_id
     except Exception as e:
         logger.warning("Không kiểm tra được onlinetext status: %s. Sẽ fallback nộp file thông thường.", e)
@@ -753,7 +755,8 @@ def _enrich_grade_course_names(call_api: Callable, userid: int, grades: List[Dic
                 if name:
                     g['coursename'] = html.unescape(name)
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 
 

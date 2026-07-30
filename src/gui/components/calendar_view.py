@@ -475,7 +475,8 @@ class CalendarView(ft.Container):
         try:
             self._page_ref.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     # Public API
     def update_data(self, activities: List[Dict[str, Any]]):
@@ -652,7 +653,8 @@ class CalendarView(ft.Container):
         try:
             self._page_ref.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _restyle_cell(self, cell, day: int, col: int, today):
         """Restyle a single cell - extracted for targeted updates."""
@@ -838,7 +840,8 @@ class CalendarView(ft.Container):
         try:
             self._page_ref.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _update_day_panel(self):
         """Update bottom panel - CV-06: better microcopy."""
@@ -1021,7 +1024,8 @@ class CalendarView(ft.Container):
             month_summary = header_col.controls[1].content
             month_summary.color = C.TEXT_SECONDARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Weekdays Row Controls
         try:
@@ -1029,7 +1033,8 @@ class CalendarView(ft.Container):
                 txt = wd_c.content
                 txt.color = C.CRITICAL if txt.value == "CN" else C.TEXT_SECONDARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Mode Toggle Colors
         try:
@@ -1048,7 +1053,8 @@ class CalendarView(ft.Container):
             self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
             self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Day Panel Static Info
         self._day_title.color = C.TEXT_PRIMARY
@@ -1060,7 +1066,8 @@ class CalendarView(ft.Container):
             self._day_empty.content.controls[1].color = C.TEXT_SECONDARY
             self._day_empty.content.controls[2].color = C.BORDER
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":
@@ -1074,7 +1081,8 @@ class CalendarView(ft.Container):
         try:
             self.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
@@ -1083,7 +1091,8 @@ def main(page: ft.Page):
         from gui.flet_compat import patch_flet
         patch_flet()
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     from gui.app_controller import AppController
     AppController(page)
 

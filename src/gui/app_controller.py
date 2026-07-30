@@ -212,7 +212,8 @@ class AppController:
                                 "UTHelper",
                             )
                     except Exception:
-                        pass
+                        import logging as _fb_log
+                        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             else:
                 await self.page.window.destroy()
 
@@ -1035,7 +1036,8 @@ class AppController:
             self.orchestrator.moodle_service.clear_all_caches()
             self.orchestrator.clear_detail_cache()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         self.refresh_btn.disabled = True
         self.status_text.value    = "Đang cập nhật dữ liệu..."
@@ -1233,7 +1235,8 @@ class AppController:
             try:
                 self._data_cache.record_failed_attempt(str(exc))
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             with self._data_lock:
                 self.all_data = []
             
@@ -1389,7 +1392,8 @@ class AppController:
             self.urgency_popup.items[4].content.controls[1].color = _C.CRITICAL
             self.urgency_popup.items[4].content.controls[3].color = _C.CRITICAL
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         try:
             from gui.core.theme import _TYPE_COLORS
@@ -1431,7 +1435,8 @@ class AppController:
             self.type_popup.items[5].content.controls[1].color = _C.TEXT_SECONDARY
             self.type_popup.items[5].content.controls[3].color = _C.TEXT_SECONDARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         try:
             self.course_btn_label.color = _C.TEXT_PRIMARY
@@ -1439,14 +1444,16 @@ class AppController:
             self.course_popup.content.border = ft.Border.all(1, _C.BORDER)
             self.course_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         try:
             self._overdue_cb.label_style.color = _C.TEXT_SECONDARY
             self._overdue_cb.check_color = _C.BG
             self._overdue_cb.active_color = _C.CRITICAL
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Empty state
         if hasattr(self, '_empty_icon'):
@@ -1483,7 +1490,8 @@ class AppController:
             content_area = self.dashboard.controls[3]
             content_area.bgcolor = _C.BG
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):
@@ -1492,7 +1500,8 @@ class AppController:
                 try:
                     card.update_data(card.data, force=True)
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Icon buttons
         buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
@@ -1674,7 +1683,8 @@ class AppController:
             try:
                 self._safe_run_task(_update_ui)
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     async def _open_update_url(self, e):
         """Open a platform installer from a verified published release."""
@@ -1750,7 +1760,8 @@ class AppController:
                 self.orchestrator._userid_cache = None
                 self.orchestrator.is_logged_in = False
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             from core.data_cache import DataCache
 
             cache_namespace = (
@@ -1827,13 +1838,15 @@ class AppController:
             try:
                 self.orchestrator.invalidate_detail_cache(url)
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             
             # 2. Lưu cache đĩa để không bị mất khi restart app
             try:
                 self._data_cache.save_local_activities(data_copy)
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
             
             # 3. Làm mới UI của dashboard (cập nhật card status badge, đếm số bài đã nộp...)
@@ -1903,7 +1916,8 @@ class AppController:
                     cards_snapshot = list(self.active_cards)
                 self._pulse_cards_once(cards_snapshot, pulse_high)
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     async def _countdown_loop_async(self):
         while self._page_alive.is_set():
@@ -1935,7 +1949,8 @@ class AppController:
                 elif self.detail_view.visible and self.detail_view.refresh_countdown():
                     self.page.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _on_disconnect(self, e):
         self._page_alive.clear()
@@ -1946,7 +1961,8 @@ class AppController:
         try:
             self.orchestrator.client.close()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
@@ -1955,7 +1971,8 @@ def main(page: ft.Page):
         from gui.flet_compat import patch_flet
         patch_flet()
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     AppController(page)
 
 if __name__ == "__main__":

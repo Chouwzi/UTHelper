@@ -200,4 +200,5 @@ class DataCache:
                     except OSError:
                         pass
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)

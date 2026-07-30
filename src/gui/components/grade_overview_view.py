@@ -221,14 +221,16 @@ class GradeOverviewView(ft.Container):
         try:
             self.content.controls[1].color = C.BORDER
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             
         # Loading controls
         self._loading.color = C.ACCENT
         try:
             self._loading_row.controls[1].color = C.TEXT_SECONDARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             
         # Empty text
         self._empty_text.color = C.TEXT_SECONDARY
@@ -261,12 +263,14 @@ class GradeOverviewView(ft.Container):
                         item_row.controls[0].color = C.TEXT_SECONDARY
                         item_row.controls[1].color = C.TEXT_PRIMARY
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         try:
             self.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
@@ -275,7 +279,8 @@ def main(page: ft.Page):
         from gui.flet_compat import patch_flet
         patch_flet()
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     from gui.app_controller import AppController
     AppController(page)
 

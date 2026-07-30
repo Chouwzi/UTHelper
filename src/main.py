@@ -27,7 +27,8 @@ try:
         l.setLevel(logging.DEBUG)
         l.addHandler(file_handler)
 except Exception:
-    pass
+    import logging as _fb_log
+    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 # ==============================
 
 # iOS/mobile SSL fix: must be set BEFORE any httpx/ssl import
@@ -105,7 +106,8 @@ for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 logging.basicConfig(
     level=logging.DEBUG,

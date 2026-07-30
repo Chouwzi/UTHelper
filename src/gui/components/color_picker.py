@@ -72,7 +72,8 @@ class ColorPicker:
                 self.prv.bgcolor = f"#{val}"
                 self.prv.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _apply(self, e):
         self.container_box.bgcolor = self.hex_inp.value

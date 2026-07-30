@@ -29,7 +29,8 @@ def parse_datetime(s: str) -> datetime | None:
             dt = dt.astimezone(_LOCAL_TZ).replace(tzinfo=None)
         return dt
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     try:
         dt = _dateutil_parser.parse(s)

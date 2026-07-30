@@ -38,7 +38,8 @@ def detect_platform(page=None):
                 IS_MOBILE = False
                 IS_DESKTOP = True
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     logger.info(
         "Platform detected: %s (mobile=%s, desktop=%s)",

@@ -109,7 +109,8 @@ def _read_secret(key: str) -> str:
             if val:
                 return val
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     # Tier 2: keyring
     if _HAS_KEYRING:
         try:
@@ -117,7 +118,8 @@ def _read_secret(key: str) -> str:
             if val:
                 return val
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     return ""
 
 def _write_secret(key: str, value: str):
@@ -133,7 +135,8 @@ def _write_secret(key: str, value: str):
                 try:
                     ss.delete(key=key)
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             return
         except Exception as e:
             _logger.warning(f"SecureStorage write failed for {key}: {e}")
@@ -344,7 +347,8 @@ def load_settings() -> Settings:
                 s.UTH_PASSWORD = kp
                 _write_secret('password', kp)
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     return s
 

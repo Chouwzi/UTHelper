@@ -153,7 +153,8 @@ class EmailNotifier(BaseNotifier):
                 remaining = html.escape(str(remaining))
                 type_label = html.escape(type_label)
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
             html_content += f"""
                     <div class="task-card {css_class}">

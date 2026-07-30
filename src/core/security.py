@@ -35,14 +35,16 @@ class HTMLSanitizer:
                 try:
                     del tag.attrs[attr]
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                 continue
             # Remove event handlers and inline styles
             if al.startswith("on") or al == "style":
                 try:
                     del tag.attrs[attr]
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                 continue
             # Validate URI schemes in dangerous attributes
             if al in cls._URI_ATTRS:
@@ -53,12 +55,14 @@ class HTMLSanitizer:
                         try:
                             del tag.attrs[attr]
                         except Exception:
-                            pass
+                            import logging as _fb_log
+                            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                 except Exception:
                     try:
                         del tag.attrs[attr]
                     except Exception:
-                        pass
+                        import logging as _fb_log
+                        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     @classmethod
     def _strip_disallowed_tags(cls, parent) -> None:

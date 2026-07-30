@@ -614,7 +614,8 @@ class SettingsView(ft.Container):
             try:
                 container.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Expansion tiles (title text + icon colors)
         for tile in getattr(self, '_tiles', []):
@@ -627,7 +628,8 @@ class SettingsView(ft.Container):
             try:
                 tile.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # ALL text fields - update border, focus, text, bg colors
         _all_fields = [
@@ -679,7 +681,8 @@ class SettingsView(ft.Container):
             try:
                 self._save_btn.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Sticky footer
         if hasattr(self, '_sticky_footer'):
@@ -690,7 +693,8 @@ class SettingsView(ft.Container):
             try:
                 self._sticky_footer.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Test login button
         if hasattr(self, '_test_login_btn'):
@@ -803,18 +807,21 @@ class SettingsView(ft.Container):
                     check_icon = card.content.controls[0].controls[0]
                     check_icon.visible = selected
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                 
                 # Update label font weight
                 try:
                     label = card.content.controls[3]
                     label.weight = ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             try:
                 row_ctrl.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         else:
             # Fallback if row or length mismatch
             new_row = self._build_theme_selector()
@@ -822,7 +829,8 @@ class SettingsView(ft.Container):
             try:
                 self._theme_cards_row.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 
     async def _handle_reset_defaults(self, e):
@@ -1030,7 +1038,8 @@ class SettingsView(ft.Container):
             try:
                 self._debug_info_text.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1324,7 +1333,8 @@ class SettingsView(ft.Container):
                 lines.append(f"\nBackground check: {'BẬT' if cfg.BACKGROUND_CHECK_ANDROID else 'TẮT'}")
                 lines.append(f"Interval: {cfg.CHECK_INTERVAL_MINUTES} phút")
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
             self._debug_mobile_text.value = "\n".join(lines)
             self._debug_mobile_text.color = C.TEXT_PRIMARY
@@ -1394,7 +1404,8 @@ class SettingsView(ft.Container):
             try:
                 self._debug_update_text.update()
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         threading.Thread(target=_worker, daemon=True, name="debug-update").start()
 
@@ -1407,19 +1418,22 @@ class SettingsView(ft.Container):
             try:
                 self._on_test_tray(t); sent.append("Windows Tray")
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         if hasattr(self, '_on_test_mobile') and self._on_test_mobile and _pu.IS_MOBILE:
             try:
                 self._on_test_mobile(t); sent.append("Mobile")
             except Exception:
-                pass
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         for name, cb in [("Telegram", "_on_test_tele"), ("Discord", "_on_test_discord"), ("Gmail", "_on_test_mail")]:
             fn = getattr(self, cb, None)
             if fn:
                 try:
                     fn(t); sent.append(name)
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         self._debug_info_text.value = f"Broadcast [{t}] tới: {', '.join(sent) or 'Không có kênh nào'}"
         self._debug_info_text.color = C.SAFE if sent else C.WARNING
         self._debug_info_text.update()
@@ -1880,7 +1894,8 @@ class SettingsView(ft.Container):
                             import logging
                             logging.error(f"Failed handling autostart: {ex}")
                         except Exception:
-                            pass
+                            import logging as _fb_log
+                            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                         
                 settings.START_WITH_WINDOWS = self._sw_start_with_windows.value
                 settings.START_MINIMIZED = self._sw_start_minimized.value
@@ -1946,7 +1961,8 @@ def main(page: ft.Page):
         from gui.flet_compat import patch_flet
         patch_flet()
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     from gui.app_controller import AppController
     AppController(page)
 

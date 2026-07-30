@@ -697,7 +697,8 @@ class DetailView(ft.Container):
                 try:
                     client = self._get_client() if self._get_client else None
                 except Exception:
-                    pass
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
                 if client:
                     prefetched = data.get("details", {}).get("raw_submission_status")
                     self._page.run_task(
@@ -1039,7 +1040,8 @@ class DetailView(ft.Container):
         try:
             client = self._get_client() if self._get_client else None
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         if not client:
             self._show_upload_status("Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
@@ -1156,7 +1158,8 @@ class DetailView(ft.Container):
         try:
             client = self._get_client() if self._get_client else None
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         if not client:
             self._show_upload_status("Chưa đăng nhập.", C.CRITICAL)
             return
@@ -1235,7 +1238,8 @@ class DetailView(ft.Container):
                 if site_info and isinstance(site_info, dict):
                     default_author = site_info.get('fullname', '')
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         self._edit_author.value = default_author
         self._edit_license.value = 'unknown'
         self._edit_status.value = ""
@@ -1377,7 +1381,8 @@ class DetailView(ft.Container):
         try:
             client = self._get_client() if self._get_client else None
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         if not client:
             self._edit_status.value = "Chưa đăng nhập"
             self._edit_status.color = C.CRITICAL
@@ -1481,7 +1486,8 @@ class DetailView(ft.Container):
             self._error_banner.content.controls[0].color = C.WARNING
             self._error_banner.content.controls[1].color = C.WARNING
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Text Fields & Dropdowns (Edit metadata dialog)
         _edit_fields = [
@@ -1508,7 +1514,8 @@ class DetailView(ft.Container):
             # Update Button
             self._file_edit_dialog.actions[1].bgcolor = C.ACCENT
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Delete Dialog
         try:
@@ -1520,7 +1527,8 @@ class DetailView(ft.Container):
             # Delete Button
             self._delete_confirm_dialog.actions[1].bgcolor = C.CRITICAL
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Buttons (Batch delete, multiselect, edit submitted)
         try:
@@ -1542,7 +1550,8 @@ class DetailView(ft.Container):
             self._edit_submitted_btn.content.controls[0].color = C.WARNING
             self._edit_submitted_btn.content.controls[1].color = C.WARNING
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Areas (submitted, submission, pick, submit, upload modes)
         try:
@@ -1578,7 +1587,8 @@ class DetailView(ft.Container):
             self._cutoff_row.controls[0].color = C.WARNING
             self._header_open_btn.icon_color = C.ACCENT
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Layout elements
         try:
@@ -1597,7 +1607,8 @@ class DetailView(ft.Container):
             info_box.content.controls[2].controls[0].color = C.TEXT_SECONDARY
             info_box.content.controls[3].controls[0].color = C.WARNING
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # If data is currently shown, refresh dynamic content
         if self._current_data:
@@ -1606,7 +1617,8 @@ class DetailView(ft.Container):
         try:
             self.update()
         except Exception:
-            pass
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
@@ -1615,7 +1627,8 @@ def main(page: ft.Page):
         from gui.flet_compat import patch_flet
         patch_flet()
     except Exception:
-        pass
+        import logging as _fb_log
+        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     from gui.app_controller import AppController
     AppController(page)
 
