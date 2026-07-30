@@ -4,6 +4,32 @@ import sys
 import traceback
 from pathlib import Path
 
+# ===== SETUP DEBUG LOGGER =====
+# Force stdout/stderr to be unbuffered/line-buffered
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(line_buffering=True)
+
+try:
+    _appdata = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "UTHelper")
+    os.makedirs(_appdata, exist_ok=True)
+    log_path = os.path.join(_appdata, "debug_app.log")
+    file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+    
+    for log_name in ["flet", "flet_transport", "gui", "core"]:
+        l = logging.getLogger(log_name)
+        l.setLevel(logging.DEBUG)
+        l.addHandler(file_handler)
+except Exception:
+    pass
+# ==============================
+
 # iOS/mobile SSL fix: must be set BEFORE any httpx/ssl import
 # Python in sandboxed iOS/Android apps cannot locate system CA certificates.
 # Setting these env vars ensures SSL verification works everywhere.
@@ -37,7 +63,7 @@ _boot_log(f"Android: {hasattr(sys, '_ANDROID_')}")
 # Platform-aware data directories
 try:
     if sys.platform == 'win32':
-        _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHElearningAlert"
+        _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHelper"
     elif os.environ.get('FLET_APP_STORAGE_DATA'):
         _APPDATA_DIR = Path(os.environ['FLET_APP_STORAGE_DATA'])
     else:
@@ -59,11 +85,9 @@ try:
     _LOG_DIR = _APPDATA_DIR / "logs"
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     
-    from logging.handlers import RotatingFileHandler
-    _file_handler = RotatingFileHandler(
+    _file_handler = logging.FileHandler(
         _LOG_DIR / "app.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
+        mode='a',
         encoding="utf-8",
     )
     _file_handler.setLevel(logging.DEBUG)
@@ -88,12 +112,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-logging.getLogger("flet_core").setLevel(logging.WARNING)
-logging.getLogger("flet").setLevel(logging.WARNING)
+logging.getLogger("flet_core").setLevel(logging.DEBUG)
+logging.getLogger("flet").setLevel(logging.DEBUG)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 # Suppress known harmless Flet web session teardown errors
 # (NoneType.put_nowait race condition during disconnect)
-logging.getLogger("flet_core.session").setLevel(logging.CRITICAL)
+# logging.getLogger("flet_core.session").setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +211,9 @@ def main():
     if web_mode:
         run_kwargs["view"] = ft.AppView.WEB_BROWSER
         run_kwargs["port"] = web_port
+    elif os.environ.get("FLET_SERVER_PORT"):
+        # Flet >= 0.82 workaround removed to test if it's causing the issue in 0.85.3
+        pass
     
     ft.run(**run_kwargs)
 

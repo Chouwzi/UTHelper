@@ -11,6 +11,7 @@ import asyncio
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
+from core.version import APP_VERSION
 import platform_utils as _pu  # use _pu.IS_MOBILE for live platform detection
 from gui.components.color_picker import open_color_picker
 
@@ -222,7 +223,7 @@ class SettingsView(ft.Container):
 
     def _init_layout(self):
         self._title_text = ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY)
-        self._version_text = ft.Text(f"UTHelper v{__import__('main').__version__}", size=11, color=C.TEXT_SECONDARY)
+        self._version_text = ft.Text(f"UTHelper v{APP_VERSION}", size=11, color=C.TEXT_SECONDARY)
         self._header_divider = ft.Divider(height=16, color=C.BORDER)
         
         # Build sections using imported builders
@@ -1267,7 +1268,7 @@ class SettingsView(ft.Container):
                     # Try Flet's haptic feedback
                     try:
                         from flet import HapticFeedback
-                        self._page.run_task(lambda: self._page.haptic_feedback(HapticFeedback.MEDIUM_IMPACT))
+                        self._page.haptic_feedback(HapticFeedback.MEDIUM_IMPACT)
                         self._debug_mobile_text.value = "✅ Đã gửi haptic feedback (Flet)"
                         self._debug_mobile_text.color = C.SAFE
                     except Exception:

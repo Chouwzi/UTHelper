@@ -264,7 +264,7 @@ class DetailView(ft.Container):
             border=ft.Border.all(1, C.CRITICAL),
             padding=ft.Padding.symmetric(vertical=6, horizontal=12),
             border_radius=6,
-            on_click=lambda _: self._confirm_batch_delete(),
+            on_click=self._on_confirm_batch_delete_async,
             ink=True,
             visible=False,
         )
@@ -283,7 +283,7 @@ class DetailView(ft.Container):
             border=ft.Border.all(1, C.BORDER),
             padding=ft.Padding.symmetric(vertical=6, horizontal=12),
             border_radius=6,
-            on_click=lambda _: self._toggle_multiselect(),
+            on_click=self._on_toggle_multiselect_async,
             ink=True,
             visible=False,
         )
@@ -373,7 +373,7 @@ class DetailView(ft.Container):
             border=ft.Border.all(1, C.BORDER),
             border_radius=6,
             padding=ft.Padding.symmetric(vertical=6, horizontal=12),
-            on_click=lambda _: self._set_upload_mode(True),
+            on_click=self._on_mode_overwrite_async,
             ink=True,
             expand=True,
         )
@@ -385,7 +385,7 @@ class DetailView(ft.Container):
             bgcolor=C.ACCENT,
             border_radius=6,
             padding=ft.Padding.symmetric(vertical=6, horizontal=12),
-            on_click=lambda _: self._set_upload_mode(False),
+            on_click=self._on_mode_append_async,
             ink=True,
             expand=True,
         )
@@ -946,7 +946,7 @@ class DetailView(ft.Container):
                         ft.IconButton(
                             ft.Icons.CLOSE_ROUNDED, icon_size=14,
                             icon_color=C.TEXT_SECONDARY,
-                            on_click=lambda _, idx=i: self._remove_file(idx),
+                            on_click=self._create_remove_handler(i),
                             style=ft.ButtonStyle(padding=ft.Padding.all(4)),
                         ),
                     ],
@@ -967,6 +967,24 @@ class DetailView(ft.Container):
         # Show upload mode toggle when there are both new files and existing submitted files
         self._upload_mode_row.visible = has_files and bool(self._submitted_files)
         self._page.update()
+
+
+    async def _on_confirm_batch_delete_async(self, e):
+        self._confirm_batch_delete()
+
+    async def _on_toggle_multiselect_async(self, e):
+        self._toggle_multiselect()
+
+    async def _on_mode_overwrite_async(self, e):
+        self._set_upload_mode(True)
+
+    async def _on_mode_append_async(self, e):
+        self._set_upload_mode(False)
+
+    def _create_remove_handler(self, idx):
+        async def handler(e):
+            self._remove_file(idx)
+        return handler
 
     def _remove_file(self, index: int):
         """Xóa file khỏi danh sách đã chọn."""

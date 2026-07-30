@@ -540,7 +540,7 @@ Access-Control-Expose-Headers: Content-Disposition, Link
 
 ---
 
-## 🔮 Ứng dụng cho UTH-Elearning-Alert
+## 🔮 Ứng dụng cho UTHelper
 
 | Tính năng | API sử dụng | Ưu tiên |
 |-----------|-------------|---------|

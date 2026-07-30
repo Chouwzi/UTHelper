@@ -9,7 +9,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def add_to_startup(app_name: str = "UTHElearningAlert") -> bool:
+def add_to_startup(app_name: str = "UTHelper") -> bool:
     """Add app to system startup. Windows-only; no-op on other platforms."""
     if sys.platform != "win32":
         logger.info("Auto-start not supported on this platform (non-Windows).")
@@ -41,7 +41,7 @@ def add_to_startup(app_name: str = "UTHElearningAlert") -> bool:
         return False
 
 
-def remove_from_startup(app_name: str = "UTHElearningAlert") -> bool:
+def remove_from_startup(app_name: str = "UTHelper") -> bool:
     """Remove app from system startup. Windows-only; no-op on other platforms."""
     if sys.platform != "win32":
         return False

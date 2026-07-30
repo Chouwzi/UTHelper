@@ -20,9 +20,13 @@ try:
 except ImportError:
     _HAS_KEYRING = False
 
-# Mò đường dẫn thư mục gốc, chạy script lẻ hay đóng gói exe đều dùng được
-if getattr(sys, 'frozen', False):
-    # Nếu đang chạy từ file exe được build bởi PyInstaller
+# Mò đường dẫn thư mục gốc, chạy script lẻ hay đóng gói Flet đều dùng được
+_flet_assets = os.environ.get("FLET_ASSETS_DIR")
+if _flet_assets:
+    # Nếu được đóng gói bởi Flet, FLET_ASSETS_DIR sẽ trỏ thẳng vào thư mục assets
+    BASE_DIR = Path(_flet_assets).parent
+elif getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # PyInstaller legacy fallback
     BASE_DIR = Path(sys._MEIPASS)
 else:
     # Nếu đang chạy mã nguồn Python thông thường
@@ -32,32 +36,42 @@ else:
 
 
 # Platform-aware data directory
-def _get_user_data_dir() -> Path:
-    """Trả về thư mục lưu trữ dữ liệu phù hợp với nền tảng."""
-    if sys.platform == 'win32':
-        return Path(os.getenv('APPDATA', BASE_DIR)) / "UTHElearningAlert"
-    
-    # Mobile (Android/iOS): Flet sets FLET_APP_STORAGE_DATA env var
-    flet_data = os.environ.get('FLET_APP_STORAGE_DATA')
+def is_android():
+    return hasattr(sys, '_ANDROID_') or 'android' in sys.platform.lower() or hasattr(sys, '_IOS_')
+
+def is_windows():
+    return sys.platform == 'win32'
+
+def _get_windows_data_dir() -> Path:
+    return Path(os.getenv('APPDATA', BASE_DIR)) / "UTHelper"
+
+def _get_android_data_dir() -> Path:
+    flet_data = os.getenv("FLET_APP_DATA")
     if flet_data:
-        return Path(flet_data) / "UTHElearningAlert"
-        
-    # Fallback an toàn cho Mobile khi chạy ngầm không có biến môi trường
-    if hasattr(sys, '_ANDROID_') or 'android' in sys.platform.lower() or hasattr(sys, '_IOS_'):
-        import tempfile
-        return Path(tempfile.gettempdir()) / "UTHElearningAlert"
+        return Path(flet_data) / "UTHelper"
+    return Path(BASE_DIR) / "UTHelper"
 
-    # macOS/iOS native fallback (Application Support)
-    if sys.platform == 'darwin':
-        return Path.home() / "Library" / "Application Support" / "UTHElearningAlert"
-    # Fallback for Linux/other
-    return Path.home() / ".uthelper"
+def _get_linux_data_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "UTHelper"
 
-_USER_DATA_DIR = _get_user_data_dir()
+def _get_macos_data_dir() -> Path:
+    return Path.home() / "Library" / "Application Support" / "UTHelper"
+
+def get_data_dir() -> Path:
+    """Trả về thư mục lưu trữ dữ liệu tùy theo OS."""
+    if is_android():
+        return _get_android_data_dir()
+    elif is_windows():
+        return _get_windows_data_dir()
+    elif platform.system() == "Darwin":
+        return _get_macos_data_dir()
+    return _get_linux_data_dir()
+
+_USER_DATA_DIR = get_data_dir()
 _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_FILE = _USER_DATA_DIR / "settings.json"
 
-KEYRING_SERVICE_NAME = "UTHElearningAlert"
+KEYRING_SERVICE_NAME = "UTHelper"
 
 # Secret field mapping (attr_name → storage_key)
 _SECRET_FIELDS = {

@@ -104,11 +104,11 @@ class AppController:
         # Android back button - intercept to navigate within app instead of exiting
         if platform_utils.IS_MOBILE:
             self.page.on_view_pop = self._on_back_button
-        self.page.run_task(self._pulse_loop_async)
-        self.page.run_task(self._countdown_loop_async)
-        self.page.run_task(self._sync_coordinator.run)
+        self._safe_run_task(self._pulse_loop_async)
+        self._safe_run_task(self._countdown_loop_async)
+        self._safe_run_task(self._sync_coordinator.run)
         if self._android_background and self._android_background.available:
-            self.page.run_task(self._initialize_android_background)
+            self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
         
         # Check update in background
@@ -116,7 +116,7 @@ class AppController:
         check_for_update_async(APP_VERSION, self._on_update_check)
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
-            self.page.run_task(self._show_login_dialog)
+            self._safe_run_task(self._show_login_dialog)
         # With credentials, the coordinator waits until cache age + the
         # one-minute startup grace are due. Manual refresh remains immediate.
 
@@ -127,6 +127,13 @@ class AppController:
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+
+    def _safe_run_task(self, handler, *args, **kwargs):
+        if not hasattr(self.page, "session") or self.page.session is None:
+            return None
+        if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
+            return None
+        return self.page.run_task(handler, *args, **kwargs)
 
     def _init_window(self):
         # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
@@ -145,13 +152,13 @@ class AppController:
         if not _is_mobile:
             self.page.window.width        = 420
             self.page.window.height       = 720
-            self.page.window.max_width    = 420
-            self.page.window.min_width    = 420
-            self.page.window.always_on_top = settings.ALWAYS_ON_TOP
-            self.page.window.resizable    = False
-            self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
-            self.page.window.prevent_close = True
-            self.page.window.on_event = self._on_window_event
+            # self.page.window.max_width    = 420
+            # self.page.window.min_width    = 420
+            # self.page.window.always_on_top = settings.ALWAYS_ON_TOP
+            # self.page.window.resizable    = False
+            # self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
+            # self.page.window.prevent_close = True
+            # self.page.window.on_event = self._on_window_event
         
         self.page.title               = "UTHelper"
         self.page.bgcolor             = C.BG
@@ -176,14 +183,14 @@ class AppController:
 
         # Runtime permission requests and native service initialization must run
         # on Flet's event loop, after accurate platform detection.
-        self.page.run_task(self.notifier.initialize, self.page)
+        self._safe_run_task(self.notifier.initialize, self.page)
         
         # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
         import sys
         if not _is_mobile and settings.START_MINIMIZED and "--autostart" in sys.argv:
-            self.page.window.visible = False
+            pass # self.page.window.visible = False
         elif not _is_mobile:
-            self.page.window.visible = True
+            pass # self.page.window.visible = True
             
         self.page.update()
 
@@ -271,10 +278,10 @@ class AppController:
         ]
 
         self.urgency_popup, self._update_urgency_counts = self._make_filter_popup(
-            _URGENCY_CFG, lambda key: self.page.run_task(self._set_urgency, key)
+            _URGENCY_CFG, lambda key: self._safe_run_task(self._set_urgency, key)
         )
         self.type_popup, self._update_type_counts = self._make_filter_popup(
-            _TYPE_CFG, lambda key: self.page.run_task(self._set_type, key)
+            _TYPE_CFG, lambda key: self._safe_run_task(self._set_type, key)
         )
 
         self.course_btn_label = ft.Text("Môn học", size=12, color=C.TEXT_PRIMARY, weight=ft.FontWeight.W_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
@@ -298,7 +305,7 @@ class AppController:
             active_color=C.CRITICAL,
             check_color=C.BG,
             scale=1,
-            on_change=lambda e: self.page.run_task(self._toggle_overdue, e)
+            on_change=lambda e: self._safe_run_task(self._toggle_overdue, e)
         )
 
         self.search_field = ft.TextField(
@@ -321,25 +328,25 @@ class AppController:
             ft.Icons.CALENDAR_MONTH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Lịch",
-            on_click=lambda e: self.page.run_task(self._toggle_calendar),
+            on_click=lambda e: self._safe_run_task(self._toggle_calendar),
         )
         self.refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Làm mới",
-            on_click=lambda e: self.page.run_task(self._load_data_async),
+            on_click=lambda e: self._safe_run_task(self._load_data_async),
         )
         self.settings_btn = ft.IconButton(
             ft.Icons.SETTINGS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Cài đặt",
-            on_click=lambda e: self.page.run_task(self._show_settings),
+            on_click=lambda e: self._safe_run_task(self._show_settings),
         )
         self.grades_btn = ft.IconButton(
             ft.Icons.INSIGHTS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Bảng điểm",
-            on_click=lambda e: self.page.run_task(self._toggle_grades),
+            on_click=lambda e: self._safe_run_task(self._toggle_grades),
         )
 
     def _init_banner_and_states(self):
@@ -385,7 +392,7 @@ class AppController:
         self._error_retry_btn = ft.Button(
             "Thử lại",
             icon=ft.Icons.REFRESH_ROUNDED,
-            on_click=lambda _: self.page.run_task(self._load_data_async),
+            on_click=lambda _: self._safe_run_task(self._load_data_async),
             bgcolor=C.ACCENT, color=C.TEXT_PRIMARY,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
         )
@@ -470,16 +477,16 @@ class AppController:
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
-        self.detail_view   = DetailView(self.page, on_close=lambda: self.page.run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed)
+        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed)
         self.calendar_view = CalendarView(
             self.page,
-            on_close=lambda: self.page.run_task(self._close_calendar),
-            on_open_detail=lambda data: self.page.run_task(self._show_detail_async, data),
+            on_close=lambda: self._safe_run_task(self._close_calendar),
+            on_open_detail=lambda data: self._safe_run_task(self._show_detail_async, data),
         )
         self.settings_view = SettingsView(
             self.page,
             self.orchestrator,
-            on_close=lambda: self.page.run_task(self._close_settings),
+            on_close=lambda: self._safe_run_task(self._close_settings),
             on_saved=self._on_settings_saved,
             on_test_tray=self._on_test_tray,
             on_test_mobile=self._on_test_mobile,
@@ -489,7 +496,7 @@ class AppController:
             on_theme_preview=self._rebuild_colors,
         )
         self.grade_overview_view = GradeOverviewView(
-            on_close=lambda: self.page.run_task(self._close_grades),
+            on_close=lambda: self._safe_run_task(self._close_grades),
         )
 
         for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
@@ -527,7 +534,7 @@ class AppController:
                 except Exception:
                     break
                 await asyncio.sleep(0.8)
-        self.page.run_task(_pulse_skeletons)
+        self._safe_run_task(_pulse_skeletons)
 
     def _make_skeleton_card(self):
         """Create a skeleton placeholder card that mimics ActivityCard layout."""
@@ -648,7 +655,7 @@ class AppController:
         type_counts = counts["type"]
 
         def _on_course_select(e, c_name):
-            self.page.run_task(self._set_course, c_name)
+            self._safe_run_task(self._set_course, c_name)
 
         c_items = [ft.PopupMenuItem(
             content=ft.Row([ft.Text("Tất cả môn học", size=12, color=C.TEXT_SECONDARY, expand=True), ft.Icon(ft.Icons.CHECK, size=12, color=C.TEXT_PRIMARY, visible=(self.active_course == "all"))], spacing=6, tight=True),
@@ -862,7 +869,7 @@ class AppController:
         async def _delayed_render():
             await asyncio.sleep(0.15)
             self._render_cards_only()
-        self._search_task = self.page.run_task(_delayed_render)
+        self._search_task = self._safe_run_task(_delayed_render)
 
     async def _check_grades_background(self):
         """PERF-OPT: Check grade changes in background (non-blocking)."""
@@ -1211,14 +1218,14 @@ class AppController:
                     logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
                 # PERF-OPT: Grade check moved to background task to not block main data display
-                self.page.run_task(self._check_grades_background)
+                self._safe_run_task(self._check_grades_background)
 
             self._update_footer()
             
             self._prefetch_cancel_event.clear()
             with self._data_lock:
                 prefetch_copy = list(self.all_data)
-            self.page.run_task(self._prefetch_details_async, prefetch_copy)
+            self._safe_run_task(self._prefetch_details_async, prefetch_copy)
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
         except Exception as exc:
@@ -1549,7 +1556,7 @@ class AppController:
         
         if getattr(self, '_needs_reload', False):
             self._needs_reload = False
-            self.page.run_task(self._load_data_async)
+            self._safe_run_task(self._load_data_async)
         # _update_footer() already calls _refresh_ui() which calls page.update()
         # No extra page.update() needed
 
@@ -1630,7 +1637,7 @@ class AppController:
             await notifier.setup(self.page)
             await notifier.notify([dummy])
 
-        self.page.run_task(_send)
+        self._safe_run_task(_send)
 
     def _on_test_tele(self, mock_type="critical"):
         dummy = self._test_notification_base(mock_type)
@@ -1665,7 +1672,7 @@ class AppController:
                 self._update_banner.visible = True
                 self.page.update()
             try:
-                self.page.run_task(_update_ui)
+                self._safe_run_task(_update_ui)
             except Exception:
                 pass
 
@@ -1765,7 +1772,7 @@ class AppController:
             if credentials_changed:
                 # Prevent the previous account token/Room snapshot from being
                 # used while the new credentials have not logged in yet.
-                self.page.run_task(self._android_background.logout)
+                self._safe_run_task(self._android_background.logout)
             else:
                 async def _apply_android_settings():
                     await self._android_background.configure(
@@ -1781,7 +1788,7 @@ class AppController:
                         if not bool(diagnostics.get("exact_alarm_allowed", False)):
                             await self._android_background.request_exact_alarm_access()
 
-                self.page.run_task(_apply_android_settings)
+                self._safe_run_task(_apply_android_settings)
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
@@ -1833,7 +1840,7 @@ class AppController:
             self._update_footer()
 
     def _show_detail(self, data: dict):
-        self.page.run_task(self._show_detail_async, data)
+        self._safe_run_task(self._show_detail_async, data)
 
     async def _show_detail_async(self, data: dict):
         # Ghi nhận nếu màn hình chi tiết được mở từ Lịch để phục vụ quay lại (back-navigation)

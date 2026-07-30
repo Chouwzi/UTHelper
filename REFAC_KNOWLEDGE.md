@@ -1,6 +1,6 @@
 # Cơ sở tri thức Tái cấu trúc (Refactoring Knowledge Base)
 
-Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ thuật và tiến độ thực tế trong quá trình tái cấu trúc codebase `UTH-Elearning-Alert` theo các nguyên lý Clean Code và SOLID.
+Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ thuật và tiến độ thực tế trong quá trình tái cấu trúc codebase `UTHelper` theo các nguyên lý Clean Code và SOLID.
 
 ---
 

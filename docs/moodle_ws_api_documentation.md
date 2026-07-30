@@ -5,7 +5,7 @@
 > **Theme**: Edly
 > **Total Available WS Functions**: 421 (via `moodle_mobile_app` service)
 > **Last Updated**: 2026-06-22
-> **Purpose**: Complete API reference for the UTH-Elearning-Alert project — designed so any AI agent can read this file and interact with the Moodle APIs immediately.
+> **Purpose**: Complete API reference for the UTHelper project — designed so any AI agent can read this file and interact with the Moodle APIs immediately.
 
 ---
 
@@ -30,7 +30,7 @@
     - 12b. [Known Limitations & Disabled Endpoints](#12b-known-limitations--disabled-endpoints)
 13. [Full Function List (All 421)](#13-full-function-list-all-421)
 14. [Portal API vs Moodle WS — Comparison Table](#14-portal-api-vs-moodle-ws--comparison-table)
-15. [Feature Priority Table for UTH-Elearning-Alert](#15-feature-priority-table-for-uth-elearning-alert)
+15. [Feature Priority Table for UTHelper](#15-feature-priority-table-for-uthelper)
 16. [Technical Reference](#16-technical-reference)
 
 ---
@@ -2142,11 +2142,11 @@ Below is the complete list of all 421 web service functions available via the `m
 | **Mobile Support** | Web only | Designed for mobile apps |
 
 > [!IMPORTANT]
-> **Recommendation**: Use Moodle WS API as the **primary data source** for UTH-Elearning-Alert. It provides more data, more reliable authentication, and no risk of session invalidation.
+> **Recommendation**: Use Moodle WS API as the **primary data source** for UTHelper. It provides more data, more reliable authentication, and no risk of session invalidation.
 
 ---
 
-## 15. Feature Priority Table for UTH-Elearning-Alert
+## 15. Feature Priority Table for UTHelper
 
 | Priority | Feature | Primary API | Key Parameters | Notes |
 |---|---|---|---|---|

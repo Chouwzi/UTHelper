@@ -32,7 +32,7 @@ verification.
 
 Production releases require a persistent Android keystore and a Windows code
 signing certificate in GitHub Actions secrets. Portable Windows users need a
-one-time migration to MSIX, while data under `%APPDATA%\UTHElearningAlert`
+one-time migration to MSIX, while data under `%APPDATA%\UTHelper`
 remains outside the install directory. Android still requires explicit user
 confirmation in PackageInstaller.
 

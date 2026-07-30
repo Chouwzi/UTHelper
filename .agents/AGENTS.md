@@ -1,4 +1,4 @@
-# Quy tắc Agent cho UTH-Elearning-Alert
+# Quy tắc Agent cho UTHelper
 
 Tài liệu này là nguồn quy tắc bắt buộc cho mọi Agent/AI làm việc trong repo này. Mục tiêu hiện tại là refactor có kiểm soát theo Clean Code, SOLID/OOP và Clean Architecture, không phá hành vi đã ổn định của UTHelper.
 

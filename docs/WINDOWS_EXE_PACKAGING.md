@@ -41,7 +41,7 @@ Validate the output on a clean Windows profile or VM:
 - Test tray minimize/restore/exit.
 - Test Windows toast/tray notification.
 - Enable/disable autostart and confirm the registry command points to the built exe.
-- Confirm settings are written under `%APPDATA%\UTHElearningAlert`, not beside the exe.
+- Confirm settings are written under `%APPDATA%\UTHelper`, not beside the exe.
 
 ## Single-File EXE Path
 
@@ -82,7 +82,7 @@ If the executable starts but a dynamic dependency fails, repeat the debug build 
 - Keep build output outside `src`; `src/build` can be accidentally bundled and previously added over 100 MB of artifact weight.
 - Bundle assets to `assets` for PyInstaller/Flet pack. Runtime code now checks both `src/assets` and `assets`.
 - Prefer `sys.executable` for autostart when frozen. The app already does this.
-- Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHElearningAlert`.
+- Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHelper`.
 - Do not request UAC/admin unless the app truly needs it; autostart uses HKCU and does not require elevation.
 - Code signing is recommended for distribution to reduce SmartScreen friction, but signing requires a certificate and should happen after reproducible local builds.
 
