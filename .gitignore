@@ -110,6 +110,7 @@ benchmark_*.py
 
 # ── Agent workspace (skill configs, not source) ──
 .agent/
+.worktrees/
 
 # ── Installer output ──
 Output/
