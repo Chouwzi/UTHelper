@@ -22,10 +22,9 @@ class NotificationHistory:
 
     def add(self, assignments: List[Any], channels: List[str]) -> None:
         """Ghi nhận một lần gửi thông báo."""
-        from core.safe_file_io import get_memory_lock, SafeFileIO
-        # Nhóm toàn bộ thao tác đọc, sửa, ghi dưới lock của tệp tin này
-        mem_lock = get_memory_lock(self._path)
-        with mem_lock:
+        from core.safe_file_io import SafeFileIO
+        # Nhóm toàn bộ thao tác đọc, sửa, ghi dưới lock của tệp tin này để an toàn đa tiến trình
+        with SafeFileIO.transaction(self._path):
             try:
                 entries = self._load_raw_unlocked()
                 for a in assignments:

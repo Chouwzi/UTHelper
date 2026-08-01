@@ -11,6 +11,9 @@ $env:PYTHONUTF8=1
 $env:FLET_CLI_NO_RICH_OUTPUT="true"
 flet build windows
 
+Write-Host "2.5. Chạy Post-Build Cleanup (Giảm dung lượng)..." -ForegroundColor Cyan
+python scripts\post_build_cleanup.py
+
 
 Write-Host "3. Chạy Inno Setup đóng gói (ISCC)..." -ForegroundColor Cyan
 $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"

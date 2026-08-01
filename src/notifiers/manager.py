@@ -280,7 +280,7 @@ class NotificationManager:
 
     async def _merge_native_receipts(self, cache: Dict) -> None:
         """Merge receipts emitted while the foreground process was sleeping."""
-        changed = False
+        pending_receipts = []
         for notifier in self.notifiers:
             consume = getattr(notifier, "consume_delivery_receipts", None)
             if not consume:
@@ -295,12 +295,22 @@ class NotificationManager:
                 continue
             if not isinstance(receipts, (list, tuple)):
                 continue
-            for receipt in receipts:
+            pending_receipts.extend(receipts)
+
+        if not pending_receipts:
+            return
+
+        from core.safe_file_io import SafeFileIO
+        from pathlib import Path
+        with SafeFileIO.transaction(Path(self._cache_path)):
+            disk_cache = self._load_cache()
+            changed = False
+            for receipt in pending_receipts:
                 activity_key = str(receipt.get("activity_key", ""))
                 milestone = receipt.get("milestone")
                 if not activity_key or milestone is None:
                     continue
-                entry = cache.setdefault(
+                entry = disk_cache.setdefault(
                     activity_key,
                     {"milestones": [], "updated_at": datetime.now().isoformat()},
                 )
@@ -315,8 +325,10 @@ class NotificationManager:
                     delivered.append(milestone)
                 entry["updated_at"] = datetime.now().isoformat()
                 changed = True
-        if changed:
-            self._save_cache(cache)
+
+            if changed:
+                self._save_cache(disk_cache)
+                cache.update(disk_cache)
 
     async def reconcile_schedules(self, assignments: List[Any]) -> ScheduleResult:
         """Reconcile platform-native reminders after a successful activity fetch."""
@@ -471,44 +483,49 @@ class NotificationManager:
         channel: str | None = None,
     ):
         """Mark assignments as notified in cache."""
-        if cache is None:
-            cache = self._load_cache()
-        updated = False
-        for item in items:
-            url = item["url"]
-            ms = item["milestone"]
-            deadline_revision = item.get("deadline_revision", "")
+        from core.safe_file_io import SafeFileIO
+        from pathlib import Path
+        
+        with SafeFileIO.transaction(Path(self._cache_path)):
+            disk_cache = self._load_cache()
+            updated = False
+            for item in items:
+                url = item["url"]
+                ms = item["milestone"]
+                deadline_revision = item.get("deadline_revision", "")
 
-            if url not in cache:
-                cache[url] = {
-                    "milestones": [],
-                    "deadline_revision": deadline_revision,
-                    "updated_at": datetime.now().isoformat(),
-                }
+                if url not in disk_cache:
+                    disk_cache[url] = {
+                        "milestones": [],
+                        "deadline_revision": deadline_revision,
+                        "updated_at": datetime.now().isoformat(),
+                    }
 
-            entry = cache[url]
-            # Backward compat: migrate list → dict in-place
-            if isinstance(entry, list):
-                entry = {"milestones": entry, "updated_at": datetime.now().isoformat()}
-                cache[url] = entry
+                entry = disk_cache[url]
+                # Backward compat: migrate list → dict in-place
+                if isinstance(entry, list):
+                    entry = {"milestones": entry, "updated_at": datetime.now().isoformat()}
+                    disk_cache[url] = entry
 
-            if entry.get("deadline_revision") not in (None, "", deadline_revision):
-                entry["milestones"] = []
-                entry["channels"] = {}
-            entry["deadline_revision"] = deadline_revision
+                if entry.get("deadline_revision") not in (None, "", deadline_revision):
+                    entry["milestones"] = []
+                    entry["channels"] = {}
+                entry["deadline_revision"] = deadline_revision
 
-            delivered = (
-                entry.setdefault("channels", {}).setdefault(channel, [])
-                if channel
-                else entry.setdefault("milestones", [])
-            )
-            if ms not in delivered:
-                delivered.append(ms)
-                entry["updated_at"] = datetime.now().isoformat()
-                updated = True
+                delivered = (
+                    entry.setdefault("channels", {}).setdefault(channel, [])
+                    if channel
+                    else entry.setdefault("milestones", [])
+                )
+                if ms not in delivered:
+                    delivered.append(ms)
+                    entry["updated_at"] = datetime.now().isoformat()
+                    updated = True
 
-        if updated:
-            self._save_cache(cache)
+            if updated:
+                self._save_cache(disk_cache)
+                if cache is not None:
+                    cache.update(disk_cache)
 
     @property
     def history(self):

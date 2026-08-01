@@ -152,13 +152,13 @@ class AppController:
         if not _is_mobile:
             self.page.window.width        = 420
             self.page.window.height       = 720
-            # self.page.window.max_width    = 420
-            # self.page.window.min_width    = 420
-            # self.page.window.always_on_top = settings.ALWAYS_ON_TOP
-            # self.page.window.resizable    = False
-            # self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
-            # self.page.window.prevent_close = True
-            # self.page.window.on_event = self._on_window_event
+            self.page.window.max_width    = 420
+            self.page.window.min_width    = 420
+            self.page.window.always_on_top = settings.ALWAYS_ON_TOP
+            self.page.window.resizable    = False
+            self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
+            self.page.window.prevent_close = True
+            self.page.window.on_event = self._on_window_event
         
         self.page.title               = "UTHelper"
         self.page.bgcolor             = C.BG
@@ -188,9 +188,9 @@ class AppController:
         # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
         import sys
         if not _is_mobile and settings.START_MINIMIZED and "--autostart" in sys.argv:
-            pass # self.page.window.visible = False
+            self.page.window.visible = False
         elif not _is_mobile:
-            pass # self.page.window.visible = True
+            self.page.window.visible = True
             
         self.page.update()
 

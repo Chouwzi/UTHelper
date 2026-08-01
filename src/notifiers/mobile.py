@@ -194,7 +194,8 @@ class MobileNotifier(BaseNotifier):
     ) -> ScheduleResult:
         """Make Android AlarmManager schedules match the current activity feed."""
         result = ScheduleResult(desired=len(reminders))
-        if not self._android_notif:
+        notifier = self._android_notif or self._notifier
+        if not notifier or not hasattr(notifier, "schedule_notification"):
             return result
 
         from core.safe_file_io import SafeFileIO
@@ -209,7 +210,8 @@ class MobileNotifier(BaseNotifier):
         for state_key, old_value in previous.items():
             if state_key not in desired or desired[state_key] != old_value:
                 try:
-                    await self._android_notif.cancel(int(state_key))
+                    if hasattr(notifier, "cancel"):
+                        await notifier.cancel(int(state_key))
                     result.cancelled += 1
                 except Exception as exc:
                     result.failed += 1
@@ -225,7 +227,7 @@ class MobileNotifier(BaseNotifier):
                 continue
             reminder = next(item for item in reminders if item.state_key == state_key)
             try:
-                await self._android_notif.schedule_notification(
+                await notifier.schedule_notification(
                     notification_id=reminder.notification_id,
                     title=reminder.activity.title,
                     body=self._schedule_body(reminder),
@@ -242,12 +244,12 @@ class MobileNotifier(BaseNotifier):
             except Exception as exc:
                 result.failed += 1
                 result.errors.append(f"schedule {state_key}: {exc}")
-
         SafeFileIO.write_json_atomic(self._schedule_state_path, persisted)
         return result
 
     async def cancel_activity(self, activity_id: str) -> int:
-        if not self._android_notif:
+        notifier = self._android_notif or self._notifier
+        if not notifier or not hasattr(notifier, "cancel"):
             return 0
         from core.safe_file_io import SafeFileIO
 
@@ -258,13 +260,13 @@ class MobileNotifier(BaseNotifier):
             if str(value.get("activity_id", "")) == str(activity_id)
         ]
         cancelled = 0
-        for key in matching:
+        for state_key in matching:
             try:
-                await self._android_notif.cancel(int(key))
-                state.pop(key, None)
+                await notifier.cancel(int(state_key))
+                state.pop(state_key, None)
                 cancelled += 1
-            except Exception as exc:
-                logger.warning("Cannot cancel Android reminder %s: %s", key, exc)
+            except Exception as e:
+                logger.warning("Failed to cancel schedule %s: %s", state_key, e)
         SafeFileIO.write_json_atomic(self._schedule_state_path, state)
         return cancelled
 

@@ -3,17 +3,11 @@ import os
 from pathlib import Path
 import sys
 import logging
-
+import tempfile
+import platform
 # Secure storage import chain
-# Tier 1: flet-secure-storage (cross-platform, native keystores)
-# Tier 2: keyring (Windows Credential Manager legacy fallback)
-# Tier 3: plaintext JSON (last resort, not recommended)
-try:
-    import flet_secure_storage as fss
-    _HAS_SECURE_STORAGE = True
-except ImportError:
-    _HAS_SECURE_STORAGE = False
-
+# Tier 1: keyring (Windows Credential Manager)
+# Tier 2: plaintext JSON (last resort, not recommended)
 try:
     import keyring
     _HAS_KEYRING = True
@@ -83,35 +77,10 @@ _SECRET_FIELDS = {
     'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
 }
 
-# Lazy-init SecureStorage instance
-_secure_storage: 'fss.SecureStorage | None' = None
 
-def _get_secure_storage() -> 'fss.SecureStorage | None':
-    """Khởi tạo SecureStorage instance (lazy, singleton)."""
-    global _secure_storage
-    if _secure_storage is not None:
-        return _secure_storage
-    if not _HAS_SECURE_STORAGE:
-        return None
-    try:
-        _secure_storage = fss.SecureStorage()
-        return _secure_storage
-    except Exception:
-        return None
 
 def _read_secret(key: str) -> str:
-    """Đọc secret từ secure storage (tier 1 → tier 2 fallback)."""
-    # Tier 1: flet-secure-storage
-    ss = _get_secure_storage()
-    if ss is not None:
-        try:
-            val = ss.read(key=key)
-            if val:
-                return val
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-    # Tier 2: keyring
+    """Đọc secret từ secure storage (keyring)."""
     if _HAS_KEYRING:
         try:
             val = keyring.get_password(KEYRING_SERVICE_NAME, key)
@@ -123,24 +92,8 @@ def _read_secret(key: str) -> str:
     return ""
 
 def _write_secret(key: str, value: str):
-    """Ghi secret vào secure storage (tier 1 → tier 2 fallback)."""
+    """Ghi secret vào secure storage (keyring)."""
     _logger = logging.getLogger(__name__)
-    # Tier 1: flet-secure-storage
-    ss = _get_secure_storage()
-    if ss is not None:
-        try:
-            if value:
-                ss.write(key=key, value=value)
-            else:
-                try:
-                    ss.delete(key=key)
-                except Exception:
-                    import logging as _fb_log
-                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            return
-        except Exception as e:
-            _logger.warning(f"SecureStorage write failed for {key}: {e}")
-    # Tier 2: keyring
     if _HAS_KEYRING:
         try:
             if value:
@@ -151,7 +104,7 @@ def _write_secret(key: str, value: str):
 
 def _has_any_secure_backend() -> bool:
     """Kiểm tra có backend nào an toàn hay không."""
-    return _get_secure_storage() is not None or _HAS_KEYRING
+    return _HAS_KEYRING
 
 class Settings(BaseModel):
     """
@@ -317,27 +270,17 @@ def load_settings() -> Settings:
         except Exception as e:
             _logger.warning(f"Failed to parse settings values: {e}")
 
-    # Khôi phục secrets từ secure storage (tier 1 → tier 2 → tier 3 JSON)
+    # Khôi phục secrets từ secure storage (keyring → tier 2 JSON fallback)
     for attr, key_suffix in _SECRET_FIELDS.items():
         val = _read_secret(key_suffix)
         if val:
             setattr(s, attr, val)
 
-    # Tier 3 fallback: restore secrets từ JSON
+    # Tier 2 fallback: restore secrets từ JSON
     if not _has_any_secure_backend():
         for attr, val in json_secrets.items():
             if not getattr(s, attr, ''):
                 setattr(s, attr, val)
-
-    # Một lần migration
-    if _get_secure_storage() is not None and json_secrets:
-        migrated = False
-        for attr, key_suffix in _SECRET_FIELDS.items():
-            if attr in json_secrets:
-                _write_secret(key_suffix, json_secrets[attr])
-                migrated = True
-        if migrated:
-            _logger.info("Migrated secrets from JSON → SecureStorage")
 
     # Legacy migration
     if _HAS_KEYRING and s.UTH_USERNAME and not s.UTH_PASSWORD:

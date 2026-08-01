@@ -1,4 +1,3 @@
-import sys
 import logging
 import os
 
@@ -14,5 +13,5 @@ def main(page: ft.Page):
 try:
     logging.info('CALLING ft.run')
     ft.run(main=main, view=ft.AppView.WEB_BROWSER, port=8561)
-except Exception as e:
+except Exception:
     logging.exception('ERROR IN ft.run')
