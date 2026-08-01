@@ -94,10 +94,11 @@ python src/main.py --web
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONUTF8 = '1'
 
-# Build APK
-flet build apk
+# Build APK (tạo shell, vá receiver/desugaring, rồi build lại)
+pip install -e ".[android-build]"
+.\scripts\build_android.ps1 -Target apk
 
-# Output: build/apk/UTHelper.apk
+# Output: build/apk/*.apk
 ```
 
 ### Windows Desktop

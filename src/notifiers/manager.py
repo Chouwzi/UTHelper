@@ -84,6 +84,17 @@ class NotificationManager:
     def register(self, notifier: BaseNotifier):
         self.notifiers.append(notifier)
 
+    def bind_native_mobile_bridge(self, bridge) -> bool:
+        """Bind the app-owned native service to the local mobile channel."""
+        for notifier in self.notifiers:
+            if self._channel_cache_key(notifier) != "mobile":
+                continue
+            bind = getattr(notifier, "bind_native_service", None)
+            if bind:
+                bind(bridge)
+                return True
+        return False
+
     def _policy(self) -> ActivityNotificationPolicy:
         return ActivityNotificationPolicy(
             NotificationPolicyConfig(
@@ -199,7 +210,12 @@ class NotificationManager:
     def _is_in_dnd(self) -> bool:
         return self._policy().is_dnd(datetime.now())
 
-    async def dispatch(self, assignments: List[Any]) -> DispatchResult:
+    async def dispatch(
+        self,
+        assignments: List[Any],
+        *,
+        excluded_channels: set[str] | None = None,
+    ) -> DispatchResult:
         """Dispatch due activity reminders without blocking the Flet event loop."""
         result = DispatchResult()
         diagnostics = self._diagnostics_state()
@@ -221,9 +237,12 @@ class NotificationManager:
         # toast must not suppress retrying a failed Telegram/email delivery.
         channel_items: list[tuple[Any, str, str, list[Dict]]] = []
         matched_keys: set[tuple[str, int | str]] = set()
+        excluded = {value.strip().lower() for value in (excluded_channels or set())}
         for notifier in self.notifiers:
             channel = notifier.__class__.__name__
             channel_key = self._channel_cache_key(notifier)
+            if channel_key in excluded:
+                continue
             items = self._filter_assignments(assignments, cache, channel=channel_key)
             channel_items.append((notifier, channel, channel_key, items))
             matched_keys.update((item["url"], item["milestone"]) for item in items)
@@ -276,6 +295,20 @@ class NotificationManager:
             diagnostics.delivered += result.delivered
         else:
             logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
+        return result
+
+    async def dispatch_with_native_local(
+        self,
+        assignments: List[Any],
+        native_result: dict[str, Any],
+    ) -> DispatchResult:
+        """Dispatch integrations while a native mobile service owns local delivery."""
+        result = await self.dispatch(assignments, excluded_channels={"mobile"})
+        native_delivered = int(native_result.get("delivered", 0) or 0)
+        if native_delivered:
+            result.successful_channels.insert(0, "native_mobile")
+            result.delivered = max(result.delivered, native_delivered)
+        result.attempted = max(result.attempted, len(assignments))
         return result
 
     async def _merge_native_receipts(self, cache: Dict) -> None:

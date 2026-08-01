@@ -42,7 +42,7 @@ jobs:
 
       - name: 📦 Install project and Flet CLI
         run: |
-          pip install -e .
+          pip install -e ".[android-build]"
           flet --version
 
       - name: 🔨 Build APK
@@ -88,7 +88,7 @@ jobs:
           APK="${APK_CANDIDATES[0]}"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.UTHelper"
+          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
           "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
           grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
           grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml

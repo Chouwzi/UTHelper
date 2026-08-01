@@ -1,5 +1,5 @@
 name: flet_uth_background_sync
-description: Native Android WorkManager and deadline alarms for UTHelper.
+description: Native Android background sync and cross-platform deadline alarms for UTHelper.
 version: 0.1.0
 publish_to: none
 
@@ -18,4 +18,6 @@ flutter:
     platforms:
       android:
         package: com.uthelper.backgroundsync
+        pluginClass: UthBackgroundSyncPlugin
+      ios:
         pluginClass: UthBackgroundSyncPlugin

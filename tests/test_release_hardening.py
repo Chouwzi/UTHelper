@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,3 +37,48 @@ def test_appinstaller_uses_repository_name_in_stable_pages_url():
     assert 'pagesRepository = $repositoryParts[1]' in script
     assert "github.io/$pagesRepository/UTHelper.appinstaller" in script
     assert "Generated AppInstaller XML is invalid" in script
+
+
+def test_cross_compiled_targets_do_not_receive_windows_only_dependencies():
+    config = tomllib.loads(_read("pyproject.toml"))
+    project_dependencies = config["project"]["dependencies"]
+    windows_dependencies = config["tool"]["flet"]["windows"]["dependencies"]
+    android_dependencies = config["tool"]["flet"]["android"]["dependencies"]
+    android_build_dependencies = config["project"]["optional-dependencies"]["android-build"]
+
+    assert not any("pywin32" in value for value in project_dependencies)
+    assert any("pywin32" in value for value in windows_dependencies)
+    assert any("windows-toasts" in value for value in windows_dependencies)
+    assert "flet-android-notifications==0.10.0" in android_dependencies
+    assert android_build_dependencies == ["flet-android-notifications==0.10.0"]
+
+
+def test_android_build_workflows_install_the_notification_patcher():
+    for workflow_path in (
+        ".github/workflows/build-android.yml",
+        ".github/workflows/release.yml",
+    ):
+        workflow = _read(workflow_path)
+        assert 'pip install -e ".[android-build]"' in workflow
+        assert "flet-android-notifications-patch --project-root build/flutter" in workflow
+
+    build_workflow = _read(".github/workflows/build-android.yml")
+    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in build_workflow
+
+
+def test_ios_build_bundles_the_native_background_sync_plugin():
+    config = tomllib.loads(_read("pyproject.toml"))
+    ios_config = config["tool"]["flet"]["ios"]
+
+    assert "flet-uth-background-sync==0.1.0" in ios_config["dependencies"]
+    assert ios_config["dev_packages"]["flet-uth-background-sync"] == (
+        "extensions/flet_uth_background_sync"
+    )
+
+
+def test_local_android_build_script_applies_the_native_notification_patch():
+    script = _read("scripts/build_android.ps1")
+
+    assert "ORG_GRADLE_PROJECT_kotlin.incremental" in script
+    assert "flet-android-notifications-patch" in script
+    assert script.count("build $Target --verbose") == 2
