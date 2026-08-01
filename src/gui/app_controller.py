@@ -143,10 +143,10 @@ class AppController:
         _is_mobile = platform_utils.IS_MOBILE
         _is_windows = platform_utils.IS_WINDOWS
 
-        if platform_utils.IS_ANDROID:
-            from platform_utils.background_sync import create_android_background_bridge
+        if platform_utils.IS_ANDROID or platform_utils.IS_IOS:
+            from platform_utils.background_sync import create_mobile_background_bridge
 
-            self._android_background = create_android_background_bridge(self.page)
+            self._android_background = create_mobile_background_bridge(self.page)
         
         # Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống
         if not _is_mobile:
@@ -179,6 +179,8 @@ class AppController:
         else:
             self.tray = None
             self.notifier = NotificationManager()
+            if platform_utils.IS_IOS and self._android_background:
+                self.notifier.bind_native_mobile_bridge(self._android_background)
         self.orchestrator.notifier = self.notifier
 
         # Runtime permission requests and native service initialization must run
@@ -1193,14 +1195,11 @@ class AppController:
                             dispatch_copy
                         )
                     else:
-                        from core.notification_types import DispatchResult, ScheduleResult
+                        from core.notification_types import ScheduleResult
 
-                        dispatch_result = DispatchResult(
-                            attempted=len(dispatch_copy),
-                            delivered=int(native_schedule_result.get("delivered", 0) or 0),
-                            successful_channels=["android_native"]
-                            if native_schedule_result.get("delivered")
-                            else [],
+                        dispatch_result = await self.notifier.dispatch_with_native_local(
+                            dispatch_copy,
+                            native_schedule_result,
                         )
                         schedule_result = ScheduleResult(
                             desired=int(native_schedule_result.get("scheduled", 0) or 0),

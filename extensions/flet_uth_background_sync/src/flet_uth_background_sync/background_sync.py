@@ -52,6 +52,25 @@ class AndroidBackgroundSync(Service):
         """Open Android's special-access screen after an explicit user action."""
         return await self._invoke_method("request_exact_alarm_access")
 
+    async def show_notification(
+        self,
+        notification_id: int,
+        title: str,
+        body: str,
+        payload: str = "",
+    ) -> bool:
+        return bool(
+            await self._invoke_method(
+                "show_notification",
+                {
+                    "notification_id": notification_id,
+                    "title": title,
+                    "body": body,
+                    "payload": payload,
+                },
+            )
+        )
+
     async def install_update(
         self, url: str, sha256: str, expected_size: int = 0
     ) -> dict[str, Any]:

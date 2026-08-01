@@ -71,7 +71,12 @@ class ActivityNotificationPolicy:
         return start <= at.hour < end
 
     def accepts(self, activity: ActivityNotification) -> bool:
-        if activity.course_name in self.config.muted_courses:
+        muted_courses = {
+            value.strip().casefold()
+            for value in self.config.muted_courses
+            if value and value.strip()
+        }
+        if activity.course_name.strip().casefold() in muted_courses:
             return False
         if (
             self.config.ignore_submitted

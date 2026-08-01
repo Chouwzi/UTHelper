@@ -406,6 +406,58 @@ class TestDispatch:
 
         asyncio.run(mgr.dispatch([a]))  # Should not raise
 
+    @patch("notifiers.manager.config")
+    def test_native_mobile_dispatch_excludes_only_local_mobile_channel(
+        self, mock_config, tmp_path
+    ):
+        """Native scheduling must not suppress Telegram/email-style channels."""
+        mgr = _make_manager(tmp_path)
+        mock_config.NOTIFY_MUTED_COURSES = []
+        mock_config.NOTIFY_IGNORE_SUBMITTED = False
+        mock_config.NOTIFY_TYPES = None
+        mock_config.NOTIFY_MILESTONES_MINUTES = [60]
+        mock_config.NOTIFY_MILESTONES = []
+        mock_config.NOTIFY_MINUTES_BEFORE = 0
+
+        class MobileNotifier:
+            def __init__(self):
+                self.calls = 0
+
+            def notify(self, _items):
+                self.calls += 1
+                return True
+
+        class TelegramNotifier:
+            def __init__(self):
+                self.calls = 0
+
+            def notify(self, _items):
+                self.calls += 1
+                return True
+
+        mobile = MobileNotifier()
+        telegram = TelegramNotifier()
+        mgr.notifiers = [mobile, telegram]
+        activity = Mock(
+            id="quiz-42",
+            course_name="Web",
+            submission_status="unknown",
+            event_type="quiz",
+            url="https://example.test/quiz/42",
+            deadline=datetime.now() + timedelta(minutes=30),
+        )
+
+        result = asyncio.run(
+            mgr.dispatch_with_native_local(
+                [activity], {"delivered": 1, "scheduled": 2, "cancelled": 0}
+            )
+        )
+
+        assert mobile.calls == 0
+        assert telegram.calls == 1
+        assert result.delivered == 1
+        assert set(result.successful_channels) == {"native_mobile", "TelegramNotifier"}
+
 
 class TestDispatchGradeAlert:
     """dispatch_grade_alert() full flow tests."""
@@ -469,3 +521,24 @@ class TestHistoryProperty:
         assert diagnostics.pending_schedules == 3
         assert diagnostics.scheduled_delivered == 2
         assert diagnostics.last_scheduled_delivery_at == "2026-07-19T18:00:00"
+
+    def test_bind_native_mobile_bridge_targets_only_mobile_notifier(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+
+        class MobileNotifier:
+            def __init__(self):
+                self.bridge = None
+
+            def bind_native_service(self, bridge):
+                self.bridge = bridge
+
+        class TelegramNotifier:
+            pass
+
+        mobile = MobileNotifier()
+        telegram = TelegramNotifier()
+        bridge = object()
+        mgr.notifiers = [mobile, telegram]
+
+        assert mgr.bind_native_mobile_bridge(bridge) is True
+        assert mobile.bridge is bridge

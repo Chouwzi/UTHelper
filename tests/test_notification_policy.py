@@ -217,3 +217,62 @@ def test_android_notification_tap_opens_activity_payload(tmp_path):
     notifier._page.launch_url.assert_called_once_with(
         "https://courses.example/activity/42"
     )
+
+
+def test_ios_native_service_delivers_explicit_grade_alert_body(tmp_path):
+    class NativeBridge:
+        def __init__(self):
+            self.shown = []
+
+        async def show_notification(self, **payload):
+            self.shown.append(payload)
+            return True
+
+    bridge = NativeBridge()
+    notifier = MobileNotifier.__new__(MobileNotifier)
+    notifier._android_notif = None
+    notifier._notifier = None
+    notifier._native_service = None
+    notifier._backend = "none"
+    notifier._page = None
+    notifier._schedule_state_path = tmp_path / "schedules.json"
+
+    notifier.bind_native_service(bridge)
+    grade = SimpleNamespace(
+        title="Điểm mới: Giữa kỳ",
+        body="Môn: Lập trình\nĐiểm cũ: 7.0\nĐiểm mới: 8.5",
+        course_name="Lập trình",
+        url="https://courses.example/grades",
+    )
+
+    assert asyncio.run(notifier.notify([grade])) is True
+    assert bridge.shown == [
+        {
+            "notification_id": stable_notification_id(
+                "https://courses.example/grades", "immediate"
+            ),
+            "title": "Điểm mới: Giữa kỳ",
+            "body": "Môn: Lập trình\nĐiểm cũ: 7.0\nĐiểm mới: 8.5",
+            "payload": "https://courses.example/grades",
+        }
+    ]
+
+
+def test_generic_mobile_setup_records_granted_permission(tmp_path):
+    class GenericBackend:
+        async def request_permissions(self):
+            return True
+
+    notifier = MobileNotifier.__new__(MobileNotifier)
+    notifier._android_notif = None
+    notifier._notifier = GenericBackend()
+    notifier._native_service = None
+    notifier._backend = "flet_notifications"
+    notifier._notifications_enabled = False
+    notifier._exact_alarm_enabled = False
+    notifier._page = None
+    notifier._schedule_state_path = tmp_path / "schedules.json"
+
+    asyncio.run(notifier.setup(SimpleNamespace()))
+
+    assert notifier._notifications_enabled is True

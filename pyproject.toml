@@ -17,13 +17,19 @@ dependencies = [
     "flet>=0.86.0",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
-    "flet-android-notifications==0.9.0; sys_platform != 'win32'",
-    "pystray>=0.19.5; sys_platform == 'win32'",
-    "pywin32>=306.0; sys_platform == 'win32'",
-    "windows-toasts>=1.3.1; sys_platform == 'win32'",
-    "keyring>=25.0.0; sys_platform == 'win32'",
-    "pillow>=12.2.0; sys_platform == 'win32'",
-    "lxml>=6.0.4; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+windows = [
+    "pystray>=0.19.5",
+    "pywin32>=306.0",
+    "windows-toasts>=1.3.1",
+    "keyring>=25.0.0",
+    "pillow>=12.2.0",
+    "lxml>=6.0.4",
+]
+android-build = [
+    "flet-android-notifications==0.10.0",
 ]
 
 [project.scripts]
@@ -44,9 +50,22 @@ path = "src"
 module = "main"
 
 # ── Android-specific configuration ──
+[tool.flet.windows]
+dependencies = [
+    "pystray>=0.19.5",
+    "pywin32>=306.0",
+    "windows-toasts>=1.3.1",
+    "keyring>=25.0.0",
+    "pillow>=12.2.0",
+    "lxml>=6.0.4",
+]
+
 [tool.flet.android]
 adaptive_icon_background = "#0F172A"
-dependencies = ["flet-uth-background-sync==0.1.0"]
+dependencies = [
+    "flet-android-notifications==0.10.0",
+    "flet-uth-background-sync==0.1.0",
+]
 
 [tool.flet.android.dev_packages]
 flet-uth-background-sync = "extensions/flet_uth_background_sync"
@@ -67,6 +86,10 @@ flet-uth-background-sync = "extensions/flet_uth_background_sync"
 # ── iOS-specific configuration ──
 [tool.flet.ios]
 bundle_id = "com.uthelper.UTHelper"
+dependencies = ["flet-uth-background-sync==0.1.0"]
+
+[tool.flet.ios.dev_packages]
+flet-uth-background-sync = "extensions/flet_uth_background_sync"
 
 [tool.flet.ios.info]
 # Allow cleartext HTTP for Moodle instances without HTTPS

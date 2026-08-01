@@ -1,4 +1,4 @@
-"""Optional bridge to the native Android background synchronization service."""
+"""Optional bridge to native mobile background/local-notification services."""
 
 from __future__ import annotations
 
@@ -97,12 +97,32 @@ class AndroidBackgroundBridge:
             return {"status": "unavailable"}
         return await self.service.install_update(url, sha256, expected_size)
 
+    async def show_notification(
+        self,
+        *,
+        notification_id: int,
+        title: str,
+        body: str,
+        payload: str = "",
+    ) -> bool:
+        if not self.service:
+            return False
+        return bool(
+            await self.service.show_notification(
+                notification_id, title, body, payload
+            )
+        )
+
     async def logout(self) -> None:
         if self.service:
             await self.service.logout()
 
 
 def create_android_background_bridge(page):
-    from platform_utils import IS_ANDROID
+    from platform_utils import IS_ANDROID, IS_IOS
 
-    return AndroidBackgroundBridge(page) if IS_ANDROID else None
+    return AndroidBackgroundBridge(page) if IS_ANDROID or IS_IOS else None
+
+
+# Platform-neutral name for new call sites; keep the old factory for compatibility.
+create_mobile_background_bridge = create_android_background_bridge

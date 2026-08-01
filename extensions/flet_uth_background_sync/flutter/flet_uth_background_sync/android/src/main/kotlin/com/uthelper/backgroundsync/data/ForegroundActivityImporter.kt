@@ -41,7 +41,7 @@ class ForegroundActivityImporter {
             url = url,
             submissionState = state,
             graded = value.boolean("graded") || state == "graded" || old?.graded == true,
-            revision = incomingRevision.ifBlank { sha256("$key|$deadline") },
+            revision = sha256("$incomingRevision|$key|$deadline"),
             lastSeenGeneration = generation,
         )
     }.distinctBy(ActivityEntity::activityKey)

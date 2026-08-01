@@ -28,10 +28,23 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: 📦 Install Flet CLI
+      - name: 📦 Install project and test tools
         run: |
-          pip install flet
+          pip install -e . pytest
           flet --version
+
+      - name: 🧪 Verify notification contracts
+        env:
+          PYTHONPATH: src:extensions/flet_uth_background_sync/src
+        run: |
+          python -m pytest \
+            tests/test_notification_e2e_contract.py \
+            tests/test_notification_policy.py \
+            tests/test_notification_manager_extended.py \
+            tests/test_windows_notifier.py \
+            tests/test_background_sync_bridge.py \
+            extensions/flet_uth_background_sync/tests/test_package_contract.py \
+            -q
 
       - name: 🔨 Build IPA (unsigned)
         run: |

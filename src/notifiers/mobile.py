@@ -39,6 +39,7 @@ class MobileNotifier(BaseNotifier):
     def __init__(self):
         self._notifier = None
         self._android_notif = None
+        self._native_service = None
         self._backend = "none"
         self._notifications_enabled = False
         self._exact_alarm_enabled = False
@@ -79,6 +80,11 @@ class MobileNotifier(BaseNotifier):
         """Return the active backend name for UI display."""
         return self._backend
 
+    def bind_native_service(self, bridge) -> None:
+        """Use the app-owned native bridge for iOS immediate notifications."""
+        self._native_service = bridge
+        self._backend = "ios_user_notifications"
+
     async def setup(self, page):
         """Request notification permissions on mobile."""
         self._page = page
@@ -101,8 +107,14 @@ class MobileNotifier(BaseNotifier):
                 logger.warning("Failed to request Android permissions: %s", e)
         elif self._notifier and hasattr(self._notifier, 'request_permissions'):
             try:
-                await self._notifier.request_permissions()
-                logger.info("Notification permissions granted")
+                permission = self._notifier.request_permissions()
+                if inspect.isawaitable(permission):
+                    permission = await permission
+                self._notifications_enabled = permission is not False
+                logger.info(
+                    "Notification permissions enabled=%s",
+                    self._notifications_enabled,
+                )
             except Exception as e:
                 logger.warning("Failed to request notification permissions: %s", e)
 
@@ -118,11 +130,25 @@ class MobileNotifier(BaseNotifier):
             remaining = _get_str(a, 'remaining')
 
             notif_title = title
-            notif_body = course
-            if remaining:
+            notif_body = _get_str(a, "body") or course
+            if remaining and not _get_str(a, "body"):
                 notif_body += f" - Còn {remaining}"
 
-            if self._android_notif:
+            native_service = getattr(self, "_native_service", None)
+            if native_service:
+                try:
+                    delivered = await native_service.show_notification(
+                        notification_id=self._notification_id(a),
+                        title=notif_title,
+                        body=notif_body,
+                        payload=_get_str(a, "url"),
+                    )
+                    if delivered is not True:
+                        all_succeeded = False
+                except Exception as e:
+                    all_succeeded = False
+                    logger.warning("iOS notification failed: %s", e)
+            elif self._android_notif:
                 try:
                     notification_id = self._notification_id(a)
                     await self._android_notif.show_notification(

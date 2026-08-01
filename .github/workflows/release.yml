@@ -51,7 +51,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - run: pip install -e .
+      - run: pip install -e ".[android-build]"
       - name: Build and patch Android notifications
         shell: bash
         run: |

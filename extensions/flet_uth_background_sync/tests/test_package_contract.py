@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FLUTTER = ROOT / "flutter" / "flet_uth_background_sync"
 ANDROID = FLUTTER / "android"
+IOS = FLUTTER / "ios"
 
 
 def test_native_dependency_versions_are_pinned():
@@ -54,10 +55,10 @@ def test_foreground_import_is_revision_and_submission_safe():
     )
     policy = next(ANDROID.rglob("NotificationPolicy.kt")).read_text(encoding="utf-8")
     assert 'incomingState == "unknown" && old != null' in importer
-    assert 'sha256("$key|$deadline")' in importer
+    assert 'sha256("$incomingRevision|$key|$deadline")' in importer
     assert 'Regex("/mod/([^/]+)/")' in importer
     assert "DateTimeFormatter.ISO_LOCAL_DATE_TIME" in importer
-    assert 'activity.submissionState.lowercase() == "unknown"' in policy
+    assert 'activity.submissionState.lowercase() == "unknown"' not in policy
 
 
 def test_android_updater_requires_https_checksum_and_package_installer():
@@ -94,3 +95,20 @@ def test_python_service_forwards_configuration(monkeypatch):
     assert imported == {"enabled": True}
     assert captured["name"] == "import_activities"
     assert captured["arguments"]["authoritative"] is True
+
+
+def test_flutter_package_registers_ios_user_notifications_adapter():
+    pubspec = (FLUTTER / "pubspec.yaml").read_text(encoding="utf-8")
+    swift = (IOS / "Classes/UthBackgroundSyncPlugin.swift").read_text(
+        encoding="utf-8"
+    )
+    podspec = (IOS / "flet_uth_background_sync.podspec").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ios:" in pubspec
+    assert "pluginClass: UthBackgroundSyncPlugin" in pubspec
+    assert "UNUserNotificationCenter" in swift
+    assert 'case "import_activities"' in swift
+    assert "seenScheduleKeys" in swift
+    assert "s.source_files = 'Classes/**/*.swift'" in podspec

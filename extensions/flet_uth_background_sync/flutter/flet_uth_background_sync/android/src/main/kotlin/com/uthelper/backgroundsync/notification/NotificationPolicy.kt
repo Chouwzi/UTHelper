@@ -19,10 +19,9 @@ class NotificationPolicy(private val settings: NativeSettings) {
         if (settings.notifyTypes.isNotEmpty() && activity.eventType !in settings.notifyTypes) {
             return false
         }
-        if (activity.courseName.lowercase() in settings.mutedCourses) return false
-        if (settings.ignoreSubmitted && activity.eventType in SUBMITTABLE_TYPES &&
-            activity.submissionState.lowercase() == "unknown"
-        ) return false
+        if (settings.mutedCourses.any { it.trim().equals(activity.courseName.trim(), ignoreCase = true) }) {
+            return false
+        }
         if (settings.ignoreSubmitted && isCompleted(activity)) return false
         return true
     }
@@ -86,7 +85,6 @@ class NotificationPolicy(private val settings: NativeSettings) {
 
     companion object {
         private val COMPLETED_STATES = setOf("submitted", "graded", "đã nộp", "đã chấm")
-        private val SUBMITTABLE_TYPES = setOf("assignment", "quiz")
     }
 }
 
