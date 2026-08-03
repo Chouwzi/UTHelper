@@ -29,6 +29,10 @@ from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.view_manager import ViewManager
+from gui.controllers.startup_visibility import (
+    is_autostart_launch,
+    should_hide_startup_window,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,10 +175,11 @@ class AppController:
         set_page_theme(self.page)
         
         # Khay hệ thống & Thông báo (tự động nhận biết nền tảng)
+        tray_ready = False
         if _is_windows:
             from gui.tray import TrayApp
             self.tray = TrayApp(self.page)
-            self.tray.setup()
+            tray_ready = self.tray.setup()
             self.notifier = NotificationManager(self.tray)
         else:
             self.tray = None
@@ -187,12 +192,25 @@ class AppController:
         # on Flet's event loop, after accurate platform detection.
         self._safe_run_task(self.notifier.initialize, self.page)
         
-        # Chỉ tự ẩn xuống tray nếu app được Win gọi khởi động (có cờ --autostart)
-        import sys
-        if not _is_mobile and settings.START_MINIMIZED and "--autostart" in sys.argv:
-            self.page.window.visible = False
-        elif not _is_mobile:
-            self.page.window.visible = True
+        autostart_launch = is_autostart_launch()
+        hide_window = should_hide_startup_window(
+            autostart_launch=autostart_launch,
+            start_minimized=settings.START_MINIMIZED,
+            tray_ready=tray_ready,
+            is_mobile=_is_mobile,
+        )
+        if (
+            autostart_launch
+            and settings.START_MINIMIZED
+            and not _is_mobile
+            and not tray_ready
+        ):
+            logger.warning(
+                "Autostart requested a hidden window, but the tray was unavailable; "
+                "keeping the main window visible"
+            )
+        if not _is_mobile:
+            self.page.window.visible = not hide_window
             
         self.page.update()
 
