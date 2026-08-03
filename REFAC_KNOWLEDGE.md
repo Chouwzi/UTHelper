@@ -198,3 +198,14 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Kept the existing submission GUI adapters until the server-driven UI migration.
 - Validation: 112 targeted tests passed; full suite reached **488 passed,
   22 skipped**; `ruff check src tests` passed.
+
+# 2026-08-04 - Stateful Moodle 4.3 submission protocol coverage
+
+- Added an in-process Moodle 4.3 fake covering assignment/status reads, draft
+  allocation and uploads, exact-set saves, tracked draft cleanup, downloads,
+  and statement-aware finalization without network access or credentials.
+- Exercised the public `SubmissionWorkflow` across first submissions, append,
+  replace, remove/clear, rename/path moves, duplicate rejection, stale snapshot
+  aborts, and draft-to-submitted transitions.
+- Validation: 141 submission-focused tests passed; full suite reached **531
+  passed, 22 skipped**; `ruff check src tests` passed.
