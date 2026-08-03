@@ -14,7 +14,7 @@ dependencies = [
     "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
     "pydantic>=2.6.4",
-    "flet>=0.86.0",
+    "flet==0.86.5",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
 ]
@@ -48,6 +48,10 @@ copyright = "Copyright (c) 2026"
 [tool.flet.app]
 path = "src"
 module = "main"
+
+[tool.flet.compile]
+app = true
+packages = true
 
 # ── Android-specific configuration ──
 [tool.flet.windows]

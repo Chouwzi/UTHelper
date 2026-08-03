@@ -53,6 +53,20 @@ def test_cross_compiled_targets_do_not_receive_windows_only_dependencies():
     assert android_build_dependencies == ["flet-android-notifications==0.10.0"]
 
 
+def test_flet_build_version_and_compilation_are_reproducible():
+    config = tomllib.loads(_read("pyproject.toml"))
+
+    assert "flet==0.86.5" in config["project"]["dependencies"]
+    assert not any(
+        dependency.startswith("flet>=")
+        for dependency in config["project"]["dependencies"]
+    )
+    assert config["tool"]["flet"]["compile"] == {
+        "app": True,
+        "packages": True,
+    }
+
+
 def test_android_build_workflows_install_the_notification_patcher():
     for workflow_path in (
         ".github/workflows/build-android.yml",
