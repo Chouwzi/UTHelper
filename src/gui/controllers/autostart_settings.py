@@ -17,6 +17,7 @@ class AutostartUiState:
     editable: bool
     success: bool
     message: str = ""
+    confirmed: bool = True
 
 
 def _to_ui_state(
@@ -45,6 +46,10 @@ def _to_ui_state(
         editable=regular,
         success=regular,
         message=status.message or default_messages.get(status.state, ""),
+        confirmed=status.state not in {
+            AutostartState.UNAVAILABLE,
+            AutostartState.ERROR,
+        },
     )
     if requested is not None and result.enabled != requested:
         return AutostartUiState(
@@ -53,6 +58,7 @@ def _to_ui_state(
             success=False,
             message=result.message
             or "Windows không xác nhận trạng thái khởi động đã yêu cầu.",
+            confirmed=result.confirmed,
         )
     return result
 

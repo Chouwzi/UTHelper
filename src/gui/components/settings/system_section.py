@@ -9,13 +9,16 @@ def init_system_controls(view):
     view._sw_start_with_windows = ft.Switch(
         value=settings.START_WITH_WINDOWS, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-        label="Khởi động cùng Windows"
+        label="Khởi động cùng Windows",
+        on_change=view._on_autostart_toggle,
     )
     view._sw_start_minimized = ft.Switch(
         value=settings.START_MINIMIZED, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-        label="Khởi động ở chế độ thu nhỏ"
+        label="Khi khởi động cùng Windows: Ẩn xuống khay hệ thống",
+        disabled=not settings.START_WITH_WINDOWS,
     )
+    view._autostart_status = ft.Text("", size=11, color=C.TEXT_SECONDARY)
     view._sw_minimize_to_tray = ft.Switch(
         value=settings.MINIMIZE_TO_TRAY, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
@@ -64,7 +67,10 @@ def build_system_section(view) -> ft.Container:
     """Xây dựng Container nhóm cấu hình hệ thống phù hợp với từng nền tảng Desktop/Mobile."""
     if not _pu.IS_MOBILE:
         controls = [
-            view._sw_start_with_windows, view._sw_start_minimized, view._sw_minimize_to_tray,
+            view._sw_start_with_windows,
+            view._sw_start_minimized,
+            view._autostart_status,
+            view._sw_minimize_to_tray,
             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._interval_field,
             view._build_hint("Dùng chung cho foreground, Windows tray và Android background."),

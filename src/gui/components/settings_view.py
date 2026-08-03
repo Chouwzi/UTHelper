@@ -8,6 +8,7 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import logging
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
@@ -24,15 +25,16 @@ from gui.components.settings.theme_section import init_theme_controls, build_the
 from gui.components.settings.notification_section import init_notification_controls, build_notification_section, build_advanced_section
 from gui.components.settings.integration_section import init_integration_controls, build_integration_section
 from gui.components.settings.debug_section import init_debug_controls, build_debug_section
+from gui.controllers.autostart_settings import AutostartSettingsCoordinator
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator)
         self._init_controls()
         self._init_layout()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -52,6 +54,13 @@ class SettingsView(ft.Container):
         self._hint_containers = []
         self._tiles = []
         self._section_containers = []
+        self._autostart_coordinator = autostart_coordinator
+        if self._autostart_coordinator is None and not _pu.IS_MOBILE:
+            from platform_utils.autostart import create_autostart_service
+
+            self._autostart_coordinator = AutostartSettingsCoordinator(
+                create_autostart_service()
+            )
 
     def _init_controls(self):
         self._save_status = ft.Text("", size=12, color=C.SAFE)
@@ -1626,6 +1635,60 @@ class SettingsView(ft.Container):
                 self._debug_info_text.update()
         self._page.run_task(_confirm)
 
+    def _sync_autostart_dependency(self):
+        """Keep the visibility preference scoped to an enabled autostart state."""
+        self._sw_start_minimized.disabled = not bool(
+            self._sw_start_with_windows.value
+        )
+
+    def _on_autostart_toggle(self, _event):
+        self._sync_autostart_dependency()
+        self._autostart_status.value = ""
+        try:
+            self._sw_start_minimized.update()
+            self._autostart_status.update()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Autostart controls are not mounted yet", exc_info=True
+            )
+
+    def _apply_autostart_ui(self, result):
+        self._sw_start_with_windows.value = result.enabled
+        self._sw_start_with_windows.disabled = not result.editable
+        self._sync_autostart_dependency()
+        self._autostart_status.value = result.message
+        self._autostart_status.color = C.SAFE if result.success else C.WARNING
+
+    async def _reconcile_autostart(self):
+        if self._autostart_coordinator is None:
+            return
+        result = await self._autostart_coordinator.load()
+        self._apply_autostart_ui(result)
+        if result.confirmed and settings.START_WITH_WINDOWS != result.enabled:
+            settings.START_WITH_WINDOWS = result.enabled
+            save_settings()
+        try:
+            self.update()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Settings view is not mounted during autostart reconciliation",
+                exc_info=True,
+            )
+
+    async def _apply_autostart_change(self) -> bool:
+        if self._autostart_coordinator is None:
+            return True
+        requested = bool(self._sw_start_with_windows.value)
+        current = await self._autostart_coordinator.load()
+        if current.confirmed and current.enabled == requested:
+            result = current
+        elif current.editable:
+            result = await self._autostart_coordinator.change(requested)
+        else:
+            result = current
+        self._apply_autostart_ui(result)
+        return result.confirmed and result.enabled == requested
+
     def load_current_settings(self):
         for tile in getattr(self, '_tiles', []):
             tile.expanded = False
@@ -1666,6 +1729,7 @@ class SettingsView(ft.Container):
             self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
             self._sw_start_minimized.value = settings.START_MINIMIZED
             self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
+            self._sync_autostart_dependency()
         self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
         self._toggle_bg_check_ui()
         self._sw_email.value = settings.ENABLE_GMAIL
@@ -1749,6 +1813,14 @@ class SettingsView(ft.Container):
 
         self._save_status.value = ""
         self.update()
+        if not _pu.IS_MOBILE and self._autostart_coordinator is not None:
+            try:
+                self._page.run_task(self._reconcile_autostart)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Cannot schedule Windows autostart reconciliation",
+                    exc_info=True,
+                )
 
     def has_changes(self):
         if self._selected_theme != getattr(settings, 'THEME', 'midnight_blue'): return True
@@ -1882,21 +1954,11 @@ class SettingsView(ft.Container):
             
             # Desktop-only settings (autostart, tray, always on top)
             if not _pu.IS_MOBILE:
-                if settings.START_WITH_WINDOWS != self._sw_start_with_windows.value:
-                    try:
-                        import core.autostart as autostart
-                        if self._sw_start_with_windows.value:
-                            autostart.add_to_startup()
-                        else:
-                            autostart.remove_from_startup()
-                    except Exception as ex:
-                        try:
-                            import logging
-                            logging.error(f"Failed handling autostart: {ex}")
-                        except Exception:
-                            import logging as _fb_log
-                            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                        
+                if not await self._apply_autostart_change():
+                    self._save_status.value = self._autostart_status.value
+                    self._save_status.color = C.CRITICAL
+                    self.update()
+                    return False
                 settings.START_WITH_WINDOWS = self._sw_start_with_windows.value
                 settings.START_MINIMIZED = self._sw_start_minimized.value
                 settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
