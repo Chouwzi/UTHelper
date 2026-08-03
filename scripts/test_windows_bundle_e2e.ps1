@@ -10,12 +10,16 @@ if (-not $resolvedBundle.StartsWith($workspaceRoot, [StringComparison]::OrdinalI
     throw "BundleDir must be inside the workspace: $resolvedBundle"
 }
 
-$exe = Join-Path $resolvedBundle "UTHelper.exe"
-if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-    throw "UTHelper.exe was not found: $exe"
+$manualExe = Join-Path $resolvedBundle "UTHelper.exe"
+$autostartExe = Join-Path $resolvedBundle "UTHelperAutostart.exe"
+if (-not (Test-Path -LiteralPath $manualExe -PathType Leaf)) {
+    throw "UTHelper.exe was not found: $manualExe"
+}
+if (-not (Test-Path -LiteralPath $autostartExe -PathType Leaf)) {
+    throw "UTHelperAutostart.exe was not found: $autostartExe"
 }
 
-$existing = Get-Process -Name "UTHelper" -ErrorAction SilentlyContinue
+$existing = Get-Process -Name "UTHelper", "UTHelperAutostart" -ErrorAction SilentlyContinue
 if ($existing) {
     $ids = ($existing | Select-Object -ExpandProperty Id) -join ", "
     throw "Close existing UTHelper processes before E2E (PID: $ids)"
@@ -79,18 +83,15 @@ function Write-E2ESettings {
 function Invoke-LaunchProbe {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
-        [string[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][string]$Executable,
         [Parameter(Mandatory = $true)][bool]$ExpectedVisible
     )
 
     $process = $null
     try {
         $startArguments = @{
-            FilePath = $exe
+            FilePath = $Executable
             PassThru = $true
-        }
-        if ($Arguments.Count -gt 0) {
-            $startArguments.ArgumentList = $Arguments
         }
         $process = Start-Process @startArguments
         $deadline = [DateTime]::UtcNow.AddSeconds($ObservationSeconds)
@@ -133,13 +134,13 @@ try {
     $env:APPDATA = $profileRoot
 
     Write-E2ESettings -StartMinimized $true
-    Invoke-LaunchProbe -Name "manual-visible" -ExpectedVisible $true
+    Invoke-LaunchProbe -Name "manual-visible" -Executable $manualExe -ExpectedVisible $true
 
     Write-E2ESettings -StartMinimized $false
-    Invoke-LaunchProbe -Name "autostart-visible" -Arguments @("--autostart") -ExpectedVisible $true
+    Invoke-LaunchProbe -Name "autostart-visible" -Executable $autostartExe -ExpectedVisible $true
 
     Write-E2ESettings -StartMinimized $true
-    Invoke-LaunchProbe -Name "autostart-hidden" -Arguments @("--autostart") -ExpectedVisible $false
+    Invoke-LaunchProbe -Name "autostart-hidden" -Executable $autostartExe -ExpectedVisible $false
 }
 finally {
     $env:APPDATA = $originalAppData

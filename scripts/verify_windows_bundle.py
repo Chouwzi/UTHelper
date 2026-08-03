@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import filecmp
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,6 +22,13 @@ def inspect_bundle(bundle_dir: Path) -> tuple[str, ...]:
         return (f"Bundle directory does not exist: {root}",)
     if not (root / "UTHelper.exe").is_file():
         issues.append("UTHelper.exe is missing")
+    autostart_runner = root / "UTHelperAutostart.exe"
+    if not autostart_runner.is_file():
+        issues.append("UTHelperAutostart.exe is missing")
+    elif (root / "UTHelper.exe").is_file() and not filecmp.cmp(
+        root / "UTHelper.exe", autostart_runner, shallow=False
+    ):
+        issues.append("UTHelperAutostart.exe is not byte-identical to UTHelper.exe")
     if not any(root.glob("python3*.dll")):
         issues.append("Python runtime DLL is missing")
     if not (root / "flutter_windows.dll").is_file():

@@ -111,3 +111,24 @@ def test_inno_uninstall_scopes_autostart_cleanup_to_known_values():
     assert 'ValueName: "UTHElearningAlert"' in script
     assert script.count("uninsdeletevalue") == 2
     assert "uninsdeletekey" not in script
+
+
+def test_windows_release_prepares_alias_before_verification_and_packaging():
+    workflow = _read(".github/workflows/release.yml")
+    installer = _read("scripts/build_installer.ps1")
+
+    for script in (workflow, installer):
+        assert "prepare_windows_bundle.py" in script
+        assert script.index("prepare_windows_bundle.py") < script.index(
+            "verify_windows_bundle.py"
+        )
+
+
+def test_msix_and_e2e_use_argument_free_autostart_alias():
+    msix = _read("scripts/package_msix.ps1")
+    e2e = _read("scripts/test_windows_bundle_e2e.ps1")
+
+    assert 'Executable="UTHelperAutostart.exe"' in msix
+    assert "uap10:Parameters" not in msix
+    assert 'Join-Path $resolvedBundle "UTHelperAutostart.exe"' in e2e
+    assert 'Arguments @("--autostart")' not in e2e

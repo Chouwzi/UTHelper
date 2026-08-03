@@ -23,19 +23,23 @@ $env:FLET_CLI_NO_RICH_OUTPUT="true"
 flet build windows --output $resolvedBundle
 if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed with exit code $LASTEXITCODE" }
 
-Write-Host "3. Kiểm tra tính toàn vẹn bundle..." -ForegroundColor Cyan
+Write-Host "3. Tạo runner alias dành cho Windows autostart..." -ForegroundColor Cyan
+python (Join-Path $PSScriptRoot "prepare_windows_bundle.py") $resolvedBundle
+if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
+
+Write-Host "4. Kiểm tra tính toàn vẹn bundle..." -ForegroundColor Cyan
 python (Join-Path $PSScriptRoot "verify_windows_bundle.py") $resolvedBundle
 if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
 
 if (-not $SkipE2E) {
-    Write-Host "4. Chạy E2E bundle Windows..." -ForegroundColor Cyan
+    Write-Host "5. Chạy E2E bundle Windows..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot "test_windows_bundle_e2e.ps1") `
         -BundleDir $resolvedBundle `
         -ObservationSeconds $E2EObservationSeconds
     if ($LASTEXITCODE -ne 0) { throw "Windows bundle E2E failed" }
 }
 
-Write-Host "5. Chạy Inno Setup đóng gói (ISCC)..." -ForegroundColor Cyan
+Write-Host "6. Chạy Inno Setup đóng gói (ISCC)..." -ForegroundColor Cyan
 $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 
 if (-Not (Test-Path $isccPath)) {
