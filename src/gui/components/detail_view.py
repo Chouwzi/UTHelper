@@ -10,13 +10,27 @@ if _project_root not in sys.path:
 import flet as ft
 import asyncio
 import logging
+from collections import Counter
 from gui.core.theme import C
 from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
+from gui.components.detail.submission_presenter import (
+    SubmissionUiPolicy,
+    mutation_message,
+)
+from core.submission_models import (
+    FileIdentity,
+    FileMutationIntent,
+    MutationOperation,
+    RemoteFile,
+    SelectedFile,
+    SubmissionSnapshot,
+    normalize_filepath,
+)
 from core.use_cases.submission_workflow import (
-    FileMetadataUpdate,
+    FinalizeSubmissionIntent,
     SelectedSubmissionFile,
-    SubmittedFile,
+    SubmissionMutationResult,
     SubmissionTarget,
 )
 
@@ -67,19 +81,6 @@ _KEY_TRANSLATIONS = {
 def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
-# Moodle license shortnames → display names
-_LICENSE_OPTIONS = [
-    ("unknown", "Licence not specified"),
-    ("allrightsreserved", "All rights reserved"),
-    ("public", "Public domain"),
-    ("cc-4.0", "Creative Commons - 4.0 International"),
-    ("cc-nc-4.0", "CC - NonCommercial 4.0"),
-    ("cc-nd-4.0", "CC - NoDerivatives 4.0"),
-    ("cc-nc-nd-4.0", "CC - NonCommercial-NoDerivatives 4.0"),
-    ("cc-nc-sa-4.0", "CC - NonCommercial-ShareAlike 4.0"),
-    ("cc-sa-4.0", "CC - ShareAlike 4.0"),
-]
-
 class DetailView(ft.Container):
     def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None):
         super().__init__()
@@ -99,6 +100,12 @@ class DetailView(ft.Container):
         self._submission_workflow_factory = submission_workflow_factory
         self._selected_files = []          
         self._is_uploading  = False
+        self._submission_snapshot: SubmissionSnapshot | None = None
+        self._submission_fingerprint = ""
+        self._submission_policy: SubmissionUiPolicy | None = None
+        self._pending_file_mutation: tuple[MutationOperation, bool] | None = None
+        self._view_generation = 0
+        self._snapshot_load_generation = 0
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
@@ -108,31 +115,16 @@ class DetailView(ft.Container):
     def _submission_target(self, url: str, course_id: int) -> SubmissionTarget:
         return SubmissionTarget(url=url, course_id=course_id)
 
-    def _selected_submission_files(self) -> list[SelectedSubmissionFile]:
-        return [
-            SelectedSubmissionFile(
-                name=getattr(file_item, "name", "file"),
-                bytes=getattr(file_item, "bytes", b""),
-            )
-            for file_item in self._selected_files
-        ]
-
-    def _submitted_file_dtos(self, files: list[dict]) -> list[SubmittedFile]:
-        return [
-            SubmittedFile(
-                name=file_item.get("name", "file"),
-                url=file_item.get("url", ""),
-                filepath=file_item.get("filepath", "/"),
-            )
-            for file_item in files
-        ]
-
-    def _submitted_file_dicts(self, files: list[SubmittedFile]) -> list[dict]:
+    @staticmethod
+    def _submitted_file_dicts(files: tuple[RemoteFile, ...]) -> list[dict]:
         return [
             {
                 "name": file_item.name,
                 "url": file_item.url,
                 "filepath": file_item.filepath,
+                "size": file_item.size,
+                "mimetype": file_item.mimetype,
+                "timemodified": file_item.modified_time,
             }
             for file_item in files
         ]
@@ -164,6 +156,9 @@ class DetailView(ft.Container):
         self._file_list_col = ft.Column(spacing=4, visible=False)
         self._upload_progress = ft.ProgressBar(color=C.SAFE, bgcolor=C.BORDER, visible=False)
         self._upload_status = ft.Text("", size=12, color=C.TEXT_SECONDARY, visible=False)
+        self._submission_status_value = ft.Text(
+            "", size=12, color=C.TEXT_PRIMARY, expand=True
+        )
 
         self._submitted_files = []  
         self._editing_file_index = -1  
@@ -175,19 +170,6 @@ class DetailView(ft.Container):
             border_color=C.BORDER, focused_border_color=C.ACCENT,
             color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
             bgcolor=C.BG,
-        )
-        self._edit_author = ft.TextField(
-            label="Tác giả", text_size=13, dense=True,
-            border_color=C.BORDER, focused_border_color=C.ACCENT,
-            color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
-            bgcolor=C.BG,
-        )
-        self._edit_license = ft.Dropdown(
-            label="Chọn giấy phép", text_size=13, dense=True,
-            border_color=C.BORDER, focused_border_color=C.ACCENT,
-            color=C.TEXT_PRIMARY, label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
-            bgcolor=C.BG, filled=True, fill_color=C.BG,
-            options=[ft.dropdown.Option(key=k, text=v) for k, v in _LICENSE_OPTIONS],
         )
         self._edit_filepath = ft.TextField(
             label="Đường dẫn", text_size=13, dense=True,
@@ -204,8 +186,6 @@ class DetailView(ft.Container):
             content=ft.Container(
                 content=ft.Column(controls=[
                     self._edit_filename,
-                    self._edit_author,
-                    self._edit_license,
                     self._edit_filepath,
                     self._edit_status,
                 ], spacing=12, tight=True),
@@ -247,6 +227,30 @@ class DetailView(ft.Container):
             actions_alignment=ft.MainAxisAlignment.END,
         )
         self._pending_delete_indices = []
+
+        self._replace_confirm_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Xác nhận thay thế", size=16, weight=ft.FontWeight.BOLD,
+                          color=C.WARNING),
+            bgcolor=C.SURFACE,
+            content=ft.Text(
+                "Thao tác này sẽ thay thế toàn bộ danh sách file hiện có trên Moodle.",
+                size=13,
+                color=C.TEXT_PRIMARY,
+            ),
+            actions=[
+                ft.TextButton("Hủy", on_click=self._close_replace_confirmation,
+                              style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
+                ft.Button(
+                    "Tiếp tục",
+                    icon=ft.Icons.SWAP_HORIZ_ROUNDED,
+                    on_click=self._confirm_replace_mutation,
+                    bgcolor=C.WARNING,
+                    color=ft.Colors.WHITE,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
 
         self._submitted_files_col = ft.Column(spacing=4, visible=False)
 
@@ -349,7 +353,7 @@ class DetailView(ft.Container):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.CLOUD_UPLOAD_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Nộp bài", size=13, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                    ft.Text("Lưu bài nộp", size=13, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
                 ],
                 spacing=6, alignment=ft.MainAxisAlignment.CENTER,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -361,6 +365,36 @@ class DetailView(ft.Container):
             ink=True,
             visible=False,
             expand=True,
+        )
+
+        self._finalize_btn = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.SEND_ROUNDED, size=16, color=ft.Colors.WHITE),
+                    ft.Text("Nộp bài", size=13, color=ft.Colors.WHITE,
+                            weight=ft.FontWeight.W_600),
+                ],
+                spacing=6,
+                alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SAFE,
+            padding=ft.Padding.symmetric(vertical=13),
+            border_radius=8,
+            on_click=self._on_finalize,
+            ink=True,
+            visible=False,
+            expand=True,
+        )
+
+        self._submission_statement = ft.Checkbox(
+            label="Tôi xác nhận bài nộp này là sản phẩm của mình.",
+            value=False,
+            active_color=C.ACCENT,
+            visible=False,
+        )
+        self._submission_policy_text = ft.Text(
+            "", size=11, color=C.TEXT_SECONDARY, visible=False
         )
 
         self._upload_mode_overwrite = False  
@@ -422,11 +456,14 @@ class DetailView(ft.Container):
                 ], spacing=6),
                 self._file_list_col,
                 self._upload_mode_row,
+                self._submission_policy_text,
+                self._submission_statement,
                 self._upload_progress,
                 self._upload_status,
                 ft.Row(controls=[
                     self._pick_btn,
                     self._submit_btn,
+                    self._finalize_btn,
                 ], spacing=8),
             ], spacing=10),
             bgcolor=C.SURFACE,
@@ -632,6 +669,7 @@ class DetailView(ft.Container):
         return changed
 
     def update_detail(self, data: dict):
+        self._view_generation += 1
         self._loading_bar.visible  = False
         self._error_banner.visible = False
         self._title_text.value     = data.get("title", "Không có tiêu đề")
@@ -651,15 +689,23 @@ class DetailView(ft.Container):
         self._upload_progress.visible = False
         self._upload_status.visible = False
         self._is_uploading = False
+        self._pending_file_mutation = None
+        self._replace_confirm_dialog.open = False
+        self._upload_mode_row.visible = False
         self._submitted_files.clear()
+        self._submission_snapshot = None
+        self._submission_fingerprint = ""
+        self._submission_policy = None
+        self._submission_statement.value = False
+        self._submission_statement.visible = False
+        self._submission_policy_text.visible = False
+        self._pick_btn.visible = False
+        self._submit_btn.visible = False
+        self._finalize_btn.visible = False
         self._submitted_files_col.controls.clear()
         self._submitted_area.visible = False
 
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
-            # Chưa nộp + là assignment → hiện submission area
-            self._submission_area.visible = True
-            self._pick_btn.visible = True
-            self._submit_btn.visible = False  # chỉ hiện khi đã chọn file
             # CTA chính → mở browser (fallback)
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
             self._cta_text.value = "Mở trong trình duyệt"
@@ -668,10 +714,6 @@ class DetailView(ft.Container):
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
         elif sub_status in ("submitted", "Đã nộp"):
-            # Đã nộp nhưng chưa chấm → vẫn cho nộp thêm file
-            self._submission_area.visible = True
-            self._pick_btn.visible = True
-            self._submit_btn.visible = False
             self._cta_icon.name = ft.Icons.VISIBILITY_ROUNDED
             self._cta_text.value = "Xem bài nộp"
             self._open_btn.bgcolor = C.SURFACE
@@ -756,36 +798,75 @@ class DetailView(ft.Container):
             "Đăng tải các bình luận.",          # Moodle comment template (raw HTML)
             "Time remaining", "Thời gian còn lại",  # Already shown in info box above
         }
-        if status_data:
-            rows = []
-            for k, v in status_data.items():
-                if (k not in _SKIP_KEYS 
-                    and v 
-                    and str(v).strip() not in ("-", "") 
-                    and "___" not in str(v)):
-                    
-                    translated_key = _translate_key(k)
-                    translated_val = _translate_status(str(v))
-                    val_color = C.TEXT_PRIMARY
-                    
-                    if k in ("Submission status", "Trạng thái nộp bài") or translated_key == "Trạng thái nộp bài":
-                        val_str = str(v).lower()
-                        is_submitted = (
-                            "submit" in val_str or 
-                            "finish" in val_str or 
-                            "nộp" in translated_val.lower() or 
-                            "hoàn thành" in translated_val.lower()
-                        ) and "chưa" not in translated_val.lower() and "no" not in val_str
-                        val_color = C.SAFE if is_submitted else C.CRITICAL
-                        
-                    rows.append(
-                        ft.Row(controls=[
-                            ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
-                            ft.Text(translated_val, size=12, color=val_color, expand=True, weight=ft.FontWeight.W_600 if val_color in (C.SAFE, C.CRITICAL) else ft.FontWeight.NORMAL),
-                        ], spacing=8)
+        if not isinstance(status_data, dict):
+            status_data = {}
+        rows = []
+        has_submission_status = False
+        self._submission_status_value.value = "Đang đồng bộ với Moodle..."
+        self._submission_status_value.color = C.TEXT_SECONDARY
+        self._submission_status_value.weight = ft.FontWeight.W_600
+        for k, v in status_data.items():
+            if (k not in _SKIP_KEYS
+                and v
+                and str(v).strip() not in ("-", "")
+                and "___" not in str(v)):
+
+                translated_key = _translate_key(k)
+                translated_val = _translate_status(str(v))
+                val_color = C.TEXT_PRIMARY
+                is_submission_status = (
+                    k in ("Submission status", "Trạng thái nộp bài")
+                    or translated_key == "Trạng thái nộp bài"
+                )
+
+                if is_submission_status:
+                    if not is_assignment:
+                        continue
+                    has_submission_status = True
+                    val_str = str(v).lower()
+                    is_submitted = (
+                        "submit" in val_str
+                        or "finish" in val_str
+                        or "nộp" in translated_val.lower()
+                        or "hoàn thành" in translated_val.lower()
+                    ) and "chưa" not in translated_val.lower() and "no" not in val_str
+                    val_color = C.SAFE if is_submitted else C.CRITICAL
+                    self._submission_status_value.value = translated_val
+                    self._submission_status_value.color = val_color
+                    value_control = self._submission_status_value
+                else:
+                    value_control = ft.Text(
+                        translated_val,
+                        size=12,
+                        color=val_color,
+                        expand=True,
+                        weight=ft.FontWeight.NORMAL,
                     )
-            if rows:
-                self._content_col.controls.append(self._section("Trạng thái", rows))
+
+                rows.append(
+                    ft.Row(controls=[
+                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
+                        value_control,
+                    ], spacing=8)
+                )
+        if is_assignment and not has_submission_status:
+            rows.insert(
+                0,
+                ft.Row(
+                    controls=[
+                        ft.Text(
+                            "Trạng thái nộp bài",
+                            size=12,
+                            color=C.TEXT_SECONDARY,
+                            width=130,
+                        ),
+                        self._submission_status_value,
+                    ],
+                    spacing=8,
+                ),
+            )
+        if rows:
+            self._content_col.controls.append(self._section("Trạng thái", rows))
 
         # Thông tin Quiz
         quiz_rows = []
@@ -967,6 +1048,7 @@ class DetailView(ft.Container):
         self._upload_progress.visible = False
         # Show upload mode toggle when there are both new files and existing submitted files
         self._upload_mode_row.visible = has_files and bool(self._submitted_files)
+        self._render_submission_policy()
         self._page.update()
 
 
@@ -995,6 +1077,8 @@ class DetailView(ft.Container):
 
     def _set_upload_mode(self, overwrite: bool):
         """Chuyển chế độ upload: ghi đè hoặc thêm file."""
+        if self._is_uploading:
+            return
         self._upload_mode_overwrite = overwrite
         if overwrite:
             # Overwrite active
@@ -1031,76 +1115,424 @@ class DetailView(ft.Container):
             )
         self._page.update()
 
-    async def _on_submit(self, e):
-        """Upload files và nộp bài qua Moodle WS API."""
-        if self._is_uploading or not self._selected_files:
+    def _apply_submission_snapshot(self, snapshot: SubmissionSnapshot):
+        """Replace displayed submission state with one authoritative snapshot."""
+        self._submission_snapshot = snapshot
+        self._submission_fingerprint = snapshot.fingerprint
+        self._submission_policy = SubmissionUiPolicy.from_snapshot(snapshot)
+        self._submitted_files = DetailView._submitted_file_dicts(snapshot.remote_files)
+        self._last_server_status = DetailView._map_submission_status(snapshot.raw_status)
+        DetailView._update_visible_submission_status(self, snapshot.raw_status)
+        self._render_submission_policy()
+        self._build_submitted_files_ui()
+
+        DetailView._notify_submission_status(self, snapshot, self._current_url)
+
+    @staticmethod
+    def _map_submission_status(raw_status: str) -> str:
+        return {
+            "submitted": "Đã nộp",
+            "draft": "Bản nháp",
+            "new": "Chưa nộp",
+            "graded": "Đã chấm điểm",
+        }.get(raw_status, raw_status)
+
+    def _update_visible_submission_status(self, raw_status: str):
+        status = DetailView._map_submission_status(raw_status)
+        colors = {
+            "new": C.CRITICAL,
+            "draft": C.WARNING,
+            "submitted": C.SAFE,
+            "graded": C.SAFE,
+        }
+        self._submission_status_value.value = status
+        self._submission_status_value.color = colors.get(raw_status, C.TEXT_PRIMARY)
+        self._submission_status_value.weight = ft.FontWeight.W_600
+
+    def _notify_submission_status(
+        self, snapshot: SubmissionSnapshot, target_url: str
+    ):
+        status = DetailView._map_submission_status(snapshot.raw_status)
+        if target_url == self._current_url:
+            self._last_server_status = status
+            self._current_data["submission_status"] = status
+        if status and self._on_status_changed and target_url:
+            self._on_status_changed(target_url, status)
+
+    def _apply_mutation_result(self, result: SubmissionMutationResult):
+        """Render verified server truth, retaining the last truth if refresh failed."""
+        if result.snapshot is not None:
+            self._apply_submission_snapshot(result.snapshot)
+            if result.partial:
+                changed = DetailView._reconcile_selected_files(
+                    self, result.snapshot
+                )
+                if changed and hasattr(self, "_update_file_preview"):
+                    self._update_file_preview()
+        color = C.SAFE if result.ok else C.CRITICAL
+        self._show_upload_status(mutation_message(result), color)
+
+    def _reconcile_selected_files(self, snapshot: SubmissionSnapshot) -> bool:
+        """Drop pending picker entries already verified in a partial result."""
+        verified = Counter(
+            (normalize_filepath(item.filepath), item.name, item.size)
+            for item in snapshot.remote_files
+        )
+        pending = []
+        for item in self._selected_files:
+            identity = (
+                normalize_filepath(getattr(item, "filepath", "/") or "/"),
+                getattr(item, "name", "file"),
+                int(getattr(item, "size", 0) or 0),
+            )
+            if verified[identity]:
+                verified[identity] -= 1
+            else:
+                pending.append(item)
+        changed = len(pending) != len(self._selected_files)
+        if changed:
+            self._selected_files[:] = pending
+        return changed
+
+    def _selected_file_models(self) -> tuple[SelectedFile, ...]:
+        selected = []
+        for item in self._selected_files:
+            selected.append(
+                SelectedFile(
+                    name=getattr(item, "name", "file"),
+                    size=int(getattr(item, "size", 0) or 0),
+                    mimetype=getattr(item, "mime_type", "") or "",
+                    source_path=getattr(item, "path", "") or "",
+                )
+            )
+        return tuple(selected)
+
+    def _selected_submission_files(self) -> tuple[SelectedSubmissionFile, ...]:
+        """Capture picker-owned bytes before leaving the current view turn."""
+        payloads = []
+        for item in self._selected_files:
+            content = getattr(item, "bytes", None)
+            if isinstance(content, bytes):
+                payloads.append(
+                    SelectedSubmissionFile(
+                        name=getattr(item, "name", "file"),
+                        bytes=content,
+                        filepath=getattr(item, "filepath", "/") or "/",
+                    )
+                )
+        return tuple(payloads)
+
+    def _build_file_intent(
+        self,
+        operation: MutationOperation,
+        *,
+        finalize: bool,
+        remove_identities: tuple[FileIdentity, ...] = (),
+        rename_identity: FileIdentity | None = None,
+        new_name: str = "",
+        new_filepath: str = "/",
+    ) -> FileMutationIntent:
+        statement_value = getattr(self._submission_statement, "value", False)
+        accepted = statement_value if isinstance(statement_value, bool) else False
+        return FileMutationIntent(
+            operation=operation,
+            selected_files=DetailView._selected_file_models(self),
+            remove_identities=remove_identities,
+            rename_identity=rename_identity,
+            new_name=new_name,
+            new_filepath=new_filepath,
+            finalize=finalize,
+            accept_statement=accepted,
+            expected_fingerprint=self._submission_fingerprint,
+        )
+
+    def _render_submission_policy(self):
+        policy = self._submission_policy
+        if policy is None:
             return
+        busy = self._is_uploading
+        has_selected = bool(self._selected_files)
+        has_any_files = has_selected or bool(self._submitted_files)
+        has_submission_content = has_any_files or bool(
+            self._submission_snapshot
+            and self._submission_snapshot.online_text.strip()
+        )
+        self._file_list_col.disabled = busy
+        self._upload_mode_row.disabled = busy
+        self._upload_mode_row.visible = (
+            has_selected
+            and bool(self._submitted_files)
+            and policy.show_picker
+            and not busy
+        )
+        self._submission_area.visible = policy.show_picker or bool(policy.edit_reason)
+        self._pick_btn.visible = policy.show_picker and not busy
+        self._submit_btn.visible = (
+            has_selected
+            and not busy
+            and (policy.show_save_submission or policy.show_save_draft)
+        )
+        self._submit_btn.content.controls[1].value = policy.primary_action_label
+        self._finalize_btn.visible = (
+            has_submission_content and policy.show_finalize and not busy
+        )
+        self._submission_statement.visible = (
+            has_submission_content and policy.show_statement and not busy
+        )
+        self._submission_policy_text.value = policy.edit_reason or policy.limit_text
+        self._submission_policy_text.color = (
+            C.WARNING if policy.edit_reason else C.TEXT_SECONDARY
+        )
+        self._submission_policy_text.visible = True
+        self._build_submitted_files_ui()
 
-        client = None
-        try:
-            client = self._get_client() if self._get_client else None
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+    async def _on_submit(self, e=None):
+        operation = (
+            MutationOperation.REPLACE
+            if self._upload_mode_overwrite
+            else MutationOperation.ADD
+        )
+        await self._request_file_mutation(operation, finalize=False)
 
-        if not client:
-            self._show_upload_status("Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
+    async def _on_finalize(self, e=None):
+        await self._request_finalize_submission()
+
+    async def _request_finalize_submission(self):
+        if self._is_uploading:
             return
+        policy = self._submission_policy
+        if policy is None or not policy.show_finalize:
+            return
+        if policy.show_statement:
+            if getattr(self._submission_statement, "value", False) is not True:
+                self._show_upload_status(
+                    "Bạn cần xác nhận cam kết trước khi nộp bài.", C.WARNING
+                )
+                return
+        await self._execute_finalize_submission()
 
-        # Resolve assign_id từ URL
+    async def _request_file_mutation(
+        self, operation: MutationOperation, *, finalize: bool
+    ):
+        if self._is_uploading:
+            return
+        policy = self._submission_policy
+        if finalize and policy and policy.show_statement:
+            if getattr(self._submission_statement, "value", False) is not True:
+                self._show_upload_status(
+                    "Bạn cần xác nhận cam kết trước khi nộp bài.", C.WARNING
+                )
+                return
+        if operation is MutationOperation.REPLACE and self._submitted_files:
+            self._pending_file_mutation = (operation, finalize)
+            self._show_replace_confirmation()
+            return
+        await self._execute_file_mutation(operation, finalize)
+
+    def _show_replace_confirmation(self):
+        dialog = self._replace_confirm_dialog
+        if dialog not in self._page.overlay:
+            self._page.overlay.append(dialog)
+        dialog.open = True
+        self._page.update()
+
+    def _close_replace_confirmation(self, e=None):
+        self._replace_confirm_dialog.open = False
+        self._pending_file_mutation = None
+        self._page.update()
+
+    async def _confirm_replace_mutation(self, e=None):
+        pending = self._pending_file_mutation
+        self._pending_file_mutation = None
+        dialog = getattr(self, "_replace_confirm_dialog", None)
+        if dialog is not None:
+            dialog.open = False
+        page = getattr(self, "_page", None)
+        if page is not None:
+            page.update()
+        if pending is not None:
+            await self._execute_file_mutation(*pending)
+
+    async def _execute_file_mutation(
+        self,
+        operation: MutationOperation,
+        finalize: bool,
+        *,
+        remove_identities: tuple[FileIdentity, ...] = (),
+        rename_identity: FileIdentity | None = None,
+        new_name: str = "",
+        new_filepath: str = "/",
+    ):
+        client = self._get_client() if self._get_client else None
         data = self._current_data
         url = data.get("url", "")
         course_id = data.get("course_id")
-
-        if not url or not course_id or '/mod/assign/' not in url:
-            self._show_upload_status("Không thể xác định bài tập. Thử mở trong trình duyệt.", C.CRITICAL)
+        if not client:
+            self._show_upload_status("Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
+            return
+        if not url or not course_id or "/mod/assign/" not in url:
+            self._show_upload_status("Không thể xác định bài tập trên Moodle.", C.CRITICAL)
             return
 
+        generation = self._view_generation
+        target_url = url
+        target_course_id = int(course_id)
+        intent = self._build_file_intent(
+            operation,
+            finalize=finalize,
+            remove_identities=remove_identities,
+            rename_identity=rename_identity,
+            new_name=new_name,
+            new_filepath=new_filepath,
+        )
+        selected_files = DetailView._selected_submission_files(self)
         self._is_uploading = True
         self._upload_progress.visible = True
-        self._upload_progress.value = None  # indeterminate
-        self._pick_btn.visible = False
-        self._submit_btn.visible = False
-        self._show_upload_status("Đang tải lên...", C.TEXT_SECONDARY)
-
+        self._upload_progress.value = None
+        self._show_upload_status("Đang đồng bộ với Moodle...", C.TEXT_SECONDARY)
+        self._render_submission_policy()
+        self._page.update()
         try:
-            success = await asyncio.to_thread(
-                self._do_submit_sync, client, url, int(course_id)
+            result = await asyncio.to_thread(
+                self._do_mutate_files_sync,
+                client,
+                target_url,
+                target_course_id,
+                intent,
+                selected_files,
             )
-            if success:
-                self._show_upload_status("Nộp bài thành công!", C.SAFE)
-                self._upload_progress.value = 1.0
-                self._selected_files.clear()
-                self._file_list_col.controls.clear()
-                self._file_list_col.visible = False
-                self._submit_btn.visible = False
-                self._pick_btn.visible = True
-                # Reload submitted files to show what's on server
-                asyncio.ensure_future(
-                    self._async_load_submitted_files(client, url, int(course_id))
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._apply_mutation_result(result)
+                if result.ok:
+                    self._selected_files.clear()
+                    self._file_list_col.controls.clear()
+                    self._file_list_col.visible = False
+                    self._upload_progress.value = 1.0
+            elif result.snapshot is not None:
+                DetailView._notify_submission_status(
+                    self, result.snapshot, target_url
                 )
-            else:
-                self._show_upload_status("Nộp bài thất bại. Thử lại hoặc mở trình duyệt.", C.CRITICAL)
-                self._pick_btn.visible = True
-                self._submit_btn.visible = True
-                self._upload_progress.visible = False
-        except Exception as ex:
-            logger.error("Submit error: %s", ex)
-            self._show_upload_status(f"Lỗi: {ex}", C.CRITICAL)
-            self._pick_btn.visible = True
-            self._submit_btn.visible = True
-            self._upload_progress.visible = False
+        except Exception:
+            logger.error("Submission mutation failed unexpectedly")
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._show_upload_status(
+                    "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                )
         finally:
-            self._is_uploading = False
-            self._page.update()
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._is_uploading = False
+                self._upload_progress.visible = False
+                self._render_submission_policy()
+                self._page.update()
 
-    def _do_submit_sync(self, client, url: str, course_id: int) -> bool:
-        """Thực hiện upload + submit đồng bộ (chạy trong thread)."""
-        return self._submission_workflow(client).submit_files(
-            target=self._submission_target(url, course_id),
-            selected_files=self._selected_submission_files(),
-            submitted_files=self._submitted_file_dtos(self._submitted_files),
-            overwrite=self._upload_mode_overwrite,
+    async def _execute_finalize_submission(self):
+        client = self._get_client() if self._get_client else None
+        data = self._current_data
+        url = data.get("url", "")
+        course_id = data.get("course_id")
+        if not client:
+            self._show_upload_status(
+                "Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL
+            )
+            return
+        if not url or not course_id:
+            self._show_upload_status(
+                "Không thể xác định bài tập trên Moodle.", C.CRITICAL
+            )
+            return
+
+        generation = self._view_generation
+        target_url = url
+        target_course_id = int(course_id)
+        finalize_intent = FinalizeSubmissionIntent(
+            accept_statement=(
+                getattr(self._submission_statement, "value", False) is True
+            ),
+            expected_fingerprint=self._submission_fingerprint,
+        )
+        self._is_uploading = True
+        self._upload_progress.visible = True
+        self._upload_progress.value = None
+        self._show_upload_status("Đang đồng bộ với Moodle...", C.TEXT_SECONDARY)
+        self._render_submission_policy()
+        self._page.update()
+        try:
+            result = await asyncio.to_thread(
+                self._do_finalize_submission_sync,
+                client,
+                target_url,
+                target_course_id,
+                finalize_intent,
+            )
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._apply_mutation_result(result)
+                if result.ok:
+                    self._upload_progress.value = 1.0
+            elif result.snapshot is not None:
+                DetailView._notify_submission_status(
+                    self, result.snapshot, target_url
+                )
+        except Exception:
+            logger.error("Submission finalization failed unexpectedly")
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._show_upload_status(
+                    "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                )
+        finally:
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._is_uploading = False
+                self._upload_progress.visible = False
+                self._render_submission_policy()
+                self._page.update()
+
+    def _is_current_mutation_context(
+        self, generation: int, target_url: str, target_course_id: int
+    ) -> bool:
+        try:
+            current_course_id = int(self._current_data.get("course_id"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            self._view_generation == generation
+            and self._current_url == target_url
+            and current_course_id == target_course_id
+        )
+
+    def _do_mutate_files_sync(
+        self,
+        client,
+        url: str,
+        course_id: int,
+        intent: FileMutationIntent,
+        selected_files: tuple[SelectedSubmissionFile, ...] = (),
+    ) -> SubmissionMutationResult:
+        return self._submission_workflow(client).mutate_files(
+            self._submission_target(url, course_id),
+            intent,
+            selected_files=selected_files,
+        )
+
+    def _do_finalize_submission_sync(
+        self,
+        client,
+        url: str,
+        course_id: int,
+        intent: FinalizeSubmissionIntent,
+    ) -> SubmissionMutationResult:
+        return self._submission_workflow(client).finalize_submission(
+            self._submission_target(url, course_id), intent
         )
 
     def _show_upload_status(self, text: str, color: str):
@@ -1111,102 +1543,99 @@ class DetailView(ft.Container):
 
     async def _async_load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
         """Async wrapper: load submitted files in bg thread, then update UI."""
+        self._snapshot_load_generation += 1
+        load_generation = self._snapshot_load_generation
+        view_generation = self._view_generation
         try:
-            self._last_server_status = None
-            await asyncio.to_thread(
-                self._load_submitted_files, client, url, course_id, prefetched_status
+            result = await asyncio.to_thread(
+                self._load_submission_snapshot,
+                client,
+                url,
+                course_id,
+                prefetched_status,
             )
-            
-            # Cập nhật trạng thái nộp bài thông qua callback để đồng bộ các Activity Cards ở dashboard
-            if self._last_server_status and self._on_status_changed and self._current_url:
-                self._current_data["submission_status"] = self._last_server_status
-                self._on_status_changed(self._current_url, self._last_server_status)
-                
-            self._build_submitted_files_ui()
+            if not self._is_current_snapshot_load(
+                load_generation,
+                view_generation,
+                url,
+                course_id,
+            ):
+                return
+            if result.ok and result.snapshot is not None:
+                self._apply_submission_snapshot(result.snapshot)
+            elif result.issue is not None:
+                failed = SubmissionMutationResult.failure(result.issue, None)
+                self._show_upload_status(mutation_message(failed), C.CRITICAL)
             self._page.update()
-        except Exception as ex:
-            logger.debug("Load submitted files error: %s", ex)
+        except Exception:
+            logger.exception("Load submitted snapshot failed unexpectedly")
+            if not self._is_current_snapshot_load(
+                load_generation,
+                view_generation,
+                url,
+                course_id,
+            ):
+                return
+            self._show_upload_status(
+                "Không thể kiểm tra trạng thái bài nộp mới nhất.", C.CRITICAL
+            )
+            self._page.update()
 
-    def _load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
-        """Load danh sách file đã nộp từ server (chạy trong thread)."""
-        result = self._submission_workflow(client).load_submitted_files(
+    def _is_current_snapshot_load(
+        self,
+        load_generation: int,
+        view_generation: int,
+        url: str,
+        course_id: int,
+    ) -> bool:
+        try:
+            current_course_id = int(self._current_data.get("course_id"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            self._snapshot_load_generation == load_generation
+            and self._view_generation == view_generation
+            and self._current_url == url
+            and current_course_id == course_id
+        )
+
+    def _load_submission_snapshot(self, client, url: str, course_id: int,
+                                  prefetched_status: Optional[dict] = None):
+        return self._submission_workflow(client).load_snapshot(
             target=self._submission_target(url, course_id),
             prefetched_status=prefetched_status,
         )
-        self._last_server_status = result.last_server_status
-        self._submitted_files = self._submitted_file_dicts(result.files)
 
     def _build_submitted_files_ui(self):
-        build_submitted_files_ui(self)
+        policy = self._submission_policy
+        show_actions = bool(
+            policy and policy.show_file_actions and not self._is_uploading
+        )
+        build_submitted_files_ui(self, show_file_actions=show_actions)
 
     async def _on_remove_submitted_files(self, indices: list):
-        """Xóa nhiều file đã nộp: re-upload các file còn lại rồi re-submit.
-        
-        Workflow:
-        1. Download tất cả file CÒN LẠI từ server
-        2. Upload chúng vào draft area mới
-        3. mod_assign_save_submission để re-submit
-        """
+        """Remove the selected server identities through the verified workflow."""
         if self._is_uploading:
             return
-        indices_set = set(indices)
-        
-        removed_names = [self._submitted_files[i].get('name', '') for i in indices if 0 <= i < len(self._submitted_files)]
-        files_to_keep = [f for i, f in enumerate(self._submitted_files) if i not in indices_set]
-        
-        client = None
-        try:
-            client = self._get_client() if self._get_client else None
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-        if not client:
-            self._show_upload_status("Chưa đăng nhập.", C.CRITICAL)
-            return
-
-        data = self._current_data
-        url = data.get("url", "")
-        course_id = data.get("course_id")
-        if not url or not course_id or '/mod/assign/' not in url:
-            self._show_upload_status("Không xác định được bài tập.", C.CRITICAL)
-            return
-
-        self._is_uploading = True
-        count = len(removed_names)
-        if count == 1:
-            self._show_upload_status(f"Đang xóa '{removed_names[0]}'...", C.TEXT_SECONDARY)
-        else:
-            self._show_upload_status(f"Đang xóa {count} file...", C.TEXT_SECONDARY)
-        self._page.update()
-
-        try:
-            success = await asyncio.to_thread(
-                self._do_remove_file_sync, client, url, int(course_id), files_to_keep
+        valid = sorted({i for i in indices if 0 <= i < len(self._submitted_files)})
+        identities = tuple(
+            (
+                self._submitted_files[i].get("filepath", "/"),
+                self._submitted_files[i].get("name", ""),
             )
-            if success:
-                if count == 1:
-                    self._show_upload_status(f"Đã xóa '{removed_names[0]}'", C.SAFE)
-                else:
-                    self._show_upload_status(f"Đã xóa {count} file", C.SAFE)
-                # Reload submitted files
-                asyncio.ensure_future(
-                    self._async_load_submitted_files(client, url, int(course_id))
-                )
-            else:
-                self._show_upload_status("Xóa thất bại. Thử mở trình duyệt.", C.CRITICAL)
-        except Exception as ex:
-            logger.error("Remove submitted file error: %s", ex)
-            self._show_upload_status(f"Lỗi: {ex}", C.CRITICAL)
-        finally:
-            self._is_uploading = False
-            self._page.update()
-
-    def _do_remove_file_sync(self, client, url: str, course_id: int,
-                             files_to_keep: list) -> bool:
-        """Re-upload các file cần giữ rồi re-submit (chạy trong thread)."""
-        return self._submission_workflow(client).remove_files(
-            target=self._submission_target(url, course_id),
-            files_to_keep=self._submitted_file_dtos(files_to_keep),
+            for i in valid
+        )
+        if not identities:
+            return
+        operation = (
+            MutationOperation.CLEAR
+            if len(identities) == len(self._submitted_files)
+            else MutationOperation.REMOVE
+        )
+        await self._execute_file_mutation(
+            operation,
+            False,
+            remove_identities=identities,
         )
 
     async def _on_edit_submitted(self, e):
@@ -1228,20 +1657,6 @@ class DetailView(ft.Container):
 
         self._edit_filename.value = f.get('name', '')
         self._edit_filepath.value = f.get('filepath', '/')
-
-        # Lấy tên tác giả mặc định từ user profile
-        default_author = ''
-        try:
-            client = self._get_client() if self._get_client else None
-            if client:
-                site_info = client.call_ws_api('core_webservice_get_site_info')
-                if site_info and isinstance(site_info, dict):
-                    default_author = site_info.get('fullname', '')
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-        self._edit_author.value = default_author
-        self._edit_license.value = 'unknown'
         self._edit_status.value = ""
         self._edit_status.visible = False
 
@@ -1264,7 +1679,13 @@ class DetailView(ft.Container):
             return
         name = self._submitted_files[index].get('name', 'file')
         self._pending_delete_indices = [index]
-        self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
+        if len(self._submitted_files) == 1:
+            self._delete_confirm_text.value = (
+                "Bạn đang xóa toàn bộ file. Moodle sẽ lưu một bản ghi bài nộp "
+                f"không có file.\n  • {name}"
+            )
+        else:
+            self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -1278,7 +1699,14 @@ class DetailView(ft.Container):
         indices = sorted(self._selected_file_indices)
         names = [self._submitted_files[i].get('name', '') for i in indices]
         self._pending_delete_indices = indices
-        if len(names) == 1:
+        deleting_all = len(indices) == len(self._submitted_files)
+        if deleting_all:
+            file_list = "\n".join(f"  • {n}" for n in names)
+            self._delete_confirm_text.value = (
+                "Bạn đang xóa toàn bộ file. Moodle sẽ lưu một bản ghi bài nộp "
+                f"không có file.\n{file_list}"
+            )
+        elif len(names) == 1:
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{names[0]}'?"
         else:
             file_list = "\n".join(f"  • {n}" for n in names)
@@ -1309,6 +1737,8 @@ class DetailView(ft.Container):
 
     def _toggle_multiselect(self):
         """Bật/tắt chế độ chọn nhiều file."""
+        if not self._submission_policy or not self._submission_policy.show_file_actions:
+            return
         self._is_multiselect_mode = not self._is_multiselect_mode
         self._selected_file_indices.clear()
 
@@ -1350,7 +1780,7 @@ class DetailView(ft.Container):
         self._page.update()
 
     async def _on_update_file_metadata(self, e=None):
-        """Xử lý cập nhật thông tin file: đổi tên, author, license, filepath."""
+        """Rename or move a submitted file through the verified workflow."""
         idx = self._editing_file_index
         if idx < 0 or idx >= len(self._submitted_files):
             return
@@ -1359,8 +1789,6 @@ class DetailView(ft.Container):
 
         old_file = self._submitted_files[idx]
         new_name = (self._edit_filename.value or '').strip()
-        new_author = (self._edit_author.value or '').strip()
-        new_license = self._edit_license.value or 'unknown'
         new_filepath = (self._edit_filepath.value or '/').strip()
 
         if not new_name:
@@ -1370,94 +1798,22 @@ class DetailView(ft.Container):
             self._page.update()
             return
 
-        # Check if anything changed (author/license luôn cập nhật vì API không trả chúng)
         name_changed = new_name != old_file.get('name', '')
+        path_changed = new_filepath != old_file.get('filepath', '/')
 
-        if not name_changed and not new_author:
+        if not name_changed and not path_changed:
             self._close_edit_dialog()
             return
-
-        client = None
-        try:
-            client = self._get_client() if self._get_client else None
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-        if not client:
-            self._edit_status.value = "Chưa đăng nhập"
-            self._edit_status.color = C.CRITICAL
-            self._edit_status.visible = True
-            self._page.update()
-            return
-
-        data = self._current_data
-        url = data.get("url", "")
-        course_id = data.get("course_id")
-        if not url or not course_id or '/mod/assign/' not in url:
-            self._edit_status.value = "Không xác định được bài tập"
-            self._edit_status.color = C.CRITICAL
-            self._edit_status.visible = True
-            self._page.update()
-            return
-
-        self._is_uploading = True
-        self._edit_status.value = "Đang cập nhật..."
-        self._edit_status.color = C.TEXT_SECONDARY
-        self._edit_status.visible = True
-        self._page.update()
-
-        meta = {
-            'new_name': new_name,
-            'author': new_author,
-            'license': new_license,
-            'filepath': new_filepath,
-        }
-
-        try:
-            success = await asyncio.to_thread(
-                self._do_update_metadata_sync,
-                client, url, int(course_id), idx, meta,
-            )
-            if success:
-                self._close_edit_dialog()
-                self._show_upload_status(
-                    f"Đã cập nhật '{new_name}'", C.SAFE
-                )
-                asyncio.ensure_future(
-                    self._async_load_submitted_files(client, url, int(course_id))
-                )
-            else:
-                self._edit_status.value = "Cập nhật thất bại"
-                self._edit_status.color = C.CRITICAL
-                self._edit_status.visible = True
-        except Exception as ex:
-            logger.error("Update metadata error: %s", ex)
-            self._edit_status.value = f"Lỗi: {ex}"
-            self._edit_status.color = C.CRITICAL
-            self._edit_status.visible = True
-        finally:
-            self._is_uploading = False
-            self._page.update()
-
-    def _do_update_metadata_sync(self, client, url: str, course_id: int,
-                                 target_idx: int, meta: dict) -> bool:
-        """Re-upload tất cả file với metadata mới cho file target (chạy trong thread).
-
-        Workflow:
-        1. Download tất cả submitted files
-        2. Upload lại vào draft area mới, file target dùng tên/metadata mới
-        3. mod_assign_save_submission
-        """
-        return self._submission_workflow(client).update_file_metadata(
-            target=self._submission_target(url, course_id),
-            submitted_files=self._submitted_file_dtos(self._submitted_files),
-            target_idx=target_idx,
-            meta=FileMetadataUpdate(
-                new_name=meta["new_name"],
-                author=meta.get("author", ""),
-                license=meta.get("license", "unknown"),
-                filepath=meta.get("filepath", "/"),
+        self._file_edit_dialog.open = False
+        await self._execute_file_mutation(
+            MutationOperation.RENAME,
+            False,
+            rename_identity=(
+                old_file.get("filepath", "/"),
+                old_file.get("name", ""),
             ),
+            new_name=new_name,
+            new_filepath=new_filepath,
         )
 
     def update_theme(self):
@@ -1491,8 +1847,7 @@ class DetailView(ft.Container):
 
         # Text Fields & Dropdowns (Edit metadata dialog)
         _edit_fields = [
-            self._edit_filename, self._edit_author,
-            self._edit_license, self._edit_filepath
+            self._edit_filename, self._edit_filepath
         ]
         for f in _edit_fields:
             if f:

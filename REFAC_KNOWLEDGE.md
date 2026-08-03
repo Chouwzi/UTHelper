@@ -186,3 +186,56 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Local artifact gates passed for a clean Flet bundle, direct and installed
   manual/visible-autostart/hidden-autostart probes, Inno compile/install/uninstall,
   and Windows SDK MSIX pack/unpack validation.
+
+# 2026-08-04 - Verified Moodle submission file state machine
+
+- Replaced Boolean submission mutations with fresh typed snapshots, optimistic
+  fingerprint checks, exact desired-set rebuilds, structured outcomes, and
+  authoritative post-save/finalization verification.
+- Added assignment permission/constraint gates, bounded file materialization,
+  retained-file size checks, tracked pre-save draft cleanup, online-text
+  preservation, and explicit draft/final statement transitions.
+- Kept the existing submission GUI adapters until the server-driven UI migration.
+- Validation: 112 targeted tests passed; full suite reached **488 passed,
+  22 skipped**; `ruff check src tests` passed.
+
+# 2026-08-04 - Stateful Moodle 4.3 submission protocol coverage
+
+- Added an in-process Moodle 4.3 fake covering assignment/status reads, draft
+  allocation and uploads, exact-set saves, tracked draft cleanup, downloads,
+  and statement-aware finalization without network access or credentials.
+- Exercised the public `SubmissionWorkflow` across first submissions, append,
+  replace, remove/clear, rename/path moves, duplicate rejection, stale snapshot
+  aborts, and draft-to-submitted transitions.
+- Validation: 141 submission-focused tests passed; full suite reached **531
+  passed, 22 skipped**; `ruff check src tests` passed.
+
+# 2026-08-04 - Live-safe Moodle submission verification boundary
+
+- `SubmissionWorkflow` owns assignment-file state transitions. Callers provide an
+  immutable `SubmissionSnapshot` fingerprint plus a `FileMutationIntent`; the
+  workflow reloads server state, builds the exact desired set, saves it, and
+  returns only freshly verified server truth.
+- Draft transport remains below that state machine. An allocated, unlinked draft
+  item may be tested independently with uniquely synthetic upload/list/delete
+  operations, but it must never call assignment save or finalization.
+- The opt-in production probe may save and clear one generated file only on a
+  freshly `new`, empty, editable, unlocked, ungraded, file-enabled draft
+  assignment at least seven days before its due/cutoff boundary. Cleanup repeats
+  only the same exact clear after another safe-state check. Moodle cannot remove
+  the resulting empty submission record, so that residual is reported explicitly.
+- Normal test runs skip live probes. Operators must use existing environment or
+  secure app authentication and the documented external 180-second timeout; no
+  credentials, tokens, authenticated URLs, assignment identities, or file content
+  belong in test output or committed artifacts.
+- Live authentication is isolated from application state. A paired
+  `UTH_TEST_USER`/`UTH_TEST_PASS` login always takes precedence over cached app
+  tokens and keeps the acquired token in memory only. Without that pair, the
+  harness accepts only the token read directly from secure keyring and verifies
+  its site-info username against the configured account identity; plaintext JSON
+  fallback is never eligible for an assignment mutation.
+- The snapshot fingerprint now covers online-text content by hash, draft/file
+  plugin modes and limits, team mode, opening/due/cutoff boundaries, permissions,
+  status, and remote identities. A caller-supplied workflow safety guard evaluates
+  that freshly reloaded snapshot before any download, draft allocation, upload, or
+  save, closing the live precheck-to-mutation drift window.

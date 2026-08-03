@@ -10,6 +10,7 @@ Endpoints:
 import html
 import logging
 import threading
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 
@@ -527,6 +528,62 @@ def _get_quiz_detail(
 # Assignment Submission (In-App Upload)
 # ---------------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class MoodleWarning:
+    """A warning returned by a Moodle mutation web-service call."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class MoodleActionResult:
+    """The explicit success/failure result for a Moodle mutation."""
+
+    ok: bool
+    warnings: tuple[MoodleWarning, ...] = ()
+    message: str = ""
+
+
+def _extract_warnings(result: Any) -> tuple[MoodleWarning, ...]:
+    """Normalize Moodle warning response variants without treating them as success."""
+    raw_warnings: Any
+    if isinstance(result, list):
+        raw_warnings = result
+    elif isinstance(result, dict):
+        raw_warnings = result.get("warnings", ())
+    else:
+        raw_warnings = ()
+
+    if not isinstance(raw_warnings, (list, tuple)):
+        return ()
+
+    warnings: list[MoodleWarning] = []
+    for warning in raw_warnings:
+        if isinstance(warning, dict):
+            warnings.append(
+                MoodleWarning(
+                    code=str(warning.get("warningcode", warning.get("code", ""))),
+                    message=str(warning.get("message", "")),
+                )
+            )
+        else:
+            warnings.append(MoodleWarning(code="", message=str(warning)))
+    return tuple(warnings)
+
+
+def _parse_empty_success_response(result: Any) -> MoodleActionResult:
+    """Parse endpoints whose only successful response is Moodle's empty list."""
+    if result == []:
+        return MoodleActionResult(ok=True)
+    warnings = _extract_warnings(result)
+    if warnings:
+        return MoodleActionResult(ok=False, warnings=warnings)
+    if isinstance(result, dict) and result.get("exception"):
+        return MoodleActionResult(ok=False, message=str(result.get("message", "")))
+    return MoodleActionResult(ok=False, message="Unexpected Moodle response")
+
 def upload_file_to_draft(
     call_api: Callable,
     filename: str,
@@ -572,145 +629,82 @@ def upload_file_to_draft(
     return None
 
 
-def save_assignment_submission(
+def save_assignment_submission_result(
     call_api: Callable,
     assign_id: int,
     draft_itemid: int,
-) -> bool:
-    """Nộp bài assignment với file từ draft area.
-    
-    Gọi mod_assign_save_submission để lưu bài nộp. Tự động bảo toàn và gửi kèm
-    onlinetext nếu bài tập yêu cầu để tránh lỗi dmlwriteexception từ Moodle database.
-    
-    Args:
-        call_api: WS API caller.
-        assign_id: Assignment ID thật (KHÔNG phải cmid).
-        draft_itemid: Draft area itemid từ upload_file_to_draft().
-    
-    Returns:
-        True nếu nộp thành công, False nếu lỗi.
+    online_text: str,
+    online_text_format: int,
+    text_draft_itemid: int,
+) -> MoodleActionResult:
+    """Save a submission using an already captured online-text snapshot.
+
+    Snapshot acquisition and allocation of the text editor draft area are
+    intentionally handled by the caller, so a failed status lookup cannot be
+    silently converted into a different submission request.
     """
     params = {
         'assignmentid': assign_id,
         'plugindata[files_filemanager]': draft_itemid,
+        'plugindata[onlinetext_editor][text]': online_text,
+        'plugindata[onlinetext_editor][format]': online_text_format,
+        'plugindata[onlinetext_editor][itemid]': text_draft_itemid,
     }
-    
-    try:
-        # Lấy trạng thái hiện tại để kiểm tra xem có onlinetext plugin không
-        status = call_api('mod_assign_get_submission_status', assignid=assign_id)
-        if status and isinstance(status, dict):
-            last_attempt = status.get('lastattempt', {})
-            submission = last_attempt.get('submission', {})
-            plugins = submission.get('plugins', [])
-            
-            has_onlinetext = False
-            onlinetext_val = ""
-            onlinetext_format = 1
-            
-            for plugin in plugins:
-                if plugin.get('type') == 'onlinetext':
-                    has_onlinetext = True
-                    editorfields = plugin.get('editorfields', [])
-                    if editorfields:
-                        onlinetext_val = editorfields[0].get('text', '')
-                        onlinetext_format = editorfields[0].get('format', 1)
-                    break
-            
-            if has_onlinetext:
-                # Đưa onlinetext vào params để tránh Moodle xóa text hoặc báo dmlwriteexception
-                params['plugindata[onlinetext_editor][text]'] = onlinetext_val
-                params['plugindata[onlinetext_editor][format]'] = onlinetext_format
-                
-                # Cần draft itemid riêng cho text editor để không làm trống files_filemanager
-                text_draft_id = 0
-                try:
-                    text_draft_res = call_api('core_files_get_unused_draft_itemid')
-                    if text_draft_res and isinstance(text_draft_res, dict):
-                        text_draft_id = text_draft_res.get('itemid', 0)
-                except Exception:
-                    import logging as _fb_log
-                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                params['plugindata[onlinetext_editor][itemid]'] = text_draft_id
-    except Exception as e:
-        logger.warning("Không kiểm tra được onlinetext status: %s. Sẽ fallback nộp file thông thường.", e)
 
     try:
         result = call_api('mod_assign_save_submission', **params)
     except Exception as e:
         logger.error("Lỗi khi nộp bài (assign_id=%d): %s", assign_id, e)
+        return MoodleActionResult(ok=False, message="Moodle request failed")
+    return _parse_empty_success_response(result)
+
+
+def save_assignment_submission(
+    call_api: Callable,
+    assign_id: int,
+    draft_itemid: int,
+    online_text: Optional[str] = None,
+    online_text_format: Optional[int] = None,
+    text_draft_itemid: Optional[int] = None,
+) -> bool:
+    """Compatibility wrapper that refuses to save without an explicit text snapshot."""
+    if online_text is None or online_text_format is None or text_draft_itemid is None:
         return False
-
-    if result is None:
-        return False
-    
-    # mod_assign_save_submission trả về [] (empty list) khi thành công
-    if isinstance(result, list):
-        if len(result) == 0:
-            logger.info("Nộp bài thành công (assign_id=%d, draft=%d)", assign_id, draft_itemid)
-            return True
-        else:
-            is_empty_warning = False
-            for w in result:
-                msg = w.get('message', w) if isinstance(w, dict) else str(w)
-                code = w.get('warningcode', '') if isinstance(w, dict) else ''
-                logger.warning("Submission warning: %s (code=%s)", msg, code)
-                if code == 'couldnotsavesubmission':
-                    is_empty_warning = True
-            if is_empty_warning:
-                logger.info("Empty submission saved successfully despite Moodle warning")
-                return True
-            return False
-    
-    # Trả về dict với warnings
-    if isinstance(result, dict):
-        warnings = result.get('warnings', [])
-        if warnings:
-            is_empty_warning = False
-            for w in warnings:
-                msg = w.get('message', w) if isinstance(w, dict) else str(w)
-                code = w.get('warningcode', '') if isinstance(w, dict) else ''
-                logger.warning("Submission warning: %s (code=%s)", msg, code)
-                if code == 'couldnotsavesubmission':
-                    is_empty_warning = True
-            if is_empty_warning:
-                logger.info("Empty submission saved successfully despite Moodle warning")
-                return True
-            return False
-        # Không có warnings → coi như thành công
-        return True
-    
-    # List rỗng hoặc response không xác định → thử coi là thành công
-    logger.info("Nộp bài response (assign_id=%d): %s", assign_id, result)
-    return True
+    return save_assignment_submission_result(
+        call_api,
+        assign_id,
+        draft_itemid,
+        online_text,
+        online_text_format,
+        text_draft_itemid,
+    ).ok
 
 
-def submit_for_grading(call_api: Callable, assign_id: int) -> bool:
-    """mod_assign_submit_for_grading - chính thức nộp bài sau khi save.
-
-    Moodle requires this call AFTER save_submission to officially submit.
-    Without it, the submission stays as 'draft' and may NOT be graded.
-    """
+def submit_for_grading_result(
+    call_api: Callable,
+    assign_id: int,
+    accept_submission_statement: bool,
+) -> MoodleActionResult:
+    """Finalize a saved assignment submission with the caller's statement choice."""
     try:
         result = call_api(
             'mod_assign_submit_for_grading',
             assignmentid=assign_id,
-            acceptsubmissionstatement=1,
+            acceptsubmissionstatement=int(accept_submission_statement),
         )
     except Exception as e:
         logger.error("Submit for grading failed (assign_id=%d): %s", assign_id, e)
-        return False
+        return MoodleActionResult(ok=False, message="Moodle request failed")
+    return _parse_empty_success_response(result)
 
-    if result is None:
+
+def submit_for_grading(
+    call_api: Callable, assign_id: int, accept_submission_statement: bool = False
+) -> bool:
+    """Compatibility wrapper that never infers acceptance of Moodle's statement."""
+    if not accept_submission_statement:
         return False
-    # Returns [] on success
-    if isinstance(result, list) and len(result) == 0:
-        logger.info("Submit for grading thành công (assign_id=%d)", assign_id)
-        return True
-    if isinstance(result, dict) and 'exception' in result:
-        logger.warning("Submit for grading error: %s", result.get('message', ''))
-        return False
-    logger.info("Submit for grading response (assign_id=%d): %s", assign_id, result)
-    return True
+    return submit_for_grading_result(call_api, assign_id, True).ok
 
 
 def get_course_grades(call_api: Callable, userid: int) -> Optional[List[Dict[str, Any]]]:

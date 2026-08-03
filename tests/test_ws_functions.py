@@ -23,6 +23,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from core import ws_functions
 
 
+def test_empty_success_response_rejects_unknown_empty_dict():
+    result = ws_functions._parse_empty_success_response({})
+
+    assert result.ok is False
+    assert result.message == "Unexpected Moodle response"
+
+
 class TestGetSiteInfo:
     """get_site_info() tests."""
 

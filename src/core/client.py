@@ -4,12 +4,62 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+from dataclasses import dataclass
 from typing import Optional
 from config import settings
 import logging
 import sys as _sys
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_draft_filepath(filepath: str) -> str:
+    """Return a Moodle draft path with exactly one leading and trailing slash."""
+    parts = str(filepath or "").replace("\\", "/").strip("/")
+    return f"/{parts}/" if parts else "/"
+
+
+@dataclass(frozen=True)
+class DraftFileRecord:
+    """The exact identity Moodle assigned to an uploaded draft file."""
+
+    itemid: int
+    filepath: str
+    filename: str
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.filepath, self.filename
+
+
+@dataclass(frozen=True)
+class DraftUploadResult:
+    """Structured draft upload outcome without response content or credentials."""
+
+    record: Optional[DraftFileRecord] = None
+    error_code: str = ""
+
+
+def _draft_upload_error_code(payload: object) -> str:
+    """Return an explicit, code-like Moodle ``errorcode`` or ``errortype``."""
+    if not isinstance(payload, dict):
+        return ""
+    for field in ("errorcode", "errortype"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if not isinstance(value, str):
+            return "moodleerror"
+        raw_code = value.strip()
+        if not raw_code:
+            continue
+        code_chars = raw_code.replace("_", "")
+        return (
+            raw_code
+            if len(raw_code) <= 64 and code_chars.isascii() and code_chars.isalnum()
+            else "moodleerror"
+        )
+    return ""
 
 # Phát hiện hệ điều hành/nền tảng
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
@@ -396,30 +446,25 @@ class MoodleClient:
             logger.error(f"Lỗi khi lấy user ID: {e}")
         return None
 
-    def upload_draft_file(self, filename: str, file_bytes: bytes,
-                          itemid: int = 0,
-                          author: str = None,
-                          license_key: str = None) -> Optional[int]:
-        """Upload file lên Moodle draft area qua /webservice/upload.php.
-        
-        Đây là endpoint chính thức Moodle dùng cho mobile app upload.
-        Dùng multipart/form-data (không base64) → hiệu quả bộ nhớ hơn.
-        """
+    def upload_draft_file_result(
+        self,
+        filename: str,
+        file_bytes: bytes,
+        itemid: int = 0,
+        filepath: str = "/",
+    ) -> DraftUploadResult:
+        """Upload a file and return its identity or a sanitized Moodle error code."""
         token = self._get_ws_token()
         if not token:
             logger.error("Không có WS token để upload file.")
-            return None
-        
+            return DraftUploadResult(error_code="missingtoken")
+
         form_data = {
             'token': token,
             'itemid': str(itemid),
             'filearea': 'draft',
-            'filepath': '/',
+            'filepath': _normalize_draft_filepath(filepath),
         }
-        if author:
-            form_data['author'] = author
-        if license_key:
-            form_data['license'] = license_key
 
         try:
             status, result = self._post_multipart(
@@ -430,19 +475,64 @@ class MoodleClient:
             )
         except Exception as e:
             logger.error("Lỗi upload file '%s': %s", filename, e)
-            return None
-        
-        if isinstance(result, list) and len(result) > 0:
-            item = result[0]
-            if 'itemid' in item:
-                logger.info("Upload thành công '%s' → draft itemid=%s", filename, item['itemid'])
-                return item['itemid']
-        
+            return DraftUploadResult(error_code="transporterror")
+
+        if not 200 <= status < 300:
+            logger.warning("Draft upload failed with HTTP status %d", status)
+            return DraftUploadResult(error_code="httpstatus")
         if isinstance(result, dict):
-            logger.error("Upload lỗi: %s (code=%s)", 
-                        result.get('error', ''), result.get('errorcode', ''))
-        
-        return None
+            return DraftUploadResult(
+                error_code=_draft_upload_error_code(result) or "invalidresponse"
+            )
+        if not isinstance(result, list) or not result or not isinstance(result[0], dict):
+            logger.warning("Draft upload returned an unexpected response shape")
+            return DraftUploadResult(error_code="invalidresponse")
+
+        uploaded = result[0]
+        error_code = _draft_upload_error_code(uploaded)
+        if error_code:
+            return DraftUploadResult(error_code=error_code)
+        raw_itemid = uploaded.get("itemid")
+        server_filename = uploaded.get("filename")
+        server_filepath = uploaded.get("filepath")
+        if isinstance(raw_itemid, bool) or not isinstance(server_filename, str) or not server_filename or not isinstance(server_filepath, str):
+            logger.warning("Draft upload response did not include a valid file identity")
+            return DraftUploadResult(error_code="invalidresponse")
+        try:
+            server_itemid = int(raw_itemid)
+        except (TypeError, ValueError):
+            logger.warning("Draft upload response did not include a valid item ID")
+            return DraftUploadResult(error_code="invalidresponse")
+        if server_itemid <= 0:
+            logger.warning("Draft upload response contained a non-positive item ID")
+            return DraftUploadResult(error_code="invalidresponse")
+        return DraftUploadResult(
+            record=DraftFileRecord(
+                itemid=server_itemid,
+                filepath=_normalize_draft_filepath(server_filepath),
+                filename=server_filename,
+            )
+        )
+
+    def upload_draft_file_record(
+        self,
+        filename: str,
+        file_bytes: bytes,
+        itemid: int = 0,
+        filepath: str = "/",
+    ) -> Optional[DraftFileRecord]:
+        """Compatibility wrapper returning only the server-confirmed identity."""
+        return self.upload_draft_file_result(
+            filename, file_bytes, itemid, filepath
+        ).record
+
+    def upload_draft_file(self, filename: str, file_bytes: bytes,
+                          itemid: int = 0,
+                          author: str = None,
+                          license_key: str = None) -> Optional[int]:
+        """Compatibility wrapper returning only the Moodle draft item ID."""
+        record = self.upload_draft_file_record(filename, file_bytes, itemid, "/")
+        return record.itemid if record else None
 
     def download_file(self, url: str) -> Optional[bytes]:
         """Tải file từ Moodle server. Tự động append wstoken."""

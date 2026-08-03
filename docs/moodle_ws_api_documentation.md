@@ -791,6 +791,108 @@ GET https://courses.ut.edu.vn/webservice/rest/server.php?wstoken=YOUR_TOKEN_HERE
 > - `status = "submitted"` means the user has submitted.
 > - If `canedit = false` and `cansubmit = false`, the submission window is closed.
 
+### Verified assignment-file workflow and draft semantics
+
+The upload endpoint stores each multipart file in the current user's draft area.
+Allocate an unused draft item ID first, then pass that same positive `itemid` to
+each sequential upload that belongs to one logical file set. The response identity
+(`itemid`, normalized `filepath`, and `filename`) is authoritative. Uploading an
+already-present path/name must return the structured `filenameexist` error; a
+generic failed upload is not sufficient evidence of duplicate handling. It is not
+an overwrite operation. Depending on the endpoint path, Moodle may return that
+explicit `errorcode` directly or inside the first object of the normal JSON list
+envelope. The UTH production `upload.php` response instead exposes the short
+structured code in `errortype`; clients may accept either explicitly named code
+field in a direct or list-wrapped error object. They must preserve the exact
+code-like value and must not inspect or infer from free-form `error`, `message`,
+`filename`, `filepath`, or `size` fields.
+
+`mod_assign_save_submission` treats the supplied file-manager draft item as the
+complete replacement set. Consequently, add, remove, rename, path-move, replace,
+and clear operations rebuild the exact desired set in a fresh draft and save it as
+one state transition. Existing files that must remain are downloaded, bounded by
+the assignment limits, and re-uploaded. Online text is preserved from the same
+fresh status snapshot. A successful empty-set save clears submission files but does
+not delete the Moodle submission database record; that record-removal operation is
+not supported by this workflow or the available student web-service contract.
+
+Assignments with `submissiondrafts=1` remain in `draft` after save. They move to
+`submitted` only through the separate `mod_assign_submit_for_grading` transition,
+with explicit submission-statement acceptance when required. Assignments without
+drafts may become final as part of save, so they are excluded from reversible live
+write probes. Any non-empty Moodle `warnings` array makes save/finalization a
+failure, even when the transport returned HTTP success. The client refreshes status
+after every accepted transition and reports success only when the server file set
+and state match exactly.
+
+#### Opt-in live safety contract
+
+`tests/test_submission_live_safe.py` is skipped unless
+`UTH_LIVE_SUBMISSION_TEST=1`. There are exactly two accepted authentication paths:
+
+1. A complete `UTH_TEST_USER` plus `UTH_TEST_PASS` pair. This path takes precedence
+   over every cached app token, acquires a token without consulting global
+   settings, verifies the returned account identity, and keeps the token in memory
+   without calling `save_settings` or writing keyring.
+2. If the environment pair is absent, a token read directly from secure keyring.
+   The harness verifies its site-info username against the configured expected
+   username before any probe.
+
+A token restored from plaintext settings JSON is rejected for live assignment
+mutation, even if the normal app compatibility loader accepted it. An incomplete
+environment pair, missing keyring backend, missing expected username, or identity
+mismatch skips before mutation. Never put credential values, tokens, authenticated
+URLs, user or assignment identities, or file content in the command, test source,
+logs, or test report.
+
+The unlinked-draft probe allocates one unused item ID, uploads two unique synthetic
+files to it, appends a third using the same ID, verifies returned and listed
+identities, verifies a deliberate duplicate is rejected, and deletes only those
+tracked identities in `finally`. It passes only after listing proves none remains,
+and it is forbidden from calling either assignment mutation endpoint.
+
+The optional assignment probe discovers candidates read-only and selects at most
+one. Immediately before save it must freshly confirm all of the following:
+
+- status is exactly `new`, with no remote file or online-text content;
+- submissions are enabled and `canedit=true`, `locked=false`, `graded=false`;
+- a file plugin is enabled, draft/repeated editing is enabled, and a small `.txt`
+  file satisfies the advertised constraints;
+- it is not a team submission and is already open;
+- every non-zero due or cutoff boundary remains at least seven days away. A zero
+  boundary means Moodle configured no boundary and is safe for this check.
+
+The precheck fingerprint includes status/editability/lock/grade flags, remote file
+metadata, a hash (never the value) of online text, draft and file-plugin enablement,
+file count/size/type limits, team mode, and opening/due/cutoff timestamps. The
+production workflow reloads assignment configuration and status, compares that
+complete fingerprint, and evaluates the full live-safety predicate again before
+any retained-file download, draft allocation, upload, or assignment save. Online
+text appearing or draft mode becoming final during that interval therefore aborts
+with zero file I/O and zero save calls.
+
+The probe never calls `mod_assign_submit_for_grading`. Before cleanup it refreshes
+again and clears only when the state is still editable/unlocked/ungraded and the
+remote set is either empty or exactly the one generated identity. Its `finally`
+path may retry only that same idempotent clear after another fresh safety check.
+Absence of the exact generated path/name must be verified. An empty `draft`
+submission record may remain because Moodle exposes no safe removal operation; this
+is the sole allowed production residual and the run reports it explicitly. Any
+state drift aborts without touching another file.
+
+Run the opt-in module in a separate process with a hard 180-second deadline:
+
+```powershell
+$job = Start-Job { Set-Location $using:PWD; $env:PYTHONPATH='src;extensions/flet_uth_background_sync/src'; python -m pytest tests/test_submission_live_safe.py -q --tb=short -x }
+if (-not (Wait-Job $job -Timeout 180)) { Stop-Job $job; Remove-Job $job -Force; throw 'Live draft probe timed out after 180 seconds' }
+Receive-Job $job
+Remove-Job $job
+```
+
+Every HTTP operation also has a finite connection/read timeout. If the opt-in flag,
+secure authentication, required Moodle functions, or a qualifying assignment is
+absent, the relevant probe skips without weakening any gate.
+
 ---
 
 ## 8b. Quiz

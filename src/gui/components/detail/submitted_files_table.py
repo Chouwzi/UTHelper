@@ -2,7 +2,7 @@ import flet as ft
 from gui.core.theme import C
 from datetime import datetime
 
-def build_submitted_files_ui(view):
+def build_submitted_files_ui(view, *, show_file_actions: bool = True):
     """Xây dựng giao diện hiển thị danh sách các file đã nộp trên server."""
     view._submitted_files_col.controls.clear()
     view._selected_file_indices.clear()
@@ -44,37 +44,44 @@ def build_submitted_files_ui(view):
         ], spacing=2)
 
         # Hộp kiểm checkbox phục vụ chế độ chọn xóa nhiều file (mặc định ẩn)
-        cb = ft.Checkbox(
-            value=False,
-            on_change=lambda e, idx=i: view._on_file_checkbox_changed(idx, e.control.value),
-            active_color=C.CRITICAL,
-            visible=False,  # Sẽ được hiển thị khi kích hoạt chế độ multiselect
-        )
+        action_controls = []
+        if show_file_actions:
+            action_controls = [
+                ft.Checkbox(
+                    value=False,
+                    on_change=lambda e, idx=i: view._on_file_checkbox_changed(
+                        idx, e.control.value
+                    ),
+                    active_color=C.CRITICAL,
+                    visible=False,
+                ),
+                ft.IconButton(
+                    ft.Icons.EDIT_ROUNDED, icon_size=14,
+                    icon_color=C.ACCENT,
+                    tooltip="Chỉnh sửa",
+                    on_click=lambda _, idx=i: view._show_file_edit_dialog(idx),
+                    style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                ),
+                ft.IconButton(
+                    ft.Icons.DELETE_OUTLINE_ROUNDED, icon_size=14,
+                    icon_color=C.CRITICAL,
+                    tooltip="Xóa file này",
+                    on_click=lambda _, idx=i: view._confirm_single_delete(idx),
+                    style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                ),
+            ]
 
         row = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(
                     controls=[
-                        cb,
+                        *action_controls[:1],
                         ft.Icon(ft.Icons.DESCRIPTION_ROUNDED, size=16, color=C.SAFE),
                         ft.Text(f.get('name', ''), size=12, color=C.TEXT_PRIMARY,
                                 expand=True, max_lines=1,
                                 overflow=ft.TextOverflow.ELLIPSIS,
                                 weight=ft.FontWeight.W_500),
-                        ft.IconButton(
-                            ft.Icons.EDIT_ROUNDED, icon_size=14,
-                            icon_color=C.ACCENT,
-                            tooltip="Chỉnh sửa",
-                            on_click=lambda _, idx=i: view._show_file_edit_dialog(idx),
-                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
-                        ),
-                        ft.IconButton(
-                            ft.Icons.DELETE_OUTLINE_ROUNDED, icon_size=14,
-                            icon_color=C.CRITICAL,
-                            tooltip="Xóa file này",
-                            on_click=lambda _, idx=i: view._confirm_single_delete(idx),
-                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
-                        ),
+                        *action_controls[1:],
                     ],
                     spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
@@ -92,7 +99,7 @@ def build_submitted_files_ui(view):
 
     view._submitted_files_col.visible = True
     view._submitted_area.visible = True
-    view._edit_submitted_btn.visible = True
+    view._edit_submitted_btn.visible = show_file_actions
     # Chỉ hiển thị nút chọn nhiều khi danh sách có từ 2 file trở lên
-    view._multiselect_btn.visible = len(view._submitted_files) > 1
+    view._multiselect_btn.visible = show_file_actions and len(view._submitted_files) > 1
     view._batch_delete_btn.visible = False
