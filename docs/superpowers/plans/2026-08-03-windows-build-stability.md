@@ -263,7 +263,7 @@ def test_windows_bundle_e2e_is_isolated_and_cleans_exact_processes():
     assert "$env:APPDATA = $profileRoot" in script
     assert '"START_MINIMIZED": true' in script
     assert '"START_MINIMIZED": false' in script
-    assert '"--autostart"' in script
+    assert '"UTHelperAutostart.exe"' in script
     assert "IsWindowVisible" in script
     assert "Stop-Process -Id $process.Id" in script
     assert "finally" in script
@@ -332,9 +332,10 @@ Each probe writes this complete non-secret configuration before launch:
 ```
 
 For `manual-visible`, launch without arguments and require a visible window. For
-`autostart-visible`, write `START_MINIMIZED=false`, launch with `--autostart`, and
-require a visible window. For `autostart-hidden`, write `START_MINIMIZED=true`, launch
-with `--autostart`, and require no visible window while the process remains alive.
+`autostart-visible`, write `START_MINIMIZED=false`, launch `UTHelperAutostart.exe`
+without arguments, and require a visible window. For `autostart-hidden`, write
+`START_MINIMIZED=true`, launch the same alias without arguments, and require no
+visible window while the process remains alive.
 
 The launch/cleanup core must be:
 

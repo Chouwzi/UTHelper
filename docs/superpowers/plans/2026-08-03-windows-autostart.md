@@ -11,8 +11,8 @@
 ## Global Constraints
 
 - Never use the parent process as the UTHelper executable.
-- The canonical unpackaged command is `"<current UTHelper.exe>" --autostart`; development mode may include a real entry script only when the current process is Python/PythonW.
-- MSIX uses `TaskId="UTHelperStartup"`, `Enabled="false"`, and `uap10:Parameters="--autostart"`.
+- The canonical packaged command is `"<bundle>/UTHelperAutostart.exe"` with no arguments; development mode may include a real entry script and `--autostart` only when the current process is Python/PythonW.
+- MSIX uses `TaskId="UTHelperStartup"`, `Enabled="false"`, and `Executable="UTHelperAutostart.exe"` with no parameters.
 - A user- or policy-disabled startup task must not be reported as enabled or programmatically overridden.
 - Persist `START_WITH_WINDOWS` only after the requested Windows state is read back successfully.
 - Manual launches are visible. Only `--autostart` plus `START_MINIMIZED=true` may hide the window, and only after tray readiness is confirmed.
@@ -98,7 +98,7 @@ def test_python_development_command_rejects_missing_script(tmp_path):
 def test_run_key_enable_reads_back_exact_canonical_command():
     values: dict[str, str] = {}
     backend = RunKeyAutostartBackend(
-        command='"C:\\Program Files\\UTHelper\\UTHelper.exe" --autostart',
+        command='"C:\\Program Files\\UTHelper\\UTHelperAutostart.exe"',
         reader=values.get,
         writer=values.__setitem__,
         deleter=lambda name: values.pop(name, None),
@@ -112,7 +112,7 @@ def test_run_key_enable_reads_back_exact_canonical_command():
 def test_run_key_stale_command_is_disabled_until_explicit_enable():
     values = {"UTHelper": '"C:\\Temp\\pythonw.exe" "main.py" --autostart'}
     backend = RunKeyAutostartBackend(
-        command='"C:\\Program Files\\UTHelper\\UTHelper.exe" --autostart',
+        command='"C:\\Program Files\\UTHelper\\UTHelperAutostart.exe"',
         reader=values.get,
         writer=values.__setitem__,
         deleter=lambda name: values.pop(name, None),
@@ -126,7 +126,7 @@ def test_run_key_writer_failure_returns_error():
         raise PermissionError("denied")
 
     backend = RunKeyAutostartBackend(
-        command='"C:\\UTHelper.exe" --autostart',
+        command='"C:\\UTHelperAutostart.exe"',
         reader=lambda name: None,
         writer=fail_write,
         deleter=lambda name: None,
@@ -136,7 +136,7 @@ def test_run_key_writer_failure_returns_error():
 
 def test_run_key_disable_is_idempotent():
     backend = RunKeyAutostartBackend(
-        command='"C:\\UTHelper.exe" --autostart',
+        command='"C:\\UTHelperAutostart.exe"',
         reader=lambda name: None,
         writer=lambda name, value: None,
         deleter=lambda name: None,
@@ -147,7 +147,7 @@ def test_run_key_disable_is_idempotent():
 def test_enable_removes_legacy_value_after_read_back():
     values = {"UTHElearningAlert": '"C:\\Old\\UTHelper.exe" --autostart'}
     backend = RunKeyAutostartBackend(
-        command='"C:\\UTHelper.exe" --autostart',
+        command='"C:\\UTHelperAutostart.exe"',
         reader=values.get,
         writer=values.__setitem__,
         deleter=lambda name: values.pop(name, None),
@@ -165,8 +165,9 @@ Expected: collection fails on missing enums/classes/functions.
 - [ ] **Step 3: Implement the model, current-process lookup, and Run-key backend**
 
 Use `subprocess.list2cmdline` for command construction. A current executable whose
-lowercase stem is `python` or `pythonw` is development mode; every other executable,
-including Flet's `UTHelper.exe`, ignores `argv0` and receives only `--autostart`.
+lowercase stem is `python` or `pythonw` is development mode. A packaged runner
+resolves the sibling alias and passes no arguments because Flet 0.86.5 treats any
+desktop argument as a development-server launch and skips embedded Python.
 
 The current-process lookup must use this Windows API shape:
 
@@ -349,7 +350,7 @@ git commit -m "feat: support MSIX StartupTask autostart state"
 **Interfaces:**
 - Consumes: `StartupTaskAutostartBackend` and fixed TaskId from Task 2.
 - Produces: bundled `winrt-Windows.ApplicationModel==3.2.1` on Windows.
-- Produces: validated manifest extension for `UTHelper.exe --autostart`.
+- Produces: validated manifest extension for `UTHelperAutostart.exe` without parameters.
 
 - [ ] **Step 1: Add failing dependency and manifest assertions**
 
@@ -368,9 +369,9 @@ def test_msix_manifest_declares_disabled_full_trust_startup_task():
     assert 'xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"' in script
     assert 'IgnorableNamespaces="uap rescap desktop uap10"' in script
     assert 'Category="windows.startupTask"' in script
-    assert 'Executable="UTHelper.exe"' in script
+    assert 'Executable="UTHelperAutostart.exe"' in script
     assert 'EntryPoint="Windows.FullTrustApplication"' in script
-    assert 'uap10:Parameters="--autostart"' in script
+    assert 'uap10:Parameters=' not in script
     assert 'TaskId="UTHelperStartup"' in script
     assert 'Enabled="false"' in script
 ```
@@ -389,9 +390,8 @@ the manifest root with `desktop` and `uap10`, then add this child under
 
 ```xml
 <desktop:Extension Category="windows.startupTask"
-                   Executable="UTHelper.exe"
-                   EntryPoint="Windows.FullTrustApplication"
-                   uap10:Parameters="--autostart">
+                   Executable="UTHelperAutostart.exe"
+                   EntryPoint="Windows.FullTrustApplication">
   <desktop:StartupTask TaskId="UTHelperStartup"
                        Enabled="false"
                        DisplayName="UTHelper" />
@@ -704,10 +704,10 @@ git commit -m "fix: reconcile Windows autostart settings with OS state"
     ("argv", "start_minimized", "is_mobile", "tray_ready", "expected"),
     [
         (["UTHelper.exe"], True, False, True, False),
-        (["UTHelper.exe", "--autostart"], False, False, True, False),
-        (["UTHelper.exe", "--autostart"], True, False, True, True),
-        (["UTHelper.exe", "--autostart"], True, False, False, False),
-        (["UTHelper.exe", "--autostart"], True, True, True, False),
+        (["UTHelperAutostart.exe"], False, False, True, False),
+        (["UTHelperAutostart.exe"], True, False, True, True),
+        (["UTHelperAutostart.exe"], True, False, False, False),
+        (["UTHelperAutostart.exe"], True, True, True, False),
     ],
 )
 def test_startup_visibility_matrix(argv, start_minimized, is_mobile, tray_ready, expected):
@@ -805,7 +805,7 @@ git commit -m "fix: hide autostart launches only with a ready tray"
 def test_real_hkcu_run_round_trip_uses_exact_command():
     app_name = f"UTHelper_Test_{uuid.uuid4().hex}"
     command = subprocess.list2cmdline(
-        [r"C:\Program Files\UTHelper Test\UTHelper.exe", "--autostart"]
+        [r"C:\Program Files\UTHelper Test\UTHelperAutostart.exe"]
     )
     backend = RunKeyAutostartBackend(command=command, app_name=app_name)
     try:

@@ -1,7 +1,7 @@
 # Windows build stability and autostart design
 
 Date: 2026-08-03  
-Status: Approved design, pending implementation plan  
+Status: Approved revision, implementation in progress  
 Branch: `feature/windows-startup-stability`
 
 ## Context
@@ -59,8 +59,8 @@ Use a single application-facing autostart service with two Windows backends:
 | Runtime | Backend | Launch registration |
 |---|---|---|
 | Source/development | Run key | Quoted `pythonw.exe`, real entry script, `--autostart` |
-| Flet portable or Inno install | Run key | Quoted current `UTHelper.exe`, `--autostart` |
-| Identity-bearing MSIX | `Windows.ApplicationModel.StartupTask` | Manifest-declared `UTHelperStartup` task with `--autostart` |
+| Flet portable or Inno install | Run key | Quoted sibling `UTHelperAutostart.exe`, no arguments |
+| Identity-bearing MSIX | `Windows.ApplicationModel.StartupTask` | Manifest-declared `UTHelperStartup` task targeting `UTHelperAutostart.exe`, no arguments |
 
 The service exposes structured state and mutation results. The GUI never infers
 success from a saved preference and does not write a desired state that Windows
@@ -114,10 +114,14 @@ The backend detects the current executable with the current-process Windows API
 `GetModuleFileNameW`. It must never use the parent process as the application
 executable.
 
-For a Flet runner, the exact Run value is:
+Flet 0.86.5's generated desktop entry point interprets any command-line argument as
+a development-server launch and does not start the embedded Python production app.
+Therefore `UTHelper.exe --autostart` is invalid even though the executable remains
+alive. The bundle preparation step creates a byte-for-byte sibling runner alias.
+For a packaged Flet runner, the exact Run value is:
 
 ```text
-"C:\\Program Files\\UTHelper\\UTHelper.exe" --autostart
+"C:\\Program Files\\UTHelper\\UTHelperAutostart.exe"
 ```
 
 The command uses Windows command-line quoting and supports spaces and non-ASCII path
@@ -136,14 +140,14 @@ legacy `UTHElearningAlert` value names.
 
 ## MSIX backend
 
-The generated manifest declares:
+The generated manifest declares the alias as the startup executable and passes no
+parameters:
 
 ```xml
 <desktop:Extension
     Category="windows.startupTask"
-    Executable="UTHelper.exe"
-    EntryPoint="Windows.FullTrustApplication"
-    uap10:Parameters="--autostart">
+    Executable="UTHelperAutostart.exe"
+    EntryPoint="Windows.FullTrustApplication">
   <desktop:StartupTask
       TaskId="UTHelperStartup"
       Enabled="false"
@@ -190,14 +194,17 @@ data into the UI.
 
 ## Launch visibility behavior
 
-`--autostart` is the authoritative launch-context marker:
+The packaged runner name `UTHelperAutostart.exe` is the authoritative launch-context
+marker. Source/development launches retain `--autostart` because Python receives the
+argument directly there. Detection uses the current-process executable, never the
+parent process or `sys.argv[0]` alone:
 
 | Launch context | Visibility preference | Initial behavior |
 |---|---|---|
 | Manual | Any | Show the main window |
-| `--autostart` | Visible | Show the main window |
-| `--autostart` | Hidden | Initialize tray, then hide the main window |
-| `--autostart` | Hidden, tray unavailable | Show the main window and report/log the fallback |
+| Packaged alias or development `--autostart` | Visible | Show the main window |
+| Packaged alias or development `--autostart` | Hidden | Initialize tray, then hide the main window |
+| Packaged alias or development `--autostart` | Hidden, tray unavailable | Show the main window and report/log the fallback |
 
 The controller must not hide the window until a usable tray owner exists. Existing
 single-instance behavior must still bring a hidden running instance to the foreground
@@ -237,7 +244,8 @@ write the user's production startup entry.
 
 - Use a uniquely named temporary HKCU Run value, verify exact bytes/command semantics,
   then remove it in `finally`.
-- Launch the canonical command and verify `--autostart` reaches the process.
+- Launch both canonical commands and verify the packaged alias and development flag
+  reach the same Python launch-context policy.
 - Parse and validate the generated MSIX manifest/package with Windows SDK tooling.
 
 ### End-to-end gates
@@ -246,7 +254,7 @@ write the user's production startup entry.
 2. Static bundle verification.
 3. Direct bundle smoke launch: process remains alive through the observation window
    and creates expected startup evidence.
-4. Visible and hidden `--autostart` launch probes, with exact PID cleanup.
+4. Visible and hidden alias launch probes, with exact PID cleanup.
 5. Inno compilation from the verified bundle and archive/content inspection.
 6. MSIX packing, `makeappx validate`, and dependency/content inspection.
 7. An opt-in login/reboot checklist or harness verifies actual Windows sign-in launch;

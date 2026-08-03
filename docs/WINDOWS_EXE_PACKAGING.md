@@ -63,7 +63,7 @@ Validate the output on a clean Windows profile or VM:
 - Test tray minimize/restore/exit.
 - Test Windows toast/tray notification.
 - For an Inno/portable build, enable/disable autostart and confirm the Run value
-  points to the installed executable with only `--autostart` appended.
+  points to installed `UTHelperAutostart.exe` with no arguments.
 - For MSIX, confirm the manifest StartupTask is visible in Windows Startup Apps;
   do not expect a classic Run value.
 - Confirm settings are written under `%APPDATA%\UTHelper`, not beside the exe.
