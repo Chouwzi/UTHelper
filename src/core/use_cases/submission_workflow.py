@@ -260,6 +260,7 @@ class SubmissionWorkflow:
             grading_result = self.moodle_service.submit_for_grading_result(assign_id, True)
             if not grading_result.ok:
                 logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
+                return False
         return True
 
     def _get_preserved_online_text(self, assign_id: int) -> Optional[tuple[str, int, int]]:

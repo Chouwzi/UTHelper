@@ -59,6 +59,7 @@ class _FakeMoodleService:
     def __init__(self):
         self.calls = {"saved": [], "submitted": []}
         self.status = {"lastattempt": {"submission": {"status": "submitted"}}}
+        self.finalize_result = MoodleActionResult(ok=True)
 
     def resolve_cmid_to_assign_id(self, cmid, course_id):
         return 77 if cmid == 123 and course_id == 456 else None
@@ -76,7 +77,7 @@ class _FakeMoodleService:
 
     def submit_for_grading_result(self, assign_id, accept_submission_statement):
         self.calls["submitted"].append((assign_id, accept_submission_statement))
-        return MoodleActionResult(ok=True)
+        return self.finalize_result
 
     def get_submission_status(self, assign_id):
         return self.status
@@ -99,7 +100,7 @@ def test_load_submitted_files_maps_server_status(moodle_service):
     assert result.files == [SubmittedFile(name="old.txt", url="https://files/old.txt")]
 
 
-def test_submit_files_append_reuploads_existing_file_before_new_file(moodle_service):
+def test_submit_files_saves_without_finalizing_when_statement_not_accepted(moodle_service):
     client = _FakeClient()
 
     ok = SubmissionWorkflow(client, moodle_service).submit_files(
@@ -113,6 +114,23 @@ def test_submit_files_append_reuploads_existing_file_before_new_file(moodle_serv
     assert [upload["filename"] for upload in client.uploads] == ["old.txt", "new.txt"]
     assert moodle_service.calls["saved"] == [(77, client.uploads[-1]["result"], "", 1, 901)]
     assert moodle_service.calls["submitted"] == []
+
+
+def test_submit_files_returns_false_when_requested_finalization_fails(moodle_service):
+    moodle_service.finalize_result = MoodleActionResult(ok=False, message="finalization rejected")
+    client = _FakeClient()
+
+    ok = SubmissionWorkflow(client, moodle_service).submit_files(
+        SubmissionTarget(ASSIGN_URL, 456),
+        selected_files=[SelectedSubmissionFile("new.txt", b"new")],
+        submitted_files=[],
+        overwrite=True,
+        accept_submission_statement=True,
+    )
+
+    assert ok is False
+    assert moodle_service.calls["saved"] == [(77, client.uploads[-1]["result"], "", 1, 901)]
+    assert moodle_service.calls["submitted"] == [(77, True)]
 
 
 def test_submit_files_preserves_existing_online_text_and_requires_explicit_acceptance(moodle_service):
