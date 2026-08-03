@@ -28,7 +28,9 @@ def test_msix_packaging_requires_identity_match_timestamp_and_verification():
     assert "does not match certificate subject" in script
     assert "/tr $TimestampUrl /td SHA256" in script
     assert "signtool verification failed" in script
-    assert "makeappx validation failed" in script
+    assert "$makeAppx.FullName unpack" in script
+    assert "MSIX package verification failed" in script
+    assert "$makeAppx.FullName validate" not in script
 
 
 def test_appinstaller_uses_repository_name_in_stable_pages_url():

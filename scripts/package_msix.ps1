@@ -119,8 +119,31 @@ if ($null -eq $makeAppx) { throw "makeappx.exe was not found" }
 New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($resolvedOutput)) -Force | Out-Null
 & $makeAppx.FullName pack /d $stage /p $resolvedOutput /o
 if ($LASTEXITCODE -ne 0) { throw "makeappx failed with exit code $LASTEXITCODE" }
-& $makeAppx.FullName validate /p $resolvedOutput
-if ($LASTEXITCODE -ne 0) { throw "makeappx validation failed with exit code $LASTEXITCODE" }
+
+$verificationStage = Join-Path $workspaceRoot "build\msix-verify"
+if (Test-Path -LiteralPath $verificationStage) {
+    Remove-Item -LiteralPath $verificationStage -Recurse -Force
+}
+try {
+    & $makeAppx.FullName unpack /p $resolvedOutput /d $verificationStage /o
+    if ($LASTEXITCODE -ne 0) {
+        throw "MSIX package verification failed: unpack exited with $LASTEXITCODE"
+    }
+    foreach ($requiredFile in @(
+        "AppxManifest.xml",
+        "UTHelper.exe",
+        "UTHelperAutostart.exe"
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $verificationStage $requiredFile) -PathType Leaf)) {
+            throw "MSIX package verification failed: $requiredFile is missing"
+        }
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $verificationStage) {
+        Remove-Item -LiteralPath $verificationStage -Recurse -Force
+    }
+}
 
 if ($CertificatePath) {
     $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
