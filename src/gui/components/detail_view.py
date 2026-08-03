@@ -796,48 +796,75 @@ class DetailView(ft.Container):
             "Đăng tải các bình luận.",          # Moodle comment template (raw HTML)
             "Time remaining", "Thời gian còn lại",  # Already shown in info box above
         }
-        if status_data:
-            rows = []
-            for k, v in status_data.items():
-                if (k not in _SKIP_KEYS 
-                    and v 
-                    and str(v).strip() not in ("-", "") 
-                    and "___" not in str(v)):
-                    
-                    translated_key = _translate_key(k)
-                    translated_val = _translate_status(str(v))
-                    val_color = C.TEXT_PRIMARY
-                    
-                    if k in ("Submission status", "Trạng thái nộp bài") or translated_key == "Trạng thái nộp bài":
-                        val_str = str(v).lower()
-                        is_submitted = (
-                            "submit" in val_str or 
-                            "finish" in val_str or 
-                            "nộp" in translated_val.lower() or 
-                            "hoàn thành" in translated_val.lower()
-                        ) and "chưa" not in translated_val.lower() and "no" not in val_str
-                        val_color = C.SAFE if is_submitted else C.CRITICAL
-                        self._submission_status_value.value = translated_val
-                        self._submission_status_value.color = val_color
-                        self._submission_status_value.weight = ft.FontWeight.W_600
-                        value_control = self._submission_status_value
-                    else:
-                        value_control = ft.Text(
-                            translated_val,
-                            size=12,
-                            color=val_color,
-                            expand=True,
-                            weight=ft.FontWeight.NORMAL,
-                        )
+        if not isinstance(status_data, dict):
+            status_data = {}
+        rows = []
+        has_submission_status = False
+        self._submission_status_value.value = "Đang đồng bộ với Moodle..."
+        self._submission_status_value.color = C.TEXT_SECONDARY
+        self._submission_status_value.weight = ft.FontWeight.W_600
+        for k, v in status_data.items():
+            if (k not in _SKIP_KEYS
+                and v
+                and str(v).strip() not in ("-", "")
+                and "___" not in str(v)):
 
-                    rows.append(
-                        ft.Row(controls=[
-                            ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
-                            value_control,
-                        ], spacing=8)
+                translated_key = _translate_key(k)
+                translated_val = _translate_status(str(v))
+                val_color = C.TEXT_PRIMARY
+                is_submission_status = (
+                    k in ("Submission status", "Trạng thái nộp bài")
+                    or translated_key == "Trạng thái nộp bài"
+                )
+
+                if is_submission_status:
+                    if not is_assignment:
+                        continue
+                    has_submission_status = True
+                    val_str = str(v).lower()
+                    is_submitted = (
+                        "submit" in val_str
+                        or "finish" in val_str
+                        or "nộp" in translated_val.lower()
+                        or "hoàn thành" in translated_val.lower()
+                    ) and "chưa" not in translated_val.lower() and "no" not in val_str
+                    val_color = C.SAFE if is_submitted else C.CRITICAL
+                    self._submission_status_value.value = translated_val
+                    self._submission_status_value.color = val_color
+                    value_control = self._submission_status_value
+                else:
+                    value_control = ft.Text(
+                        translated_val,
+                        size=12,
+                        color=val_color,
+                        expand=True,
+                        weight=ft.FontWeight.NORMAL,
                     )
-            if rows:
-                self._content_col.controls.append(self._section("Trạng thái", rows))
+
+                rows.append(
+                    ft.Row(controls=[
+                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
+                        value_control,
+                    ], spacing=8)
+                )
+        if is_assignment and not has_submission_status:
+            rows.insert(
+                0,
+                ft.Row(
+                    controls=[
+                        ft.Text(
+                            "Trạng thái nộp bài",
+                            size=12,
+                            color=C.TEXT_SECONDARY,
+                            width=130,
+                        ),
+                        self._submission_status_value,
+                    ],
+                    spacing=8,
+                ),
+            )
+        if rows:
+            self._content_col.controls.append(self._section("Trạng thái", rows))
 
         # Thông tin Quiz
         quiz_rows = []

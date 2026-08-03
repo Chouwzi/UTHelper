@@ -275,6 +275,59 @@ def test_visible_submission_status_tracks_each_server_snapshot():
     assert colors[0] != colors[1] != colors[2]
 
 
+@pytest.mark.parametrize("details", [{}, {"status_data": {}}])
+def test_assignment_always_mounts_status_control_before_snapshot(details):
+    view = DetailView(MockPage(), lambda: None)
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": details,
+        }
+    )
+
+    status_sections = [
+        section
+        for section in view._content_col.controls
+        if section.content.controls[0].value == "TRẠNG THÁI"
+    ]
+    assert len(status_sections) == 1
+    rows = status_sections[0].content.controls[1].content.controls
+    submission_rows = [
+        row for row in rows if row.controls[0].value == "Trạng thái nộp bài"
+    ]
+    assert len(submission_rows) == 1
+    assert submission_rows[0].controls[1] is view._submission_status_value
+    assert view._submission_status_value.value == "Đang đồng bộ với Moodle..."
+
+    view._apply_submission_snapshot(snapshot(raw_status="submitted"))
+
+    assert submission_rows[0].controls[1].value == "Đã nộp"
+
+
+def test_non_assignment_does_not_mount_submission_status_row():
+    view = DetailView(MockPage(), lambda: None)
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=123",
+            "course_id": 456,
+            "type": "quiz",
+            "details": {
+                "status_data": {"Submission status": "No submission"}
+            },
+        }
+    )
+
+    labels = [
+        row.controls[0].value
+        for section in view._content_col.controls
+        if section.content.controls[0].value == "TRẠNG THÁI"
+        for row in section.content.controls[1].content.controls
+    ]
+    assert "Trạng thái nộp bài" not in labels
+
+
 @pytest.mark.anyio
 async def test_late_mutation_updates_dashboard_but_never_current_detail_view():
     started = threading.Event()
