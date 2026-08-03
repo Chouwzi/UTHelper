@@ -23,8 +23,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.1.0-blue?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/flet-0.85+-7C4DFF?style=flat-square" alt="Flet" />
-  <img src="https://img.shields.io/badge/tests-322%20passed%20%7C%2022%20skipped-22C55E?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/flet-0.86.5-7C4DFF?style=flat-square" alt="Flet" />
+  <img src="https://img.shields.io/badge/tests-448%20passed%20%7C%2022%20skipped-22C55E?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS%20%7C%20Web-E8710A?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20NC-red?style=flat-square" alt="License: PolyForm Noncommercial" /></a>
 </p>
@@ -103,10 +103,16 @@ pip install -e ".[android-build]"
 
 ### Windows Desktop
 
-```bash
+```powershell
 $env:PYTHONIOENCODING = 'utf-8'
-flet build windows
+$env:PYTHONUTF8 = '1'
+.\scripts\build_installer.ps1
 ```
+
+Lệnh trên build bundle Flet, tạo runner autostart không tham số, chạy verifier,
+kiểm thử ba chế độ cửa sổ và đóng gói Inno. Xem
+[`docs/WINDOWS_EXE_PACKAGING.md`](docs/WINDOWS_EXE_PACKAGING.md) để chạy riêng từng
+cổng bundle, installer hoặc MSIX.
 
 ### Yêu cầu build
 

@@ -20,22 +20,21 @@ Fresh verification before build:
 .\.venv\Scripts\python.exe src\main.py
 ```
 
-Build:
+Build and prepare the argument-free autostart alias:
 
 ```powershell
-flet build windows `
-  --project uthelper `
-  --product "UTHelper" `
-  --artifact "UTHelper" `
-  --description "UTHelper" `
-  --company "UTHelper" `
-  --copyright "Copyright (c) 2026" `
-  --output dist\flet-build
+flet build windows --output dist\flet-build --verbose
+.\.venv\Scripts\python.exe scripts\prepare_windows_bundle.py dist\flet-build
 ```
 
 Flet 0.86 compiles the application and installed Python packages to `.pyc` by
 default. These files are runtime inputs, not disposable cache files. Do not run a
 recursive `*.pyc` cleanup over the generated bundle.
+
+Flet 0.86.5 treats any desktop command-line argument as a development-server
+launch and does not start the embedded production Python app. Packaged autostart
+therefore uses the byte-identical `UTHelperAutostart.exe` sibling with no
+arguments. `--autostart` is retained only for direct Python development runs.
 
 Verify the bundle before any installer or MSIX step:
 
@@ -54,6 +53,21 @@ Run the bounded, isolated window/tray smoke matrix:
 The harness uses a temporary `APPDATA`, tests manual-visible,
 autostart-visible, and autostart-hidden launches, and terminates only the process
 it created. Every wait has a fixed deadline.
+
+Build the per-user Inno installer and run the installed-bundle gate:
+
+```powershell
+.\scripts\build_installer.ps1
+.\scripts\test_windows_installer_e2e.ps1 `
+  -InstallerPath .\dist\UTHelper_Setup_v2.1.0.exe `
+  -InstallDir build\installer-e2e\UTHelper `
+  -ObservationSeconds 8
+```
+
+The installer harness refuses to overwrite an existing current-user UTHelper
+installation. Install and uninstall processes have explicit deadlines; the
+installed bundle is verified and runs the same visibility matrix before it is
+uninstalled.
 
 Validate the output on a clean Windows profile or VM:
 
@@ -108,8 +122,14 @@ If the executable starts but a dynamic dependency fails, repeat the debug build 
 - Bundle assets to `assets` for PyInstaller/Flet pack. Runtime code now checks both `src/assets` and `assets`.
 - A Flet runner embeds Python in the current `UTHelper.exe`. Resolve that current
   process executable; never infer it from the parent process.
+- A packaged Run value targets quoted `UTHelperAutostart.exe` with no arguments.
+  Source development targets `pythonw.exe`, the real entry script, and
+  `--autostart`.
 - Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHelper`.
 - Do not request UAC/admin unless the app truly needs it; autostart uses HKCU and does not require elevation.
+- `makeappx pack` validates the manifest while creating the package. The packaging
+  script then unpacks the result and verifies the manifest and both runners;
+  `makeappx validate` is not a supported Windows SDK command.
 - Code signing is recommended for distribution to reduce SmartScreen friction, but signing requires a certificate and should happen after reproducible local builds.
 
 ## Sources

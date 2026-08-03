@@ -162,3 +162,27 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Targeted validation: 10 scheduler/release/diagnostics tests passed; Ruff and
   workflow YAML parsing passed. A pre-existing milestone expectation in the
   wider manager test is being migrated concurrently from hours to minutes.
+
+# 2026-08-03 - Stable Flet Windows startup and truthful autostart
+
+- Root-caused the immediate packaged-app crash to recursive deletion of Flet
+  0.86 compiled `.pyc` runtime files, including `Lib/encodings`; removed the
+  unsafe cleanup and added a fail-closed bundle verifier.
+- Pinned the matching Flet core/CLI/desktop toolchain to 0.86.5 and require the
+  Python runtime, encodings, compiled app, Flutter DLL, WinRT ApplicationModel
+  projection, and byte-identical autostart runner before packaging.
+- Flet 0.86.5 does not start embedded Python when its production runner receives
+  desktop CLI arguments. Packaged/Inno/MSIX autostart therefore targets
+  `UTHelperAutostart.exe` without arguments; only source development retains
+  `pythonw main.py --autostart`.
+- Windows autostart now reads back real HKCU Run or MSIX StartupTask state and
+  reports user/policy rejection instead of persisting false success. The Settings
+  UI reconciles OS state and scopes the hidden-window preference to autostart.
+- Hidden startup is allowed only after the tray reports readiness; tray failure
+  keeps the main window visible, preventing an invisible orphan process.
+- Inno installation is per-user, cleanup is limited to the current and legacy
+  Run value names, and the installed-bundle E2E uses bounded install/uninstall
+  processes with exact PID cleanup.
+- Local artifact gates passed for a clean Flet bundle, direct and installed
+  manual/visible-autostart/hidden-autostart probes, Inno compile/install/uninstall,
+  and Windows SDK MSIX pack/unpack validation.
