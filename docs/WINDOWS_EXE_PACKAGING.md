@@ -33,6 +33,28 @@ flet build windows `
   --output dist\flet-build
 ```
 
+Flet 0.86 compiles the application and installed Python packages to `.pyc` by
+default. These files are runtime inputs, not disposable cache files. Do not run a
+recursive `*.pyc` cleanup over the generated bundle.
+
+Verify the bundle before any installer or MSIX step:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_windows_bundle.py dist\flet-build
+```
+
+Run the bounded, isolated window/tray smoke matrix:
+
+```powershell
+.\scripts\test_windows_bundle_e2e.ps1 `
+  -BundleDir dist\flet-build `
+  -ObservationSeconds 8
+```
+
+The harness uses a temporary `APPDATA`, tests manual-visible,
+autostart-visible, and autostart-hidden launches, and terminates only the process
+it created. Every wait has a fixed deadline.
+
 Validate the output on a clean Windows profile or VM:
 
 - Launch the built `UTHelper.exe`.
@@ -40,7 +62,10 @@ Validate the output on a clean Windows profile or VM:
 - Open detail view and browser deep link.
 - Test tray minimize/restore/exit.
 - Test Windows toast/tray notification.
-- Enable/disable autostart and confirm the registry command points to the built exe.
+- For an Inno/portable build, enable/disable autostart and confirm the Run value
+  points to the installed executable with only `--autostart` appended.
+- For MSIX, confirm the manifest StartupTask is visible in Windows Startup Apps;
+  do not expect a classic Run value.
 - Confirm settings are written under `%APPDATA%\UTHelper`, not beside the exe.
 
 ## Single-File EXE Path
@@ -81,7 +106,8 @@ If the executable starts but a dynamic dependency fails, repeat the debug build 
 
 - Keep build output outside `src`; `src/build` can be accidentally bundled and previously added over 100 MB of artifact weight.
 - Bundle assets to `assets` for PyInstaller/Flet pack. Runtime code now checks both `src/assets` and `assets`.
-- Prefer `sys.executable` for autostart when frozen. The app already does this.
+- A Flet runner embeds Python in the current `UTHelper.exe`. Resolve that current
+  process executable; never infer it from the parent process.
 - Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHelper`.
 - Do not request UAC/admin unless the app truly needs it; autostart uses HKCU and does not require elevation.
 - Code signing is recommended for distribution to reduce SmartScreen friction, but signing requires a certificate and should happen after reproducible local builds.

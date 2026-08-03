@@ -96,3 +96,14 @@ def test_local_android_build_script_applies_the_native_notification_patch():
     assert "ORG_GRADLE_PROJECT_kotlin.incremental" in script
     assert "flet-android-notifications-patch" in script
     assert script.count("build $Target --verbose") == 2
+
+
+def test_inno_uninstall_scopes_autostart_cleanup_to_known_values():
+    script = _read("scripts/UTHelper_Setup.iss")
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    assert script.count(run_key) == 2
+    assert 'ValueName: "UTHelper"' in script
+    assert 'ValueName: "UTHElearningAlert"' in script
+    assert script.count("uninsdeletevalue") == 2
+    assert "uninsdeletekey" not in script
