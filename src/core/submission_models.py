@@ -96,6 +96,16 @@ class SubmissionSnapshot:
         return self.submissions_enabled and self.can_edit and not self.locked and not self.graded
 
     @property
+    def remote_names(self) -> tuple[str, ...]:
+        """Return deterministic display names for the current server file set."""
+        return tuple(sorted(file.name for file in self.remote_files))
+
+    @property
+    def remote_identities(self) -> tuple[FileIdentity, ...]:
+        """Return deterministic Moodle path/name identities for verification and UI use."""
+        return tuple(sorted(file.identity for file in self.remote_files))
+
+    @property
     def fingerprint(self) -> str:
         """Stable server-state fingerprint that intentionally excludes file URLs."""
         from hashlib import sha256

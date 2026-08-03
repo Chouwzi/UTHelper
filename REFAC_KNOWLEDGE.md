@@ -186,3 +186,15 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Local artifact gates passed for a clean Flet bundle, direct and installed
   manual/visible-autostart/hidden-autostart probes, Inno compile/install/uninstall,
   and Windows SDK MSIX pack/unpack validation.
+
+# 2026-08-04 - Verified Moodle submission file state machine
+
+- Replaced Boolean submission mutations with fresh typed snapshots, optimistic
+  fingerprint checks, exact desired-set rebuilds, structured outcomes, and
+  authoritative post-save/finalization verification.
+- Added assignment permission/constraint gates, bounded file materialization,
+  retained-file size checks, tracked pre-save draft cleanup, online-text
+  preservation, and explicit draft/final statement transitions.
+- Kept the existing submission GUI adapters until the server-driven UI migration.
+- Validation: 112 targeted tests passed; full suite reached **488 passed,
+  22 skipped**; `ruff check src tests` passed.
