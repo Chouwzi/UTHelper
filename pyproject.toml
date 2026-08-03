@@ -111,3 +111,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "windows_integration: isolated tests against real Windows user APIs",
+]
