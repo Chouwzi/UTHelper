@@ -24,11 +24,11 @@ class FakeMoodle43:
         self.submission_modified_time = 1_700_000_000
 
         self.save_calls = 0
-        self.finalize_acceptances: list[bool] = []
+        self.finalize_attempts: list[bool] = []
         self.cleanup_calls: list[tuple[int, tuple[tuple[str, str], ...]]] = []
         self.allocated_itemids: list[int] = []
         self.remote_sets_before_save: list[dict[tuple[str, str], bytes]] = []
-        self.reject_upload_number_as_duplicate = 0
+        self.fail_upload_number = 0
 
         self._next_itemid = 900
         self._upload_count = 0
@@ -69,11 +69,10 @@ class FakeMoodle43:
         self._upload_count += 1
         key = (normalize_filepath(filepath), filename)
         item_files = self.drafts[itemid]
-        if (
-            key in item_files
-            or self._upload_count == self.reject_upload_number_as_duplicate
-        ):
+        if key in item_files:
             return {"errorcode": "filenameexist", "error": "already exists"}
+        if self._upload_count == self.fail_upload_number:
+            return {"errorcode": "uploadfailed", "error": "synthetic failure"}
         item_files[key] = content
         return [{"itemid": itemid, "filepath": key[0], "filename": key[1]}]
 
@@ -212,6 +211,7 @@ class FakeMoodle43:
     def _submit_for_grading(self, params: dict) -> list | dict:
         assert params["assignmentid"] == self.assignment_id
         accepted = bool(params["acceptsubmissionstatement"])
+        self.finalize_attempts.append(accepted)
         if self.statement_required and not accepted:
             return {
                 "warnings": [
@@ -221,7 +221,6 @@ class FakeMoodle43:
                     }
                 ]
             }
-        self.finalize_acceptances.append(accepted)
         self.submission_status = "submitted"
         self.submission_modified_time += 1
         return []

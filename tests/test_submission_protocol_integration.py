@@ -179,9 +179,26 @@ def test_rename_and_path_move_preserve_exact_bytes(protocol_workflow):
     }
 
 
-def test_same_item_duplicate_rejection_cleans_tracked_uploads(protocol_workflow):
+def test_fake_rejects_same_item_duplicate_identity_without_changing_draft():
+    server = FakeMoodle43(drafts=False, statement=False)
+    itemid = server.call_ws_api("core_files_get_unused_draft_itemid")["itemid"]
+    first = server.upload(itemid, "proof", "answer.pdf", b"first")
+    before_duplicate = dict(server.drafts[itemid])
+
+    duplicate = server.upload(itemid, "/proof/", "answer.pdf", b"replacement")
+
+    assert first == [
+        {"itemid": itemid, "filepath": "/proof/", "filename": "answer.pdf"}
+    ]
+    assert duplicate == {"errorcode": "filenameexist", "error": "already exists"}
+    assert server.drafts[itemid] == before_duplicate == {
+        ("/proof/", "answer.pdf"): b"first"
+    }
+
+
+def test_mid_upload_failure_cleans_tracked_uploads(protocol_workflow):
     server = protocol_workflow.server
-    server.reject_upload_number_as_duplicate = 2
+    server.fail_upload_number = 2
 
     result = run_mutation(
         protocol_workflow,
@@ -227,6 +244,14 @@ def test_draft_statement_submission_changes_status_only_after_accepted_finalize(
         file,
         finalize=True,
     )
+
+    assert saved.ok is True
+    assert saved.outcome is MutationOutcome.DRAFT_SAVED
+    assert rejected.issue.code is SubmissionErrorCode.STATEMENT_NOT_ACCEPTED
+    assert rejected.partial is True
+    assert server.submission_status == "draft"
+    assert server.finalize_attempts == []
+
     finalized = run_mutation(
         protocol,
         MutationOperation.REPLACE,
@@ -235,11 +260,7 @@ def test_draft_statement_submission_changes_status_only_after_accepted_finalize(
         accept_statement=True,
     )
 
-    assert saved.ok is True
-    assert saved.outcome is MutationOutcome.DRAFT_SAVED
-    assert rejected.issue.code is SubmissionErrorCode.STATEMENT_NOT_ACCEPTED
-    assert rejected.partial is True
     assert finalized.ok is True
     assert finalized.outcome is MutationOutcome.SUBMITTED_FOR_GRADING
     assert server.submission_status == "submitted"
-    assert server.finalize_acceptances == [True]
+    assert server.finalize_attempts == [True]
