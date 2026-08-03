@@ -21,18 +21,14 @@ def test_packaged_flet_command_targets_argument_free_sibling_alias(tmp_path):
 
     command = build_autostart_command(executable=executable)
 
-    assert command == subprocess.list2cmdline(
-        [str(executable.with_name("UTHelperAutostart.exe"))]
-    )
+    assert command == f'"{executable.with_name("UTHelperAutostart.exe")}"'
     assert "--autostart" not in command
 
 
 def test_packaged_alias_resolves_to_itself(tmp_path):
     executable = tmp_path / "UTHelperAutostart.exe"
 
-    assert build_autostart_command(executable=executable) == subprocess.list2cmdline(
-        [str(executable)]
-    )
+    assert build_autostart_command(executable=executable) == f'"{executable}"'
 
 
 def test_development_command_uses_pythonw_real_script_and_flag(tmp_path):
@@ -198,7 +194,7 @@ def test_factory_selects_run_key_for_unpacked_windows(monkeypatch, tmp_path):
     service = autostart.create_autostart_service(platform_name="win32")
 
     assert isinstance(service, RunKeyAutostartBackend)
-    assert service.command.endswith("UTHelperAutostart.exe")
+    assert service.command.endswith('UTHelperAutostart.exe"')
 
 
 def test_factory_returns_unavailable_service_off_windows():

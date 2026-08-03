@@ -111,7 +111,9 @@ def build_autostart_command(
         if executable.name.casefold() == AUTOSTART_RUNNER_NAME.casefold()
         else executable.with_name(AUTOSTART_RUNNER_NAME)
     )
-    return subprocess.list2cmdline([str(alias)])
+    # Windows executable paths cannot contain a quote. Always quote the image path
+    # so a future install location containing spaces cannot change command parsing.
+    return f'"{alias}"'
 
 
 def _read_run_value(name: str) -> str | None:
