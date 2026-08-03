@@ -130,6 +130,45 @@ def test_apply_skips_mutation_when_os_already_matches(monkeypatch):
     assert view._autostart_coordinator.requests == []
 
 
+def test_unavailable_backend_does_not_block_unrelated_save_when_unchanged(monkeypatch):
+    unavailable = AutostartUiState(
+        False,
+        False,
+        False,
+        "Khởi động cùng Windows không khả dụng.",
+        confirmed=False,
+    )
+    view = view_for(unavailable)
+    view._sw_start_with_windows.value = False
+    monkeypatch.setattr(
+        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
+    )
+
+    result = asyncio.run(SettingsView._apply_autostart_change(view))
+
+    assert result is True
+    assert view._autostart_coordinator.requests == []
+
+
+def test_unconfirmed_backend_rejects_requested_state_change(monkeypatch):
+    unavailable = AutostartUiState(
+        False,
+        False,
+        False,
+        "Không thể đọc trạng thái Windows.",
+        confirmed=False,
+    )
+    view = view_for(unavailable)
+    view._sw_start_with_windows.value = True
+    monkeypatch.setattr(
+        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
+    )
+
+    result = asyncio.run(SettingsView._apply_autostart_change(view))
+
+    assert result is False
+
+
 def test_save_path_calls_transactional_autostart_before_persisting():
     source = __import__(
         "inspect"

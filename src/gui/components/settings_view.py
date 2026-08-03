@@ -1680,7 +1680,10 @@ class SettingsView(ft.Container):
             return True
         requested = bool(self._sw_start_with_windows.value)
         current = await self._autostart_coordinator.load()
-        if current.confirmed and current.enabled == requested:
+        if not current.confirmed:
+            self._apply_autostart_ui(current)
+            return requested == settings.START_WITH_WINDOWS
+        if current.enabled == requested:
             result = current
         elif current.editable:
             result = await self._autostart_coordinator.change(requested)
