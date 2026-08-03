@@ -122,8 +122,12 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
-      - run: pip install -e .
+      - run: pip install -e ".[windows]"
       - run: flet build windows --output dist\flet-build --verbose
+      - name: Prepare Flet Windows bundle
+        run: python scripts\prepare_windows_bundle.py dist\flet-build
+      - name: Verify Flet Windows bundle
+        run: python scripts\verify_windows_bundle.py dist\flet-build
       - name: Decode Windows signing certificate
         shell: pwsh
         env:

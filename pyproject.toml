@@ -14,16 +14,18 @@ dependencies = [
     "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
     "pydantic>=2.6.4",
-    "flet>=0.86.0",
+    "flet==0.86.5",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
 ]
 
 [project.optional-dependencies]
 windows = [
+    "flet[cli,desktop]==0.86.5",
     "pystray>=0.19.5",
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
+    "winrt-Windows.ApplicationModel==3.2.1",
     "keyring>=25.0.0",
     "pillow>=12.2.0",
     "lxml>=6.0.4",
@@ -49,12 +51,17 @@ copyright = "Copyright (c) 2026"
 path = "src"
 module = "main"
 
+[tool.flet.compile]
+app = true
+packages = true
+
 # ── Android-specific configuration ──
 [tool.flet.windows]
 dependencies = [
     "pystray>=0.19.5",
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
+    "winrt-Windows.ApplicationModel==3.2.1",
     "keyring>=25.0.0",
     "pillow>=12.2.0",
     "lxml>=6.0.4",
@@ -104,3 +111,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "windows_integration: isolated tests against real Windows user APIs",
+]

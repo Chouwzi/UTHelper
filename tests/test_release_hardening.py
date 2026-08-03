@@ -28,7 +28,9 @@ def test_msix_packaging_requires_identity_match_timestamp_and_verification():
     assert "does not match certificate subject" in script
     assert "/tr $TimestampUrl /td SHA256" in script
     assert "signtool verification failed" in script
-    assert "makeappx validation failed" in script
+    assert "$makeAppx.FullName unpack" in script
+    assert "MSIX package verification failed" in script
+    assert "$makeAppx.FullName validate" not in script
 
 
 def test_appinstaller_uses_repository_name_in_stable_pages_url():
@@ -49,8 +51,31 @@ def test_cross_compiled_targets_do_not_receive_windows_only_dependencies():
     assert not any("pywin32" in value for value in project_dependencies)
     assert any("pywin32" in value for value in windows_dependencies)
     assert any("windows-toasts" in value for value in windows_dependencies)
+    assert "winrt-Windows.ApplicationModel==3.2.1" in windows_dependencies
     assert "flet-android-notifications==0.10.0" in android_dependencies
     assert android_build_dependencies == ["flet-android-notifications==0.10.0"]
+
+
+def test_flet_build_version_and_compilation_are_reproducible():
+    config = tomllib.loads(_read("pyproject.toml"))
+
+    assert "flet==0.86.5" in config["project"]["dependencies"]
+    assert (
+        "flet[cli,desktop]==0.86.5"
+        in config["project"]["optional-dependencies"]["windows"]
+    )
+    assert not any(
+        dependency.startswith("flet>=")
+        for dependency in config["project"]["dependencies"]
+    )
+    assert config["tool"]["flet"]["compile"] == {
+        "app": True,
+        "packages": True,
+    }
+    assert (
+        "winrt-Windows.ApplicationModel==3.2.1"
+        in config["project"]["optional-dependencies"]["windows"]
+    )
 
 
 def test_android_build_workflows_install_the_notification_patcher():
@@ -82,3 +107,37 @@ def test_local_android_build_script_applies_the_native_notification_patch():
     assert "ORG_GRADLE_PROJECT_kotlin.incremental" in script
     assert "flet-android-notifications-patch" in script
     assert script.count("build $Target --verbose") == 2
+
+
+def test_inno_uninstall_scopes_autostart_cleanup_to_known_values():
+    script = _read("scripts/UTHelper_Setup.iss")
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    assert script.count(run_key) == 2
+    assert 'ValueName: "UTHelper"' in script
+    assert 'ValueName: "UTHElearningAlert"' in script
+    assert script.count("uninsdeletevalue") == 2
+    assert "uninsdeletekey" not in script
+    assert "PrivilegesRequired=lowest" in script
+    assert "PrivilegesRequired=admin" not in script
+
+
+def test_windows_release_prepares_alias_before_verification_and_packaging():
+    workflow = _read(".github/workflows/release.yml")
+    installer = _read("scripts/build_installer.ps1")
+
+    for script in (workflow, installer):
+        assert "prepare_windows_bundle.py" in script
+        assert script.index("prepare_windows_bundle.py") < script.index(
+            "verify_windows_bundle.py"
+        )
+
+
+def test_msix_and_e2e_use_argument_free_autostart_alias():
+    msix = _read("scripts/package_msix.ps1")
+    e2e = _read("scripts/test_windows_bundle_e2e.ps1")
+
+    assert 'Executable="UTHelperAutostart.exe"' in msix
+    assert "uap10:Parameters" not in msix
+    assert 'Join-Path $resolvedBundle "UTHelperAutostart.exe"' in e2e
+    assert 'Arguments @("--autostart")' not in e2e
