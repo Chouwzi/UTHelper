@@ -547,6 +547,7 @@ def test_environment_credentials_ignore_cached_account_and_do_not_persist(monkey
     ("result", "accepted"),
     [
         (DraftUploadResult(error_code="filenameexist"), True),
+        (DraftUploadResult(error_code="differentcode"), False),
         (DraftUploadResult(error_code="invalidresponse"), False),
         (DraftUploadResult(error_code="moodleerror"), False),
         (DraftUploadResult(error_code="httpstatus"), False),

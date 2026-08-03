@@ -801,8 +801,11 @@ already-present path/name must return the structured `filenameexist` error; a
 generic failed upload is not sufficient evidence of duplicate handling. It is not
 an overwrite operation. Depending on the endpoint path, Moodle may return that
 explicit `errorcode` directly or inside the first object of the normal JSON list
-envelope. Clients may unwrap only that named field; they must not infer a duplicate
-from free-form `error` or `message` text.
+envelope. The UTH production `upload.php` response instead exposes the short
+structured code in `errortype`; clients may accept either explicitly named code
+field in a direct or list-wrapped error object. They must preserve the exact
+code-like value and must not inspect or infer from free-form `error`, `message`,
+`filename`, `filepath`, or `size` fields.
 
 `mod_assign_save_submission` treats the supplied file-manager draft item as the
 complete replacement set. Consequently, add, remove, rename, path-move, replace,

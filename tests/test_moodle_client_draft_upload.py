@@ -6,7 +6,13 @@ from core.moodle_service import MoodleService
 
 
 LIVE_DUPLICATE_RESPONSE_ENVELOPE = [
-    {"errorcode": "filenameexist", "error": "synthetic duplicate"}
+    {
+        "error": "synthetic duplicate",
+        "errortype": "filenameexist",
+        "filename": "synthetic.txt",
+        "filepath": "/synthetic/",
+        "size": 0,
+    }
 ]
 
 
@@ -66,6 +72,21 @@ def test_upload_result_decodes_live_list_wrapped_duplicate_error(monkeypatch):
     assert result.error_code == "filenameexist"
 
 
+def test_upload_result_decodes_direct_structured_errortype(monkeypatch):
+    client = configured_client(monkeypatch)
+    client._post_multipart = Mock(
+        return_value=(
+            200,
+            {"error": "synthetic redacted detail", "errortype": "filenameexist"},
+        )
+    )
+
+    result = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert result.record is None
+    assert result.error_code == "filenameexist"
+
+
 def test_upload_result_does_not_infer_duplicate_from_arbitrary_message(monkeypatch):
     client = configured_client(monkeypatch)
     client._post_multipart = Mock(
@@ -76,6 +97,35 @@ def test_upload_result_does_not_infer_duplicate_from_arbitrary_message(monkeypat
 
     assert result.record is None
     assert result.error_code == "invalidresponse"
+
+
+def test_upload_result_preserves_unknown_explicit_errortype_without_inferring_duplicate(
+    monkeypatch,
+):
+    client = configured_client(monkeypatch)
+    client._post_multipart = Mock(
+        return_value=(
+            200,
+            [{"error": "synthetic duplicate words", "errortype": "DifferentCode"}],
+        )
+    )
+
+    result = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert result.record is None
+    assert result.error_code == "DifferentCode"
+
+
+def test_upload_result_rejects_non_code_like_errortype(monkeypatch):
+    client = configured_client(monkeypatch)
+    client._post_multipart = Mock(
+        return_value=(200, [{"errortype": "x" * 65}])
+    )
+
+    result = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert result.record is None
+    assert result.error_code == "moodleerror"
 
 
 def test_upload_result_keeps_transport_http_and_malformed_failures_distinct(monkeypatch):

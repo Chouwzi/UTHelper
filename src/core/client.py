@@ -41,13 +41,25 @@ class DraftUploadResult:
 
 
 def _draft_upload_error_code(payload: object) -> str:
-    """Return only an explicit, syntactically safe Moodle ``errorcode`` field."""
-    if not isinstance(payload, dict) or "errorcode" not in payload:
+    """Return an explicit, code-like Moodle ``errorcode`` or ``errortype``."""
+    if not isinstance(payload, dict):
         return ""
-    raw_code = str(payload.get("errorcode", "")).strip().lower()
-    if not raw_code:
-        return "moodleerror"
-    return raw_code if raw_code.replace("_", "").isalnum() else "moodleerror"
+    for field in ("errorcode", "errortype"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if not isinstance(value, str):
+            return "moodleerror"
+        raw_code = value.strip()
+        if not raw_code:
+            continue
+        code_chars = raw_code.replace("_", "")
+        return (
+            raw_code
+            if len(raw_code) <= 64 and code_chars.isascii() and code_chars.isalnum()
+            else "moodleerror"
+        )
+    return ""
 
 # Phát hiện hệ điều hành/nền tảng
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
