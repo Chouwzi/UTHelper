@@ -608,6 +608,81 @@ def test_legacy_submit_adapter_remains_boolean(tmp_path):
     assert ok is True
 
 
+def test_mutate_files_uses_selected_bytes_without_a_local_path():
+    workflow, client, _ = workflow_fixture()
+    content = b"exact picker bytes"
+    selected = SelectedFile(
+        name="new.pdf",
+        size=len(content),
+        mimetype="application/pdf",
+        source_path="",
+    )
+    payload = SelectedSubmissionFile("new.pdf", content)
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(selected,)),
+        selected_files=(payload,),
+    )
+
+    assert result.ok is True
+    assert client.uploads[0].content == content
+    assert "exact picker bytes" not in repr(payload)
+
+
+def test_mutate_files_preserves_multiple_selected_byte_payloads_without_paths():
+    workflow, client, _ = workflow_fixture()
+    contents = (b"first exact bytes", b"second exact bytes")
+    selected = tuple(
+        SelectedFile(
+            name=name,
+            size=len(content),
+            mimetype="application/pdf",
+            source_path="",
+        )
+        for name, content in zip(("first.pdf", "second.pdf"), contents)
+    )
+    payloads = tuple(
+        SelectedSubmissionFile(item.name, content)
+        for item, content in zip(selected, contents)
+    )
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=selected),
+        selected_files=payloads,
+    )
+
+    assert result.ok is True
+    assert [upload.content for upload in client.uploads] == list(contents)
+
+
+def test_selected_bytes_are_not_logged_when_upload_raises(caplog):
+    workflow, client, _ = workflow_fixture()
+    content = b"NEVER_LOG_THESE_PICKER_BYTES"
+    selected = SelectedFile(
+        name="new.pdf",
+        size=len(content),
+        mimetype="application/pdf",
+        source_path="",
+    )
+
+    def fail_upload(name, body, itemid, filepath):
+        raise RuntimeError(repr(body))
+
+    client.upload_draft_file_record = fail_upload
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(selected,)),
+        selected_files=(SelectedSubmissionFile("new.pdf", content),),
+    )
+
+    assert result.ok is False
+    assert result.issue.code is SubmissionErrorCode.UPLOAD_FAILED
+    assert "NEVER_LOG_THESE_PICKER_BYTES" not in caplog.text
+
+
 def test_legacy_remove_adapter_keeps_empty_guard():
     workflow, _, _ = workflow_fixture()
 

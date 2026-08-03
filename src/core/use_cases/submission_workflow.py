@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -33,10 +33,11 @@ class SubmissionTarget:
 
 @dataclass(frozen=True)
 class SelectedSubmissionFile:
-    """Legacy byte-backed input retained until the GUI uses ``SelectedFile``."""
+    """Byte-backed picker content kept outside intent reprs and logs."""
 
     name: str
-    bytes: bytes
+    bytes: bytes = field(repr=False)
+    filepath: str = "/"
 
 
 @dataclass(frozen=True)
@@ -226,8 +227,14 @@ class SubmissionWorkflow:
         self,
         target: SubmissionTarget,
         intent: FileMutationIntent,
+        *,
+        selected_files: tuple[SelectedSubmissionFile, ...] = (),
     ) -> SubmissionMutationResult:
-        return self._mutate_files(target, intent, {})
+        selected_bytes = {
+            (normalize_filepath(item.filepath), item.name): item.bytes
+            for item in selected_files
+        }
+        return self._mutate_files(target, intent, selected_bytes)
 
     def _mutate_files(
         self,
@@ -475,7 +482,7 @@ class SubmissionWorkflow:
                         filepath=item.metadata.filepath,
                     )
                 except Exception:
-                    logger.exception("Moodle draft upload failed")
+                    logger.error("Moodle draft upload failed")
                     record = None
                 if record is None:
                     failure = _error(SubmissionErrorCode.UPLOAD_FAILED, expected_identity)

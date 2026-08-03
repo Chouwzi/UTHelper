@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import asyncio
+import threading
 import pytest
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock
@@ -16,6 +17,8 @@ from core.submission_models import (
     SubmissionSnapshot,
 )
 from core.use_cases.submission_workflow import (
+    MutationOutcome,
+    SelectedSubmissionFile,
     SubmissionError,
     SubmissionErrorCode,
     SubmissionMutationResult,
@@ -69,6 +72,7 @@ def detail_view_shell():
         _is_uploading=False,
         _selected_files=[],
         _submission_statement=SimpleNamespace(value=False),
+        _submission_status_value=SimpleNamespace(value="", color=None),
         _upload_status=SimpleNamespace(value="", color=None, visible=False),
         _last_server_status=None,
         _on_status_changed=None,
@@ -84,6 +88,7 @@ def detail_view_shell():
         "_show_upload_status",
         "_request_file_mutation",
         "_confirm_replace_mutation",
+        "_selected_submission_files",
     ):
         setattr(shell, name, MethodType(getattr(DetailView, name), shell))
     return shell
@@ -193,6 +198,152 @@ async def test_replace_waits_for_confirmation_before_running_workflow(
     detail_view_shell._execute_file_mutation.assert_awaited_once_with(
         MutationOperation.REPLACE, False
     )
+
+
+def test_picker_bytes_are_preserved_for_single_and_multiple_pathless_files(
+    detail_view_shell,
+):
+    first = SimpleNamespace(
+        name="first.pdf", size=5, path=None, bytes=b"first", mime_type="application/pdf"
+    )
+    second = SimpleNamespace(
+        name="second.pdf", size=6, path=None, bytes=b"second", mime_type="application/pdf"
+    )
+
+    detail_view_shell._selected_files = [first]
+    assert detail_view_shell._selected_submission_files() == (
+        SelectedSubmissionFile("first.pdf", b"first"),
+    )
+
+    detail_view_shell._selected_files = [first, second]
+    assert detail_view_shell._selected_submission_files() == (
+        SelectedSubmissionFile("first.pdf", b"first"),
+        SelectedSubmissionFile("second.pdf", b"second"),
+    )
+
+
+def test_partial_finalize_reconciles_confirmed_pending_files(detail_view_shell):
+    selected = SimpleNamespace(
+        name="new.pdf", size=1024, path=None, bytes=b"new", mime_type="application/pdf"
+    )
+    detail_view_shell._selected_files = [selected]
+    detail_view_shell._update_file_preview = MagicMock()
+    verified = snapshot(files=(remote("new.pdf"),))
+    result = SubmissionMutationResult.failure(
+        SubmissionError(
+            SubmissionErrorCode.FINALIZE_REJECTED,
+            "Moodle rejected finalization",
+        ),
+        verified,
+        partial=True,
+    )
+
+    detail_view_shell._apply_mutation_result(result)
+
+    assert detail_view_shell._selected_files == []
+    retry = detail_view_shell._build_file_intent(
+        MutationOperation.ADD, finalize=True
+    )
+    assert retry.selected_files == ()
+
+
+def test_visible_submission_status_tracks_each_server_snapshot():
+    view = DetailView(MockPage(), lambda: None)
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {
+                "status_data": {"Submission status": "No submission"}
+            },
+        }
+    )
+    status_section = view._content_col.controls[0]
+    status_row = status_section.content.controls[1].content.controls[0]
+    assert status_row.controls[1] is view._submission_status_value
+
+    values = []
+    colors = []
+
+    for raw_status in ("new", "draft", "submitted"):
+        view._apply_submission_snapshot(snapshot(raw_status=raw_status))
+        values.append(view._submission_status_value.value)
+        colors.append(view._submission_status_value.color)
+
+    assert values == ["Chưa nộp", "Bản nháp", "Đã nộp"]
+    assert colors[0] != colors[1] != colors[2]
+
+
+@pytest.mark.anyio
+async def test_late_mutation_updates_dashboard_but_never_current_detail_view():
+    started = threading.Event()
+    release = threading.Event()
+    callbacks = []
+    server_a = snapshot(
+        files=(remote("a-result.pdf"),),
+        raw_status="submitted",
+        can_edit=False,
+    )
+
+    class SlowWorkflow:
+        def mutate_files(self, target, intent, *, selected_files=()):
+            assert selected_files == (
+                SelectedSubmissionFile("a-new.pdf", b"A-new"),
+            )
+            started.set()
+            assert release.wait(5)
+            return SubmissionMutationResult.success(
+                server_a, MutationOutcome.SUBMITTED_FOR_GRADING
+            )
+
+    page = MockPage()
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: object(),
+        on_status_changed=lambda url, status: callbacks.append((url, status)),
+        submission_workflow_factory=lambda _: SlowWorkflow(),
+    )
+    url_a = "https://courses.ut.edu.vn/mod/assign/view.php?id=101"
+    url_b = "https://courses.ut.edu.vn/mod/assign/view.php?id=202"
+    view.update_detail({"url": url_a, "course_id": 1, "type": "other"})
+    view._apply_submission_snapshot(snapshot(files=(remote("a-old.pdf"),)))
+    view._selected_files = [
+        SimpleNamespace(
+            name="a-new.pdf", size=5, path=None, bytes=b"A-new", mime_type="application/pdf"
+        )
+    ]
+
+    mutation = asyncio.create_task(
+        view._execute_file_mutation(MutationOperation.ADD, False)
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+
+    view.update_detail({"url": url_b, "course_id": 2, "type": "other"})
+    server_b = snapshot(
+        assignment_id=202,
+        files=(remote("b-current.pdf"),),
+        submission_id=202,
+    )
+    view._apply_submission_snapshot(server_b)
+    pending_b = SimpleNamespace(
+        name="b-new.pdf", size=5, path=None, bytes=b"B-new", mime_type="application/pdf"
+    )
+    view._selected_files = [pending_b]
+    view._is_uploading = True
+    view._render_submission_policy()
+
+    release.set()
+    await mutation
+
+    assert view._current_url == url_b
+    assert view._submission_snapshot is server_b
+    assert [item["name"] for item in view._submitted_files] == ["b-current.pdf"]
+    assert view._selected_files == [pending_b]
+    assert view._is_uploading is True
+    assert view._pick_btn.visible is False
+    assert callbacks[-1] == (url_a, "Đã nộp")
 
 class MockPage:
     def __init__(self):
