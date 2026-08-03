@@ -21,8 +21,8 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-; Require admin privileges for installation
-PrivilegesRequired=admin
+; Per-user install: settings and startup state live in HKCU/AppData.
+PrivilegesRequired=lowest
 OutputDir=..\dist
 OutputBaseFilename=UTHelper_Setup_v{#MyAppVersion}
 Compression=lzma

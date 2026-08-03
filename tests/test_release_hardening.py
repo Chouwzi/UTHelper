@@ -116,6 +116,8 @@ def test_inno_uninstall_scopes_autostart_cleanup_to_known_values():
     assert 'ValueName: "UTHElearningAlert"' in script
     assert script.count("uninsdeletevalue") == 2
     assert "uninsdeletekey" not in script
+    assert "PrivilegesRequired=lowest" in script
+    assert "PrivilegesRequired=admin" not in script
 
 
 def test_windows_release_prepares_alias_before_verification_and_packaging():
