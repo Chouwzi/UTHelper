@@ -142,7 +142,7 @@ class TestSaveAssignmentSubmission:
     def test_success_dict_no_warnings(self):
         mock_api = Mock(return_value={})
         result = ws_functions.save_assignment_submission(mock_api, assign_id=1, draft_itemid=999)
-        assert result is True
+        assert result is False
 
     def test_failure_with_warnings(self):
         mock_api = Mock(return_value={"warnings": [{"message": "Too late"}]})
@@ -158,6 +158,31 @@ class TestSaveAssignmentSubmission:
         mock_api = Mock(side_effect=Exception("Error"))
         result = ws_functions.save_assignment_submission(mock_api, assign_id=1, draft_itemid=999)
         assert result is False
+
+    def test_could_not_save_warning_is_failure(self):
+        mock_api = Mock(return_value=[{"warningcode": "couldnotsavesubmission", "message": "closed"}])
+
+        result = ws_functions.save_assignment_submission_result(mock_api, 77, 900, "", 1, 0)
+
+        assert result.ok is False
+        assert result.warnings[0].code == "couldnotsavesubmission"
+
+    def test_result_uses_snapshot_online_text_without_status_lookup(self):
+        mock_api = Mock(return_value=[])
+
+        result = ws_functions.save_assignment_submission_result(
+            mock_api, 77, 900, "<p>Keep this</p>", 1, 901
+        )
+
+        assert result.ok is True
+        assert mock_api.call_args.args == ("mod_assign_save_submission",)
+        assert mock_api.call_args.kwargs == {
+            "assignmentid": 77,
+            "plugindata[files_filemanager]": 900,
+            "plugindata[onlinetext_editor][text]": "<p>Keep this</p>",
+            "plugindata[onlinetext_editor][format]": 1,
+            "plugindata[onlinetext_editor][itemid]": 901,
+        }
 
 
 class TestSubmitForGrading:
@@ -178,6 +203,14 @@ class TestSubmitForGrading:
     def test_api_error(self):
         mock_api = Mock(side_effect=Exception("Error"))
         assert ws_functions.submit_for_grading(mock_api, assign_id=1) is False
+
+    def test_passes_explicit_statement_choice(self):
+        mock_api = Mock(return_value=[])
+
+        result = ws_functions.submit_for_grading_result(mock_api, 77, False)
+
+        assert result.ok is True
+        assert mock_api.call_args.kwargs["acceptsubmissionstatement"] == 0
 
 
 class TestWSEventsToAssignments:

@@ -1,6 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Optional, Dict, Any, List
+from typing import Callable, Optional, Dict, Any, List, Iterable
+import logging
 from core import ws_functions
+
+logger = logging.getLogger(__name__)
 
 class MoodleService:
     """Lớp dịch vụ đóng gói các hành động gọi Web Service Moodle và cơ chế lưu cache."""
@@ -108,13 +111,73 @@ class MoodleService:
         """Tải một tệp tin lên vùng nháp (draft area) trên server Moodle."""
         return ws_functions.upload_file_to_draft(self.call_ws_api, file_path, draft_id)
 
+    def get_unused_draft_itemid(self) -> Optional[int]:
+        """Allocate a separate Moodle draft area for an editor field."""
+        try:
+            result = self.call_ws_api("core_files_get_unused_draft_itemid")
+            itemid = result.get("itemid") if isinstance(result, dict) else None
+            if isinstance(itemid, bool) or itemid is None:
+                return None
+            parsed_itemid = int(itemid)
+            return parsed_itemid if parsed_itemid > 0 else None
+        except (TypeError, ValueError):
+            return None
+        except Exception as exc:
+            logger.warning("Could not allocate Moodle draft area: %s", exc)
+            return None
+
+    def save_assignment_submission_result(
+        self,
+        assign_id: int,
+        draft_itemid: int,
+        online_text: str,
+        online_text_format: int,
+        text_draft_itemid: int,
+    ) -> ws_functions.MoodleActionResult:
+        """Save a submission with the snapshot text and its own editor draft ID."""
+        return ws_functions.save_assignment_submission_result(
+            self.call_ws_api,
+            assign_id,
+            draft_itemid,
+            online_text,
+            online_text_format,
+            text_draft_itemid,
+        )
+
     def save_assignment_submission(self, assign_id: int, draft_id: int, onlinetext: str = "", item_id_text: int = 0) -> bool:
         """Lưu bài nộp (bao gồm cả tệp nháp hoặc bài viết trực tuyến) vào hệ thống."""
-        return ws_functions.save_assignment_submission(self.call_ws_api, assign_id, draft_id, onlinetext, item_id_text)
+        return self.save_assignment_submission_result(
+            assign_id, draft_id, onlinetext, 1, item_id_text
+        ).ok
+
+    def submit_for_grading_result(
+        self, assign_id: int, accept_submission_statement: bool
+    ) -> ws_functions.MoodleActionResult:
+        """Finalize a saved submission with an explicit statement choice."""
+        return ws_functions.submit_for_grading_result(
+            self.call_ws_api, assign_id, accept_submission_statement
+        )
 
     def submit_for_grading(self, assign_id: int) -> bool:
         """Xác nhận nộp bài chính thức để giảng viên chấm điểm (submit for grading)."""
-        return ws_functions.submit_for_grading(self.call_ws_api, assign_id)
+        return self.submit_for_grading_result(assign_id, True).ok
+
+    def delete_draft_files(
+        self, itemid: int, identities: Iterable[tuple[str, str]]
+    ) -> bool:
+        """Delete exactly the uploaded draft identities and require Moodle confirmation."""
+        params: dict[str, Any] = {"draftitemid": itemid}
+        for index, (filepath, filename) in enumerate(identities):
+            params[f"files[{index}][filepath]"] = filepath
+            params[f"files[{index}][filename]"] = filename
+        if len(params) == 1:
+            return True
+        try:
+            result = self.call_ws_api("core_files_delete_draft_files", **params)
+        except Exception as exc:
+            logger.warning("Could not delete Moodle draft files: %s", exc)
+            return False
+        return isinstance(result, dict) and "parentpaths" in result
 
     def ws_events_to_assignments(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Chuyển Moodle calendar events sang activity dictionaries của UTHelper."""
