@@ -57,6 +57,10 @@ def test_flet_build_version_and_compilation_are_reproducible():
     config = tomllib.loads(_read("pyproject.toml"))
 
     assert "flet==0.86.5" in config["project"]["dependencies"]
+    assert (
+        "flet[cli,desktop]==0.86.5"
+        in config["project"]["optional-dependencies"]["windows"]
+    )
     assert not any(
         dependency.startswith("flet>=")
         for dependency in config["project"]["dependencies"]

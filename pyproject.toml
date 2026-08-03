@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 windows = [
+    "flet[cli,desktop]==0.86.5",
     "pystray>=0.19.5",
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
