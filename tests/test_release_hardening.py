@@ -49,6 +49,7 @@ def test_cross_compiled_targets_do_not_receive_windows_only_dependencies():
     assert not any("pywin32" in value for value in project_dependencies)
     assert any("pywin32" in value for value in windows_dependencies)
     assert any("windows-toasts" in value for value in windows_dependencies)
+    assert "winrt-Windows.ApplicationModel==3.2.1" in windows_dependencies
     assert "flet-android-notifications==0.10.0" in android_dependencies
     assert android_build_dependencies == ["flet-android-notifications==0.10.0"]
 
@@ -69,6 +70,10 @@ def test_flet_build_version_and_compilation_are_reproducible():
         "app": True,
         "packages": True,
     }
+    assert (
+        "winrt-Windows.ApplicationModel==3.2.1"
+        in config["project"]["optional-dependencies"]["windows"]
+    )
 
 
 def test_android_build_workflows_install_the_notification_patcher():

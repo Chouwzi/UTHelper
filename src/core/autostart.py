@@ -1,8 +1,21 @@
-"""
-Platform-aware autostart for Windows.
-Delegates to platform.autostart which handles conditional winreg import.
-Kept for backward compatibility with existing imports.
-"""
-from platform_utils.autostart import add_to_startup, remove_from_startup
+"""Compatibility exports for the platform-aware autostart service."""
 
-__all__ = ["add_to_startup", "remove_from_startup"]
+from platform_utils.autostart import (
+    AutostartState,
+    AutostartStatus,
+    add_to_startup,
+    create_autostart_service,
+    get_autostart_status,
+    remove_from_startup,
+    set_autostart_enabled,
+)
+
+__all__ = [
+    "AutostartState",
+    "AutostartStatus",
+    "add_to_startup",
+    "create_autostart_service",
+    "get_autostart_status",
+    "remove_from_startup",
+    "set_autostart_enabled",
+]
