@@ -12,6 +12,7 @@ from core.use_cases.submission_workflow import (
     SubmissionTarget,
     SubmissionWorkflow,
 )
+from core.ws_functions import MoodleActionResult
 
 
 ASSIGN_URL = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
@@ -57,20 +58,28 @@ class _FakeClient:
 class _FakeMoodleService:
     def __init__(self):
         self.calls = {"saved": [], "submitted": []}
+        self.status = {"lastattempt": {"submission": {"status": "submitted"}}}
 
     def resolve_cmid_to_assign_id(self, cmid, course_id):
         return 77 if cmid == 123 and course_id == 456 else None
 
-    def save_assignment_submission(self, assign_id, draft_itemid, onlinetext="", item_id_text=0):
-        self.calls["saved"].append((assign_id, draft_itemid))
-        return True
+    def get_unused_draft_itemid(self):
+        return 901
 
-    def submit_for_grading(self, assign_id):
-        self.calls["submitted"].append(assign_id)
-        return True
+    def save_assignment_submission_result(
+        self, assign_id, draft_itemid, online_text, online_text_format, text_draft_itemid
+    ):
+        self.calls["saved"].append(
+            (assign_id, draft_itemid, online_text, online_text_format, text_draft_itemid)
+        )
+        return MoodleActionResult(ok=True)
+
+    def submit_for_grading_result(self, assign_id, accept_submission_statement):
+        self.calls["submitted"].append((assign_id, accept_submission_statement))
+        return MoodleActionResult(ok=True)
 
     def get_submission_status(self, assign_id):
-        return {"lastattempt": {"submission": {"status": "submitted"}}}
+        return self.status
 
     def get_submitted_files(self, assign_id, status=None):
         return [{"name": "old.txt", "url": "https://files/old.txt"}]
@@ -102,8 +111,35 @@ def test_submit_files_append_reuploads_existing_file_before_new_file(moodle_serv
 
     assert ok is True
     assert [upload["filename"] for upload in client.uploads] == ["old.txt", "new.txt"]
-    assert moodle_service.calls["saved"] == [(77, client.uploads[-1]["result"])]
-    assert moodle_service.calls["submitted"] == [77]
+    assert moodle_service.calls["saved"] == [(77, client.uploads[-1]["result"], "", 1, 901)]
+    assert moodle_service.calls["submitted"] == []
+
+
+def test_submit_files_preserves_existing_online_text_and_requires_explicit_acceptance(moodle_service):
+    moodle_service.status = {
+        "lastattempt": {
+            "submission": {
+                "status": "draft",
+                "plugins": [{
+                    "type": "onlinetext",
+                    "editorfields": [{"text": "<p>Keep me</p>", "format": 1}],
+                }],
+            }
+        }
+    }
+    client = _FakeClient()
+
+    ok = SubmissionWorkflow(client, moodle_service).submit_files(
+        SubmissionTarget(ASSIGN_URL, 456),
+        selected_files=[SelectedSubmissionFile("new.txt", b"new")],
+        submitted_files=[],
+        overwrite=True,
+        accept_submission_statement=True,
+    )
+
+    assert ok is True
+    assert moodle_service.calls["saved"] == [(77, client.uploads[-1]["result"], "<p>Keep me</p>", 1, 901)]
+    assert moodle_service.calls["submitted"] == [(77, True)]
 
 
 def test_submit_files_overwrite_skips_existing_files(moodle_service):

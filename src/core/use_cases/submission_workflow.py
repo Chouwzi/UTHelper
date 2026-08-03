@@ -101,6 +101,7 @@ class SubmissionWorkflow:
         selected_files: list[SelectedSubmissionFile],
         submitted_files: list[SubmittedFile],
         overwrite: bool,
+        accept_submission_statement: bool = False,
     ) -> bool:
         assign_id = self._resolve_assign_id(target.url, target.course_id)
         if not assign_id:
@@ -128,12 +129,15 @@ class SubmissionWorkflow:
             logger.error("Không có file nào được upload thành công")
             return False
 
-        return self._save_and_submit(assign_id, draft_itemid)
+        return self._save_and_submit(
+            assign_id, draft_itemid, accept_submission_statement
+        )
 
     def remove_files(
         self,
         target: SubmissionTarget,
         files_to_keep: list[SubmittedFile],
+        accept_submission_statement: bool = False,
     ) -> bool:
         assign_id = self._resolve_assign_id(target.url, target.course_id)
         if not assign_id:
@@ -149,13 +153,11 @@ class SubmissionWorkflow:
         if draft_itemid is None:
             return False
 
-        save_ok = self.moodle_service.save_assignment_submission(assign_id, draft_itemid)
+        save_ok = self._save_and_submit(
+            assign_id, draft_itemid, accept_submission_statement
+        )
         if not save_ok:
             raise ValueError("Moodle từ chối lưu bài nộp. Thử lại hoặc mở trình duyệt.")
-
-        grading_ok = self.moodle_service.submit_for_grading(assign_id)
-        if not grading_ok:
-            logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
         return True
 
     def update_file_metadata(
@@ -164,6 +166,7 @@ class SubmissionWorkflow:
         submitted_files: list[SubmittedFile],
         target_idx: int,
         meta: FileMetadataUpdate,
+        accept_submission_statement: bool = False,
     ) -> bool:
         assign_id = self._resolve_assign_id(target.url, target.course_id)
         if not assign_id:
@@ -197,7 +200,9 @@ class SubmissionWorkflow:
                 return False
             draft_itemid = result_id
 
-        return self._save_and_submit(assign_id, draft_itemid)
+        return self._save_and_submit(
+            assign_id, draft_itemid, accept_submission_statement
+        )
 
     def _reupload_existing_files(
         self,
@@ -231,13 +236,69 @@ class SubmissionWorkflow:
             draft_itemid = result_id
         return draft_itemid
 
-    def _save_and_submit(self, assign_id: int, draft_itemid: int) -> bool:
-        save_ok = self.moodle_service.save_assignment_submission(assign_id, draft_itemid)
-        if save_ok:
-            grading_ok = self.moodle_service.submit_for_grading(assign_id)
-            if not grading_ok:
+    def _save_and_submit(
+        self,
+        assign_id: int,
+        draft_itemid: int,
+        accept_submission_statement: bool,
+    ) -> bool:
+        preserved_text = self._get_preserved_online_text(assign_id)
+        if preserved_text is None:
+            logger.warning("Cannot save assignment %d without a submission text snapshot", assign_id)
+            return False
+        online_text, online_text_format, text_draft_itemid = preserved_text
+        save_result = self.moodle_service.save_assignment_submission_result(
+            assign_id,
+            draft_itemid,
+            online_text,
+            online_text_format,
+            text_draft_itemid,
+        )
+        if not save_result.ok:
+            return False
+        if accept_submission_statement:
+            grading_result = self.moodle_service.submit_for_grading_result(assign_id, True)
+            if not grading_result.ok:
                 logger.warning("Save OK but submit_for_grading failed for assign_id=%d", assign_id)
-        return save_ok
+        return True
+
+    def _get_preserved_online_text(self, assign_id: int) -> Optional[tuple[str, int, int]]:
+        """Read the current editor value before replacing a file-only submission."""
+        try:
+            status = self.moodle_service.get_submission_status(assign_id)
+        except Exception:
+            return None
+        if not isinstance(status, dict):
+            return None
+
+        last_attempt = status.get("lastattempt", {})
+        if not isinstance(last_attempt, dict):
+            return None
+        submission = last_attempt.get("submission", {})
+        if not isinstance(submission, dict):
+            return None
+        plugins = submission.get("plugins", [])
+        if not isinstance(plugins, list):
+            return None
+        try:
+            text_draft_itemid = self.moodle_service.get_unused_draft_itemid()
+        except Exception:
+            return None
+        if text_draft_itemid is None:
+            return None
+        for plugin in plugins:
+            if not isinstance(plugin, dict) or plugin.get("type") != "onlinetext":
+                continue
+            editorfields = plugin.get("editorfields", [])
+            field = editorfields[0] if isinstance(editorfields, list) and editorfields else {}
+            if not isinstance(field, dict):
+                return None
+            try:
+                online_text_format = int(field.get("format", 1))
+            except (TypeError, ValueError):
+                return None
+            return str(field.get("text", "")), online_text_format, text_draft_itemid
+        return "", 1, text_draft_itemid
 
     @staticmethod
     def _submitted_file_from_mapping(file_item: dict[str, Any]) -> SubmittedFile:

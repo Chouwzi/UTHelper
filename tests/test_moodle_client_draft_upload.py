@@ -58,6 +58,8 @@ def test_delete_draft_files_uses_each_tracked_identity_and_requires_confirmation
     }
 
     assert MoodleService(Mock(return_value={})).delete_draft_files(900, (("/", "answer.pdf"),)) is False
+    warning_result = {"parentpaths": [], "warnings": [{"message": "not deleted"}]}
+    assert MoodleService(Mock(return_value=warning_result)).delete_draft_files(900, (("/", "answer.pdf"),)) is False
 
 
 def test_service_allocates_draft_itemid_and_delegates_structured_mutations():

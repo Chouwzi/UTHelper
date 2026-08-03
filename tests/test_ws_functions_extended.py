@@ -134,10 +134,11 @@ class TestSaveAssignmentSubmission:
     """save_assignment_submission() tests."""
 
     def test_success_empty_list(self):
-        """Empty list = success per Moodle convention."""
+        """The legacy wrapper declines a save without a text snapshot."""
         mock_api = Mock(return_value=[])
         result = ws_functions.save_assignment_submission(mock_api, assign_id=1, draft_itemid=999)
-        assert result is True
+        assert result is False
+        mock_api.assert_not_called()
 
     def test_success_dict_no_warnings(self):
         mock_api = Mock(return_value={})
@@ -184,13 +185,24 @@ class TestSaveAssignmentSubmission:
             "plugindata[onlinetext_editor][itemid]": 901,
         }
 
+    def test_legacy_wrapper_preserves_explicit_existing_online_text(self):
+        mock_api = Mock(return_value=[])
+
+        assert ws_functions.save_assignment_submission(
+            mock_api, 77, 900, "<p>Existing text</p>", 1, 901
+        ) is True
+        assert mock_api.call_args.kwargs["plugindata[onlinetext_editor][text]"] == "<p>Existing text</p>"
+
 
 class TestSubmitForGrading:
     """submit_for_grading() tests."""
 
-    def test_success(self):
+    def test_explicit_acceptance_is_required_for_legacy_finalize_wrapper(self):
         mock_api = Mock(return_value=[])
-        assert ws_functions.submit_for_grading(mock_api, assign_id=1) is True
+        assert ws_functions.submit_for_grading(mock_api, assign_id=1) is False
+        mock_api.assert_not_called()
+        assert ws_functions.submit_for_grading(mock_api, assign_id=1, accept_submission_statement=True) is True
+        assert mock_api.call_args.kwargs["acceptsubmissionstatement"] == 1
 
     def test_exception_in_result(self):
         mock_api = Mock(return_value={"exception": "error", "message": "Not allowed"})

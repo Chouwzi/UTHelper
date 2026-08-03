@@ -144,10 +144,19 @@ class MoodleService:
             text_draft_itemid,
         )
 
-    def save_assignment_submission(self, assign_id: int, draft_id: int, onlinetext: str = "", item_id_text: int = 0) -> bool:
-        """Lưu bài nộp (bao gồm cả tệp nháp hoặc bài viết trực tuyến) vào hệ thống."""
+    def save_assignment_submission(
+        self,
+        assign_id: int,
+        draft_id: int,
+        online_text: Optional[str] = None,
+        online_text_format: Optional[int] = None,
+        text_draft_itemid: Optional[int] = None,
+    ) -> bool:
+        """Compatibility wrapper that refuses a save without a captured text snapshot."""
+        if online_text is None or online_text_format is None or text_draft_itemid is None:
+            return False
         return self.save_assignment_submission_result(
-            assign_id, draft_id, onlinetext, 1, item_id_text
+            assign_id, draft_id, online_text, online_text_format, text_draft_itemid
         ).ok
 
     def submit_for_grading_result(
@@ -158,8 +167,12 @@ class MoodleService:
             self.call_ws_api, assign_id, accept_submission_statement
         )
 
-    def submit_for_grading(self, assign_id: int) -> bool:
-        """Xác nhận nộp bài chính thức để giảng viên chấm điểm (submit for grading)."""
+    def submit_for_grading(
+        self, assign_id: int, accept_submission_statement: bool = False
+    ) -> bool:
+        """Compatibility wrapper that only finalizes after explicit acceptance."""
+        if not accept_submission_statement:
+            return False
         return self.submit_for_grading_result(assign_id, True).ok
 
     def delete_draft_files(
@@ -177,7 +190,11 @@ class MoodleService:
         except Exception as exc:
             logger.warning("Could not delete Moodle draft files: %s", exc)
             return False
-        return isinstance(result, dict) and "parentpaths" in result
+        return (
+            isinstance(result, dict)
+            and "parentpaths" in result
+            and not result.get("warnings")
+        )
 
     def ws_events_to_assignments(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Chuyển Moodle calendar events sang activity dictionaries của UTHelper."""

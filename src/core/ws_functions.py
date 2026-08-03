@@ -663,11 +663,13 @@ def save_assignment_submission(
     call_api: Callable,
     assign_id: int,
     draft_itemid: int,
-    online_text: str = "",
-    online_text_format: int = 1,
-    text_draft_itemid: int = 0,
+    online_text: Optional[str] = None,
+    online_text_format: Optional[int] = None,
+    text_draft_itemid: Optional[int] = None,
 ) -> bool:
-    """Compatibility wrapper for callers expecting a Boolean save result."""
+    """Compatibility wrapper that refuses to save without an explicit text snapshot."""
+    if online_text is None or online_text_format is None or text_draft_itemid is None:
+        return False
     return save_assignment_submission_result(
         call_api,
         assign_id,
@@ -696,8 +698,12 @@ def submit_for_grading_result(
     return _parse_empty_success_response(result)
 
 
-def submit_for_grading(call_api: Callable, assign_id: int) -> bool:
-    """Compatibility wrapper for callers that always accepted the statement."""
+def submit_for_grading(
+    call_api: Callable, assign_id: int, accept_submission_statement: bool = False
+) -> bool:
+    """Compatibility wrapper that never infers acceptance of Moodle's statement."""
+    if not accept_submission_statement:
+        return False
     return submit_for_grading_result(call_api, assign_id, True).ok
 
 
