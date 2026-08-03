@@ -53,6 +53,11 @@ def editable_snapshot(**changes) -> SubmissionSnapshot:
         submissions_enabled=True,
         submission_drafts=False,
         statement_required=False,
+        file_submission_enabled=True,
+        team_submission=False,
+        due_date=0,
+        cutoff_date=0,
+        allows_submissions_from_date=0,
         maximum_file_count=5,
         maximum_file_bytes=1_048_576,
         accepted_file_types=(".pdf",),
@@ -70,12 +75,18 @@ def assignment_mapping(snapshot: SubmissionSnapshot) -> dict:
     return {
         "id": snapshot.assignment_id,
         "nosubmissions": not snapshot.submissions_enabled,
+        "submissiondrafts": int(snapshot.submission_drafts),
+        "teamsubmission": int(snapshot.team_submission),
+        "duedate": snapshot.due_date,
+        "cutoffdate": snapshot.cutoff_date,
+        "allowsubmissionsfromdate": snapshot.allows_submissions_from_date,
         "configs": [
             {"subtype": "assign", "plugin": "assign", "name": "submissiondrafts", "value": int(snapshot.submission_drafts)},
             {"subtype": "assign", "plugin": "assign", "name": "requiresubmissionstatement", "value": int(snapshot.statement_required)},
             {"subtype": "assignsubmission", "plugin": "file", "name": "maxfilesubmission", "value": snapshot.maximum_file_count},
             {"subtype": "assignsubmission", "plugin": "file", "name": "maxsubmissionsizebytes", "value": snapshot.maximum_file_bytes},
             {"subtype": "assignsubmission", "plugin": "file", "name": "acceptedfiletypes", "value": ",".join(snapshot.accepted_file_types)},
+            {"subtype": "assignsubmission", "plugin": "file", "name": "enabled", "value": int(snapshot.file_submission_enabled)},
         ],
     }
 
@@ -256,6 +267,63 @@ def intent(operation, *, selected=(), remove=(), rename=None, name="", filepath=
         accept_statement=accept,
         expected_fingerprint=fingerprint,
     )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        {"online_text": "appeared between reads"},
+        {"submission_drafts": False},
+    ],
+)
+def test_live_safety_drift_aborts_before_upload_or_save(tmp_path, drift):
+    displayed = editable_snapshot(
+        raw_status="new",
+        submission_drafts=True,
+        remote_files=(),
+        online_text="",
+        accepted_file_types=(".txt",),
+    )
+    workflow, client, service = workflow_fixture(snapshot=displayed)
+    service.current = replace(displayed, **drift)
+    selected = local_file(tmp_path, "probe.txt", b"synthetic")
+
+    result = workflow.mutate_files(
+        target(),
+        intent(
+            MutationOperation.ADD,
+            selected=(selected,),
+            fingerprint=displayed.fingerprint,
+        ),
+        safety_guard=lambda snapshot: (
+            snapshot.raw_status == "new"
+            and snapshot.submission_drafts
+            and not snapshot.online_text
+        ),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.STALE_SNAPSHOT
+    assert client.uploads == []
+    assert service.saved == []
+
+
+def test_safety_guard_checks_fresh_workflow_snapshot_before_any_file_io(tmp_path):
+    current = editable_snapshot(remote_files=(), online_text="")
+    workflow, client, service = workflow_fixture(snapshot=current)
+    selected = local_file(tmp_path)
+    observed = []
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.ADD, selected=(selected,)),
+        safety_guard=lambda snapshot: observed.append(snapshot) or False,
+    )
+
+    assert observed == [service.current]
+    assert result.issue.code is SubmissionErrorCode.STALE_SNAPSHOT
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.saved == []
 
 
 def test_load_snapshot_resolves_config_and_uses_prefetched_status_for_display():

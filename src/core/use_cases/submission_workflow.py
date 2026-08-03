@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 from core.moodle_service import MoodleService
@@ -229,18 +229,20 @@ class SubmissionWorkflow:
         intent: FileMutationIntent,
         *,
         selected_files: tuple[SelectedSubmissionFile, ...] = (),
+        safety_guard: Callable[[SubmissionSnapshot], bool] | None = None,
     ) -> SubmissionMutationResult:
         selected_bytes = {
             (normalize_filepath(item.filepath), item.name): item.bytes
             for item in selected_files
         }
-        return self._mutate_files(target, intent, selected_bytes)
+        return self._mutate_files(target, intent, selected_bytes, safety_guard)
 
     def _mutate_files(
         self,
         target: SubmissionTarget,
         intent: FileMutationIntent,
         selected_bytes: dict[FileIdentity, bytes],
+        safety_guard: Callable[[SubmissionSnapshot], bool] | None = None,
     ) -> SubmissionMutationResult:
         loaded = self._load_context(target, None)
         if isinstance(loaded, SubmissionError):
@@ -254,6 +256,15 @@ class SubmissionWorkflow:
             return SubmissionMutationResult.failure(
                 _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
             )
+        if safety_guard is not None:
+            try:
+                safe = safety_guard(snapshot)
+            except Exception:
+                safe = False
+            if not safe:
+                return SubmissionMutationResult.failure(
+                    _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
+                )
 
         plan_or_issue = self._build_plan(snapshot, intent)
         if isinstance(plan_or_issue, SubmissionError):
@@ -668,6 +679,7 @@ class SubmissionWorkflow:
                 accept_statement=accept_submission_statement,
             ),
             byte_map,
+            None,
         )
         return result.ok
 

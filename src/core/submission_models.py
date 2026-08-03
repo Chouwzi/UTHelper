@@ -85,11 +85,16 @@ class SubmissionSnapshot:
     maximum_file_bytes: int
     accepted_file_types: tuple[str, ...]
     remote_files: tuple[RemoteFile, ...]
-    online_text: str
+    online_text: str = field(repr=False)
     online_text_format: int
     attempt_number: int
     submission_id: int
     submission_modified_time: int
+    file_submission_enabled: bool = False
+    team_submission: bool = False
+    due_date: int = 0
+    cutoff_date: int = 0
+    allows_submissions_from_date: int = 0
 
     @property
     def is_editable(self) -> bool:
@@ -120,8 +125,24 @@ class SubmissionSnapshot:
             "can_submit": self.can_submit,
             "locked": self.locked,
             "graded": self.graded,
+            "submissions_enabled": self.submissions_enabled,
+            "submission_drafts": self.submission_drafts,
+            "statement_required": self.statement_required,
+            "file_submission_enabled": self.file_submission_enabled,
+            "team_submission": self.team_submission,
+            "due_date": self.due_date,
+            "cutoff_date": self.cutoff_date,
+            "allows_submissions_from_date": self.allows_submissions_from_date,
+            "maximum_file_count": self.maximum_file_count,
+            "maximum_file_bytes": self.maximum_file_bytes,
+            "accepted_file_types": self.accepted_file_types,
+            "online_text_hash": sha256(self.online_text.encode()).hexdigest(),
+            "online_text_format": self.online_text_format,
             "submission_modified_time": self.submission_modified_time,
-            "files": sorted((f.filepath, f.name, f.size, f.modified_time) for f in self.remote_files),
+            "files": sorted(
+                (f.filepath, f.name, f.size, f.mimetype, f.modified_time)
+                for f in self.remote_files
+            ),
         }
         return sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 

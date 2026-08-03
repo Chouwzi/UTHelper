@@ -109,6 +109,11 @@ class FakeMoodle43:
                 {
                     "id": self.assignment_id,
                     "cmid": self.cmid,
+                    "submissiondrafts": int(self.submission_drafts),
+                    "teamsubmission": 0,
+                    "duedate": 0,
+                    "cutoffdate": 0,
+                    "allowsubmissionsfromdate": 0,
                     "configs": [
                         {
                             "subtype": "assign",
@@ -121,6 +126,12 @@ class FakeMoodle43:
                             "plugin": "assign",
                             "name": "requiresubmissionstatement",
                             "value": int(self.statement_required),
+                        },
+                        {
+                            "subtype": "assignsubmission",
+                            "plugin": "file",
+                            "name": "enabled",
+                            "value": 1,
                         },
                         {
                             "subtype": "assignsubmission",
@@ -249,6 +260,10 @@ class FakeMoodle43:
 def assignment_fixture():
     return {
         "id": 77,
+        "teamsubmission": 0,
+        "duedate": 0,
+        "cutoffdate": 0,
+        "allowsubmissionsfromdate": 0,
         "configs": [
             {
                 "subtype": "assign",

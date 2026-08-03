@@ -797,7 +797,9 @@ The upload endpoint stores each multipart file in the current user's draft area.
 Allocate an unused draft item ID first, then pass that same positive `itemid` to
 each sequential upload that belongs to one logical file set. The response identity
 (`itemid`, normalized `filepath`, and `filename`) is authoritative. Uploading an
-already-present path/name is a duplicate error; it is not an overwrite operation.
+already-present path/name must return the structured `filenameexist` error; a
+generic failed upload is not sufficient evidence of duplicate handling. It is not
+an overwrite operation.
 
 `mod_assign_save_submission` treats the supplied file-manager draft item as the
 complete replacement set. Consequently, add, remove, rename, path-move, replace,
@@ -820,11 +822,22 @@ and state match exactly.
 #### Opt-in live safety contract
 
 `tests/test_submission_live_safe.py` is skipped unless
-`UTH_LIVE_SUBMISSION_TEST=1`. Authentication may come only from both
-`UTH_TEST_USER` and `UTH_TEST_PASS`, or from the app's already-configured secure
-settings/keyring. Never put credential values, tokens, authenticated URLs, user or
-assignment identities, or file content in the command, test source, logs, or test
-report.
+`UTH_LIVE_SUBMISSION_TEST=1`. There are exactly two accepted authentication paths:
+
+1. A complete `UTH_TEST_USER` plus `UTH_TEST_PASS` pair. This path takes precedence
+   over every cached app token, acquires a token without consulting global
+   settings, verifies the returned account identity, and keeps the token in memory
+   without calling `save_settings` or writing keyring.
+2. If the environment pair is absent, a token read directly from secure keyring.
+   The harness verifies its site-info username against the configured expected
+   username before any probe.
+
+A token restored from plaintext settings JSON is rejected for live assignment
+mutation, even if the normal app compatibility loader accepted it. An incomplete
+environment pair, missing keyring backend, missing expected username, or identity
+mismatch skips before mutation. Never put credential values, tokens, authenticated
+URLs, user or assignment identities, or file content in the command, test source,
+logs, or test report.
 
 The unlinked-draft probe allocates one unused item ID, uploads two unique synthetic
 files to it, appends a third using the same ID, verifies returned and listed
@@ -839,8 +852,18 @@ one. Immediately before save it must freshly confirm all of the following:
 - submissions are enabled and `canedit=true`, `locked=false`, `graded=false`;
 - a file plugin is enabled, draft/repeated editing is enabled, and a small `.txt`
   file satisfies the advertised constraints;
-- it is not a team submission, is already open, and its due date plus any non-zero
-  cutoff remain at least seven days away.
+- it is not a team submission and is already open;
+- every non-zero due or cutoff boundary remains at least seven days away. A zero
+  boundary means Moodle configured no boundary and is safe for this check.
+
+The precheck fingerprint includes status/editability/lock/grade flags, remote file
+metadata, a hash (never the value) of online text, draft and file-plugin enablement,
+file count/size/type limits, team mode, and opening/due/cutoff timestamps. The
+production workflow reloads assignment configuration and status, compares that
+complete fingerprint, and evaluates the full live-safety predicate again before
+any retained-file download, draft allocation, upload, or assignment save. Online
+text appearing or draft mode becoming final during that interval therefore aborts
+with zero file I/O and zero save calls.
 
 The probe never calls `mod_assign_submit_for_grading`. Before cleanup it refreshes
 again and clears only when the state is still editable/unlocked/ungraded and the

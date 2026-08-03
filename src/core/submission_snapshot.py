@@ -136,6 +136,15 @@ def _online_text(plugins: object) -> tuple[str, int]:
     return "", 0
 
 
+def _has_submission_plugin(plugins: object, plugin_type: str) -> bool:
+    if not isinstance(plugins, Iterable) or isinstance(plugins, (str, bytes, Mapping)):
+        return False
+    return any(
+        str(_as_mapping(item).get("type", "")).strip().lower() == plugin_type
+        for item in plugins
+    )
+
+
 def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], status: Mapping[str, object]) -> SubmissionSnapshot:
     """Create a pure snapshot from flexible Moodle 4.3 WS response mappings."""
     assignment = _as_mapping(assignment)
@@ -144,7 +153,10 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
     submission = _as_mapping(last_attempt.get("submission"))
     configs = _config_index(assignment)
     plugins = submission.get("plugins", ())
-    submission_drafts = _as_bool(_config_value(configs, ("submissiondrafts",)))
+    raw_submission_drafts = assignment.get("submissiondrafts")
+    if raw_submission_drafts is None:
+        raw_submission_drafts = _config_value(configs, ("submissiondrafts",))
+    submission_drafts = _as_bool(raw_submission_drafts)
     statement_required = _as_bool(_config_value(configs, ("requiresubmissionstatement",)))
     maximum_file_count = max(0, _as_int(_config_value(configs, ("maxfilesubmission", "maxfiles"))))
     maximum_file_bytes = max(0, _as_int(_config_value(configs, ("maxsubmissionsizebytes", "maxbytes"))))
@@ -155,6 +167,13 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
     )
 
     online_text, online_text_format = _online_text(plugins)
+    file_plugin_enabled = _as_bool(
+        _config_value(
+            configs,
+            ("enabled",),
+            plugins=("file", "assignsubmission_file"),
+        )
+    )
     return SubmissionSnapshot(
         assignment_id=assign_id,
         raw_status=str(submission.get("status", "")),
@@ -165,6 +184,15 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
         submissions_enabled=submissions_enabled,
         submission_drafts=submission_drafts,
         statement_required=statement_required,
+        file_submission_enabled=(
+            file_plugin_enabled and _has_submission_plugin(plugins, "file")
+        ),
+        team_submission=_as_bool(assignment.get("teamsubmission")),
+        due_date=max(0, _as_int(assignment.get("duedate", 0))),
+        cutoff_date=max(0, _as_int(assignment.get("cutoffdate", 0))),
+        allows_submissions_from_date=max(
+            0, _as_int(assignment.get("allowsubmissionsfromdate", 0))
+        ),
         maximum_file_count=maximum_file_count,
         maximum_file_bytes=maximum_file_bytes,
         accepted_file_types=_accepted_file_types(_config_value(configs, ("acceptedfiletypes", "filetypeslist"))),

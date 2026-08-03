@@ -228,3 +228,14 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   secure app authentication and the documented external 180-second timeout; no
   credentials, tokens, authenticated URLs, assignment identities, or file content
   belong in test output or committed artifacts.
+- Live authentication is isolated from application state. A paired
+  `UTH_TEST_USER`/`UTH_TEST_PASS` login always takes precedence over cached app
+  tokens and keeps the acquired token in memory only. Without that pair, the
+  harness accepts only the token read directly from secure keyring and verifies
+  its site-info username against the configured account identity; plaintext JSON
+  fallback is never eligible for an assignment mutation.
+- The snapshot fingerprint now covers online-text content by hash, draft/file
+  plugin modes and limits, team mode, opening/due/cutoff boundaries, permissions,
+  status, and remote identities. A caller-supplied workflow safety guard evaluates
+  that freshly reloaded snapshot before any download, draft allocation, upload, or
+  save, closing the live precheck-to-mutation drift window.

@@ -31,6 +31,14 @@ class DraftFileRecord:
     def identity(self) -> tuple[str, str]:
         return self.filepath, self.filename
 
+
+@dataclass(frozen=True)
+class DraftUploadResult:
+    """Structured draft upload outcome without response content or credentials."""
+
+    record: Optional[DraftFileRecord] = None
+    error_code: str = ""
+
 # Phát hiện hệ điều hành/nền tảng
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
 _is_ios = _sys.platform == 'ios' or (
@@ -416,18 +424,18 @@ class MoodleClient:
             logger.error(f"Lỗi khi lấy user ID: {e}")
         return None
 
-    def upload_draft_file_record(
+    def upload_draft_file_result(
         self,
         filename: str,
         file_bytes: bytes,
         itemid: int = 0,
         filepath: str = "/",
-    ) -> Optional[DraftFileRecord]:
-        """Upload a file and return the server-confirmed draft file identity."""
+    ) -> DraftUploadResult:
+        """Upload a file and return its identity or a sanitized Moodle error code."""
         token = self._get_ws_token()
         if not token:
             logger.error("Không có WS token để upload file.")
-            return None
+            return DraftUploadResult(error_code="missingtoken")
 
         form_data = {
             'token': token,
@@ -445,14 +453,18 @@ class MoodleClient:
             )
         except Exception as e:
             logger.error("Lỗi upload file '%s': %s", filename, e)
-            return None
+            return DraftUploadResult(error_code="transporterror")
 
         if not 200 <= status < 300:
             logger.warning("Draft upload failed with HTTP status %d", status)
-            return None
+            return DraftUploadResult(error_code="httpstatus")
+        if isinstance(result, dict):
+            raw_code = str(result.get("errorcode", "")).strip().lower()
+            error_code = raw_code if raw_code.replace("_", "").isalnum() else "moodleerror"
+            return DraftUploadResult(error_code=error_code or "moodleerror")
         if not isinstance(result, list) or not result or not isinstance(result[0], dict):
             logger.warning("Draft upload returned an unexpected response shape")
-            return None
+            return DraftUploadResult(error_code="invalidresponse")
 
         uploaded = result[0]
         raw_itemid = uploaded.get("itemid")
@@ -460,20 +472,34 @@ class MoodleClient:
         server_filepath = uploaded.get("filepath")
         if isinstance(raw_itemid, bool) or not isinstance(server_filename, str) or not server_filename or not isinstance(server_filepath, str):
             logger.warning("Draft upload response did not include a valid file identity")
-            return None
+            return DraftUploadResult(error_code="invalidresponse")
         try:
             server_itemid = int(raw_itemid)
         except (TypeError, ValueError):
             logger.warning("Draft upload response did not include a valid item ID")
-            return None
+            return DraftUploadResult(error_code="invalidresponse")
         if server_itemid <= 0:
             logger.warning("Draft upload response contained a non-positive item ID")
-            return None
-        return DraftFileRecord(
-            itemid=server_itemid,
-            filepath=_normalize_draft_filepath(server_filepath),
-            filename=server_filename,
+            return DraftUploadResult(error_code="invalidresponse")
+        return DraftUploadResult(
+            record=DraftFileRecord(
+                itemid=server_itemid,
+                filepath=_normalize_draft_filepath(server_filepath),
+                filename=server_filename,
+            )
         )
+
+    def upload_draft_file_record(
+        self,
+        filename: str,
+        file_bytes: bytes,
+        itemid: int = 0,
+        filepath: str = "/",
+    ) -> Optional[DraftFileRecord]:
+        """Compatibility wrapper returning only the server-confirmed identity."""
+        return self.upload_draft_file_result(
+            filename, file_bytes, itemid, filepath
+        ).record
 
     def upload_draft_file(self, filename: str, file_bytes: bytes,
                           itemid: int = 0,

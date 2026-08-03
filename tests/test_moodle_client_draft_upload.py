@@ -32,6 +32,19 @@ def test_upload_draft_file_record_rejects_unsuccessful_or_malformed_response(mon
     client._post_multipart = Mock(return_value=(500, []))
     assert client.upload_draft_file_record("answer.pdf", b"pdf") is None
 
+
+def test_upload_draft_file_result_preserves_sanitized_moodle_error_code(monkeypatch):
+    client = configured_client(monkeypatch)
+    client._post_multipart = Mock(
+        return_value=(200, {"errorcode": "filenameexist", "error": "already exists"})
+    )
+
+    result = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert result.record is None
+    assert result.error_code == "filenameexist"
+    assert "synthetic" not in repr(result)
+
     client._post_multipart = Mock(return_value=(200, [{"itemid": "not-an-id"}]))
     assert client.upload_draft_file_record("answer.pdf", b"pdf") is None
 
