@@ -179,40 +179,27 @@ def test_rename_and_path_move_preserve_exact_bytes(protocol_workflow):
     }
 
 
-def test_fake_rejects_same_item_duplicate_identity_without_changing_draft():
-    server = FakeMoodle43(drafts=False, statement=False)
-    itemid = server.call_ws_api("core_files_get_unused_draft_itemid")["itemid"]
-    first = server.upload(itemid, "proof", "answer.pdf", b"first")
-    before_duplicate = dict(server.drafts[itemid])
-
-    duplicate = server.upload(itemid, "/proof/", "answer.pdf", b"replacement")
-
-    assert first == [
-        {"itemid": itemid, "filepath": "/proof/", "filename": "answer.pdf"}
-    ]
-    assert duplicate == {"errorcode": "filenameexist", "error": "already exists"}
-    assert server.drafts[itemid] == before_duplicate == {
-        ("/proof/", "answer.pdf"): b"first"
-    }
-
-
-def test_mid_upload_failure_cleans_tracked_uploads(protocol_workflow):
+def test_same_item_duplicate_rejection_cleans_tracked_uploads(protocol_workflow):
     server = protocol_workflow.server
-    server.fail_upload_number = 2
+    server.preseed_duplicate_upload_number = 2
 
     result = run_mutation(
         protocol_workflow,
         MutationOperation.REPLACE,
         selected("first.pdf", b"first"),
-        selected("duplicate.pdf", b"second"),
+        selected("answer.pdf", b"answer", "proof"),
     )
 
     assert result.ok is False
     assert result.issue.code is SubmissionErrorCode.UPLOAD_FAILED
     assert server.save_calls == 0
-    assert server.drafts[server.allocated_itemids[0]] == {}
+    draft_id = server.allocated_itemids[0]
+    assert server.duplicate_collisions == [
+        (draft_id, ("/proof/", "answer.pdf"))
+    ]
+    assert server.drafts[draft_id] == {}
     assert server.cleanup_calls == [
-        (server.allocated_itemids[0], (("/", "first.pdf"),))
+        (draft_id, (("/", "first.pdf"),))
     ]
 
 

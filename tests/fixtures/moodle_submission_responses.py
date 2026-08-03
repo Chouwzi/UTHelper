@@ -26,9 +26,10 @@ class FakeMoodle43:
         self.save_calls = 0
         self.finalize_attempts: list[bool] = []
         self.cleanup_calls: list[tuple[int, tuple[tuple[str, str], ...]]] = []
+        self.duplicate_collisions: list[tuple[int, tuple[str, str]]] = []
         self.allocated_itemids: list[int] = []
         self.remote_sets_before_save: list[dict[tuple[str, str], bytes]] = []
-        self.fail_upload_number = 0
+        self.preseed_duplicate_upload_number = 0
 
         self._next_itemid = 900
         self._upload_count = 0
@@ -69,10 +70,14 @@ class FakeMoodle43:
         self._upload_count += 1
         key = (normalize_filepath(filepath), filename)
         item_files = self.drafts[itemid]
+        hook_seeded = self._upload_count == self.preseed_duplicate_upload_number
+        if hook_seeded:
+            item_files[key] = b"synthetic same-identity collision"
         if key in item_files:
+            self.duplicate_collisions.append((itemid, key))
+            if hook_seeded:
+                item_files.pop(key)
             return {"errorcode": "filenameexist", "error": "already exists"}
-        if self._upload_count == self.fail_upload_number:
-            return {"errorcode": "uploadfailed", "error": "synthetic failure"}
         item_files[key] = content
         return [{"itemid": itemid, "filepath": key[0], "filename": key[1]}]
 
