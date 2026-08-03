@@ -309,11 +309,15 @@ Real-site tests may perform only:
   safety window, has no submitted work, is ungraded/unlocked, and permits repeated
   editing.
 
-Because this server lacks submission-record removal, the default live verification
-suite will not mutate even a qualifying empty assignment: it cannot guarantee an
-exact rollback to the original `new` state. Enabling such a probe requires an
-explicit opt-in flag and records the chosen assignment and rollback limitations
-without recording credentials or file contents.
+Because this server lacks submission-record removal, an assignment probe cannot
+guarantee an exact rollback to the original `new` state. The user has explicitly
+authorized a bounded probe on a qualifying empty assignment when the generated test
+file can be removed afterward. Such a probe must use a clearly synthetic unique file,
+verify that the assignment is still empty/editable and comfortably before its due
+date immediately before saving, then remove the file and verify that no test file
+remains. An empty submission record may remain and must be reported as a known,
+non-sensitive side effect. The harness records no credentials, tokens, authenticated
+URLs, or file contents.
 
 The suite always aborts on status drift. It never accesses a submitted sensitive
 assignment for write testing, never attempts late submission, and never logs tokens,
@@ -361,10 +365,11 @@ Fixtures contain synthetic identities and files only.
 ### Live-safe checks
 
 The bounded live suite verifies enabled capabilities, reads assignment/status shapes,
-and exercises only an unlinked draft item upload/list/delete cycle. It confirms all
-created draft files are gone before passing. Assignment writes remain skipped unless
-the explicit opt-in safety contract is satisfied; submitted assignments are never
-eligible.
+and exercises an unlinked draft item upload/list/delete cycle. It confirms all created
+draft files are gone before passing. It may also exercise one qualifying empty,
+editable, comfortably-before-deadline assignment under the explicit user
+authorization above; it must delete the generated file and verify its absence before
+passing. Previously submitted assignments are never eligible.
 
 ### Release gates
 
