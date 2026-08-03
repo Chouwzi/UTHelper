@@ -209,3 +209,22 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   aborts, and draft-to-submitted transitions.
 - Validation: 141 submission-focused tests passed; full suite reached **531
   passed, 22 skipped**; `ruff check src tests` passed.
+
+# 2026-08-04 - Live-safe Moodle submission verification boundary
+
+- `SubmissionWorkflow` owns assignment-file state transitions. Callers provide an
+  immutable `SubmissionSnapshot` fingerprint plus a `FileMutationIntent`; the
+  workflow reloads server state, builds the exact desired set, saves it, and
+  returns only freshly verified server truth.
+- Draft transport remains below that state machine. An allocated, unlinked draft
+  item may be tested independently with uniquely synthetic upload/list/delete
+  operations, but it must never call assignment save or finalization.
+- The opt-in production probe may save and clear one generated file only on a
+  freshly `new`, empty, editable, unlocked, ungraded, file-enabled draft
+  assignment at least seven days before its due/cutoff boundary. Cleanup repeats
+  only the same exact clear after another safe-state check. Moodle cannot remove
+  the resulting empty submission record, so that residual is reported explicitly.
+- Normal test runs skip live probes. Operators must use existing environment or
+  secure app authentication and the documented external 180-second timeout; no
+  credentials, tokens, authenticated URLs, assignment identities, or file content
+  belong in test output or committed artifacts.
