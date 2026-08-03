@@ -5,6 +5,11 @@ from core.client import MoodleClient
 from core.moodle_service import MoodleService
 
 
+LIVE_DUPLICATE_RESPONSE_ENVELOPE = [
+    {"errorcode": "filenameexist", "error": "synthetic duplicate"}
+]
+
+
 def configured_client(monkeypatch):
     client = MoodleClient()
     monkeypatch.setattr(client, "_get_ws_token", Mock(return_value="test-token"))
@@ -47,6 +52,47 @@ def test_upload_draft_file_result_preserves_sanitized_moodle_error_code(monkeypa
 
     client._post_multipart = Mock(return_value=(200, [{"itemid": "not-an-id"}]))
     assert client.upload_draft_file_record("answer.pdf", b"pdf") is None
+
+
+def test_upload_result_decodes_live_list_wrapped_duplicate_error(monkeypatch):
+    client = configured_client(monkeypatch)
+    client._post_multipart = Mock(
+        return_value=(200, LIVE_DUPLICATE_RESPONSE_ENVELOPE)
+    )
+
+    result = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert result.record is None
+    assert result.error_code == "filenameexist"
+
+
+def test_upload_result_does_not_infer_duplicate_from_arbitrary_message(monkeypatch):
+    client = configured_client(monkeypatch)
+    client._post_multipart = Mock(
+        return_value=(200, [{"error": "synthetic filename already exists"}])
+    )
+
+    result = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert result.record is None
+    assert result.error_code == "invalidresponse"
+
+
+def test_upload_result_keeps_transport_http_and_malformed_failures_distinct(monkeypatch):
+    client = configured_client(monkeypatch)
+
+    client._post_multipart = Mock(side_effect=OSError("synthetic transport failure"))
+    transport = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    client._post_multipart = Mock(return_value=(503, []))
+    http = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    client._post_multipart = Mock(return_value=(200, [{"error": "synthetic"}]))
+    malformed = client.upload_draft_file_result("answer.pdf", b"synthetic", 900)
+
+    assert transport.error_code == "transporterror"
+    assert http.error_code == "httpstatus"
+    assert malformed.error_code == "invalidresponse"
 
 
 def test_legacy_upload_returns_only_draft_itemid(monkeypatch):

@@ -39,6 +39,16 @@ class DraftUploadResult:
     record: Optional[DraftFileRecord] = None
     error_code: str = ""
 
+
+def _draft_upload_error_code(payload: object) -> str:
+    """Return only an explicit, syntactically safe Moodle ``errorcode`` field."""
+    if not isinstance(payload, dict) or "errorcode" not in payload:
+        return ""
+    raw_code = str(payload.get("errorcode", "")).strip().lower()
+    if not raw_code:
+        return "moodleerror"
+    return raw_code if raw_code.replace("_", "").isalnum() else "moodleerror"
+
 # Phát hiện hệ điều hành/nền tảng
 _is_android = hasattr(_sys, '_ANDROID_') or 'android' in getattr(_sys, 'platform', '').lower()
 _is_ios = _sys.platform == 'ios' or (
@@ -459,14 +469,17 @@ class MoodleClient:
             logger.warning("Draft upload failed with HTTP status %d", status)
             return DraftUploadResult(error_code="httpstatus")
         if isinstance(result, dict):
-            raw_code = str(result.get("errorcode", "")).strip().lower()
-            error_code = raw_code if raw_code.replace("_", "").isalnum() else "moodleerror"
-            return DraftUploadResult(error_code=error_code or "moodleerror")
+            return DraftUploadResult(
+                error_code=_draft_upload_error_code(result) or "invalidresponse"
+            )
         if not isinstance(result, list) or not result or not isinstance(result[0], dict):
             logger.warning("Draft upload returned an unexpected response shape")
             return DraftUploadResult(error_code="invalidresponse")
 
         uploaded = result[0]
+        error_code = _draft_upload_error_code(uploaded)
+        if error_code:
+            return DraftUploadResult(error_code=error_code)
         raw_itemid = uploaded.get("itemid")
         server_filename = uploaded.get("filename")
         server_filepath = uploaded.get("filepath")

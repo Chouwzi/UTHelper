@@ -799,7 +799,10 @@ each sequential upload that belongs to one logical file set. The response identi
 (`itemid`, normalized `filepath`, and `filename`) is authoritative. Uploading an
 already-present path/name must return the structured `filenameexist` error; a
 generic failed upload is not sufficient evidence of duplicate handling. It is not
-an overwrite operation.
+an overwrite operation. Depending on the endpoint path, Moodle may return that
+explicit `errorcode` directly or inside the first object of the normal JSON list
+envelope. Clients may unwrap only that named field; they must not infer a duplicate
+from free-form `error` or `message` text.
 
 `mod_assign_save_submission` treats the supplied file-manager draft item as the
 complete replacement set. Consequently, add, remove, rename, path-move, replace,

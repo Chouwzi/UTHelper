@@ -19,7 +19,7 @@ import pytest
 
 import config
 from config import settings
-from core.client import MoodleClient
+from core.client import DraftUploadResult, MoodleClient
 from core.moodle_service import MoodleService
 from core.submission_models import (
     FileMutationIntent,
@@ -177,6 +177,10 @@ def _draft_identities(client: MoodleClient, user_id: int, item_id: int) -> set[t
     }
 
 
+def _is_exact_filename_duplicate(result: DraftUploadResult) -> bool:
+    return result.record is None and result.error_code == "filenameexist"
+
+
 def run_unlinked_draft_probe() -> None:
     """Upload/list/reject-duplicate/delete in one unused, unlinked draft area."""
     client = _live_client()
@@ -215,8 +219,7 @@ def run_unlinked_draft_probe() -> None:
             item_id,
             "/",
         )
-        assert duplicate.record is None
-        assert duplicate.error_code == "filenameexist"
+        assert _is_exact_filename_duplicate(duplicate)
         assert expected.issubset(_draft_identities(client, user_id, item_id))
     finally:
         if tracked:
@@ -538,6 +541,19 @@ def test_environment_credentials_ignore_cached_account_and_do_not_persist(monkey
     assert client._get_ws_token() == "isolated-test-token"  # noqa: SLF001
     assert calls == ["token.php", "server.php"]
     assert (settings.UTH_USERNAME, settings.UTH_PASSWORD, settings.MOODLE_WS_TOKEN) == before
+
+
+@pytest.mark.parametrize(
+    ("result", "accepted"),
+    [
+        (DraftUploadResult(error_code="filenameexist"), True),
+        (DraftUploadResult(error_code="invalidresponse"), False),
+        (DraftUploadResult(error_code="moodleerror"), False),
+        (DraftUploadResult(error_code="httpstatus"), False),
+    ],
+)
+def test_live_duplicate_gate_accepts_only_exact_error_code(result, accepted):
+    assert _is_exact_filename_duplicate(result) is accepted
 
 
 def test_assignment_auth_rejects_plaintext_settings_fallback(monkeypatch):
