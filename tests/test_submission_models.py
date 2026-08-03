@@ -26,6 +26,27 @@ def test_parse_snapshot_uses_lastattempt_permissions_and_file_limits():
     assert snapshot.online_text == "<p>Keep <em>this</em></p>"
 
 
+def test_parse_snapshot_prefers_lastattempt_submissions_enabled_over_assignment_fallback():
+    assignment = assignment_fixture()
+    assignment["nosubmissions"] = False
+    status = editable_status_fixture()
+    status["lastattempt"]["submissionsenabled"] = False
+
+    snapshot = parse_submission_snapshot(77, assignment, status)
+
+    assert snapshot.submissions_enabled is False
+
+
+def test_parse_snapshot_uses_assignment_compatibility_fallback_when_attempt_flag_missing():
+    assignment = assignment_fixture()
+    assignment["nosubmissions"] = True
+    status = editable_status_fixture()
+
+    snapshot = parse_submission_snapshot(77, assignment, status)
+
+    assert snapshot.submissions_enabled is False
+
+
 def test_snapshot_fingerprint_excludes_authenticated_url_query():
     first = parse_submission_snapshot(77, assignment_fixture(), editable_status_fixture("?token=one"))
     second = parse_submission_snapshot(77, assignment_fixture(), editable_status_fixture("?token=two"))

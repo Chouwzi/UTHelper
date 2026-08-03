@@ -148,7 +148,11 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
     statement_required = _as_bool(_config_value(configs, ("requiresubmissionstatement",)))
     maximum_file_count = max(0, _as_int(_config_value(configs, ("maxfilesubmission", "maxfiles"))))
     maximum_file_bytes = max(0, _as_int(_config_value(configs, ("maxsubmissionsizebytes", "maxbytes"))))
-    submissions_enabled = not _as_bool(assignment.get("nosubmissions"))
+    assignment_submissions_enabled = not _as_bool(assignment.get("nosubmissions"))
+    submissions_enabled = _as_bool(
+        last_attempt.get("submissionsenabled"),
+        assignment_submissions_enabled,
+    )
 
     online_text, online_text_format = _online_text(plugins)
     return SubmissionSnapshot(

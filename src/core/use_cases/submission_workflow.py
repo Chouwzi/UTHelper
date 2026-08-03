@@ -418,7 +418,7 @@ class SubmissionWorkflow:
                 except Exception:
                     logger.exception("Could not download retained submission file")
                     return _error(SubmissionErrorCode.DOWNLOAD_FAILED, item.remote.identity)
-                if content is None:
+                if not isinstance(content, bytes) or not content:
                     return _error(SubmissionErrorCode.DOWNLOAD_FAILED, item.remote.identity)
                 if item.remote.size and len(content) != item.remote.size:
                     return _error(
@@ -526,7 +526,7 @@ class SubmissionWorkflow:
         refreshed = self._refresh_snapshot(context)
         if isinstance(refreshed, SubmissionError):
             return SubmissionMutationResult.failure(
-                refreshed, snapshot, partial=True
+                refreshed, None, partial=True
             )
         if not self._files_match(plan, refreshed):
             return SubmissionMutationResult.failure(
@@ -534,7 +534,7 @@ class SubmissionWorkflow:
             )
 
         if not snapshot.submission_drafts:
-            if refreshed.raw_status == "draft":
+            if refreshed.raw_status != "submitted":
                 return SubmissionMutationResult.failure(
                     _error(SubmissionErrorCode.VERIFICATION_FAILED), refreshed
                 )
@@ -577,7 +577,7 @@ class SubmissionWorkflow:
         final_snapshot = self._refresh_snapshot(context)
         if isinstance(final_snapshot, SubmissionError):
             return SubmissionMutationResult.failure(
-                final_snapshot, refreshed, partial=True
+                final_snapshot, None, partial=True
             )
         if final_snapshot.raw_status != "submitted" or not self._files_match(
             plan, final_snapshot

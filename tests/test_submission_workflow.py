@@ -111,6 +111,7 @@ def status_mapping(snapshot: SubmissionSnapshot) -> dict:
             "cansubmit": snapshot.can_submit,
             "locked": snapshot.locked,
             "graded": snapshot.graded,
+            "submissionsenabled": snapshot.submissions_enabled,
         }
     }
 
@@ -154,6 +155,8 @@ class FakeService:
         finalize_result: MoodleActionResult | None = None,
         verified_files: tuple[RemoteFile, ...] | None = None,
         post_save_can_submit: bool | None = None,
+        post_save_raw_status: str | None = None,
+        fail_status_calls: tuple[int, ...] = (),
     ):
         self.initial = snapshot
         self.current = snapshot
@@ -162,6 +165,8 @@ class FakeService:
         self.finalize_result = finalize_result or MoodleActionResult(ok=True)
         self.verified_files = verified_files
         self.post_save_can_submit = post_save_can_submit
+        self.post_save_raw_status = post_save_raw_status
+        self.fail_status_calls = set(fail_status_calls)
         self.allocated_draft_id = 900
         self._allocations = iter((900, 901, 902, 903))
         self.saved: list[tuple[int, int]] = []
@@ -184,6 +189,8 @@ class FakeService:
     def get_submission_status(self, assign_id: int):
         self.status_calls += 1
         assert assign_id == 77
+        if self.status_calls in self.fail_status_calls:
+            raise RuntimeError("synthetic refresh failure")
         return status_mapping(self.current)
 
     def get_unused_draft_itemid(self):
@@ -201,7 +208,11 @@ class FakeService:
                 )
             self.current = replace(
                 self.current,
-                raw_status="draft" if self.current.submission_drafts else "submitted",
+                raw_status=(
+                    self.post_save_raw_status
+                    if self.post_save_raw_status is not None
+                    else "draft" if self.current.submission_drafts else "submitted"
+                ),
                 can_submit=self.current.can_submit if self.post_save_can_submit is None else self.post_save_can_submit,
                 remote_files=files,
                 submission_modified_time=self.current.submission_modified_time + 1,
@@ -378,6 +389,31 @@ def test_permission_gates_never_upload(tmp_path, changes, code):
     assert client.uploads == []
 
 
+def test_lastattempt_disabled_stops_mutation_even_when_assignment_allows_submissions(tmp_path):
+    workflow, client, service = workflow_fixture(
+        snapshot=editable_snapshot(submissions_enabled=False)
+    )
+    service.get_assignments = lambda course_ids: {
+        "courses": [{
+            "id": 456,
+            "assignments": [{
+                **assignment_mapping(service.current),
+                "nosubmissions": False,
+            }],
+        }]
+    }
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.SUBMISSIONS_CLOSED
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.saved == []
+
+
 def test_duplicate_against_retained_remote_file_stops_before_download(tmp_path):
     workflow, client, service = workflow_fixture()
 
@@ -398,6 +434,21 @@ def test_nonzero_remote_size_mismatch_stops_before_upload_and_save():
     result = workflow.mutate_files(target(), intent(MutationOperation.ADD))
 
     assert result.issue.code is SubmissionErrorCode.DOWNLOAD_SIZE_MISMATCH
+    assert client.uploads == []
+    assert service.saved == []
+
+
+@pytest.mark.parametrize("invalid_content", [b"", "not bytes", bytearray(b"old")])
+def test_invalid_or_empty_retained_download_stops_before_upload_and_save(invalid_content):
+    zero_sized = remote("old.pdf", b"")
+    workflow, client, service = workflow_fixture(
+        snapshot=editable_snapshot(remote_files=(zero_sized,))
+    )
+    client.downloads[zero_sized.url] = invalid_content
+
+    result = workflow.mutate_files(target(), intent(MutationOperation.ADD))
+
+    assert result.issue.code is SubmissionErrorCode.DOWNLOAD_FAILED
     assert client.uploads == []
     assert service.saved == []
 
@@ -445,6 +496,55 @@ def test_post_save_file_mismatch_returns_server_snapshot(tmp_path):
     assert result.issue.code is SubmissionErrorCode.VERIFICATION_FAILED
     assert result.snapshot.remote_names == ("other.pdf",)
     assert service.saved
+
+
+def test_non_draft_requires_exact_submitted_status_after_save(tmp_path):
+    workflow, _, service = workflow_fixture(post_save_raw_status="new")
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.VERIFICATION_FAILED
+    assert result.snapshot.raw_status == "new"
+    assert service.saved
+
+
+def test_post_save_refresh_failure_does_not_return_stale_snapshot(tmp_path):
+    workflow, _, service = workflow_fixture(fail_status_calls=(2,))
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.SNAPSHOT_LOAD_FAILED
+    assert result.partial is True
+    assert result.snapshot is None
+    assert service.saved
+
+
+def test_post_finalize_refresh_failure_does_not_return_stale_snapshot(tmp_path):
+    workflow, _, service = workflow_fixture(
+        snapshot=editable_snapshot(submission_drafts=True),
+        fail_status_calls=(3,),
+    )
+
+    result = workflow.mutate_files(
+        target(),
+        intent(
+            MutationOperation.REPLACE,
+            selected=(local_file(tmp_path),),
+            finalize=True,
+        ),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.SNAPSHOT_LOAD_FAILED
+    assert result.partial is True
+    assert result.snapshot is None
+    assert service.saved
+    assert service.finalized == [(77, False)]
 
 
 def test_statement_required_without_acceptance_stops_before_finalize(tmp_path):
