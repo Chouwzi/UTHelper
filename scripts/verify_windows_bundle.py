@@ -42,8 +42,13 @@ def inspect_bundle(bundle_dir: Path) -> tuple[str, ...]:
     if not app_dir.is_dir() or not any(app_dir.glob("main.py*")):
         issues.append("compiled application entry is missing")
 
-    if not (root / "site-packages").is_dir():
+    site_packages = root / "site-packages"
+    if not site_packages.is_dir():
         issues.append("site-packages directory is missing")
+    elif not any(
+        (site_packages / "winrt").glob("_winrt_windows_applicationmodel*.pyd")
+    ):
+        issues.append("Windows.ApplicationModel projection is missing")
 
     return tuple(issues)
 

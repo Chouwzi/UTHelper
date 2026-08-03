@@ -14,10 +14,17 @@ def _write_valid_bundle(root: Path) -> None:
     (root / "Lib" / "encodings").mkdir(parents=True)
     (root / "app").mkdir()
     (root / "site-packages").mkdir()
+    (root / "site-packages" / "winrt").mkdir()
     (root / "UTHelper.exe").write_bytes(b"MZ")
     (root / "UTHelperAutostart.exe").write_bytes(b"MZ")
     (root / "python314.dll").write_bytes(b"dll")
     (root / "flutter_windows.dll").write_bytes(b"dll")
+    (
+        root
+        / "site-packages"
+        / "winrt"
+        / "_winrt_windows_applicationmodel.cp314-win_amd64.pyd"
+    ).write_bytes(b"pyd")
     (root / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
     (root / "app" / "main.pyc").write_bytes(b"pyc")
 
@@ -38,6 +45,10 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
         ("flutter_windows.dll", "Flutter runtime DLL"),
         ("Lib/encodings/__init__.pyc", "filesystem encodings"),
         ("app/main.pyc", "compiled application entry"),
+        (
+            "site-packages/winrt/_winrt_windows_applicationmodel.cp314-win_amd64.pyd",
+            "Windows.ApplicationModel projection",
+        ),
     ],
 )
 def test_missing_runtime_artifact_fails_closed(tmp_path, relative_path, message):
