@@ -79,6 +79,11 @@ class SubmissionUiPolicy:
     @classmethod
     def from_snapshot(cls, snapshot: SubmissionSnapshot) -> SubmissionUiPolicy:
         editable = snapshot.is_editable
+        file_editable = (
+            editable
+            and snapshot.file_submission_enabled
+            and not snapshot.team_submission
+        )
         reason = ""
         if snapshot.locked:
             reason = "Bài nộp đã bị khóa trên Moodle."
@@ -88,13 +93,25 @@ class SubmissionUiPolicy:
             reason = "Moodle hiện không cho phép nộp bài này."
         elif not snapshot.can_edit:
             reason = "Bạn không có quyền chỉnh sửa bài nộp này trên Moodle."
+        elif snapshot.team_submission:
+            reason = (
+                "Bài nộp nhóm chỉ được chỉnh sửa trong trình duyệt để bảo vệ "
+                "bài làm chung."
+            )
+        elif not snapshot.file_submission_enabled:
+            reason = "Bài tập này không bật nộp file trên Moodle."
 
-        draft_enabled = editable and snapshot.submission_drafts
-        show_finalize = draft_enabled and snapshot.can_submit
+        draft_enabled = file_editable and snapshot.submission_drafts
+        show_finalize = (
+            editable
+            and not snapshot.team_submission
+            and snapshot.submission_drafts
+            and snapshot.can_submit
+        )
         return cls(
-            show_picker=editable,
-            show_file_actions=editable,
-            show_save_submission=editable and not snapshot.submission_drafts,
+            show_picker=file_editable,
+            show_file_actions=file_editable,
+            show_save_submission=file_editable and not snapshot.submission_drafts,
             show_save_draft=draft_enabled,
             show_finalize=show_finalize,
             show_statement=show_finalize and snapshot.statement_required,

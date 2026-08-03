@@ -28,6 +28,7 @@ from core.submission_models import (
     normalize_filepath,
 )
 from core.use_cases.submission_workflow import (
+    FinalizeSubmissionIntent,
     SelectedSubmissionFile,
     SubmissionMutationResult,
     SubmissionTarget,
@@ -104,6 +105,7 @@ class DetailView(ft.Container):
         self._submission_policy: SubmissionUiPolicy | None = None
         self._pending_file_mutation: tuple[MutationOperation, bool] | None = None
         self._view_generation = 0
+        self._snapshot_load_generation = 0
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
@@ -1251,6 +1253,10 @@ class DetailView(ft.Container):
         busy = self._is_uploading
         has_selected = bool(self._selected_files)
         has_any_files = has_selected or bool(self._submitted_files)
+        has_submission_content = has_any_files or bool(
+            self._submission_snapshot
+            and self._submission_snapshot.online_text.strip()
+        )
         self._file_list_col.disabled = busy
         self._upload_mode_row.disabled = busy
         self._upload_mode_row.visible = (
@@ -1268,10 +1274,10 @@ class DetailView(ft.Container):
         )
         self._submit_btn.content.controls[1].value = policy.primary_action_label
         self._finalize_btn.visible = (
-            has_any_files and policy.show_finalize and not busy
+            has_submission_content and policy.show_finalize and not busy
         )
         self._submission_statement.visible = (
-            has_any_files and policy.show_statement and not busy
+            has_submission_content and policy.show_statement and not busy
         )
         self._submission_policy_text.value = policy.edit_reason or policy.limit_text
         self._submission_policy_text.color = (
@@ -1289,12 +1295,21 @@ class DetailView(ft.Container):
         await self._request_file_mutation(operation, finalize=False)
 
     async def _on_finalize(self, e=None):
-        operation = (
-            MutationOperation.REPLACE
-            if self._upload_mode_overwrite and self._selected_files
-            else MutationOperation.ADD
-        )
-        await self._request_file_mutation(operation, finalize=True)
+        await self._request_finalize_submission()
+
+    async def _request_finalize_submission(self):
+        if self._is_uploading:
+            return
+        policy = self._submission_policy
+        if policy is None or not policy.show_finalize:
+            return
+        if policy.show_statement:
+            if getattr(self._submission_statement, "value", False) is not True:
+                self._show_upload_status(
+                    "Bạn cần xác nhận cam kết trước khi nộp bài.", C.WARNING
+                )
+                return
+        await self._execute_finalize_submission()
 
     async def _request_file_mutation(
         self, operation: MutationOperation, *, finalize: bool
@@ -1416,6 +1431,72 @@ class DetailView(ft.Container):
                 self._render_submission_policy()
                 self._page.update()
 
+    async def _execute_finalize_submission(self):
+        client = self._get_client() if self._get_client else None
+        data = self._current_data
+        url = data.get("url", "")
+        course_id = data.get("course_id")
+        if not client:
+            self._show_upload_status(
+                "Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL
+            )
+            return
+        if not url or not course_id:
+            self._show_upload_status(
+                "Không thể xác định bài tập trên Moodle.", C.CRITICAL
+            )
+            return
+
+        generation = self._view_generation
+        target_url = url
+        target_course_id = int(course_id)
+        finalize_intent = FinalizeSubmissionIntent(
+            accept_statement=(
+                getattr(self._submission_statement, "value", False) is True
+            ),
+            expected_fingerprint=self._submission_fingerprint,
+        )
+        self._is_uploading = True
+        self._upload_progress.visible = True
+        self._upload_progress.value = None
+        self._show_upload_status("Đang đồng bộ với Moodle...", C.TEXT_SECONDARY)
+        self._render_submission_policy()
+        self._page.update()
+        try:
+            result = await asyncio.to_thread(
+                self._do_finalize_submission_sync,
+                client,
+                target_url,
+                target_course_id,
+                finalize_intent,
+            )
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._apply_mutation_result(result)
+                if result.ok:
+                    self._upload_progress.value = 1.0
+            elif result.snapshot is not None:
+                DetailView._notify_submission_status(
+                    self, result.snapshot, target_url
+                )
+        except Exception:
+            logger.error("Submission finalization failed unexpectedly")
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._show_upload_status(
+                    "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                )
+        finally:
+            if self._is_current_mutation_context(
+                generation, target_url, target_course_id
+            ):
+                self._is_uploading = False
+                self._upload_progress.visible = False
+                self._render_submission_policy()
+                self._page.update()
+
     def _is_current_mutation_context(
         self, generation: int, target_url: str, target_course_id: int
     ) -> bool:
@@ -1443,6 +1524,17 @@ class DetailView(ft.Container):
             selected_files=selected_files,
         )
 
+    def _do_finalize_submission_sync(
+        self,
+        client,
+        url: str,
+        course_id: int,
+        intent: FinalizeSubmissionIntent,
+    ) -> SubmissionMutationResult:
+        return self._submission_workflow(client).finalize_submission(
+            self._submission_target(url, course_id), intent
+        )
+
     def _show_upload_status(self, text: str, color: str):
         """Hiện thông báo trạng thái upload."""
         self._upload_status.value = text
@@ -1451,6 +1543,9 @@ class DetailView(ft.Container):
 
     async def _async_load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
         """Async wrapper: load submitted files in bg thread, then update UI."""
+        self._snapshot_load_generation += 1
+        load_generation = self._snapshot_load_generation
+        view_generation = self._view_generation
         try:
             result = await asyncio.to_thread(
                 self._load_submission_snapshot,
@@ -1459,7 +1554,12 @@ class DetailView(ft.Container):
                 course_id,
                 prefetched_status,
             )
-            if url != self._current_url:
+            if not self._is_current_snapshot_load(
+                load_generation,
+                view_generation,
+                url,
+                course_id,
+            ):
                 return
             if result.ok and result.snapshot is not None:
                 self._apply_submission_snapshot(result.snapshot)
@@ -1469,10 +1569,35 @@ class DetailView(ft.Container):
             self._page.update()
         except Exception:
             logger.exception("Load submitted snapshot failed unexpectedly")
+            if not self._is_current_snapshot_load(
+                load_generation,
+                view_generation,
+                url,
+                course_id,
+            ):
+                return
             self._show_upload_status(
                 "Không thể kiểm tra trạng thái bài nộp mới nhất.", C.CRITICAL
             )
             self._page.update()
+
+    def _is_current_snapshot_load(
+        self,
+        load_generation: int,
+        view_generation: int,
+        url: str,
+        course_id: int,
+    ) -> bool:
+        try:
+            current_course_id = int(self._current_data.get("course_id"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            self._snapshot_load_generation == load_generation
+            and self._view_generation == view_generation
+            and self._current_url == url
+            and current_course_id == course_id
+        )
 
     def _load_submission_snapshot(self, client, url: str, course_id: int,
                                   prefetched_status: Optional[dict] = None):

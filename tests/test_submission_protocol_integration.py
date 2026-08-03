@@ -22,7 +22,9 @@ class ProtocolWorkflow:
 
 
 def target() -> SubmissionTarget:
-    return SubmissionTarget("moodle-fake://assignment/view?id=123", 456)
+    return SubmissionTarget(
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=123", 456
+    )
 
 
 def selected(name: str, content: bytes, filepath: str = "/") -> tuple[SelectedFile, SelectedSubmissionFile]:

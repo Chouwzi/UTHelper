@@ -22,6 +22,7 @@ from core.use_cases.submission_workflow import (
     SubmissionError,
     SubmissionErrorCode,
     SubmissionMutationResult,
+    SubmissionSnapshotResult,
 )
 import flet as ft
 
@@ -92,6 +93,7 @@ def detail_view_shell():
         "_build_file_intent",
         "_show_upload_status",
         "_request_file_mutation",
+        "_on_finalize",
         "_confirm_replace_mutation",
         "_selected_submission_files",
     ):
@@ -250,6 +252,91 @@ def test_partial_finalize_reconciles_confirmed_pending_files(detail_view_shell):
         MutationOperation.ADD, finalize=True
     )
     assert retry.selected_files == ()
+
+
+@pytest.mark.anyio
+async def test_finalize_action_is_separate_from_file_mutation_selection(
+    detail_view_shell,
+):
+    detail_view_shell._request_finalize_submission = AsyncMock()
+
+    await detail_view_shell._on_finalize()
+
+    detail_view_shell._request_finalize_submission.assert_awaited_once_with()
+
+
+def test_online_text_only_snapshot_renders_finalize_without_file_controls():
+    view = DetailView(MockPage(), lambda: None)
+    view._apply_submission_snapshot(
+        snapshot(
+            files=(),
+            online_text="<p>Online answer</p>",
+            file_submission_enabled=False,
+        )
+    )
+
+    assert view._pick_btn.visible is False
+    assert view._submit_btn.visible is False
+    assert view._finalize_btn.visible is True
+
+
+@pytest.mark.anyio
+async def test_newest_same_assignment_snapshot_load_wins_when_older_finishes_last():
+    first_started = threading.Event()
+    release_first = threading.Event()
+    older = snapshot(
+        files=(remote("older.pdf"),),
+        raw_status="submitted",
+        submission_modified_time=1_700_000_001,
+    )
+    newer = snapshot(
+        files=(remote("newer.pdf"),),
+        raw_status="draft",
+        submission_modified_time=1_700_000_002,
+    )
+
+    class OverlappingWorkflow:
+        calls = 0
+        lock = threading.Lock()
+
+        def load_snapshot(self, target, prefetched_status=None):
+            with self.lock:
+                self.calls += 1
+                call = self.calls
+            if call == 1:
+                first_started.set()
+                assert release_first.wait(5)
+                return SubmissionSnapshotResult.success(older)
+            return SubmissionSnapshotResult.success(newer)
+
+    page = MockPage()
+    workflow = OverlappingWorkflow()
+    callbacks = []
+    view = DetailView(
+        page,
+        lambda: None,
+        on_status_changed=lambda url, status: callbacks.append((url, status)),
+        submission_workflow_factory=lambda _: workflow,
+    )
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
+    view.update_detail({"url": url, "course_id": 456, "type": "other"})
+
+    first = asyncio.create_task(
+        view._async_load_submitted_files(object(), url, 456)
+    )
+    assert await asyncio.to_thread(first_started.wait, 2)
+    second = asyncio.create_task(
+        view._async_load_submitted_files(object(), url, 456)
+    )
+    await second
+    release_first.set()
+    await first
+
+    assert view._submission_snapshot is newer
+    assert view._submission_fingerprint == newer.fingerprint
+    assert [item["name"] for item in view._submitted_files] == ["newer.pdf"]
+    assert view._last_server_status == "Bản nháp"
+    assert callbacks == [(url, "Bản nháp")]
 
 
 def test_visible_submission_status_tracks_each_server_snapshot():

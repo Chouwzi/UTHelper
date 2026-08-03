@@ -13,6 +13,7 @@ from core.submission_models import (
 )
 from core.use_cases.submission_workflow import (
     FileMetadataUpdate,
+    FinalizeSubmissionIntent,
     MutationOutcome,
     SelectedSubmissionFile,
     SubmittedFile,
@@ -187,6 +188,7 @@ class FakeService:
         self.status_calls = 0
         self.assignment_calls = 0
         self.resolve_calls = 0
+        self.allocation_calls = 0
 
     def resolve_cmid_to_assign_id(self, cmid: int, course_id: int):
         self.resolve_calls += 1
@@ -205,6 +207,7 @@ class FakeService:
         return status_mapping(self.current)
 
     def get_unused_draft_itemid(self):
+        self.allocation_calls += 1
         return next(self._allocations)
 
     def save_assignment_submission_result(self, assign_id, draft_id, text, text_format, text_draft_id):
@@ -386,6 +389,307 @@ def test_expected_fingerprint_conflict_stops_before_download_or_upload(tmp_path)
     assert client.downloads_requested == []
     assert client.uploads == []
     assert service.saved == []
+
+
+def test_server_drift_during_draft_upload_aborts_immediately_before_save_and_cleans_exact_files(
+    tmp_path,
+):
+    displayed = editable_snapshot()
+    workflow, client, service = workflow_fixture(snapshot=displayed)
+    original_upload = client.upload_draft_file_record
+
+    def upload_then_change_server(name, content, itemid, filepath):
+        record = original_upload(name, content, itemid, filepath)
+        if len(client.uploads) == 1:
+            service.current = replace(
+                displayed,
+                online_text="<p>concurrent authoritative text</p>",
+                submission_modified_time=displayed.submission_modified_time + 7,
+            )
+        return record
+
+    client.upload_draft_file_record = upload_then_change_server
+
+    result = workflow.mutate_files(
+        target(),
+        intent(
+            MutationOperation.ADD,
+            selected=(local_file(tmp_path),),
+            fingerprint=displayed.fingerprint,
+        ),
+    )
+
+    assert result.ok is False
+    assert result.issue.code is SubmissionErrorCode.STALE_SNAPSHOT
+    assert result.snapshot == service.current
+    assert service.saved == []
+    assert service.cleaned == [
+        (900, (("/", "old.pdf"), ("/", "new.pdf")))
+    ]
+
+
+def test_permission_drift_during_upload_returns_precise_fresh_failure_and_cleans(
+    tmp_path,
+):
+    displayed = editable_snapshot(remote_files=())
+    workflow, client, service = workflow_fixture(snapshot=displayed)
+    original_upload = client.upload_draft_file_record
+
+    def upload_then_lock(name, content, itemid, filepath):
+        record = original_upload(name, content, itemid, filepath)
+        service.current = replace(displayed, locked=True, can_edit=False)
+        return record
+
+    client.upload_draft_file_record = upload_then_lock
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.LOCKED
+    assert result.snapshot.locked is True
+    assert service.saved == []
+    assert service.cleaned == [(900, (("/", "new.pdf"),))]
+
+
+def test_assignment_config_drift_during_upload_is_included_in_pre_save_fingerprint(
+    tmp_path,
+):
+    displayed = editable_snapshot(remote_files=())
+    workflow, client, service = workflow_fixture(snapshot=displayed)
+    original_upload = client.upload_draft_file_record
+
+    def upload_then_change_limit(name, content, itemid, filepath):
+        record = original_upload(name, content, itemid, filepath)
+        service.current = replace(
+            displayed,
+            maximum_file_count=displayed.maximum_file_count + 1,
+        )
+        return record
+
+    client.upload_draft_file_record = upload_then_change_limit
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.STALE_SNAPSHOT
+    assert result.snapshot.maximum_file_count == displayed.maximum_file_count + 1
+    assert service.assignment_calls == 2
+    assert service.saved == []
+    assert service.cleaned == [(900, (("/", "new.pdf"),))]
+
+
+def test_safety_guard_is_repeated_immediately_before_save_and_cleans_tracked_files(
+    tmp_path,
+):
+    displayed = editable_snapshot(remote_files=())
+    workflow, client, service = workflow_fixture(snapshot=displayed)
+    guard_results = iter((True, False))
+    observed = []
+
+    result = workflow.mutate_files(
+        target(),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+        safety_guard=lambda fresh: observed.append(fresh) or next(guard_results),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.STALE_SNAPSHOT
+    assert observed == [displayed, displayed]
+    assert service.saved == []
+    assert service.cleaned == [(900, (("/", "new.pdf"),))]
+
+
+@pytest.mark.parametrize(
+    "file_intent",
+    [
+        intent(MutationOperation.ADD, selected=(SelectedFile("new.pdf", 3),)),
+        intent(MutationOperation.REPLACE, selected=(SelectedFile("new.pdf", 3),)),
+        intent(MutationOperation.REMOVE, remove=(("/", "old.pdf"),)),
+        intent(MutationOperation.CLEAR),
+        intent(
+            MutationOperation.RENAME,
+            rename=("/", "old.pdf"),
+            name="renamed.pdf",
+        ),
+        intent(
+            MutationOperation.RENAME,
+            rename=("/", "old.pdf"),
+            name="old.pdf",
+            filepath="moved",
+        ),
+    ],
+    ids=("add", "replace", "remove", "clear", "rename", "move"),
+)
+def test_file_submission_capability_gates_every_file_mutation_before_io(file_intent):
+    workflow, client, service = workflow_fixture(
+        snapshot=editable_snapshot(file_submission_enabled=False)
+    )
+
+    result = workflow.mutate_files(target(), file_intent)
+
+    assert result.issue.code is SubmissionErrorCode.UNSUPPORTED_OPERATION
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.allocation_calls == 0
+    assert service.saved == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        MutationOperation.ADD,
+        MutationOperation.REPLACE,
+        MutationOperation.REMOVE,
+        MutationOperation.CLEAR,
+        MutationOperation.RENAME,
+    ),
+)
+def test_team_submission_is_browser_only_for_file_mutations(operation, tmp_path):
+    workflow, client, service = workflow_fixture(
+        snapshot=editable_snapshot(team_submission=True)
+    )
+    kwargs = {}
+    if operation in (MutationOperation.ADD, MutationOperation.REPLACE):
+        kwargs["selected"] = (local_file(tmp_path),)
+    elif operation is MutationOperation.REMOVE:
+        kwargs["remove"] = (("/", "old.pdf"),)
+    elif operation is MutationOperation.RENAME:
+        kwargs.update(rename=("/", "old.pdf"), name="renamed.pdf")
+
+    result = workflow.mutate_files(target(), intent(operation, **kwargs))
+
+    assert result.issue.code is SubmissionErrorCode.UNSUPPORTED_OPERATION
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.allocation_calls == 0
+    assert service.saved == []
+
+
+def test_online_text_only_draft_finalizes_without_file_save_or_upload():
+    draft = editable_snapshot(
+        raw_status="draft",
+        submission_drafts=True,
+        statement_required=True,
+        file_submission_enabled=False,
+        remote_files=(),
+        online_text="<p>Online answer</p>",
+    )
+    workflow, client, service = workflow_fixture(snapshot=draft)
+
+    result = workflow.finalize_submission(
+        target(),
+        FinalizeSubmissionIntent(
+            accept_statement=True,
+            expected_fingerprint=draft.fingerprint,
+        ),
+    )
+
+    assert result.ok is True
+    assert result.outcome is MutationOutcome.SUBMITTED_FOR_GRADING
+    assert result.snapshot.raw_status == "submitted"
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.allocation_calls == 0
+    assert service.saved == []
+    assert service.finalized == [(77, True)]
+    assert service.status_calls == 3
+
+
+def test_finalize_only_verifies_current_draft_content_was_not_replaced():
+    draft = editable_snapshot(
+        raw_status="draft",
+        submission_drafts=True,
+        remote_files=(),
+        online_text="<p>Expected online answer</p>",
+    )
+    workflow, _, service = workflow_fixture(snapshot=draft)
+    original_finalize = service.submit_for_grading_result
+
+    def finalize_with_content_drift(assign_id, accept):
+        result = original_finalize(assign_id, accept)
+        service.current = replace(
+            service.current,
+            online_text="<p>Unexpected concurrent answer</p>",
+        )
+        return result
+
+    service.submit_for_grading_result = finalize_with_content_drift
+
+    result = workflow.finalize_submission(
+        target(), FinalizeSubmissionIntent(expected_fingerprint=draft.fingerprint)
+    )
+
+    assert result.issue.code is SubmissionErrorCode.VERIFICATION_FAILED
+    assert result.partial is True
+    assert result.snapshot.online_text == "<p>Unexpected concurrent answer</p>"
+    assert service.saved == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://courses.ut.edu.vn/mod/assign/view.php?id=123",
+        "https://evil.example/mod/assign/view.php?id=123",
+        "https://courses.ut.edu.vn:444/mod/assign/view.php?id=123",
+        "https://user:pass@courses.ut.edu.vn/mod/assign/view.php?id=123",
+        "https://courses.ut.edu.vn/mod/assign/view.php/extra?id=123",
+        "https://courses.ut.edu.vn/mod/quiz/view.php?id=123",
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=123&id=124",
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=123#fragment",
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=123&extra=1",
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=not-an-int",
+    ),
+)
+def test_invalid_target_boundary_rejects_before_assignment_resolution(url):
+    workflow, client, service = workflow_fixture()
+
+    result = workflow.load_snapshot(SubmissionTarget(url, 456))
+
+    assert result.issue.code is SubmissionErrorCode.INVALID_TARGET
+    assert service.resolve_calls == 0
+    assert service.assignment_calls == 0
+    assert service.status_calls == 0
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.saved == []
+
+
+def test_foreign_target_mutation_performs_zero_network_or_local_file_io(tmp_path):
+    workflow, client, service = workflow_fixture()
+    selected = local_file(tmp_path)
+
+    result = workflow.mutate_files(
+        SubmissionTarget(
+            "https://attacker.example/mod/assign/view.php?id=123", 456
+        ),
+        intent(MutationOperation.REPLACE, selected=(selected,)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.INVALID_TARGET
+    assert service.resolve_calls == 0
+    assert service.assignment_calls == 0
+    assert service.status_calls == 0
+    assert service.allocation_calls == 0
+    assert client.downloads_requested == []
+    assert client.uploads == []
+    assert service.saved == []
+
+
+def test_target_boundary_accepts_case_insensitive_host_and_effective_https_port():
+    workflow, _, service = workflow_fixture()
+
+    result = workflow.load_snapshot(
+        SubmissionTarget(
+            "https://COURSES.UT.EDU.VN:443/mod/assign/view.php?id=123",
+            456,
+        )
+    )
+
+    assert result.ok is True
+    assert service.resolve_calls == 1
 
 
 def test_remove_one_reuploads_only_remaining_remote_files():
@@ -580,7 +884,7 @@ def test_non_draft_requires_exact_submitted_status_after_save(tmp_path):
 
 
 def test_post_save_refresh_failure_does_not_return_stale_snapshot(tmp_path):
-    workflow, _, service = workflow_fixture(fail_status_calls=(2,))
+    workflow, _, service = workflow_fixture(fail_status_calls=(3,))
 
     result = workflow.mutate_files(
         target(),
@@ -596,7 +900,7 @@ def test_post_save_refresh_failure_does_not_return_stale_snapshot(tmp_path):
 def test_post_finalize_refresh_failure_does_not_return_stale_snapshot(tmp_path):
     workflow, _, service = workflow_fixture(
         snapshot=editable_snapshot(submission_drafts=True),
-        fail_status_calls=(3,),
+        fail_status_calls=(4,),
     )
 
     result = workflow.mutate_files(
@@ -650,8 +954,9 @@ def test_mutation_resolves_assignment_only_once(tmp_path):
 
     workflow.mutate_files(target(), intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),), finalize=True))
 
-    assert service.resolve_calls == service.assignment_calls == 1
-    assert service.status_calls == 3
+    assert service.resolve_calls == 1
+    assert service.assignment_calls == 2
+    assert service.status_calls == 4
 
 
 def test_legacy_load_adapter_maps_verified_snapshot():

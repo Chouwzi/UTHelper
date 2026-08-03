@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, urlsplit
 
 from core.moodle_service import MoodleService
 from core.submission_models import (
@@ -38,6 +39,14 @@ class SelectedSubmissionFile:
     name: str
     bytes: bytes = field(repr=False)
     filepath: str = "/"
+
+
+@dataclass(frozen=True)
+class FinalizeSubmissionIntent:
+    """Finalize the authoritative current draft without rebuilding its file area."""
+
+    accept_statement: bool = False
+    expected_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -188,6 +197,7 @@ def _error(
 @dataclass(frozen=True)
 class _SnapshotContext:
     assignment_id: int
+    course_id: int
     assignment: dict[str, Any]
     snapshot: SubmissionSnapshot
 
@@ -237,6 +247,79 @@ class SubmissionWorkflow:
         }
         return self._mutate_files(target, intent, selected_bytes, safety_guard)
 
+    def finalize_submission(
+        self,
+        target: SubmissionTarget,
+        intent: FinalizeSubmissionIntent,
+        *,
+        safety_guard: Callable[[SubmissionSnapshot], bool] | None = None,
+    ) -> SubmissionMutationResult:
+        """Finalize the current server draft without saving a file manager."""
+        loaded = self._load_context(target, None)
+        if isinstance(loaded, SubmissionError):
+            return SubmissionMutationResult.failure(loaded, None)
+        snapshot = loaded.snapshot
+
+        issue = self._finalize_issue(snapshot, intent)
+        if issue is not None:
+            return SubmissionMutationResult.failure(issue, snapshot)
+        if (
+            intent.expected_fingerprint
+            and intent.expected_fingerprint != snapshot.fingerprint
+        ):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
+            )
+        if not self._passes_safety_guard(snapshot, safety_guard):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
+            )
+
+        fresh = self._reload_context(loaded)
+        if isinstance(fresh, SubmissionError):
+            return SubmissionMutationResult.failure(fresh, None)
+        issue = self._finalize_issue(fresh.snapshot, intent)
+        if issue is not None:
+            return SubmissionMutationResult.failure(issue, fresh.snapshot)
+        if fresh.snapshot.fingerprint != snapshot.fingerprint:
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.STALE_SNAPSHOT), fresh.snapshot
+            )
+        if not self._passes_safety_guard(fresh.snapshot, safety_guard):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.STALE_SNAPSHOT), fresh.snapshot
+            )
+
+        try:
+            finalized = self.moodle_service.submit_for_grading_result(
+                fresh.assignment_id, intent.accept_statement
+            )
+        except Exception:
+            logger.exception("Moodle finalization failed")
+            finalized = None
+        if finalized is None or not finalized.ok or finalized.warnings:
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.FINALIZE_REJECTED), fresh.snapshot
+            )
+
+        final_snapshot = self._refresh_snapshot(fresh)
+        if isinstance(final_snapshot, SubmissionError):
+            return SubmissionMutationResult.failure(
+                final_snapshot, None, partial=True
+            )
+        if (
+            final_snapshot.raw_status != "submitted"
+            or not self._submission_content_matches(fresh.snapshot, final_snapshot)
+        ):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.VERIFICATION_FAILED),
+                final_snapshot,
+                partial=True,
+            )
+        return SubmissionMutationResult.success(
+            final_snapshot, MutationOutcome.SUBMITTED_FOR_GRADING
+        )
+
     def _mutate_files(
         self,
         target: SubmissionTarget,
@@ -252,19 +335,17 @@ class SubmissionWorkflow:
         issue = self._permission_issue(snapshot)
         if issue is not None:
             return SubmissionMutationResult.failure(issue, snapshot)
+        issue = self._file_mutation_issue(snapshot)
+        if issue is not None:
+            return SubmissionMutationResult.failure(issue, snapshot)
         if intent.expected_fingerprint and intent.expected_fingerprint != snapshot.fingerprint:
             return SubmissionMutationResult.failure(
                 _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
             )
-        if safety_guard is not None:
-            try:
-                safe = safety_guard(snapshot)
-            except Exception:
-                safe = False
-            if not safe:
-                return SubmissionMutationResult.failure(
-                    _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
-                )
+        if not self._passes_safety_guard(snapshot, safety_guard):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.STALE_SNAPSHOT), snapshot
+            )
 
         plan_or_issue = self._build_plan(snapshot, intent)
         if isinstance(plan_or_issue, SubmissionError):
@@ -279,7 +360,9 @@ class SubmissionWorkflow:
         materialized = self._materialize(plan, selected_bytes)
         if isinstance(materialized, SubmissionError):
             return SubmissionMutationResult.failure(materialized, snapshot)
-        return self._upload_save_verify(loaded, plan, materialized, intent)
+        return self._upload_save_verify(
+            loaded, plan, materialized, intent, safety_guard
+        )
 
     def _load_context(
         self,
@@ -311,16 +394,40 @@ class SubmissionWorkflow:
         if assignment is None or not isinstance(status, dict):
             return _error(SubmissionErrorCode.SNAPSHOT_LOAD_FAILED)
         snapshot = parse_submission_snapshot(int(assignment_id), assignment, status)
-        return _SnapshotContext(int(assignment_id), assignment, snapshot)
+        return _SnapshotContext(
+            int(assignment_id), int(target.course_id), assignment, snapshot
+        )
 
     @staticmethod
     def _extract_cmid(url: str) -> int | None:
-        try:
-            values = parse_qs(urlparse(url).query).get("id", ())
-            cmid = int(values[0])
-            return cmid if cmid > 0 else None
-        except (IndexError, TypeError, ValueError):
+        if not isinstance(url, str) or url != url.strip() or "#" in url:
             return None
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+            query = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+        except (TypeError, ValueError):
+            return None
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != "courses.ut.edu.vn"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or parsed.path != "/mod/assign/view.php"
+            or parsed.fragment
+            or len(query) != 1
+            or query[0][0] != "id"
+            or re.fullmatch(r"[0-9]+", query[0][1]) is None
+        ):
+            return None
+        cmid = int(query[0][1])
+        return cmid if cmid > 0 else None
 
     @classmethod
     def _find_assignment(
@@ -357,6 +464,45 @@ class SubmissionWorkflow:
         if not snapshot.can_edit:
             return _error(SubmissionErrorCode.NOT_EDITABLE)
         return None
+
+    @staticmethod
+    def _file_mutation_issue(
+        snapshot: SubmissionSnapshot,
+    ) -> SubmissionError | None:
+        if not snapshot.file_submission_enabled or snapshot.team_submission:
+            return _error(SubmissionErrorCode.UNSUPPORTED_OPERATION)
+        return None
+
+    @classmethod
+    def _finalize_issue(
+        cls,
+        snapshot: SubmissionSnapshot,
+        intent: FinalizeSubmissionIntent,
+    ) -> SubmissionError | None:
+        issue = cls._permission_issue(snapshot)
+        if issue is not None:
+            return issue
+        if snapshot.team_submission or not snapshot.submission_drafts:
+            return _error(SubmissionErrorCode.UNSUPPORTED_OPERATION)
+        if not snapshot.can_submit:
+            return _error(SubmissionErrorCode.FINALIZE_REJECTED)
+        if not snapshot.remote_files and not snapshot.online_text.strip():
+            return _error(SubmissionErrorCode.UNSUPPORTED_OPERATION)
+        if snapshot.statement_required and not intent.accept_statement:
+            return _error(SubmissionErrorCode.STATEMENT_NOT_ACCEPTED)
+        return None
+
+    @staticmethod
+    def _passes_safety_guard(
+        snapshot: SubmissionSnapshot,
+        safety_guard: Callable[[SubmissionSnapshot], bool] | None,
+    ) -> bool:
+        if safety_guard is None:
+            return True
+        try:
+            return bool(safety_guard(snapshot))
+        except Exception:
+            return False
 
     @staticmethod
     def _build_plan(
@@ -468,6 +614,7 @@ class SubmissionWorkflow:
         plan: tuple[_PlannedFile, ...],
         materialized: tuple[tuple[_PlannedFile, bytes], ...],
         intent: FileMutationIntent,
+        safety_guard: Callable[[SubmissionSnapshot], bool] | None,
     ) -> SubmissionMutationResult:
         snapshot = context.snapshot
         try:
@@ -513,6 +660,25 @@ class SubmissionWorkflow:
 
             if failure is not None:
                 return SubmissionMutationResult.failure(failure, snapshot)
+
+            fresh = self._reload_context(context)
+            if isinstance(fresh, SubmissionError):
+                return SubmissionMutationResult.failure(fresh, None)
+            issue = self._permission_issue(fresh.snapshot)
+            if issue is None:
+                issue = self._file_mutation_issue(fresh.snapshot)
+            if issue is not None:
+                return SubmissionMutationResult.failure(issue, fresh.snapshot)
+            if fresh.snapshot.fingerprint != snapshot.fingerprint:
+                return SubmissionMutationResult.failure(
+                    _error(SubmissionErrorCode.STALE_SNAPSHOT), fresh.snapshot
+                )
+            if not self._passes_safety_guard(fresh.snapshot, safety_guard):
+                return SubmissionMutationResult.failure(
+                    _error(SubmissionErrorCode.STALE_SNAPSHOT), fresh.snapshot
+                )
+            context = fresh
+            snapshot = fresh.snapshot
 
             save_attempted = True
             try:
@@ -624,6 +790,30 @@ class SubmissionWorkflow:
             context.assignment_id, context.assignment, status
         )
 
+    def _reload_context(
+        self,
+        context: _SnapshotContext,
+    ) -> _SnapshotContext | SubmissionError:
+        """Re-read assignment configuration and status without resolving again."""
+        try:
+            response = self.moodle_service.get_assignments([context.course_id])
+            assignment = self._find_assignment(response, context.assignment_id)
+            status = self.moodle_service.get_submission_status(context.assignment_id)
+        except Exception:
+            logger.exception("Could not reload Moodle submission snapshot")
+            return _error(SubmissionErrorCode.SNAPSHOT_LOAD_FAILED)
+        if assignment is None or not isinstance(status, dict):
+            return _error(SubmissionErrorCode.SNAPSHOT_LOAD_FAILED)
+        snapshot = parse_submission_snapshot(
+            context.assignment_id, assignment, status
+        )
+        return _SnapshotContext(
+            context.assignment_id,
+            context.course_id,
+            assignment,
+            snapshot,
+        )
+
     @staticmethod
     def _files_match(
         plan: tuple[_PlannedFile, ...],
@@ -638,6 +828,25 @@ class SubmissionWorkflow:
             for item in snapshot.remote_files
         )
         return expected == actual
+
+    @staticmethod
+    def _submission_content_matches(
+        before: SubmissionSnapshot,
+        after: SubmissionSnapshot,
+    ) -> bool:
+        before_files = sorted(
+            (item.identity, item.size, item.mimetype)
+            for item in before.remote_files
+        )
+        after_files = sorted(
+            (item.identity, item.size, item.mimetype)
+            for item in after.remote_files
+        )
+        return (
+            before_files == after_files
+            and before.online_text == after.online_text
+            and before.online_text_format == after.online_text_format
+        )
 
     # Deprecated adapters retained until the submission GUI migration.
     def load_submitted_files(

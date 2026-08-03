@@ -82,6 +82,37 @@ def test_policy_formats_server_limits_for_people():
     assert policy.limit_text == "Tối đa 3 file · 10 MB · .pdf, .docx"
 
 
+def test_online_text_only_draft_exposes_finalize_but_no_file_controls():
+    policy = SubmissionUiPolicy.from_snapshot(
+        snapshot(
+            submission_drafts=True,
+            file_submission_enabled=False,
+            online_text="<p>Online answer</p>",
+        )
+    )
+
+    assert policy.show_picker is False
+    assert policy.show_file_actions is False
+    assert policy.show_save_draft is False
+    assert policy.show_finalize is True
+
+
+def test_team_submission_uses_browser_fallback_reason_and_hides_mutations():
+    policy = SubmissionUiPolicy.from_snapshot(
+        snapshot(
+            submission_drafts=True,
+            team_submission=True,
+            remote_files=(remote(),),
+        )
+    )
+
+    assert policy.show_picker is False
+    assert policy.show_file_actions is False
+    assert policy.show_save_draft is False
+    assert policy.show_finalize is False
+    assert "trình duyệt" in policy.edit_reason
+
+
 def test_every_workflow_error_has_a_safe_vietnamese_message():
     secret = "https://moodle.invalid/?token=SECRET"
 
