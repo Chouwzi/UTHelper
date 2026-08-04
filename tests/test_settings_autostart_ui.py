@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 
 from gui.components.settings.system_section import init_system_controls
@@ -31,6 +32,8 @@ def view_for(result):
         _sw_start_with_windows=control(value=False, disabled=False),
         _sw_start_minimized=control(value=True, disabled=True),
         _autostart_status=control(value="", color=None),
+        _baseline_snapshot=None,
+        _loading=False,
         update=lambda: None,
     )
     view._sync_autostart_dependency = MethodType(
@@ -77,6 +80,34 @@ def test_reconcile_uses_real_windows_state_and_control_editability(monkeypatch):
     assert view._sw_start_minimized.disabled is True
     assert view._autostart_status.value == "Bật lại trong Task Manager."
     assert saved == [True]
+
+
+def test_reconcile_rebases_only_autostart_without_creating_false_dirty_state(
+    monkeypatch,
+):
+    from gui.view_models.settings_form import SettingsFormSnapshot
+    from config import settings
+
+    result = AutostartUiState(False, True, True, "")
+    view = view_for(result)
+    baseline = SettingsFormSnapshot.from_settings(settings)
+    baseline = replace(baseline, start_with_windows=True)
+    view._baseline_snapshot = baseline
+    view._capture_form_snapshot = lambda: replace(
+        baseline,
+        start_with_windows=bool(view._sw_start_with_windows.value),
+    )
+    monkeypatch.setattr(
+        "gui.components.settings_view.settings.START_WITH_WINDOWS", True
+    )
+    monkeypatch.setattr(
+        "gui.components.settings_view.save_settings", lambda: True
+    )
+
+    asyncio.run(SettingsView._reconcile_autostart(view))
+
+    assert view._baseline_snapshot.start_with_windows is False
+    assert SettingsView.has_changes(view) is False
 
 
 def test_apply_autostart_rolls_control_back_when_windows_rejects(monkeypatch):
@@ -200,3 +231,34 @@ def test_save_path_calls_transactional_autostart_before_persisting(monkeypatch):
 
     assert asyncio.run(SettingsView._save(view, None)) is True
     assert calls == ["capture", "autostart", "capture", "persist"]
+
+
+def test_save_rolls_windows_autostart_back_when_persistence_fails(monkeypatch):
+    calls = []
+    snapshot = SimpleNamespace(theme="midnight_blue", always_on_top=False)
+
+    async def apply_autostart():
+        calls.append("autostart-on")
+        view._autostart_rollback_enabled = False
+        return True
+
+    async def rollback_autostart():
+        calls.append("autostart-off")
+        return True
+
+    view = SimpleNamespace(
+        _capture_form_snapshot=lambda: snapshot,
+        _apply_autostart_change=apply_autostart,
+        _rollback_autostart_change=rollback_autostart,
+        _persist_snapshot_to_settings=lambda _value: calls.append("persist") or False,
+        _save_status=SimpleNamespace(value="", color=None),
+        _autostart_status=SimpleNamespace(value=""),
+        _unsaved_dot=SimpleNamespace(visible=True),
+        _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
+        _on_saved=None,
+        update=lambda: None,
+    )
+    monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    assert calls == ["autostart-on", "persist", "autostart-off"]

@@ -6,6 +6,7 @@ import sys
 import logging
 import tempfile
 import platform
+import threading
 # Secure storage import chain
 # Tier 1: keyring (Windows Credential Manager)
 # Tier 2: plaintext JSON (last resort, not recommended)
@@ -121,6 +122,40 @@ def _write_secret(key: str, value: str) -> bool:
 def _has_any_secure_backend() -> bool:
     """Kiểm tra có backend nào an toàn hay không."""
     return _HAS_KEYRING
+
+
+_settings_save_lock = threading.RLock()
+
+
+def _snapshot_secure_secrets() -> dict[str, str] | None:
+    """Capture all keyring values before starting a settings transaction."""
+    if not _HAS_KEYRING:
+        return None
+    snapshot: dict[str, str] = {}
+    try:
+        for key_suffix in _SECRET_FIELDS.values():
+            snapshot[key_suffix] = (
+                keyring.get_password(KEYRING_SERVICE_NAME, key_suffix) or ""
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Cannot snapshot secure settings before save: %s", exc
+        )
+        return None
+    return snapshot
+
+
+def _restore_secure_secrets(snapshot: dict[str, str]) -> bool:
+    """Compensate keyring mutations after a failed settings transaction."""
+    restored = True
+    for key_suffix, value in snapshot.items():
+        if not _write_secret(key_suffix, value):
+            restored = False
+    if not restored:
+        logging.getLogger(__name__).critical(
+            "Secure settings rollback was incomplete; JSON was not committed"
+        )
+    return restored
 
 class Settings(BaseModel):
     """
@@ -324,62 +359,43 @@ def load_settings() -> Settings:
 settings = load_settings()
 
 def save_settings() -> bool:
-    """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng an toàn."""
+    """Persist settings transactionally across keyring and JSON storage."""
     _logger = logging.getLogger(__name__)
-    has_secure = _has_any_secure_backend()
+    with _settings_save_lock:
+        has_secure = _has_any_secure_backend()
+        data = settings.model_dump()
+        if not has_secure:
+            for attr in _SECRET_FIELDS:
+                value = getattr(settings, attr, "")
+                if value:
+                    data[attr] = value
+            _logger.warning(
+                "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
+            )
 
-    # --- Step 1: Save non-secret settings to JSON ---
-    json_ok = False
-    try:
-        def get_data_to_write():
-            data = settings.model_dump()
-            if not has_secure:
-                for attr in _SECRET_FIELDS:
-                    val = getattr(settings, attr, '')
-                    if val:
-                        data[attr] = val
-            return data
-            
-        from core.safe_file_io import SafeFileIO
-        json_ok = SafeFileIO.write_json_atomic(CONFIG_FILE, get_data_to_write())
-    except Exception as e:
-        _logger.error(f"Failed to save settings: {e}")
+        previous_secrets: dict[str, str] | None = None
+        if has_secure:
+            previous_secrets = _snapshot_secure_secrets()
+            if previous_secrets is None:
+                return False
+            for attr, key_suffix in _SECRET_FIELDS.items():
+                value = getattr(settings, attr, "")
+                if previous_secrets.get(key_suffix, "") == value:
+                    continue
+                if not _write_secret(key_suffix, value):
+                    _restore_secure_secrets(previous_secrets)
+                    return False
 
-    # --- Step 2: Save all secrets to secure storage ---
-    secrets_ok = True
-    if has_secure:
-        for attr, key_suffix in _SECRET_FIELDS.items():
-            try:
-                val = getattr(settings, attr, '')
-                if not _write_secret(key_suffix, val):
-                    secrets_ok = False
-            except Exception as e:
-                secrets_ok = False
-                _logger.warning(f"Failed to write {attr} to secure storage: {e}")
-    else:
-        _logger.warning(
-            "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
-        )
-
-    # --- Step 3: Cleanup legacy secrets from JSON file ---
-    cleanup_ok = True
-    if json_ok and has_secure:
         try:
             from core.safe_file_io import SafeFileIO
-            data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
-            stripped = {k: v for k, v in data.items() if k not in _SECRET_FIELDS}
-            if len(stripped) < len(data):
-                cleanup_ok = bool(
-                    SafeFileIO.write_json_atomic(CONFIG_FILE, stripped)
-                )
-                if cleanup_ok:
-                    _logger.info("Cleaned legacy secrets from settings JSON file")
-                else:
-                    _logger.warning("Failed to clean legacy secrets from settings JSON")
-        except Exception as e:
-            cleanup_ok = False
-            _logger.warning(f"Failed to clean legacy secrets from JSON: {e}")
 
-    return bool(json_ok and secrets_ok and cleanup_ok)
+            json_ok = bool(SafeFileIO.write_json_atomic(CONFIG_FILE, data))
+        except Exception as exc:
+            json_ok = False
+            _logger.error("Failed to save settings: %s", exc)
+
+        if not json_ok and previous_secrets is not None:
+            _restore_secure_secrets(previous_secrets)
+        return json_ok
 
 

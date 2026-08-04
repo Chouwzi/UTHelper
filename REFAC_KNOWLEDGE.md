@@ -266,11 +266,16 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   whose default is enabled. Its wording promises checking only; installing and
   restarting still require confirmation in the update coordinator.
 - Crash-reporting consent is a three-state value (`not_asked`, `enabled`, or
-  `disabled`). The first-run dialog performs no diagnostics/network work, treats
-  window dismissal as deferral, and considers a choice decided only after
+  `disabled`). The first-run dialog performs no diagnostics/network work, offers
+  a visible `Để sau` deferral, and considers a choice decided only after
   `save_settings()` succeeds.
-- Settings persistence now reports JSON, secure-store write/delete, and legacy
-  cleanup failures to the caller. Snapshot persistence restores all in-memory
-  form values and Moodle provenance when a save fails.
+- Settings persistence snapshots secure values, applies keyring mutations, and
+  commits JSON exactly once. A secret or JSON failure compensates all prior
+  keyring mutations before reporting failure, while the UI restores the complete
+  in-memory snapshot and Moodle provenance.
+- Windows autostart reconciliation rebases only its OS-owned snapshot field, so
+  opening Settings cannot create a false dirty prompt or mask concurrent user
+  edits. If a later settings commit fails, the OS autostart change is compensated
+  back to its previously confirmed state.
 - Validation: 88 Settings/autostart-focused tests passed; the full suite passed
   with **810 passed, 24 skipped**; `ruff check src tests` passed.

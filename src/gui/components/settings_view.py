@@ -9,6 +9,7 @@ if _project_root not in sys.path:
 import flet as ft
 import asyncio
 import logging
+from dataclasses import replace
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
@@ -1674,8 +1675,17 @@ class SettingsView(ft.Container):
         result = await self._autostart_coordinator.load()
         self._apply_autostart_ui(result)
         if result.confirmed and settings.START_WITH_WINDOWS != result.enabled:
+            previous_enabled = settings.START_WITH_WINDOWS
             settings.START_WITH_WINDOWS = result.enabled
-            save_settings()
+            if not save_settings():
+                settings.START_WITH_WINDOWS = previous_enabled
+        if result.confirmed and self._baseline_snapshot is not None:
+            # Only rebase the OS-owned field. Other edits made while the async
+            # query was in flight must remain dirty.
+            self._baseline_snapshot = replace(
+                self._baseline_snapshot,
+                start_with_windows=result.enabled,
+            )
         try:
             self.update()
         except Exception:
@@ -1685,6 +1695,7 @@ class SettingsView(ft.Container):
             )
 
     async def _apply_autostart_change(self) -> bool:
+        self._autostart_rollback_enabled = None
         if self._autostart_coordinator is None:
             return True
         requested = bool(self._sw_start_with_windows.value)
@@ -1696,10 +1707,23 @@ class SettingsView(ft.Container):
             result = current
         elif current.editable:
             result = await self._autostart_coordinator.change(requested)
+            if result.confirmed and result.enabled == requested:
+                self._autostart_rollback_enabled = current.enabled
         else:
             result = current
         self._apply_autostart_ui(result)
         return result.confirmed and result.enabled == requested
+
+    async def _rollback_autostart_change(self) -> bool:
+        previous = getattr(self, "_autostart_rollback_enabled", None)
+        if previous is None or self._autostart_coordinator is None:
+            return True
+        result = await self._autostart_coordinator.change(previous)
+        self._apply_autostart_ui(result)
+        if result.confirmed and result.enabled == previous:
+            self._autostart_rollback_enabled = None
+            return True
+        return False
 
     def _capture_form_snapshot(self) -> SettingsFormSnapshot:
         """Map controls to the canonical form model in exactly one place."""
@@ -1988,7 +2012,18 @@ class SettingsView(ft.Container):
                 pending = self._capture_form_snapshot()
 
             if not self._persist_snapshot_to_settings(pending):
-                self._save_status.value = "Lỗi: Không thể lưu cài đặt. Vui lòng thử lại."
+                autostart_restored = True
+                if not _pu.IS_MOBILE:
+                    autostart_restored = await self._rollback_autostart_change()
+                if autostart_restored:
+                    self._save_status.value = (
+                        "Lỗi: Không thể lưu cài đặt. Vui lòng thử lại."
+                    )
+                else:
+                    self._save_status.value = (
+                        "Lỗi: Không thể lưu và chưa thể khôi phục Khởi động cùng "
+                        "Windows. Vui lòng kiểm tra lại trong Task Manager."
+                    )
                 self._save_status.color = C.CRITICAL
                 self.update()
                 return False

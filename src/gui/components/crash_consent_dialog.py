@@ -48,6 +48,10 @@ class CrashConsentDialog:
             # Closing the window is an explicit deferral, not a decision.
             return None
 
+        def defer(_event) -> None:
+            # Keep ``not_asked`` so a later process may ask again.
+            self._page.pop_dialog()
+
         def choose(decision: CrashConsentDecision):
             def handler(_event) -> None:
                 if self._decision_in_flight:
@@ -78,6 +82,7 @@ class CrashConsentDialog:
                 color=C.TEXT_SECONDARY,
             ),
             actions=[
+                ft.TextButton("Để sau", on_click=defer),
                 ft.TextButton("Từ chối", on_click=choose("disabled")),
                 ft.TextButton("Bật", on_click=choose("enabled")),
             ],

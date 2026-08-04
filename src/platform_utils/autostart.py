@@ -96,6 +96,13 @@ def build_autostart_command(
     stem = executable.stem.casefold()
     if stem in {"python", "pythonw"}:
         script = Path(argv0 if argv0 is not None else sys.argv[0]).resolve()
+        if argv0 is None and not script.is_file():
+            # Test runners and other Python hosts can expose a console-script
+            # shim as argv[0]. In a source checkout, use the canonical repo
+            # entry point instead of crashing Settings construction.
+            repo_entry = Path(__file__).resolve().parents[2] / "main.py"
+            if repo_entry.is_file():
+                script = repo_entry
         if not script.is_file():
             raise AutostartConfigurationError(
                 f"Development entry script does not exist: {script}"

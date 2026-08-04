@@ -28,7 +28,7 @@ def _button(dialog, text):
     return next(action for action in dialog.actions if action.content == text)
 
 
-def test_not_asked_opens_modal_with_distinct_enable_and_decline_actions():
+def test_not_asked_opens_modal_with_enable_decline_and_later_actions():
     page = FakePage()
     component = CrashConsentDialog(page, Mock(return_value=True))
 
@@ -36,7 +36,11 @@ def test_not_asked_opens_modal_with_distinct_enable_and_decline_actions():
     assert len(page.dialogs) == 1
     dialog = page.dialogs[0]
     assert dialog.modal is True
-    assert {action.content for action in dialog.actions} == {"Bật", "Từ chối"}
+    assert {action.content for action in dialog.actions} == {
+        "Bật",
+        "Từ chối",
+        "Để sau",
+    }
 
 
 @pytest.mark.parametrize("consent", ["enabled", "disabled"])
@@ -57,6 +61,19 @@ def test_window_dismiss_defers_without_calling_decision():
 
     decision.assert_not_called()
     assert component.current_consent == "not_asked"
+
+
+def test_later_button_is_a_user_accessible_deferral_without_a_decision():
+    page = FakePage()
+    decision = Mock()
+    component = CrashConsentDialog(page, decision)
+    component.present_if_needed("not_asked")
+
+    _button(page.dialogs[0], "Để sau").on_click(SimpleNamespace())
+
+    decision.assert_not_called()
+    assert component.current_consent == "not_asked"
+    assert page.pop_count == 1
 
 
 @pytest.mark.parametrize(

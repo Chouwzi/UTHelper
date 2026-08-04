@@ -190,6 +190,12 @@ def test_save_settings_reports_one_secure_secret_failure(monkeypatch):
 
     monkeypatch.setattr(config, "_has_any_secure_backend", lambda: True)
     monkeypatch.setattr(
+        config,
+        "_snapshot_secure_secrets",
+        lambda: {key: "" for key in config._SECRET_FIELDS.values()},
+    )
+    monkeypatch.setattr(config.settings, "GMAIL_APP_PASSWORD", "new-secret")
+    monkeypatch.setattr(
         "core.safe_file_io.SafeFileIO.write_json_atomic", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
@@ -204,22 +210,79 @@ def test_save_settings_reports_one_secure_secret_failure(monkeypatch):
     assert config.save_settings() is False
 
 
-def test_save_settings_reports_legacy_cleanup_failure(monkeypatch):
+def test_failed_secret_write_restores_prior_keyring_and_keeps_json(monkeypatch, tmp_path):
     import config
 
-    writes = iter([True, False])
-    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: True)
-    monkeypatch.setattr(config, "_write_secret", lambda *_args: True)
+    config_file = tmp_path / "settings.json"
+    config_file.write_text('{"THEME": "midnight_blue"}', encoding="utf-8")
+    stored = {
+        "password": "old-password",
+        "gmail_app_password": "old-mail-secret",
+    }
+
+    def get_password(_service, key):
+        return stored.get(key)
+
+    def set_password(_service, key, value):
+        if key == "gmail_app_password" and value == "new-mail-secret":
+            raise RuntimeError("synthetic later write failure")
+        stored[key] = value
+
+    def delete_password(_service, key):
+        stored.pop(key, None)
+
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(config.keyring, "get_password", get_password)
+    monkeypatch.setattr(config.keyring, "set_password", set_password)
+    monkeypatch.setattr(config.keyring, "delete_password", delete_password)
     monkeypatch.setattr(
-        "core.safe_file_io.SafeFileIO.write_json_atomic",
-        lambda *_args, **_kwargs: next(writes),
-    )
-    monkeypatch.setattr(
-        "core.safe_file_io.SafeFileIO.read_json_safe",
-        lambda *_args, **_kwargs: {"THEME": "midnight_blue", "UTH_PASSWORD": "legacy"},
+        config,
+        "settings",
+        config.Settings(
+            THEME="sakura_pink",
+            UTH_PASSWORD="",
+            GMAIL_APP_PASSWORD="new-mail-secret",
+        ),
     )
 
     assert config.save_settings() is False
+    assert stored == {
+        "password": "old-password",
+        "gmail_app_password": "old-mail-secret",
+    }
+    assert config_file.read_text(encoding="utf-8") == '{"THEME": "midnight_blue"}'
+
+
+def test_json_failure_restores_prior_keyring_values(monkeypatch):
+    import config
+
+    stored = {"password": "old-password"}
+
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(config.keyring, "get_password", lambda _service, key: stored.get(key))
+    monkeypatch.setattr(
+        config.keyring,
+        "set_password",
+        lambda _service, key, value: stored.__setitem__(key, value),
+    )
+    monkeypatch.setattr(
+        config.keyring,
+        "delete_password",
+        lambda _service, key: stored.pop(key, None),
+    )
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        config,
+        "settings",
+        config.Settings(UTH_PASSWORD="new-password", THEME="sakura_pink"),
+    )
+
+    assert config.save_settings() is False
+    assert stored == {"password": "old-password"}
 
 
 def test_save_settings_reports_complete_success(monkeypatch):
@@ -227,18 +290,21 @@ def test_save_settings_reports_complete_success(monkeypatch):
 
     writes = []
     monkeypatch.setattr(config, "_has_any_secure_backend", lambda: True)
+    monkeypatch.setattr(
+        config,
+        "_snapshot_secure_secrets",
+        lambda: {
+            key: getattr(config.settings, attr, "")
+            for attr, key in config._SECRET_FIELDS.items()
+        },
+    )
     monkeypatch.setattr(config, "_write_secret", lambda *_args: True)
     monkeypatch.setattr(
         "core.safe_file_io.SafeFileIO.write_json_atomic",
         lambda *_args, **_kwargs: writes.append(True) or True,
     )
-    monkeypatch.setattr(
-        "core.safe_file_io.SafeFileIO.read_json_safe",
-        lambda *_args, **_kwargs: {"THEME": "midnight_blue", "UTH_PASSWORD": "legacy"},
-    )
-
     assert config.save_settings() is True
-    assert len(writes) == 2
+    assert len(writes) == 1
 
 
 @pytest.mark.parametrize(
