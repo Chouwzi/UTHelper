@@ -1,10 +1,11 @@
 import logging
 import os
 import sys
-import traceback
 from pathlib import Path
 
 from diagnostics.logging_setup import configure_logging
+from diagnostics.models import AppPhase
+from diagnostics.runtime import create_default_runtime
 from gui.controllers.startup_visibility import is_autostart_launch
 from platform_utils.single_instance import bootstrap_windows_instance
 
@@ -100,9 +101,9 @@ for msg in _BOOT_LOG:
     logger.info("[BOOT] %s", msg)
 
 
-def _show_crash_screen(page, error_msg: str):
-    """Show error details on screen instead of black screen."""
-    import flet as ft
+def _show_crash_screen(page, ft, reference: str | None):
+    """Show a reference-only failure screen without exception-owned text."""
+    safe_reference = reference or "không khả dụng"
     page.bgcolor = "#0F172A"
     page.padding = 20
     page.scroll = ft.ScrollMode.AUTO
@@ -112,11 +113,11 @@ def _show_crash_screen(page, error_msg: str):
             ft.Icon(ft.Icons.ERROR_OUTLINE, color="#EF4444", size=48),
             ft.Text("UTHelper - Khởi động lỗi", size=20, color="#F8FAFC",
                      weight=ft.FontWeight.BOLD),
-            ft.Text("Ứng dụng gặp lỗi khi khởi động. Chi tiết:", 
+            ft.Text("Ứng dụng gặp lỗi khi khởi động.",
                      size=14, color="#94A3B8"),
             ft.Container(
                 content=ft.Text(
-                    error_msg,
+                    f"Mã tham chiếu: {safe_reference}",
                     size=11,
                     color="#FCA5A5",
                     selectable=True,
@@ -126,7 +127,7 @@ def _show_crash_screen(page, error_msg: str):
                 border_radius=8,
                 padding=12,
             ),
-            ft.Text("Vui lòng chụp màn hình và gửi cho nhà phát triển.", 
+            ft.Text("Vui lòng gửi mã tham chiếu cho nhà phát triển.",
                      size=12, color="#64748B"),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -150,21 +151,39 @@ def _is_source_checkout(module_path: Path) -> bool:
 def main() -> int:
     web_mode = _is_web_mode(sys.argv, os.environ)
     result = None
+    development = _is_source_checkout(Path(__file__))
     if sys.platform == "win32" and not web_mode:
         result = bootstrap_windows_instance(
             autostart_launch=is_autostart_launch(),
             release_channel="stable",
-            development=_is_source_checkout(Path(__file__)),
+            development=development,
         )
         if result.exit_code is not None:
             return result.exit_code
+
+    runtime = None
+    try:
+        runtime = create_default_runtime(
+            _APPDATA_DIR,
+            development=development,
+        )
+        runtime.start()
+    except Exception:
+        _boot_log("Diagnostic runtime unavailable")
 
     # Desktop ownership must be decided before loading the heavyweight Flet
     # runtime. A secondary process can then hand off and exit without starting
     # a second Flutter/Python UI stack.
     import flet as ft
 
+    active_page = None
+
     def _app_target(page: ft.Page):
+        nonlocal active_page
+        active_page = page
+        if runtime is not None:
+            runtime.attach_page(page)
+            runtime.mark_phase(AppPhase.GUI)
         try:
             logger.info("Starting app imports...")
             
@@ -188,13 +207,15 @@ def main() -> int:
             )
             logger.info("App started successfully")
             
-        except Exception:
-            error_msg = traceback.format_exc()
-            logger.critical("App crashed during startup:\n%s", error_msg)
+        except Exception as exc:
+            reference = None
+            if runtime is not None:
+                reference = runtime.record_exception(exc, AppPhase.GUI)
+            logger.critical("App startup failed; reference=%s", reference or "none")
             try:
-                _show_crash_screen(page, error_msg)
-            except Exception as render_exc:
-                logger.critical("Even crash screen failed: %s", render_exc)
+                _show_crash_screen(page, ft, reference)
+            except Exception:
+                logger.critical("Reference-only crash screen failed")
     
     # On Android, Flet bundles assets automatically and sets FLET_ASSETS_DIR
     _assets = os.environ.get("FLET_ASSETS_DIR") or os.path.abspath(
@@ -217,14 +238,37 @@ def main() -> int:
         # Flet >= 0.82 workaround removed to test if it's causing the issue in 0.85.3
         pass
     
+    clean_exit = False
+    exit_code = 0
     try:
         run_kwargs["main"] = _app_target
         run_kwargs.pop("target", None)
         ft.run(**run_kwargs)
-        return 0
+        clean_exit = True
+    except Exception as exc:
+        reference = None
+        if runtime is not None:
+            reference = runtime.record_exception(exc, AppPhase.GUI)
+        logger.critical("Flet runner failed; reference=%s", reference or "none")
+        if active_page is not None:
+            try:
+                _show_crash_screen(active_page, ft, reference)
+            except Exception:
+                logger.critical("Reference-only crash screen failed")
+        clean_exit = True
+        exit_code = 1
     finally:
-        if result and result.broker:
-            result.broker.close(timeout_seconds=1.0)
+        try:
+            if result and result.broker:
+                result.broker.close(timeout_seconds=1.0)
+        finally:
+            if runtime is not None:
+                runtime.mark_phase(AppPhase.SHUTDOWN)
+                if clean_exit:
+                    runtime.close(clean=True)
+                else:
+                    runtime.close(clean=False)
+    return exit_code
 
 
 if __name__ == "__main__":

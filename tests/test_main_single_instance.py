@@ -18,6 +18,40 @@ class _BrokerSpy:
         self.close_calls.append(timeout_seconds)
 
 
+class _RuntimeSpy:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def start(self) -> None:
+        self.calls.append(("start",))
+
+    def attach_page(self, page) -> None:
+        self.calls.append(("attach_page", page))
+
+    def mark_phase(self, phase) -> None:
+        self.calls.append(("mark_phase", phase))
+
+    def record_exception(self, exc, phase) -> str:
+        self.calls.append(("record_exception", exc, phase))
+        return "safe-reference"
+
+    def close(self, *, clean: bool) -> None:
+        self.calls.append(("close", clean))
+
+
+@pytest.fixture(autouse=True)
+def fake_diagnostic_runtime(monkeypatch):
+    runtimes: list[_RuntimeSpy] = []
+
+    def factory(*_args, **_kwargs):
+        runtime = _RuntimeSpy()
+        runtimes.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(application, "create_default_runtime", factory)
+    return runtimes
+
+
 def _install_flet_runner(monkeypatch, *, invoke_target: bool = False, error=None):
     calls: list[dict[str, object]] = []
 
@@ -126,7 +160,9 @@ def test_windows_desktop_bootstraps_before_importing_flet(monkeypatch):
 
 
 @pytest.mark.parametrize("exit_code", [0, 2])
-def test_secondary_instance_exits_without_starting_flet(monkeypatch, exit_code):
+def test_secondary_instance_exits_without_starting_flet(
+    monkeypatch, exit_code, fake_diagnostic_runtime
+):
     calls = _install_flet_runner(monkeypatch)
     result = SimpleNamespace(exit_code=exit_code, broker=None, force_visible=False)
     monkeypatch.delenv("FLET_WEB", raising=False)
@@ -144,6 +180,7 @@ def test_secondary_instance_exits_without_starting_flet(monkeypatch, exit_code):
     assert application.main() == exit_code
 
     assert calls == []
+    assert fake_diagnostic_runtime == []
 
 
 def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatch):
@@ -176,7 +213,9 @@ def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatc
     assert broker.close_calls == [1.0]
 
 
-def test_primary_broker_is_closed_when_flet_runner_raises(monkeypatch):
+def test_primary_broker_is_closed_when_flet_runner_raises(
+    monkeypatch, fake_diagnostic_runtime
+):
     broker = _BrokerSpy()
     result = SimpleNamespace(exit_code=None, broker=broker, force_visible=False)
     _install_flet_runner(monkeypatch, error=RuntimeError("flet failed"))
@@ -192,10 +231,56 @@ def test_primary_broker_is_closed_when_flet_runner_raises(monkeypatch):
     monkeypatch.setattr(application, "is_autostart_launch", lambda: False, raising=False)
     monkeypatch.setattr(application, "_is_source_checkout", lambda path: True, raising=False)
 
-    with pytest.raises(RuntimeError, match="flet failed"):
+    assert application.main() == 1
+
+    assert broker.close_calls == [1.0]
+    runtime = fake_diagnostic_runtime[0]
+    assert any(call[0] == "record_exception" for call in runtime.calls)
+    assert ("close", True) in runtime.calls
+
+
+def test_unhandled_base_exception_leaves_run_marker(monkeypatch, fake_diagnostic_runtime):
+    broker = _BrokerSpy()
+    result = SimpleNamespace(exit_code=None, broker=broker, force_visible=False)
+    _install_flet_runner(monkeypatch, error=KeyboardInterrupt())
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.setattr(application, "bootstrap_windows_instance", lambda **_: result)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda _path: True)
+
+    with pytest.raises(KeyboardInterrupt):
         application.main()
 
     assert broker.close_calls == [1.0]
+    runtime = fake_diagnostic_runtime[0]
+    assert not any(call[0] == "record_exception" for call in runtime.calls)
+    assert ("close", False) in runtime.calls
+
+
+def test_broker_close_failure_cannot_skip_runtime_close(
+    monkeypatch, fake_diagnostic_runtime
+):
+    class BrokenBroker(_BrokerSpy):
+        def close(self, *, timeout_seconds: float) -> None:
+            super().close(timeout_seconds=timeout_seconds)
+            raise RuntimeError("broker close failed")
+
+    broker = BrokenBroker()
+    result = SimpleNamespace(exit_code=None, broker=broker, force_visible=False)
+    _install_flet_runner(monkeypatch)
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.setattr(application, "bootstrap_windows_instance", lambda **_: result)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda _path: True)
+
+    with pytest.raises(RuntimeError, match="broker close failed"):
+        application.main()
+
+    assert ("close", True) in fake_diagnostic_runtime[0].calls
 
 
 def test_source_checkout_detection_uses_the_project_pyproject_file(tmp_path):

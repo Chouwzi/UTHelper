@@ -654,3 +654,41 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Review-focused transport/config/release tests pass **61 tests in 3.01
   seconds**; broader config/spool/release regression tests pass **142 tests in
   13.53 seconds**. Full source/test Ruff and `git diff --check` pass.
+
+## Chain-safe diagnostic runtime lifecycle (2026-08-04)
+
+- Added `DiagnosticRuntime` as the sole owner of Python main-thread, worker
+  thread, unraisable, asyncio-loop, and Flet-page failure hooks. It records only
+  actual `BaseException` objects through the existing allow-listed report
+  builder, uses a thread-local recursion guard, chains prior handlers, and
+  restores a hook only while it still owns that hook.
+- The run marker contains exactly schema version, app version, coarse UTC
+  minute, phase, and `clean=false`. It is written by fsynced same-directory
+  replacement; corrupt or unsafe markers never claim a crash. A prior valid
+  uncleared marker means only `unclean_previous_exit`, and clean close removes
+  only the marker identity written by this runtime.
+- The diagnostics directory rejects links/reparse points and stays pinned for
+  the runtime with a Win32 handle plus an fsynced operation guard. The guard
+  keeps a same-user junction swap from replacing the root during marker/fault
+  work and is recovered only when it is a direct regular stale file. Marker,
+  guard, and native-fault link targets are never followed or modified.
+- Faulthandler starts only when no prior global owner exists. Its fresh file is
+  opened without following a reparse point, remains owned by its exact open
+  handle, and is truncated on that handle to **256 KiB** before close. A
+  chain-wrapper around later successful `faulthandler.enable()` calls prevents
+  shutdown from disabling a later owner; the wrapper is restored only while
+  still runtime-owned.
+- Diagnostic delivery is submitted once to a single background executor;
+  startup never waits for network delivery and shutdown calls
+  `shutdown(wait=False, cancel_futures=True)`. A reference is displayed only
+  when the spool confirms a durable event; deduplication reuses the durable
+  queued event ID, while failed/oversized capture displays no false reference.
+- `src/main.py` preserves Win32 single-instance bootstrap before importing
+  Flet, starts diagnostics before GUI imports, attaches the page immediately,
+  replaces traceback UI/log output with a reference-only screen, and leaves the
+  marker on unhandled `BaseException`/native abort. Ordinary or explicitly
+  handled runner exits close cleanly. Broker-close failure cannot skip runtime
+  cleanup.
+- Focused runtime/main/logging/config verification passes **86 tests in 2.55
+  seconds**. The complete test suite exited successfully under a per-test
+  **180-second** timeout; `ruff check src tests` and `git diff --check` pass.
