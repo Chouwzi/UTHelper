@@ -177,6 +177,10 @@ def test_disconnect_closes_activation_broker_before_page_resources():
         def close(self, *, timeout_seconds):
             events.append(f"broker:{timeout_seconds}")
 
+    class Tray:
+        def close(self, *, timeout_seconds):
+            events.append(f"tray:{timeout_seconds}")
+
     class Closer:
         def __init__(self, name):
             self.name = name
@@ -192,6 +196,7 @@ def test_disconnect_closes_activation_broker_before_page_resources():
 
     controller = app_controller.AppController.__new__(app_controller.AppController)
     controller.activation_broker = Broker()
+    controller.tray = Tray()
     controller.view_manager = type(
         "ViewManager",
         (),
@@ -213,6 +218,7 @@ def test_disconnect_closes_activation_broker_before_page_resources():
     assert events == [
         "settings-navigation",
         "broker:1.0",
+        "tray:1.0",
         "page-alive",
         "prefetch",
         "coordinator",

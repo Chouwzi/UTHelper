@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,35 @@ def test_windows_desktop_bootstraps_before_running_flet(monkeypatch):
     assert len(calls) == 1
     assert set(calls[0]) == {"main", "assets_dir"}
     assert "target" not in calls[0]
+
+
+def test_windows_desktop_bootstraps_before_importing_flet(monkeypatch):
+    """A secondary must exit before loading the heavyweight UI runtime."""
+    events: list[str] = []
+    _install_flet_runner(monkeypatch)
+    result = SimpleNamespace(exit_code=0, broker=None, force_visible=False)
+    real_import = builtins.__import__
+
+    def recording_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "flet":
+            events.append("flet-import")
+        return real_import(name, globals, locals, fromlist, level)
+
+    def bootstrap(**kwargs):
+        events.append("bootstrap")
+        return result
+
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.setattr(application, "bootstrap_windows_instance", bootstrap)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda path: False)
+    monkeypatch.setattr(builtins, "__import__", recording_import)
+
+    assert application.main() == 0
+
+    assert events == ["bootstrap"]
 
 
 @pytest.mark.parametrize("exit_code", [0, 2])

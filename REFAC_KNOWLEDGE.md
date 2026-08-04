@@ -468,3 +468,26 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   claimed as passing. The real Win32 integration above verifies the kernel
   ownership, acknowledgement, manual SHOW, silent autostart, teardown, namespace
   reuse, and DACL boundary without launching Flet.
+
+## Final Windows activation lifetime hardening (2026-08-04)
+
+- Windows desktop ownership and secondary handoff now complete before the first
+  `flet` import inside `src/main.py`. Non-Windows and web paths retain their
+  bypass, while an acknowledged or failed secondary can exit without loading a
+  second Flutter/Python UI runtime.
+- The activation receiver clears its manual-reset readiness event on every
+  receiver exit, including `wait_many` adapter faults. A dead receiver therefore
+  cannot leave a stale acknowledgement that makes a later manual launch report
+  a false successful SHOW handoff; close remains bounded and idempotent after
+  this fault path.
+- `TrayApp.close()` sends `icon.stop()` once, contains native stop failures, and
+  joins only its owned daemon thread (never the current or a non-daemon thread).
+  Setup waits are clamped to **3.0 seconds** and close joins to **1.0 second**;
+  negative waits become zero and non-finite waits cannot block indefinitely.
+  Repeated close calls may retry a timed-out join but never repeat the stop
+  signal. `AppController._on_disconnect()` closes broker then tray before
+  releasing page-owned events, coordinator, and Moodle client resources.
+- Focused activation/tray regression suite: **53 passed in 1.24 seconds**.
+  Bounded full suite after these review fixes: **836 passed, 24 skipped in
+  9.72 seconds**. `ruff check src tests` and `git diff --check` passed; no GUI
+  or bundle process was launched.

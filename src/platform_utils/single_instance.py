@@ -185,10 +185,10 @@ class WindowsActivationBroker:
         return stopped
 
     def _receive_activations(self) -> None:
-        shutdown_handle = self._shutdown_handle
-        if shutdown_handle is None:
-            return
         try:
+            shutdown_handle = self._shutdown_handle
+            if shutdown_handle is None:
+                return
             while True:
                 try:
                     result = self._kernel.wait_many(
@@ -216,6 +216,11 @@ class WindowsActivationBroker:
                     self._invoke_handler(handler)
         finally:
             with self._lock:
+                # Readiness certifies that a live receiver can acknowledge a
+                # SHOW request. Clear it on every exit, including adapter
+                # faults, so a secondary cannot accept a stale manual-reset
+                # signal from a dead receiver.
+                _reset_quietly(self._kernel, self.acknowledgement_handle)
                 if self._closed:
                     self._close_owned_handles_locked()
 

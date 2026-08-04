@@ -1,11 +1,14 @@
 """System tray icon with balloon notification support using pystray."""
 import logging
+import math
 import os
 from collections.abc import Callable
 from config import BASE_DIR
 import threading
 
 logger = logging.getLogger(__name__)
+MAX_TRAY_SETUP_TIMEOUT_SECONDS = 3.0
+MAX_TRAY_CLOSE_TIMEOUT_SECONDS = 1.0
 
 
 def _load_tray_dependencies():
@@ -41,9 +44,17 @@ class TrayApp:
         self._ready_event = threading.Event()
         self._setup_done = threading.Event()
         self._setup_error = None
+        self._lifecycle_lock = threading.Lock()
+        self._close_requested = False
 
     def setup(self, ready_timeout_seconds: float = 3.0) -> bool:
         """Start the tray and report readiness within a finite deadline."""
+        ready_timeout = _bounded_timeout_seconds(
+            ready_timeout_seconds, maximum=MAX_TRAY_SETUP_TIMEOUT_SECONDS
+        )
+        with self._lifecycle_lock:
+            if self._close_requested:
+                return False
         if self._ready_event.is_set():
             return True
         try:
@@ -82,6 +93,7 @@ class TrayApp:
                         self._setup_error = exc
                         logger.warning("Tray icon event loop failed: %s", exc)
                     finally:
+                        self._ready_event.clear()
                         self._setup_done.set()
 
                 self._thread = threading.Thread(target=run_icon, daemon=True)
@@ -92,12 +104,12 @@ class TrayApp:
             self._setup_done.set()
             return False
 
-        self._setup_done.wait(timeout=max(0.0, ready_timeout_seconds))
+        self._setup_done.wait(timeout=ready_timeout)
         ready = self._ready_event.is_set()
         if not ready:
             logger.warning(
                 "Tray icon was not ready within %.1f seconds%s",
-                ready_timeout_seconds,
+                ready_timeout,
                 f": {self._setup_error}" if self._setup_error else "",
             )
         return ready
@@ -115,11 +127,42 @@ class TrayApp:
                 self._page.run_task(self._page.window.destroy)
             except Exception as e:
                 logger.error(f"Error destroying window: {e}")
-        if self._icon:
-            self._icon.stop()
+        self.close()
+
+    def close(self, timeout_seconds: float = 1.0) -> bool:
+        """Stop the tray loop once and wait only for its owned daemon thread."""
+        timeout = _bounded_timeout_seconds(
+            timeout_seconds, maximum=MAX_TRAY_CLOSE_TIMEOUT_SECONDS
+        )
+        with self._lifecycle_lock:
+            first_request = not self._close_requested
+            self._close_requested = True
+            icon = self._icon
+            thread = self._thread
+
+        if first_request and icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                logger.warning("Tray icon stop failed", exc_info=True)
+
+        if thread is None:
+            return True
+        if thread is threading.current_thread() or not thread.daemon:
+            return not thread.is_alive()
+        if not thread.is_alive():
+            return True
+        try:
+            thread.join(timeout)
+        except RuntimeError:
+            logger.warning("Tray thread join failed", exc_info=True)
+        return not thread.is_alive()
 
     def notify(self, title: str, message: str):
         """Send a Windows balloon notification via pystray, with fallback."""   
+        with self._lifecycle_lock:
+            if self._close_requested:
+                return
         if not self._icon:
             self.setup()
         
@@ -129,3 +172,10 @@ class TrayApp:
         except Exception as exc:
             logger.warning("Tray notification failed, falling back to log: %s", exc)
             logger.info("NOTIFICATION: %s - %s", title, message)
+
+
+def _bounded_timeout_seconds(timeout_seconds: float, *, maximum: float) -> float:
+    """Normalize tray waits to a finite caller-specific maximum."""
+    if not math.isfinite(timeout_seconds):
+        return 0.0 if timeout_seconds < 0 else maximum
+    return min(max(timeout_seconds, 0.0), maximum)

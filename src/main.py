@@ -179,8 +179,6 @@ def _is_source_checkout(module_path: Path) -> bool:
 
 
 def main() -> int:
-    import flet as ft
-
     web_mode = _is_web_mode(sys.argv, os.environ)
     result = None
     if sys.platform == "win32" and not web_mode:
@@ -191,6 +189,11 @@ def main() -> int:
         )
         if result.exit_code is not None:
             return result.exit_code
+
+    # Desktop ownership must be decided before loading the heavyweight Flet
+    # runtime. A secondary process can then hand off and exit without starting
+    # a second Flutter/Python UI stack.
+    import flet as ft
 
     def _app_target(page: ft.Page):
         try:

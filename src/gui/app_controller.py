@@ -2059,6 +2059,9 @@ class AppController:
                 settings_view.cancel_pending_load()
         if self.activation_broker is not None:
             self.activation_broker.close(timeout_seconds=1.0)
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            tray.close(timeout_seconds=1.0)
         self._page_alive.clear()
         self._prefetch_cancel_event.set()
         coordinator = getattr(self, "_sync_coordinator", None)

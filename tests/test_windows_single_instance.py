@@ -73,6 +73,10 @@ class FakeKernelObjectApi:
         self.release_primary_after_acknowledgement_timeout = False
         self.fail_current_user_sid: Exception | None = None
         self.fail_set_event: Exception | None = None
+        self.fail_wait_many: Exception | None = None
+        self.wait_many_entered = threading.Event()
+        self.release_wait_many = threading.Event()
+        self.release_wait_many.set()
         self._event_condition = threading.Condition()
 
     def current_user_sid(self) -> str:
@@ -147,6 +151,10 @@ class FakeKernelObjectApi:
 
     def wait_many(self, handles: tuple[FakeHandle, ...], timeout_ms: int) -> int:
         self.wait_timeouts.append(timeout_ms)
+        self.wait_many_entered.set()
+        assert self.release_wait_many.wait(0.5)
+        if self.fail_wait_many is not None:
+            raise self.fail_wait_many
         with self._event_condition:
             for index, handle in enumerate(handles):
                 if self._is_signaled(handle):
@@ -411,6 +419,30 @@ def test_binding_show_handler_starts_receiver_then_acknowledges_readiness():
     assert callbacks.wait(0.5)
     assert kernel._events[broker.acknowledgement_handle.name]
     assert broker.close()
+
+
+def test_receiver_fault_resets_readiness_and_prevents_false_secondary_acknowledgement():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    kernel.fail_wait_many = RuntimeError("receiver failed")
+    kernel.release_wait_many.clear()
+
+    broker.bind_show_handler(lambda: None)
+    assert kernel.wait_many_entered.wait(0.5)
+    assert kernel._events[broker.acknowledgement_handle.name]
+
+    kernel.release_wait_many.set()
+    receiver = broker._receiver
+    assert receiver is not None
+    receiver.join(0.5)
+    assert not receiver.is_alive()
+    assert not kernel._events[broker.acknowledgement_handle.name]
+
+    secondary = _bootstrap(kernel, acknowledgement_timeout_seconds=0.0)
+    assert secondary.role is InstanceRole.HANDOFF_FAILED
+    assert broker.close(timeout_seconds=0.1)
+    assert broker.close(timeout_seconds=0.1)
 
 
 def test_activation_signals_coalesce_without_deadlocking_receiver():
