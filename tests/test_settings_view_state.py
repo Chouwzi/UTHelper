@@ -1,9 +1,12 @@
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from gui.components.settings_view import SettingsView
+from gui.app_controller import AppController
+from gui.view_manager import ViewManager
 from gui.view_models.settings_form import SettingsFormSnapshot
 
 
@@ -77,6 +80,35 @@ def _make_state_only_view():
     view._update_profile_summary = Mock()
     view._update_dnd_summary = Mock()
     view._capture_form_snapshot = lambda: SettingsView._capture_form_snapshot(view)
+    return view
+
+
+def _make_loading_view(coordinator):
+    view = _make_state_only_view()
+    view._autostart_coordinator = coordinator
+    view._load_generation = 0
+    view._loading = False
+    view._baseline_snapshot = None
+    view._tiles = []
+    view._test_login_status = _control("")
+    view._test_login_btn = _control(text="", icon=None)
+    view._test_loading_bar = _control(visible=True)
+    view._unsaved_dot = _control(visible=True)
+    view._save_status = _control("", color=None)
+    view._autostart_status = _control("", color=None)
+    view._orchestrator = SimpleNamespace(get_cached_details_snapshot=lambda: {})
+    view._refresh_section_colors = Mock()
+    view._update_drp_options = Mock()
+    view.update = Mock()
+    view._apply_snapshot_to_controls = lambda snapshot: (
+        SettingsView._apply_snapshot_to_controls(view, snapshot)
+    )
+    view._apply_autostart_ui = lambda result: SettingsView._apply_autostart_ui(
+        view, result
+    )
+    view._load_autostart_state = lambda generation: (
+        SettingsView._load_autostart_state(view, generation)
+    )
     return view
 
 
@@ -188,3 +220,188 @@ def test_persist_snapshot_rolls_back_every_setting_and_provenance_on_failure(mon
         settings_view_module.settings.MOODLE_WS_TOKEN,
         settings_view_module.settings.MOODLE_WS_TOKEN_ORIGIN,
     ) == old_provenance
+
+
+def test_settings_load_is_awaited_transaction_with_clean_baseline(monkeypatch):
+    from gui.controllers.autostart_settings import AutostartUiState
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Coordinator:
+            async def load(self):
+                started.set()
+                await release.wait()
+                return AutostartUiState(False, True, True, "Đã đọc Windows.")
+
+        view = _make_loading_view(Coordinator())
+        task = asyncio.create_task(SettingsView.load_current_settings(view))
+        await started.wait()
+
+        assert view._load_generation == 1
+        assert view._loading is True
+        assert SettingsView.has_changes(view) is False
+        assert view._baseline_snapshot is None
+
+        release.set()
+        await task
+
+        assert view._loading is False
+        assert view._baseline_snapshot == view._capture_form_snapshot()
+        assert view._baseline_snapshot.start_with_windows is False
+        assert SettingsView.has_changes(view) is False
+        assert view._autostart_status.value == "Đã đọc Windows."
+
+    monkeypatch.setattr("gui.components.settings_view.settings.START_WITH_WINDOWS", True)
+    asyncio.run(scenario())
+
+
+def test_late_settings_load_generation_cannot_overwrite_newer_result(monkeypatch):
+    from gui.controllers.autostart_settings import AutostartUiState
+
+    async def scenario():
+        futures = [
+            asyncio.get_running_loop().create_future(),
+            asyncio.get_running_loop().create_future(),
+        ]
+        calls = 0
+
+        class Coordinator:
+            async def load(self):
+                nonlocal calls
+                future = futures[calls]
+                calls += 1
+                return await future
+
+        view = _make_loading_view(Coordinator())
+        first = asyncio.create_task(SettingsView.load_current_settings(view))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(SettingsView.load_current_settings(view))
+        await asyncio.sleep(0)
+
+        futures[1].set_result(
+            AutostartUiState(False, True, True, "Thế hệ mới.")
+        )
+        await second
+        final_baseline = view._baseline_snapshot
+
+        futures[0].set_result(AutostartUiState(True, True, True, "Thế hệ cũ."))
+        await first
+
+        assert view._load_generation == 2
+        assert view._sw_start_with_windows.value is False
+        assert view._baseline_snapshot is final_baseline
+        assert view._baseline_snapshot.start_with_windows is False
+        assert view._autostart_status.value == "Thế hệ mới."
+        assert view._loading is False
+
+    monkeypatch.setattr("gui.components.settings_view.settings.START_WITH_WINDOWS", True)
+    asyncio.run(scenario())
+    assert SettingsFormSnapshot.from_settings(
+        __import__("gui.components.settings_view", fromlist=["settings"]).settings
+    ).start_with_windows is True
+
+
+def test_cancel_pending_load_invalidates_generation_without_dirty_prompt():
+    view = SimpleNamespace(_load_generation=7, _loading=True, _baseline_snapshot=None)
+
+    SettingsView.cancel_pending_load(view)
+
+    assert view._load_generation == 8
+    assert view._loading is False
+    assert SettingsView.has_changes(view) is False
+
+
+def _view_manager(settings_view):
+    page = SimpleNamespace(update=Mock())
+    dashboard = _control(visible=True, opacity=1.0)
+    detail = _control(visible=False)
+    calendar = _control(visible=False)
+    grades = _control(visible=False)
+    controller = SimpleNamespace()
+    manager = ViewManager(
+        page,
+        dashboard,
+        detail,
+        settings_view,
+        calendar,
+        grades,
+        controller,
+    )
+    return manager, dashboard
+
+
+def test_view_manager_awaits_settings_load_before_showing_view():
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        settings_view = _control(
+            visible=False,
+            offset=None,
+            opacity=0.0,
+            cancel_pending_load=Mock(),
+        )
+
+        async def load():
+            started.set()
+            await release.wait()
+
+        settings_view.load_current_settings = load
+        manager, dashboard = _view_manager(settings_view)
+
+        pending = asyncio.create_task(manager.show_settings())
+        await started.wait()
+        assert dashboard.visible is True
+        assert settings_view.visible is False
+
+        release.set()
+        await pending
+        assert dashboard.visible is False
+        assert settings_view.visible is True
+
+    asyncio.run(scenario())
+
+
+def test_closing_settings_cancels_pending_show_and_prevents_late_reveal(monkeypatch):
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        settings_view = _control(
+            visible=False,
+            offset=None,
+            opacity=0.0,
+            cancel_pending_load=Mock(),
+        )
+
+        async def load():
+            started.set()
+            await release.wait()
+
+        settings_view.load_current_settings = load
+        manager, dashboard = _view_manager(settings_view)
+        monkeypatch.setattr("gui.view_manager.asyncio.sleep", AsyncMock())
+
+        pending = asyncio.create_task(manager.show_settings())
+        await started.wait()
+        await manager.close_settings()
+        release.set()
+        await pending
+
+        settings_view.cancel_pending_load.assert_called_once_with()
+        assert dashboard.visible is True
+        assert settings_view.visible is False
+
+    asyncio.run(scenario())
+
+
+def test_app_controller_awaits_view_manager_settings_initialization():
+    async def scenario():
+        manager = SimpleNamespace(show_settings=AsyncMock())
+        controller = SimpleNamespace(view_manager=manager)
+
+        await AppController._show_settings(controller)
+
+        manager.show_settings.assert_awaited_once_with()
+
+    asyncio.run(scenario())

@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 from types import MethodType, SimpleNamespace
 
 from gui.components.settings.system_section import init_system_controls
@@ -34,6 +33,7 @@ def view_for(result):
         _autostart_status=control(value="", color=None),
         _baseline_snapshot=None,
         _loading=False,
+        _load_generation=0,
         update=lambda: None,
     )
     view._sync_autostart_dependency = MethodType(
@@ -57,7 +57,9 @@ def test_system_controls_scope_hidden_option_to_windows_autostart():
     assert view._sw_start_with_windows.on_change is not None
 
 
-def test_reconcile_uses_real_windows_state_and_control_editability(monkeypatch):
+def test_confirmed_load_uses_real_windows_state_and_control_editability(monkeypatch):
+    import gui.components.settings_view as settings_view_module
+
     result = AutostartUiState(
         enabled=False,
         editable=False,
@@ -65,95 +67,65 @@ def test_reconcile_uses_real_windows_state_and_control_editability(monkeypatch):
         message="Bật lại trong Task Manager.",
     )
     view = view_for(result)
-    saved = []
-    monkeypatch.setattr(
-        "gui.components.settings_view.save_settings", lambda: saved.append(True)
-    )
     monkeypatch.setattr(
         "gui.components.settings_view.settings.START_WITH_WINDOWS", True
     )
 
-    asyncio.run(SettingsView._reconcile_autostart(view))
+    loaded = asyncio.run(SettingsView._load_autostart_state(view, 0))
+    SettingsView._apply_autostart_ui(view, loaded)
 
     assert view._sw_start_with_windows.value is False
     assert view._sw_start_with_windows.disabled is True
     assert view._sw_start_minimized.disabled is True
     assert view._autostart_status.value == "Bật lại trong Task Manager."
-    assert saved == [True]
+    assert loaded.confirmed is True
+    assert settings_view_module.settings.START_WITH_WINDOWS is True
 
 
-def test_reconcile_rebases_only_autostart_without_creating_false_dirty_state(
+def test_unconfirmed_autostart_load_preserves_persisted_value_without_dirty_state(
     monkeypatch,
 ):
-    from gui.view_models.settings_form import SettingsFormSnapshot
-    from config import settings
-
-    result = AutostartUiState(False, True, True, "")
-    view = view_for(result)
-    baseline = SettingsFormSnapshot.from_settings(settings)
-    baseline = replace(baseline, start_with_windows=True)
-    view._baseline_snapshot = baseline
-    view._capture_form_snapshot = lambda: replace(
-        baseline,
-        start_with_windows=bool(view._sw_start_with_windows.value),
+    result = AutostartUiState(
+        False,
+        False,
+        False,
+        "Không thể xác nhận. Hãy thử lại.",
+        confirmed=False,
     )
+    from tests.test_settings_view_state import _make_loading_view
+
+    view = _make_loading_view(FakeCoordinator(result))
     monkeypatch.setattr(
         "gui.components.settings_view.settings.START_WITH_WINDOWS", True
     )
-    monkeypatch.setattr(
-        "gui.components.settings_view.save_settings", lambda: True
-    )
 
-    asyncio.run(SettingsView._reconcile_autostart(view))
+    asyncio.run(SettingsView.load_current_settings(view))
 
-    assert view._baseline_snapshot.start_with_windows is False
+    assert view._sw_start_with_windows.value is True
+    assert view._sw_start_with_windows.disabled is True
+    assert view._baseline_snapshot.start_with_windows is True
+    assert view._autostart_status.value == "Không thể xác nhận. Hãy thử lại."
     assert SettingsView.has_changes(view) is False
 
 
-def test_reconcile_preserves_user_toggle_made_while_os_read_is_pending(
-    monkeypatch,
-):
-    from gui.view_models.settings_form import SettingsFormSnapshot
-    from config import settings
+def test_autostart_load_timeout_is_bounded_and_returns_retry_state(monkeypatch):
+    view = view_for(AutostartUiState(True, True, True, ""))
+    view._load_generation = 4
+    observed = []
 
-    async def scenario():
-        release = asyncio.Event()
-        started = asyncio.Event()
+    async def timeout(awaitable, timeout):
+        observed.append(timeout)
+        awaitable.close()
+        raise asyncio.TimeoutError
 
-        class DelayedCoordinator(FakeCoordinator):
-            async def load(self):
-                started.set()
-                await release.wait()
-                return self.load_result
+    monkeypatch.setattr("gui.components.settings_view.asyncio.wait_for", timeout)
 
-        result = AutostartUiState(False, True, True, "Trạng thái Windows đã đọc.")
-        view = view_for(result)
-        view._autostart_coordinator = DelayedCoordinator(result)
-        baseline = replace(
-            SettingsFormSnapshot.from_settings(settings),
-            start_with_windows=False,
-        )
-        view._baseline_snapshot = baseline
-        view._capture_form_snapshot = lambda: replace(
-            baseline,
-            start_with_windows=bool(view._sw_start_with_windows.value),
-        )
+    result = asyncio.run(SettingsView._load_autostart_state(view, 4))
 
-        pending = asyncio.create_task(SettingsView._reconcile_autostart(view))
-        await started.wait()
-        view._sw_start_with_windows.value = True
-        release.set()
-        await pending
-
-        assert view._sw_start_with_windows.value is True
-        assert view._baseline_snapshot.start_with_windows is False
-        assert SettingsView.has_changes(view) is True
-        assert view._autostart_status.value == "Trạng thái Windows đã đọc."
-
-    monkeypatch.setattr(
-        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
-    )
-    asyncio.run(scenario())
+    assert observed == [2.0]
+    assert result.confirmed is False
+    assert result.editable is False
+    assert "thử lại" in result.message.lower()
 
 
 def test_apply_autostart_rolls_control_back_when_windows_rejects(monkeypatch):

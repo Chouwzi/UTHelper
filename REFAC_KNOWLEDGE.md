@@ -279,3 +279,19 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   back to its previously confirmed state.
 - Validation: 88 Settings/autostart-focused tests passed; the full suite passed
   with **810 passed, 24 skipped**; `ruff check src tests` passed.
+
+# 2026-08-04 - Transactional Settings initialization
+
+- Opening Settings now awaits one generation-owned initialization transaction
+  before changing view visibility. Persisted settings are snapshotted first;
+  the Windows autostart read is bounded to 2.0 seconds; controls and the clean
+  baseline are committed together only if that generation is still current.
+- A confirmed Windows state overrides only the form snapshot's autostart field.
+  An unconfirmed or timed-out read preserves the persisted value, disables the
+  control, and presents a retry warning without mutating global settings or
+  making the form dirty.
+- Closing Settings or disconnecting invalidates the active load immediately.
+  A late coroutine cannot mutate controls, status, baseline, or visibility, and
+  ViewManager suppresses a stale pending show after close.
+- Validation: 22 task-focused tests and 105 Settings/config/activation regression
+  tests passed; focused Ruff and `git diff --check` passed.

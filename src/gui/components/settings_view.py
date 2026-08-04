@@ -27,7 +27,10 @@ from gui.components.settings.theme_section import init_theme_controls, build_the
 from gui.components.settings.notification_section import init_notification_controls, build_notification_section, build_advanced_section
 from gui.components.settings.integration_section import init_integration_controls, build_integration_section
 from gui.components.settings.debug_section import init_debug_controls, build_debug_section
-from gui.controllers.autostart_settings import AutostartSettingsCoordinator
+from gui.controllers.autostart_settings import (
+    AutostartSettingsCoordinator,
+    AutostartUiState,
+)
 from gui.view_models.settings_form import SettingsFormSnapshot
 
 class SettingsView(ft.Container):
@@ -59,6 +62,7 @@ class SettingsView(ft.Container):
         self._section_containers = []
         self._autostart_coordinator = autostart_coordinator
         self._loading = False
+        self._load_generation = 0
         self._baseline_snapshot = None
         if self._autostart_coordinator is None and not _pu.IS_MOBILE:
             from platform_utils.autostart import create_autostart_service
@@ -1669,36 +1673,44 @@ class SettingsView(ft.Container):
         self._autostart_status.value = result.message
         self._autostart_status.color = C.SAFE if result.success else C.WARNING
 
-    async def _reconcile_autostart(self):
+    async def _load_autostart_state(
+        self, generation: int
+    ) -> AutostartUiState | None:
         if self._autostart_coordinator is None:
-            return
-        value_before_read = bool(self._sw_start_with_windows.value)
-        result = await self._autostart_coordinator.load()
-        draft_after_read = bool(self._sw_start_with_windows.value)
-        user_edited_during_read = draft_after_read != value_before_read
-        self._apply_autostart_ui(result)
-        if user_edited_during_read:
-            self._sw_start_with_windows.value = draft_after_read
-            self._sync_autostart_dependency()
-        if result.confirmed and settings.START_WITH_WINDOWS != result.enabled:
-            previous_enabled = settings.START_WITH_WINDOWS
-            settings.START_WITH_WINDOWS = result.enabled
-            if not save_settings():
-                settings.START_WITH_WINDOWS = previous_enabled
-        if result.confirmed and self._baseline_snapshot is not None:
-            # Only rebase the OS-owned field. Other edits made while the async
-            # query was in flight must remain dirty.
-            self._baseline_snapshot = replace(
-                self._baseline_snapshot,
-                start_with_windows=result.enabled,
-            )
+            return None
         try:
-            self.update()
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Settings view is not mounted during autostart reconciliation",
-                exc_info=True,
+            result = await asyncio.wait_for(
+                self._autostart_coordinator.load(), timeout=2.0
             )
+        except asyncio.TimeoutError:
+            result = AutostartUiState(
+                enabled=False,
+                editable=False,
+                success=False,
+                message=(
+                    "Không thể xác nhận trạng thái Khởi động cùng Windows. "
+                    "Vui lòng thử lại."
+                ),
+                confirmed=False,
+            )
+        except Exception:
+            # Keep this diagnostic deliberately free of adapter/native error text.
+            logging.getLogger(__name__).warning(
+                "settings_autostart_load_failed"
+            )
+            result = AutostartUiState(
+                enabled=False,
+                editable=False,
+                success=False,
+                message=(
+                    "Không thể xác nhận trạng thái Khởi động cùng Windows. "
+                    "Vui lòng thử lại."
+                ),
+                confirmed=False,
+            )
+        if generation != self._load_generation:
+            return None
+        return result
 
     async def _apply_autostart_change(self) -> bool:
         self._autostart_rollback_enabled = None
@@ -1892,9 +1904,23 @@ class SettingsView(ft.Container):
             setattr(settings, name, value)
         return False
 
-    def load_current_settings(self):
+    async def load_current_settings(self) -> None:
+        self._load_generation += 1
+        generation = self._load_generation
         self._loading = True
+        snapshot = SettingsFormSnapshot.from_settings(settings)
         try:
+            autostart = await self._load_autostart_state(generation)
+            if generation != self._load_generation:
+                return
+
+            resolved = snapshot
+            if autostart is not None and autostart.confirmed:
+                resolved = replace(
+                    snapshot,
+                    start_with_windows=autostart.enabled,
+                )
+
             for tile in getattr(self, '_tiles', []):
                 tile.expanded = False
 
@@ -1905,9 +1931,8 @@ class SettingsView(ft.Container):
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
 
-            snapshot = SettingsFormSnapshot.from_settings(settings)
-            self._original_theme = snapshot.theme
-            self._apply_snapshot_to_controls(snapshot)
+            self._original_theme = resolved.theme
+            self._apply_snapshot_to_controls(resolved)
             self._refresh_section_colors()
 
             self._known_courses = set()
@@ -1927,18 +1952,23 @@ class SettingsView(ft.Container):
             self._update_drp_options()
 
             self._save_status.value = ""
-            self._baseline_snapshot = snapshot
-            self.update()
-            if not _pu.IS_MOBILE and self._autostart_coordinator is not None:
-                try:
-                    self._page.run_task(self._reconcile_autostart)
-                except Exception:
-                    logging.getLogger(__name__).warning(
-                        "Cannot schedule Windows autostart reconciliation",
-                        exc_info=True,
+            self._baseline_snapshot = self._capture_form_snapshot()
+            if autostart is not None:
+                display_state = autostart
+                if not autostart.confirmed:
+                    display_state = replace(
+                        autostart,
+                        enabled=resolved.start_with_windows,
                     )
+                self._apply_autostart_ui(display_state)
+            self.update()
         finally:
-            self._loading = False
+            if generation == self._load_generation:
+                self._loading = False
+
+    def cancel_pending_load(self) -> None:
+        self._load_generation += 1
+        self._loading = False
 
     def has_changes(self):
         if self._loading or self._baseline_snapshot is None:
@@ -1949,6 +1979,10 @@ class SettingsView(ft.Container):
         import logging
         _log = logging.getLogger("settings.dialog")
         _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
+        if self._loading:
+            self.cancel_pending_load()
+            self._on_close_cb()
+            return
         if self.has_changes():
             def close_dlg(e):
                 _log.warning(">>> CANCEL button clicked!")

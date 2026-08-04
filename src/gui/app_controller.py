@@ -1377,7 +1377,7 @@ class AppController:
         await self.view_manager.close_calendar()
 
     async def _show_settings(self):
-        self.view_manager.show_settings()
+        await self.view_manager.show_settings()
 
     async def _toggle_grades(self):
         """Toggle the grade overview panel."""
@@ -1626,6 +1626,7 @@ class AppController:
 
 
     async def _close_settings(self):
+        self.settings_view.cancel_pending_load()
         from gui.core.theme import load_theme_from_settings, set_page_theme
         load_theme_from_settings()
         set_page_theme(self.page)
@@ -2049,6 +2050,9 @@ class AppController:
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _on_disconnect(self, e):
+        settings_view = getattr(self, "settings_view", None)
+        if settings_view is not None:
+            settings_view.cancel_pending_load()
         if self.activation_broker is not None:
             self.activation_broker.close(timeout_seconds=1.0)
         self._page_alive.clear()
