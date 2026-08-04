@@ -699,3 +699,28 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   later owner. A failed later enable does not claim ownership, and a wrapper
   captured before close remains safe when invoked afterward. Deterministic
   barrier coverage bounds every wait/join and reproduces the former race.
+
+## Bounded diagnostic crash-boundary evidence (2026-08-04)
+
+- Added real child-process coverage for uncaught main-thread, worker-thread,
+  async-main, and unraisable exceptions. Each child constructs the production
+  `DiagnosticRuntime` boundary with explicit disabled consent, an injected
+  no-network delivery, deterministic safe context, and one exception whose
+  private message contains email, Moodle sesskey, and token-shaped values.
+- Every Python boundary writes exactly one schema-valid report, and none of the
+  private values enter its serialized bytes. Main/async children preserve their
+  non-zero process exit, while worker-thread/unraisable children preserve normal
+  process exit. Raw captured stderr is never rendered by test assertions; only
+  bounded byte counts and return codes cross the parent test boundary.
+- The native-abort child fsyncs the marker and local faulthandler evidence before
+  `os.abort()`. It leaves an unclean marker and no fabricated Python report. A
+  separate clean child proves ordinary close removes the marker and creates no
+  report. Every `subprocess.run` has a ten-second deadline, creates no descendant
+  process, and relies on its documented kill-and-wait behavior on timeout.
+- Focused subprocess verification passes **6 tests in 1.80 seconds**; combined
+  runtime/subprocess verification passes **36 tests in 2.48 seconds**. Two
+  initial bounded full-suite runs each reached **991 passed, 24 skipped** and
+  exposed the same Windows socket-scheduling threshold issue. After that timing
+  guard was fixed independently, the bounded full suite passed with **992
+  passed, 24 skipped in 50.81 seconds**; its runner exited normally with no
+  child or test session left behind.
