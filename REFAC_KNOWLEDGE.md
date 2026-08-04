@@ -579,3 +579,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Focused spool verification passed with **12 tests**, including simulated
   replace failure, concurrent dedupe/pruning, corruption recovery, exact caps,
   and live Windows symlink cases. Scoped Ruff and `git diff --check` passed.
+- Review hardening added a bounded five-second Windows named mutex so queue
+  mutation is serialized across application processes, not only threads. An
+  abandoned owner is recoverable and stale temp cleanup occurs only after the
+  next owner acquires the mutex; an active fsynced temp can no longer be removed
+  before its atomic replace.
+- Windows roots and entries are opened without traversing reparse points. Root
+  volume/file ID is captured before/after canonicalization and checked on every
+  operation; symlinks and junctions are rejected. Queue entries use stable
+  volume/file IDs, and deletion is applied to the verified open handle, so a
+  same-sized replacement cannot be deleted through a path race. The expanded
+  spool suite passes **15 tests**, including real spawned-process, junction, and
+  same-size replacement regressions.

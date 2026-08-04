@@ -5,10 +5,14 @@ from __future__ import annotations
 import os
 import stat
 import threading
+import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
+from typing import BinaryIO
 from uuid import UUID
 
 from diagnostics.models import DiagnosticReport
@@ -16,6 +20,80 @@ from diagnostics.models import DiagnosticReport
 MAX_EVENTS = 20
 MAX_TOTAL_BYTES = 1024 * 1024
 MAX_AGE = timedelta(days=7)
+LOCK_TIMEOUT_SECONDS = 5.0
+
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _GENERIC_READ = 0x80000000
+    _DELETE = 0x00010000
+    _FILE_READ_ATTRIBUTES = 0x0080
+    _FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
+    _OPEN_EXISTING = 3
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _FILE_DISPOSITION_INFO_CLASS = 4
+    _WAIT_OBJECT_0 = 0
+    _WAIT_ABANDONED = 0x80
+    _WAIT_TIMEOUT = 0x102
+    _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+
+    class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    class _FILE_DISPOSITION_INFO(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    _kernel32.CreateFileW.restype = wintypes.HANDLE
+    _kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
+    ]
+    _kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    _kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    _kernel32.CreateMutexW.restype = wintypes.HANDLE
+    _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    _kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    _kernel32.ReleaseMutex.restype = wintypes.BOOL
+else:
+    import errno
+    import fcntl
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +114,16 @@ class QueuedReport:
 
 
 @dataclass(frozen=True, slots=True)
+class _FileIdentity:
+    key: tuple[int, int]
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ValidatedFile:
     queued: QueuedReport
     size: int
-    identity: os.stat_result
+    identity: _FileIdentity
 
 
 _LOCKS_GUARD = threading.Lock()
@@ -62,6 +146,252 @@ def _lock_for(root: Path) -> threading.RLock:
         return _ROOT_LOCKS.setdefault(key, threading.RLock())
 
 
+def _stat_is_reparse(identity: os.stat_result) -> bool:
+    return bool(
+        getattr(identity, "st_file_attributes", 0)
+        & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _path_is_reparse(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if is_junction is not None and is_junction():
+            return True
+        return _stat_is_reparse(path.lstat())
+    except OSError:
+        return False
+
+
+def _identity_from_stat(identity: os.stat_result) -> _FileIdentity:
+    return _FileIdentity(
+        key=(int(identity.st_dev), int(identity.st_ino)),
+        size=int(identity.st_size),
+    )
+
+
+def _raise_windows_error(path: Path) -> None:
+    error = ctypes.get_last_error()
+    if error in {2, 3}:
+        raise FileNotFoundError(error, ctypes.FormatError(error), str(path))
+    raise OSError(error, ctypes.FormatError(error), str(path))
+
+
+def _windows_open_path(
+    path: Path,
+    *,
+    access: int,
+    expect_directory: bool,
+) -> tuple[int, _FileIdentity]:
+    handle = _kernel32.CreateFileW(
+        str(path),
+        access,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        _raise_windows_error(path)
+    information = _BY_HANDLE_FILE_INFORMATION()
+    if not _kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        error = ctypes.get_last_error()
+        _kernel32.CloseHandle(handle)
+        raise OSError(error, ctypes.FormatError(error), str(path))
+    attributes = int(information.dwFileAttributes)
+    is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT or is_directory != expect_directory:
+        _kernel32.CloseHandle(handle)
+        kind = "directory" if expect_directory else "regular file"
+        raise ValueError(f"{path} is not a safe {kind}")
+    file_index = (int(information.nFileIndexHigh) << 32) | int(
+        information.nFileIndexLow
+    )
+    size = (int(information.nFileSizeHigh) << 32) | int(information.nFileSizeLow)
+    return int(handle), _FileIdentity(
+        key=(int(information.dwVolumeSerialNumber), file_index),
+        size=size,
+    )
+
+
+def _path_identity(path: Path, *, expect_directory: bool) -> _FileIdentity:
+    if os.name == "nt":
+        handle, identity = _windows_open_path(
+            path,
+            access=_FILE_READ_ATTRIBUTES,
+            expect_directory=expect_directory,
+        )
+        _kernel32.CloseHandle(handle)
+        return identity
+
+    raw_identity = path.lstat()
+    if _stat_is_reparse(raw_identity) or stat.S_ISLNK(raw_identity.st_mode):
+        raise ValueError(f"{path} is a reparse point")
+    expected_mode = stat.S_ISDIR if expect_directory else stat.S_ISREG
+    if not expected_mode(raw_identity.st_mode):
+        kind = "directory" if expect_directory else "regular file"
+        raise ValueError(f"{path} is not a safe {kind}")
+    return _identity_from_stat(raw_identity)
+
+
+def _open_binary_no_follow(
+    path: Path,
+    *,
+    expected: _FileIdentity,
+) -> tuple[BinaryIO, _FileIdentity] | None:
+    if os.name == "nt":
+        try:
+            handle, identity = _windows_open_path(
+                path,
+                access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
+                expect_directory=False,
+            )
+        except (OSError, ValueError):
+            return None
+        if identity.key != expected.key:
+            _kernel32.CloseHandle(handle)
+            return None
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        except OSError:
+            _kernel32.CloseHandle(handle)
+            return None
+        return os.fdopen(descriptor, "rb"), identity
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    opened = os.fstat(descriptor)
+    identity = _identity_from_stat(opened)
+    if not stat.S_ISREG(opened.st_mode) or identity.key != expected.key:
+        os.close(descriptor)
+        return None
+    return os.fdopen(descriptor, "rb"), identity
+
+
+def _delete_exact_regular(path: Path, *, expected: _FileIdentity | None) -> bool:
+    if os.name == "nt":
+        try:
+            handle, identity = _windows_open_path(
+                path,
+                access=_DELETE | _FILE_READ_ATTRIBUTES,
+                expect_directory=False,
+            )
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError):
+            return False
+        try:
+            if expected is not None and identity.key != expected.key:
+                return False
+            disposition = _FILE_DISPOSITION_INFO(DeleteFile=1)
+            if not _kernel32.SetFileInformationByHandle(
+                handle,
+                _FILE_DISPOSITION_INFO_CLASS,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            ):
+                return False
+            return True
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    try:
+        raw_identity = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if _stat_is_reparse(raw_identity) or not stat.S_ISREG(raw_identity.st_mode):
+        return False
+    identity = _identity_from_stat(raw_identity)
+    if expected is not None and identity.key != expected.key:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+@contextmanager
+def _windows_process_lock(root: Path):
+    digest = sha256(os.path.normcase(str(root)).encode("utf-8")).hexdigest()
+    name = f"Local\\UTHelperDiagnosticSpool-{digest}"
+    handle = _kernel32.CreateMutexW(None, False, name)
+    if not handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, ctypes.FormatError(error))
+    acquired = False
+    try:
+        result = _kernel32.WaitForSingleObject(
+            handle,
+            int(LOCK_TIMEOUT_SECONDS * 1000),
+        )
+        if result in {_WAIT_OBJECT_0, _WAIT_ABANDONED}:
+            acquired = True
+        elif result == _WAIT_TIMEOUT:
+            raise TimeoutError("diagnostic spool lock timed out")
+        else:
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error))
+        yield
+    finally:
+        if acquired:
+            _kernel32.ReleaseMutex(handle)
+        _kernel32.CloseHandle(handle)
+
+
+@contextmanager
+def _posix_process_lock(root: Path):
+    lock_path = root / ".diagnostic-spool.lock"
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        identity = os.fstat(descriptor)
+        if not stat.S_ISREG(identity.st_mode):
+            raise ValueError("diagnostic spool lock is not a regular file")
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("diagnostic spool lock timed out") from exc
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _process_lock(root: Path):
+    if os.name == "nt":
+        with _windows_process_lock(root):
+            yield
+    else:
+        with _posix_process_lock(root):
+            yield
+
+
 class DiagnosticSpool:
     """Store only schema-valid reports under strict count, size, and age caps."""
 
@@ -71,13 +401,29 @@ class DiagnosticSpool:
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         requested_root = Path(root)
-        if requested_root.is_symlink():
-            raise ValueError("diagnostic spool root must not be a symlink")
+        if _path_is_reparse(requested_root):
+            raise ValueError(
+                "diagnostic spool root must not be a symlink, junction, or reparse point"
+            )
         requested_root.mkdir(parents=True, exist_ok=True)
-        if requested_root.is_symlink() or not requested_root.is_dir():
+        if _path_is_reparse(requested_root):
+            raise ValueError(
+                "diagnostic spool root must not be a symlink, junction, or reparse point"
+            )
+        requested_absolute = requested_root.absolute()
+        requested_identity = _path_identity(
+            requested_absolute,
+            expect_directory=True,
+        )
+        resolved_root = requested_absolute.resolve(strict=True)
+        resolved_identity = _path_identity(resolved_root, expect_directory=True)
+        if requested_identity.key != resolved_identity.key:
+            raise ValueError("diagnostic spool root changed during initialization")
+        if not resolved_root.is_dir():
             raise ValueError("diagnostic spool root must be a regular directory")
 
-        self.root = requested_root.resolve(strict=True)
+        self.root = resolved_root
+        self._root_identity = resolved_identity
         self._clock = clock
         self._lock = _lock_for(self.root)
 
@@ -91,7 +437,7 @@ class DiagnosticSpool:
         if len(payload) > MAX_TOTAL_BYTES:
             return EnqueueResult(too_large=True)
 
-        with self._lock:
+        with self._exclusive():
             self._assert_root()
             current = self._prune_locked()
             if any(
@@ -121,7 +467,7 @@ class DiagnosticSpool:
 
     def pending(self) -> tuple[QueuedReport, ...]:
         """Return validated pending reports in deterministic oldest-first order."""
-        with self._lock:
+        with self._exclusive():
             self._assert_root()
             return tuple(item.queued for item in self._prune_locked())
 
@@ -129,7 +475,7 @@ class DiagnosticSpool:
         """Remove only validated queue entries matching ``event_id``."""
         if not isinstance(event_id, UUID):
             raise TypeError("event_id must be a UUID")
-        with self._lock:
+        with self._exclusive():
             self._assert_root()
             for item in self._prune_locked():
                 if item.queued.report.event_id == event_id:
@@ -140,7 +486,7 @@ class DiagnosticSpool:
 
     def clear(self) -> None:
         """Delete owned direct regular JSON/temp children without following links."""
-        with self._lock:
+        with self._exclusive():
             self._assert_root()
             for path, identity in self._owned_regular_files(include_temps=True):
                 self._safe_unlink_regular(path, expected=identity)
@@ -152,11 +498,11 @@ class DiagnosticSpool:
 
     def _assert_root(self) -> None:
         try:
-            identity = self.root.lstat()
-        except OSError as exc:
+            identity = _path_identity(self.root, expect_directory=True)
+        except (OSError, ValueError) as exc:
             raise RuntimeError("diagnostic spool root is unavailable") from exc
-        if stat.S_ISLNK(identity.st_mode) or not stat.S_ISDIR(identity.st_mode):
-            raise RuntimeError("diagnostic spool root is not a safe directory")
+        if identity.key != self._root_identity.key:
+            raise RuntimeError("diagnostic spool root identity changed unexpectedly")
         try:
             resolved = self.root.resolve(strict=True)
         except OSError as exc:
@@ -164,28 +510,30 @@ class DiagnosticSpool:
         if resolved != self.root:
             raise RuntimeError("diagnostic spool root changed unexpectedly")
 
+    @contextmanager
+    def _exclusive(self):
+        with self._lock:
+            with _process_lock(self.root):
+                yield
+
     def _owned_regular_files(
         self,
         *,
         include_temps: bool,
-    ) -> tuple[tuple[Path, os.stat_result], ...]:
-        owned: list[tuple[Path, os.stat_result]] = []
+    ) -> tuple[tuple[Path, _FileIdentity], ...]:
+        owned: list[tuple[Path, _FileIdentity]] = []
         with os.scandir(self.root) as entries:
             for entry in entries:
                 is_json = entry.name.endswith(".json")
                 is_temp = entry.name.startswith(".") and entry.name.endswith(".tmp")
                 if not is_json and not (include_temps and is_temp):
                     continue
-                try:
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
-                    identity = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                if not stat.S_ISREG(identity.st_mode):
-                    continue
                 path = self.root / entry.name
                 if path.parent != self.root:
+                    continue
+                try:
+                    identity = _path_identity(path, expect_directory=False)
+                except (OSError, ValueError):
                     continue
                 owned.append((path, identity))
         return tuple(owned)
@@ -242,37 +590,21 @@ class DiagnosticSpool:
     def _read_validated(
         self,
         path: Path,
-        identity: os.stat_result,
+        identity: _FileIdentity,
     ) -> _ValidatedFile | None:
-        if identity.st_size > MAX_TOTAL_BYTES:
+        if identity.size > MAX_TOTAL_BYTES:
             return None
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except OSError:
+        opened = _open_binary_no_follow(path, expected=identity)
+        if opened is None:
             return None
-        try:
-            opened_identity = os.fstat(descriptor)
-            if not stat.S_ISREG(opened_identity.st_mode):
-                return None
-            if not self._same_identity(identity, opened_identity):
-                return None
-            with os.fdopen(descriptor, "rb") as stream:
-                descriptor = -1
-                payload = stream.read(MAX_TOTAL_BYTES + 1)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+        stream, opened_identity = opened
+        with stream:
+            payload = stream.read(MAX_TOTAL_BYTES + 1)
         if len(payload) > MAX_TOTAL_BYTES:
             return None
         try:
-            current_identity = path.lstat()
-        except OSError:
-            return None
-        if stat.S_ISLNK(current_identity.st_mode) or not stat.S_ISREG(
-            current_identity.st_mode
-        ):
+            current_identity = _path_identity(path, expect_directory=False)
+        except (OSError, ValueError):
             return None
         if not self._same_identity(identity, current_identity):
             return None
@@ -290,37 +622,15 @@ class DiagnosticSpool:
         self,
         path: Path,
         *,
-        expected: os.stat_result | None = None,
+        expected: _FileIdentity | None = None,
     ) -> bool:
         if path.parent != self.root:
             return False
-        try:
-            current = path.lstat()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
-            return False
-        if expected is not None and not self._same_identity(expected, current):
-            return False
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        return True
+        return _delete_exact_regular(path, expected=expected)
 
     @staticmethod
-    def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
-        if os.name == "nt":
-            # CPython obtains directory-entry/path and open-handle identities via
-            # different Win32 APIs; their synthetic st_ino/st_dev values are not
-            # guaranteed to agree. The caller checks the path for a reparse point
-            # both before and after opening; size then rejects a changed payload.
-            return left.st_size == right.st_size
-        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+    def _same_identity(left: _FileIdentity, right: _FileIdentity) -> bool:
+        return left.key == right.key
 
 
 __all__ = [

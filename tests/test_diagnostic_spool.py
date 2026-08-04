@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import multiprocessing as mp
+import queue
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +16,43 @@ from diagnostics.spool import MAX_TOTAL_BYTES, DiagnosticSpool
 
 
 NOW = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
+
+
+def _paused_enqueue_worker(
+    root: str,
+    report_payload: str,
+    ready,
+    release,
+    outcomes,
+) -> None:
+    import diagnostics.spool as spool_module
+
+    report = DiagnosticReport.model_validate_json(report_payload)
+    real_replace = spool_module.os.replace
+
+    def pause_before_replace(source, destination) -> None:
+        ready.set()
+        if not release.wait(5):
+            raise TimeoutError("test did not release paused replace")
+        real_replace(source, destination)
+
+    spool_module.os.replace = pause_before_replace
+    try:
+        result = DiagnosticSpool(Path(root), clock=lambda: NOW).enqueue(report)
+        outcomes.put(("writer", "stored", result.stored))
+    except BaseException as exc:  # pragma: no cover - asserted in parent process
+        outcomes.put(("writer", "error", type(exc).__name__))
+
+
+def _pending_worker(root: str, started, finished, outcomes) -> None:
+    started.set()
+    try:
+        count = len(DiagnosticSpool(Path(root), clock=lambda: NOW).pending())
+        outcomes.put(("reader", "pending", count))
+    except BaseException as exc:  # pragma: no cover - asserted in parent process
+        outcomes.put(("reader", "error", type(exc).__name__))
+    finally:
+        finished.set()
 
 
 def _report(
@@ -59,6 +99,29 @@ def _symlink(source: Path, destination: Path, *, directory: bool = False) -> Non
         os.symlink(source, destination, target_is_directory=directory)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlinks unavailable in this environment: {exc}")
+
+
+def _junction(source: Path, destination: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction behavior")
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(destination), str(source)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {completed.stderr}")
+
+
+def _stop_process(process: mp.Process) -> None:
+    process.join(5)
+    if process.is_alive():
+        process.terminate()
+        process.join(2)
+        pytest.fail(f"child process {process.name} did not stop within 5 seconds")
+    assert process.exitcode == 0
 
 
 def test_spool_accepts_only_validated_reports(tmp_path: Path) -> None:
@@ -186,6 +249,46 @@ def test_concurrent_spool_instances_serialize_dedupe_and_pruning(
     assert all(item.path.is_file() for item in pending)
 
 
+def test_processes_do_not_prune_another_process_active_temp(tmp_path: Path) -> None:
+    context = mp.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    reader_started = context.Event()
+    reader_finished = context.Event()
+    outcomes = context.Queue()
+    root = tmp_path / "spool"
+    writer = context.Process(
+        target=_paused_enqueue_worker,
+        args=(str(root), _report(0).model_dump_json(), ready, release, outcomes),
+    )
+    reader = context.Process(
+        target=_pending_worker,
+        args=(str(root), reader_started, reader_finished, outcomes),
+    )
+
+    writer.start()
+    try:
+        assert ready.wait(5), "writer did not reach its fsynced pre-replace point"
+        assert len(list(root.glob(".*.tmp"))) == 1
+        reader.start()
+        assert reader_started.wait(5), "reader process did not start"
+        reader_finished.wait(0.5)
+    finally:
+        release.set()
+        _stop_process(writer)
+        if reader.pid is not None:
+            _stop_process(reader)
+
+    try:
+        observed = {outcomes.get(timeout=2) for _ in range(2)}
+    except queue.Empty:
+        pytest.fail("child process did not report its bounded outcome")
+    assert observed == {
+        ("writer", "stored", True),
+        ("reader", "pending", 1),
+    }
+
+
 def test_acknowledge_removes_only_the_matching_validated_report(tmp_path: Path) -> None:
     spool = DiagnosticSpool(tmp_path, clock=lambda: NOW)
     first = _report(0)
@@ -256,6 +359,40 @@ def test_spool_rejects_a_symlink_root(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="symlink"):
         DiagnosticSpool(linked_root, clock=lambda: NOW)
+
+
+def test_spool_rejects_a_windows_junction_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-junction-target"
+    real_root.mkdir()
+    junction_root = tmp_path / "junction-root"
+    _junction(real_root, junction_root)
+
+    with pytest.raises(ValueError, match="junction|reparse"):
+        DiagnosticSpool(junction_root, clock=lambda: NOW)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file identity regression")
+def test_prune_never_deletes_a_same_size_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spool = DiagnosticSpool(tmp_path, clock=lambda: NOW)
+    expired = _report(0, occurred_at=NOW - timedelta(days=8))
+    queued_path = tmp_path / "expired.json"
+    queued_path.write_bytes(expired.model_dump_json().encode("utf-8"))
+    original_read = spool._read_validated
+    replacement = b"x" * queued_path.stat().st_size
+
+    def replace_after_validation(path, identity):
+        item = original_read(path, identity)
+        path.unlink()
+        path.write_bytes(replacement)
+        return item
+
+    monkeypatch.setattr(spool, "_read_validated", replace_after_validation)
+
+    assert spool.pending() == ()
+    assert queued_path.read_bytes() == replacement
 
 
 def test_spool_fails_closed_if_root_is_replaced_by_symlink(tmp_path: Path) -> None:
