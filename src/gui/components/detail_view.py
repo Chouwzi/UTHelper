@@ -121,9 +121,14 @@ class DetailView(ft.Container):
     def _positive_course_id(value) -> int | None:
         if isinstance(value, bool):
             return None
-        try:
-            course_id = int(value)
-        except (TypeError, ValueError):
+        if isinstance(value, int):
+            course_id = value
+        elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+            try:
+                course_id = int(value)
+            except ValueError:
+                return None
+        else:
             return None
         return course_id if course_id > 0 else None
 

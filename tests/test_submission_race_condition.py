@@ -537,6 +537,18 @@ def test_assignment_without_native_context_explains_browser_fallback(
             "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
             True,
         ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            1.5,
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "1.5",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
     ],
 )
 def test_assignment_with_untrusted_native_target_uses_safe_fallback(
@@ -563,6 +575,27 @@ def test_assignment_with_untrusted_native_target_uses_safe_fallback(
     assert view._pick_btn.visible is False
     assert view._submit_btn.visible is False
     assert view._finalize_btn.visible is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1, 1),
+        ("456", 456),
+        (True, None),
+        (1.5, None),
+        (-1.5, None),
+        (float("inf"), None),
+        (float("nan"), None),
+        ("1.5", None),
+        ("+1", None),
+        (" 1", None),
+    ],
+)
+def test_positive_course_id_accepts_only_canonical_positive_integers(
+    value, expected
+):
+    assert DetailView._positive_course_id(value) == expected
 
 
 def test_non_assignment_does_not_mount_submission_status_row():
