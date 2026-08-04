@@ -514,3 +514,20 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   test plus `git diff --check` passed. The planned pytest-timeout option was not
   available in this environment, so the focused run used the shell's finite
   20-second process timeout instead.
+
+## Pre-persistence diagnostic redaction (2026-08-04)
+
+- Diagnostic exception reports are now assembled exclusively from normalized
+  exception type and traceback metadata. Exception messages, arguments, causes,
+  contexts, absolute external paths, and local source roots never enter the
+  serialized report.
+- Application frames are source-relative when they belong to the configured
+  source tree and basename-only otherwise. Identifiers, paths, frame count, and
+  fingerprint inputs are allow-list normalized and bounded; event UUID and
+  occurrence time do not affect deterministic grouping.
+- Local operational log text has a separate defensive sanitizer for credentials,
+  authorization values, URLs, email addresses, home-directory paths, control
+  characters, unprintable values, and oversized input. It is not used as a
+  substitute for the report's typed allow-list boundary.
+- Focused privacy verification: **26 passed**. Scoped Ruff and `git diff --check`
+  passed; the pytest process used a finite 20-second shell timeout.
