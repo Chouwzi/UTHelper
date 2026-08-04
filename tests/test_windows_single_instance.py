@@ -434,7 +434,7 @@ def test_activation_signals_coalesce_without_deadlocking_receiver():
     assert broker.close()
 
 
-def test_shutdown_wins_promptly_and_prevents_later_callbacks():
+def test_successful_close_is_quiescent_and_prevents_future_callbacks():
     kernel = FakeKernelObjectApi()
     broker = _bootstrap(kernel).broker
     assert broker is not None
@@ -443,10 +443,50 @@ def test_shutdown_wins_promptly_and_prevents_later_callbacks():
 
     started_at = time.monotonic()
     assert broker.close()
+    receiver = broker._receiver
+    assert receiver is not None
+    assert not receiver.is_alive()
 
     kernel.set_event(broker.activation_handle)
     assert time.monotonic() - started_at < 0.5
     assert not callback_called.wait(0.05)
+    assert len(kernel.closes) == 4
+
+
+def test_false_close_allows_previously_admitted_handler_to_begin_after_return():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    admission_won = threading.Event()
+    allow_user_handler = threading.Event()
+    user_handler_started = threading.Event()
+    original_invoke = broker._invoke_handler
+
+    def pause_before_user_handler(handler) -> None:
+        admission_won.set()
+        assert allow_user_handler.wait(1.0)
+        original_invoke(handler)
+
+    broker._invoke_handler = pause_before_user_handler  # type: ignore[method-assign]
+    broker.bind_show_handler(user_handler_started.set)
+    kernel.set_event(broker.activation_handle)
+    assert admission_won.wait(0.5)
+
+    # The receiver has passed its last shutdown check, but user code has not
+    # begun. A zero-bound close must report that quiescence was not established.
+    assert not broker.close(timeout_seconds=0.0)
+    assert not user_handler_started.is_set()
+    assert not kernel.closes
+
+    allow_user_handler.set()
+    assert user_handler_started.wait(0.5)
+    receiver = broker._receiver
+    assert receiver is not None
+    receiver.join(0.5)
+
+    assert not receiver.is_alive()
+    assert len(kernel.closes) == 4
+    assert broker.close()
 
 
 def test_close_uses_only_short_kernel_waits_and_is_idempotent():

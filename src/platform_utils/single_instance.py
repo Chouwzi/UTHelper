@@ -110,10 +110,10 @@ class WindowsActivationBroker:
         self._receiver: Thread | None = None
         self._lock = Lock()
         self._close_requested = Event()
-        # This gate is deliberately held through the actual user callback. It
-        # makes callback invocation and close() linearly ordered: whichever
-        # side enters first wins. close() only waits for it within the caller's
-        # remaining timeout, so a slow callback cannot cause unbounded shutdown.
+        # A receiver which passes the shutdown check owns an in-flight callback
+        # admission until the user handler returns. close() waits for that gate
+        # only within the caller's bound; therefore only a True return certifies
+        # that no callback can begin or remain in flight.
         self._invocation_gate = Lock()
 
     def bind_show_handler(self, handler: Callable[[], None]) -> None:
@@ -142,7 +142,14 @@ class WindowsActivationBroker:
                 logger.warning("windows_activation_receiver_start_failed")
 
     def close(self, timeout_seconds: float = 1.0) -> bool:
-        """Stop the receiver and release every handle owned by this broker once."""
+        """Request bounded shutdown and report whether it fully completed.
+
+        ``True`` means the receiver has stopped, all owned handles are closed,
+        and no callback can begin later. ``False`` means shutdown is requested
+        but a callback admission which won before that request may still begin
+        or finish; receiver-exit cleanup is then deferred. Activations observed
+        after the shutdown request are never newly admitted.
+        """
         timeout = _join_timeout_seconds(timeout_seconds)
         deadline = time.monotonic() + timeout
 
@@ -162,8 +169,10 @@ class WindowsActivationBroker:
         if gate_acquired:
             self._invocation_gate.release()
         else:
-            # The receiver may still be executing user code. It owns cleanup
-            # after it exits; closing live wait handles here would be unsafe.
+            # The receiver may be executing user code or may have passed its
+            # final shutdown check and be paused immediately before calling it.
+            # False deliberately reports that quiescence was not established.
+            # The receiver owns cleanup after exit because its waits are live.
             return receiver is None or not receiver.is_alive()
 
         if receiver is not None:
@@ -198,20 +207,25 @@ class WindowsActivationBroker:
                     handler = self._handler
                 if handler is None:
                     continue
-                # Holding the invocation gate across handler() is necessary:
-                # releasing it after a separate "admitted" state would allow
-                # close() to return before the user callback actually begins.
+                # Passing the check admits this callback. Holding the gate until
+                # it returns lets a successful close certify full quiescence;
+                # a bounded close which cannot acquire the gate returns False.
                 with self._invocation_gate:
                     if self._close_requested.is_set():
                         return
-                    try:
-                        handler()
-                    except Exception:
-                        logger.warning("windows_activation_handler_failed")
+                    self._invoke_handler(handler)
         finally:
             with self._lock:
                 if self._closed:
                     self._close_owned_handles_locked()
+
+    @staticmethod
+    def _invoke_handler(handler: Callable[[], None]) -> None:
+        """Run one admitted handler while containing callback failures."""
+        try:
+            handler()
+        except Exception:
+            logger.warning("windows_activation_handler_failed")
 
     def _close_owned_handles_locked(self) -> None:
         if self._handles_closed:

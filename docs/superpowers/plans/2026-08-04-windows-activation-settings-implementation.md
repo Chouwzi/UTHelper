@@ -202,11 +202,11 @@ git commit -m "feat: add secure windows instance ownership"
 **Interfaces:**
 
 - `WindowsActivationBroker.bind_show_handler(handler: Callable[[], None]) -> None` starts no second receiver and makes the named ready event observable only after the handler is bound.
-- `WindowsActivationBroker.close(timeout_seconds: float = 1.0) -> bool` signals shutdown, joins for the supplied bound, closes all owned handles once, and reports whether the thread stopped.
+- `WindowsActivationBroker.close(timeout_seconds: float = 1.0) -> bool` signals shutdown and waits only for the supplied bound. `True` reports that the receiver stopped, all owned handles closed, and no callback can begin later. `False` reports shutdown pending: a callback admitted before the shutdown request may still begin or finish before receiver-exit cleanup. Activations observed after the request are never newly admitted.
 - `WindowActivator.request_show() -> None` is thread-safe at the boundary: it calls only `page.run_task(self.show)`.
 - `WindowActivator.show() -> None` is async and is the only code that manipulates the Flet window for a SHOW request.
 
-- [ ] Add failing broker tests for: activation invokes the callback; ten activation signals before the receiver consumes them coalesce into at least one callback without deadlock; shutdown wins promptly; `close()` passes `1000` ms or less to all waits; repeated `close()` is idempotent; no callback occurs after close.
+- [ ] Add failing broker tests for: activation invokes the callback; ten activation signals before the receiver consumes them coalesce into at least one callback without deadlock; shutdown wins promptly; `close()` passes `1000` ms or less to all waits; repeated `close()` is idempotent; no callback occurs after a successful close; a false return permits a callback admitted before shutdown to finish while later activations are rejected.
 - [ ] Implement the broker receiver with an unnamed manual-reset shutdown event and `wait_many((shutdown, activation), timeout_ms=250)`. On activation, call the bound plain callback and continue. Do not import or call Flet in this module.
 - [ ] Set the acknowledgement event only after `bind_show_handler()` has installed the callback and receiver. Reset it during close before releasing ownership so a new secondary cannot mistake teardown for readiness.
 - [ ] Add failing `WindowActivator` tests using a page spy that records property writes, `update()`, `run_task()`, and awaited `to_front()`.
