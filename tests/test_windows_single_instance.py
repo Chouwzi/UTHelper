@@ -436,3 +436,50 @@ def test_close_uses_only_short_kernel_waits_and_is_idempotent():
     assert broker.close()
     assert len(kernel.closes) == close_count
     assert all(timeout_ms <= 1000 for timeout_ms in kernel.wait_timeouts)
+
+
+def test_timed_out_close_defers_handle_cleanup_until_blocking_handler_exits():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    close_finished = threading.Event()
+    callback_count = 0
+    close_result: list[bool] = []
+
+    def blocking_handler() -> None:
+        nonlocal callback_count
+        callback_count += 1
+        handler_started.set()
+        assert release_handler.wait(1.0)
+
+    def close_with_no_wait() -> None:
+        close_result.append(broker.close(timeout_seconds=0.0))
+        close_finished.set()
+
+    broker.bind_show_handler(blocking_handler)
+    kernel.set_event(broker.activation_handle)
+    assert handler_started.wait(0.5)
+
+    closer = threading.Thread(target=close_with_no_wait)
+    closer.start()
+    try:
+        assert close_finished.wait(0.25)
+        assert close_result == [False]
+        assert not kernel.closes
+
+        kernel.set_event(broker.activation_handle)
+    finally:
+        release_handler.set()
+        closer.join(0.5)
+        receiver = broker._receiver
+        assert receiver is not None
+        receiver.join(0.5)
+
+    assert not receiver.is_alive()
+    assert callback_count == 1
+    assert len(kernel.closes) == 4
+    assert len(kernel.releases) == 1
+    assert broker.close()
+    assert len(kernel.closes) == 4

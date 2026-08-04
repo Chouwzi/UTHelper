@@ -152,41 +152,51 @@ class WindowsActivationBroker:
             stopped = receiver is None or not receiver.is_alive()
 
             with self._lock:
-                if not self._handles_closed:
-                    self._handles_closed = True
-                    _close_quietly(self._kernel, self.acknowledgement_handle)
-                    _close_quietly(self._kernel, self.activation_handle)
-                    if self._shutdown_handle is not None:
-                        _close_quietly(self._kernel, self._shutdown_handle)
-                    _release_and_close_quietly(self._kernel, self.mutex_handle)
+                if stopped:
+                    self._close_owned_handles_locked()
             return stopped
 
     def _receive_activations(self) -> None:
         shutdown_handle = self._shutdown_handle
         if shutdown_handle is None:
             return
-        while True:
-            try:
-                result = self._kernel.wait_many(
-                    (shutdown_handle, self.activation_handle), RECEIVER_WAIT_TIMEOUT_MS
-                )
-            except Exception:
-                logger.warning("windows_activation_receiver_wait_failed")
-                return
-            if result == WAIT_OBJECT_0:
-                return
-            if result != WAIT_OBJECT_0 + 1:
-                continue
-            with self._lock:
-                if self._closed:
+        try:
+            while True:
+                try:
+                    result = self._kernel.wait_many(
+                        (shutdown_handle, self.activation_handle), RECEIVER_WAIT_TIMEOUT_MS
+                    )
+                except Exception:
+                    logger.warning("windows_activation_receiver_wait_failed")
                     return
-                handler = self._handler
+                if result == WAIT_OBJECT_0:
+                    return
+                if result != WAIT_OBJECT_0 + 1:
+                    continue
+                with self._lock:
+                    if self._closed:
+                        return
+                    handler = self._handler
                 if handler is None:
                     continue
                 try:
                     handler()
                 except Exception:
                     logger.warning("windows_activation_handler_failed")
+        finally:
+            with self._lock:
+                if self._closed:
+                    self._close_owned_handles_locked()
+
+    def _close_owned_handles_locked(self) -> None:
+        if self._handles_closed:
+            return
+        self._handles_closed = True
+        _close_quietly(self._kernel, self.acknowledgement_handle)
+        _close_quietly(self._kernel, self.activation_handle)
+        if self._shutdown_handle is not None:
+            _close_quietly(self._kernel, self._shutdown_handle)
+        _release_and_close_quietly(self._kernel, self.mutex_handle)
 
 
 @dataclass(slots=True)
