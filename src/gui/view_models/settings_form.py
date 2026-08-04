@@ -52,8 +52,10 @@ def _parse_int(
         raise SettingsFormValidationError(f"{name} must be an integer")
     try:
         parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
-        raise SettingsFormValidationError(f"{name} must be an integer") from exc
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None:
+        raise SettingsFormValidationError(f"{name} must be an integer") from None
     if isinstance(value, float) and not value.is_integer():
         raise SettingsFormValidationError(f"{name} must be an integer")
     if parsed < minimum or (maximum is not None and parsed > maximum):
@@ -78,43 +80,57 @@ def _normalize_csv_strings(value: object) -> tuple[str, ...]:
     parts = value.split(",") if isinstance(value, str) else value
     try:
         raw_values = list(parts)  # type: ignore[arg-type]
-    except TypeError as exc:
-        raise SettingsFormValidationError("list value must be comma-separated") from exc
+    except TypeError:
+        raw_values = None
+    if raw_values is None:
+        raise SettingsFormValidationError("list value must be comma-separated") from None
     unique: dict[str, str] = {}
     for item in raw_values:
         normalized = str(item).strip()
         if normalized:
-            unique.setdefault(normalized.casefold(), normalized)
-    return tuple(sorted(unique.values(), key=str.casefold))
+            casefolded = normalized.casefold()
+            previous = unique.get(casefolded)
+            unique[casefolded] = (
+                normalized if previous is None else min(previous, normalized)
+            )
+    return tuple(sorted(unique.values(), key=lambda item: (item.casefold(), item)))
 
 
 def _normalize_notify_types(value: object) -> tuple[str, ...]:
     """Canonicalize the set-like notification type control."""
+    if _is_blank(value):
+        return DEFAULT_NOTIFY_TYPES
     normalized = tuple(item.casefold() for item in _normalize_csv_strings(value))
-    return tuple(sorted(set(normalized))) if normalized else DEFAULT_NOTIFY_TYPES
+    return tuple(sorted(set(normalized)))
 
 
 def _normalize_milestones(value: object) -> tuple[int, ...]:
     """Normalize positive unique notification minute milestones descending."""
     if _is_blank(value):
         return DEFAULT_MILESTONES
-    parts = value.split(",") if isinstance(value, str) else value
-    try:
-        raw_values = list(parts)  # type: ignore[arg-type]
-    except TypeError as exc:
-        raise SettingsFormValidationError(
-            "notify_milestones_minutes must be positive integers"
-        ) from exc
+    if isinstance(value, str):
+        raw_values = value.split(",")
+    else:
+        try:
+            raw_values = list(value)  # type: ignore[arg-type]
+        except TypeError:
+            raw_values = [value]
     milestones: set[int] = set()
     for item in raw_values:
-        try:
-            if isinstance(item, bool):
-                raise ValueError
-            milestone = int(item)
-        except (TypeError, ValueError) as exc:
+        if isinstance(item, bool) or (
+            isinstance(item, float) and not item.is_integer()
+        ):
             raise SettingsFormValidationError(
                 "notify_milestones_minutes must be positive integers"
-            ) from exc
+            )
+        try:
+            milestone = int(item)
+        except (TypeError, ValueError):
+            milestone = None
+        if milestone is None:
+            raise SettingsFormValidationError(
+                "notify_milestones_minutes must be positive integers"
+            ) from None
         if milestone <= 0:
             raise SettingsFormValidationError(
                 "notify_milestones_minutes must be positive integers"
