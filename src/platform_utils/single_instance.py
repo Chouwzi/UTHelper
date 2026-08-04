@@ -6,9 +6,10 @@ import hashlib
 import logging
 import math
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Callable, Protocol
 
 logger = logging.getLogger(__name__)
@@ -108,10 +109,12 @@ class WindowsActivationBroker:
         self._shutdown_handle: object | None = None
         self._receiver: Thread | None = None
         self._lock = Lock()
-        self._admission_lock = Lock()
-        self._pending_callback_admissions = 0
-        self._callbacks_begun = 0
-        self._close_lock = Lock()
+        self._close_requested = Event()
+        # This gate is deliberately held through the actual user callback. It
+        # makes callback invocation and close() linearly ordered: whichever
+        # side enters first wins. close() only waits for it within the caller's
+        # remaining timeout, so a slow callback cannot cause unbounded shutdown.
+        self._invocation_gate = Lock()
 
     def bind_show_handler(self, handler: Callable[[], None]) -> None:
         """Attach the activation callback and begin receiving notifications once."""
@@ -140,28 +143,37 @@ class WindowsActivationBroker:
 
     def close(self, timeout_seconds: float = 1.0) -> bool:
         """Stop the receiver and release every handle owned by this broker once."""
-        with self._close_lock:
-            # This serializes shutdown with the last callback admission, without
-            # holding any lifecycle lock while user code is running.
-            with self._admission_lock:
-                self._closed = True
-            with self._lock:
-                self._closed = True
-                receiver = self._receiver
-                shutdown_handle = self._shutdown_handle
-                if not self._handles_closed:
-                    _reset_quietly(self._kernel, self.acknowledgement_handle)
-                    if shutdown_handle is not None:
-                        _set_quietly(self._kernel, shutdown_handle)
+        timeout = _join_timeout_seconds(timeout_seconds)
+        deadline = time.monotonic() + timeout
 
-            if receiver is not None:
-                receiver.join(_join_timeout_seconds(timeout_seconds))
-            stopped = receiver is None or not receiver.is_alive()
+        # Publish the close request before contending with callback invocation.
+        # A receiver which reaches the gate later must reject the callback.
+        self._close_requested.set()
+        with self._lock:
+            self._closed = True
+            receiver = self._receiver
+            shutdown_handle = self._shutdown_handle
+            if not self._handles_closed:
+                _reset_quietly(self._kernel, self.acknowledgement_handle)
+                if shutdown_handle is not None:
+                    _set_quietly(self._kernel, shutdown_handle)
 
-            with self._lock:
-                if stopped:
-                    self._close_owned_handles_locked()
-            return stopped
+        gate_acquired = _acquire_before_deadline(self._invocation_gate, deadline)
+        if gate_acquired:
+            self._invocation_gate.release()
+        else:
+            # The receiver may still be executing user code. It owns cleanup
+            # after it exits; closing live wait handles here would be unsafe.
+            return receiver is None or not receiver.is_alive()
+
+        if receiver is not None:
+            receiver.join(_remaining_seconds(deadline))
+        stopped = receiver is None or not receiver.is_alive()
+
+        with self._lock:
+            if stopped:
+                self._close_owned_handles_locked()
+        return stopped
 
     def _receive_activations(self) -> None:
         shutdown_handle = self._shutdown_handle
@@ -186,37 +198,20 @@ class WindowsActivationBroker:
                     handler = self._handler
                 if handler is None:
                     continue
-                if self._admit_handler():
-                    self._invoke_handler(handler)
+                # Holding the invocation gate across handler() is necessary:
+                # releasing it after a separate "admitted" state would allow
+                # close() to return before the user callback actually begins.
+                with self._invocation_gate:
+                    if self._close_requested.is_set():
+                        return
+                    try:
+                        handler()
+                    except Exception:
+                        logger.warning("windows_activation_handler_failed")
         finally:
             with self._lock:
                 if self._closed:
                     self._close_owned_handles_locked()
-
-    def _admit_handler(self) -> bool:
-        """Reserve the next callback, unless shutdown has already started."""
-        with self._admission_lock:
-            if self._closed:
-                return False
-            self._pending_callback_admissions += 1
-            return True
-
-    def _invoke_handler(self, handler: Callable[[], None]) -> None:
-        """Begin a reserved callback only if shutdown did not cancel it first."""
-        with self._admission_lock:
-            self._pending_callback_admissions -= 1
-            if self._closed:
-                return
-            # From this point the callback is logically begun before close can
-            # observe shutdown, but user code itself never holds this lock.
-            self._callbacks_begun += 1
-        try:
-            handler()
-        except Exception:
-            logger.warning("windows_activation_handler_failed")
-        finally:
-            with self._admission_lock:
-                self._callbacks_begun -= 1
 
     def _close_owned_handles_locked(self) -> None:
         if self._handles_closed:
@@ -548,6 +543,17 @@ def _join_timeout_seconds(timeout_seconds: float) -> float:
     if not math.isfinite(timeout_seconds):
         return 0.0 if timeout_seconds < 0 else 1.0
     return max(timeout_seconds, 0.0)
+
+
+def _remaining_seconds(deadline: float) -> float:
+    return max(deadline - time.monotonic(), 0.0)
+
+
+def _acquire_before_deadline(lock: Lock, deadline: float) -> bool:
+    remaining = _remaining_seconds(deadline)
+    if remaining <= 0.0:
+        return lock.acquire(blocking=False)
+    return lock.acquire(timeout=remaining)
 
 
 def _release_and_close_quietly(api: KernelObjectApi, handle: object) -> None:

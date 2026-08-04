@@ -23,29 +23,24 @@ class FakeHandle:
     closed: bool = False
 
 
-class PauseAfterReleaseLock:
-    """Pauses one lock owner immediately after it releases the lock."""
+class ObservedInvocationGate:
+    """Lock whose receiver-side admission can be paused and observed."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._pause_once = False
-        self.released = threading.Event()
-        self.resume = threading.Event()
+        self.receiver_waiting = threading.Event()
 
-    def arm(self) -> None:
-        self._pause_once = True
-
-    def acquire(self) -> bool:
-        return self._lock.acquire()
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if threading.current_thread().name == "windows-activation-receiver":
+            self.receiver_waiting.set()
+        if timeout == -1:
+            return self._lock.acquire(blocking)
+        return self._lock.acquire(blocking, timeout)
 
     def release(self) -> None:
         self._lock.release()
-        if self._pause_once:
-            self._pause_once = False
-            self.released.set()
-            assert self.resume.wait(1.0)
 
-    def __enter__(self) -> PauseAfterReleaseLock:
+    def __enter__(self) -> ObservedInvocationGate:
         self.acquire()
         return self
 
@@ -515,61 +510,35 @@ def test_timed_out_close_defers_handle_cleanup_until_blocking_handler_exits():
     assert len(kernel.closes) == 4
 
 
-def test_close_rejects_activation_dequeued_before_callback_admission():
+def test_close_request_wins_while_receiver_waits_at_handler_invocation_gate():
     kernel = FakeKernelObjectApi()
     broker = _bootstrap(kernel).broker
     assert broker is not None
     callback_count = 0
+    gate = ObservedInvocationGate()
+    gate.acquire()
+    broker._invocation_gate = gate  # type: ignore[attr-defined]
 
     def record_callback() -> None:
         nonlocal callback_count
         callback_count += 1
 
     broker.bind_show_handler(record_callback)
-    pause_lock = PauseAfterReleaseLock()
-    broker._lock = pause_lock  # type: ignore[assignment]
-    pause_lock.arm()
     kernel.set_event(broker.activation_handle)
-    assert pause_lock.released.wait(0.5)
+    assert gate.receiver_waiting.wait(0.5)
 
     try:
         assert not broker.close(timeout_seconds=0.0)
+        assert not kernel.closes
     finally:
-        pause_lock.resume.set()
+        gate.release()
         receiver = broker._receiver
         assert receiver is not None
         receiver.join(0.5)
 
     assert not receiver.is_alive()
     assert callback_count == 0
+    assert len(kernel.closes) == 4
+    assert len(kernel.releases) == 1
     assert broker.close()
-
-
-def test_close_cancels_admitted_callback_before_its_handler_begins():
-    kernel = FakeKernelObjectApi()
-    broker = _bootstrap(kernel).broker
-    assert broker is not None
-    callback_count = 0
-
-    def record_callback() -> None:
-        nonlocal callback_count
-        callback_count += 1
-
-    broker.bind_show_handler(record_callback)
-    pause_lock = PauseAfterReleaseLock()
-    broker._admission_lock = pause_lock  # type: ignore[assignment]
-    pause_lock.arm()
-    kernel.set_event(broker.activation_handle)
-    assert pause_lock.released.wait(0.5)
-
-    try:
-        assert not broker.close(timeout_seconds=0.0)
-    finally:
-        pause_lock.resume.set()
-        receiver = broker._receiver
-        assert receiver is not None
-        receiver.join(0.5)
-
-    assert not receiver.is_alive()
-    assert callback_count == 0
-    assert broker.close()
+    assert len(kernel.closes) == 4
