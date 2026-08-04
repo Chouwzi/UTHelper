@@ -37,6 +37,7 @@ def test_moodle_site_config_accepts_only_explicit_trusted_https_origins(origin):
     "origin",
     (
         "http://courses.ut.edu.vn",
+        "https://courses.ut.edu.vn:443",
         "https://courses.ut.edu.vn:444",
         "https://user:pass@courses.ut.edu.vn",
         "https://child.courses.ut.edu.vn",
@@ -119,6 +120,15 @@ class TestSettingsSecretExclusion:
         assert "UTH_USERNAME" in dumped
         assert "THEME" in dumped
         assert "CHECK_INTERVAL_MINUTES" in dumped
+
+    def test_credential_origin_is_persisted_without_exposing_password(self):
+        dumped = Settings(
+            UTH_PASSWORD="secret",
+            UTH_CREDENTIALS_ORIGIN="https://thnn.ut.edu.vn",
+        ).model_dump()
+
+        assert dumped["UTH_CREDENTIALS_ORIGIN"] == "https://thnn.ut.edu.vn"
+        assert "UTH_PASSWORD" not in dumped
 
 
 class TestSettingsSerialization:

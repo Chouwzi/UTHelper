@@ -112,8 +112,19 @@ class DetailView(ft.Container):
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
-            return self._submission_workflow_factory(client)
+            workflow = self._submission_workflow_factory(client)
+            if workflow is not None:
+                return workflow
         raise RuntimeError("Submission workflow factory is not configured.")
+
+    def _has_submission_workflow(self, client) -> bool:
+        if not self._submission_workflow_factory:
+            return False
+        try:
+            return self._submission_workflow_factory(client) is not None
+        except Exception:
+            logger.exception("Submission workflow factory failed")
+            return False
 
     def _submission_target(self, url: str, course_id: int) -> SubmissionTarget:
         return SubmissionTarget(url=url, course_id=course_id)
@@ -174,7 +185,7 @@ class DetailView(ft.Container):
         return (
             parsed.scheme.lower() == "https"
             and moodle_site_from_url(url) is not None
-            and port in (None, 443)
+            and port is None
             and parsed.path == "/mod/assign/view.php"
             and not parsed.fragment
             and cmid > 0
@@ -847,7 +858,12 @@ class DetailView(ft.Container):
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                if client and self._client_matches_native_submission_site(client, url):
+                client_is_bound = getattr(client, "moodle_site_origin", None) is not None
+                if (
+                    client
+                    and self._client_matches_native_submission_site(client, url)
+                    and (not client_is_bound or self._has_submission_workflow(client))
+                ):
                     prefetched = data.get("details", {}).get("raw_submission_status")
                     self._page.run_task(
                         self._async_load_submitted_files,

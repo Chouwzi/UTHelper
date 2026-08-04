@@ -7,7 +7,11 @@ import urllib.error
 from dataclasses import dataclass
 from typing import Optional
 from config import settings
-from core.moodle_sites import MoodleSite, moodle_site_from_origin
+from core.moodle_sites import (
+    COURSES_MOODLE_SITE,
+    MoodleSite,
+    moodle_site_from_origin,
+)
 import logging
 import sys as _sys
 
@@ -116,8 +120,23 @@ class MoodleClient:
                 settings.MOODLE_WS_TOKEN
                 and settings.MOODLE_WS_TOKEN_ORIGIN == self.moodle_site_origin
             )
-            or (settings.UTH_USERNAME and settings.UTH_PASSWORD)
+            or self._stored_credentials_match_site()
         )
+
+    def _stored_credentials_match_site(self) -> bool:
+        """Keep unstamped legacy credentials on courses, never on THNN."""
+        if (
+            not self.moodle_site_origin
+            or not settings.UTH_USERNAME
+            or not settings.UTH_PASSWORD
+        ):
+            return False
+        credential_site = moodle_site_from_origin(
+            settings.UTH_CREDENTIALS_ORIGIN
+        )
+        if credential_site is not None:
+            return credential_site.origin == self.moodle_site_origin
+        return self.moodle_site_origin == COURSES_MOODLE_SITE.origin
 
     def _throttle(self):
         """Ensure minimum interval between API calls."""
@@ -328,8 +347,17 @@ class MoodleClient:
         ):
             return settings.MOODLE_WS_TOKEN
         
-        user = username or settings.UTH_USERNAME
-        pwd = password or settings.UTH_PASSWORD
+        credentials_are_explicit = username is not None or password is not None
+        if credentials_are_explicit:
+            user = username or ""
+            pwd = password or ""
+        elif self._stored_credentials_match_site():
+            user = settings.UTH_USERNAME
+            pwd = settings.UTH_PASSWORD
+        else:
+            logger.warning("Stored credentials are not verified for this Moodle site.")
+            self._last_login_error = "credentials_site_mismatch"
+            return ""
         
         if not user or not pwd:
             logger.warning("Chưa có thông tin đăng nhập để lấy WS token.")
@@ -344,6 +372,10 @@ class MoodleClient:
             )
             
             if data and 'token' in data:
+                if credentials_are_explicit:
+                    settings.UTH_USERNAME = user
+                    settings.UTH_PASSWORD = pwd
+                settings.UTH_CREDENTIALS_ORIGIN = self.moodle_site_origin
                 settings.MOODLE_WS_TOKEN = data['token']
                 settings.MOODLE_WS_TOKEN_ORIGIN = self.moodle_site_origin
                 from config import save_settings

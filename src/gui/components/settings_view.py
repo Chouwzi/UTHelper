@@ -1025,11 +1025,7 @@ class SettingsView(ft.Container):
 
         def _worker():
             try:
-                ok = self._orchestrator.client.login(
-                    username=settings.UTH_USERNAME,
-                    password=settings.UTH_PASSWORD,
-                    force=True,
-                )
+                ok = self._orchestrator.client.login(force=True)
                 if ok:
                     token = self._orchestrator.client.token or "?"
                     masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
@@ -1930,6 +1926,10 @@ class SettingsView(ft.Container):
 
     async def _save(self, e) -> bool:
         try:
+            credentials_changed = (
+                self._username_field.value != settings.UTH_USERNAME
+                or self._password_field.value != settings.UTH_PASSWORD
+            )
             # Save theme preset
             settings.THEME                   = self._selected_theme
             settings.COLOR_CRITICAL          = getattr(self, '_c_tb_critical', ft.TextField(value='#EF4444')).value
@@ -1942,6 +1942,10 @@ class SettingsView(ft.Container):
             settings.COLOR_OTHER             = getattr(self, '_c_tb_other', ft.TextField(value='#6B7280')).value
             settings.UTH_USERNAME            = self._username_field.value
             settings.UTH_PASSWORD            = self._password_field.value
+            if credentials_changed:
+                settings.UTH_CREDENTIALS_ORIGIN = ""
+                settings.MOODLE_WS_TOKEN = ""
+                settings.MOODLE_WS_TOKEN_ORIGIN = ""
             if not _pu.IS_MOBILE:
                 settings.ALWAYS_ON_TOP           = self._sw_always_on_top.value
             settings.INCLUDE_SUBMITTED       = self._sw_submitted.value

@@ -116,6 +116,7 @@ class Settings(BaseModel):
     # Thông tin đăng nhập UTH
     UTH_USERNAME: str = Field(default="", description="Mã số sinh viên (MSSV)")
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
+    UTH_CREDENTIALS_ORIGIN: str = Field(default="", description="Trusted Moodle origin verified for stored UTH credentials")
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)

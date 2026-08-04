@@ -17,6 +17,9 @@ from notifiers.manager import NotificationManager
 import threading
 
 from core.data_orchestrator import DataOrchestrator
+from core.moodle_service import MoodleService
+from core.moodle_sites import moodle_site_from_origin
+from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
 from config import get_sync_interval_minutes, settings
@@ -138,6 +141,36 @@ class AppController:
         if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
             return None
         return self.page.run_task(handler, *args, **kwargs)
+
+    def _submission_workflow_factory(self, client):
+        """Build a fresh workflow only for the orchestrator's current client."""
+        if client is not getattr(self.orchestrator, "client", None):
+            return None
+        site = moodle_site_from_origin(getattr(client, "moodle_site_origin", None))
+        call_ws_api = getattr(client, "call_ws_api", None)
+        if site is None or not callable(call_ws_api):
+            return None
+        return SubmissionWorkflow(
+            client,
+            MoodleService(call_ws_api),
+            site_origin=site,
+        )
+
+    def _native_background_credentials(self) -> tuple[str, str]:
+        """Return only a token proven to belong to the active Moodle client."""
+        configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+        client_site = moodle_site_from_origin(
+            getattr(getattr(self.orchestrator, "client", None), "moodle_site_origin", None)
+        )
+        token_site = moodle_site_from_origin(settings.MOODLE_WS_TOKEN_ORIGIN)
+        token = settings.MOODLE_WS_TOKEN
+        if (
+            token
+            and configured_site is not None
+            and configured_site == client_site == token_site
+        ):
+            return token, token_site.origin
+        return "", ""
 
     def _init_window(self):
         # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
@@ -498,7 +531,7 @@ class AppController:
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
-        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed)
+        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed, submission_workflow_factory=self._submission_workflow_factory)
         self.calendar_view = CalendarView(
             self.page,
             on_close=lambda: self._safe_run_task(self._close_calendar),
@@ -1016,11 +1049,8 @@ class AppController:
         if not bridge or not bridge.available:
             return
         try:
-            token = (
-                getattr(self.orchestrator.client, "token", "")
-                or getattr(settings, "MOODLE_WS_TOKEN", "")
-            )
-            await bridge.configure(token)
+            token, token_origin = self._native_background_credentials()
+            await bridge.configure(token, token_origin=token_origin)
             native_data = await bridge.cached_activities()
             if native_data:
                 diagnostics = await bridge.diagnostics()
@@ -1174,11 +1204,10 @@ class AppController:
             native_schedule_result = None
             if self._android_background and self._android_background.available:
                 try:
-                    token = (
-                        getattr(self.orchestrator.client, "token", "")
-                        or getattr(settings, "MOODLE_WS_TOKEN", "")
+                    token, token_origin = self._native_background_credentials()
+                    await self._android_background.configure(
+                        token, token_origin=token_origin
                     )
-                    await self._android_background.configure(token)
                     native_schedule_result = await self._android_background.import_activities(
                         data_copy,
                         authoritative=True,
@@ -1803,9 +1832,9 @@ class AppController:
                 self._safe_run_task(self._android_background.logout)
             else:
                 async def _apply_android_settings():
+                    token, token_origin = self._native_background_credentials()
                     await self._android_background.configure(
-                        getattr(self.orchestrator.client, "token", "")
-                        or getattr(settings, "MOODLE_WS_TOKEN", ""),
+                        token, token_origin=token_origin
                     )
                     if milestones_changed and any(
                         int(value) <= 60

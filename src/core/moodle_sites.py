@@ -27,9 +27,9 @@ _SITES_BY_ORIGIN = {site.origin: site for site in TRUSTED_MOODLE_SITES}
 def moodle_site_from_origin(origin: object) -> MoodleSite | None:
     """Return a trusted site only when ``origin`` is an exact HTTPS origin.
 
-    A trailing slash, case-insensitive host, and the effective HTTPS port are
-    normalized. Paths, credentials, queries, fragments, and every host outside
-    the explicit allow-list are rejected.
+    A trailing slash and case-insensitive host are normalized. Explicit ports,
+    paths, credentials, queries, fragments, and every host outside the explicit
+    allow-list are rejected.
     """
     if not isinstance(origin, str) or origin != origin.strip():
         return None
@@ -43,7 +43,7 @@ def moodle_site_from_origin(origin: object) -> MoodleSite | None:
         or parsed.hostname is None
         or parsed.username is not None
         or parsed.password is not None
-        or port not in (None, 443)
+        or port is not None
         or parsed.path not in ("", "/")
         or parsed.query
         or parsed.fragment
@@ -66,7 +66,7 @@ def moodle_site_from_url(url: object) -> MoodleSite | None:
         or parsed.hostname is None
         or parsed.username is not None
         or parsed.password is not None
-        or port not in (None, 443)
+        or port is not None
     ):
         return None
     return _SITES_BY_ORIGIN.get(f"https://{parsed.hostname.casefold()}")

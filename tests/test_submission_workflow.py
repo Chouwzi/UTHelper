@@ -691,7 +691,7 @@ def test_foreign_target_mutation_performs_zero_network_or_local_file_io(tmp_path
     assert service.saved == []
 
 
-def test_target_boundary_accepts_case_insensitive_host_and_effective_https_port():
+def test_target_boundary_rejects_explicit_https_port_even_when_effective():
     workflow, _, service = workflow_fixture()
 
     result = workflow.load_snapshot(
@@ -701,8 +701,8 @@ def test_target_boundary_accepts_case_insensitive_host_and_effective_https_port(
         )
     )
 
-    assert result.ok is True
-    assert service.resolve_calls == 1
+    assert result.issue.code is SubmissionErrorCode.INVALID_TARGET
+    assert service.resolve_calls == 0
 
 
 @pytest.mark.parametrize(

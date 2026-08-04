@@ -153,7 +153,7 @@ class DataOrchestrator:
             logger.error("Chưa cấu hình MSSV hoặc mật khẩu trong Settings.")
             return False
         
-        self.is_logged_in = self.client.login(username, password)
+        self.is_logged_in = self.client.login()
         if self.is_logged_in:
             logger.info("Đăng nhập WS token thành công.")
         return self.is_logged_in

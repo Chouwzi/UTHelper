@@ -24,8 +24,10 @@ from core.use_cases.submission_workflow import (
     SubmissionErrorCode,
     SubmissionMutationResult,
     SubmissionSnapshotResult,
+    SubmissionTarget,
 )
 from tests.fixtures.moodle_submission_responses import (
+    FakeMoodle43,
     captured_real_submission_shape_fixture,
 )
 import flet as ft
@@ -632,6 +634,87 @@ def test_thnn_assignment_with_courses_client_uses_browser_fallback():
     assert view._cta_text.value == "Mở trong trình duyệt"
     assert view._submission_area.visible is False
     page.run_task.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ("https://courses.ut.edu.vn", "https://thnn.ut.edu.vn"),
+)
+def test_app_controller_binds_real_workflow_to_the_current_moodle_client(origin):
+    server = FakeMoodle43(drafts=True, statement=False)
+    server.moodle_site_origin = origin
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=server)
+
+    workflow = controller._submission_workflow_factory(server)
+    result = workflow.load_snapshot(
+        SubmissionTarget(f"{origin}/mod/assign/view.php?id=123", 456)
+    )
+
+    assert result.ok is True
+    assert workflow.client is server
+    assert workflow.moodle_service.call_ws_api == server.call_ws_api
+
+    page = MockPage()
+    page.run_task = MagicMock()
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: server,
+        submission_workflow_factory=controller._submission_workflow_factory,
+    )
+    view.update_detail(
+        {
+            "url": f"{origin}/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    page.run_task.assert_called_once()
+
+
+def test_app_controller_never_builds_workflow_for_a_stale_or_other_site_client():
+    current = FakeMoodle43(drafts=True, statement=False)
+    current.moodle_site_origin = "https://courses.ut.edu.vn"
+    stale = FakeMoodle43(drafts=True, statement=False)
+    stale.moodle_site_origin = "https://thnn.ut.edu.vn"
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=current)
+
+    assert controller._submission_workflow_factory(stale) is None
+
+
+def test_bound_client_without_workflow_factory_uses_immediate_browser_fallback():
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(page, lambda: None, get_client=lambda: client)
+
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == (
+        "Moodle cho trang bài tập này chưa được cấu hình. "
+        "Hãy mở bài tập trong trình duyệt."
+    )
+    page.run_task.assert_not_called()
+
+
+def test_detail_view_rejects_assignment_urls_with_explicit_https_port():
+    assert DetailView._is_native_submission_url(
+        "https://courses.ut.edu.vn:443/mod/assign/view.php?id=123"
+    ) is False
 
 
 @pytest.mark.parametrize(

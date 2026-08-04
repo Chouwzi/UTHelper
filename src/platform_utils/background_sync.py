@@ -43,13 +43,23 @@ class AndroidBackgroundBridge:
             "dnd_end": int(settings.NOTIFY_DND_END),
         }
 
-    async def configure(self, token: str = "") -> dict[str, Any]:
+    async def configure(
+        self,
+        token: str = "",
+        *,
+        token_origin: str = "",
+    ) -> dict[str, Any]:
         if not self.service:
             return {}
         from config import settings
+        from core.moodle_sites import moodle_site_from_origin
 
-        if token:
-            await self.service.set_credentials(settings.MOODLE_BASE_URL, token)
+        configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+        issuing_site = moodle_site_from_origin(token_origin)
+        if token and configured_site is not None and issuing_site == configured_site:
+            await self.service.set_credentials(configured_site.origin, token)
+        else:
+            await self.service.logout()
         return await self.service.configure(self.settings_payload())
 
     async def import_activities(

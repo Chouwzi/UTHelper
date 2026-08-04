@@ -1,5 +1,8 @@
 import os
 import sys
+import asyncio
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -7,6 +10,7 @@ from platform_utils.background_sync import (
     AndroidBackgroundBridge,
     create_android_background_bridge,
 )
+from gui.app_controller import AppController
 
 
 def test_zero_interval_disables_android_periodic_worker(monkeypatch):
@@ -40,3 +44,98 @@ def test_native_notification_bridge_is_available_on_ios(monkeypatch):
     assert bridge is not None
     assert bridge.available is True
     assert len(page.services) == 1
+
+
+class _CredentialService:
+    def __init__(self):
+        self.credentials = []
+        self.logout_calls = 0
+        self.configure_calls = []
+
+    async def set_credentials(self, base_url, token):
+        self.credentials.append((base_url, token))
+
+    async def logout(self):
+        self.logout_calls += 1
+
+    async def configure(self, payload):
+        self.configure_calls.append(payload)
+        return {"enabled": payload["enabled"]}
+
+
+@pytest.mark.parametrize(
+    ("base_url", "token_origin"),
+    (
+        ("https://thnn.ut.edu.vn", ""),
+        ("https://thnn.ut.edu.vn", "https://courses.ut.edu.vn"),
+        ("https://courses.ut.edu.vn", "https://evil.example"),
+    ),
+)
+def test_background_bridge_never_hands_off_unbound_or_cross_site_token(
+    monkeypatch, base_url, token_origin
+):
+    service = _CredentialService()
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = service
+    monkeypatch.setattr("config.settings.MOODLE_BASE_URL", base_url)
+
+    asyncio.run(bridge.configure("secret-token", token_origin=token_origin))
+
+    assert service.credentials == []
+    assert service.logout_calls == 1
+    assert len(service.configure_calls) == 1
+
+
+def test_background_bridge_hands_off_only_matching_explicit_site_token(monkeypatch):
+    service = _CredentialService()
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = service
+    monkeypatch.setattr("config.settings.MOODLE_BASE_URL", "https://thnn.ut.edu.vn")
+
+    asyncio.run(
+        bridge.configure(
+            "thnn-token",
+            token_origin="https://thnn.ut.edu.vn",
+        )
+    )
+
+    assert service.credentials == [("https://thnn.ut.edu.vn", "thnn-token")]
+    assert service.logout_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("base_url", "client_origin", "token_origin", "expected"),
+    (
+        (
+            "https://thnn.ut.edu.vn",
+            "https://courses.ut.edu.vn",
+            "https://thnn.ut.edu.vn",
+            ("", ""),
+        ),
+        (
+            "https://courses.ut.edu.vn",
+            "https://courses.ut.edu.vn",
+            "https://evil.example",
+            ("", ""),
+        ),
+        (
+            "https://thnn.ut.edu.vn",
+            "https://thnn.ut.edu.vn",
+            "https://thnn.ut.edu.vn",
+            ("thnn-token", "https://thnn.ut.edu.vn"),
+        ),
+    ),
+)
+def test_app_controller_only_exposes_token_with_exact_client_and_issuer_provenance(
+    monkeypatch, base_url, client_origin, token_origin, expected
+):
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = type(
+        "Orchestrator",
+        (), {"client": type("Client", (), {"moodle_site_origin": client_origin})()},
+    )()
+    monkeypatch.setattr("config.settings.MOODLE_BASE_URL", base_url)
+    monkeypatch.setattr("config.settings.MOODLE_WS_TOKEN", "thnn-token")
+    monkeypatch.setattr("config.settings.MOODLE_WS_TOKEN_ORIGIN", token_origin)
+
+    assert controller._native_background_credentials() == expected
