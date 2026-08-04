@@ -163,6 +163,18 @@ def test_tray_close_contains_stop_failure_and_reports_join_timeout():
     assert 0.0 <= events[2][1] <= 0.2
 
 
+def test_tray_close_propagates_stop_failure_without_a_live_tray_thread():
+    from gui.tray import TrayApp
+
+    events: list[object] = []
+    tray = TrayApp()
+    tray._icon = _FailingTrayIconSpy(events)
+
+    assert tray.close(timeout_seconds=0.1) is False
+    assert tray.close(timeout_seconds=0.1) is False
+    assert events == ["stop"]
+
+
 def test_blocking_icon_stop_is_once_only_and_every_close_stays_bounded():
     from gui.tray import TrayApp
 

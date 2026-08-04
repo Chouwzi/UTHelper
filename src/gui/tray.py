@@ -175,18 +175,20 @@ class TrayApp:
                     self._stop_helper_failed = True
                     logger.warning("Tray stop helper start failed", exc_info=True)
             stop_thread = self._stop_thread
-            stop_helper_failed = self._stop_helper_failed
             self._setup_done.set()
 
         stop_finished = _join_owned_daemon_before_deadline(stop_thread, deadline)
         tray_finished = _join_owned_daemon_before_deadline(tray_thread, deadline)
+        with self._lifecycle_lock:
+            stop_helper_failed = self._stop_helper_failed
         return not stop_helper_failed and stop_finished and tray_finished
 
-    @staticmethod
-    def _stop_icon(icon) -> None:
+    def _stop_icon(self, icon) -> None:
         try:
             icon.stop()
         except Exception:
+            with self._lifecycle_lock:
+                self._stop_helper_failed = True
             logger.warning("Tray icon stop failed", exc_info=True)
 
     def notify(self, title: str, message: str):

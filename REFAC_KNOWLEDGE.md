@@ -486,14 +486,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   current thread nor a non-daemon thread is joined. Setup waits are clamped to
   **3.0 seconds** and the complete close budget to **1.0 second**; negative waits
   become zero and non-finite waits cannot block indefinitely. Repeated close
-  calls retry only bounded joins and never invoke stop again.
+  calls retry only bounded joins and never invoke stop again. A native stop
+  exception is recorded under the lifecycle lock; after joining the helper,
+  every current or later close reports `False` instead of falsely certifying a
+  clean shutdown.
 - Setup rechecks closure after dependency loading and atomically publishes and
   starts a candidate icon/thread under the lifecycle lock. Therefore either
   setup wins and close observes both owned resources, or close wins and no tray
   icon/thread can be published or started afterward. `AppController` closes the
   broker then tray before releasing page-owned events, coordinator, and Moodle
   client resources.
-- Focused activation/tray regression suite: **56 passed in 1.35 seconds**.
+- Focused activation/tray regression suite: **57 passed in 1.40 seconds**.
   Bounded full suite after these review fixes: **839 passed, 24 skipped in
   9.95 seconds**. `ruff check src tests` and `git diff --check` passed; no GUI
   or bundle process was launched.
