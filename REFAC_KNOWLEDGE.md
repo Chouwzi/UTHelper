@@ -255,3 +255,22 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   prefetched status.
 - Validation: 90 focused tests passed with 2 opt-in live tests skipped; the full
   suite passed with **732 passed, 24 skipped**; `ruff check src tests` passed.
+
+# 2026-08-04 - Deterministic Settings and explicit diagnostics consent
+
+- Settings UI state now crosses one immutable `SettingsFormSnapshot` boundary in
+  both directions. Dirty state compares the current normalized snapshot only to
+  the last successfully loaded or saved baseline, so merely opening and closing
+  Settings does not produce a save prompt.
+- Automatic update checks are represented by an explicit cross-platform switch
+  whose default is enabled. Its wording promises checking only; installing and
+  restarting still require confirmation in the update coordinator.
+- Crash-reporting consent is a three-state value (`not_asked`, `enabled`, or
+  `disabled`). The first-run dialog performs no diagnostics/network work, treats
+  window dismissal as deferral, and considers a choice decided only after
+  `save_settings()` succeeds.
+- Settings persistence now reports JSON, secure-store write/delete, and legacy
+  cleanup failures to the caller. Snapshot persistence restores all in-memory
+  form values and Moodle provenance when a save fails.
+- Validation: 88 Settings/autostart-focused tests passed; the full suite passed
+  with **810 passed, 24 skipped**; `ruff check src tests` passed.

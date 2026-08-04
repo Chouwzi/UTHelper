@@ -140,7 +140,7 @@ class TestReadWriteSecret:
     @patch("config._HAS_KEYRING", True)
     def test_write_secret_to_ss(self, mock_set_pw):
         from config import _write_secret
-        _write_secret("password", "my_secret")
+        assert _write_secret("password", "my_secret") is True
         mock_set_pw.assert_called_once_with("UTHelper", "password", "my_secret")
 
     @patch("config._HAS_KEYRING", True)
@@ -161,10 +161,84 @@ class TestReadWriteSecret:
             patch("config.keyring.delete_password", delete_password),
             patch("config.keyring.set_password", set_password),
         ):
-            _write_secret("password", "")
+            assert _write_secret("password", "") is True
 
         assert "password" not in stored
         assert stored_values == []
+
+    @patch("config.keyring.set_password", side_effect=RuntimeError("backend failed"))
+    @patch("config._HAS_KEYRING", True)
+    def test_write_secret_reports_backend_failure(self, _set_password):
+        from config import _write_secret
+
+        assert _write_secret("password", "synthetic-secret") is False
+
+
+def test_save_settings_reports_json_failure(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: False)
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic", lambda *_args, **_kwargs: False
+    )
+
+    assert config.save_settings() is False
+
+
+def test_save_settings_reports_one_secure_secret_failure(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: True)
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.read_json_safe", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        config,
+        "_write_secret",
+        lambda key, _value: key != "gmail_app_password",
+    )
+
+    assert config.save_settings() is False
+
+
+def test_save_settings_reports_legacy_cleanup_failure(monkeypatch):
+    import config
+
+    writes = iter([True, False])
+    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: True)
+    monkeypatch.setattr(config, "_write_secret", lambda *_args: True)
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic",
+        lambda *_args, **_kwargs: next(writes),
+    )
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.read_json_safe",
+        lambda *_args, **_kwargs: {"THEME": "midnight_blue", "UTH_PASSWORD": "legacy"},
+    )
+
+    assert config.save_settings() is False
+
+
+def test_save_settings_reports_complete_success(monkeypatch):
+    import config
+
+    writes = []
+    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: True)
+    monkeypatch.setattr(config, "_write_secret", lambda *_args: True)
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic",
+        lambda *_args, **_kwargs: writes.append(True) or True,
+    )
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.read_json_safe",
+        lambda *_args, **_kwargs: {"THEME": "midnight_blue", "UTH_PASSWORD": "legacy"},
+    )
+
+    assert config.save_settings() is True
+    assert len(writes) == 2
 
 
 @pytest.mark.parametrize(

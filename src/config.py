@@ -93,7 +93,7 @@ def _read_secret(key: str) -> str:
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     return ""
 
-def _write_secret(key: str, value: str):
+def _write_secret(key: str, value: str) -> bool:
     """Persist one secret, deleting its keyring entry when it is cleared.
 
     Every caller represents an absent secret with the empty string.  Keeping
@@ -112,9 +112,11 @@ def _write_secret(key: str, value: str):
                 except keyring.errors.PasswordDeleteError:
                     # Deleting an already-absent secret is the desired state.
                     pass
-            return
+            return True
         except Exception as e:
             _logger.warning(f"Keyring write failed for {key}: {e}")
+            return False
+    return False
 
 def _has_any_secure_backend() -> bool:
     """Kiểm tra có backend nào an toàn hay không."""
@@ -321,7 +323,7 @@ def load_settings() -> Settings:
 
 settings = load_settings()
 
-def save_settings():
+def save_settings() -> bool:
     """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng an toàn."""
     _logger = logging.getLogger(__name__)
     has_secure = _has_any_secure_backend()
@@ -344,12 +346,15 @@ def save_settings():
         _logger.error(f"Failed to save settings: {e}")
 
     # --- Step 2: Save all secrets to secure storage ---
+    secrets_ok = True
     if has_secure:
         for attr, key_suffix in _SECRET_FIELDS.items():
             try:
                 val = getattr(settings, attr, '')
-                _write_secret(key_suffix, val)
+                if not _write_secret(key_suffix, val):
+                    secrets_ok = False
             except Exception as e:
+                secrets_ok = False
                 _logger.warning(f"Failed to write {attr} to secure storage: {e}")
     else:
         _logger.warning(
@@ -357,15 +362,24 @@ def save_settings():
         )
 
     # --- Step 3: Cleanup legacy secrets from JSON file ---
+    cleanup_ok = True
     if json_ok and has_secure:
         try:
             from core.safe_file_io import SafeFileIO
             data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
             stripped = {k: v for k, v in data.items() if k not in _SECRET_FIELDS}
             if len(stripped) < len(data):
-                SafeFileIO.write_json_atomic(CONFIG_FILE, stripped)
-                _logger.info("Cleaned legacy secrets from settings JSON file")
+                cleanup_ok = bool(
+                    SafeFileIO.write_json_atomic(CONFIG_FILE, stripped)
+                )
+                if cleanup_ok:
+                    _logger.info("Cleaned legacy secrets from settings JSON file")
+                else:
+                    _logger.warning("Failed to clean legacy secrets from settings JSON")
         except Exception as e:
+            cleanup_ok = False
             _logger.warning(f"Failed to clean legacy secrets from JSON: {e}")
+
+    return bool(json_ok and secrets_ok and cleanup_ok)
 
 

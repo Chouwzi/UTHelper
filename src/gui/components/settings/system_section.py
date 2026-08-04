@@ -5,6 +5,12 @@ import platform_utils as _pu
 
 def init_system_controls(view):
     """Khởi tạo các control cấu hình vòng đời ứng dụng và tần suất đồng bộ trên hệ điều hành."""
+    view._sw_auto_update = ft.Switch(
+        value=getattr(settings, "AUTO_UPDATE_ENABLED", True),
+        active_color=C.ACCENT,
+        label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+        label="Tự động kiểm tra cập nhật",
+    )
     # Thiết lập riêng trên Desktop (Windows)
     view._sw_start_with_windows = ft.Switch(
         value=settings.START_WITH_WINDOWS, active_color=C.ACCENT,
@@ -71,6 +77,8 @@ def build_system_section(view) -> ft.Container:
             view._sw_start_minimized,
             view._autostart_status,
             view._sw_minimize_to_tray,
+            view._sw_auto_update,
+            view._build_hint("Chỉ kiểm tra phiên bản mới; cài đặt và khởi động lại luôn cần xác nhận."),
             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._interval_field,
             view._build_hint("Dùng chung cho foreground, Windows tray và Android background."),
@@ -78,9 +86,12 @@ def build_system_section(view) -> ft.Container:
             view._build_hint("Số tháng cần lấy sự kiện (1-3). (Mặc định 1)")
         ]
         title = "Hệ thống"
-        subtitle = "Khởi động và tự động cập nhật"
+        subtitle = "Khởi động và kiểm tra cập nhật"
     else:
         controls = [
+            view._sw_auto_update,
+            view._build_hint("Chỉ kiểm tra phiên bản mới; cài đặt và khởi động lại luôn cần xác nhận."),
+            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._interval_field,
             view._build_hint("Dùng cùng một chu kỳ khi app mở hoặc chạy nền."),
             view._fetch_months_field,

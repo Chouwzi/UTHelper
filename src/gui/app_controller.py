@@ -22,7 +22,7 @@ from core.moodle_sites import moodle_site_from_origin
 from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
-from config import get_sync_interval_minutes, settings
+from config import get_sync_interval_minutes, save_settings, settings
 
 from gui.core.theme import C
 from core.filter_service import FilterService
@@ -37,6 +37,7 @@ from gui.controllers.startup_visibility import (
     should_hide_startup_window,
 )
 from gui.controllers.window_activator import WindowActivator
+from gui.components.crash_consent_dialog import CrashConsentDialog
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,12 @@ class AppController:
 
         self._init_window()
         self._init_ui()
+        self._crash_consent_dialog = CrashConsentDialog(
+            self.page, self._persist_crash_consent
+        )
+        self._crash_consent_dialog.present_if_needed(
+            settings.CRASH_REPORTING_CONSENT
+        )
         self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
@@ -124,8 +131,9 @@ class AppController:
         self._tray_balloon_shown = False  # H-01: only show once
         
         # Check update in background
-        from core.update_checker import check_for_update_async
-        check_for_update_async(APP_VERSION, self._on_update_check)
+        if settings.AUTO_UPDATE_ENABLED:
+            from core.update_checker import check_for_update_async
+            check_for_update_async(APP_VERSION, self._on_update_check)
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
@@ -139,6 +147,27 @@ class AppController:
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+
+    def _persist_crash_consent(self, decision) -> bool:
+        """Persist explicit consent without mutating any open Settings draft."""
+        if decision not in {"enabled", "disabled"}:
+            return False
+        previous = settings.CRASH_REPORTING_CONSENT
+        settings.CRASH_REPORTING_CONSENT = decision
+        try:
+            persisted = bool(save_settings())
+        except Exception:
+            persisted = False
+            logger.warning("Crash-consent persistence raised", exc_info=True)
+        if persisted:
+            return True
+        settings.CRASH_REPORTING_CONSENT = previous
+        self._show_snackbar(
+            "Không thể lưu lựa chọn chẩn đoán sự cố. Vui lòng thử lại.",
+            ft.Icons.ERROR_OUTLINE_ROUNDED,
+            C.CRITICAL,
+        )
+        return False
 
     def _safe_run_task(self, handler, *args, **kwargs):
         if not hasattr(self.page, "session") or self.page.session is None:

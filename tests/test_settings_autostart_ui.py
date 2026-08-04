@@ -169,15 +169,34 @@ def test_unconfirmed_backend_rejects_requested_state_change(monkeypatch):
     assert result is False
 
 
-def test_save_path_calls_transactional_autostart_before_persisting():
-    source = __import__(
-        "inspect"
-    ).getsource(SettingsView._save)
+def test_save_path_calls_transactional_autostart_before_persisting(monkeypatch):
+    calls = []
+    snapshot = SimpleNamespace(theme="midnight_blue", always_on_top=False)
 
-    assert "await self._apply_autostart_change()" in source
-    assert source.index("await self._apply_autostart_change()") < source.index(
-        "settings.START_WITH_WINDOWS ="
+    async def apply_autostart():
+        calls.append("autostart")
+        return True
+
+    def capture():
+        calls.append("capture")
+        return snapshot
+
+    def persist(value):
+        calls.append("persist")
+        assert value is snapshot
+        return True
+
+    view = SimpleNamespace(
+        _capture_form_snapshot=capture,
+        _apply_autostart_change=apply_autostart,
+        _persist_snapshot_to_settings=persist,
+        _save_status=SimpleNamespace(value="", color=None),
+        _unsaved_dot=SimpleNamespace(visible=True),
+        _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
+        _on_saved=None,
+        update=lambda: None,
     )
-    assert source.index("settings.START_WITH_WINDOWS =") < source.index(
-        "save_settings()"
-    )
+    monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is True
+    assert calls == ["capture", "autostart", "capture", "persist"]
