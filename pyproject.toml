@@ -17,6 +17,7 @@ dependencies = [
     "flet==0.86.5",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
+    "sentry-sdk>=2,<3",
 ]
 
 [project.optional-dependencies]
@@ -107,6 +108,7 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-timeout>=2.3,<3",
 ]
 
 [tool.pytest.ini_options]

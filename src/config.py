@@ -271,6 +271,7 @@ def migrate_settings_data(raw: dict) -> dict:
     Legacy keys are intentionally preserved during this compatibility window.
     """
     data = dict(raw or {})
+    data.setdefault("CRASH_REPORTING_CONSENT", "not_asked")
     if "CHECK_INTERVAL_MINUTES" not in data:
         legacy_value = data.get("POLL_INTERVAL_MINUTES")
         if legacy_value is None:

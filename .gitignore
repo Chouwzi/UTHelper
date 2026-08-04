@@ -127,3 +127,4 @@ test-results/
 
 # ── Dynamic cache ──
 src/assets/cache/
+src/assets/diagnostics-config.json

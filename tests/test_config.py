@@ -95,6 +95,9 @@ class TestSettingsDefaults:
         s = Settings()
         assert s.MINIMIZE_TO_TRAY is True
 
+    def test_crash_consent_defaults_to_not_asked(self):
+        assert Settings().CRASH_REPORTING_CONSENT == "not_asked"
+
 
 class TestSettingsSecretExclusion:
     """Secret fields are excluded from JSON dumps."""
@@ -172,6 +175,11 @@ class TestSettingsSerialization:
 
     def test_new_install_has_all_default_notification_milestones(self):
         assert Settings().NOTIFY_MILESTONES_MINUTES == [4320, 1440, 180, 60, 30, 5]
+
+    def test_legacy_settings_without_crash_consent_migrate_to_not_asked(self):
+        migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 1})
+
+        assert migrated["CRASH_REPORTING_CONSENT"] == "not_asked"
 
 
 class TestSecretFieldsMapping:

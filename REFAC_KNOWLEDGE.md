@@ -601,3 +601,35 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   outside `foreign.json` remains untouched. The diagnostics set now passes
   **64 tests** and explicitly proves a competing spool process remains blocked
   until the active writer releases its fsynced temp transaction.
+
+## Consent-gated anonymous diagnostic delivery (2026-08-04)
+
+- Crash-reporting consent remains tri-state and defaults/migrates to
+  `not_asked`. Both `not_asked` and `disabled` construct no Sentry client and
+  perform no diagnostics network work; `disabled` also clears the exact owned
+  spool immediately. An enabled but unconfigured installation keeps its local
+  queue and performs no network work.
+- Public runtime configuration accepts only an HTTPS Sentry ingestion DSN with
+  a public key and numeric project ID. Query, fragment, password, management or
+  auth-token forms fail closed. The generator writes only sorted
+  `schema_version` and `sentry_dsn` fields through same-directory atomic
+  replacement; an empty build value produces a truthful unconfigured asset.
+- Because `[tool.flet.app].path = "src"`, the generated asset contract is
+  `src/assets/diagnostics-config.json` (not a repository-root `assets` folder).
+  Packaged loading resolves `FLET_ASSETS_DIR` and never consults
+  `UTH_SENTRY_DSN`; that override is honored only when the caller explicitly
+  enables development mode.
+- Sentry is initialized lazily with default integrations and PII disabled, no
+  breadcrumbs or traces, and a `before_send` callback that discards the SDK
+  candidate and reconstructs the complete event from the validated report
+  allow-list. The outcome-aware synchronous transport uses the remaining
+  bounded deadline and treats only an actual HTTP 2xx response as confirmed.
+  Event IDs returned by SDK queueing are never considered delivery proof.
+- Confirmed reports alone are acknowledged. Offline, timeout, HTTP 429/5xx,
+  SDK filtering, and other HTTP rejection outcomes retain the report. Retry
+  delay is bounded and suppresses an immediate second network attempt; a flush
+  budget is clamped to **0.1–5.0 seconds**.
+- The config/spool/transport regression set passes **117 tests in 10.05
+  seconds**. The real Sentry SDK 2.x envelope path was exercised with a local
+  intercepted HTTP boundary (no external report was sent). Scoped Ruff and
+  `git diff --check` pass.
