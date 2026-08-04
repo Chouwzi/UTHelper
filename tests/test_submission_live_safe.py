@@ -259,18 +259,12 @@ def _coarse_assignment_reasons(assignment: dict[str, Any], now: int) -> tuple[st
     if raw_submission_drafts is None:
         raw_submission_drafts = configs.get(("assign", "submissiondrafts"))
     submission_drafts = _as_int(raw_submission_drafts) == 1
-    file_enabled = _as_int(
-        configs.get(("file", "enabled"), configs.get(("assignsubmission_file", "enabled")))
-    ) == 1
-
     if _as_int(assignment.get("nosubmissions")):
         reasons.append("submissions-disabled")
     if _as_int(assignment.get("teamsubmission")):
         reasons.append("team-submission")
     if not submission_drafts:
         reasons.append("repeated-editing-not-confirmed")
-    if not file_enabled:
-        reasons.append("file-plugin-not-confirmed")
     if opens and opens > now:
         reasons.append("not-open")
     if due and due < now + _MINIMUM_LEAD_SECONDS:
@@ -592,8 +586,30 @@ def _real_shape_candidate(
     top_level_drafts: int | None = 1,
     config_drafts: int = 0,
     file_enabled: int | None = 1,
+    file_hidden: int | None = None,
+    include_file_plugin_configs: bool = True,
     include_status_file_plugin: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    file_plugin_configs = [
+        {
+            "subtype": "assignsubmission",
+            "plugin": "file",
+            "name": "maxfilesubmission",
+            "value": 1,
+        },
+        {
+            "subtype": "assignsubmission",
+            "plugin": "file",
+            "name": "maxsubmissionsizebytes",
+            "value": 1024,
+        },
+        {
+            "subtype": "assignsubmission",
+            "plugin": "file",
+            "name": "acceptedfiletypes",
+            "value": ".txt",
+        },
+    ]
     assignment: dict[str, Any] = {
         "id": 77,
         "cmid": 123,
@@ -610,25 +626,8 @@ def _real_shape_candidate(
                 "name": "submissiondrafts",
                 "value": config_drafts,
             },
-            {
-                "subtype": "assignsubmission",
-                "plugin": "file",
-                "name": "maxfilesubmission",
-                "value": 1,
-            },
-            {
-                "subtype": "assignsubmission",
-                "plugin": "file",
-                "name": "maxsubmissionsizebytes",
-                "value": 1024,
-            },
-            {
-                "subtype": "assignsubmission",
-                "plugin": "file",
-                "name": "acceptedfiletypes",
-                "value": ".txt",
-            },
-        ],
+        ]
+        + (file_plugin_configs if include_file_plugin_configs else []),
     }
     if top_level_drafts is not None:
         assignment["submissiondrafts"] = top_level_drafts
@@ -639,6 +638,15 @@ def _real_shape_candidate(
                 "plugin": "file",
                 "name": "enabled",
                 "value": file_enabled,
+            }
+        )
+    if file_hidden is not None:
+        assignment["configs"].append(
+            {
+                "subtype": "assignsubmission",
+                "plugin": "file",
+                "name": "hidden",
+                "value": file_hidden,
             }
         )
     plugins = []
@@ -688,12 +696,21 @@ def test_candidate_deadline_zero_means_unbounded_and_nonzero_respects_window(
     [
         ({"top_level_drafts": 1, "config_drafts": 0}, True),
         ({"top_level_drafts": None, "config_drafts": 1}, True),
-        ({"file_enabled": None}, False),
+        ({"file_enabled": None}, True),
         ({"file_enabled": 0}, False),
-        ({"include_status_file_plugin": False}, False),
+        ({"file_hidden": 1}, False),
+        ({"include_status_file_plugin": False}, True),
+        (
+            {
+                "file_enabled": None,
+                "include_file_plugin_configs": False,
+                "include_status_file_plugin": False,
+            },
+            False,
+        ),
     ],
 )
-def test_candidate_requires_explicit_file_enablement_and_fresh_status_capability(
+def test_candidate_uses_real_file_plugin_capability_evidence(
     shape_changes, eligible
 ):
     now = 1_800_000_000
