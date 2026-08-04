@@ -140,8 +140,7 @@ class ViewManager:
 
     async def close_settings(self):
         """Đóng màn hình cấu hình với hiệu ứng và hiển thị lại màn hình Dashboard chính."""
-        self._settings_navigation_generation += 1
-        self.settings_view.cancel_pending_load()
+        self.cancel_pending_settings_navigation()
         self.settings_view.offset = ft.Offset(1, 0)
         self.settings_view.opacity = 0.0
         self.page.update()
@@ -150,3 +149,8 @@ class ViewManager:
         self.dashboard.opacity = 1.0
         self.dashboard.visible = True
         self.page.update()
+
+    def cancel_pending_settings_navigation(self) -> None:
+        """Invalidate an in-flight Settings reveal without awaiting its I/O."""
+        self._settings_navigation_generation += 1
+        self.settings_view.cancel_pending_load()

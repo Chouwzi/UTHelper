@@ -292,6 +292,6 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   making the form dirty.
 - Closing Settings or disconnecting invalidates the active load immediately.
   A late coroutine cannot mutate controls, status, baseline, or visibility, and
-  ViewManager suppresses a stale pending show after close.
+  ViewManager suppresses a stale pending show after either close or disconnect.
 - Validation: 22 task-focused tests and 105 Settings/config/activation regression
   tests passed; focused Ruff and `git diff --check` passed.

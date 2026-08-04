@@ -395,6 +395,38 @@ def test_closing_settings_cancels_pending_show_and_prevents_late_reveal(monkeypa
     asyncio.run(scenario())
 
 
+def test_disconnect_invalidation_cancels_pending_show_without_page_update():
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        settings_view = _control(
+            visible=False,
+            offset=None,
+            opacity=0.0,
+            cancel_pending_load=Mock(),
+        )
+
+        async def load():
+            started.set()
+            await release.wait()
+
+        settings_view.load_current_settings = load
+        manager, dashboard = _view_manager(settings_view)
+
+        pending = asyncio.create_task(manager.show_settings())
+        await started.wait()
+        manager.cancel_pending_settings_navigation()
+        release.set()
+        await pending
+
+        settings_view.cancel_pending_load.assert_called_once_with()
+        assert dashboard.visible is True
+        assert settings_view.visible is False
+        manager.page.update.assert_not_called()
+
+    asyncio.run(scenario())
+
+
 def test_app_controller_awaits_view_manager_settings_initialization():
     async def scenario():
         manager = SimpleNamespace(show_settings=AsyncMock())

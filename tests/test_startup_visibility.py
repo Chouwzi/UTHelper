@@ -192,6 +192,15 @@ def test_disconnect_closes_activation_broker_before_page_resources():
 
     controller = app_controller.AppController.__new__(app_controller.AppController)
     controller.activation_broker = Broker()
+    controller.view_manager = type(
+        "ViewManager",
+        (),
+        {
+            "cancel_pending_settings_navigation": lambda self: events.append(
+                "settings-navigation"
+            )
+        },
+    )()
     controller._page_alive = Closer("page-alive")
     controller._prefetch_cancel_event = Closer("prefetch")
     controller._sync_coordinator = Closer("coordinator")
@@ -201,4 +210,11 @@ def test_disconnect_closes_activation_broker_before_page_resources():
 
     controller._on_disconnect(None)
 
-    assert events == ["broker:1.0", "page-alive", "prefetch", "coordinator", "client"]
+    assert events == [
+        "settings-navigation",
+        "broker:1.0",
+        "page-alive",
+        "prefetch",
+        "coordinator",
+        "client",
+    ]

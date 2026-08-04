@@ -2050,9 +2050,13 @@ class AppController:
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _on_disconnect(self, e):
-        settings_view = getattr(self, "settings_view", None)
-        if settings_view is not None:
-            settings_view.cancel_pending_load()
+        view_manager = getattr(self, "view_manager", None)
+        if view_manager is not None:
+            view_manager.cancel_pending_settings_navigation()
+        else:
+            settings_view = getattr(self, "settings_view", None)
+            if settings_view is not None:
+                settings_view.cancel_pending_load()
         if self.activation_broker is not None:
             self.activation_broker.close(timeout_seconds=1.0)
         self._page_alive.clear()
