@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -110,6 +111,92 @@ def _make_loading_view(coordinator):
         SettingsView._load_autostart_state(view, generation)
     )
     return view
+
+
+def _make_save_view(baseline, draft, coordinator=None):
+    view = _make_state_only_view()
+    SettingsView._apply_snapshot_to_controls(view, draft)
+    view._baseline_snapshot = baseline
+    view._original_theme = baseline.theme
+    view._loading = False
+    view._autostart_coordinator = coordinator
+    view._save_status = _control("", color=None)
+    view._autostart_status = _control("", color=None)
+    view._unsaved_dot = _control(visible=True)
+    view._page = SimpleNamespace(
+        window=SimpleNamespace(always_on_top=baseline.always_on_top),
+        show_dialog=Mock(),
+        pop_dialog=Mock(),
+        update=Mock(),
+    )
+    view._on_saved = Mock()
+    view._on_close_cb = Mock()
+    view._on_theme_preview = Mock()
+    view.update = Mock()
+    view._apply_snapshot_to_controls = lambda snapshot: (
+        SettingsView._apply_snapshot_to_controls(view, snapshot)
+    )
+    view._apply_autostart_ui = lambda result: SettingsView._apply_autostart_ui(
+        view, result
+    )
+    view._persist_snapshot_to_settings = lambda snapshot: (
+        SettingsView._persist_snapshot_to_settings(view, snapshot)
+    )
+    view.has_changes = lambda: SettingsView.has_changes(view)
+    async def save(event):
+        return await SettingsView._save(view, event)
+
+    view._save = save
+    return view
+
+
+def _changed_snapshot(baseline, *, start_with_windows=True):
+    return replace(
+        baseline,
+        theme="solarized_dark",
+        color_critical="#010101",
+        color_warning="#020202",
+        color_safe="#030303",
+        color_quiz="#040404",
+        color_assignment="#050505",
+        color_attendance="#060606",
+        color_open="#070707",
+        color_other="#080808",
+        uth_username="student-01",
+        uth_password="uth-secret",
+        always_on_top=not baseline.always_on_top,
+        include_submitted=not baseline.include_submitted,
+        include_graded=not baseline.include_graded,
+        start_with_windows=start_with_windows,
+        start_minimized=not baseline.start_minimized,
+        minimize_to_tray=not baseline.minimize_to_tray,
+        auto_update_enabled=not baseline.auto_update_enabled,
+        crash_reporting_consent="enabled",
+        background_check_android=not baseline.background_check_android,
+        enable_gmail=True,
+        gmail_address="mail-01@example.com",
+        gmail_app_password="mail-secret",
+        enable_discord=True,
+        discord_webhook_url="discord-secret",
+        enable_telegram=True,
+        telegram_bot_token="telegram-secret",
+        telegram_chat_id="chat-01",
+        debug_mode=True,
+        check_interval_minutes=17,
+        fetch_months=3,
+        urgency_critical_hours=11,
+        urgency_warning_hours=22,
+        opening_soon_hours=33,
+        prefetch_workers=7,
+        notify_dnd_enable=True,
+        notify_dnd_start=4,
+        notify_dnd_end=19,
+        notify_ignore_submitted=False,
+        notification_profile="exam_week",
+        notify_types=("alpha", "zeta"),
+        notify_milestones_minutes=(31, 7),
+        notify_muted_courses=("Algebra", "Zoology"),
+    )
 
 
 @pytest.mark.parametrize("consent", ["not_asked", "enabled", "disabled"])
@@ -311,6 +398,149 @@ def test_cancel_pending_load_invalidates_generation_without_dirty_prompt():
     assert view._load_generation == 8
     assert view._loading is False
     assert SettingsView.has_changes(view) is False
+
+
+def test_successful_save_persists_every_field_and_rebaselines(monkeypatch):
+    import gui.components.settings_view as settings_view_module
+    from gui.controllers.autostart_settings import AutostartUiState
+
+    baseline = SettingsFormSnapshot.from_form_values({})
+    draft = _changed_snapshot(baseline)
+    fake_settings = SimpleNamespace(
+        **baseline.to_settings_values(),
+        UTH_CREDENTIALS_ORIGIN="",
+        MOODLE_WS_TOKEN="",
+        MOODLE_WS_TOKEN_ORIGIN="",
+    )
+    save = Mock(return_value=True)
+
+    class Coordinator:
+        async def change(self, enabled):
+            return AutostartUiState(enabled, True, True, "Đã cập nhật Windows.")
+
+    view = _make_save_view(baseline, draft, Coordinator())
+    monkeypatch.setattr(settings_view_module, "settings", fake_settings)
+    monkeypatch.setattr(settings_view_module, "save_settings", save)
+    monkeypatch.setattr(settings_view_module._pu, "IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is True
+    assert SettingsFormSnapshot.from_settings(fake_settings) == draft
+    assert view._baseline_snapshot == draft
+    assert view._capture_form_snapshot() == draft
+    assert SettingsView.has_changes(view) is False
+    assert view._original_theme == draft.theme
+    assert view._page.window.always_on_top == draft.always_on_top
+    save.assert_called_once_with()
+    view._on_saved.assert_called_once_with()
+
+
+def test_rejected_autostart_still_persists_and_rebaselines_unrelated_changes(
+    monkeypatch,
+):
+    import gui.components.settings_view as settings_view_module
+    from gui.controllers.autostart_settings import AutostartUiState
+
+    baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
+    requested = replace(baseline, theme="solarized_dark", start_with_windows=True)
+    fake_settings = SimpleNamespace(
+        **baseline.to_settings_values(),
+        UTH_CREDENTIALS_ORIGIN="",
+        MOODLE_WS_TOKEN="",
+        MOODLE_WS_TOKEN_ORIGIN="",
+    )
+    save = Mock(return_value=True)
+
+    class Coordinator:
+        async def change(self, enabled):
+            assert enabled is True
+            return AutostartUiState(
+                False,
+                False,
+                False,
+                "Windows đã từ chối thay đổi.",
+            )
+
+    view = _make_save_view(baseline, requested, Coordinator())
+    monkeypatch.setattr(settings_view_module, "settings", fake_settings)
+    monkeypatch.setattr(settings_view_module, "save_settings", save)
+    monkeypatch.setattr(settings_view_module._pu, "IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    persisted = replace(requested, start_with_windows=False)
+    assert SettingsFormSnapshot.from_settings(fake_settings) == persisted
+    assert view._capture_form_snapshot() == persisted
+    assert view._baseline_snapshot == persisted
+    assert SettingsView.has_changes(view) is False
+    assert "Windows đã từ chối" in view._save_status.value
+    assert view._autostart_status.value == "Windows đã từ chối thay đổi."
+    save.assert_called_once_with()
+
+    asyncio.run(SettingsView._handle_back(view, None))
+    view._page.show_dialog.assert_not_called()
+    view._on_close_cb.assert_called_once_with()
+
+
+def test_persistence_failure_keeps_old_baseline_and_settings_open(monkeypatch):
+    import gui.components.settings_view as settings_view_module
+
+    baseline = SettingsFormSnapshot.from_form_values({})
+    draft = replace(baseline, theme="solarized_dark")
+    fake_settings = SimpleNamespace(
+        **baseline.to_settings_values(),
+        UTH_CREDENTIALS_ORIGIN="",
+        MOODLE_WS_TOKEN="",
+        MOODLE_WS_TOKEN_ORIGIN="",
+    )
+    view = _make_save_view(baseline, draft)
+    monkeypatch.setattr(settings_view_module, "settings", fake_settings)
+    monkeypatch.setattr(settings_view_module, "save_settings", Mock(return_value=False))
+    monkeypatch.setattr(settings_view_module._pu, "IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save_and_close_if_valid(view, None)) is False
+    assert view._baseline_snapshot == baseline
+    assert SettingsFormSnapshot.from_settings(fake_settings) == baseline
+    assert SettingsView.has_changes(view) is True
+    assert "Không thể lưu" in view._save_status.value
+    view._on_close_cb.assert_not_called()
+
+
+def test_discard_restores_entire_baseline_and_theme_without_logging_secrets(
+    monkeypatch,
+    caplog,
+):
+    import gui.components.settings_view as settings_view_module
+
+    baseline = _changed_snapshot(
+        SettingsFormSnapshot.from_form_values({}),
+        start_with_windows=False,
+    )
+    draft = SettingsFormSnapshot.from_form_values(
+        {"theme": "midnight_blue", "start_with_windows": True}
+    )
+    view = _make_save_view(baseline, draft)
+    applied_theme = Mock()
+    applied_page_theme = Mock()
+    state_at_close = []
+    view._on_close_cb = lambda: state_at_close.append(view._capture_form_snapshot())
+    monkeypatch.setattr(settings_view_module, "apply_theme", applied_theme)
+    monkeypatch.setattr("gui.core.theme.set_page_theme", applied_page_theme)
+
+    with caplog.at_level("DEBUG"):
+        SettingsView._discard_and_close(view)
+
+    assert state_at_close == [baseline]
+    assert view._capture_form_snapshot() == baseline
+    assert SettingsView.has_changes(view) is False
+    applied_theme.assert_called_once_with(baseline.theme)
+    applied_page_theme.assert_called_once_with(view._page)
+    view._on_theme_preview.assert_called_once_with()
+    for secret in (
+        baseline.uth_password,
+        baseline.gmail_app_password,
+        baseline.discord_webhook_url,
+        baseline.telegram_bot_token,
+    ):
+        assert secret not in caplog.text
 
 
 def _view_manager(settings_view):

@@ -128,149 +128,121 @@ def test_autostart_load_timeout_is_bounded_and_returns_retry_state(monkeypatch):
     assert "thử lại" in result.message.lower()
 
 
-def test_apply_autostart_rolls_control_back_when_windows_rejects(monkeypatch):
-    current = AutostartUiState(False, True, True, "")
+def test_save_bounds_autostart_mutation_and_persists_confirmed_actual(monkeypatch):
+    from dataclasses import replace
+    from gui.view_models.settings_form import SettingsFormSnapshot
+
+    baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
+    requested = replace(baseline, start_with_windows=True)
     rejected = AutostartUiState(
-        False, False, False, "Windows đã tắt mục này trong Task Manager."
-    )
-    view = view_for(current)
-    view._autostart_coordinator.change_result = rejected
-    view._sw_start_with_windows.value = True
-    monkeypatch.setattr(
-        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
-    )
-
-    result = asyncio.run(SettingsView._apply_autostart_change(view))
-
-    assert result is False
-    assert view._autostart_coordinator.requests == [True]
-    assert view._sw_start_with_windows.value is False
-    assert view._autostart_status.value.startswith("Windows đã tắt")
-
-
-def test_apply_autostart_accepts_confirmed_state(monkeypatch):
-    current = AutostartUiState(False, True, True, "")
-    enabled = AutostartUiState(True, True, True, "")
-    view = view_for(current)
-    view._autostart_coordinator.change_result = enabled
-    view._sw_start_with_windows.value = True
-    monkeypatch.setattr(
-        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
-    )
-
-    result = asyncio.run(SettingsView._apply_autostart_change(view))
-
-    assert result is True
-    assert view._autostart_coordinator.requests == [True]
-    assert view._sw_start_with_windows.value is True
-
-
-def test_apply_skips_mutation_when_os_already_matches(monkeypatch):
-    enabled = AutostartUiState(True, True, True, "")
-    view = view_for(enabled)
-    view._sw_start_with_windows.value = True
-    monkeypatch.setattr(
-        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
-    )
-
-    result = asyncio.run(SettingsView._apply_autostart_change(view))
-
-    assert result is True
-    assert view._autostart_coordinator.requests == []
-
-
-def test_unavailable_backend_does_not_block_unrelated_save_when_unchanged(monkeypatch):
-    unavailable = AutostartUiState(
         False,
         False,
         False,
-        "Khởi động cùng Windows không khả dụng.",
-        confirmed=False,
+        "Windows đã tắt mục này trong Task Manager.",
     )
-    view = view_for(unavailable)
-    view._sw_start_with_windows.value = False
-    monkeypatch.setattr(
-        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
-    )
+    coordinator = FakeCoordinator(AutostartUiState(False, True, True, ""), rejected)
+    observed_timeouts = []
+    persisted = []
 
-    result = asyncio.run(SettingsView._apply_autostart_change(view))
-
-    assert result is True
-    assert view._autostart_coordinator.requests == []
-
-
-def test_unconfirmed_backend_rejects_requested_state_change(monkeypatch):
-    unavailable = AutostartUiState(
-        False,
-        False,
-        False,
-        "Không thể đọc trạng thái Windows.",
-        confirmed=False,
-    )
-    view = view_for(unavailable)
-    view._sw_start_with_windows.value = True
-    monkeypatch.setattr(
-        "gui.components.settings_view.settings.START_WITH_WINDOWS", False
-    )
-
-    result = asyncio.run(SettingsView._apply_autostart_change(view))
-
-    assert result is False
-
-
-def test_save_path_calls_transactional_autostart_before_persisting(monkeypatch):
-    calls = []
-    snapshot = SimpleNamespace(theme="midnight_blue", always_on_top=False)
-
-    async def apply_autostart():
-        calls.append("autostart")
-        return True
-
-    def capture():
-        calls.append("capture")
-        return snapshot
-
-    def persist(value):
-        calls.append("persist")
-        assert value is snapshot
-        return True
+    async def bounded(awaitable, timeout):
+        observed_timeouts.append(timeout)
+        return await awaitable
 
     view = SimpleNamespace(
-        _capture_form_snapshot=capture,
-        _apply_autostart_change=apply_autostart,
-        _persist_snapshot_to_settings=persist,
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=lambda: requested,
+        _autostart_coordinator=coordinator,
+        _apply_autostart_ui=lambda state: setattr(
+            view._autostart_status, "value", state.message
+        ),
+        _persist_snapshot_to_settings=lambda value: persisted.append(value) or True,
+        _apply_snapshot_to_controls=lambda value: setattr(
+            view, "visible_snapshot", value
+        ),
         _save_status=SimpleNamespace(value="", color=None),
+        _autostart_status=SimpleNamespace(value="", color=None),
         _unsaved_dot=SimpleNamespace(visible=True),
         _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
         _on_saved=None,
         update=lambda: None,
     )
+    monkeypatch.setattr("gui.components.settings_view.asyncio.wait_for", bounded)
     monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
 
-    assert asyncio.run(SettingsView._save(view, None)) is True
-    assert calls == ["capture", "autostart", "capture", "persist"]
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    assert coordinator.requests == [True]
+    assert observed_timeouts == [2.0]
+    assert persisted == [replace(requested, start_with_windows=False)]
+    assert view._baseline_snapshot == persisted[0]
+    assert view.visible_snapshot == persisted[0]
 
 
-def test_save_rolls_windows_autostart_back_when_persistence_fails(monkeypatch):
-    calls = []
-    snapshot = SimpleNamespace(theme="midnight_blue", always_on_top=False)
+def test_save_timeout_preserves_baseline_autostart_but_persists_other_fields(
+    monkeypatch,
+):
+    from dataclasses import replace
+    from gui.view_models.settings_form import SettingsFormSnapshot
 
-    async def apply_autostart():
-        calls.append("autostart-on")
-        view._autostart_rollback_enabled = False
-        return True
+    baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
+    requested = replace(baseline, theme="solarized_dark", start_with_windows=True)
+    persisted = []
 
-    async def rollback_autostart():
-        calls.append("autostart-off")
-        return True
+    async def timeout(awaitable, timeout):
+        assert timeout == 2.0
+        awaitable.close()
+        raise asyncio.TimeoutError
 
     view = SimpleNamespace(
-        _capture_form_snapshot=lambda: snapshot,
-        _apply_autostart_change=apply_autostart,
-        _rollback_autostart_change=rollback_autostart,
-        _persist_snapshot_to_settings=lambda _value: calls.append("persist") or False,
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=lambda: requested,
+        _autostart_coordinator=FakeCoordinator(
+            AutostartUiState(False, True, True, "")
+        ),
+        _apply_autostart_ui=lambda state: setattr(
+            view._autostart_status, "value", state.message
+        ),
+        _persist_snapshot_to_settings=lambda value: persisted.append(value) or True,
+        _apply_snapshot_to_controls=lambda value: None,
         _save_status=SimpleNamespace(value="", color=None),
-        _autostart_status=SimpleNamespace(value=""),
+        _autostart_status=SimpleNamespace(value="", color=None),
+        _unsaved_dot=SimpleNamespace(visible=True),
+        _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
+        _on_saved=None,
+        update=lambda: None,
+    )
+    monkeypatch.setattr("gui.components.settings_view.asyncio.wait_for", timeout)
+    monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    assert persisted == [replace(requested, start_with_windows=False)]
+    assert "thời gian" in view._save_status.value.lower()
+
+
+def test_persistence_failure_compensates_successful_windows_change(monkeypatch):
+    from dataclasses import replace
+    from gui.view_models.settings_form import SettingsFormSnapshot
+
+    baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
+    requested = replace(baseline, start_with_windows=True)
+    coordinator = FakeCoordinator(
+        AutostartUiState(False, True, True, ""),
+        AutostartUiState(True, True, True, "Đã bật."),
+    )
+
+    async def change(enabled):
+        coordinator.requests.append(enabled)
+        return AutostartUiState(enabled, True, True, "")
+
+    coordinator.change = change
+    view = SimpleNamespace(
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=lambda: requested,
+        _autostart_coordinator=coordinator,
+        _apply_autostart_ui=lambda state: None,
+        _persist_snapshot_to_settings=lambda value: False,
+        _apply_snapshot_to_controls=lambda value: None,
+        _save_status=SimpleNamespace(value="", color=None),
+        _autostart_status=SimpleNamespace(value="", color=None),
         _unsaved_dot=SimpleNamespace(visible=True),
         _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
         _on_saved=None,
@@ -279,4 +251,5 @@ def test_save_rolls_windows_autostart_back_when_persistence_fails(monkeypatch):
     monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
 
     assert asyncio.run(SettingsView._save(view, None)) is False
-    assert calls == ["autostart-on", "persist", "autostart-off"]
+    assert coordinator.requests == [True, False]
+    assert view._baseline_snapshot == baseline

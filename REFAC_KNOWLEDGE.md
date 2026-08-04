@@ -295,3 +295,22 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   ViewManager suppresses a stale pending show after either close or disconnect.
 - Validation: 22 task-focused tests and 105 Settings/config/activation regression
   tests passed; focused Ruff and `git diff --check` passed.
+
+# 2026-08-04 - Verified Settings save and discard baseline
+
+- Settings save now captures one normalized draft and bounds a requested Windows
+  autostart mutation to 2.0 seconds. A rejected or timed-out mutation restores
+  only the autostart field to the confirmed/baseline state; every unrelated valid
+  field is still persisted and becomes the clean visible baseline.
+- A durable persistence failure keeps the previous baseline and Settings view
+  open. If Windows autostart had already changed, a separately bounded
+  compensation attempts to restore the previous OS state before reporting the
+  failure.
+- Successful persistence reapplies the normalized snapshot to every control,
+  updates the theme/always-on-top state, rebases dirty detection, and invokes the
+  saved callback once. Discard likewise restores every control and secret field
+  from the immutable baseline before reapplying the baseline theme and closing;
+  secret values are never emitted to diagnostics.
+- Validation: 52 Settings/autostart/notification/config tests passed; the full
+  suite passed with **823 passed, 24 skipped**; `ruff check src tests` and
+  `git diff --check` passed.

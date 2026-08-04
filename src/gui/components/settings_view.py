@@ -1712,37 +1712,6 @@ class SettingsView(ft.Container):
             return None
         return result
 
-    async def _apply_autostart_change(self) -> bool:
-        self._autostart_rollback_enabled = None
-        if self._autostart_coordinator is None:
-            return True
-        requested = bool(self._sw_start_with_windows.value)
-        current = await self._autostart_coordinator.load()
-        if not current.confirmed:
-            self._apply_autostart_ui(current)
-            return requested == settings.START_WITH_WINDOWS
-        if current.enabled == requested:
-            result = current
-        elif current.editable:
-            result = await self._autostart_coordinator.change(requested)
-            if result.confirmed and result.enabled == requested:
-                self._autostart_rollback_enabled = current.enabled
-        else:
-            result = current
-        self._apply_autostart_ui(result)
-        return result.confirmed and result.enabled == requested
-
-    async def _rollback_autostart_change(self) -> bool:
-        previous = getattr(self, "_autostart_rollback_enabled", None)
-        if previous is None or self._autostart_coordinator is None:
-            return True
-        result = await self._autostart_coordinator.change(previous)
-        self._apply_autostart_ui(result)
-        if result.confirmed and result.enabled == previous:
-            self._autostart_rollback_enabled = None
-            return True
-        return False
-
     def _capture_form_snapshot(self) -> SettingsFormSnapshot:
         """Map controls to the canonical form model in exactly one place."""
         return SettingsFormSnapshot.from_form_values(
@@ -1975,6 +1944,25 @@ class SettingsView(ft.Container):
             return False
         return self._capture_form_snapshot() != self._baseline_snapshot
 
+    def _discard_and_close(self) -> None:
+        """Restore the complete persisted baseline before closing Settings."""
+        if self._baseline_snapshot is not None:
+            baseline = self._baseline_snapshot
+            self._apply_snapshot_to_controls(baseline)
+            self._original_theme = baseline.theme
+            apply_theme(baseline.theme)
+            from gui.core.theme import set_page_theme
+
+            set_page_theme(self._page)
+            if self._on_theme_preview:
+                self._on_theme_preview()
+            if hasattr(self, "_unsaved_dot"):
+                self._unsaved_dot.visible = False
+            if hasattr(self, "_save_status"):
+                self._save_status.value = ""
+            self.update()
+        self._on_close_cb()
+
     async def _handle_back(self, e):
         import logging
         _log = logging.getLogger("settings.dialog")
@@ -1992,16 +1980,7 @@ class SettingsView(ft.Container):
             def discard_and_close(e):
                 _log.warning(">>> DISCARD button clicked!")
                 self._page.pop_dialog()
-                # Revert theme to original if it was changed
-                if self._selected_theme != self._original_theme:
-                    apply_theme(self._original_theme)
-                    from gui.core.theme import set_page_theme
-                    set_page_theme(self._page)
-                    if self._on_theme_preview:
-                        self._on_theme_preview()
-                # Reset internal state so next open sees the original theme
-                self._selected_theme = self._original_theme
-                self._on_close_cb()
+                self._discard_and_close()
                 _log.warning("  discard done")
 
             def save_and_close(e):
@@ -2042,19 +2021,104 @@ class SettingsView(ft.Container):
 
     async def _save(self, e) -> bool:
         try:
-            pending = self._capture_form_snapshot()
-            if not _pu.IS_MOBILE:
-                if not await self._apply_autostart_change():
-                    self._save_status.value = self._autostart_status.value
-                    self._save_status.color = C.CRITICAL
-                    self.update()
-                    return False
-                pending = self._capture_form_snapshot()
+            requested = self._capture_form_snapshot()
+            baseline = self._baseline_snapshot
+            if baseline is None:
+                raise RuntimeError("Settings baseline is unavailable")
 
-            if not self._persist_snapshot_to_settings(pending):
+            persisted = requested
+            autostart_ok = True
+            autostart_changed = False
+            if (
+                not _pu.IS_MOBILE
+                and requested.start_with_windows != baseline.start_with_windows
+            ):
+                if self._autostart_coordinator is None:
+                    result = AutostartUiState(
+                        enabled=baseline.start_with_windows,
+                        editable=False,
+                        success=False,
+                        message="Khởi động cùng Windows không khả dụng.",
+                        confirmed=False,
+                    )
+                else:
+                    try:
+                        result = await asyncio.wait_for(
+                            self._autostart_coordinator.change(
+                                requested.start_with_windows
+                            ),
+                            timeout=2.0,
+                        )
+                    except asyncio.TimeoutError:
+                        result = AutostartUiState(
+                            enabled=baseline.start_with_windows,
+                            editable=False,
+                            success=False,
+                            message=(
+                                "Thay đổi Khởi động cùng Windows đã quá thời gian. "
+                                "Các cài đặt khác vẫn được lưu."
+                            ),
+                            confirmed=False,
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "settings_autostart_change_failed"
+                        )
+                        result = AutostartUiState(
+                            enabled=baseline.start_with_windows,
+                            editable=False,
+                            success=False,
+                            message=(
+                                "Không thể thay đổi Khởi động cùng Windows. "
+                                "Các cài đặt khác vẫn được lưu."
+                            ),
+                            confirmed=False,
+                        )
+
+                actual = (
+                    result.enabled
+                    if result.confirmed
+                    else baseline.start_with_windows
+                )
+                persisted = replace(
+                    requested,
+                    start_with_windows=actual,
+                )
+                autostart_ok = (
+                    result.confirmed
+                    and actual == requested.start_with_windows
+                )
+                autostart_changed = (
+                    result.confirmed
+                    and actual != baseline.start_with_windows
+                )
+                display_result = result
+                if not result.confirmed:
+                    display_result = replace(result, enabled=actual)
+                self._apply_autostart_ui(display_result)
+
+            if not self._persist_snapshot_to_settings(persisted):
                 autostart_restored = True
-                if not _pu.IS_MOBILE:
-                    autostart_restored = await self._rollback_autostart_change()
+                if autostart_changed and self._autostart_coordinator is not None:
+                    try:
+                        restored = await asyncio.wait_for(
+                            self._autostart_coordinator.change(
+                                baseline.start_with_windows
+                            ),
+                            timeout=2.0,
+                        )
+                        autostart_restored = (
+                            restored.confirmed
+                            and restored.enabled == baseline.start_with_windows
+                        )
+                        self._apply_autostart_ui(restored)
+                    except asyncio.TimeoutError:
+                        autostart_restored = False
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "settings_autostart_rollback_failed"
+                        )
+                        autostart_restored = False
                 if autostart_restored:
                     self._save_status.value = (
                         "Lỗi: Không thể lưu cài đặt. Vui lòng thử lại."
@@ -2068,28 +2132,39 @@ class SettingsView(ft.Container):
                 self.update()
                 return False
 
-            self._original_theme = pending.theme
-            self._baseline_snapshot = pending
+            self._apply_snapshot_to_controls(persisted)
+            self._original_theme = persisted.theme
+            self._baseline_snapshot = persisted
 
-            self._save_status.value   = "Đã lưu cài đặt thành công"
-            self._save_status.color   = C.SAFE
+            if autostart_ok:
+                self._save_status.value = "Đã lưu cài đặt thành công"
+                self._save_status.color = C.SAFE
+            else:
+                warning = self._autostart_status.value or (
+                    "Khởi động cùng Windows chưa đạt trạng thái đã yêu cầu."
+                )
+                self._save_status.value = (
+                    f"Đã lưu các cài đặt khác. {warning}"
+                )
+                self._save_status.color = C.WARNING
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
             
             if not _pu.IS_MOBILE:
-                self._page.window.always_on_top = pending.always_on_top
+                self._page.window.always_on_top = persisted.always_on_top
             self.update()
 
             if self._on_saved:
                 self._on_saved()
-            return True
+            return autostart_ok
         except ValueError:
             self._save_status.value = "Lỗi: Vui lòng nhập số hợp lệ!"
             self._save_status.color = C.CRITICAL
             self.update()
             return False
-        except Exception as e_err:
-            self._save_status.value = f"Lỗi không xác định: {str(e_err)}"
+        except Exception:
+            logging.getLogger(__name__).warning("settings_save_failed")
+            self._save_status.value = "Lỗi không xác định khi lưu cài đặt."
             self._save_status.color = C.CRITICAL
             self.update()
             return False
