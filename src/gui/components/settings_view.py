@@ -1672,8 +1672,14 @@ class SettingsView(ft.Container):
     async def _reconcile_autostart(self):
         if self._autostart_coordinator is None:
             return
+        value_before_read = bool(self._sw_start_with_windows.value)
         result = await self._autostart_coordinator.load()
+        draft_after_read = bool(self._sw_start_with_windows.value)
+        user_edited_during_read = draft_after_read != value_before_read
         self._apply_autostart_ui(result)
+        if user_edited_during_read:
+            self._sw_start_with_windows.value = draft_after_read
+            self._sync_autostart_dependency()
         if result.confirmed and settings.START_WITH_WINDOWS != result.enabled:
             previous_enabled = settings.START_WITH_WINDOWS
             settings.START_WITH_WINDOWS = result.enabled
