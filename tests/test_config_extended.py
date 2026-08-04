@@ -16,6 +16,32 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 
+def test_activation_and_crash_reporting_defaults_round_trip_through_json():
+    from config import Settings
+
+    settings = Settings()
+    assert settings.AUTO_UPDATE_ENABLED is True
+    assert settings.CRASH_REPORTING_CONSENT == "not_asked"
+
+    restored = Settings.model_validate_json(settings.model_dump_json())
+    assert restored.AUTO_UPDATE_ENABLED is True
+    assert restored.CRASH_REPORTING_CONSENT == "not_asked"
+
+
+@pytest.mark.parametrize("consent", ["not_asked", "enabled", "disabled"])
+def test_crash_reporting_consent_accepts_supported_values(consent):
+    from config import Settings
+
+    assert Settings(CRASH_REPORTING_CONSENT=consent).CRASH_REPORTING_CONSENT == consent
+
+
+def test_crash_reporting_consent_rejects_unsupported_values():
+    from config import Settings
+
+    with pytest.raises(Exception):
+        Settings(CRASH_REPORTING_CONSENT="maybe")
+
+
 class TestLoadSettings:
     """load_settings() tests."""
 

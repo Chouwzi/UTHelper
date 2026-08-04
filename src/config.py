@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typing import Literal
 import os
 from pathlib import Path
 import sys
@@ -162,6 +163,14 @@ class Settings(BaseModel):
     # Android background notifications (AlarmManager)
     BACKGROUND_CHECK_ANDROID: bool = Field(default=True, description="Kiểm tra deadline nền trên Android (AlarmManager)")
     BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="[Deprecated] Tần suất Android cũ (phút)")
+    AUTO_UPDATE_ENABLED: bool = Field(
+        default=True,
+        description="Tự động kiểm tra cập nhật",
+    )
+    CRASH_REPORTING_CONSENT: Literal["not_asked", "enabled", "disabled"] = Field(
+        default="not_asked",
+        description="Quyết định gửi chẩn đoán sự cố của người dùng",
+    )
 
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")
