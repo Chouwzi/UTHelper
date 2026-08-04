@@ -23,6 +23,36 @@ class FakeHandle:
     closed: bool = False
 
 
+class PauseAfterReleaseLock:
+    """Pauses one lock owner immediately after it releases the lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pause_once = False
+        self.released = threading.Event()
+        self.resume = threading.Event()
+
+    def arm(self) -> None:
+        self._pause_once = True
+
+    def acquire(self) -> bool:
+        return self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+        if self._pause_once:
+            self._pause_once = False
+            self.released.set()
+            assert self.resume.wait(1.0)
+
+    def __enter__(self) -> PauseAfterReleaseLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+
 class FakeKernelObjectApi:
     """In-memory kernel-object adapter with deterministic ownership transitions."""
 
@@ -483,3 +513,33 @@ def test_timed_out_close_defers_handle_cleanup_until_blocking_handler_exits():
     assert len(kernel.releases) == 1
     assert broker.close()
     assert len(kernel.closes) == 4
+
+
+def test_close_rejects_activation_dequeued_before_callback_admission():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    callback_count = 0
+
+    def record_callback() -> None:
+        nonlocal callback_count
+        callback_count += 1
+
+    broker.bind_show_handler(record_callback)
+    pause_lock = PauseAfterReleaseLock()
+    broker._lock = pause_lock  # type: ignore[assignment]
+    pause_lock.arm()
+    kernel.set_event(broker.activation_handle)
+    assert pause_lock.released.wait(0.5)
+
+    try:
+        assert not broker.close(timeout_seconds=0.0)
+    finally:
+        pause_lock.resume.set()
+        receiver = broker._receiver
+        assert receiver is not None
+        receiver.join(0.5)
+
+    assert not receiver.is_alive()
+    assert callback_count == 0
+    assert broker.close()

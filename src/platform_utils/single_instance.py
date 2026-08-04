@@ -108,6 +108,7 @@ class WindowsActivationBroker:
         self._shutdown_handle: object | None = None
         self._receiver: Thread | None = None
         self._lock = Lock()
+        self._admission_lock = Lock()
         self._close_lock = Lock()
 
     def bind_show_handler(self, handler: Callable[[], None]) -> None:
@@ -138,6 +139,10 @@ class WindowsActivationBroker:
     def close(self, timeout_seconds: float = 1.0) -> bool:
         """Stop the receiver and release every handle owned by this broker once."""
         with self._close_lock:
+            # This serializes shutdown with the last callback admission, without
+            # holding any lifecycle lock while user code is running.
+            with self._admission_lock:
+                self._closed = True
             with self._lock:
                 self._closed = True
                 receiver = self._receiver
@@ -179,6 +184,9 @@ class WindowsActivationBroker:
                     handler = self._handler
                 if handler is None:
                     continue
+                with self._admission_lock:
+                    if self._closed:
+                        return
                 try:
                     handler()
                 except Exception:
