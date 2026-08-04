@@ -18,10 +18,13 @@ from diagnostics.models import (
 )
 
 _MAX_LOG_TEXT = 4096
+_LOG_REDACTION_LOOKAHEAD = 1024
 _MAX_IDENTIFIER = 128
 _MAX_PATH = 240
 _MAX_FRAMES = 40
 _FINGERPRINT_FRAMES = 8
+_REDACTION_MARKER = "[redacted]"
+_SAFE_FRAGMENT_DELIMITERS = frozenset(" \t\r\n,;(){}<>\"'")
 
 _IDENTIFIER_UNSAFE = re.compile(r"[^A-Za-z0-9_.]+")
 _FUNCTION_UNSAFE = re.compile(r"[^A-Za-z0-9_.<>-]+")
@@ -34,7 +37,8 @@ _SENSITIVE_PATTERNS = (
     re.compile(
         r"(?:['\"])?(?:password|passwd|token|access_token|refresh_token|"
         r"sesskey|cookie|moodlesession|authorization|api_key|secret)(?:['\"])?"
-        r"\s*[=:]\s*(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\s*[=:]\s*(?:bearer\s+)?"
+        r"(?:\"[^\"\r\n]*(?:\"|$)|'[^'\r\n]*(?:'|$)|[^\r\n,;]*)",
         re.IGNORECASE,
     ),
     re.compile(
@@ -58,10 +62,28 @@ def sanitize_log_text(value: object) -> str:
         text = str(value)
     except Exception:
         return "[unprintable]"
-    text = _CONTROL_CHARACTERS.sub(" ", text[:_MAX_LOG_TEXT])
+    text = text[: _MAX_LOG_TEXT + _LOG_REDACTION_LOOKAHEAD]
+    text = _CONTROL_CHARACTERS.sub(" ", text)
     for pattern in _SENSITIVE_PATTERNS:
-        text = pattern.sub("[redacted]", text)
-    return text[:_MAX_LOG_TEXT]
+        text = pattern.sub(_REDACTION_MARKER, text)
+    return _truncate_without_cross_boundary_fragment(text)
+
+
+def _truncate_without_cross_boundary_fragment(text: str) -> str:
+    """Bound output without emitting the unfinished token at the cutoff."""
+
+    if len(text) <= _MAX_LOG_TEXT:
+        return text
+
+    safe_budget = _MAX_LOG_TEXT - len(_REDACTION_MARKER)
+    candidate = text[:safe_budget]
+    cut_at = max(
+        (candidate.rfind(delimiter) for delimiter in _SAFE_FRAGMENT_DELIMITERS),
+        default=-1,
+    )
+    if cut_at < 0:
+        return _REDACTION_MARKER
+    return f"{candidate[: cut_at + 1]}{_REDACTION_MARKER}"
 
 
 def _safe_identifier(value: object, *, fallback: str = "unknown") -> str:

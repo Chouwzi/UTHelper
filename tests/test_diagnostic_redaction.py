@@ -294,6 +294,97 @@ def test_sanitize_log_text_is_total_removes_controls_and_bounds_output():
     assert len(sanitized) <= 4096
 
 
+@pytest.mark.parametrize(
+    ("boundary_fragment", "continuation"),
+    [
+        ("crossb", "oundary@example.invalid"),
+        ("Bear", "er synthetic.header.payload"),
+        ("htt", "ps://courses.example.invalid/private?token=secret"),
+        ("passw", "ord=synthetic-private-value"),
+        ("C:\\Use", "rs\\Synthetic\\private\\file.txt"),
+        ("/home/", "synthetic/private/file.txt"),
+    ],
+    ids=[
+        "email_crosses_cutoff",
+        "bearer_crosses_cutoff",
+        "url_crosses_cutoff",
+        "key_value_crosses_cutoff",
+        "windows_user_path_crosses_cutoff",
+        "unix_user_path_crosses_cutoff",
+    ],
+)
+def test_sanitize_log_text_drops_sensitive_fragment_crossing_output_cutoff(
+    boundary_fragment: str,
+    continuation: str,
+):
+    raw = "." * (4096 - len(boundary_fragment))
+    raw += boundary_fragment + continuation
+
+    sanitized = sanitize_log_text(raw)
+
+    if boundary_fragment in sanitized:
+        pytest.fail("sanitized log retained a synthetic cross-boundary fragment")
+    assert len(sanitized) <= 4096
+
+
+def test_sanitize_log_text_bounds_work_for_oversized_cross_boundary_value():
+    raw = "." * 4080 + "crossboundary" + "x" * 1_000_000 + "@example.invalid"
+
+    sanitized = sanitize_log_text(raw)
+
+    if "crossboundary" in sanitized:
+        pytest.fail("sanitized log retained an oversized cross-boundary fragment")
+    assert len(sanitized) <= 4096
+
+
+@pytest.mark.parametrize(
+    ("sensitive_value", "forbidden_fragment"),
+    [
+        (
+            "boundary_value_marker" + "x" * 100 + "@example.invalid",
+            "boundary_value_marker",
+        ),
+        ("Bearer boundary_value_marker" + "x" * 180, "boundary_value_marker"),
+        (
+            "https://example.invalid/boundary_value_marker/" + "x" * 180,
+            "boundary_value_marker",
+        ),
+        (
+            'password="boundary_value_marker private_tail_marker '
+            + "x" * 1200,
+            "private_tail_marker",
+        ),
+        (
+            r"C:\Users\Synthetic User\boundary_value_marker" + "x" * 180,
+            "boundary_value_marker",
+        ),
+        (
+            "/home/synthetic user/private_tail_marker/" + "x" * 180,
+            "private_tail_marker",
+        ),
+    ],
+    ids=[
+        "email_value_crosses_cutoff",
+        "bearer_value_crosses_cutoff",
+        "url_value_crosses_cutoff",
+        "key_value_body_crosses_cutoff",
+        "windows_user_path_value_crosses_cutoff",
+        "unix_user_path_value_crosses_cutoff",
+    ],
+)
+def test_sanitize_log_text_redacts_variable_length_family_across_cutoff(
+    sensitive_value: str,
+    forbidden_fragment: str,
+):
+    raw = "." * 4000 + sensitive_value
+
+    sanitized = sanitize_log_text(raw)
+
+    if forbidden_fragment in sanitized:
+        pytest.fail("sanitized log retained a synthetic variable-length value")
+    assert len(sanitized) <= 4096
+
+
 def test_build_report_normalizes_naive_time_to_utc(
     diagnostic_context: DiagnosticContext,
 ):

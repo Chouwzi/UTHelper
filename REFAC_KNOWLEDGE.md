@@ -531,3 +531,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   substitute for the report's typed allow-list boundary.
 - Focused privacy verification: **26 passed**. Scoped Ruff and `git diff --check`
   passed; the pytest process used a finite 20-second shell timeout.
+- Reviewer hardening now redacts over a fixed 1 KiB lookahead before enforcing
+  the 4 KiB log-output cap. If sanitized text still crosses the cap, the
+  unfinished trailing token is replaced fail-closed instead of being emitted as
+  a recognizable email, credential, URL, bearer token, or user-path fragment.
+- Cross-cutoff coverage exercises both split family prefixes and variable-length
+  values for email, bearer, URL, key/value, Windows user path, and Unix user path,
+  including a one-million-character synthetic input while regex work remains
+  bounded to the fixed scan buffer.
