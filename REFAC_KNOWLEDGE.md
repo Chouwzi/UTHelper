@@ -343,3 +343,128 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   `ruff check src tests`, PowerShell parser validation, and `git diff --check`
   passed. PSScriptAnalyzer and a verified packaged bundle were unavailable, so
   those two gates were not reported as passed.
+
+# 2026-08-04 - Windows activation and Settings state invariants
+
+## Ownership and activation boundary
+
+- Desktop startup calls the Windows single-instance bootstrap before importing
+  or starting Flet. Web mode and non-Windows platforms bypass Win32 ownership.
+  The production namespace is scoped to application identity, release channel,
+  current Windows user SID, and packaged/development mode; development and
+  packaged instances therefore cannot claim each other's namespace.
+- The three kernel-object names contain only `Local\\UTHelper-`, a SHA-256
+  digest of length-prefixed identity components, and a fixed role suffix. Raw
+  usernames, SIDs, paths, credentials, tokens, and settings never enter an
+  object name. Every named mutex/event receives a protected DACL granting only
+  the current user and `SYSTEM` the synchronization rights required by the
+  broker.
+- Ownership uses a named mutex. SHOW delivery uses a named auto-reset event;
+  readiness uses a named manual-reset event which becomes signaled only after
+  the primary receiver is bound; teardown resets readiness. Receiver shutdown
+  uses an unnamed event. A manual secondary signals SHOW and exits; an
+  autostart/StartupApproved-alias secondary exits silently. A failed handoff
+  retries ownership exactly once, becoming a visible primary only if that retry
+  succeeds.
+- Callback direction is strictly Win32 receiver -> plain callback ->
+  `WindowActivator.request_show()` -> `page.run_task(WindowActivator.show)`.
+  Only `WindowActivator.show()` touches Flet: it sets `visible=True`,
+  `minimized=False`, and `focused=True`, calls `page.update()`, then awaits
+  `page.window.to_front()`. Tray Open follows the same path. An accepted SHOW
+  prevents later startup-minimized policy from hiding the window again.
+- Unexpected Win32 initialization failures fail open as a visible primary and
+  emit only the sanitized `single_instance_fail_open` diagnostic. Packaged
+  smoke verification treats that marker as a failure rather than accepting a
+  degraded single-instance result.
+
+## Numeric timeout contract
+
+- Secondary readiness acknowledgement: at most **1.5 seconds**; non-finite or
+  oversized inputs are clamped to that maximum.
+- Receiver wait on `(shutdown, activation)`: at most **250 ms** per iteration.
+- Broker close: default and production call bound of **1.0 second**. A `True`
+  result certifies receiver shutdown, handle cleanup, and no later callback; a
+  `False` result reports an already-admitted callback may still finish while no
+  new activation is admitted.
+- Settings autostart load, requested mutation, uncertain-result readback,
+  baseline compensation, and persistence-failure rollback each have their own
+  **2.0-second** `asyncio.wait_for` bound.
+- The packaged activation harness defaults to **5 seconds** for a child process
+  to exit and **10 seconds** for a window state, polls every **100 ms**, and
+  gives only owned PIDs **3 seconds** for graceful cleanup plus **3 seconds**
+  after forced cleanup. Its parameter validation caps process/window deadlines
+  at **60 seconds**.
+- The full regression recipe below has an independent **600-second** outer
+  PowerShell job timeout. No verification command relies on an unbounded process
+  wait.
+
+## Immutable Settings baseline
+
+- `SettingsFormSnapshot` is the sole normalized form boundary. Its members are:
+  `theme`; all critical/warning/safe/quiz/assignment/attendance/open/other
+  colors; UTH username and password; always-on-top; submitted and graded
+  inclusion; start-with-Windows, start-minimized, and minimize-to-tray;
+  automatic-update checking; three-state crash-reporting consent; Android
+  background checking; Gmail enable/address/app-password; Discord
+  enable/webhook; Telegram enable/bot-token/chat-id; debug mode; refresh
+  interval; fetch-month count; urgency critical/warning/opening thresholds;
+  prefetch workers; DND enable/start/end; submitted-notification filtering;
+  notification profile, types, milestones, and muted courses. Password, app
+  password, webhook, and bot-token fields use `repr=False`; list/tuple
+  conversion occurs only at the snapshot/config boundary.
+- A Settings load first captures persisted state, then performs the bounded OS
+  autostart read. Controls and the clean baseline commit together only if the
+  load generation is still current. Closing, navigating away, or disconnecting
+  invalidates the generation; late work cannot change controls, status,
+  visibility, global settings, or baseline. An unconfirmed OS read preserves the
+  persisted autostart value, disables that control, and shows a retry warning
+  without making the form dirty.
+- Dirty state is normalized current snapshot != last successful load/save
+  snapshot. A successful save reapplies the persisted normalized snapshot to
+  every control and rebases only after durable persistence. Discard restores all
+  controls, including secret fields and theme, from the immutable baseline.
+- Autostart is an OS-owned field. A rejected or timed-out change does not discard
+  unrelated valid settings: bounded readback accepts only a confirmed requested
+  state; otherwise bounded compensation targets the prior baseline, the
+  confirmed/baseline autostart value is used, and the other fields are persisted
+  and rebased. If durable settings persistence fails after an OS change, the
+  previous baseline remains authoritative and a separately bounded compensation
+  attempts to restore the prior OS state.
+
+## Reproducible verification on 2026-08-04
+
+Run from the repository worktree with
+`PYTHONPATH=src;extensions/flet_uth_background_sync/src`:
+
+```powershell
+$job = Start-Job { Set-Location '<worktree>'; $env:PYTHONPATH='src;extensions/flet_uth_background_sync/src'; python -m pytest tests -q --tb=short }
+if (-not (Wait-Job $job -Timeout 600)) { Stop-Job $job; throw 'pytest exceeded 600 seconds' }
+Receive-Job $job
+Remove-Job $job
+ruff check src tests
+
+$job = Start-Job { Set-Location '<worktree>'; $env:PYTHONPATH='src;extensions/flet_uth_background_sync/src'; python -m pytest -m windows_integration -q --tb=short }
+if (-not (Wait-Job $job -Timeout 120)) { Stop-Job $job; throw 'windows_integration pytest exceeded 120 seconds' }
+Receive-Job $job
+Remove-Job $job
+
+git diff --check
+rg -n "password|bot_token|webhook|user_sid" src/platform_utils/single_instance.py src/gui/view_models/settings_form.py tests/test_windows_single_instance.py
+rg -n "while True|\.wait\(\)" src/platform_utils/single_instance.py scripts/test_windows_single_instance_e2e.ps1
+rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
+```
+
+- First bounded full suite: **830 passed, 24 skipped in 10.80 seconds**.
+- Separate real-Windows marker: **2 passed, 852 deselected in 1.51 seconds**.
+- `ruff check src tests` and `git diff --check`: passed.
+- The sensitive-name scan returned only expected protocol/field identifiers,
+  `repr=False` declarations, and synthetic SID literals in tests; it found no
+  secret value logging in the scoped files. The wait scan found one intentional
+  receiver `while True`, whose `wait_many` is bounded to 250 ms and exits on
+  shutdown; it found no bare `.wait()` and no `Wait-Process`.
+- A development GUI launch was deliberately not run. No verified packaged or
+  installed candidate existed in this worktree, so installed-build manual
+  activation and the packaged five-scenario E2E were also not run and are not
+  claimed as passing. The real Win32 integration above verifies the kernel
+  ownership, acknowledgement, manual SHOW, silent autostart, teardown, namespace
+  reuse, and DACL boundary without launching Flet.
