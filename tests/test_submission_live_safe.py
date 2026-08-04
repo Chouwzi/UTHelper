@@ -20,6 +20,7 @@ import pytest
 import config
 from config import settings
 from core.client import DraftUploadResult, MoodleClient
+from core.moodle_sites import moodle_site_from_origin
 from core.moodle_service import MoodleService
 from core.submission_models import (
     FileMutationIntent,
@@ -75,8 +76,12 @@ class _LiveAuthUnavailable(RuntimeError):
 class _IsolatedLiveMoodleClient(MoodleClient):
     """In-memory WS token client with no global cache read, refresh, or write."""
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, site_origin: str):
         super().__init__()
+        site = moodle_site_from_origin(site_origin)
+        if site is None:
+            raise _LiveAuthUnavailable("live Moodle origin is not trusted")
+        self._moodle_site = site
         self.__live_token = token
 
     def _get_ws_token(self, *args: Any, **kwargs: Any) -> str:
@@ -90,7 +95,7 @@ class _IsolatedLiveMoodleClient(MoodleClient):
             **params,
         }
         _, result = self._post(
-            f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+            f"{self.moodle_site_origin}/webservice/rest/server.php",
             request_params,
             timeout=20,
         )
@@ -112,8 +117,10 @@ def live_call_spy(monkeypatch: pytest.MonkeyPatch) -> _LiveCallSpy:
     return spy
 
 
-def _verified_isolated_client(token: str, expected_username: str) -> _IsolatedLiveMoodleClient:
-    client = _IsolatedLiveMoodleClient(token)
+def _verified_isolated_client(
+    token: str, expected_username: str, site_origin: str
+) -> _IsolatedLiveMoodleClient:
+    client = _IsolatedLiveMoodleClient(token, site_origin)
     site_info = client.call_ws_api("core_webservice_get_site_info")
     actual_username = site_info.get("username") if isinstance(site_info, dict) else None
     if not isinstance(actual_username, str) or actual_username != expected_username:
@@ -123,6 +130,9 @@ def _verified_isolated_client(token: str, expected_username: str) -> _IsolatedLi
 
 def _create_isolated_live_client() -> _IsolatedLiveMoodleClient:
     """Use env credentials first, otherwise a verified secure-keyring token only."""
+    configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+    if configured_site is None:
+        raise _LiveAuthUnavailable("configured live Moodle origin is not trusted")
     user = os.environ.get("UTH_TEST_USER", "")
     password = os.environ.get("UTH_TEST_PASS", "")
     if bool(user) != bool(password):
@@ -131,22 +141,29 @@ def _create_isolated_live_client() -> _IsolatedLiveMoodleClient:
     if user and password:
         bootstrap = MoodleClient()
         _, result = bootstrap._post(  # noqa: SLF001
-            f"{settings.MOODLE_BASE_URL}/login/token.php",
+            f"{configured_site.origin}/login/token.php",
             {"username": user, "password": password, "service": "moodle_mobile_app"},
             timeout=15,
         )
         token = result.get("token") if isinstance(result, dict) else None
         if not isinstance(token, str) or not token:
             raise _LiveAuthUnavailable("environment credential authentication failed")
-        return _verified_isolated_client(token, user)
+        return _verified_isolated_client(token, user, configured_site.origin)
 
     if not config._HAS_KEYRING:  # noqa: SLF001
         raise _LiveAuthUnavailable("secure keyring is unavailable")
     expected_username = settings.UTH_USERNAME
     token = config._read_secret("ws_token")  # noqa: SLF001
+    token_site = moodle_site_from_origin(
+        config._read_secret("ws_token_origin")  # noqa: SLF001
+    )
     if not expected_username or not token:
         raise _LiveAuthUnavailable("verified secure live authentication is unavailable")
-    return _verified_isolated_client(token, expected_username)
+    if token_site is None or token_site != configured_site:
+        raise _LiveAuthUnavailable("secure live token origin does not match configured Moodle")
+    return _verified_isolated_client(
+        token, expected_username, configured_site.origin
+    )
 
 
 def _live_client() -> _IsolatedLiveMoodleClient:
@@ -562,11 +579,87 @@ def test_assignment_auth_rejects_plaintext_settings_fallback(monkeypatch):
         _create_isolated_live_client()
 
 
+@pytest.mark.parametrize(
+    ("configured_base", "stored_origin"),
+    [
+        ("https://courses.ut.edu.vn", "https://thnn.ut.edu.vn"),
+        ("https://thnn.ut.edu.vn", "https://courses.ut.edu.vn"),
+    ],
+)
+def test_secure_token_from_the_other_trusted_site_makes_zero_requests(
+    monkeypatch, configured_base, stored_origin
+):
+    monkeypatch.delenv("UTH_TEST_USER", raising=False)
+    monkeypatch.delenv("UTH_TEST_PASS", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", configured_base)
+    monkeypatch.setattr(settings, "UTH_USERNAME", "expected-user")
+    secrets = {
+        "ws_token": "secure-test-token",
+        "ws_token_origin": stored_origin,
+    }
+    monkeypatch.setattr(config, "_read_secret", secrets.get)
+    requests: list[str] = []
+
+    def record_request(_client, url, _data, timeout):
+        del timeout
+        requests.append(url)
+        return 200, {"username": "expected-user"}
+
+    monkeypatch.setattr(MoodleClient, "_post", record_request)
+
+    with pytest.raises(_LiveAuthUnavailable, match="origin"):
+        _create_isolated_live_client()
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "stored_origin",
+    ["", "not-an-origin", "https://moodle.example.edu"],
+)
+def test_missing_or_untrusted_secure_token_origin_makes_zero_requests(
+    monkeypatch, stored_origin
+):
+    monkeypatch.delenv("UTH_TEST_USER", raising=False)
+    monkeypatch.delenv("UTH_TEST_PASS", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(
+        settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn"
+    )
+    monkeypatch.setattr(settings, "UTH_USERNAME", "expected-user")
+    secrets = {
+        "ws_token": "secure-test-token",
+        "ws_token_origin": stored_origin,
+    }
+    monkeypatch.setattr(config, "_read_secret", secrets.get)
+    requests: list[str] = []
+
+    def record_request(_client, url, _data, timeout):
+        del timeout
+        requests.append(url)
+        return 200, {"username": "expected-user"}
+
+    monkeypatch.setattr(MoodleClient, "_post", record_request)
+
+    with pytest.raises(_LiveAuthUnavailable, match="origin"):
+        _create_isolated_live_client()
+
+    assert requests == []
+
+
 def test_secure_token_account_identity_must_match_expected_username(monkeypatch):
     monkeypatch.delenv("UTH_TEST_USER", raising=False)
     monkeypatch.delenv("UTH_TEST_PASS", raising=False)
     monkeypatch.setattr(config, "_HAS_KEYRING", True)
-    monkeypatch.setattr(config, "_read_secret", lambda key: "secure-test-token")
+    secrets = {
+        "ws_token": "secure-test-token",
+        "ws_token_origin": "https://courses.ut.edu.vn",
+    }
+    monkeypatch.setattr(config, "_read_secret", secrets.get)
+    monkeypatch.setattr(
+        settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn"
+    )
     monkeypatch.setattr(settings, "UTH_USERNAME", "expected-user")
     monkeypatch.setattr(
         MoodleClient,

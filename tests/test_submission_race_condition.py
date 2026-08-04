@@ -327,12 +327,14 @@ async def test_newest_same_assignment_snapshot_load_wins_when_older_finishes_las
     url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
     view.update_detail({"url": url, "course_id": 456, "type": "other"})
 
+    first_ticket = view._reserve_submission_snapshot_load()
     first = asyncio.create_task(
-        view._async_load_submitted_files(object(), url, 456)
+        view._async_load_submitted_files(object(), url, 456, None, *first_ticket)
     )
     assert await asyncio.to_thread(first_started.wait, 2)
+    second_ticket = view._reserve_submission_snapshot_load()
     second = asyncio.create_task(
-        view._async_load_submitted_files(object(), url, 456)
+        view._async_load_submitted_files(object(), url, 456, None, *second_ticket)
     )
     await second
     release_first.set()
@@ -343,6 +345,63 @@ async def test_newest_same_assignment_snapshot_load_wins_when_older_finishes_las
     assert [item["name"] for item in view._submitted_files] == ["newer.pdf"]
     assert view._last_server_status == "Bản nháp"
     assert callbacks == [(url, "Bản nháp")]
+
+
+@pytest.mark.anyio
+async def test_older_queued_same_assignment_load_cannot_start_after_newer_and_repaint():
+    older = snapshot(
+        files=(remote("older.pdf"),),
+        raw_status="submitted",
+        submission_modified_time=1_700_000_001,
+    )
+    newer = snapshot(
+        files=(remote("newer.pdf"),),
+        raw_status="draft",
+        submission_modified_time=1_700_000_002,
+    )
+
+    class PrefetchedWorkflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            del target
+            selected = older if prefetched_status["revision"] == "old" else newer
+            return SubmissionSnapshotResult.success(selected)
+
+    class QueuedPage(MockPage):
+        def __init__(self):
+            super().__init__()
+            self.queued = []
+
+        def run_task(self, func, *args, **kwargs):
+            self.queued.append((func, args, kwargs))
+
+        async def run_queued(self, index):
+            func, args, kwargs = self.queued[index]
+            await func(*args, **kwargs)
+
+    page = QueuedPage()
+    workflow = PrefetchedWorkflow()
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: object(),
+        submission_workflow_factory=lambda _: workflow,
+    )
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
+    base = {"url": url, "course_id": 456, "type": "assignment"}
+
+    view.update_detail(
+        {**base, "details": {"raw_submission_status": {"revision": "old"}}}
+    )
+    view.update_detail(
+        {**base, "details": {"raw_submission_status": {"revision": "new"}}}
+    )
+
+    assert len(page.queued) == 2
+    await page.run_queued(1)
+    await page.run_queued(0)
+
+    assert view._submission_snapshot is newer
+    assert [item["name"] for item in view._submitted_files] == ["newer.pdf"]
 
 
 @pytest.mark.anyio
@@ -362,7 +421,8 @@ async def test_real_shape_snapshot_renders_submission_area_and_picker_after_load
     url = "https://courses.ut.edu.vn/mod/assign/view.php?id=77"
     view.update_detail({"url": url, "course_id": 456, "type": "assignment"})
 
-    await view._async_load_submitted_files(object(), url, 456)
+    ticket = view._reserve_submission_snapshot_load()
+    await view._async_load_submitted_files(object(), url, 456, None, *ticket)
 
     assert view._submission_area.visible is True
     assert view._pick_btn.visible is True
@@ -395,7 +455,10 @@ async def test_late_previous_assignment_snapshot_cannot_expose_new_picker():
     url_a = "https://courses.ut.edu.vn/mod/assign/view.php?id=77"
     url_b = "https://courses.ut.edu.vn/mod/assign/view.php?id=202"
     view.update_detail({"url": url_a, "course_id": 1, "type": "assignment"})
-    first = asyncio.create_task(view._async_load_submitted_files(object(), url_a, 1))
+    ticket = view._reserve_submission_snapshot_load()
+    first = asyncio.create_task(
+        view._async_load_submitted_files(object(), url_a, 1, None, *ticket)
+    )
     assert await asyncio.to_thread(started.wait, 2)
 
     view.update_detail({"url": url_b, "course_id": 2, "type": "assignment"})

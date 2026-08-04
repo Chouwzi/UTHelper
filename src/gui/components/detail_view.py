@@ -865,9 +865,17 @@ class DetailView(ft.Container):
                     and (not client_is_bound or self._has_submission_workflow(client))
                 ):
                     prefetched = data.get("details", {}).get("raw_submission_status")
+                    load_generation, view_generation = (
+                        self._reserve_submission_snapshot_load()
+                    )
                     self._page.run_task(
                         self._async_load_submitted_files,
-                        client, url, course_id, prefetched
+                        client,
+                        url,
+                        course_id,
+                        prefetched,
+                        load_generation,
+                        view_generation,
                     )
                 elif client:
                     submission_context_reason = (
@@ -1686,11 +1694,21 @@ class DetailView(ft.Container):
         self._upload_status.color = color
         self._upload_status.visible = True
 
-    async def _async_load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
-        """Async wrapper: load submitted files in bg thread, then update UI."""
+    def _reserve_submission_snapshot_load(self) -> tuple[int, int]:
+        """Reserve load/view generations synchronously at scheduling time."""
         self._snapshot_load_generation += 1
-        load_generation = self._snapshot_load_generation
-        view_generation = self._view_generation
+        return self._snapshot_load_generation, self._view_generation
+
+    async def _async_load_submitted_files(
+        self,
+        client,
+        url: str,
+        course_id: int,
+        prefetched_status: Optional[dict],
+        load_generation: int,
+        view_generation: int,
+    ):
+        """Load one already-reserved snapshot request and apply it if current."""
         try:
             result = await asyncio.to_thread(
                 self._load_submission_snapshot,

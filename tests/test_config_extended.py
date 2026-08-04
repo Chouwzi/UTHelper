@@ -118,12 +118,103 @@ class TestReadWriteSecret:
         mock_set_pw.assert_called_once_with("UTHelper", "password", "my_secret")
 
     @patch("config._HAS_KEYRING", True)
-    def test_write_empty_does_nothing(self):
+    def test_write_empty_deletes_secret_instead_of_storing_an_empty_value(self):
         from config import _write_secret
-        # _write_secret doesn't delete anymore when value is empty, it just returns if no value
-        with patch("config.keyring.set_password") as mock_set_pw:
+
+        stored = {"password": "old-secret"}
+        stored_values = []
+
+        def delete_password(service, key):
+            assert service == "UTHelper"
+            stored.pop(key, None)
+
+        def set_password(service, key, value):
+            stored_values.append((service, key, value))
+
+        with (
+            patch("config.keyring.delete_password", delete_password),
+            patch("config.keyring.set_password", set_password),
+        ):
             _write_secret("password", "")
-            mock_set_pw.assert_not_called()
+
+        assert "password" not in stored
+        assert stored_values == []
+
+
+@pytest.mark.parametrize(
+    "settings_values",
+    [
+        {
+            "UTH_USERNAME": "same-account",
+            "UTH_PASSWORD": "new-password",
+            "UTH_CREDENTIALS_ORIGIN": "",
+            "MOODLE_BASE_URL": "https://courses.ut.edu.vn",
+        },
+        {
+            "UTH_USERNAME": "same-account",
+            "UTH_PASSWORD": "same-password",
+            "UTH_CREDENTIALS_ORIGIN": "",
+            "MOODLE_BASE_URL": "https://thnn.ut.edu.vn",
+        },
+        {
+            "UTH_USERNAME": "",
+            "UTH_PASSWORD": "",
+            "UTH_CREDENTIALS_ORIGIN": "",
+            "MOODLE_BASE_URL": "https://courses.ut.edu.vn",
+        },
+    ],
+    ids=["credential-change", "site-change", "logout"],
+)
+def test_cleared_moodle_token_is_deleted_from_keyring_and_stays_cleared_after_restart(
+    monkeypatch, tmp_path, settings_values
+):
+    """A save after identity invalidation must not resurrect the old token."""
+    import config
+
+    stored = {
+        "ws_token": "old-token",
+        "ws_token_origin": "https://courses.ut.edu.vn",
+        "password": "old-password",
+        "gmail_app_password": "unrelated-mail-secret",
+    }
+
+    def get_password(service, key):
+        assert service == "UTHelper"
+        return stored.get(key)
+
+    def set_password(service, key, value):
+        assert service == "UTHelper"
+        assert value != ""
+        stored[key] = value
+
+    def delete_password(service, key):
+        assert service == "UTHelper"
+        stored.pop(key, None)
+
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(config.keyring, "get_password", get_password)
+    monkeypatch.setattr(config.keyring, "set_password", set_password)
+    monkeypatch.setattr(config.keyring, "delete_password", delete_password)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "settings.json")
+    pending = config.Settings(
+        **settings_values,
+        MOODLE_WS_TOKEN="",
+        MOODLE_WS_TOKEN_ORIGIN="",
+        GMAIL_APP_PASSWORD="unrelated-mail-secret",
+        THEME="sakura_pink",
+    )
+    monkeypatch.setattr(config, "settings", pending)
+
+    config.save_settings()
+
+    assert "ws_token" not in stored
+    assert "ws_token_origin" not in stored
+    assert stored["gmail_app_password"] == "unrelated-mail-secret"
+    restarted = config.load_settings()
+    assert restarted.MOODLE_WS_TOKEN == ""
+    assert restarted.MOODLE_WS_TOKEN_ORIGIN == ""
+    assert restarted.GMAIL_APP_PASSWORD == "unrelated-mail-secret"
+    assert restarted.THEME == "sakura_pink"
 
 
 class TestHasSecureBackend:

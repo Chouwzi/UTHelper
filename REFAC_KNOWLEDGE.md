@@ -239,3 +239,19 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   status, and remote identities. A caller-supplied workflow safety guard evaluates
   that freshly reloaded snapshot before any download, draft allocation, upload, or
   save, closing the live precheck-to-mutation drift window.
+
+# 2026-08-04 - Submission provenance final-review hardening
+
+- Empty secure-setting values now delete their keyring entries idempotently, so
+  clearing a Moodle token/origin during an account, credential, site, or logout
+  transition cannot be undone by the next process restart.
+- The opt-in live submission harness resolves the configured Moodle base through
+  the trusted-site allow-list, requires the secure token's stored issuer origin to
+  match it before any request, and binds the isolated client to that verified
+  origin for every subsequent call.
+- Detail submission snapshot loads reserve both load and view generations at the
+  synchronous scheduling boundary. An older queued coroutine therefore cannot
+  start after a newer request and adopt the newer generation while carrying stale
+  prefetched status.
+- Validation: 90 focused tests passed with 2 opt-in live tests skipped; the full
+  suite passed with **732 passed, 24 skipped**; `ruff check src tests` passed.

@@ -93,12 +93,24 @@ def _read_secret(key: str) -> str:
     return ""
 
 def _write_secret(key: str, value: str):
-    """Ghi secret vào secure storage (keyring)."""
+    """Persist one secret, deleting its keyring entry when it is cleared.
+
+    Every caller represents an absent secret with the empty string.  Keeping
+    the delete at this boundary prevents a later ``load_settings()`` from
+    resurrecting credentials that the in-memory settings intentionally
+    invalidated.
+    """
     _logger = logging.getLogger(__name__)
     if _HAS_KEYRING:
         try:
             if value:
                 keyring.set_password(KEYRING_SERVICE_NAME, key, value)
+            else:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, key)
+                except keyring.errors.PasswordDeleteError:
+                    # Deleting an already-absent secret is the desired state.
+                    pass
             return
         except Exception as e:
             _logger.warning(f"Keyring write failed for {key}: {e}")
