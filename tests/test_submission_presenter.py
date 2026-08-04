@@ -1,9 +1,13 @@
 from core.submission_models import RemoteFile, SubmissionSnapshot
+from core.submission_snapshot import parse_submission_snapshot
 from core.use_cases.submission_workflow import (
     MutationOutcome,
     SubmissionError,
     SubmissionErrorCode,
     SubmissionMutationResult,
+)
+from tests.fixtures.moodle_submission_responses import (
+    captured_real_submission_shape_fixture,
 )
 from gui.components.detail.submission_presenter import (
     SubmissionUiPolicy,
@@ -80,6 +84,18 @@ def test_policy_formats_server_limits_for_people():
     policy = SubmissionUiPolicy.from_snapshot(snapshot())
 
     assert policy.limit_text == "Tối đa 3 file · 10 MB · .pdf, .docx"
+
+
+def test_real_shape_snapshot_exposes_file_draft_and_statement_policy():
+    assignment, status = captured_real_submission_shape_fixture()
+
+    policy = SubmissionUiPolicy.from_snapshot(
+        parse_submission_snapshot(77, assignment, status)
+    )
+
+    assert policy.show_picker is True
+    assert policy.show_save_draft is True
+    assert policy.show_statement is True
 
 
 def test_online_text_only_draft_exposes_finalize_but_no_file_controls():

@@ -16,6 +16,7 @@ from core.submission_models import (
     RemoteFile,
     SubmissionSnapshot,
 )
+from core.submission_snapshot import parse_submission_snapshot
 from core.use_cases.submission_workflow import (
     MutationOutcome,
     SelectedSubmissionFile,
@@ -23,6 +24,9 @@ from core.use_cases.submission_workflow import (
     SubmissionErrorCode,
     SubmissionMutationResult,
     SubmissionSnapshotResult,
+)
+from tests.fixtures.moodle_submission_responses import (
+    captured_real_submission_shape_fixture,
 )
 import flet as ft
 
@@ -337,6 +341,68 @@ async def test_newest_same_assignment_snapshot_load_wins_when_older_finishes_las
     assert [item["name"] for item in view._submitted_files] == ["newer.pdf"]
     assert view._last_server_status == "Bản nháp"
     assert callbacks == [(url, "Bản nháp")]
+
+
+@pytest.mark.anyio
+async def test_real_shape_snapshot_renders_submission_area_and_picker_after_load():
+    assignment, status = captured_real_submission_shape_fixture()
+    real_snapshot = parse_submission_snapshot(77, assignment, status)
+
+    class Workflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            return SubmissionSnapshotResult.success(real_snapshot)
+
+    view = DetailView(
+        MockPage(),
+        lambda: None,
+        submission_workflow_factory=lambda _: Workflow(),
+    )
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=77"
+    view.update_detail({"url": url, "course_id": 456, "type": "assignment"})
+
+    await view._async_load_submitted_files(object(), url, 456)
+
+    assert view._submission_area.visible is True
+    assert view._pick_btn.visible is True
+    assert view._submit_btn.visible is False
+
+
+@pytest.mark.anyio
+async def test_late_previous_assignment_snapshot_cannot_expose_new_picker():
+    started = threading.Event()
+    release = threading.Event()
+    assignment, status = captured_real_submission_shape_fixture()
+    eligible_a = parse_submission_snapshot(77, assignment, status)
+    ineligible_b = snapshot(
+        assignment_id=202,
+        file_submission_enabled=False,
+        submission_id=202,
+    )
+
+    class SlowWorkflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            started.set()
+            assert release.wait(5)
+            return SubmissionSnapshotResult.success(eligible_a)
+
+    view = DetailView(
+        MockPage(),
+        lambda: None,
+        submission_workflow_factory=lambda _: SlowWorkflow(),
+    )
+    url_a = "https://courses.ut.edu.vn/mod/assign/view.php?id=77"
+    url_b = "https://courses.ut.edu.vn/mod/assign/view.php?id=202"
+    view.update_detail({"url": url_a, "course_id": 1, "type": "assignment"})
+    first = asyncio.create_task(view._async_load_submitted_files(object(), url_a, 1))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    view.update_detail({"url": url_b, "course_id": 2, "type": "assignment"})
+    view._apply_submission_snapshot(ineligible_b)
+    release.set()
+    await first
+
+    assert view._submission_snapshot is ineligible_b
+    assert view._pick_btn.visible is False
 
 
 def test_visible_submission_status_tracks_each_server_snapshot():
