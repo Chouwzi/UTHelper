@@ -36,6 +36,7 @@ from gui.controllers.startup_visibility import (
     is_autostart_launch,
     should_hide_startup_window,
 )
+from gui.controllers.window_activator import WindowActivator
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,12 @@ def _save_setting(key: str, value):
 
 
 class AppController:
-    def __init__(self, page: ft.Page):
+    def __init__(
+        self, page: ft.Page, *, activation_broker=None, force_visible: bool = False
+    ):
         self.page = page
+        self.activation_broker = activation_broker
+        self.force_visible = force_visible
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
         self._page_alive = threading.Event()
@@ -178,6 +183,7 @@ class AppController:
         return "", ""
 
     def _init_window(self):
+        self.window_activator = WindowActivator(self.page)
         # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
         detect_platform(self.page)
         # Đọc lại các cờ sau khi phát hiện lúc runtime (chúng có thể đã thay đổi)
@@ -216,7 +222,9 @@ class AppController:
         tray_ready = False
         if _is_windows:
             from gui.tray import TrayApp
-            self.tray = TrayApp(self.page)
+            self.tray = TrayApp(
+                self.page, on_show=self.window_activator.request_show
+            )
             tray_ready = self.tray.setup()
             self.notifier = NotificationManager(self.tray)
         else:
@@ -230,27 +238,35 @@ class AppController:
         # on Flet's event loop, after accurate platform detection.
         self._safe_run_task(self.notifier.initialize, self.page)
         
-        autostart_launch = is_autostart_launch()
-        hide_window = should_hide_startup_window(
-            autostart_launch=autostart_launch,
-            start_minimized=settings.START_MINIMIZED,
-            tray_ready=tray_ready,
-            is_mobile=_is_mobile,
-        )
-        if (
-            autostart_launch
-            and settings.START_MINIMIZED
-            and not _is_mobile
-            and not tray_ready
-        ):
-            logger.warning(
-                "Autostart requested a hidden window, but the tray was unavailable; "
-                "keeping the main window visible"
-            )
         if not _is_mobile:
-            self.page.window.visible = not hide_window
-            
+            if self.force_visible:
+                self.page.window.visible = True
+            else:
+                autostart_launch = is_autostart_launch()
+                hide_window = should_hide_startup_window(
+                    autostart_launch=autostart_launch,
+                    start_minimized=settings.START_MINIMIZED,
+                    tray_ready=tray_ready,
+                    is_mobile=_is_mobile,
+                )
+                if (
+                    autostart_launch
+                    and settings.START_MINIMIZED
+                    and not tray_ready
+                ):
+                    logger.warning(
+                        "Autostart requested a hidden window, but the tray was unavailable; "
+                        "keeping the main window visible"
+                    )
+                self.page.window.visible = not hide_window
+
         self.page.update()
+        if self.force_visible and not _is_mobile:
+            self.window_activator.request_show()
+        if self.activation_broker is not None:
+            self.activation_broker.bind_show_handler(
+                self.window_activator.request_show
+            )
 
     async def _on_window_event(self, e):
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
@@ -2004,6 +2020,8 @@ class AppController:
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _on_disconnect(self, e):
+        if self.activation_broker is not None:
+            self.activation_broker.close(timeout_seconds=1.0)
         self._page_alive.clear()
         self._prefetch_cancel_event.set()
         coordinator = getattr(self, "_sync_coordinator", None)

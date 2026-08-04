@@ -4,6 +4,9 @@ import sys
 import traceback
 from pathlib import Path
 
+from gui.controllers.startup_visibility import is_autostart_launch
+from platform_utils.single_instance import bootstrap_windows_instance
+
 # ===== SETUP DEBUG LOGGER =====
 # Force stdout/stderr to be unbuffered/line-buffered
 if hasattr(sys.stdout, 'reconfigure'):
@@ -164,9 +167,31 @@ def _show_crash_screen(page, error_msg: str):
     page.update()
 
 
-def main():
+def _is_web_mode(argv, environ) -> bool:
+    return environ.get("FLET_WEB") == "1" or "--web" in argv
+
+
+def _is_source_checkout(module_path: Path) -> bool:
+    try:
+        return (module_path.resolve().parents[1] / "pyproject.toml").is_file()
+    except IndexError:
+        return False
+
+
+def main() -> int:
     import flet as ft
-    
+
+    web_mode = _is_web_mode(sys.argv, os.environ)
+    result = None
+    if sys.platform == "win32" and not web_mode:
+        result = bootstrap_windows_instance(
+            autostart_launch=is_autostart_launch(),
+            release_channel="stable",
+            development=_is_source_checkout(Path(__file__)),
+        )
+        if result.exit_code is not None:
+            return result.exit_code
+
     def _app_target(page: ft.Page):
         try:
             logger.info("Starting app imports...")
@@ -184,7 +209,11 @@ def main():
             logger.info("GUI module imported OK")
             
             # Run the app
-            app_main(page)
+            app_main(
+                page,
+                activation_broker=result.broker if result else None,
+                force_visible=result.force_visible if result else False,
+            )
             logger.info("App started successfully")
             
         except Exception:
@@ -201,7 +230,6 @@ def main():
     )
     
     # Support web mode for testing: set FLET_WEB=1 or pass --web
-    web_mode = os.environ.get("FLET_WEB") == "1" or "--web" in sys.argv
     try:
         web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
         if not (1 <= web_port <= 65535):
@@ -217,7 +245,14 @@ def main():
         # Flet >= 0.82 workaround removed to test if it's causing the issue in 0.85.3
         pass
     
-    ft.run(**run_kwargs)
+    try:
+        run_kwargs["main"] = _app_target
+        run_kwargs.pop("target", None)
+        ft.run(**run_kwargs)
+        return 0
+    finally:
+        if result and result.broker:
+            result.broker.close(timeout_seconds=1.0)
 
 
 if __name__ == "__main__":
@@ -225,4 +260,4 @@ if __name__ == "__main__":
     if sys.platform == 'win32':
         import multiprocessing
         multiprocessing.freeze_support()
-    main()
+    raise SystemExit(main())

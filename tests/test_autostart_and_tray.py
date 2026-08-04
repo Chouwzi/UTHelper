@@ -8,6 +8,30 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from platform_utils.autostart import add_to_startup, remove_from_startup
 
+
+class _NoUiAccessPage:
+    def __getattribute__(self, name):
+        if name in {"window", "run_task", "update"}:
+            raise AssertionError("tray Open must delegate to the supplied callback")
+        return super().__getattribute__(name)
+
+
+def test_tray_open_delegates_to_show_callback_without_touching_page():
+    from gui.tray import TrayApp
+
+    calls: list[str] = []
+    tray = TrayApp(_NoUiAccessPage(), on_show=lambda: calls.append("show"))
+
+    tray.show_app(None, None)
+
+    assert calls == ["show"]
+
+
+def test_tray_open_is_a_safe_noop_without_a_show_callback():
+    from gui.tray import TrayApp
+
+    TrayApp(_NoUiAccessPage()).show_app(None, None)
+
 class TestAutostart(unittest.TestCase):
     def test_autostart_windows(self):
         # We only run actual registry test if on Windows

@@ -1,6 +1,7 @@
 """System tray icon with balloon notification support using pystray."""
 import logging
 import os
+from collections.abc import Callable
 from config import BASE_DIR
 import threading
 
@@ -32,9 +33,10 @@ def _resolve_tray_icon_path() -> str:
 class TrayApp:
     """Minimal system-tray wrapper that exposes a .notify() method and context menu."""
 
-    def __init__(self, page=None):
+    def __init__(self, page=None, *, on_show: Callable[[], None] | None = None):
         self._icon = None
         self._page = page
+        self._on_show = on_show
         self._thread = None
         self._ready_event = threading.Event()
         self._setup_done = threading.Event()
@@ -101,18 +103,11 @@ class TrayApp:
         return ready
 
     def show_app(self, icon, item):
-        if self._page:
+        if self._on_show is not None:
             try:
-                # Schedule UI update on Flet event loop (thread-safe)
-                self._page.run_task(self._show_app_async)
+                self._on_show()
             except Exception as e:
                 logger.error(f"Lỗi khi phục hồi app: {e}")
-
-    async def _show_app_async(self):
-        """Thread-safe UI update via Flet event loop."""
-        self._page.window.visible = True
-        self._page.window.minimized = False
-        self._page.update()
 
     def exit_app(self, icon, item):
         if self._page:
