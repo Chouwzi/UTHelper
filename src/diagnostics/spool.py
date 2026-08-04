@@ -33,7 +33,8 @@ if os.name == "nt":
     _GENERIC_READ = 0x80000000
     _DELETE = 0x00010000
     _FILE_READ_ATTRIBUTES = 0x0080
-    _FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
+    _FILE_SHARE_READ_WRITE = 0x00000001 | 0x00000002
+    _FILE_SHARE_ALL = _FILE_SHARE_READ_WRITE | 0x00000004
     _OPEN_EXISTING = 3
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -184,11 +185,14 @@ def _windows_open_path(
     *,
     access: int,
     expect_directory: bool,
+    share: int | None = None,
 ) -> tuple[int, _FileIdentity]:
+    if share is None:
+        share = _FILE_SHARE_ALL
     handle = _kernel32.CreateFileW(
         str(path),
         access,
-        _FILE_SHARE_ALL,
+        share,
         None,
         _OPEN_EXISTING,
         _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
@@ -235,6 +239,70 @@ def _path_identity(path: Path, *, expect_directory: bool) -> _FileIdentity:
         kind = "directory" if expect_directory else "regular file"
         raise ValueError(f"{path} is not a safe {kind}")
     return _identity_from_stat(raw_identity)
+
+
+@contextmanager
+def _pin_verified_root(root: Path, *, expected: _FileIdentity):
+    if os.name == "nt":
+        try:
+            handle, identity = _windows_open_path(
+                root,
+                access=_FILE_READ_ATTRIBUTES,
+                expect_directory=True,
+                share=_FILE_SHARE_READ_WRITE,
+            )
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("diagnostic spool root is unavailable") from exc
+        try:
+            if identity.key != expected.key:
+                raise RuntimeError(
+                    "diagnostic spool root identity changed unexpectedly"
+                )
+            guard_path = root / ".diagnostic-spool.operation"
+            try:
+                guard = guard_path.open("xb")
+            except FileExistsError:
+                try:
+                    stale_identity = _path_identity(
+                        guard_path,
+                        expect_directory=False,
+                    )
+                except (OSError, ValueError) as exc:
+                    raise RuntimeError(
+                        "diagnostic spool operation guard is unsafe"
+                    ) from exc
+                if not _delete_exact_regular(
+                    guard_path,
+                    expected=stale_identity,
+                ):
+                    raise RuntimeError(
+                        "diagnostic spool operation guard is unavailable"
+                    )
+                guard = guard_path.open("xb")
+            try:
+                guard.write(b"UTHelper diagnostic spool operation\n")
+                guard.flush()
+                os.fsync(guard.fileno())
+                guard_identity = _path_identity(
+                    guard_path,
+                    expect_directory=False,
+                )
+                yield
+            finally:
+                guard.close()
+                if "guard_identity" in locals():
+                    _delete_exact_regular(
+                        guard_path,
+                        expected=guard_identity,
+                    )
+        finally:
+            _kernel32.CloseHandle(handle)
+        return
+
+    identity = _path_identity(root, expect_directory=True)
+    if identity.key != expected.key:
+        raise RuntimeError("diagnostic spool root identity changed unexpectedly")
+    yield
 
 
 def _open_binary_no_follow(
@@ -514,7 +582,11 @@ class DiagnosticSpool:
     def _exclusive(self):
         with self._lock:
             with _process_lock(self.root):
-                yield
+                with _pin_verified_root(
+                    self.root,
+                    expected=self._root_identity,
+                ):
+                    yield
 
     def _owned_regular_files(
         self,

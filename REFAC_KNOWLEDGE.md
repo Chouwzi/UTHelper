@@ -591,3 +591,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   same-sized replacement cannot be deleted through a path race. The expanded
   spool suite passes **15 tests**, including real spawned-process, junction, and
   same-size replacement regressions.
+- A follow-up root-namespace review found that validating and then closing the
+  directory handle left a junction-swap window before scanning. Each Windows
+  transaction now holds the verified root handle without delete sharing and an
+  fsynced, exact-identity operation guard until all queue work finishes. This
+  prevents the root from becoming empty/removable during the transaction, while
+  exact-handle cleanup prevents the guard from targeting a replacement. A
+  synchronized spawned-process regression proves the swap is blocked and an
+  outside `foreign.json` remains untouched. The diagnostics set now passes
+  **64 tests** and explicitly proves a competing spool process remains blocked
+  until the active writer releases its fsynced temp transaction.

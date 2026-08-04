@@ -55,6 +55,40 @@ def _pending_worker(root: str, started, finished, outcomes) -> None:
         finished.set()
 
 
+def _swap_root_for_junction_worker(
+    root: str,
+    outside: str,
+    start,
+    finished,
+    outcomes,
+) -> None:
+    if not start.wait(5):
+        outcomes.put(("attacker", "error", "start-timeout"))
+        finished.set()
+        return
+    root_path = Path(root)
+    try:
+        root_path.rmdir()
+    except OSError as exc:
+        outcomes.put(("attacker", "blocked", type(exc).__name__))
+        finished.set()
+        return
+    try:
+        completed = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", root, outside],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        status = "swapped" if completed.returncode == 0 else "error"
+        outcomes.put(("attacker", status, completed.returncode))
+    except BaseException as exc:  # pragma: no cover - asserted in parent process
+        outcomes.put(("attacker", "error", type(exc).__name__))
+    finally:
+        finished.set()
+
+
 def _report(
     index: int,
     *,
@@ -272,7 +306,7 @@ def test_processes_do_not_prune_another_process_active_temp(tmp_path: Path) -> N
         assert len(list(root.glob(".*.tmp"))) == 1
         reader.start()
         assert reader_started.wait(5), "reader process did not start"
-        reader_finished.wait(0.5)
+        assert reader_finished.wait(0.5) is False
     finally:
         release.set()
         _stop_process(writer)
@@ -369,6 +403,49 @@ def test_spool_rejects_a_windows_junction_root(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="junction|reparse"):
         DiagnosticSpool(junction_root, clock=lambda: NOW)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows root handle regression")
+def test_pending_pins_verified_root_against_junction_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = mp.get_context("spawn")
+    root = tmp_path / "spool"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    foreign = outside / "foreign.json"
+    foreign.write_text('{"private":"must-survive"}', encoding="utf-8")
+    spool = DiagnosticSpool(root, clock=lambda: NOW)
+    start = context.Event()
+    finished = context.Event()
+    outcomes = context.Queue()
+    attacker = context.Process(
+        target=_swap_root_for_junction_worker,
+        args=(str(root), str(outside), start, finished, outcomes),
+    )
+    original_assert_root = spool._assert_root
+
+    def pause_after_root_verification() -> None:
+        original_assert_root()
+        start.set()
+        assert finished.wait(5), "root-swap process did not report a result"
+
+    monkeypatch.setattr(spool, "_assert_root", pause_after_root_verification)
+    attacker.start()
+    try:
+        assert spool.pending() == ()
+    finally:
+        start.set()
+        _stop_process(attacker)
+
+    try:
+        outcome = outcomes.get(timeout=2)
+    except queue.Empty:
+        pytest.fail("root-swap process did not provide an outcome")
+    assert outcome[0:2] == ("attacker", "blocked")
+    assert foreign.read_text(encoding="utf-8") == '{"private":"must-survive"}'
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows file identity regression")
