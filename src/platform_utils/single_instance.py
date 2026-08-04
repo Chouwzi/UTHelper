@@ -1,0 +1,407 @@
+"""Private, per-user Windows single-instance ownership primitives."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import sys
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol
+
+logger = logging.getLogger(__name__)
+
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
+
+
+class InstanceRole(str, Enum):
+    PRIMARY = "primary"
+    SECONDARY_ACTIVATED = "secondary_activated"
+    SECONDARY_SILENT = "secondary_silent"
+    FALLBACK_VISIBLE_PRIMARY = "fallback_visible_primary"
+    HANDOFF_FAILED = "handoff_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class InstanceObjectNames:
+    mutex: str
+    activation: str
+    acknowledgement: str
+
+
+@dataclass(frozen=True, slots=True)
+class MutexCreation:
+    """A mutex handle and whether another process already owns its name."""
+
+    handle: object
+    already_exists: bool
+
+
+class KernelObjectApi(Protocol):
+    """Minimal kernel-object adapter used by the pure bootstrap policy."""
+
+    def current_user_sid(self) -> str: ...
+
+    def create_user_system_security_attributes(self, user_sid: str) -> object: ...
+
+    def create_mutex(
+        self, name: str, initial_owner: bool, security_attributes: object
+    ) -> MutexCreation: ...
+
+    def create_event(
+        self,
+        name: str | None,
+        manual_reset: bool,
+        initial_state: bool,
+        security_attributes: object,
+    ) -> object: ...
+
+    def open_mutex(self, name: str) -> object: ...
+
+    def open_event(self, name: str) -> object: ...
+
+    def wait_one(self, handle: object, timeout_ms: int) -> int: ...
+
+    def wait_many(self, handles: tuple[object, ...], timeout_ms: int) -> int: ...
+
+    def set_event(self, handle: object) -> None: ...
+
+    def reset_event(self, handle: object) -> None: ...
+
+    def release_mutex(self, handle: object) -> None: ...
+
+    def close_handle(self, handle: object) -> None: ...
+
+
+@dataclass(slots=True)
+class InstanceBootstrapResult:
+    role: InstanceRole
+    broker: WindowsActivationBroker | None
+    exit_code: int | None
+    force_visible: bool
+
+
+class WindowsActivationBroker:
+    """Owns the three primary handles until the later receiver is attached."""
+
+    def __init__(
+        self,
+        *,
+        kernel: KernelObjectApi,
+        mutex_handle: object,
+        activation_handle: object,
+        acknowledgement_handle: object,
+    ) -> None:
+        self._kernel = kernel
+        self.mutex_handle = mutex_handle
+        self.activation_handle = activation_handle
+        self.acknowledgement_handle = acknowledgement_handle
+        self._closed = False
+
+    def close(self) -> None:
+        """Release only the handles acquired by this broker."""
+        if self._closed:
+            return
+        self._closed = True
+        self._kernel.reset_event(self.acknowledgement_handle)
+        self._kernel.close_handle(self.acknowledgement_handle)
+        self._kernel.close_handle(self.activation_handle)
+        self._kernel.release_mutex(self.mutex_handle)
+        self._kernel.close_handle(self.mutex_handle)
+
+
+@dataclass(slots=True)
+class _PyWin32Handle:
+    native: object
+    closed: bool = False
+
+
+class PyWin32KernelObjectApi:
+    """Lazy pywin32 adapter which never exposes a raw owned native handle."""
+
+    def __init__(self) -> None:
+        try:
+            import pywintypes
+            import win32api
+            import win32con
+            import win32event
+            import win32security
+        except ImportError:
+            raise
+        self._pywintypes = pywintypes
+        self._win32api = win32api
+        self._win32con = win32con
+        self._win32event = win32event
+        self._win32security = win32security
+
+    def current_user_sid(self) -> str:
+        token = self._win32security.OpenProcessToken(
+            self._win32api.GetCurrentProcess(), self._win32con.TOKEN_QUERY
+        )
+        try:
+            user = self._win32security.GetTokenInformation(
+                token, self._win32security.TokenUser
+            )
+            return self._win32security.ConvertSidToStringSid(user[0])
+        finally:
+            self._win32api.CloseHandle(token)
+
+    def create_user_system_security_attributes(self, user_sid: str) -> object:
+        user = self._win32security.ConvertStringSidToSid(user_sid)
+        system = self._win32security.CreateWellKnownSid(
+            self._win32security.WinLocalSystemSid, None
+        )
+        dacl = self._win32security.ACL()
+        dacl.AddAccessAllowedAce(
+            self._win32security.ACL_REVISION,
+            self._win32con.GENERIC_ALL,
+            user,
+        )
+        dacl.AddAccessAllowedAce(
+            self._win32security.ACL_REVISION,
+            self._win32con.GENERIC_ALL,
+            system,
+        )
+        descriptor = self._win32security.SECURITY_DESCRIPTOR()
+        descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
+        descriptor.SetSecurityDescriptorControl(
+            self._win32security.SE_DACL_PROTECTED,
+            self._win32security.SE_DACL_PROTECTED,
+        )
+        attributes = self._pywintypes.SECURITY_ATTRIBUTES()
+        attributes.SECURITY_DESCRIPTOR = descriptor
+        return attributes
+
+    def create_mutex(
+        self, name: str, initial_owner: bool, security_attributes: object
+    ) -> MutexCreation:
+        native = self._win32event.CreateMutex(security_attributes, initial_owner, name)
+        return MutexCreation(
+            _PyWin32Handle(native),
+            self._win32api.GetLastError() == self._win32con.ERROR_ALREADY_EXISTS,
+        )
+
+    def create_event(
+        self,
+        name: str | None,
+        manual_reset: bool,
+        initial_state: bool,
+        security_attributes: object,
+    ) -> _PyWin32Handle:
+        native = self._win32event.CreateEvent(
+            security_attributes, manual_reset, initial_state, name
+        )
+        return _PyWin32Handle(native)
+
+    def open_mutex(self, name: str) -> _PyWin32Handle:
+        native = self._win32event.OpenMutex(
+            self._win32con.SYNCHRONIZE | self._win32event.MUTEX_MODIFY_STATE,
+            False,
+            name,
+        )
+        return _PyWin32Handle(native)
+
+    def open_event(self, name: str) -> _PyWin32Handle:
+        native = self._win32event.OpenEvent(
+            self._win32con.SYNCHRONIZE | self._win32event.EVENT_MODIFY_STATE,
+            False,
+            name,
+        )
+        return _PyWin32Handle(native)
+
+    def wait_one(self, handle: object, timeout_ms: int) -> int:
+        return self._win32event.WaitForSingleObject(self._native(handle), timeout_ms)
+
+    def wait_many(self, handles: tuple[object, ...], timeout_ms: int) -> int:
+        return self._win32event.WaitForMultipleObjects(
+            tuple(self._native(handle) for handle in handles), False, timeout_ms
+        )
+
+    def set_event(self, handle: object) -> None:
+        self._win32event.SetEvent(self._native(handle))
+
+    def reset_event(self, handle: object) -> None:
+        self._win32event.ResetEvent(self._native(handle))
+
+    def release_mutex(self, handle: object) -> None:
+        self._win32event.ReleaseMutex(self._native(handle))
+
+    def close_handle(self, handle: object) -> None:
+        if not isinstance(handle, _PyWin32Handle) or handle.closed:
+            return
+        handle.closed = True
+        self._win32api.CloseHandle(handle.native)
+
+    @staticmethod
+    def _native(handle: object) -> object:
+        if not isinstance(handle, _PyWin32Handle) or handle.closed:
+            raise RuntimeError("invalid kernel handle")
+        return handle.native
+
+
+def build_instance_object_names(
+    *, app_identity: str, release_channel: str, user_sid: str, development: bool
+) -> InstanceObjectNames:
+    components = (
+        app_identity,
+        release_channel,
+        user_sid,
+        "dev" if development else "prod",
+    )
+    payload = b"".join(
+        len(value.encode("utf-8")).to_bytes(4, "big") + value.encode("utf-8")
+        for value in components
+    )
+    digest = hashlib.sha256(payload).hexdigest()
+    prefix = f"Local\\UTHelper-{digest}"
+    return InstanceObjectNames(
+        mutex=f"{prefix}-mutex",
+        activation=f"{prefix}-activate",
+        acknowledgement=f"{prefix}-ready",
+    )
+
+
+def bootstrap_windows_instance(
+    *,
+    autostart_launch: bool,
+    development: bool,
+    platform_name: str = sys.platform,
+    app_identity: str = "com.uthelper.UTHelper",
+    release_channel: str = "stable",
+    kernel: KernelObjectApi | None = None,
+    acknowledgement_timeout_seconds: float = 1.5,
+) -> InstanceBootstrapResult:
+    """Claim primary ownership or hand a manual secondary launch to the primary."""
+    if platform_name != "win32":
+        return InstanceBootstrapResult(InstanceRole.PRIMARY, None, None, False)
+
+    api: KernelObjectApi | None = None
+    secondary_mutex: object | None = None
+    try:
+        api = kernel or PyWin32KernelObjectApi()
+        user_sid = api.current_user_sid()
+        names = build_instance_object_names(
+            app_identity=app_identity,
+            release_channel=release_channel,
+            user_sid=user_sid,
+            development=development,
+        )
+        security_attributes = api.create_user_system_security_attributes(user_sid)
+        creation = api.create_mutex(names.mutex, True, security_attributes)
+        if not creation.already_exists:
+            return _create_primary(api, creation.handle, names, security_attributes, False)
+
+        secondary_mutex = creation.handle
+        if autostart_launch:
+            return InstanceBootstrapResult(InstanceRole.SECONDARY_SILENT, None, 0, False)
+
+        acknowledgement_received = _signal_and_wait_for_acknowledgement(
+            api,
+            names,
+            _timeout_milliseconds(acknowledgement_timeout_seconds),
+        )
+        if acknowledgement_received:
+            return InstanceBootstrapResult(
+                InstanceRole.SECONDARY_ACTIVATED, None, 0, False
+            )
+
+        api.close_handle(secondary_mutex)
+        secondary_mutex = None
+        retry = api.create_mutex(names.mutex, True, security_attributes)
+        if not retry.already_exists:
+            return _create_primary(api, retry.handle, names, security_attributes, True)
+        api.close_handle(retry.handle)
+        return InstanceBootstrapResult(InstanceRole.HANDOFF_FAILED, None, 2, False)
+    except Exception as exc:
+        if _is_expected_kernel_error(exc):
+            return InstanceBootstrapResult(InstanceRole.HANDOFF_FAILED, None, 2, False)
+        logger.warning("single_instance_fail_open")
+        return InstanceBootstrapResult(
+            InstanceRole.FALLBACK_VISIBLE_PRIMARY, None, None, True
+        )
+    finally:
+        if secondary_mutex is not None:
+            _close_quietly(api, secondary_mutex)
+
+
+def _create_primary(
+    api: KernelObjectApi,
+    mutex_handle: object,
+    names: InstanceObjectNames,
+    security_attributes: object,
+    force_visible: bool,
+) -> InstanceBootstrapResult:
+    activation_handle: object | None = None
+    acknowledgement_handle: object | None = None
+    try:
+        activation_handle = api.create_event(
+            names.activation, False, False, security_attributes
+        )
+        acknowledgement_handle = api.create_event(
+            names.acknowledgement, True, False, security_attributes
+        )
+        broker = WindowsActivationBroker(
+            kernel=api,
+            mutex_handle=mutex_handle,
+            activation_handle=activation_handle,
+            acknowledgement_handle=acknowledgement_handle,
+        )
+        return InstanceBootstrapResult(InstanceRole.PRIMARY, broker, None, force_visible)
+    except Exception:
+        if acknowledgement_handle is not None:
+            _close_quietly(api, acknowledgement_handle)
+        if activation_handle is not None:
+            _close_quietly(api, activation_handle)
+        _release_and_close_quietly(api, mutex_handle)
+        raise
+
+
+def _signal_and_wait_for_acknowledgement(
+    api: KernelObjectApi, names: InstanceObjectNames, timeout_ms: int
+) -> bool:
+    activation_handle: object | None = None
+    acknowledgement_handle: object | None = None
+    try:
+        activation_handle = api.open_event(names.activation)
+        acknowledgement_handle = api.open_event(names.acknowledgement)
+        api.set_event(activation_handle)
+        result = api.wait_one(acknowledgement_handle, timeout_ms)
+        if result == WAIT_OBJECT_0:
+            return True
+        if result == WAIT_TIMEOUT:
+            return False
+        raise RuntimeError("unexpected acknowledgement wait result")
+    finally:
+        if acknowledgement_handle is not None:
+            _close_quietly(api, acknowledgement_handle)
+        if activation_handle is not None:
+            _close_quietly(api, activation_handle)
+
+
+def _timeout_milliseconds(seconds: float) -> int:
+    return max(0, int(seconds * 1000))
+
+
+def _is_expected_kernel_error(exc: Exception) -> bool:
+    if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return True
+    code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    return code in {2, 3, 5, 183}
+
+
+def _close_quietly(api: KernelObjectApi | None, handle: object) -> None:
+    if api is None:
+        return
+    try:
+        api.close_handle(handle)
+    except Exception:
+        return
+
+
+def _release_and_close_quietly(api: KernelObjectApi, handle: object) -> None:
+    try:
+        api.release_mutex(handle)
+    except Exception:
+        pass
+    _close_quietly(api, handle)
