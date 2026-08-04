@@ -577,6 +577,63 @@ def test_assignment_with_untrusted_native_target_uses_safe_fallback(
     assert view._finalize_btn.visible is False
 
 
+def test_thnn_assignment_uses_native_loading_when_the_client_is_bound_to_thnn():
+    class Workflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            return SubmissionSnapshotResult.success(snapshot())
+
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://thnn.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: client,
+        submission_workflow_factory=lambda _: Workflow(),
+    )
+
+    view.update_detail(
+        {
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    page.run_task.assert_called_once()
+
+
+def test_thnn_assignment_with_courses_client_uses_browser_fallback():
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(page, lambda: None, get_client=lambda: client)
+
+    view.update_detail(
+        {
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == (
+        "Moodle cho trang bài tập này chưa được cấu hình. "
+        "Hãy mở bài tập trong trình duyệt."
+    )
+    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._submission_area.visible is False
+    page.run_task.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

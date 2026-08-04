@@ -25,6 +25,7 @@ from core.ws_functions import MoodleActionResult, MoodleWarning
 
 
 ASSIGN_URL = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
+THNN_ASSIGN_URL = "https://thnn.ut.edu.vn/mod/assign/view.php?id=123"
 
 
 def target() -> SubmissionTarget:
@@ -137,11 +138,16 @@ class Upload:
 
 
 class FakeClient:
-    def __init__(self, snapshot: SubmissionSnapshot):
+    def __init__(
+        self,
+        snapshot: SubmissionSnapshot,
+        moodle_site_origin: str = "https://courses.ut.edu.vn",
+    ):
         self.downloads = {item.url: Path(item.name).stem.encode() for item in snapshot.remote_files}
         self.uploads: list[Upload] = []
         self.downloads_requested: list[str] = []
         self.fail_upload_at = 0
+        self.moodle_site_origin = moodle_site_origin
 
     def download_file(self, url: str):
         self.downloads_requested.append(url)
@@ -245,11 +251,17 @@ class FakeService:
         return True
 
 
-def workflow_fixture(snapshot=None, **kwargs):
+def workflow_fixture(
+    snapshot=None,
+    *,
+    site_origin="https://courses.ut.edu.vn",
+    client_site_origin=None,
+    **kwargs,
+):
     snapshot = snapshot or editable_snapshot()
-    client = FakeClient(snapshot)
+    client = FakeClient(snapshot, client_site_origin or site_origin)
     service = FakeService(snapshot, client, **kwargs)
-    return SubmissionWorkflow(client, service), client, service
+    return SubmissionWorkflow(client, service, site_origin=site_origin), client, service
 
 
 def local_file(tmp_path, name="new.pdf", content=b"new", filepath="/") -> SelectedFile:
@@ -633,6 +645,7 @@ def test_finalize_only_verifies_current_draft_content_was_not_replaced():
     (
         "http://courses.ut.edu.vn/mod/assign/view.php?id=123",
         "https://evil.example/mod/assign/view.php?id=123",
+        "https://child.courses.ut.edu.vn/mod/assign/view.php?id=123",
         "https://courses.ut.edu.vn:444/mod/assign/view.php?id=123",
         "https://user:pass@courses.ut.edu.vn/mod/assign/view.php?id=123",
         "https://courses.ut.edu.vn/mod/assign/view.php/extra?id=123",
@@ -690,6 +703,94 @@ def test_target_boundary_accepts_case_insensitive_host_and_effective_https_port(
 
     assert result.ok is True
     assert service.resolve_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("site_origin", "url"),
+    (
+        ("https://courses.ut.edu.vn", ASSIGN_URL),
+        ("https://thnn.ut.edu.vn", THNN_ASSIGN_URL),
+    ),
+)
+def test_target_boundary_accepts_the_selected_explicit_trusted_site(
+    site_origin, url
+):
+    workflow, _, service = workflow_fixture(site_origin=site_origin)
+
+    result = workflow.load_snapshot(SubmissionTarget(url, 456))
+
+    assert result.ok is True
+    assert service.resolve_calls == 1
+
+
+def test_target_boundary_rejects_the_other_trusted_site_without_resolution():
+    workflow, client, service = workflow_fixture(
+        site_origin="https://courses.ut.edu.vn"
+    )
+
+    result = workflow.load_snapshot(SubmissionTarget(THNN_ASSIGN_URL, 456))
+
+    assert result.issue.code is SubmissionErrorCode.INVALID_TARGET
+    assert service.resolve_calls == 0
+    assert client.downloads_requested == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://thnn.ut.edu.vn/mod/assign/view.php?id=123",
+        "https://user:pass@thnn.ut.edu.vn/mod/assign/view.php?id=123",
+        "https://child.thnn.ut.edu.vn/mod/assign/view.php?id=123",
+        "https://thnn.ut.edu.vn/mod/assign/view.php/extra?id=123",
+        "https://thnn.ut.edu.vn/mod/assign/view.php?id=123&id=124",
+        "https://thnn.ut.edu.vn/mod/assign/view.php?id=123&extra=1",
+        "https://thnn.ut.edu.vn/mod/assign/view.php?id=1.5",
+        "https://thnn.ut.edu.vn/mod/assign/view.php?id=123#fragment",
+    ),
+)
+def test_thnn_target_boundary_rejects_non_exact_assignment_urls(url):
+    workflow, client, service = workflow_fixture(
+        site_origin="https://thnn.ut.edu.vn"
+    )
+
+    result = workflow.load_snapshot(SubmissionTarget(url, 456))
+
+    assert result.issue.code is SubmissionErrorCode.INVALID_TARGET
+    assert service.resolve_calls == 0
+    assert client.downloads_requested == []
+
+
+def test_client_from_another_site_cannot_mutate_thnn_assignment(tmp_path):
+    workflow, client, service = workflow_fixture(
+        site_origin="https://thnn.ut.edu.vn",
+        client_site_origin="https://courses.ut.edu.vn",
+    )
+
+    result = workflow.mutate_files(
+        SubmissionTarget(THNN_ASSIGN_URL, 456),
+        intent(MutationOperation.REPLACE, selected=(local_file(tmp_path),)),
+    )
+
+    assert result.issue.code is SubmissionErrorCode.CLIENT_ORIGIN_MISMATCH
+    assert service.resolve_calls == 0
+    assert service.allocation_calls == 0
+    assert client.downloads_requested == []
+    assert client.uploads == []
+
+
+def test_invalid_target_is_rejected_before_client_site_mismatch():
+    workflow, client, service = workflow_fixture(
+        site_origin="https://thnn.ut.edu.vn",
+        client_site_origin="https://courses.ut.edu.vn",
+    )
+
+    result = workflow.load_snapshot(
+        SubmissionTarget("https://attacker.example/mod/assign/view.php?id=123", 456)
+    )
+
+    assert result.issue.code is SubmissionErrorCode.INVALID_TARGET
+    assert service.resolve_calls == 0
+    assert client.downloads_requested == []
 
 
 def test_remove_one_reuploads_only_remaining_remote_files():

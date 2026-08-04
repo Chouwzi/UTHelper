@@ -19,17 +19,33 @@ class TestWSToken:
     def test_cached_token_returned(self, mock_settings):
         """Nếu đã có token trong settings, không gọi API."""
         mock_settings.MOODLE_WS_TOKEN = "cached_token_abc"
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = "https://courses.ut.edu.vn"
         mock_settings.MOODLE_BASE_URL = "https://courses.ut.edu.vn"
         mock_settings.UTH_USERNAME = "test"
         mock_settings.UTH_PASSWORD = "pass"
         mock_settings.PREFETCH_WORKERS = 4
         
         from core.client import MoodleClient
-        with patch.object(MoodleClient, '__init__', lambda self: None):
-            client = MoodleClient()
+        client = MoodleClient()
         
         token = client._get_ws_token()
         assert token == "cached_token_abc"
+
+    @patch('core.client.settings')
+    def test_token_from_another_moodle_origin_is_not_reused(self, mock_settings):
+        mock_settings.MOODLE_WS_TOKEN = "courses-token"
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = "https://courses.ut.edu.vn"
+        mock_settings.MOODLE_BASE_URL = "https://thnn.ut.edu.vn"
+        mock_settings.UTH_USERNAME = ""
+        mock_settings.UTH_PASSWORD = ""
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+
+        assert client.moodle_site_origin == "https://thnn.ut.edu.vn"
+        assert client.has_site_credentials is False
+        assert client._get_ws_token() == ""
     
 
 

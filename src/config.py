@@ -72,6 +72,7 @@ _SECRET_FIELDS = {
     'UTH_PASSWORD': 'password',
     'MOODLE_SESSION': 'moodle_session',
     'MOODLE_WS_TOKEN': 'ws_token',
+    'MOODLE_WS_TOKEN_ORIGIN': 'ws_token_origin',
     'GMAIL_APP_PASSWORD': 'gmail_app_password',
     'DISCORD_WEBHOOK_URL': 'discord_webhook',
     'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
@@ -117,6 +118,7 @@ class Settings(BaseModel):
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
+    MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"

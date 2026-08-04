@@ -14,6 +14,7 @@ class FakeMoodle43:
     cmid = 123
 
     def __init__(self, *, drafts: bool, statement: bool):
+        self.moodle_site_origin = "https://courses.ut.edu.vn"
         self.remote_files: dict[tuple[str, str], bytes] = {}
         self.drafts: dict[int, dict[tuple[str, str], bytes]] = {}
         self.submission_status = "new"

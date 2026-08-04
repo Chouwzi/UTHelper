@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlsplit
 
 from core.moodle_service import MoodleService
+from core.moodle_sites import MoodleSite, moodle_site_from_origin, moodle_site_from_url
 from core.submission_models import (
     FileIdentity,
     FileMutationIntent,
@@ -76,6 +77,7 @@ class SubmittedFilesResult:
 
 class SubmissionErrorCode(str, Enum):
     INVALID_TARGET = "invalid_target"
+    CLIENT_ORIGIN_MISMATCH = "client_origin_mismatch"
     ASSIGNMENT_NOT_FOUND = "assignment_not_found"
     SNAPSHOT_LOAD_FAILED = "snapshot_load_failed"
     SUBMISSIONS_CLOSED = "submissions_closed"
@@ -163,6 +165,7 @@ class SubmissionMutationResult:
 
 _ERROR_MESSAGES = {
     SubmissionErrorCode.INVALID_TARGET: "The assignment URL is invalid.",
+    SubmissionErrorCode.CLIENT_ORIGIN_MISMATCH: "The Moodle client is not authenticated for this assignment site.",
     SubmissionErrorCode.ASSIGNMENT_NOT_FOUND: "The assignment could not be found.",
     SubmissionErrorCode.SNAPSHOT_LOAD_FAILED: "The latest submission state could not be loaded.",
     SubmissionErrorCode.SUBMISSIONS_CLOSED: "Submissions are not enabled for this assignment.",
@@ -219,9 +222,23 @@ _VALIDATION_CODES = {
 class SubmissionWorkflow:
     """Own Moodle file mutation policy and return only refreshed server truth."""
 
-    def __init__(self, client: Any, moodle_service: Optional[MoodleService] = None):
+    def __init__(
+        self,
+        client: Any,
+        moodle_service: Optional[MoodleService] = None,
+        *,
+        site_origin: str | MoodleSite | None = None,
+    ):
         self.client = client
         self.moodle_service = moodle_service or MoodleService(client.call_ws_api)
+        if isinstance(site_origin, MoodleSite):
+            self.site = site_origin
+        elif site_origin is not None:
+            self.site = moodle_site_from_origin(site_origin)
+        else:
+            self.site = moodle_site_from_origin(
+                getattr(client, "moodle_site_origin", None)
+            )
 
     def load_snapshot(
         self,
@@ -372,6 +389,8 @@ class SubmissionWorkflow:
         cmid = self._extract_cmid(target.url)
         if cmid is None:
             return _error(SubmissionErrorCode.INVALID_TARGET)
+        if not self._client_matches_selected_site():
+            return _error(SubmissionErrorCode.CLIENT_ORIGIN_MISMATCH)
         try:
             assignment_id = self.moodle_service.resolve_cmid_to_assign_id(
                 cmid, target.course_id
@@ -398,8 +417,15 @@ class SubmissionWorkflow:
             int(assignment_id), int(target.course_id), assignment, snapshot
         )
 
-    @staticmethod
-    def _extract_cmid(url: str) -> int | None:
+    def _client_matches_selected_site(self) -> bool:
+        if self.site is None:
+            return False
+        client_site = moodle_site_from_origin(
+            getattr(self.client, "moodle_site_origin", None)
+        )
+        return client_site == self.site
+
+    def _extract_cmid(self, url: str) -> int | None:
         if not isinstance(url, str) or url != url.strip() or "#" in url:
             return None
         try:
@@ -414,8 +440,8 @@ class SubmissionWorkflow:
             return None
         if (
             parsed.scheme.lower() != "https"
-            or parsed.hostname is None
-            or parsed.hostname.casefold() != "courses.ut.edu.vn"
+            or self.site is None
+            or moodle_site_from_url(url) != self.site
             or parsed.username is not None
             or parsed.password is not None
             or port not in (None, 443)

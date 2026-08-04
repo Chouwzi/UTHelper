@@ -15,6 +15,40 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from config import Settings, _SECRET_FIELDS, migrate_settings_data
+from core.moodle_sites import TRUSTED_MOODLE_SITES, moodle_site_from_origin
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://courses.ut.edu.vn",
+        "https://thnn.ut.edu.vn",
+    ),
+)
+def test_moodle_site_config_accepts_only_explicit_trusted_https_origins(origin):
+    site = moodle_site_from_origin(origin)
+
+    assert site is not None
+    assert site.origin == origin
+    assert site in TRUSTED_MOODLE_SITES
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "http://courses.ut.edu.vn",
+        "https://courses.ut.edu.vn:444",
+        "https://user:pass@courses.ut.edu.vn",
+        "https://child.courses.ut.edu.vn",
+        "https://ut.edu.vn",
+        "https://evil.example",
+        "https://courses.ut.edu.vn/moodle",
+        "https://courses.ut.edu.vn?site=thnn",
+        "https://courses.ut.edu.vn#fragment",
+    ),
+)
+def test_moodle_site_config_rejects_non_exact_origins(origin):
+    assert moodle_site_from_origin(origin) is None
 
 
 class TestSettingsDefaults:

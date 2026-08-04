@@ -29,6 +29,7 @@ from core.submission_models import (
     SubmissionSnapshot,
     normalize_filepath,
 )
+from core.moodle_sites import moodle_site_from_origin, moodle_site_from_url
 from core.use_cases.submission_workflow import (
     FinalizeSubmissionIntent,
     SelectedSubmissionFile,
@@ -172,12 +173,26 @@ class DetailView(ft.Container):
             return False
         return (
             parsed.scheme.lower() == "https"
-            and parsed.hostname is not None
-            and parsed.hostname.casefold() == "courses.ut.edu.vn"
+            and moodle_site_from_url(url) is not None
             and port in (None, 443)
             and parsed.path == "/mod/assign/view.php"
             and not parsed.fragment
             and cmid > 0
+        )
+
+    @staticmethod
+    def _client_matches_native_submission_site(client, url: str) -> bool:
+        """Require a bound client before using its native Moodle credentials."""
+        assignment_site = moodle_site_from_url(url)
+        client_origin = getattr(client, "moodle_site_origin", None)
+        if client_origin is None:
+            # Test adapters that do not represent a real client remain usable;
+            # SubmissionWorkflow itself still fails closed before any mutation.
+            return True
+        return bool(
+            assignment_site is not None
+            and moodle_site_from_origin(client_origin) == assignment_site
+            and getattr(client, "has_site_credentials", True)
         )
 
     @staticmethod
@@ -832,11 +847,16 @@ class DetailView(ft.Container):
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                if client:
+                if client and self._client_matches_native_submission_site(client, url):
                     prefetched = data.get("details", {}).get("raw_submission_status")
                     self._page.run_task(
                         self._async_load_submitted_files,
                         client, url, course_id, prefetched
+                    )
+                elif client:
+                    submission_context_reason = (
+                        "Moodle cho trang bài tập này chưa được cấu hình. "
+                        "Hãy mở bài tập trong trình duyệt."
                     )
                 else:
                     submission_context_reason = (

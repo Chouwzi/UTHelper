@@ -7,6 +7,7 @@ import urllib.error
 from dataclasses import dataclass
 from typing import Optional
 from config import settings
+from core.moodle_sites import MoodleSite, moodle_site_from_origin
 import logging
 import sys as _sys
 
@@ -95,9 +96,28 @@ class MoodleClient:
     _MIN_INTERVAL = 0.05  # 50ms = tối đa 20 req/s (trước đây là 200ms - gây lãng phí 1.6s cho mỗi chu kỳ quét)
 
     def __init__(self):
+        self._moodle_site: MoodleSite | None = moodle_site_from_origin(
+            settings.MOODLE_BASE_URL
+        )
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT lấy từ portal API - thời hạn khoảng 30 ngày
         self._last_call_time: float = 0.0  # Nhãn thời gian đơn điệu (monotonic)
+
+    @property
+    def moodle_site_origin(self) -> str:
+        """The immutable trusted origin this client was configured to use."""
+        return self._moodle_site.origin if self._moodle_site else ""
+
+    @property
+    def has_site_credentials(self) -> bool:
+        """Whether this client can authenticate only to its configured site."""
+        return bool(
+            (
+                settings.MOODLE_WS_TOKEN
+                and settings.MOODLE_WS_TOKEN_ORIGIN == self.moodle_site_origin
+            )
+            or (settings.UTH_USERNAME and settings.UTH_PASSWORD)
+        )
 
     def _throttle(self):
         """Ensure minimum interval between API calls."""
@@ -295,8 +315,17 @@ class MoodleClient:
         Token này stateless, không ảnh hưởng browser session.
         Valid rất lâu (~30 ngày), cache trong settings.
         """
-        # Trả về cached token nếu có
-        if not force and settings.MOODLE_WS_TOKEN:
+        if not self.moodle_site_origin:
+            logger.warning("Moodle site is not explicitly trusted or configured.")
+            self._last_login_error = "untrusted_site"
+            return ""
+
+        # Reuse only a token whose issuing Moodle origin is recorded exactly.
+        if (
+            not force
+            and settings.MOODLE_WS_TOKEN
+            and settings.MOODLE_WS_TOKEN_ORIGIN == self.moodle_site_origin
+        ):
             return settings.MOODLE_WS_TOKEN
         
         user = username or settings.UTH_USERNAME
@@ -309,13 +338,14 @@ class MoodleClient:
         
         try:
             status, data = self._post(
-                f"{settings.MOODLE_BASE_URL}/login/token.php",
+                f"{self.moodle_site_origin}/login/token.php",
                 {'username': user, 'password': pwd, 'service': 'moodle_mobile_app'},
                 timeout=15
             )
             
             if data and 'token' in data:
                 settings.MOODLE_WS_TOKEN = data['token']
+                settings.MOODLE_WS_TOKEN_ORIGIN = self.moodle_site_origin
                 from config import save_settings
                 save_settings()
                 logger.info("Lấy WS API token thành công.")
@@ -346,6 +376,7 @@ class MoodleClient:
         """
         if force:
             settings.MOODLE_WS_TOKEN = ""
+            settings.MOODLE_WS_TOKEN_ORIGIN = ""
         token = self._get_ws_token(username, password, force=force)
         return bool(token)
     
@@ -372,7 +403,7 @@ class MoodleClient:
         
         try:
             status, result = self._post(
-                f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+                f"{self.moodle_site_origin}/webservice/rest/server.php",
                 request_params,
                 timeout=20
             )
@@ -386,11 +417,12 @@ class MoodleClient:
                 logger.warning(f"WS token hết hạn hoặc không hợp lệ: {result.get('error', '')}")
                 # Token đã hết hạn → bắt buộc làm mới (force refresh)
                 settings.MOODLE_WS_TOKEN = ""
+                settings.MOODLE_WS_TOKEN_ORIGIN = ""
                 token = self._get_ws_token(force=True)
                 if token:
                     request_params['wstoken'] = token
                     status, result = self._post(
-                        f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+                        f"{self.moodle_site_origin}/webservice/rest/server.php",
                         request_params,
                         timeout=20
                     )
@@ -468,7 +500,7 @@ class MoodleClient:
 
         try:
             status, result = self._post_multipart(
-                f"{settings.MOODLE_BASE_URL}/webservice/upload.php",
+                f"{self.moodle_site_origin}/webservice/upload.php",
                 fields=form_data,
                 files={'file': (filename, file_bytes)},
                 timeout=60.0,
