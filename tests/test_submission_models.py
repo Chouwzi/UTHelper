@@ -4,7 +4,11 @@ import pytest
 
 from core.submission_models import SelectedFile
 from core.submission_snapshot import parse_submission_snapshot, validate_desired_files
-from tests.fixtures.moodle_submission_responses import assignment_fixture, editable_status_fixture
+from tests.fixtures.moodle_submission_responses import (
+    assignment_fixture,
+    captured_real_submission_shape_fixture,
+    editable_status_fixture,
+)
 
 
 def selected(name: str, size: int = 1, mimetype: str = "") -> SelectedFile:
@@ -67,27 +71,81 @@ def test_top_level_submissiondrafts_wins_with_config_fallback():
     assert parse_submission_snapshot(77, assignment, editable_status_fixture()).submission_drafts is True
 
 
-def test_file_submission_requires_explicit_enabled_config_and_status_plugin():
-    assignment = assignment_fixture()
-    without_enabled = parse_submission_snapshot(77, assignment, editable_status_fixture())
-    assert without_enabled.file_submission_enabled is False
+def test_parse_snapshot_recognizes_captured_real_file_submission_shape():
+    assignment, status = captured_real_submission_shape_fixture()
 
-    assignment["configs"].append(
-        {
-            "subtype": "assignsubmission",
-            "plugin": "file",
-            "name": "enabled",
-            "value": 1,
+    snapshot = parse_submission_snapshot(77, assignment, status)
+
+    assert snapshot.file_submission_enabled is True
+    assert snapshot.statement_required is True
+    assert snapshot.submissions_enabled is True
+    assert snapshot.can_edit is True
+
+
+@pytest.mark.parametrize(
+    ("configs", "plugins", "expected"),
+    [
+        ([], [{"type": "file"}], True),
+        (
+            [
+                {
+                    "subtype": "assignsubmission",
+                    "plugin": "assignsubmission_file",
+                    "name": "maxfilesubmission",
+                    "value": "2",
+                }
+            ],
+            [],
+            True,
+        ),
+        ([], [], False),
+        (
+            [
+                {
+                    "subtype": "assignsubmission",
+                    "plugin": "file",
+                    "name": "enabled",
+                    "value": "0",
+                }
+            ],
+            [{"type": "file"}],
+            False,
+        ),
+        (
+            [
+                {
+                    "subtype": "assignsubmission",
+                    "plugin": "file",
+                    "name": "visible",
+                    "value": "0",
+                }
+            ],
+            [{"type": "file"}],
+            False,
+        ),
+    ],
+)
+def test_file_submission_capability_uses_real_plugin_evidence(configs, plugins, expected):
+    assignment = {"configs": configs}
+    status = {
+        "lastattempt": {
+            "submission": {"plugins": plugins},
+            "canedit": True,
+            "submissionsenabled": True,
         }
-    )
-    status = editable_status_fixture()
-    status["lastattempt"]["submission"]["plugins"] = [
-        plugin
-        for plugin in status["lastattempt"]["submission"]["plugins"]
-        if plugin["type"] != "file"
-    ]
-    without_status_plugin = parse_submission_snapshot(77, assignment, status)
-    assert without_status_plugin.file_submission_enabled is False
+    }
+
+    assert parse_submission_snapshot(77, assignment, status).file_submission_enabled is expected
+
+
+def test_top_level_statement_requirement_wins_with_legacy_config_fallback():
+    assignment = assignment_fixture()
+    assignment["requiresubmissionstatement"] = 0
+
+    assert parse_submission_snapshot(77, assignment, editable_status_fixture()).statement_required is False
+
+    assignment.pop("requiresubmissionstatement")
+    assert parse_submission_snapshot(77, assignment, editable_status_fixture()).statement_required is True
 
 
 def test_parse_snapshot_prefers_lastattempt_submissions_enabled_over_assignment_fallback():
