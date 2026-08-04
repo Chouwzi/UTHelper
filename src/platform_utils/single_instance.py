@@ -109,6 +109,8 @@ class WindowsActivationBroker:
         self._receiver: Thread | None = None
         self._lock = Lock()
         self._admission_lock = Lock()
+        self._pending_callback_admissions = 0
+        self._callbacks_begun = 0
         self._close_lock = Lock()
 
     def bind_show_handler(self, handler: Callable[[], None]) -> None:
@@ -184,17 +186,37 @@ class WindowsActivationBroker:
                     handler = self._handler
                 if handler is None:
                     continue
-                with self._admission_lock:
-                    if self._closed:
-                        return
-                try:
-                    handler()
-                except Exception:
-                    logger.warning("windows_activation_handler_failed")
+                if self._admit_handler():
+                    self._invoke_handler(handler)
         finally:
             with self._lock:
                 if self._closed:
                     self._close_owned_handles_locked()
+
+    def _admit_handler(self) -> bool:
+        """Reserve the next callback, unless shutdown has already started."""
+        with self._admission_lock:
+            if self._closed:
+                return False
+            self._pending_callback_admissions += 1
+            return True
+
+    def _invoke_handler(self, handler: Callable[[], None]) -> None:
+        """Begin a reserved callback only if shutdown did not cancel it first."""
+        with self._admission_lock:
+            self._pending_callback_admissions -= 1
+            if self._closed:
+                return
+            # From this point the callback is logically begun before close can
+            # observe shutdown, but user code itself never holds this lock.
+            self._callbacks_begun += 1
+        try:
+            handler()
+        except Exception:
+            logger.warning("windows_activation_handler_failed")
+        finally:
+            with self._admission_lock:
+                self._callbacks_begun -= 1
 
     def _close_owned_handles_locked(self) -> None:
         if self._handles_closed:

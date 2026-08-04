@@ -543,3 +543,33 @@ def test_close_rejects_activation_dequeued_before_callback_admission():
     assert not receiver.is_alive()
     assert callback_count == 0
     assert broker.close()
+
+
+def test_close_cancels_admitted_callback_before_its_handler_begins():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    callback_count = 0
+
+    def record_callback() -> None:
+        nonlocal callback_count
+        callback_count += 1
+
+    broker.bind_show_handler(record_callback)
+    pause_lock = PauseAfterReleaseLock()
+    broker._admission_lock = pause_lock  # type: ignore[assignment]
+    pause_lock.arm()
+    kernel.set_event(broker.activation_handle)
+    assert pause_lock.released.wait(0.5)
+
+    try:
+        assert not broker.close(timeout_seconds=0.0)
+    finally:
+        pause_lock.resume.set()
+        receiver = broker._receiver
+        assert receiver is not None
+        receiver.join(0.5)
+
+    assert not receiver.is_alive()
+    assert callback_count == 0
+    assert broker.close()
