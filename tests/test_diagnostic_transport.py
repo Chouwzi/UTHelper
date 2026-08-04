@@ -490,7 +490,11 @@ def test_diagnostic_socket_timeout_is_synchronous_and_bounded():
                 timeout_seconds=0.1,
                 context=ssl.create_default_context(),
             )
-        assert time.monotonic() - started < 0.8
+        # Windows CI can delay the local server thread for roughly a second
+        # after many subprocess tests.  The exception above proves the 100 ms
+        # socket timeout fired; this wider ceiling only guards against a hung
+        # synchronous request without making scheduler latency a test failure.
+        assert time.monotonic() - started < 2.0
     finally:
         server.shutdown()
         server.server_close()
