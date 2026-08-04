@@ -644,11 +644,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   network work. Non-finite `Retry-After` values are ignored in favor of the
   worker's bounded exponential delay.
 - Every Flet invocation in Android/iOS/Windows release workflows and the local
-  Windows EXE installer path now atomically generates
+  Android and Windows EXE installer paths now atomically generates
   `src/assets/diagnostics-config.json` immediately after the previous build and
   before the next one. GitHub uses the public `vars.SENTRY_DSN` value; absent
   values generate the explicit empty/unconfigured asset. A release-hardening
-  test enumerates all seven literal build invocations and locks this ordering.
+  test discovers both literal and command-object build invocations across every
+  workflow YAML and PowerShell build script. It now locks all **nine** actual
+  Flet builds, including both passes in `scripts/build_android.ps1`.
 - Review-focused transport/config/release tests pass **61 tests in 3.01
   seconds**; broader config/spool/release regression tests pass **142 tests in
   13.53 seconds**. Full source/test Ruff and `git diff --check` pass.

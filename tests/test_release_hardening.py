@@ -179,21 +179,36 @@ def test_single_instance_e2e_embedded_csharp_targets_windows_powershell_51():
 
 
 def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
-    build_files = (
+    candidates = tuple((ROOT / ".github" / "workflows").glob("*.y*ml")) + tuple(
+        (ROOT / "scripts").glob("*.ps1")
+    )
+    invocation_markers = ("flet build ", "$fletCommand.Source build ")
+    build_files = []
+    for path in candidates:
+        content = path.read_text(encoding="utf-8").replace("\\", "/")
+        if any(marker in content for marker in invocation_markers):
+            build_files.append(path.relative_to(ROOT).as_posix())
+
+    assert set(build_files) == {
         ".github/workflows/release.yml",
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
+        "scripts/build_android.ps1",
         "scripts/build_installer.ps1",
-    )
+    }
     generator = "scripts/generate_public_runtime_config.py"
     output = "src/assets/diagnostics-config.json"
+    total_builds = 0
 
     for relative_path in build_files:
         content = _read(relative_path).replace("\\", "/")
         lines = content.splitlines()
         build_indexes = [
-            index for index, line in enumerate(lines) if "flet build " in line
+            index
+            for index, line in enumerate(lines)
+            if any(marker in line for marker in invocation_markers)
         ]
+        total_builds += len(build_indexes)
         generator_indexes = [
             index for index, line in enumerate(lines) if generator in line
         ]
@@ -211,8 +226,15 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
             assert output in matching[0]
             previous_build = build_index
 
-    for workflow_path in build_files[:3]:
+    assert total_builds == 9
+
+    for workflow_path in (
+        ".github/workflows/release.yml",
+        ".github/workflows/build-ios.yml",
+        ".github/workflows/build-android.yml",
+    ):
         workflow = _read(workflow_path)
         assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
         assert "secrets.SENTRY_DSN" not in workflow
     assert "$env:SENTRY_DSN" in _read("scripts/build_installer.ps1")
+    assert "$env:SENTRY_DSN" in _read("scripts/build_android.ps1")
