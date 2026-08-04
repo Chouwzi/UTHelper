@@ -692,3 +692,10 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Focused runtime/main/logging/config verification passes **86 tests in 2.55
   seconds**. The complete test suite exited successfully under a per-test
   **180-second** timeout; `ruff check src tests` and `git diff --check` pass.
+- Faulthandler ownership review found a close race between a later successful
+  `enable()` call and its supersession flag. The tracked enable call and flag
+  assignment now execute under the same runtime lifecycle lock used by close,
+  so close can neither disable nor close resources across a partially published
+  later owner. A failed later enable does not claim ownership, and a wrapper
+  captured before close remains safe when invoked afterward. Deterministic
+  barrier coverage bounds every wait/join and reproduces the former race.

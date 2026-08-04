@@ -679,9 +679,10 @@ class DiagnosticRuntime:
             previous_enable(file=stream, all_threads=True)
 
             def tracked_enable(*args: Any, **kwargs: Any) -> Any:
-                result = previous_enable(*args, **kwargs)
-                self._fault_superseded = True
-                return result
+                with self._lifecycle_lock:
+                    result = previous_enable(*args, **kwargs)
+                    self._fault_superseded = True
+                    return result
 
             faulthandler.enable = tracked_enable
             self._previous_fault_enable = previous_enable

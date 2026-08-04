@@ -508,6 +508,107 @@ def test_close_does_not_disable_a_later_faulthandler_owner(tmp_path, monkeypatch
     disable.assert_not_called()
 
 
+def test_later_faulthandler_enable_is_atomic_with_close(tmp_path, monkeypatch):
+    later_enable_entered = threading.Event()
+    release_later_enable = threading.Event()
+    close_started = threading.Event()
+    close_finished = threading.Event()
+    calls = 0
+
+    def controlled_enable(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        later_enable_entered.set()
+        if not release_later_enable.wait(2):
+            raise TimeoutError("test did not release later faulthandler owner")
+        return None
+
+    disable = Mock()
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setattr(faulthandler, "enable", controlled_enable)
+    monkeypatch.setattr(faulthandler, "disable", disable)
+    runtime = _runtime(tmp_path)
+    runtime.start()
+
+    later_thread = threading.Thread(
+        target=lambda: faulthandler.enable(file=object(), all_threads=False),
+        daemon=True,
+    )
+
+    def close_runtime() -> None:
+        close_started.set()
+        runtime.close(clean=True)
+        close_finished.set()
+
+    close_thread = threading.Thread(target=close_runtime, daemon=True)
+    later_thread.start()
+    close_launched = False
+    try:
+        assert later_enable_entered.wait(1)
+        close_thread.start()
+        close_launched = True
+        assert close_started.wait(1)
+        close_finished_before_enable_returned = close_finished.wait(0.05)
+    finally:
+        release_later_enable.set()
+        later_thread.join(2)
+        if close_launched:
+            close_thread.join(2)
+
+    assert not later_thread.is_alive()
+    assert not close_launched or not close_thread.is_alive()
+    assert close_finished_before_enable_returned is False
+    disable.assert_not_called()
+
+
+def test_failed_later_faulthandler_enable_does_not_take_ownership(
+    tmp_path, monkeypatch
+):
+    calls = 0
+
+    def failing_second_enable(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("later owner failed")
+        return None
+
+    disable = Mock()
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setattr(faulthandler, "enable", failing_second_enable)
+    monkeypatch.setattr(faulthandler, "disable", disable)
+    runtime = _runtime(tmp_path)
+    runtime.start()
+
+    with pytest.raises(RuntimeError, match="later owner failed"):
+        faulthandler.enable(file=object(), all_threads=False)
+    runtime.close(clean=True)
+
+    disable.assert_called_once_with()
+
+
+def test_captured_enable_wrapper_remains_safe_after_runtime_close(
+    tmp_path, monkeypatch
+):
+    enable = Mock()
+    disable = Mock()
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setattr(faulthandler, "enable", enable)
+    monkeypatch.setattr(faulthandler, "disable", disable)
+    runtime = _runtime(tmp_path)
+    runtime.start()
+    captured_wrapper = faulthandler.enable
+
+    runtime.close(clean=True)
+    later_file = object()
+    captured_wrapper(file=later_file, all_threads=False)
+
+    disable.assert_called_once_with()
+    assert enable.call_args_list[-1].kwargs["file"] is later_file
+
+
 def test_close_does_not_overwrite_a_later_enable_wrapper(tmp_path, monkeypatch):
     enable = Mock()
     disable = Mock()
