@@ -61,7 +61,8 @@ public static class UTHelperWindowProbe
         bool found = false;
         EnumWindows((hwnd, lParam) =>
         {
-            GetWindowThreadProcessId(hwnd, out uint owner);
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
             if (owner == targetProcessId)
             {
                 found = true;
@@ -76,7 +77,8 @@ public static class UTHelperWindowProbe
         bool found = false;
         EnumWindows((hwnd, lParam) =>
         {
-            GetWindowThreadProcessId(hwnd, out uint owner);
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
             if (owner == targetProcessId && IsWindowVisible(hwnd) && !IsIconic(hwnd))
             {
                 found = true;
@@ -92,7 +94,8 @@ public static class UTHelperWindowProbe
         bool visible = false;
         EnumWindows((hwnd, lParam) =>
         {
-            GetWindowThreadProcessId(hwnd, out uint owner);
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
             if (owner == targetProcessId)
             {
                 hasWindow = true;
@@ -111,7 +114,8 @@ public static class UTHelperWindowProbe
         bool found = false;
         EnumWindows((hwnd, lParam) =>
         {
-            GetWindowThreadProcessId(hwnd, out uint owner);
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
             if (owner == targetProcessId)
             {
                 found = true;

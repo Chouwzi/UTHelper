@@ -146,5 +146,33 @@ def test_msix_and_e2e_use_argument_free_autostart_alias():
 def test_bundle_e2e_requires_activation_handoff_and_fail_open_scan():
     e2e = _read("scripts/test_windows_bundle_e2e.ps1")
 
-    assert "test_windows_single_instance_e2e.ps1" in e2e
-    assert "single_instance_fail_open" in e2e
+    invocation = (
+        '$activationOutput = & (Join-Path $PSScriptRoot '
+        '"test_windows_single_instance_e2e.ps1") `\n'
+        "    -ExePath $manualExe `\n"
+        "    -StartupAliasPath $autostartExe `\n"
+        "    -WorkingDirectory $resolvedBundle `\n"
+        "    -ProcessExitTimeoutSeconds 5 `\n"
+        "    -WindowTimeoutSeconds $ObservationSeconds 2>&1"
+    )
+    capture = "$capturedActivationLog = $activationOutput | Out-String"
+    fail_open_guard = (
+        'if ($capturedActivationLog -match "single_instance_fail_open") {'
+    )
+    terminating_failure = 'throw "Packaged activation emitted the fail-open diagnostic"'
+
+    assert invocation in e2e
+    assert capture in e2e
+    assert fail_open_guard in e2e
+    assert terminating_failure in e2e
+    assert e2e.index(invocation) < e2e.index(capture)
+    assert e2e.index(capture) < e2e.index(fail_open_guard)
+    assert e2e.index(fail_open_guard) < e2e.index(terminating_failure)
+
+
+def test_single_instance_e2e_embedded_csharp_targets_windows_powershell_51():
+    script = _read("scripts/test_windows_single_instance_e2e.ps1")
+
+    assert "out uint owner" not in script
+    assert script.count("uint owner;") == 4
+    assert script.count("out owner") == 4
