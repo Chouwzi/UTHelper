@@ -539,3 +539,23 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   values for email, bearer, URL, key/value, Windows user path, and Unix user path,
   including a one-million-character synthetic input while regex work remains
   bounded to the fixed scan buffer.
+
+## Bounded, redacted application logging (2026-08-04)
+
+- Replaced the two import-time `FileHandler` blocks in `src/main.py` with one
+  diagnostics-owned `RotatingFileHandler`, configured only after the platform
+  data directory exists and without changing the pre-Flet Windows ownership
+  bootstrap.
+- The local application log is capped at 2 MiB with three backups. Exact known
+  legacy logs that already exceed the cap are removed before the new handler is
+  opened; an `app.log` symlink is unlinked without following or modifying its
+  target.
+- The owned formatter sanitizes the complete final record, including formatted
+  arguments, exception output, and stack information, immediately before the
+  file write. Formatting failures fall back to bounded non-sensitive text.
+- Configuration is process-idempotent. `LoggingRuntime.close()` is idempotent
+  and removes/closes only its owned handler, leaving every pre-existing root
+  handler untouched.
+- Focused logging verification passed with **8 tests**. Logging/config/main
+  startup regression verification passed with **54 tests**; `ruff check src
+  tests` and `git diff --check` passed.

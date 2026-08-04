@@ -4,35 +4,15 @@ import sys
 import traceback
 from pathlib import Path
 
+from diagnostics.logging_setup import configure_logging
 from gui.controllers.startup_visibility import is_autostart_launch
 from platform_utils.single_instance import bootstrap_windows_instance
 
-# ===== SETUP DEBUG LOGGER =====
 # Force stdout/stderr to be unbuffered/line-buffered
-if hasattr(sys.stdout, 'reconfigure'):
+if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
-if hasattr(sys.stderr, 'reconfigure'):
+if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(line_buffering=True)
-
-try:
-    _appdata = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "UTHelper")
-    os.makedirs(_appdata, exist_ok=True)
-    log_path = os.path.join(_appdata, "debug_app.log")
-    file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
-    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-    root_logger.addHandler(file_handler)
-    
-    for log_name in ["flet", "flet_transport", "gui", "core"]:
-        l = logging.getLogger(log_name)
-        l.setLevel(logging.DEBUG)
-        l.addHandler(file_handler)
-except Exception:
-    import logging as _fb_log
-    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-# ==============================
 
 # iOS/mobile SSL fix: must be set BEFORE any httpx/ssl import
 # Python in sandboxed iOS/Android apps cannot locate system CA certificates.
@@ -84,24 +64,12 @@ except Exception as exc:
     _boot_log(f"Data dir init failed: {exc}")
     _APPDATA_DIR = Path.home()
 
-# Setup logging to file BEFORE imports
+# Set up the sole owned file logger after the platform data directory exists.
 try:
-    _LOG_DIR = _APPDATA_DIR / "logs"
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    
-    _file_handler = logging.FileHandler(
-        _LOG_DIR / "app.log",
-        mode='a',
-        encoding="utf-8",
-    )
-    _file_handler.setLevel(logging.DEBUG)
-    _file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    logging.getLogger().addHandler(_file_handler)
-    _boot_log(f"Log file: {_LOG_DIR / 'app.log'}")
+    _LOGGING_RUNTIME = configure_logging(_APPDATA_DIR, debug=True)
+    _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
 except Exception as exc:
+    _LOGGING_RUNTIME = None
     _boot_log(f"Log setup failed: {exc}")
 
 # Console encoding fix (Windows-only, harmless on other platforms)
@@ -112,11 +80,12 @@ for _stream in (sys.stdout, sys.stderr):
         import logging as _fb_log
         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+if _LOGGING_RUNTIME is None:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 logging.getLogger("flet_core").setLevel(logging.DEBUG)
 logging.getLogger("flet").setLevel(logging.DEBUG)
 logging.getLogger("httpx").setLevel(logging.WARNING)
