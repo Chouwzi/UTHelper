@@ -560,3 +560,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Focused logging verification passed with **8 tests**. Logging/config/main
   startup regression verification passed with **54 tests**; `ruff check src
   tests` and `git diff --check` passed.
+
+## Atomic bounded diagnostic spool (2026-08-04)
+
+- Added a diagnostics-owned offline queue that accepts only validated
+  `DiagnosticReport` instances and revalidates their serialized schema before
+  persistence. Entries are written with exclusive-create, flush, file fsync,
+  and atomic replace; temporary files are cleaned on every failure path.
+- Queue pruning is deterministic by report time, event ID, and filename. It
+  removes invalid/expired direct regular entries, deduplicates fingerprints,
+  and retains at most **20 events**, **1 MiB**, and **7 days** of reports.
+- A process-wide per-root reentrant lock serializes multiple spool instances.
+  Directory scans never recurse or follow symlinks; initialization rejects a
+  symlink root and every operation fails closed if the root is replaced.
+  Acknowledge and clear remove only validated or explicitly owned direct regular
+  JSON/hidden-temp children, leaving nested/unrelated entries and link targets
+  untouched.
+- Focused spool verification passed with **12 tests**, including simulated
+  replace failure, concurrent dedupe/pruning, corruption recovery, exact caps,
+  and live Windows symlink cases. Scoped Ruff and `git diff --check` passed.
