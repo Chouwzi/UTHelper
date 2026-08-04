@@ -546,10 +546,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   diagnostics-owned `RotatingFileHandler`, configured only after the platform
   data directory exists and without changing the pre-Flet Windows ownership
   bootstrap.
-- The local application log is capped at 2 MiB with three backups. Exact known
-  legacy logs that already exceed the cap are removed before the new handler is
-  opened; an `app.log` symlink is unlinked without following or modifying its
-  target.
+- The local application log is capped at 2 MiB with three backups. The exact
+  legacy root `data_dir/debug_app.log`, `logs/app.log`, and the three owned
+  backups are checked before the new handler opens. Oversized regular files and
+  unsafe symlinks at only those paths are unlinked without following or
+  modifying their targets; unrelated names remain untouched.
 - The owned formatter sanitizes the complete final record, including formatted
   arguments, exception output, and stack information, immediately before the
   file write. Formatting failures fall back to bounded non-sensitive text.

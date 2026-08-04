@@ -189,15 +189,22 @@ def test_legacy_oversized_logs_are_safely_removed_before_handler_opens(
     log_dir.mkdir()
     oversized = b"x" * (2 * 1024 * 1024 + 1)
     (log_dir / "app.log").write_bytes(oversized)
-    (log_dir / "debug_app.log").write_bytes(oversized)
-    unrelated = log_dir / "app.log.private"
-    unrelated.write_bytes(oversized)
+    (log_dir / "app.log.1").write_bytes(oversized)
+    (tmp_path / "debug_app.log").write_bytes(oversized)
+    unrelated_paths = (
+        log_dir / "debug_app.log",
+        log_dir / "app.log.4",
+        log_dir / "app.log.private",
+    )
+    for path in unrelated_paths:
+        path.write_bytes(oversized)
 
     runtime = configure_logging(tmp_path, debug=False)
 
     assert (log_dir / "app.log").stat().st_size < 2 * 1024 * 1024
-    assert not (log_dir / "debug_app.log").exists()
-    assert unrelated.read_bytes() == oversized
+    assert not (log_dir / "app.log.1").exists()
+    assert not (tmp_path / "debug_app.log").exists()
+    assert all(path.read_bytes() == oversized for path in unrelated_paths)
     runtime.close()
 
 
@@ -224,6 +231,30 @@ def test_log_path_symlink_is_unlinked_without_touching_its_target(
     assert target.read_text(encoding="utf-8") == "must remain"
     assert not link.is_symlink()
     assert link.is_file()
+    runtime.close()
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "symlink"),
+    reason="platform has no symlink support",
+)
+def test_root_legacy_debug_symlink_is_unlinked_without_touching_its_target(
+    tmp_path: Path,
+    isolated_root_logger: logging.Logger,
+) -> None:
+    target = tmp_path / "outside-debug.log"
+    target.write_text("must remain", encoding="utf-8")
+    link = tmp_path / "debug_app.log"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    runtime = configure_logging(tmp_path, debug=False)
+
+    assert target.read_text(encoding="utf-8") == "must remain"
+    assert not link.exists()
+    assert not link.is_symlink()
     runtime.close()
 
 

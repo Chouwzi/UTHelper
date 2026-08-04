@@ -104,9 +104,10 @@ def configure_logging(data_dir: Path, *, debug: bool) -> LoggingRuntime:
                 root.setLevel(level)
                 return runtime
 
-        log_dir = Path(data_dir) / "logs"
+        data_path = Path(data_dir)
+        log_dir = data_path / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        _remove_unsafe_or_oversized_legacy_logs(log_dir)
+        _remove_unsafe_or_oversized_legacy_logs(data_path, log_dir)
         handler = RotatingFileHandler(
             log_dir / "app.log",
             maxBytes=MAX_LOG_BYTES,
@@ -123,17 +124,22 @@ def configure_logging(data_dir: Path, *, debug: bool) -> LoggingRuntime:
         return runtime
 
 
-def _remove_unsafe_or_oversized_legacy_logs(log_dir: Path) -> None:
-    names = ["app.log", "debug_app.log"]
-    names.extend(f"app.log.{index}" for index in range(1, BACKUP_COUNT + 1))
-    for name in names:
-        path = log_dir / name
+def _remove_unsafe_or_oversized_legacy_logs(
+    data_dir: Path,
+    log_dir: Path,
+) -> None:
+    paths = [data_dir / "debug_app.log", log_dir / "app.log"]
+    paths.extend(
+        log_dir / f"app.log.{index}"
+        for index in range(1, BACKUP_COUNT + 1)
+    )
+    for path in paths:
         try:
             metadata = path.lstat()
         except FileNotFoundError:
             continue
         if stat.S_ISLNK(metadata.st_mode):
-            path.unlink()
+            path.unlink(missing_ok=True)
             continue
         if stat.S_ISREG(metadata.st_mode) and metadata.st_size >= MAX_LOG_BYTES:
-            path.unlink()
+            path.unlink(missing_ok=True)
