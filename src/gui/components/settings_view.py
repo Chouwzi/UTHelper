@@ -1942,7 +1942,12 @@ class SettingsView(ft.Container):
     def has_changes(self):
         if self._loading or self._baseline_snapshot is None:
             return False
-        return self._capture_form_snapshot() != self._baseline_snapshot
+        try:
+            return self._capture_form_snapshot() != self._baseline_snapshot
+        except ValueError:
+            # Invalid form input is necessarily unsaved. Do not include supplied
+            # values in diagnostics; Back must still offer the safe discard path.
+            return True
 
     def _discard_and_close(self) -> None:
         """Restore the complete persisted baseline before closing Settings."""
@@ -2028,11 +2033,14 @@ class SettingsView(ft.Container):
 
             persisted = requested
             autostart_ok = True
-            autostart_changed = False
+            autostart_may_need_compensation = False
             if (
                 not _pu.IS_MOBILE
                 and requested.start_with_windows != baseline.start_with_windows
             ):
+                mutation_attempted = self._autostart_coordinator is not None
+                mutation_uncertain = False
+                compensation_attempted = False
                 if self._autostart_coordinator is None:
                     result = AutostartUiState(
                         enabled=baseline.start_with_windows,
@@ -2050,17 +2058,19 @@ class SettingsView(ft.Container):
                             timeout=2.0,
                         )
                     except asyncio.TimeoutError:
+                        mutation_uncertain = True
                         result = AutostartUiState(
                             enabled=baseline.start_with_windows,
                             editable=False,
                             success=False,
                             message=(
                                 "Thay đổi Khởi động cùng Windows đã quá thời gian. "
-                                "Các cài đặt khác vẫn được lưu."
+                                "Chưa thể xác nhận trạng thái; vui lòng thử lại."
                             ),
                             confirmed=False,
                         )
                     except Exception:
+                        mutation_uncertain = True
                         logging.getLogger(__name__).warning(
                             "settings_autostart_change_failed"
                         )
@@ -2069,11 +2079,97 @@ class SettingsView(ft.Container):
                             editable=False,
                             success=False,
                             message=(
-                                "Không thể thay đổi Khởi động cùng Windows. "
-                                "Các cài đặt khác vẫn được lưu."
+                                "Không thể xác nhận thay đổi Khởi động cùng "
+                                "Windows; vui lòng thử lại."
                             ),
                             confirmed=False,
                         )
+
+                    if not result.confirmed:
+                        mutation_uncertain = True
+                        uncertainty_warning = result.message or (
+                            "Không thể xác nhận thay đổi Khởi động cùng "
+                            "Windows; vui lòng thử lại."
+                        )
+                        try:
+                            readback = await asyncio.wait_for(
+                                self._autostart_coordinator.load(),
+                                timeout=2.0,
+                            )
+                        except asyncio.TimeoutError:
+                            readback = AutostartUiState(
+                                enabled=baseline.start_with_windows,
+                                editable=False,
+                                success=False,
+                                message=uncertainty_warning,
+                                confirmed=False,
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "settings_autostart_readback_failed"
+                            )
+                            readback = AutostartUiState(
+                                enabled=baseline.start_with_windows,
+                                editable=False,
+                                success=False,
+                                message=uncertainty_warning,
+                                confirmed=False,
+                            )
+
+                        if (
+                            readback.confirmed
+                            and readback.enabled == requested.start_with_windows
+                        ):
+                            result = readback
+                            mutation_uncertain = False
+                        else:
+                            compensation_attempted = True
+                            try:
+                                compensation = await asyncio.wait_for(
+                                    self._autostart_coordinator.change(
+                                        baseline.start_with_windows
+                                    ),
+                                    timeout=2.0,
+                                )
+                            except asyncio.TimeoutError:
+                                compensation = AutostartUiState(
+                                    enabled=baseline.start_with_windows,
+                                    editable=False,
+                                    success=False,
+                                    message="",
+                                    confirmed=False,
+                                )
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "settings_autostart_compensation_failed"
+                                )
+                                compensation = AutostartUiState(
+                                    enabled=baseline.start_with_windows,
+                                    editable=False,
+                                    success=False,
+                                    message="",
+                                    confirmed=False,
+                                )
+
+                            mutation_uncertain = not compensation.confirmed
+                            if compensation.confirmed:
+                                result = replace(
+                                    compensation,
+                                    success=False,
+                                    message=uncertainty_warning,
+                                )
+                            else:
+                                result = AutostartUiState(
+                                    enabled=baseline.start_with_windows,
+                                    editable=False,
+                                    success=False,
+                                    message=(
+                                        f"{uncertainty_warning} Không thể xác "
+                                        "nhận trạng thái sau khôi phục; vui lòng "
+                                        "thử lại."
+                                    ),
+                                    confirmed=False,
+                                )
 
                 actual = (
                     result.enabled
@@ -2087,10 +2183,14 @@ class SettingsView(ft.Container):
                 autostart_ok = (
                     result.confirmed
                     and actual == requested.start_with_windows
+                    and not compensation_attempted
                 )
-                autostart_changed = (
-                    result.confirmed
-                    and actual != baseline.start_with_windows
+                autostart_may_need_compensation = (
+                    mutation_attempted
+                    and (
+                        mutation_uncertain
+                        or actual != baseline.start_with_windows
+                    )
                 )
                 display_result = result
                 if not result.confirmed:
@@ -2099,7 +2199,10 @@ class SettingsView(ft.Container):
 
             if not self._persist_snapshot_to_settings(persisted):
                 autostart_restored = True
-                if autostart_changed and self._autostart_coordinator is not None:
+                if (
+                    autostart_may_need_compensation
+                    and self._autostart_coordinator is not None
+                ):
                     try:
                         restored = await asyncio.wait_for(
                             self._autostart_coordinator.change(

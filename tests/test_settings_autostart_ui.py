@@ -177,27 +177,46 @@ def test_save_bounds_autostart_mutation_and_persists_confirmed_actual(monkeypatc
     assert view.visible_snapshot == persisted[0]
 
 
-def test_save_timeout_preserves_baseline_autostart_but_persists_other_fields(
-    monkeypatch,
-):
+def test_save_timeout_readback_accepts_escaped_requested_state(monkeypatch):
     from dataclasses import replace
     from gui.view_models.settings_form import SettingsFormSnapshot
 
     baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
     requested = replace(baseline, theme="solarized_dark", start_with_windows=True)
     persisted = []
+    observed_timeouts = []
 
-    async def timeout(awaitable, timeout):
-        assert timeout == 2.0
-        awaitable.close()
-        raise asyncio.TimeoutError
+    class EscapedMutationCoordinator:
+        def __init__(self):
+            self.requests = []
+            self.os_enabled = False
+
+        def change(self, enabled):
+            self.requests.append(enabled)
+
+            async def mutate():
+                self.os_enabled = enabled
+                return AutostartUiState(enabled, True, True, "")
+
+            return mutate()
+
+        async def load(self):
+            return AutostartUiState(self.os_enabled, True, True, "Đã xác nhận.")
+
+    coordinator = EscapedMutationCoordinator()
+
+    async def first_timeout(awaitable, timeout):
+        observed_timeouts.append(timeout)
+        if len(observed_timeouts) == 1:
+            awaitable.close()
+            coordinator.os_enabled = True
+            raise asyncio.TimeoutError
+        return await awaitable
 
     view = SimpleNamespace(
         _baseline_snapshot=baseline,
         _capture_form_snapshot=lambda: requested,
-        _autostart_coordinator=FakeCoordinator(
-            AutostartUiState(False, True, True, "")
-        ),
+        _autostart_coordinator=coordinator,
         _apply_autostart_ui=lambda state: setattr(
             view._autostart_status, "value", state.message
         ),
@@ -210,12 +229,158 @@ def test_save_timeout_preserves_baseline_autostart_but_persists_other_fields(
         _on_saved=None,
         update=lambda: None,
     )
-    monkeypatch.setattr("gui.components.settings_view.asyncio.wait_for", timeout)
+    monkeypatch.setattr(
+        "gui.components.settings_view.asyncio.wait_for", first_timeout
+    )
+    monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is True
+    assert coordinator.requests == [True]
+    assert observed_timeouts == [2.0, 2.0]
+    assert persisted == [requested]
+    assert view._baseline_snapshot == requested
+
+
+def test_unconfirmed_timeout_readback_compensates_before_persisting(monkeypatch):
+    from dataclasses import replace
+    from gui.view_models.settings_form import SettingsFormSnapshot
+
+    baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
+    requested = replace(baseline, theme="solarized_dark", start_with_windows=True)
+    persisted = []
+    calls = []
+
+    class Coordinator:
+        def change(self, enabled):
+            calls.append(("change", enabled))
+
+            async def result():
+                return AutostartUiState(enabled, True, True, "Đã khôi phục.")
+
+            return result()
+
+        def load(self):
+            calls.append(("load", None))
+
+            async def result():
+                return AutostartUiState(
+                    False,
+                    True,
+                    True,
+                    "Đã xác nhận trạng thái cũ.",
+                )
+
+            return result()
+
+    async def first_timeout(awaitable, timeout):
+        assert timeout == 2.0
+        if not calls or calls == [("change", True)]:
+            awaitable.close()
+            raise asyncio.TimeoutError
+        return await awaitable
+
+    coordinator = Coordinator()
+    view = SimpleNamespace(
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=lambda: requested,
+        _autostart_coordinator=coordinator,
+        _apply_autostart_ui=lambda state: setattr(
+            view._autostart_status, "value", state.message
+        ),
+        _persist_snapshot_to_settings=lambda value: persisted.append(value) or True,
+        _apply_snapshot_to_controls=lambda value: None,
+        _save_status=SimpleNamespace(value="", color=None),
+        _autostart_status=SimpleNamespace(value="", color=None),
+        _unsaved_dot=SimpleNamespace(visible=True),
+        _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
+        _on_saved=None,
+        update=lambda: None,
+    )
+    monkeypatch.setattr(
+        "gui.components.settings_view.asyncio.wait_for", first_timeout
+    )
     monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
 
     assert asyncio.run(SettingsView._save(view, None)) is False
+    assert calls == [("change", True), ("load", None), ("change", False)]
     assert persisted == [replace(requested, start_with_windows=False)]
-    assert "thời gian" in view._save_status.value.lower()
+    assert "thử lại" in view._save_status.value.lower()
+
+
+def test_unknown_mutation_is_compensated_again_when_persistence_fails(monkeypatch):
+    from dataclasses import replace
+    from gui.view_models.settings_form import SettingsFormSnapshot
+
+    baseline = SettingsFormSnapshot.from_form_values({"start_with_windows": False})
+    requested = replace(baseline, start_with_windows=True)
+    calls = []
+
+    class Coordinator:
+        def change(self, enabled):
+            calls.append(("change", enabled))
+
+            async def result():
+                return AutostartUiState(
+                    enabled,
+                    False,
+                    False,
+                    "Không thể xác nhận. Hãy thử lại.",
+                    confirmed=False,
+                )
+
+            return result()
+
+        def load(self):
+            calls.append(("load", None))
+
+            async def result():
+                return AutostartUiState(
+                    False,
+                    False,
+                    False,
+                    "Không thể xác nhận. Hãy thử lại.",
+                    confirmed=False,
+                )
+
+            return result()
+
+    async def first_timeout(awaitable, timeout):
+        assert timeout == 2.0
+        if calls == [("change", True)]:
+            awaitable.close()
+            raise asyncio.TimeoutError
+        return await awaitable
+
+    view = SimpleNamespace(
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=lambda: requested,
+        _autostart_coordinator=Coordinator(),
+        _apply_autostart_ui=lambda state: setattr(
+            view._autostart_status, "value", state.message
+        ),
+        _persist_snapshot_to_settings=lambda value: False,
+        _apply_snapshot_to_controls=lambda value: None,
+        _save_status=SimpleNamespace(value="", color=None),
+        _autostart_status=SimpleNamespace(value="", color=None),
+        _unsaved_dot=SimpleNamespace(visible=True),
+        _page=SimpleNamespace(window=SimpleNamespace(always_on_top=True)),
+        _on_saved=None,
+        update=lambda: None,
+    )
+    monkeypatch.setattr(
+        "gui.components.settings_view.asyncio.wait_for", first_timeout
+    )
+    monkeypatch.setattr("gui.components.settings_view._pu.IS_MOBILE", False)
+
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    assert calls == [
+        ("change", True),
+        ("load", None),
+        ("change", False),
+        ("change", False),
+    ]
+    assert view._baseline_snapshot == baseline
+    assert "chưa thể khôi phục" in view._save_status.value.lower()
 
 
 def test_persistence_failure_compensates_successful_windows_change(monkeypatch):

@@ -306,11 +306,18 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
   open. If Windows autostart had already changed, a separately bounded
   compensation attempts to restore the previous OS state before reporting the
   failure.
+- A timed-out or otherwise unconfirmed Windows mutation is never interpreted as
+  the old value. Settings performs a separately bounded readback; only a
+  confirmed requested state is accepted. Every other result ends with a bounded
+  compensation request for the baseline, and unresolved mutation uncertainty is
+  carried into persistence-failure recovery.
 - Successful persistence reapplies the normalized snapshot to every control,
   updates the theme/always-on-top state, rebases dirty detection, and invokes the
   saved callback once. Discard likewise restores every control and secret field
   from the immutable baseline before reapplying the baseline theme and closing;
   secret values are never emitted to diagnostics.
-- Validation: 52 Settings/autostart/notification/config tests passed; the full
-  suite passed with **823 passed, 24 skipped**; `ruff check src tests` and
+- Invalid numeric or color input counts as dirty without logging the supplied
+  value, so Back still opens the discard flow and can restore the valid baseline.
+- Validation: 56 Settings/autostart/notification/config tests passed; the full
+  suite passed with **827 passed, 24 skipped**; `ruff check src tests` and
   `git diff --check` passed.

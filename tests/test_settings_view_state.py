@@ -143,6 +143,7 @@ def _make_save_view(baseline, draft, coordinator=None):
         SettingsView._persist_snapshot_to_settings(view, snapshot)
     )
     view.has_changes = lambda: SettingsView.has_changes(view)
+    view._discard_and_close = lambda: SettingsView._discard_and_close(view)
     async def save(event):
         return await SettingsView._save(view, event)
 
@@ -534,6 +535,49 @@ def test_discard_restores_entire_baseline_and_theme_without_logging_secrets(
     applied_theme.assert_called_once_with(baseline.theme)
     applied_page_theme.assert_called_once_with(view._page)
     view._on_theme_preview.assert_called_once_with()
+    for secret in (
+        baseline.uth_password,
+        baseline.gmail_app_password,
+        baseline.discord_webhook_url,
+        baseline.telegram_bot_token,
+    ):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("control_name", "invalid_value"),
+    [
+        ("_interval_field", "invalid-number-private-marker"),
+        ("_c_tb_critical", "invalid-color-private-marker"),
+    ],
+)
+def test_back_with_invalid_form_still_allows_safe_discard(
+    monkeypatch,
+    caplog,
+    control_name,
+    invalid_value,
+):
+    import gui.components.settings_view as settings_view_module
+
+    baseline = _changed_snapshot(
+        SettingsFormSnapshot.from_form_values({}),
+        start_with_windows=False,
+    )
+    view = _make_save_view(baseline, baseline)
+    getattr(view, control_name).value = invalid_value
+    dialogs = []
+    view._page.show_dialog = dialogs.append
+    monkeypatch.setattr(settings_view_module, "apply_theme", Mock())
+    monkeypatch.setattr("gui.core.theme.set_page_theme", Mock())
+
+    with caplog.at_level("DEBUG"):
+        asyncio.run(SettingsView._handle_back(view, None))
+        assert len(dialogs) == 1
+        dialogs[0].actions[1].on_click(None)
+
+    assert view._capture_form_snapshot() == baseline
+    view._on_close_cb.assert_called_once_with()
+    assert invalid_value not in caplog.text
     for secret in (
         baseline.uth_password,
         baseline.gmail_app_password,
