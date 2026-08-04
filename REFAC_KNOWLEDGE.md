@@ -724,3 +724,34 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   guard was fixed independently, the bounded full suite passed with **992
   passed, 24 skipped in 50.81 seconds**; its runner exited normally with no
   child or test session left behind.
+
+## Anonymous Windows crash correlation (2026-08-04)
+
+- Run-state schema 2 now records a local-only, minute-coarse UTC start time,
+  periodically refreshed last heartbeat, lifecycle phase, app version, and a
+  strict executable basename. A daemon heartbeat refreshes the atomic marker
+  every minute; clean shutdown signals it and joins for at most 0.5 seconds.
+- Only Windows installations with a valid prior unclean marker whose heartbeat
+  is no more than ten minutes old query the Application event channel. The
+  production adapter requests provider `Application Error`, Event ID 1000,
+  reverse chronological order, one batch of at most 50 records, and a one-second
+  `EvtNext` timeout. It never formats event messages and discards paths, report
+  IDs, user/machine/process data, command lines, and unrelated event fields.
+- Correlation requires the application basename to match case-insensitively and
+  the event time to fall inside the prior run window. Remotely eligible evidence
+  is limited to a normalized exception code, a 128-character-safe faulting
+  module basename, and a minute-coarse event time. Permission, API, timezone,
+  malformed, future, stale, oversized, and unrelated inputs fail closed.
+- Native code/module metadata is a strict pair and is attached to exactly the
+  next durable sanitized report for the unclean run. Capture serialization
+  prevents concurrent reports from consuming it twice; a failed enqueue keeps
+  it available for the next durable report. Missing Windows evidence preserves
+  the truthful `unclean_previous_exit` classification and makes no native-crash
+  claim.
+- Focused Windows evidence, redaction, transport, and runtime verification
+  passes **132 tests in 6.65 seconds**. The bounded full suite passes **1022
+  tests with 24 skipped in 49.49 seconds**. `ruff check src tests` and `git
+  diff --check` pass, and bounded tests assert heartbeat/capture helper threads
+  terminate before returning. A broader `ruff check src tests scripts` still
+  reports 18 pre-existing issues confined to `scripts/debug_panel_test.py` and
+  `scripts/notification_system_test.py`; no Task 8 file is implicated.

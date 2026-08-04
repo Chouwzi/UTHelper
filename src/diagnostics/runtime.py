@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import faulthandler
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -23,14 +24,31 @@ from diagnostics.redaction import build_report
 from diagnostics.release_config import load_runtime_public_dsn
 from diagnostics.spool import DiagnosticSpool
 from diagnostics.transport import DiagnosticDeliveryWorker
+from diagnostics.windows_evidence import (
+    RUN_STATE_SCHEMA_VERSION,
+    EventReader,
+    RunState,
+    WindowsCrashEvidence,
+    find_recent_application_error,
+    read_windows_application_errors,
+)
 
 
-RUN_STATE_SCHEMA_VERSION = 1
 MAX_RUN_STATE_BYTES = 4096
 MAX_FAULT_LOG_BYTES = 256 * 1024
+HEARTBEAT_INTERVAL_SECONDS = 60.0
+HEARTBEAT_JOIN_SECONDS = 0.5
 
 _RUN_STATE_KEYS = frozenset(
-    ("app_version", "clean", "phase", "schema_version", "timestamp")
+    (
+        "app_version",
+        "clean",
+        "executable_basename",
+        "last_heartbeat",
+        "phase",
+        "schema_version",
+        "started_at",
+    )
 )
 
 if os.name == "nt":
@@ -134,11 +152,22 @@ def _is_regular(path: Path) -> bool:
     return stat.S_ISREG(metadata.st_mode) and not attributes & reparse_flag
 
 
-def _coarse_timestamp(value: datetime) -> str:
+def _normalized_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    value = value.astimezone(UTC).replace(second=0, microsecond=0)
-    return value.strftime("%Y-%m-%dT%H:%M:00Z")
+    return value.astimezone(UTC)
+
+
+def _safe_process_basename(value: str | None) -> str:
+    candidate = str(value or sys.executable).replace("\\", "/").rsplit("/", 1)[-1]
+    if (
+        not candidate
+        or len(candidate) > 128
+        or not candidate[0].isalnum()
+        or any(not (character.isascii() and (character.isalnum() or character in "._-")) for character in candidate)
+    ):
+        return "python.exe"
+    return candidate
 
 
 def _pin_windows_directory(path: Path) -> int | None:
@@ -233,6 +262,9 @@ class DiagnosticRuntime:
         delivery_executor: Executor | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         emergency_writer: TextIO | None = None,
+        executable_basename: str | None = None,
+        evidence_reader: EventReader = read_windows_application_errors,
+        heartbeat_interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.diagnostics_dir = self.data_dir / "diagnostics"
@@ -249,8 +281,15 @@ class DiagnosticRuntime:
         )
         self._owns_executor = delivery_executor is None
         self._clock = clock
+        self._executable_basename = _safe_process_basename(executable_basename)
+        self._evidence_reader = evidence_reader
+        heartbeat_interval = float(heartbeat_interval_seconds)
+        if not math.isfinite(heartbeat_interval):
+            heartbeat_interval = HEARTBEAT_INTERVAL_SECONDS
+        self._heartbeat_interval_seconds = max(0.01, min(heartbeat_interval, 300.0))
         self._emergency_writer = emergency_writer or sys.__stderr__
         self._local = threading.local()
+        self._capture_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self.shutdown_event = threading.Event()
         self._previous: _HookSet | None = None
@@ -259,6 +298,9 @@ class DiagnosticRuntime:
         self._async_hooks: list[_AsyncHook] = []
         self._phase = AppPhase.BOOT
         self._unclean_previous_exit = False
+        self._pending_windows_evidence: WindowsCrashEvidence | None = None
+        self._run_started_at: datetime | None = None
+        self._heartbeat_thread: threading.Thread | None = None
         self._diagnostics_identity: tuple[int, int] | None = None
         self._root_handle: int | None = None
         self._guard_stream: TextIO | None = None
@@ -292,8 +334,18 @@ class DiagnosticRuntime:
                 return
             self._started = True
             self._prepare_diagnostics_dir()
-            self._unclean_previous_exit = self._read_previous_marker()
+            now = _normalized_utc(self._clock())
+            previous_marker = self._read_previous_marker(now)
+            self._unclean_previous_exit = previous_marker is not None
+            if previous_marker is not None:
+                self._pending_windows_evidence = find_recent_application_error(
+                    previous_marker,
+                    now=now,
+                    reader=self._evidence_reader,
+                )
+            self._run_started_at = now
             self._write_run_state(AppPhase.BOOT)
+            self._start_heartbeat()
             self._previous = _HookSet.capture()
             self._install_hooks()
             self._enable_faulthandler()
@@ -318,30 +370,46 @@ class DiagnosticRuntime:
             return None
         self._local.capturing = True
         try:
-            report = build_report(exc, self.context(phase))
-            outcome = self.spool.enqueue(report)
-            pending = self.spool.pending()
-            if outcome.stored:
-                durable = next(
-                    (
-                        item.report
-                        for item in pending
-                        if item.report.event_id == report.event_id
+            with self._capture_lock:
+                context = self.context(phase)
+                evidence = self._peek_windows_evidence(context)
+                report = build_report(
+                    exc,
+                    context,
+                    native_exception_code=(
+                        evidence.exception_code if evidence is not None else None
                     ),
-                    None,
-                )
-            elif outcome.deduplicated:
-                durable = next(
-                    (
-                        item.report
-                        for item in pending
-                        if item.report.fingerprint == report.fingerprint
+                    faulting_module=(
+                        evidence.faulting_module_basename
+                        if evidence is not None
+                        else None
                     ),
-                    None,
                 )
-            else:
-                durable = None
-            return durable.event_id.hex if durable is not None else None
+                outcome = self.spool.enqueue(report)
+                pending = self.spool.pending()
+                if outcome.stored:
+                    durable = next(
+                        (
+                            item.report
+                            for item in pending
+                            if item.report.event_id == report.event_id
+                        ),
+                        None,
+                    )
+                elif outcome.deduplicated:
+                    durable = next(
+                        (
+                            item.report
+                            for item in pending
+                            if item.report.fingerprint == report.fingerprint
+                        ),
+                        None,
+                    )
+                else:
+                    durable = None
+                if durable is not None and evidence is not None:
+                    self._commit_windows_evidence(evidence)
+                return durable.event_id.hex if durable is not None else None
         except Exception:
             self._write_emergency("diagnostic capture failed\n")
             return None
@@ -411,11 +479,14 @@ class DiagnosticRuntime:
 
     def close(self, clean: bool) -> None:
         """Restore owned hooks and release resources without waiting on delivery."""
+        heartbeat: threading.Thread | None = None
         with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
             self.shutdown_event.set()
+            heartbeat = self._heartbeat_thread
+            self._heartbeat_thread = None
             self._restore_page_hooks()
             self._restore_async_hooks()
             self._restore_global_hooks()
@@ -428,6 +499,40 @@ class DiagnosticRuntime:
                 self._write_emergency("diagnostic delivery shutdown failed\n")
             self._release_operation_guard()
             self._release_root_pin()
+        if heartbeat is not None and heartbeat is not threading.current_thread():
+            heartbeat.join(timeout=HEARTBEAT_JOIN_SECONDS)
+
+    def _peek_windows_evidence(
+        self,
+        context: DiagnosticContext,
+    ) -> WindowsCrashEvidence | None:
+        if not context.unclean_previous_exit:
+            return None
+        with self._lifecycle_lock:
+            return self._pending_windows_evidence
+
+    def _commit_windows_evidence(self, evidence: WindowsCrashEvidence) -> None:
+        with self._lifecycle_lock:
+            if self._pending_windows_evidence is evidence:
+                self._pending_windows_evidence = None
+
+    def _start_heartbeat(self) -> None:
+        if not self._root_is_owned():
+            return
+        heartbeat = threading.Thread(
+            target=self._heartbeat_loop,
+            name="uthelper-diagnostic-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = heartbeat
+        heartbeat.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self.shutdown_event.wait(self._heartbeat_interval_seconds):
+            with self._lifecycle_lock:
+                if self._closed:
+                    return
+                self._write_run_state(self._phase)
 
     def _install_hooks(self) -> None:
         previous = self._previous
@@ -582,49 +687,49 @@ class DiagnosticRuntime:
             and _identity(self.diagnostics_dir) == self._diagnostics_identity
         )
 
-    def _read_previous_marker(self) -> bool:
+    def _read_previous_marker(self, now: datetime) -> RunState | None:
         if not self._root_is_owned() or not _is_regular(self.run_state_path):
-            return False
+            return None
         try:
             if self.run_state_path.stat().st_size > MAX_RUN_STATE_BYTES:
-                return False
+                return None
             raw = self.run_state_path.read_bytes()
             if len(raw) > MAX_RUN_STATE_BYTES:
-                return False
+                return None
             payload = json.loads(raw.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            return False
+            return None
         if not isinstance(payload, dict) or set(payload) != _RUN_STATE_KEYS:
-            return False
-        if payload.get("schema_version") != RUN_STATE_SCHEMA_VERSION:
-            return False
-        if payload.get("clean") is not False:
-            return False
-        if payload.get("phase") not in {item.value for item in AppPhase}:
-            return False
-        if not isinstance(payload.get("app_version"), str):
-            return False
-        timestamp = payload.get("timestamp")
-        if not isinstance(timestamp, str) or len(timestamp) != 20:
-            return False
+            return None
         try:
-            datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:00Z")
+            state = RunState.model_validate(payload)
         except ValueError:
-            return False
-        return True
+            return None
+        if state.started_at > state.last_heartbeat or state.last_heartbeat > now:
+            return None
+        return state
 
     def _write_run_state(self, phase: AppPhase) -> None:
         if not self._root_is_owned():
             return
         try:
             context = self.context(phase)
-            payload = {
-                "app_version": context.app_version,
-                "clean": False,
-                "phase": phase.value,
-                "schema_version": RUN_STATE_SCHEMA_VERSION,
-                "timestamp": _coarse_timestamp(self._clock()),
-            }
+            started_at = self._run_started_at
+            if started_at is None:
+                return
+            state = RunState(
+                app_version=context.app_version,
+                clean=False,
+                executable_basename=self._executable_basename,
+                last_heartbeat=_normalized_utc(self._clock()).replace(
+                    second=0,
+                    microsecond=0,
+                ),
+                phase=phase,
+                schema_version=RUN_STATE_SCHEMA_VERSION,
+                started_at=started_at.replace(second=0, microsecond=0),
+            )
+            payload = state.model_dump(mode="json")
             encoded = (
                 json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
                 + "\n"
@@ -775,12 +880,18 @@ def create_default_runtime(
         delivery=delivery,
         context_provider=context_provider,
         consent_provider=consent_provider,
+        executable_basename=(
+            "UTHelper.exe"
+            if sys.platform == "win32" and not development
+            else None
+        ),
     )
 
 
 __all__ = [
     "MAX_FAULT_LOG_BYTES",
     "MAX_RUN_STATE_BYTES",
+    "HEARTBEAT_INTERVAL_SECONDS",
     "RUN_STATE_SCHEMA_VERSION",
     "DiagnosticRuntime",
     "create_default_runtime",

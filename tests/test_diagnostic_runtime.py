@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -18,6 +19,7 @@ import pytest
 from diagnostics.models import AppPhase, CrashConsent, DiagnosticContext
 from diagnostics.runtime import DiagnosticRuntime
 from diagnostics.spool import DiagnosticSpool
+from diagnostics.windows_evidence import ApplicationErrorEvent
 
 
 NOW = datetime(2026, 8, 4, 5, 7, 39, tzinfo=UTC)
@@ -70,8 +72,11 @@ def _runtime(
     executor: _Executor | None = None,
     delivery: _Delivery | None = None,
     emergency_writer=None,
+    evidence_reader=lambda **_kwargs: (),
+    clock=lambda: NOW,
+    heartbeat_interval_seconds: float = 60.0,
 ) -> DiagnosticRuntime:
-    spool = DiagnosticSpool(tmp_path / "telemetry" / "pending", clock=lambda: NOW)
+    spool = DiagnosticSpool(tmp_path / "telemetry" / "pending", clock=clock)
     return DiagnosticRuntime(
         data_dir=tmp_path,
         spool=spool,
@@ -79,8 +84,11 @@ def _runtime(
         context_provider=_context,
         consent_provider=lambda: CrashConsent.DISABLED,
         delivery_executor=executor or _Executor(),
-        clock=lambda: NOW,
+        clock=clock,
         emergency_writer=emergency_writer,
+        executable_basename="UTHelper.exe",
+        evidence_reader=evidence_reader,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
     )
 
 
@@ -256,6 +264,197 @@ def test_unclean_marker_is_reported_but_clean_close_removes_it(tmp_path):
     assert not marker.exists()
 
 
+def test_windows_evidence_attaches_to_only_next_unclean_report(
+    tmp_path, monkeypatch
+):
+    first = _runtime(tmp_path)
+    first.start()
+    first.close(clean=False)
+    next_now = NOW.replace(minute=8)
+    reader = Mock(
+        return_value=(
+            ApplicationErrorEvent(
+                application_basename="uthelper.exe",
+                event_time=NOW.replace(second=50),
+                exception_code="c0000409",
+                faulting_module=r"C:\\Program Files\\UTHelper\\flutter_windows.dll",
+            ),
+        )
+    )
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    second = _runtime(
+        tmp_path,
+        clock=lambda: next_now,
+        evidence_reader=reader,
+    )
+
+    second.start()
+    second.record_exception(RuntimeError("private first"), AppPhase.GUI)
+    second.record_exception(LookupError("private second"), AppPhase.GUI)
+
+    reports = tuple(item.report for item in second.spool.pending())
+    native_reports = [report for report in reports if report.native_exception_code]
+    assert len(native_reports) == 1
+    assert native_reports[0].unclean_previous_exit is True
+    assert native_reports[0].native_exception_code == "0xc0000409"
+    assert native_reports[0].faulting_module == "flutter_windows.dll"
+    assert sum(report.faulting_module is not None for report in reports) == 1
+    second.close(clean=True)
+
+
+def test_absent_windows_event_keeps_unclean_classification(tmp_path, monkeypatch):
+    first = _runtime(tmp_path)
+    first.start()
+    first.close(clean=False)
+    reader = Mock(return_value=())
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    second = _runtime(
+        tmp_path,
+        clock=lambda: NOW.replace(minute=8),
+        evidence_reader=reader,
+    )
+
+    second.start()
+    second.record_exception(RuntimeError("private"), AppPhase.GUI)
+
+    report = second.spool.pending()[0].report
+    assert report.unclean_previous_exit is True
+    assert report.native_exception_code is None
+    assert report.faulting_module is None
+    second.close(clean=True)
+
+
+def test_native_evidence_waits_for_next_durable_report(tmp_path, monkeypatch):
+    first = _runtime(tmp_path)
+    first.start()
+    first.close(clean=False)
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    second = _runtime(
+        tmp_path,
+        clock=lambda: NOW.replace(minute=8),
+        evidence_reader=lambda **_kwargs: (
+            ApplicationErrorEvent(
+                application_basename="UTHelper.exe",
+                event_time=NOW.replace(second=50),
+                exception_code="c0000409",
+                faulting_module="flutter_windows.dll",
+            ),
+        ),
+    )
+    second.start()
+    original_enqueue = second.spool.enqueue
+    calls = 0
+
+    def fail_once(report):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(stored=False, deduplicated=False, too_large=True)
+        return original_enqueue(report)
+
+    second.spool.enqueue = fail_once
+
+    assert second.record_exception(RuntimeError("first"), AppPhase.GUI) is None
+    assert second.record_exception(LookupError("second"), AppPhase.GUI) is not None
+
+    report = second.spool.pending()[0].report
+    assert report.exception_type == "LookupError"
+    assert report.native_exception_code == "0xc0000409"
+    assert report.faulting_module == "flutter_windows.dll"
+    second.close(clean=True)
+
+
+def test_concurrent_capture_commits_native_evidence_exactly_once(
+    tmp_path, monkeypatch
+):
+    first = _runtime(tmp_path)
+    first.start()
+    first.close(clean=False)
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    second = _runtime(
+        tmp_path,
+        clock=lambda: NOW.replace(minute=8),
+        evidence_reader=lambda **_kwargs: (
+            ApplicationErrorEvent(
+                application_basename="UTHelper.exe",
+                event_time=NOW.replace(second=50),
+                exception_code="c0000409",
+                faulting_module="flutter_windows.dll",
+            ),
+        ),
+    )
+    second.start()
+    original_enqueue = second.spool.enqueue
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def controlled_enqueue(report):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_entered.set()
+            if not release_first.wait(1):
+                raise TimeoutError("test did not release first capture")
+        return original_enqueue(report)
+
+    second.spool.enqueue = controlled_enqueue
+    first_thread = threading.Thread(
+        target=lambda: second.record_exception(RuntimeError("first"), AppPhase.GUI),
+        daemon=True,
+    )
+    second_thread = threading.Thread(
+        target=lambda: second.record_exception(LookupError("second"), AppPhase.GUI),
+        daemon=True,
+    )
+    first_thread.start()
+    second_started = False
+    try:
+        assert first_entered.wait(1)
+        second_thread.start()
+        second_started = True
+        time.sleep(0.02)
+    finally:
+        release_first.set()
+        first_thread.join(2)
+        if second_started:
+            second_thread.join(2)
+
+    assert not first_thread.is_alive()
+    assert not second_started or not second_thread.is_alive()
+    reports = tuple(item.report for item in second.spool.pending())
+    native_reports = [report for report in reports if report.native_exception_code]
+    assert len(native_reports) == 1
+    assert native_reports[0].exception_type == "RuntimeError"
+    second.close(clean=True)
+
+
+def test_heartbeat_preserves_started_at_and_advances_last_heartbeat(tmp_path):
+    current = [NOW]
+    runtime = _runtime(
+        tmp_path,
+        clock=lambda: current[0],
+        heartbeat_interval_seconds=0.01,
+    )
+    runtime.start()
+    marker = tmp_path / "diagnostics" / "run-state.json"
+    started_at = json.loads(marker.read_text("utf-8"))["started_at"]
+    current[0] = NOW.replace(minute=9)
+    deadline = time.monotonic() + 0.5
+    payload = json.loads(marker.read_text("utf-8"))
+    while payload["last_heartbeat"] != "2026-08-04T05:09:00Z":
+        if time.monotonic() >= deadline:
+            pytest.fail("bounded heartbeat did not update the marker")
+        time.sleep(0.01)
+        payload = json.loads(marker.read_text("utf-8"))
+
+    assert payload["started_at"] == started_at
+    heartbeat = runtime._heartbeat_thread
+    runtime.close(clean=True)
+    assert heartbeat is not None
+    assert not heartbeat.is_alive()
+
+
 def test_marker_is_strict_atomic_and_coarse(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.start()
@@ -265,9 +464,11 @@ def test_marker_is_strict_atomic_and_coarse(tmp_path):
     assert payload == {
         "app_version": "2.2.0",
         "clean": False,
+        "executable_basename": "UTHelper.exe",
+        "last_heartbeat": "2026-08-04T05:07:00Z",
         "phase": "boot",
-        "schema_version": 1,
-        "timestamp": "2026-08-04T05:07:00Z",
+        "schema_version": 2,
+        "started_at": "2026-08-04T05:07:00Z",
     }
     assert list(marker.parent.glob(".run-state.json.*.tmp")) == []
 

@@ -102,7 +102,12 @@ def test_enabled_without_dsn_constructs_no_client_or_network(tmp_path, monkeypat
 
 
 def test_strict_before_send_reconstructs_only_allowlisted_event():
-    report = _report()
+    report = _report().model_copy(
+        update={
+            "native_exception_code": "0xc0000409",
+            "faulting_module": "flutter_windows.dll",
+        }
+    )
     unsafe = {
         "event_id": "attacker",
         "message": "raw secret",
@@ -134,6 +139,8 @@ def test_strict_before_send_reconstructs_only_allowlisted_event():
     assert "raw secret" not in serialized
     assert event["event_id"] == report.event_id.hex
     assert event["fingerprint"] == [report.fingerprint]
+    assert event["tags"]["native_exception_code"] == "0xc0000409"
+    assert event["tags"]["faulting_module"] == "flutter_windows.dll"
 
 
 class _FakeClient:

@@ -159,6 +159,8 @@ def build_report(
     context: DiagnosticContext,
     *,
     occurred_at: datetime | None = None,
+    native_exception_code: str | None = None,
+    faulting_module: str | None = None,
 ) -> DiagnosticReport:
     """Build one immutable report from exception metadata, never its message.
 
@@ -174,6 +176,8 @@ def build_report(
         f"{frame.module}:{frame.function}:{frame.relative_path}:{frame.line}"
         for frame in frames[-_FINGERPRINT_FRAMES:]
     )
+    if native_exception_code is not None and faulting_module is not None:
+        fingerprint_parts.extend((native_exception_code, faulting_module))
     fingerprint = sha256("|".join(fingerprint_parts).encode("utf-8")).hexdigest()
 
     return DiagnosticReport(
@@ -183,5 +187,7 @@ def build_report(
         occurred_at=_normalized_occurred_at(occurred_at),
         exception_type=exception_type,
         frames=frames,
+        native_exception_code=native_exception_code,
+        faulting_module=faulting_module,
         **context.model_dump(exclude={"source_root"}),
     )

@@ -44,6 +44,8 @@ def valid_report_dict() -> dict[str, object]:
         "phase": "gui",
         "window_state": "foreground",
         "unclean_previous_exit": False,
+        "native_exception_code": None,
+        "faulting_module": None,
     }
 
 
@@ -100,6 +102,34 @@ def test_consent_is_tri_state():
         "enabled",
         "disabled",
     }
+
+
+def test_native_evidence_fields_are_strict_optional_allowlist():
+    report = DiagnosticReport.model_validate(
+        {
+            **valid_report_dict(),
+            "native_exception_code": "0xc0000409",
+            "faulting_module": "flutter_windows.dll",
+        }
+    )
+    assert report.native_exception_code == "0xc0000409"
+    assert report.faulting_module == "flutter_windows.dll"
+    serialized = report.model_dump_json()
+    assert "Users" not in serialized
+
+    for field, value in (
+        ("native_exception_code", "private-code"),
+        ("faulting_module", r"C:\\Users\\Alice\\private.dll"),
+    ):
+        with pytest.raises(ValidationError):
+            DiagnosticReport.model_validate({**valid_report_dict(), field: value})
+
+    for partial in (
+        {"native_exception_code": "0xc0000409"},
+        {"faulting_module": "flutter_windows.dll"},
+    ):
+        with pytest.raises(ValidationError, match="must be complete"):
+            DiagnosticReport.model_validate({**valid_report_dict(), **partial})
 
 
 @pytest.mark.parametrize(

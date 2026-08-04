@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SCHEMA_VERSION = 1
 
@@ -89,3 +89,17 @@ class DiagnosticReport(BaseModel):
     phase: AppPhase
     window_state: Literal["foreground", "tray", "unknown"]
     unclean_previous_exit: bool
+    native_exception_code: str | None = Field(
+        default=None,
+        pattern=r"^0x[0-9a-f]{8}$",
+    )
+    faulting_module: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    )
+
+    @model_validator(mode="after")
+    def _native_evidence_is_complete(self) -> "DiagnosticReport":
+        if (self.native_exception_code is None) != (self.faulting_module is None):
+            raise ValueError("native crash evidence must be complete")
+        return self

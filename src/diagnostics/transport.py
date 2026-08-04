@@ -155,6 +155,10 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
     }
     if report.flutter_version is not None:
         tags["flutter_version"] = report.flutter_version
+    if report.native_exception_code is not None:
+        tags["native_exception_code"] = report.native_exception_code
+    if report.faulting_module is not None:
+        tags["faulting_module"] = report.faulting_module
     return {
         "event_id": report.event_id.hex,
         "timestamp": report.occurred_at.astimezone(timezone.utc).isoformat(),
