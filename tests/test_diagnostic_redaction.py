@@ -132,6 +132,21 @@ def test_native_evidence_fields_are_strict_optional_allowlist():
             DiagnosticReport.model_validate({**valid_report_dict(), **partial})
 
 
+def test_fingerprint_separates_clean_and_unclean_classification(
+    diagnostic_context: DiagnosticContext,
+):
+    exc = _captured_exception("private")
+    clean = build_report(exc, diagnostic_context)
+    same_clean = build_report(exc, diagnostic_context)
+    unclean = build_report(
+        exc,
+        diagnostic_context.model_copy(update={"unclean_previous_exit": True}),
+    )
+
+    assert clean.fingerprint == same_clean.fingerprint
+    assert clean.fingerprint != unclean.fingerprint
+
+
 @pytest.mark.parametrize(
     "secret",
     SYNTHETIC_SECRETS,

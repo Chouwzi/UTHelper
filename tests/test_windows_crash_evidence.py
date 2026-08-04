@@ -205,15 +205,15 @@ def test_production_reader_never_formats_or_returns_forbidden_event_fields(
       </EventData>
     </Event>"""
     calls = []
-    closed = []
+    query_handle = Mock()
+    event_handle = Mock()
     fake = SimpleNamespace(
         EvtQueryChannelPath=1,
         EvtQueryReverseDirection=2,
         EvtRenderEventXml=3,
-        EvtQuery=lambda *args: calls.append(("query", args)) or "query-handle",
-        EvtNext=lambda *args: calls.append(("next", args)) or ("event-handle",),
+        EvtQuery=lambda *args: calls.append(("query", args)) or query_handle,
+        EvtNext=lambda *args: calls.append(("next", args)) or (event_handle,),
         EvtRender=lambda *_args: rendered,
-        EvtClose=lambda handle: closed.append(handle),
     )
     monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
     monkeypatch.setitem(sys.modules, "win32evtlog", fake)
@@ -234,19 +234,19 @@ def test_production_reader_never_formats_or_returns_forbidden_event_fields(
         assert forbidden not in payload
     next_call = next(args for name, args in calls if name == "next")
     assert next_call[1:] == (50, 1000, 0)
-    assert set(closed) == {"query-handle", "event-handle"}
+    event_handle.Close.assert_called_once_with()
+    query_handle.Close.assert_called_once_with()
 
 
 def test_production_reader_none_handle_result_fails_closed(monkeypatch):
-    closed = []
+    query_handle = Mock()
     fake = SimpleNamespace(
         EvtQueryChannelPath=1,
         EvtQueryReverseDirection=2,
         EvtRenderEventXml=3,
-        EvtQuery=lambda *_args: "query-handle",
+        EvtQuery=lambda *_args: query_handle,
         EvtNext=lambda *_args: None,
         EvtRender=Mock(side_effect=AssertionError("must not render")),
-        EvtClose=lambda handle: closed.append(handle),
     )
     monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
     monkeypatch.setitem(sys.modules, "win32evtlog", fake)
@@ -260,7 +260,59 @@ def test_production_reader_none_handle_result_fails_closed(monkeypatch):
         )
         == ()
     )
-    assert closed == ["query-handle"]
+    query_handle.Close.assert_called_once_with()
+
+
+def test_production_reader_closes_handles_once_when_render_fails(monkeypatch):
+    query_handle = Mock()
+    event_handle = Mock()
+    fake = SimpleNamespace(
+        EvtQueryChannelPath=1,
+        EvtQueryReverseDirection=2,
+        EvtRenderEventXml=3,
+        EvtQuery=lambda *_args: query_handle,
+        EvtNext=lambda *_args: (event_handle, event_handle),
+        EvtRender=Mock(side_effect=PermissionError("private")),
+    )
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    monkeypatch.setitem(sys.modules, "win32evtlog", fake)
+
+    assert (
+        read_windows_application_errors(
+            event_id=1000,
+            since=NOW - timedelta(minutes=1),
+            until=NOW,
+            limit=50,
+        )
+        == ()
+    )
+    event_handle.Close.assert_called_once_with()
+    query_handle.Close.assert_called_once_with()
+
+
+def test_production_reader_closes_query_when_event_read_fails(monkeypatch):
+    query_handle = Mock()
+    fake = SimpleNamespace(
+        EvtQueryChannelPath=1,
+        EvtQueryReverseDirection=2,
+        EvtRenderEventXml=3,
+        EvtQuery=lambda *_args: query_handle,
+        EvtNext=Mock(side_effect=OSError("private")),
+        EvtRender=Mock(side_effect=AssertionError("must not render")),
+    )
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    monkeypatch.setitem(sys.modules, "win32evtlog", fake)
+
+    assert (
+        read_windows_application_errors(
+            event_id=1000,
+            since=NOW - timedelta(minutes=1),
+            until=NOW,
+            limit=50,
+        )
+        == ()
+    )
+    query_handle.Close.assert_called_once_with()
 
 
 @pytest.mark.parametrize(

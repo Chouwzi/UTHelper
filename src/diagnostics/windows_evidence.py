@@ -223,6 +223,20 @@ def _render_application_error(handle: object, win32evtlog) -> ApplicationErrorEv
         return None
 
 
+def _close_pyhandles_once(*handles: object | None) -> None:
+    closed_identities: set[int] = set()
+    for handle in handles:
+        if handle is None or id(handle) in closed_identities:
+            continue
+        closed_identities.add(id(handle))
+        try:
+            close = getattr(handle, "Close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+
+
 def read_windows_application_errors(
     *,
     event_id: int,
@@ -274,17 +288,7 @@ def read_windows_application_errors(
         )
         return ()
     finally:
-        for handle in handles:
-            try:
-                if win32evtlog is not None:
-                    win32evtlog.EvtClose(handle)
-            except Exception:
-                pass
-        if query is not None and win32evtlog is not None:
-            try:
-                win32evtlog.EvtClose(query)
-            except Exception:
-                pass
+        _close_pyhandles_once(*handles, query)
 
 
 __all__ = [

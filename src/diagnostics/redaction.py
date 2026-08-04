@@ -171,7 +171,11 @@ def build_report(
 
     frames = _safe_frames(exc.__traceback__, context.source_root)
     exception_type = _safe_identifier(type(exc).__name__, fallback="Exception")
-    fingerprint_parts = [exception_type, context.phase.value]
+    fingerprint_parts = [
+        exception_type,
+        context.phase.value,
+        f"unclean_previous_exit={str(context.unclean_previous_exit).lower()}",
+    ]
     fingerprint_parts.extend(
         f"{frame.module}:{frame.function}:{frame.relative_path}:{frame.line}"
         for frame in frames[-_FINGERPRINT_FRAMES:]

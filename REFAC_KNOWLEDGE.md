@@ -755,3 +755,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   terminate before returning. A broader `ruff check src tests scripts` still
   reports 18 pre-existing issues confined to `scripts/debug_panel_test.py` and
   `scripts/notification_system_test.py`; no Task 8 file is implicated.
+- Review hardening separates clean and unclean classifications in the content
+  fingerprint. An identical exception already queued during a clean run can no
+  longer absorb the next run's `unclean_previous_exit=true` report, while
+  reports within the same classification still deduplicate. The production
+  event-log adapter now closes real pywin32 `PyHANDLE` objects through their
+  `.Close()` method exactly once, including query, read, and render failure
+  paths; it does not call a nonexistent module-level `EvtClose` function.
+- Review-fix RED reproduced six failures. The final focused regression set
+  passes **130 tests in 6.48 seconds**, and the bounded full suite passes **1026
+  tests with 24 skipped in 48.01 seconds**. `ruff check src tests` and `git diff
+  --check` pass, and the full runner exited normally with no helper process or
+  heartbeat thread left behind.

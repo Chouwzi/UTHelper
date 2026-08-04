@@ -111,6 +111,10 @@ def _unraisable_args(exc: BaseException):
     )
 
 
+def _record_identical_failure(runtime: DiagnosticRuntime) -> str | None:
+    return runtime.record_exception(RuntimeError("private identical"), AppPhase.GUI)
+
+
 @pytest.fixture(autouse=True)
 def preserve_global_hooks():
     original = (sys.excepthook, threading.excepthook, sys.unraisablehook)
@@ -321,6 +325,31 @@ def test_absent_windows_event_keeps_unclean_classification(tmp_path, monkeypatch
     assert report.unclean_previous_exit is True
     assert report.native_exception_code is None
     assert report.faulting_module is None
+    second.close(clean=True)
+
+
+def test_unclean_classification_is_not_deduped_into_existing_clean_report(
+    tmp_path, monkeypatch
+):
+    first = _runtime(tmp_path)
+    first.start()
+    assert _record_identical_failure(first) is not None
+    first.close(clean=False)
+    monkeypatch.setattr("diagnostics.windows_evidence.sys.platform", "win32")
+    second = _runtime(
+        tmp_path,
+        clock=lambda: NOW.replace(minute=8),
+        evidence_reader=lambda **_kwargs: (),
+    )
+
+    second.start()
+    assert _record_identical_failure(second) is not None
+    assert _record_identical_failure(second) is not None
+
+    reports = tuple(item.report for item in second.spool.pending())
+    assert len(reports) == 2
+    assert {report.unclean_previous_exit for report in reports} == {False, True}
+    assert len({report.fingerprint for report in reports}) == 2
     second.close(clean=True)
 
 
