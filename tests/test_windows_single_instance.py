@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
+import time
 
 import pytest
 
@@ -39,11 +41,14 @@ class FakeKernelObjectApi:
         self.closes: list[FakeHandle] = []
         self._mutex_owned = False
         self._events: dict[str, bool] = {}
+        self._anonymous_events: dict[int, bool] = {}
+        self._event_manual_reset: dict[str | int, bool] = {}
         self._acknowledgement_name: str | None = None
         self.acknowledgement_results: list[int] = []
         self.release_primary_after_acknowledgement_timeout = False
         self.fail_current_user_sid: Exception | None = None
         self.fail_set_event: Exception | None = None
+        self._event_condition = threading.Condition()
 
     def current_user_sid(self) -> str:
         self.current_user_sid_calls += 1
@@ -75,11 +80,16 @@ class FakeKernelObjectApi:
         self.created_events.append(
             (name, manual_reset, initial_state, security_attributes)
         )
+        handle = FakeHandle("event", name)
+        event_key = self._event_key(handle)
+        self._event_manual_reset[event_key] = manual_reset
         if name is not None:
             self._events.setdefault(name, initial_state)
             if name.endswith("-ready"):
                 self._acknowledgement_name = name
-        return FakeHandle("event", name)
+        else:
+            self._anonymous_events[event_key] = initial_state
+        return handle
 
     def open_mutex(self, name: str) -> FakeHandle:
         self.opened_mutexes.append(name)
@@ -112,19 +122,31 @@ class FakeKernelObjectApi:
 
     def wait_many(self, handles: tuple[FakeHandle, ...], timeout_ms: int) -> int:
         self.wait_timeouts.append(timeout_ms)
+        with self._event_condition:
+            for index, handle in enumerate(handles):
+                if self._is_signaled(handle):
+                    self._consume_auto_reset_event(handle)
+                    return WAIT_OBJECT_0 + index
+            self._event_condition.wait(timeout_ms / 1000)
+            for index, handle in enumerate(handles):
+                if self._is_signaled(handle):
+                    self._consume_auto_reset_event(handle)
+                    return WAIT_OBJECT_0 + index
         return WAIT_TIMEOUT
 
     def set_event(self, handle: FakeHandle) -> None:
         if self.fail_set_event is not None:
             raise self.fail_set_event
         self.signals.append(handle)
-        if handle.name is not None:
-            self._events[handle.name] = True
+        with self._event_condition:
+            self._set_event_state(handle, True)
+            self._event_condition.notify_all()
 
     def reset_event(self, handle: FakeHandle) -> None:
         self.resets.append(handle)
-        if handle.name is not None:
-            self._events[handle.name] = False
+        with self._event_condition:
+            self._set_event_state(handle, False)
+            self._event_condition.notify_all()
 
     def release_mutex(self, handle: FakeHandle) -> None:
         self.releases.append(handle)
@@ -137,6 +159,25 @@ class FakeKernelObjectApi:
     def mark_primary_ready(self) -> None:
         assert self._acknowledgement_name is not None
         self._events[self._acknowledgement_name] = True
+
+    @staticmethod
+    def _event_key(handle: FakeHandle) -> str | int:
+        return handle.name if handle.name is not None else id(handle)
+
+    def _is_signaled(self, handle: FakeHandle) -> bool:
+        if handle.name is not None:
+            return self._events.get(handle.name, False)
+        return self._anonymous_events.get(self._event_key(handle), False)
+
+    def _set_event_state(self, handle: FakeHandle, state: bool) -> None:
+        if handle.name is not None:
+            self._events[handle.name] = state
+        else:
+            self._anonymous_events[self._event_key(handle)] = state
+
+    def _consume_auto_reset_event(self, handle: FakeHandle) -> None:
+        if not self._event_manual_reset[self._event_key(handle)]:
+            self._set_event_state(handle, False)
 
 
 def _bootstrap(kernel: FakeKernelObjectApi, **overrides):
@@ -329,3 +370,69 @@ def test_acknowledgement_timeout_is_clamped_to_a_documented_finite_bound(
 
     assert result.role is InstanceRole.HANDOFF_FAILED
     assert kernel.wait_timeouts == [expected_timeout_ms]
+
+
+def test_binding_show_handler_starts_receiver_then_acknowledges_readiness():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    callbacks = threading.Event()
+
+    assert not kernel._events[broker.acknowledgement_handle.name]
+
+    broker.bind_show_handler(callbacks.set)
+    kernel.set_event(broker.activation_handle)
+
+    assert callbacks.wait(0.5)
+    assert kernel._events[broker.acknowledgement_handle.name]
+    assert broker.close()
+
+
+def test_activation_signals_coalesce_without_deadlocking_receiver():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    callback_count = 0
+    callback_called = threading.Event()
+
+    def record_callback() -> None:
+        nonlocal callback_count
+        callback_count += 1
+        callback_called.set()
+
+    broker.bind_show_handler(record_callback)
+    for _ in range(10):
+        kernel.set_event(broker.activation_handle)
+
+    assert callback_called.wait(0.5)
+    assert callback_count >= 1
+    assert broker.close()
+
+
+def test_shutdown_wins_promptly_and_prevents_later_callbacks():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    callback_called = threading.Event()
+    broker.bind_show_handler(callback_called.set)
+
+    started_at = time.monotonic()
+    assert broker.close()
+
+    kernel.set_event(broker.activation_handle)
+    assert time.monotonic() - started_at < 0.5
+    assert not callback_called.wait(0.05)
+
+
+def test_close_uses_only_short_kernel_waits_and_is_idempotent():
+    kernel = FakeKernelObjectApi()
+    broker = _bootstrap(kernel).broker
+    assert broker is not None
+    broker.bind_show_handler(lambda: None)
+
+    assert broker.close()
+    close_count = len(kernel.closes)
+
+    assert broker.close()
+    assert len(kernel.closes) == close_count
+    assert all(timeout_ms <= 1000 for timeout_ms in kernel.wait_timeouts)

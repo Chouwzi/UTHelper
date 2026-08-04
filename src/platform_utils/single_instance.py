@@ -8,7 +8,8 @@ import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from threading import Lock, Thread
+from typing import Callable, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
 # Every manual handoff is bounded to this duration, regardless of caller input.
 MAX_ACKNOWLEDGEMENT_TIMEOUT_SECONDS = 1.5
+RECEIVER_WAIT_TIMEOUT_MS = 250
 
 
 class InstanceRole(str, Enum):
@@ -86,7 +88,7 @@ class InstanceBootstrapResult:
 
 
 class WindowsActivationBroker:
-    """Owns the three primary handles until the later receiver is attached."""
+    """Owns primary handles and dispatches bounded activation notifications."""
 
     def __init__(
         self,
@@ -101,17 +103,90 @@ class WindowsActivationBroker:
         self.activation_handle = activation_handle
         self.acknowledgement_handle = acknowledgement_handle
         self._closed = False
+        self._handles_closed = False
+        self._handler: Callable[[], None] | None = None
+        self._shutdown_handle: object | None = None
+        self._receiver: Thread | None = None
+        self._lock = Lock()
+        self._close_lock = Lock()
 
-    def close(self) -> None:
-        """Release only the handles acquired by this broker."""
-        if self._closed:
+    def bind_show_handler(self, handler: Callable[[], None]) -> None:
+        """Attach the activation callback and begin receiving notifications once."""
+        with self._lock:
+            if self._closed:
+                return
+            self._handler = handler
+            if self._receiver is not None:
+                return
+            try:
+                shutdown_handle = self._kernel.create_event(None, True, False, None)
+                receiver = Thread(
+                    target=self._receive_activations,
+                    name="windows-activation-receiver",
+                    daemon=True,
+                )
+                self._shutdown_handle = shutdown_handle
+                receiver.start()
+                self._receiver = receiver
+                self._kernel.set_event(self.acknowledgement_handle)
+            except Exception:
+                if self._shutdown_handle is not None:
+                    _close_quietly(self._kernel, self._shutdown_handle)
+                    self._shutdown_handle = None
+                logger.warning("windows_activation_receiver_start_failed")
+
+    def close(self, timeout_seconds: float = 1.0) -> bool:
+        """Stop the receiver and release every handle owned by this broker once."""
+        with self._close_lock:
+            with self._lock:
+                self._closed = True
+                receiver = self._receiver
+                shutdown_handle = self._shutdown_handle
+                if not self._handles_closed:
+                    _reset_quietly(self._kernel, self.acknowledgement_handle)
+                    if shutdown_handle is not None:
+                        _set_quietly(self._kernel, shutdown_handle)
+
+            if receiver is not None:
+                receiver.join(_join_timeout_seconds(timeout_seconds))
+            stopped = receiver is None or not receiver.is_alive()
+
+            with self._lock:
+                if not self._handles_closed:
+                    self._handles_closed = True
+                    _close_quietly(self._kernel, self.acknowledgement_handle)
+                    _close_quietly(self._kernel, self.activation_handle)
+                    if self._shutdown_handle is not None:
+                        _close_quietly(self._kernel, self._shutdown_handle)
+                    _release_and_close_quietly(self._kernel, self.mutex_handle)
+            return stopped
+
+    def _receive_activations(self) -> None:
+        shutdown_handle = self._shutdown_handle
+        if shutdown_handle is None:
             return
-        self._closed = True
-        self._kernel.reset_event(self.acknowledgement_handle)
-        self._kernel.close_handle(self.acknowledgement_handle)
-        self._kernel.close_handle(self.activation_handle)
-        self._kernel.release_mutex(self.mutex_handle)
-        self._kernel.close_handle(self.mutex_handle)
+        while True:
+            try:
+                result = self._kernel.wait_many(
+                    (shutdown_handle, self.activation_handle), RECEIVER_WAIT_TIMEOUT_MS
+                )
+            except Exception:
+                logger.warning("windows_activation_receiver_wait_failed")
+                return
+            if result == WAIT_OBJECT_0:
+                return
+            if result != WAIT_OBJECT_0 + 1:
+                continue
+            with self._lock:
+                if self._closed:
+                    return
+                handler = self._handler
+                if handler is None:
+                    continue
+                try:
+                    handler()
+                except Exception:
+                    logger.warning("windows_activation_handler_failed")
 
 
 @dataclass(slots=True)
@@ -412,6 +487,27 @@ def _close_quietly(api: KernelObjectApi | None, handle: object) -> None:
         api.close_handle(handle)
     except Exception:
         return
+
+
+def _reset_quietly(api: KernelObjectApi, handle: object) -> None:
+    try:
+        api.reset_event(handle)
+    except Exception:
+        return
+
+
+def _set_quietly(api: KernelObjectApi, handle: object) -> None:
+    try:
+        api.set_event(handle)
+    except Exception:
+        return
+
+
+def _join_timeout_seconds(timeout_seconds: float) -> float:
+    """Keep shutdown joins finite while respecting ordinary caller-supplied bounds."""
+    if not math.isfinite(timeout_seconds):
+        return 0.0 if timeout_seconds < 0 else 1.0
+    return max(timeout_seconds, 0.0)
 
 
 def _release_and_close_quietly(api: KernelObjectApi, handle: object) -> None:
