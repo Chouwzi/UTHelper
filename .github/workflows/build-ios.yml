@@ -47,8 +47,11 @@ jobs:
             -q
 
       - name: 🔨 Build IPA (unsigned)
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
         run: |
           echo "Building UTHelper for iOS..."
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           yes | flet build ipa --verbose
 
       - name: 📦 Package xcarchive → IPA

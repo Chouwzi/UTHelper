@@ -633,3 +633,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   seconds**. The real Sentry SDK 2.x envelope path was exercised with a local
   intercepted HTTP boundary (no external report was sent). Scoped Ruff and
   `git diff --check` pass.
+- Delivery hardening now installs an explicit no-redirect urllib handler.
+  Diagnostic POST redirects are retained as `http_rejected`; neither the
+  envelope body nor public Sentry auth header can be replayed to a second
+  origin. A bounded two-origin loopback regression verifies exactly one request
+  reaches the configured origin and none reaches the redirect target. Socket
+  delivery remains synchronous, and a slow-origin regression confirms the
+  configured deadline returns without an application-owned background sender.
+- NaN and positive/negative infinity are rejected before Sentry construction or
+  network work. Non-finite `Retry-After` values are ignored in favor of the
+  worker's bounded exponential delay.
+- Every Flet invocation in Android/iOS/Windows release workflows and the local
+  Windows EXE installer path now atomically generates
+  `src/assets/diagnostics-config.json` immediately after the previous build and
+  before the next one. GitHub uses the public `vars.SENTRY_DSN` value; absent
+  values generate the explicit empty/unconfigured asset. A release-hardening
+  test enumerates all seven literal build invocations and locks this ordering.
+- Review-focused transport/config/release tests pass **61 tests in 3.01
+  seconds**; broader config/spool/release regression tests pass **142 tests in
+  13.53 seconds**. Full source/test Ruff and `git diff --check` pass.

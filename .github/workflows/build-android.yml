@@ -46,6 +46,8 @@ jobs:
           flet --version
 
       - name: 🔨 Build APK
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
         run: |
           BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
           echo "Building $BUILD_TYPE..."
@@ -77,8 +79,10 @@ jobs:
 
           # First pass materializes Flet's Flutter project. The notification
           # extension patcher then registers AlarmManager receivers/services.
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           yes | flet build $BUILD_TYPE --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           yes | flet build $BUILD_TYPE --verbose
 
       - name: 🔎 Verify notification manifest wiring

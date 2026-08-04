@@ -20,6 +20,8 @@ Write-Host "2. Chạy Flet Build (Windows)..." -ForegroundColor Cyan
 $env:PYTHONIOENCODING="utf-8"
 $env:PYTHONUTF8=1
 $env:FLET_CLI_NO_RICH_OUTPUT="true"
+python (Join-Path $workspaceRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $workspaceRoot "src\assets\diagnostics-config.json")
+if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
 flet build windows --output $resolvedBundle
 if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed with exit code $LASTEXITCODE" }
 

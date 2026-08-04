@@ -54,9 +54,13 @@ jobs:
       - run: pip install -e ".[android-build]"
       - name: Build and patch Android notifications
         shell: bash
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
         run: |
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           yes | flet build apk --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           yes | flet build apk --verbose
           MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
           grep -q "ScheduledNotificationReceiver" "$MANIFEST"
@@ -123,7 +127,14 @@ jobs:
           python-version: '3.13'
           cache: pip
       - run: pip install -e ".[windows]"
-      - run: flet build windows --output dist\flet-build --verbose
+      - name: Generate public diagnostics config and build Windows bundle
+        shell: pwsh
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+        run: |
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
+          flet build windows --output dist\flet-build --verbose
       - name: Prepare Flet Windows bundle
         run: python scripts\prepare_windows_bundle.py dist\flet-build
       - name: Verify Flet Windows bundle

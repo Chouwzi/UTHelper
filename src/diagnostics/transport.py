@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import math
 import socket
 import ssl
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 import certifi
 
@@ -21,6 +22,37 @@ from diagnostics.spool import DiagnosticSpool
 _MAX_DELIVERY_SECONDS = 5.0
 _MIN_DELIVERY_SECONDS = 0.1
 _MAX_RETRY_AFTER_SECONDS = 300.0
+
+
+class _RejectDiagnosticRedirects(HTTPRedirectHandler):
+    """Keep the authenticated diagnostic envelope on its original origin."""
+
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def _bounded_delivery_seconds(value: float) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("diagnostic delivery deadline must be finite") from exc
+    if not math.isfinite(seconds):
+        raise ValueError("diagnostic delivery deadline must be finite")
+    return min(max(seconds, _MIN_DELIVERY_SECONDS), _MAX_DELIVERY_SECONDS)
+
+
+def _open_diagnostic_request(
+    request: Request,
+    *,
+    timeout_seconds: float,
+    context: ssl.SSLContext,
+) -> Any:
+    """Open one request without following redirects or spawning background I/O."""
+    opener = build_opener(
+        HTTPSHandler(context=context),
+        _RejectDiagnosticRedirects(),
+    )
+    return opener.open(request, timeout=_bounded_delivery_seconds(timeout_seconds))
 
 
 @dataclass(frozen=True)
@@ -52,7 +84,9 @@ class DeliveryOutcome:
     ) -> "DeliveryOutcome":
         delay = None
         if retry_after is not None:
-            delay = min(max(float(retry_after), 0.0), _MAX_RETRY_AFTER_SECONDS)
+            candidate = float(retry_after)
+            if math.isfinite(candidate):
+                delay = min(max(candidate, 0.0), _MAX_RETRY_AFTER_SECONDS)
         return cls(
             confirmed=False,
             retryable=True,
@@ -158,7 +192,10 @@ def _retry_after_seconds(value: str | None) -> float | None:
     if not value:
         return None
     try:
-        return min(max(float(value.strip()), 0.0), _MAX_RETRY_AFTER_SECONDS)
+        candidate = float(value.strip())
+        if not math.isfinite(candidate):
+            return None
+        return min(max(candidate, 0.0), _MAX_RETRY_AFTER_SECONDS)
     except ValueError:
         try:
             parsed = parsedate_to_datetime(value)
@@ -225,10 +262,7 @@ def _new_sentry_client(
             self.outcome: DeliveryOutcome | None = None
 
         def prepare(self, timeout_seconds: float) -> None:
-            self.timeout_seconds = min(
-                max(float(timeout_seconds), _MIN_DELIVERY_SECONDS),
-                _MAX_DELIVERY_SECONDS,
-            )
+            self.timeout_seconds = _bounded_delivery_seconds(timeout_seconds)
             self.outcome = None
 
         def capture_envelope(self, envelope: Any) -> None:
@@ -251,9 +285,9 @@ def _new_sentry_client(
             )
             try:
                 context = ssl.create_default_context(cafile=certifi.where())
-                with urlopen(
+                with _open_diagnostic_request(
                     request,
-                    timeout=self.timeout_seconds,
+                    timeout_seconds=self.timeout_seconds,
                     context=context,
                 ) as response:
                     status = int(response.getcode())
@@ -277,7 +311,10 @@ def _new_sentry_client(
                         status_code=status,
                     )
             except HTTPError as exc:
-                self.outcome = _http_outcome_from_error(exc)
+                try:
+                    self.outcome = _http_outcome_from_error(exc)
+                finally:
+                    exc.close()
             except (TimeoutError, socket.timeout):
                 self.outcome = DeliveryOutcome.retryable_failure("timeout")
             except (URLError, OSError):
@@ -314,6 +351,7 @@ class SentryDiagnosticTransport:
         timeout_seconds: float = _MAX_DELIVERY_SECONDS,
     ) -> DeliveryOutcome:
         validated = _validated_report(report)
+        bounded_timeout = _bounded_delivery_seconds(timeout_seconds)
         if self._client is None:
             try:
                 self._client = _new_sentry_client(
@@ -329,10 +367,7 @@ class SentryDiagnosticTransport:
         try:
             return self._client.send_report(
                 validated,
-                timeout_seconds=min(
-                    max(float(timeout_seconds), _MIN_DELIVERY_SECONDS),
-                    _MAX_DELIVERY_SECONDS,
-                ),
+                timeout_seconds=bounded_timeout,
             )
         except (TimeoutError, socket.timeout):
             return DeliveryOutcome.retryable_failure("timeout")
@@ -378,10 +413,7 @@ class DiagnosticDeliveryWorker:
             )
 
         start = self.monotonic()
-        budget = min(
-            max(float(deadline_seconds), _MIN_DELIVERY_SECONDS),
-            _MAX_DELIVERY_SECONDS,
-        )
+        budget = _bounded_delivery_seconds(deadline_seconds)
         if start < self._next_attempt_at:
             return FlushSummary(
                 retained=len(self.spool.pending()),

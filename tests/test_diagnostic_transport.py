@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.message import Message
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import socket
+import ssl
+import threading
+import time
 from urllib.error import HTTPError, URLError
+from urllib.request import Request
 from uuid import UUID
 
 import pytest
@@ -18,6 +23,7 @@ from diagnostics.transport import (
     DeliveryOutcome,
     DiagnosticDeliveryWorker,
     SentryDiagnosticTransport,
+    _open_diagnostic_request,
     _strict_before_send,
 )
 
@@ -255,11 +261,18 @@ class _HttpResponse:
 def test_real_sdk_adapter_confirms_http_and_envelope_is_strict(monkeypatch):
     captured = {}
 
-    def successful_post(request, *, timeout, context):
-        captured.update(request=request, timeout=timeout, context=context)
+    def successful_post(request, *, timeout_seconds, context):
+        captured.update(
+            request=request,
+            timeout=timeout_seconds,
+            context=context,
+        )
         return _HttpResponse(200)
 
-    monkeypatch.setattr("diagnostics.transport.urlopen", successful_post)
+    monkeypatch.setattr(
+        "diagnostics.transport._open_diagnostic_request",
+        successful_post,
+    )
 
     outcome = SentryDiagnosticTransport(VALID_DSN).send(
         _report(),
@@ -320,7 +333,10 @@ def test_real_sdk_adapter_retains_http_and_network_failures(
     def failed_post(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr("diagnostics.transport.urlopen", failed_post)
+    monkeypatch.setattr(
+        "diagnostics.transport._open_diagnostic_request",
+        failed_post,
+    )
 
     outcome = SentryDiagnosticTransport(VALID_DSN).send(_report())
 
@@ -330,6 +346,188 @@ def test_real_sdk_adapter_retains_http_and_network_failures(
     assert outcome.status_code == status
     if status == 429:
         assert outcome.retry_after_seconds == 3
+
+
+def test_real_sdk_adapter_treats_redirect_as_retained_rejection(monkeypatch):
+    headers = Message()
+    headers["Location"] = "https://other-origin.invalid/capture"
+
+    def redirect(*_args, **_kwargs):
+        raise HTTPError(VALID_DSN, 302, "redirect", headers, None)
+
+    monkeypatch.setattr(
+        "diagnostics.transport._open_diagnostic_request",
+        redirect,
+    )
+
+    outcome = SentryDiagnosticTransport(VALID_DSN).send(_report())
+
+    assert not outcome.confirmed
+    assert not outcome.retryable
+    assert outcome.reason == "http_rejected"
+    assert outcome.status_code == 302
+
+
+def test_non_finite_retry_after_is_ignored():
+    outcome = DeliveryOutcome.retryable_failure(
+        "rate_limited",
+        status_code=429,
+        retry_after=float("nan"),
+    )
+
+    assert outcome.retry_after_seconds is None
+
+
+def test_diagnostic_post_never_follows_redirect_to_second_origin():
+    first_requests = []
+    second_requests = []
+
+    class SecondOrigin(BaseHTTPRequestHandler):
+        def do_GET(self):
+            second_requests.append(("GET", dict(self.headers), b""))
+            self.send_response(204)
+            self.end_headers()
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            second_requests.append(
+                ("POST", dict(self.headers), self.rfile.read(length))
+            )
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    second = HTTPServer(("127.0.0.1", 0), SecondOrigin)
+    second_url = f"http://127.0.0.1:{second.server_port}/capture"
+
+    class RedirectingOrigin(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            first_requests.append((dict(self.headers), self.rfile.read(length)))
+            self.send_response(302)
+            self.send_header("Location", second_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    first = HTTPServer(("127.0.0.1", 0), RedirectingOrigin)
+    servers = (first, second)
+    threads = [
+        threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": 0.02},
+            daemon=True,
+        )
+        for server in servers
+    ]
+    for thread in threads:
+        thread.start()
+
+    envelope = b'{"event":"allowlisted"}'
+    request = Request(
+        f"http://127.0.0.1:{first.server_port}/envelope",
+        data=envelope,
+        headers={"X-Sentry-Auth": "Sentry sentry_key=public"},
+        method="POST",
+    )
+    try:
+        with pytest.raises(HTTPError) as captured:
+            _open_diagnostic_request(
+                request,
+                timeout_seconds=0.5,
+                context=ssl.create_default_context(),
+            )
+        assert captured.value.code == 302
+        time.sleep(0.05)
+        assert len(first_requests) == 1
+        assert first_requests[0][1] == envelope
+        assert second_requests == []
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=1.0)
+            assert not thread.is_alive()
+
+
+def test_diagnostic_socket_timeout_is_synchronous_and_bounded():
+    class SlowOrigin(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            time.sleep(0.25)
+            try:
+                self.send_response(204)
+                self.end_headers()
+            except OSError:
+                pass
+
+        def log_message(self, *_args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), SlowOrigin)
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    request = Request(
+        f"http://127.0.0.1:{server.server_port}/slow",
+        data=b"allowlisted-envelope",
+        method="POST",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises((TimeoutError, socket.timeout, URLError)):
+            _open_diagnostic_request(
+                request,
+                timeout_seconds=0.1,
+                context=ssl.create_default_context(),
+            )
+        assert time.monotonic() - started < 0.8
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("deadline", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_delivery_deadline_is_rejected_before_sdk(
+    tmp_path, monkeypatch, deadline
+):
+    calls = []
+    monkeypatch.setattr(
+        "diagnostics.transport._new_sentry_client",
+        lambda **_: calls.append(True),
+    )
+    _spool, worker = _worker_with_one_report(tmp_path)
+
+    with pytest.raises(ValueError, match="finite"):
+        worker.flush_once(CrashConsent.ENABLED, deadline_seconds=deadline)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_transport_timeout_is_rejected_before_sdk(monkeypatch, timeout):
+    calls = []
+    monkeypatch.setattr(
+        "diagnostics.transport._new_sentry_client",
+        lambda **_: calls.append(True),
+    )
+    transport = SentryDiagnosticTransport(VALID_DSN)
+
+    with pytest.raises(ValueError, match="finite"):
+        transport.send(_report(), timeout_seconds=timeout)
+
+    assert calls == []
 
 
 def test_deadline_is_clamped_and_expired_deadline_does_not_construct_client(

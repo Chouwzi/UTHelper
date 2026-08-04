@@ -176,3 +176,43 @@ def test_single_instance_e2e_embedded_csharp_targets_windows_powershell_51():
     assert "out uint owner" not in script
     assert script.count("uint owner;") == 4
     assert script.count("out owner") == 4
+
+
+def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
+    build_files = (
+        ".github/workflows/release.yml",
+        ".github/workflows/build-ios.yml",
+        ".github/workflows/build-android.yml",
+        "scripts/build_installer.ps1",
+    )
+    generator = "scripts/generate_public_runtime_config.py"
+    output = "src/assets/diagnostics-config.json"
+
+    for relative_path in build_files:
+        content = _read(relative_path).replace("\\", "/")
+        lines = content.splitlines()
+        build_indexes = [
+            index for index, line in enumerate(lines) if "flet build " in line
+        ]
+        generator_indexes = [
+            index for index, line in enumerate(lines) if generator in line
+        ]
+
+        assert build_indexes, relative_path
+        assert len(generator_indexes) == len(build_indexes), relative_path
+        previous_build = -1
+        for build_index in build_indexes:
+            prebuild = lines[previous_build + 1 : build_index]
+            matching = [line for line in prebuild if generator in line]
+            assert len(matching) == 1, (
+                f"{relative_path}:{build_index + 1} must generate config once "
+                "after the prior build and before this Flet build"
+            )
+            assert output in matching[0]
+            previous_build = build_index
+
+    for workflow_path in build_files[:3]:
+        workflow = _read(workflow_path)
+        assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
+        assert "secrets.SENTRY_DSN" not in workflow
+    assert "$env:SENTRY_DSN" in _read("scripts/build_installer.ps1")

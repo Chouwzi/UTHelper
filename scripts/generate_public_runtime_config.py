@@ -16,7 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate UTHelper's public diagnostics runtime config",
     )
-    parser.add_argument("--sentry-dsn", default="")
+    parser.add_argument("--sentry-dsn", nargs="?", const="", default="")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:

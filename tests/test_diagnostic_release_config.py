@@ -13,6 +13,7 @@ from diagnostics.release_config import (
     load_public_dsn,
     load_runtime_public_dsn,
 )
+from scripts.generate_public_runtime_config import main as generate_config_main
 
 VALID_DSN = "https://0123456789abcdef@o123.ingest.sentry.io/456"
 
@@ -106,6 +107,17 @@ def test_empty_build_value_generates_truthful_unconfigured_asset(tmp_path):
     generate_public_config(output, "")
 
     assert load_public_dsn(output, development=False, environ={}) is None
+
+
+def test_cli_accepts_missing_powershell_empty_value_as_unconfigured(tmp_path):
+    output = tmp_path / "diagnostics-config.json"
+
+    assert generate_config_main(["--sentry-dsn", "--output", str(output)]) == 0
+
+    assert json.loads(output.read_text("utf-8")) == {
+        "schema_version": 1,
+        "sentry_dsn": "",
+    }
 
 
 def test_atomic_generator_failure_preserves_previous_asset(tmp_path, monkeypatch):
