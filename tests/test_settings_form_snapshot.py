@@ -1,6 +1,8 @@
 """Tests for the canonical, immutable settings form state."""
 
 import dataclasses
+from decimal import Decimal
+from fractions import Fraction
 from types import SimpleNamespace
 import traceback
 
@@ -239,3 +241,64 @@ def test_all_fields_round_trip_through_the_explicit_config_mapping():
     assert (
         SettingsFormSnapshot.from_settings(SimpleNamespace(**mapped_values)) == snapshot
     )
+
+
+@pytest.mark.parametrize("value", [Decimal("1.5"), Fraction(3, 2)])
+def test_non_integral_numeric_objects_are_rejected_for_bounded_integers(value):
+    secret = "decimal-fraction-secret"
+    with pytest.raises(SettingsFormValidationError) as exc_info:
+        SettingsFormSnapshot.from_form_values(
+            {"check_interval_minutes": value, "uth_password": secret}
+        )
+
+    error = exc_info.value
+    assert secret not in "".join(traceback.format_exception(error))
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.parametrize("value", [Decimal("1.5"), Fraction(3, 2)])
+def test_non_integral_numeric_objects_are_rejected_for_milestones(value):
+    secret = "milestone-decimal-fraction-secret"
+    with pytest.raises(SettingsFormValidationError) as exc_info:
+        SettingsFormSnapshot.from_form_values(
+            {"notify_milestones_minutes": [value], "gmail_app_password": secret}
+        )
+
+    error = exc_info.value
+    assert secret not in "".join(traceback.format_exception(error))
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+BOOLEAN_FIELD_CONFIG_KEYS = (
+    ("always_on_top", "ALWAYS_ON_TOP"),
+    ("include_submitted", "INCLUDE_SUBMITTED"),
+    ("include_graded", "INCLUDE_GRADED"),
+    ("start_with_windows", "START_WITH_WINDOWS"),
+    ("start_minimized", "START_MINIMIZED"),
+    ("minimize_to_tray", "MINIMIZE_TO_TRAY"),
+    ("auto_update_enabled", "AUTO_UPDATE_ENABLED"),
+    ("background_check_android", "BACKGROUND_CHECK_ANDROID"),
+    ("enable_gmail", "ENABLE_GMAIL"),
+    ("enable_discord", "ENABLE_DISCORD"),
+    ("enable_telegram", "ENABLE_TELEGRAM"),
+    ("debug_mode", "DEBUG_MODE"),
+    ("notify_dnd_enable", "NOTIFY_DND_ENABLE"),
+    ("notify_ignore_submitted", "NOTIFY_IGNORE_SUBMITTED"),
+)
+
+
+@pytest.mark.parametrize(("snapshot_field", "config_key"), BOOLEAN_FIELD_CONFIG_KEYS)
+def test_boolean_settings_mapping_is_one_hot(snapshot_field, config_key):
+    persisted_values = {key: False for _, key in BOOLEAN_FIELD_CONFIG_KEYS}
+    persisted_values[config_key] = True
+
+    snapshot = SettingsFormSnapshot.from_settings(SimpleNamespace(**persisted_values))
+    mapped_values = snapshot.to_settings_values()
+
+    assert getattr(snapshot, snapshot_field) is True
+    assert mapped_values[config_key] is True
+    assert {
+        key for _, key in BOOLEAN_FIELD_CONFIG_KEYS if mapped_values[key]
+    } == {config_key}

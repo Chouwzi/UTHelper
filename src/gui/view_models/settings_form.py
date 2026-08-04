@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
+from numbers import Number
 import re
 from typing import Literal, Mapping, Protocol
 
@@ -38,6 +40,19 @@ def _is_blank(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _coerce_integral(value: object) -> int | None:
+    """Return an integer only when a numeric value has no fractional part."""
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+        if isinstance(value, (Number, Decimal)) and value != parsed:
+            return None
+    except Exception:
+        return None
+    return parsed
+
+
 def _parse_int(
     name: str,
     value: object,
@@ -50,14 +65,9 @@ def _parse_int(
         return default
     if isinstance(value, bool):
         raise SettingsFormValidationError(f"{name} must be an integer")
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        parsed = None
+    parsed = _coerce_integral(value)
     if parsed is None:
         raise SettingsFormValidationError(f"{name} must be an integer") from None
-    if isinstance(value, float) and not value.is_integer():
-        raise SettingsFormValidationError(f"{name} must be an integer")
     if parsed < minimum or (maximum is not None and parsed > maximum):
         raise SettingsFormValidationError(f"{name} is outside its allowed range")
     return parsed
@@ -117,16 +127,7 @@ def _normalize_milestones(value: object) -> tuple[int, ...]:
             raw_values = [value]
     milestones: set[int] = set()
     for item in raw_values:
-        if isinstance(item, bool) or (
-            isinstance(item, float) and not item.is_integer()
-        ):
-            raise SettingsFormValidationError(
-                "notify_milestones_minutes must be positive integers"
-            )
-        try:
-            milestone = int(item)
-        except (TypeError, ValueError):
-            milestone = None
+        milestone = _coerce_integral(item)
         if milestone is None:
             raise SettingsFormValidationError(
                 "notify_milestones_minutes must be positive integers"
