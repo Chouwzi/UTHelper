@@ -43,6 +43,7 @@ class FakeKernelObjectApi:
         self.acknowledgement_results: list[int] = []
         self.release_primary_after_acknowledgement_timeout = False
         self.fail_current_user_sid: Exception | None = None
+        self.fail_set_event: Exception | None = None
 
     def current_user_sid(self) -> str:
         self.current_user_sid_calls += 1
@@ -114,6 +115,8 @@ class FakeKernelObjectApi:
         return WAIT_TIMEOUT
 
     def set_event(self, handle: FakeHandle) -> None:
+        if self.fail_set_event is not None:
+            raise self.fail_set_event
         self.signals.append(handle)
         if handle.name is not None:
             self._events[handle.name] = True
@@ -286,3 +289,43 @@ def test_unexpected_adapter_exception_fails_open_without_leaking_native_detail(c
     assert result.force_visible
     assert "single_instance_fail_open" in caplog.text
     assert "native secret object name" not in caplog.text
+
+
+@pytest.mark.parametrize("failure_site", ("current_user_sid", "set_event"))
+def test_already_exists_error_outside_its_valid_branch_fails_open(failure_site):
+    kernel = FakeKernelObjectApi()
+    error = OSError(183, "already exists")
+    if failure_site == "current_user_sid":
+        kernel.fail_current_user_sid = error
+    else:
+        _bootstrap(kernel)
+        kernel.mark_primary_ready()
+        kernel.fail_set_event = error
+
+    result = _bootstrap(kernel)
+
+    assert result.role is InstanceRole.FALLBACK_VISIBLE_PRIMARY
+    assert result.broker is None
+    assert result.exit_code is None
+    assert result.force_visible
+
+
+@pytest.mark.parametrize(
+    ("requested_seconds", "expected_timeout_ms"),
+    (
+        (float("inf"), 1500),
+        (float("nan"), 1500),
+        (999999999.0, 1500),
+        (float("-inf"), 0),
+    ),
+)
+def test_acknowledgement_timeout_is_clamped_to_a_documented_finite_bound(
+    requested_seconds, expected_timeout_ms
+):
+    kernel = FakeKernelObjectApi()
+    _bootstrap(kernel)
+
+    result = _bootstrap(kernel, acknowledgement_timeout_seconds=requested_seconds)
+
+    assert result.role is InstanceRole.HANDOFF_FAILED
+    assert kernel.wait_timeouts == [expected_timeout_ms]

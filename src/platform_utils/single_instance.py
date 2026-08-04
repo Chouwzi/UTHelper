@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
+# Every manual handoff is bounded to this duration, regardless of caller input.
+MAX_ACKNOWLEDGEMENT_TIMEOUT_SECONDS = 1.5
 
 
 class InstanceRole(str, Enum):
@@ -313,9 +316,7 @@ def bootstrap_windows_instance(
             return _create_primary(api, retry.handle, names, security_attributes, True)
         api.close_handle(retry.handle)
         return InstanceBootstrapResult(InstanceRole.HANDOFF_FAILED, None, 2, False)
-    except Exception as exc:
-        if _is_expected_kernel_error(exc):
-            return InstanceBootstrapResult(InstanceRole.HANDOFF_FAILED, None, 2, False)
+    except Exception:
         logger.warning("single_instance_fail_open")
         return InstanceBootstrapResult(
             InstanceRole.FALLBACK_VISIBLE_PRIMARY, None, None, True
@@ -363,8 +364,18 @@ def _signal_and_wait_for_acknowledgement(
     activation_handle: object | None = None
     acknowledgement_handle: object | None = None
     try:
-        activation_handle = api.open_event(names.activation)
-        acknowledgement_handle = api.open_event(names.acknowledgement)
+        try:
+            activation_handle = api.open_event(names.activation)
+        except Exception as exc:
+            if _is_expected_event_open_error(exc):
+                return False
+            raise
+        try:
+            acknowledgement_handle = api.open_event(names.acknowledgement)
+        except Exception as exc:
+            if _is_expected_event_open_error(exc):
+                return False
+            raise
         api.set_event(activation_handle)
         result = api.wait_one(acknowledgement_handle, timeout_ms)
         if result == WAIT_OBJECT_0:
@@ -380,14 +391,18 @@ def _signal_and_wait_for_acknowledgement(
 
 
 def _timeout_milliseconds(seconds: float) -> int:
-    return max(0, int(seconds * 1000))
+    if not math.isfinite(seconds):
+        return 0 if seconds < 0 else int(MAX_ACKNOWLEDGEMENT_TIMEOUT_SECONDS * 1000)
+    bounded_seconds = min(max(seconds, 0.0), MAX_ACKNOWLEDGEMENT_TIMEOUT_SECONDS)
+    return int(bounded_seconds * 1000)
 
 
-def _is_expected_kernel_error(exc: Exception) -> bool:
+def _is_expected_event_open_error(exc: Exception) -> bool:
+    """Only named-event open races are valid handoff branch conditions."""
     if isinstance(exc, (FileNotFoundError, PermissionError)):
         return True
     code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
-    return code in {2, 3, 5, 183}
+    return code in {2, 3, 5}
 
 
 def _close_quietly(api: KernelObjectApi | None, handle: object) -> None:
