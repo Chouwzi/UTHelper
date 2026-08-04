@@ -504,6 +504,67 @@ def test_assignment_without_native_context_explains_browser_fallback(
     assert view._finalize_btn.visible is False
 
 
+@pytest.mark.parametrize(
+    ("url", "course_id", "reason", "browser_available"),
+    [
+        (
+            "",
+            456,
+            "Không thể xác định đường dẫn bài tập an toàn trên Moodle.",
+            False,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/quiz/view.php?id=123",
+            456,
+            "Đường dẫn này không phải bài tập Moodle. Hãy mở trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "unknown",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            0,
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            -1,
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+    ],
+)
+def test_assignment_with_untrusted_native_target_uses_safe_fallback(
+    url, course_id, reason, browser_available
+):
+    page = MockPage()
+    page.run_task = MagicMock()
+    view = DetailView(page, lambda: None, get_client=lambda: object())
+
+    view.update_detail(
+        {
+            "url": url,
+            "course_id": course_id,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == reason
+    assert view._open_btn.visible is browser_available
+    assert view._header_open_btn.visible is browser_available
+    page.run_task.assert_not_called()
+    assert view._submission_area.visible is False
+    assert view._pick_btn.visible is False
+    assert view._submit_btn.visible is False
+    assert view._finalize_btn.visible is False
+
+
 def test_non_assignment_does_not_mount_submission_status_row():
     view = DetailView(MockPage(), lambda: None)
     view.update_detail(
