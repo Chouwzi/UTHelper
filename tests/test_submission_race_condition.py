@@ -689,6 +689,21 @@ def test_app_controller_never_builds_workflow_for_a_stale_or_other_site_client()
     assert controller._submission_workflow_factory(stale) is None
 
 
+def test_app_controller_rejects_when_both_configured_and_client_sites_are_invalid():
+    current = FakeMoodle43(drafts=True, statement=False)
+    current.moodle_site_origin = "https://moodle.example.edu"
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=current)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "gui.app_controller.settings.MOODLE_BASE_URL",
+            "https://moodle.example.edu",
+        )
+
+        assert controller._submission_workflow_factory(current) is None
+
+
 @pytest.mark.parametrize(
     "configured_base",
     ("https://thnn.ut.edu.vn", "https://moodle.example.edu"),
