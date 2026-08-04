@@ -435,7 +435,9 @@ def test_visible_submission_status_tracks_each_server_snapshot():
 
 @pytest.mark.parametrize("details", [{}, {"status_data": {}}])
 def test_assignment_always_mounts_status_control_before_snapshot(details):
-    view = DetailView(MockPage(), lambda: None)
+    page = MockPage()
+    page.run_task = MagicMock()
+    view = DetailView(page, lambda: None, get_client=lambda: object())
     view.update_detail(
         {
             "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
@@ -462,6 +464,44 @@ def test_assignment_always_mounts_status_control_before_snapshot(details):
     view._apply_submission_snapshot(snapshot(raw_status="submitted"))
 
     assert submission_rows[0].controls[1].value == "Đã nộp"
+
+
+@pytest.mark.parametrize(
+    ("get_client", "course_id", "reason"),
+    [
+        (
+            lambda: None,
+            456,
+            "Không thể kết nối Moodle trong ứng dụng. Hãy mở bài tập trong trình duyệt.",
+        ),
+        (
+            lambda: object(),
+            None,
+            "Thiếu thông tin học phần nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+        ),
+    ],
+)
+def test_assignment_without_native_context_explains_browser_fallback(
+    get_client, course_id, reason
+):
+    view = DetailView(MockPage(), lambda: None, get_client=get_client)
+
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": course_id,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == reason
+    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert callable(view._open_btn.on_click)
+    assert view._submission_area.visible is False
+    assert view._pick_btn.visible is False
+    assert view._submit_btn.visible is False
+    assert view._finalize_btn.visible is False
 
 
 def test_non_assignment_does_not_mount_submission_status_row():

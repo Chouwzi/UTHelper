@@ -699,6 +699,7 @@ class DetailView(ft.Container):
         self._submission_statement.value = False
         self._submission_statement.visible = False
         self._submission_policy_text.visible = False
+        self._submission_area.visible = False
         self._pick_btn.visible = False
         self._submit_btn.visible = False
         self._finalize_btn.visible = False
@@ -730,11 +731,19 @@ class DetailView(ft.Container):
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
 
+        submission_context_reason = ""
+
         # Load submitted files in background (for assignments)
         if is_assignment:
             url = data.get("url", "")
             course_id = data.get("course_id")
-            if url and course_id and '/mod/assign/' in url:
+            client = None
+            if not course_id:
+                submission_context_reason = (
+                    "Thiếu thông tin học phần nên không thể đồng bộ bài nộp. "
+                    "Hãy mở bài tập trong trình duyệt."
+                )
+            elif url and '/mod/assign/' in url:
                 client = None
                 try:
                     client = self._get_client() if self._get_client else None
@@ -747,6 +756,18 @@ class DetailView(ft.Container):
                         self._async_load_submitted_files,
                         client, url, int(course_id), prefetched
                     )
+                else:
+                    submission_context_reason = (
+                        "Không thể kết nối Moodle trong ứng dụng. "
+                        "Hãy mở bài tập trong trình duyệt."
+                    )
+            if submission_context_reason:
+                self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+                self._cta_text.value = "Mở trong trình duyệt"
+                self._open_btn.bgcolor = C.SURFACE
+                self._open_btn.border = ft.Border.all(1, C.ACCENT)
+                self._cta_text.color = C.ACCENT
+                self._cta_icon.color = C.ACCENT
         else:
             self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
@@ -865,6 +886,10 @@ class DetailView(ft.Container):
                     spacing=8,
                 ),
             )
+        if submission_context_reason:
+            self._submission_status_value.value = submission_context_reason
+            self._submission_status_value.color = C.WARNING
+            self._submission_status_value.weight = ft.FontWeight.W_600
         if rows:
             self._content_col.controls.append(self._section("Trạng thái", rows))
 

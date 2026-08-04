@@ -168,6 +168,61 @@ class TestGetUserId:
         assert result is None
 
 
+class TestAssignmentMerge:
+    def _make_orchestrator(self):
+        with patch("core.data_orchestrator.MoodleClient"), \
+             patch("core.data_orchestrator.GradeMonitor"):
+            from core.data_orchestrator import DataOrchestrator
+            return DataOrchestrator()
+
+    def test_matching_assignment_backfills_missing_course_id_only(self):
+        orch = self._make_orchestrator()
+        calendar_item = {
+            "id": "calendar_123",
+            "title": "Tiêu đề lịch mới hơn",
+            "course": "Tên môn từ lịch mới hơn",
+            "deadline": "2030-01-01 10:00:00",
+            "urgency": "warning",
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "type": "assignment",
+            "details": {"fresh": True},
+            "course_id": None,
+        }
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_assignments.return_value = [
+            {
+                "id": 456,
+                "fullname": "Tên môn cũ từ assign API",
+                "assignments": [
+                    {
+                        "id": 7,
+                        "cmid": 123,
+                        "name": "Tiêu đề cũ từ assign API",
+                        "duedate": 1,
+                        "cutoffdate": 0,
+                    }
+                ],
+            }
+        ]
+
+        result = orch._merge_all_assignments([calendar_item], course_ids=[456])
+
+        assert result == [calendar_item]
+        assert calendar_item == {
+            "id": "calendar_123",
+            "title": "Tiêu đề lịch mới hơn",
+            "course": "Tên môn từ lịch mới hơn",
+            "deadline": "2030-01-01 10:00:00",
+            "urgency": "warning",
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "type": "assignment",
+            "details": {"fresh": True},
+            "course_id": 456,
+            "cutoff_date": 0,
+            "late_status": "closed",
+        }
+
+
 class TestCalendarPagination:
     """Moodle caps action-event pages at 50 records."""
 
