@@ -146,9 +146,10 @@ class AppController:
         """Build a fresh workflow only for the orchestrator's current client."""
         if client is not getattr(self.orchestrator, "client", None):
             return None
+        configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
         site = moodle_site_from_origin(getattr(client, "moodle_site_origin", None))
         call_ws_api = getattr(client, "call_ws_api", None)
-        if site is None or not callable(call_ws_api):
+        if configured_site != site or not callable(call_ws_api):
             return None
         return SubmissionWorkflow(
             client,

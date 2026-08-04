@@ -65,6 +65,41 @@ class TestWSToken:
         assert client._get_ws_token() == ""
         client._post.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("credential_origin", "expects_auth"),
+        (
+            ("", True),
+            ("not-a-moodle-origin", False),
+            ("https://moodle.example.edu", False),
+            ("https://courses.ut.edu.vn:443", False),
+            ("https://thnn.ut.edu.vn", False),
+        ),
+    )
+    @patch("core.client.settings")
+    def test_courses_legacy_credentials_require_an_exactly_empty_origin_stamp(
+        self, mock_settings, credential_origin, expects_auth
+    ):
+        mock_settings.MOODLE_WS_TOKEN = ""
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        mock_settings.MOODLE_BASE_URL = "https://courses.ut.edu.vn"
+        mock_settings.UTH_USERNAME = "legacy-user"
+        mock_settings.UTH_PASSWORD = "legacy-pass"
+        mock_settings.UTH_CREDENTIALS_ORIGIN = credential_origin
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+        client._post = MagicMock(return_value=(200, {"token": "courses-token"}))
+
+        assert client.has_site_credentials is expects_auth
+        with patch("config.save_settings"):
+            token = client._get_ws_token()
+        assert token == ("courses-token" if expects_auth else "")
+        if expects_auth:
+            client._post.assert_called_once()
+        else:
+            client._post.assert_not_called()
+
     @patch('core.client.settings')
     def test_matching_stamped_credentials_authenticate_only_their_site(
         self, mock_settings

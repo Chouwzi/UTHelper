@@ -640,12 +640,15 @@ def test_thnn_assignment_with_courses_client_uses_browser_fallback():
     "origin",
     ("https://courses.ut.edu.vn", "https://thnn.ut.edu.vn"),
 )
-def test_app_controller_binds_real_workflow_to_the_current_moodle_client(origin):
+def test_app_controller_binds_real_workflow_to_the_current_moodle_client(
+    origin, monkeypatch
+):
     server = FakeMoodle43(drafts=True, statement=False)
     server.moodle_site_origin = origin
     controller = AppController.__new__(AppController)
     controller.orchestrator = SimpleNamespace(client=server)
 
+    monkeypatch.setattr("gui.app_controller.settings.MOODLE_BASE_URL", origin)
     workflow = controller._submission_workflow_factory(server)
     result = workflow.load_snapshot(
         SubmissionTarget(f"{origin}/mod/assign/view.php?id=123", 456)
@@ -684,6 +687,48 @@ def test_app_controller_never_builds_workflow_for_a_stale_or_other_site_client()
     controller.orchestrator = SimpleNamespace(client=current)
 
     assert controller._submission_workflow_factory(stale) is None
+
+
+@pytest.mark.parametrize(
+    "configured_base",
+    ("https://thnn.ut.edu.vn", "https://moodle.example.edu"),
+)
+def test_app_controller_rejects_current_client_after_configured_moodle_site_changes(
+    configured_base,
+):
+    current = FakeMoodle43(drafts=True, statement=False)
+    current.moodle_site_origin = "https://courses.ut.edu.vn"
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=current)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "gui.app_controller.settings.MOODLE_BASE_URL",
+            configured_base,
+        )
+
+        assert controller._submission_workflow_factory(current) is None
+
+        page = MockPage()
+        page.run_task = MagicMock()
+        view = DetailView(
+            page,
+            lambda: None,
+            get_client=lambda: current,
+            submission_workflow_factory=controller._submission_workflow_factory,
+        )
+        view.update_detail(
+            {
+                "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+                "course_id": 456,
+                "type": "assignment",
+                "details": {},
+            }
+        )
+
+    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._submission_area.visible is False
+    page.run_task.assert_not_called()
 
 
 def test_bound_client_without_workflow_factory_uses_immediate_browser_fallback():

@@ -124,7 +124,7 @@ class MoodleClient:
         )
 
     def _stored_credentials_match_site(self) -> bool:
-        """Keep unstamped legacy credentials on courses, never on THNN."""
+        """Keep exactly unstamped legacy credentials on courses, never on THNN."""
         if (
             not self.moodle_site_origin
             or not settings.UTH_USERNAME
@@ -136,7 +136,10 @@ class MoodleClient:
         )
         if credential_site is not None:
             return credential_site.origin == self.moodle_site_origin
-        return self.moodle_site_origin == COURSES_MOODLE_SITE.origin
+        return (
+            settings.UTH_CREDENTIALS_ORIGIN == ""
+            and self.moodle_site_origin == COURSES_MOODLE_SITE.origin
+        )
 
     def _throttle(self):
         """Ensure minimum interval between API calls."""
