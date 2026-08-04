@@ -2,6 +2,7 @@
 import logging
 import math
 import os
+import time
 from collections.abc import Callable
 from config import BASE_DIR
 import threading
@@ -46,6 +47,8 @@ class TrayApp:
         self._setup_error = None
         self._lifecycle_lock = threading.Lock()
         self._close_requested = False
+        self._stop_thread = None
+        self._stop_helper_failed = False
 
     def setup(self, ready_timeout_seconds: float = 3.0) -> bool:
         """Start the tray and report readiness within a finite deadline."""
@@ -55,29 +58,37 @@ class TrayApp:
         with self._lifecycle_lock:
             if self._close_requested:
                 return False
-        if self._ready_event.is_set():
-            return True
+            if self._ready_event.is_set():
+                return True
         try:
             pystray, item, Image = _load_tray_dependencies()
-            
-            if self._icon is None:
+
+            # Dependency loading may yield long enough for close() to win.
+            # Recheck before doing any candidate construction, then recheck
+            # once more at the atomic publish/start point below.
+            with self._lifecycle_lock:
+                if self._close_requested:
+                    return False
+                needs_icon = self._icon is None
+
+            if needs_icon:
                 # Thử tìm icon.ico trước (tốt nhất cho Windows Tray), sau đó mới tới icon.png
                 icon_path = _resolve_tray_icon_path()
-                
+
                 try:
                     img = Image.open(icon_path).convert("RGBA")
                 except Exception as e:
                     logger.warning("Tray icon load failed (%s), using default icon: %r", icon_path, e)
                     img = Image.new("RGBA", (64, 64), color=(59, 130, 246, 255))
-                
+
                 menu = pystray.Menu(
                     item('Mở UTHelper', self.show_app, default=True),
                     item('Thoát', self.exit_app)
                 )
 
-                self._icon = pystray.Icon("uth_alert", img, title="UTHelper", menu=menu)
-                self._setup_done.clear()
-                self._setup_error = None
+                candidate_icon = pystray.Icon(
+                    "uth_alert", img, title="UTHelper", menu=menu
+                )
 
                 def mark_ready(icon):
                     try:
@@ -88,7 +99,7 @@ class TrayApp:
 
                 def run_icon():
                     try:
-                        self._icon.run(setup=mark_ready)
+                        candidate_icon.run(setup=mark_ready)
                     except Exception as exc:
                         self._setup_error = exc
                         logger.warning("Tray icon event loop failed: %s", exc)
@@ -96,8 +107,18 @@ class TrayApp:
                         self._ready_event.clear()
                         self._setup_done.set()
 
-                self._thread = threading.Thread(target=run_icon, daemon=True)
-                self._thread.start()
+                candidate_thread = threading.Thread(target=run_icon, daemon=True)
+                with self._lifecycle_lock:
+                    if self._close_requested:
+                        return False
+                    if self._icon is None:
+                        self._setup_done.clear()
+                        self._setup_error = None
+                        self._icon = candidate_icon
+                        self._thread = candidate_thread
+                        # Publish and start are one lifecycle decision: close
+                        # cannot win between them and miss the owned thread.
+                        candidate_thread.start()
         except Exception as exc:
             logger.warning("Tray icon setup failed: %s", exc)
             self._setup_error = exc
@@ -130,33 +151,43 @@ class TrayApp:
         self.close()
 
     def close(self, timeout_seconds: float = 1.0) -> bool:
-        """Stop the tray loop once and wait only for its owned daemon thread."""
+        """Stop tray resources once within one shared monotonic deadline."""
         timeout = _bounded_timeout_seconds(
             timeout_seconds, maximum=MAX_TRAY_CLOSE_TIMEOUT_SECONDS
         )
+        deadline = time.monotonic() + timeout
         with self._lifecycle_lock:
             first_request = not self._close_requested
             self._close_requested = True
             icon = self._icon
-            thread = self._thread
+            tray_thread = self._thread
+            if first_request and icon is not None:
+                stop_thread = threading.Thread(
+                    target=self._stop_icon,
+                    args=(icon,),
+                    name="tray-icon-stop",
+                    daemon=True,
+                )
+                self._stop_thread = stop_thread
+                try:
+                    stop_thread.start()
+                except Exception:
+                    self._stop_helper_failed = True
+                    logger.warning("Tray stop helper start failed", exc_info=True)
+            stop_thread = self._stop_thread
+            stop_helper_failed = self._stop_helper_failed
+            self._setup_done.set()
 
-        if first_request and icon is not None:
-            try:
-                icon.stop()
-            except Exception:
-                logger.warning("Tray icon stop failed", exc_info=True)
+        stop_finished = _join_owned_daemon_before_deadline(stop_thread, deadline)
+        tray_finished = _join_owned_daemon_before_deadline(tray_thread, deadline)
+        return not stop_helper_failed and stop_finished and tray_finished
 
-        if thread is None:
-            return True
-        if thread is threading.current_thread() or not thread.daemon:
-            return not thread.is_alive()
-        if not thread.is_alive():
-            return True
+    @staticmethod
+    def _stop_icon(icon) -> None:
         try:
-            thread.join(timeout)
-        except RuntimeError:
-            logger.warning("Tray thread join failed", exc_info=True)
-        return not thread.is_alive()
+            icon.stop()
+        except Exception:
+            logger.warning("Tray icon stop failed", exc_info=True)
 
     def notify(self, title: str, message: str):
         """Send a Windows balloon notification via pystray, with fallback."""   
@@ -179,3 +210,18 @@ def _bounded_timeout_seconds(timeout_seconds: float, *, maximum: float) -> float
     if not math.isfinite(timeout_seconds):
         return 0.0 if timeout_seconds < 0 else maximum
     return min(max(timeout_seconds, 0.0), maximum)
+
+
+def _join_owned_daemon_before_deadline(thread, deadline: float) -> bool:
+    """Join only an owned daemon and never exceed the shared close deadline."""
+    if thread is None:
+        return True
+    if thread is threading.current_thread() or not thread.daemon:
+        return not thread.is_alive()
+    if not thread.is_alive():
+        return True
+    try:
+        thread.join(max(deadline - time.monotonic(), 0.0))
+    except RuntimeError:
+        logger.warning("Tray thread join failed", exc_info=True)
+    return not thread.is_alive()
