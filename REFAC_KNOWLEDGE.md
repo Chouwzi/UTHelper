@@ -500,3 +500,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   Bounded full suite after these review fixes: **839 passed, 24 skipped in
   9.95 seconds**. `ruff check src tests` and `git diff --check` passed; no GUI
   or bundle process was launched.
+
+## Private diagnostic report schema (2026-08-04)
+
+- Added a dedicated `diagnostics` boundary with immutable Pydantic models for
+  consent, lifecycle phase, normalized frames, local construction context, and
+  the versioned report payload. Every model rejects unknown fields; report
+  strings and frame count/line ranges are bounded.
+- The remotely eligible report deliberately has no exception message, raw
+  traceback, username, Moodle data, or stable device identifier. Local
+  `source_root` context is excluded from serialization.
+- Focused schema verification: **2 passed**. `ruff check` for the new package and
+  test plus `git diff --check` passed. The planned pytest-timeout option was not
+  available in this environment, so the focused run used the shell's finite
+  20-second process timeout instead.
