@@ -321,3 +321,25 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 - Validation: 56 Settings/autostart/notification/config tests passed; the full
   suite passed with **827 passed, 24 skipped**; `ruff check src tests` and
   `git diff --check` passed.
+
+# 2026-08-04 - Real Windows activation integration boundary
+
+- The real pywin32 adapter now reads `ERROR_ALREADY_EXISTS` from `winerror`;
+  using the absent `win32con` member previously forced every packaged Windows
+  bootstrap into the sanitized fail-open path after creating its mutex.
+- A randomized production-style namespace integration test exercises real named
+  mutex/events with separate adapters. It verifies manual SHOW delivery and
+  readiness acknowledgement, silent autostart secondaries, bounded broker close,
+  immediate namespace reuse, and protected DACLs containing exactly the current
+  user and `SYSTEM` on every named object.
+- The focused packaged harness isolates `%APPDATA%` and `%LOCALAPPDATA%` beneath
+  a unique system-temp directory. It covers hidden alias startup, manual reveal,
+  silent alias reuse, four concurrent manual launches, and primary replacement.
+  All waits use numeric deadlines; cleanup can terminate only recorded owned
+  PIDs and removes the profile only after resolving it beneath the temp root.
+- The bundle harness delegates to the focused scenarios and rejects the
+  `single_instance_fail_open` marker from the two known packaged log files.
+- Validation: 33 single-instance/integration/release-hardening tests passed;
+  `ruff check src tests`, PowerShell parser validation, and `git diff --check`
+  passed. PSScriptAnalyzer and a verified packaged bundle were unavailable, so
+  those two gates were not reported as passed.

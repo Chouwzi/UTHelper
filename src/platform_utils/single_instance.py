@@ -254,6 +254,7 @@ class PyWin32KernelObjectApi:
             import win32con
             import win32event
             import win32security
+            import winerror
         except ImportError:
             raise
         self._pywintypes = pywintypes
@@ -261,6 +262,7 @@ class PyWin32KernelObjectApi:
         self._win32con = win32con
         self._win32event = win32event
         self._win32security = win32security
+        self._winerror = winerror
 
     def current_user_sid(self) -> str:
         token = self._win32security.OpenProcessToken(
@@ -306,7 +308,7 @@ class PyWin32KernelObjectApi:
         native = self._win32event.CreateMutex(security_attributes, initial_owner, name)
         return MutexCreation(
             _PyWin32Handle(native),
-            self._win32api.GetLastError() == self._win32con.ERROR_ALREADY_EXISTS,
+            self._win32api.GetLastError() == self._winerror.ERROR_ALREADY_EXISTS,
         )
 
     def create_event(

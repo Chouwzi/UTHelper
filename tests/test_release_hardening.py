@@ -141,3 +141,10 @@ def test_msix_and_e2e_use_argument_free_autostart_alias():
     assert "uap10:Parameters" not in msix
     assert 'Join-Path $resolvedBundle "UTHelperAutostart.exe"' in e2e
     assert 'Arguments @("--autostart")' not in e2e
+
+
+def test_bundle_e2e_requires_activation_handoff_and_fail_open_scan():
+    e2e = _read("scripts/test_windows_bundle_e2e.ps1")
+
+    assert "test_windows_single_instance_e2e.ps1" in e2e
+    assert "single_instance_fail_open" in e2e
