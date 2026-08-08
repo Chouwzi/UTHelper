@@ -99,6 +99,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
+          pip install -e extensions/flet_uth_background_sync
           pip install pytest pytest-cov
 
       - name: Run tests
@@ -176,4 +177,4 @@ jobs:
         run: |
           pip install pip-audit
           pip install -e "${{ matrix.extras }}"
-          pip-audit --strict --desc
+          pip-audit --strict --desc --skip-editable

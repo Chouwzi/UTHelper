@@ -263,6 +263,8 @@ def test_main_import_owns_one_rotating_log_without_legacy_debug_file(
 ) -> None:
     env = os.environ.copy()
     env["APPDATA"] = str(tmp_path)
+    env["FLET_APP_STORAGE_DATA"] = str(tmp_path / "UTHelper")
+    env["FLET_APP_STORAGE_TEMP"] = str(tmp_path / "UTHelper" / "flet" / "temp")
     completed = subprocess.run(
         [
             sys.executable,

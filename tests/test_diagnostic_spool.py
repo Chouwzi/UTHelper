@@ -255,7 +255,8 @@ def test_enqueue_cleans_temporary_file_when_atomic_replace_fails(
     with pytest.raises(OSError, match="simulated replace failure"):
         spool.enqueue(_report(0))
 
-    assert list(tmp_path.iterdir()) == []
+    expected = {".diagnostic-spool.lock"} if os.name != "nt" else set()
+    assert {path.name for path in tmp_path.iterdir()} == expected
 
 
 def test_concurrent_spool_instances_serialize_dedupe_and_pruning(

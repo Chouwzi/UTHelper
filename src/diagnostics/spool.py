@@ -299,7 +299,10 @@ def _pin_verified_root(root: Path, *, expected: _FileIdentity):
             _kernel32.CloseHandle(handle)
         return
 
-    identity = _path_identity(root, expect_directory=True)
+    try:
+        identity = _path_identity(root, expect_directory=True)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("diagnostic spool root is unavailable") from exc
     if identity.key != expected.key:
         raise RuntimeError("diagnostic spool root identity changed unexpectedly")
     yield
