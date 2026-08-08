@@ -101,11 +101,28 @@ class AndroidBackgroundBridge:
         return bool(await self.service.request_exact_alarm_access())
 
     async def install_update(
-        self, url: str, sha256: str, expected_size: int = 0
+        self,
+        url: str,
+        sha256: str,
+        expected_size: int,
+        expected_package_id: str,
+        expected_version_code: int,
+        expected_certificate_sha256: str,
     ) -> dict[str, Any]:
         if not self.service:
             return {"status": "unavailable"}
-        return await self.service.install_update(url, sha256, expected_size)
+        return await self.service.install_update(
+            url,
+            sha256,
+            expected_size,
+            expected_package_id,
+            expected_version_code,
+            expected_certificate_sha256,
+        )
+
+    async def cancel_update(self) -> None:
+        if self.service:
+            await self.service.cancel_update()
 
     async def show_notification(
         self,

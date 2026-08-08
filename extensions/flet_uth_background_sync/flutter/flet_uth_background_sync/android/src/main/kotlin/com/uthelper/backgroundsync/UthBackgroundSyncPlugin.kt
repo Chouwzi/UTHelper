@@ -32,6 +32,7 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var channel: MethodChannel
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val updateInstaller by lazy { ApkUpdateInstaller(context) }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -40,6 +41,7 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        updateInstaller.cancel()
         channel.setMethodCallHandler(null)
         scope.cancel()
     }
@@ -168,16 +170,23 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
             "install_update" -> execute(result) {
-                val update = ApkUpdateInstaller(context).downloadVerifyAndOpen(
+                val update = updateInstaller.downloadVerifyAndOpen(
                     url = call.argument<String>("url").orEmpty(),
                     expectedSha256 = call.argument<String>("sha256").orEmpty(),
                     expectedSize = call.argument<Number>("expected_size")?.toLong() ?: 0L,
+                    expectedPackageId = call.argument<String>("expected_package_id").orEmpty(),
+                    expectedVersionCode = call.argument<Number>("expected_version_code")?.toLong() ?: 0L,
+                    expectedCertificateSha256 = call.argument<String>("expected_certificate_sha256").orEmpty(),
                 )
                 mapOf(
                     "status" to update.status,
                     "bytes" to update.bytes,
                     "sha256" to update.sha256,
                 )
+            }
+            "cancel_update" -> {
+                updateInstaller.cancel()
+                result.success(null)
             }
             "logout" -> execute(result) {
                 BackgroundSyncScheduler(context).cancelAll()

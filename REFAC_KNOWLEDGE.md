@@ -888,3 +888,23 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   process cancellation. Tasks 1-3 plus architecture boundaries pass **35
   tests**; focused Ruff passes. The production trust set intentionally remains
   empty until the release certificate fingerprint is reviewed and pre-shipped.
+
+## Android installed-signer update boundary (2026-08-08)
+
+- The Python/Flet/Kotlin bridge now carries required APK byte size, package ID,
+  monotonic versionCode, and manifest certificate SHA-256, plus an explicit
+  `cancel_update` path. Kotlin owns one atomic request and checks cancellation
+  before connection, around every bounded read, and before installer launch;
+  partial files are removed in `finally`.
+- APK bytes must come through approved HTTPS GitHub hosts, finish within the
+  180-second/20-second socket bounds, and match exact size and SHA-256 before
+  Android package metadata is read. The archive must have the running package
+  ID, the exact expected and newer versionCode, contain the manifest signer,
+  and share a signer/signing-lineage certificate with the currently installed
+  app. Thus a tampered manifest and attacker APK cannot redefine local trust.
+- Python bridge contracts pass **18 tests**. Both debug and release Android JVM
+  tests pass under Gradle 8.14 with `--no-daemon` in **50 seconds**, including
+  wrong-package, rollback, attacker-signer, and signing-lineage cases. The
+  standalone test invocation receives the official cached Flutter embedding JAR
+  through an optional Gradle property; packaged builds keep their host-provided
+  Flutter dependency.

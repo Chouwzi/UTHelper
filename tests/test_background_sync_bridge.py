@@ -103,6 +103,52 @@ def test_background_bridge_hands_off_only_matching_explicit_site_token(monkeypat
     assert service.logout_calls == 0
 
 
+def test_install_update_forwards_identity_version_signer_and_cancel():
+    class FakeService:
+        def __init__(self):
+            self.calls = []
+
+        async def install_update(self, *args):
+            self.calls.append(("install", args))
+            return {"status": "verified"}
+
+        async def cancel_update(self):
+            self.calls.append(("cancel", ()))
+
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = FakeService()
+
+    result = asyncio.run(
+        bridge.install_update(
+            "https://github.com/Chouwzi/UTHelper/releases/download/"
+            "v2.2.0/UTHelper-2.2.0.apk",
+            "ab" * 32,
+            123,
+            "com.uthelper.uthelper",
+            2_002_000,
+            "cd" * 32,
+        )
+    )
+    asyncio.run(bridge.cancel_update())
+
+    assert result == {"status": "verified"}
+    assert bridge.service.calls == [
+        (
+            "install",
+            (
+                "https://github.com/Chouwzi/UTHelper/releases/download/"
+                "v2.2.0/UTHelper-2.2.0.apk",
+                "ab" * 32,
+                123,
+                "com.uthelper.uthelper",
+                2_002_000,
+                "cd" * 32,
+            ),
+        ),
+        ("cancel", ()),
+    ]
+
+
 @pytest.mark.parametrize(
     ("base_url", "client_origin", "token_origin", "expected"),
     (
