@@ -100,7 +100,7 @@ jobs:
         run: |
           pip install -e .
           pip install -e extensions/flet_uth_background_sync
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov keyring
 
       - name: Run tests
         run: |
@@ -177,4 +177,5 @@ jobs:
         run: |
           pip install pip-audit
           pip install -e "${{ matrix.extras }}"
-          pip-audit --strict --desc --skip-editable
+          pip freeze --exclude-editable > audit-requirements.txt
+          pip-audit --strict --desc --requirement audit-requirements.txt
