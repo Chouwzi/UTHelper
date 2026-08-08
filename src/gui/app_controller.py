@@ -1,5 +1,6 @@
 import os
 import sys
+from math import pi
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -7,7 +8,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import flet as ft
-from datetime import datetime
+from datetime import date, datetime
 from core.time_utils import parse_datetime
 import asyncio
 import logging
@@ -32,6 +33,7 @@ from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.view_manager import ViewManager
+from gui.core.utils import clean_course_name, format_deadline, get_type_color, get_urgency_color
 from gui.controllers.startup_visibility import (
     is_autostart_launch,
     should_hide_startup_window,
@@ -512,6 +514,92 @@ class AppController:
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
 
+        self._today_schedule_expanded = False
+        self._today_schedule_toggle_icon = ft.Icon(
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            size=18,
+            color=C.TEXT_SECONDARY,
+            rotate=ft.Rotate(angle=0, alignment=ft.Alignment.CENTER),
+            animate_rotation=ft.Animation(duration=260, curve=ft.AnimationCurve.EASE_OUT_CUBIC),
+        )
+        self._today_schedule_count = ft.Text("", size=11, color=C.TEXT_SECONDARY, expand=True)
+        self._today_schedule_items_column = ft.Column(controls=[], spacing=6)
+        self._today_schedule_empty = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Icon(ft.Icons.CALENDAR_MONTH_ROUNDED, size=24, color=C.BORDER),
+                    ft.Text("Không có hoạt động nào đến hạn hôm nay", size=11, color=C.TEXT_SECONDARY),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+            ),
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.only(top=4, bottom=4),
+        )
+        self._today_schedule_body = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Container(height=1, bgcolor=C.BORDER),
+                    self._today_schedule_empty,
+                    self._today_schedule_items_column,
+                ],
+                spacing=8,
+            ),
+            padding=ft.Padding.only(left=12, right=12, top=0, bottom=12),
+            visible=False,
+        )
+        self._today_schedule_header = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.CALENDAR_TODAY_ROUNDED, size=18, color=C.ACCENT),
+                    ft.Column(
+                        controls=[
+                            ft.Text(
+                                "Lịch học hôm nay",
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                            ),
+                            self._today_schedule_count,
+                        ],
+                        spacing=1,
+                        expand=True,
+                    ),
+                    self._today_schedule_toggle_icon,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(left=12, right=12, top=12, bottom=12),
+            on_click=lambda _: self._toggle_today_schedule(),
+            ink=True,
+        )
+        self._today_schedule_bar = ft.Container(
+            width=3,
+            border_radius=ft.BorderRadius.only(top_left=10, bottom_left=10),
+            bgcolor=C.ACCENT,
+        )
+        self.today_schedule_panel = ft.Container(
+            content=ft.Row(
+                controls=[
+                    self._today_schedule_bar,
+                    ft.Container(
+                        content=ft.Column(
+                            controls=[self._today_schedule_header, self._today_schedule_body],
+                            spacing=0,
+                        ),
+                        expand=True,
+                    ),
+                ],
+                spacing=0,
+            ),
+            margin=ft.Margin(left=10, right=10, top=0, bottom=0),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+        )
+        self._refresh_today_schedule_panel([])
+
     def _init_views_and_transitions(self):
         header_container = ft.Container(
             content=ft.Column(controls=[
@@ -560,9 +648,11 @@ class AppController:
         )
 
         content_area = ft.Container(
-            content=ft.Stack(controls=[
-                ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
-            ], expand=True),
+            content=ft.Column(controls=[
+                ft.Stack(controls=[
+                    ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
+                ], expand=True),
+            ], spacing=8, expand=True),
             padding=ft.Padding.only(left=4, right=4, bottom=8),
             expand=True, clip_behavior=ft.ClipBehavior.NONE,
         )
@@ -804,6 +894,7 @@ class AppController:
         is_empty = (len(filtered_items) == 0 and not self.loading_bar.visible)
         self.empty_state.visible = is_empty
         self.error_state.visible = False
+        self._refresh_today_schedule_panel(base)
 
         # P2/P6: Contextual empty state messaging
         if is_empty:
@@ -858,12 +949,107 @@ class AppController:
             
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
+        render_cards = [self.today_schedule_panel] + render_cards
             
         with self._cards_lock:
             self.active_cards = render_cards
         
         self.cards_column.controls = render_cards
         self.page.update()
+
+    def _get_today_schedule_items(self, activities: list[dict] | None = None) -> list[dict]:
+        """Return activities that fall on today's date, sorted by deadline time."""
+        source = activities if activities is not None else list(self.all_data)
+        today = date.today()
+        timed_items: list[tuple[datetime, dict]] = []
+        for activity in source:
+            deadline_str = activity.get("deadline", "")
+            deadline_dt = parse_datetime(deadline_str)
+            if not deadline_dt or deadline_dt.year >= 2099:
+                continue
+            if deadline_dt.date() != today:
+                continue
+            timed_items.append((deadline_dt, activity))
+
+        timed_items.sort(key=lambda item: (item[0], item[1].get("title", "")))
+        return [activity for _, activity in timed_items]
+
+    def _make_today_schedule_item(self, activity: dict) -> ft.Container:
+        deadline_str = activity.get("deadline", "")
+        deadline_dt = parse_datetime(deadline_str)
+        time_text = deadline_dt.strftime("%H:%M") if deadline_dt else "Hôm nay"
+        course_name = clean_course_name(
+            activity.get("course_name", "")
+            or activity.get("course", "")
+            or activity.get("details", {}).get("course_full_name", "")
+        )
+        title = activity.get("title", "Không có tiêu đề")
+        urgency_color = get_urgency_color(activity.get("urgency", "safe"))
+        type_color = get_type_color(activity.get("type", "other"))
+
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Container(width=3, height=34, bgcolor=type_color or urgency_color, border_radius=3),
+                    ft.Column(
+                        controls=[
+                            ft.Text(
+                                title,
+                                size=12,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            ft.Text(
+                                f"{course_name} · {format_deadline(deadline_str)}" if course_name else format_deadline(deadline_str),
+                                size=10,
+                                color=C.TEXT_SECONDARY,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.Container(
+                        content=ft.Text(time_text, size=10, color=type_color or urgency_color, weight=ft.FontWeight.W_600),
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                        border=ft.Border.all(1, type_color or urgency_color),
+                        border_radius=999,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.BG,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=8,
+            padding=ft.Padding.only(left=10, right=10, top=8, bottom=8),
+            ink=True,
+            on_click=lambda _: self._show_detail(activity),
+        )
+
+    def _toggle_today_schedule(self):
+        self._today_schedule_expanded = not self._today_schedule_expanded
+        self._refresh_today_schedule_panel()
+
+    def _refresh_today_schedule_panel(self, activities: list[dict] | None = None):
+        items = self._get_today_schedule_items(activities if activities is not None else list(self.all_data))
+        count = len(items)
+
+        self._today_schedule_toggle_icon.rotate = ft.Rotate(
+            angle=pi / 2 if self._today_schedule_expanded else 0,
+            alignment=ft.Alignment.CENTER,
+        )
+        self._today_schedule_bar.bgcolor = C.ACCENT if self._today_schedule_expanded else C.BORDER
+        self._today_schedule_count.value = f"{count} mục" if count else "Không có lịch học hôm nay"
+
+        body_items = [self._make_today_schedule_item(item) for item in items]
+        self._today_schedule_items_column.controls = body_items
+        self._today_schedule_empty.visible = len(body_items) == 0
+        self._today_schedule_items_column.visible = len(body_items) > 0
+        self._today_schedule_body.visible = self._today_schedule_expanded
 
     def _update_footer(self):
         self._refresh_ui()
@@ -906,6 +1092,7 @@ class AppController:
 
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
+        render_cards = [self.today_schedule_panel] + render_cards
 
         with self._cards_lock:
             self.active_cards = render_cards
@@ -1598,6 +1785,47 @@ class AppController:
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        # Today schedule card follows the same live theme refresh path.
+        if hasattr(self, 'today_schedule_panel'):
+            self.today_schedule_panel.bgcolor = _C.SURFACE
+            self.today_schedule_panel.border = ft.Border.all(1, _C.BORDER)
+        if hasattr(self, '_today_schedule_bar'):
+            self._today_schedule_bar.bgcolor = _C.ACCENT if self._today_schedule_expanded else _C.BORDER
+        if hasattr(self, '_today_schedule_header'):
+            try:
+                header_row = self._today_schedule_header.content
+                header_row.controls[0].color = _C.ACCENT
+                header_row.controls[1].controls[0].color = _C.TEXT_PRIMARY
+                header_row.controls[1].controls[1].color = _C.TEXT_SECONDARY
+                header_row.controls[2].color = _C.TEXT_SECONDARY
+                self._today_schedule_header.bgcolor = _C.SURFACE
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if hasattr(self, '_today_schedule_empty'):
+            try:
+                empty_col = self._today_schedule_empty.content
+                empty_col.controls[0].color = _C.BORDER
+                empty_col.controls[1].color = _C.TEXT_SECONDARY
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if hasattr(self, '_today_schedule_body'):
+            self._today_schedule_body.bgcolor = _C.SURFACE
+            try:
+                body_col = self._today_schedule_body.content
+                body_col.controls[0].color = _C.BORDER
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        # Rebuild schedule items so their type/urgency colors follow the new theme.
+        try:
+            self._refresh_today_schedule_panel(list(self.all_data))
+        except Exception:
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Icon buttons
         buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
