@@ -122,6 +122,24 @@ jobs:
           path: coverage.xml
           retention-days: 7
 
+  dependency-review:
+    name: 🔐 Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out pull request source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Reject newly introduced vulnerable dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
+        timeout-minutes: 5
+        with:
+          fail-on-severity: moderate
+
   security:
     name: 🔒 Security (${{ matrix.surface }})
     runs-on: ${{ matrix.os }}
