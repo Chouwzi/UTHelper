@@ -299,7 +299,10 @@ def _pin_verified_root(root: Path, *, expected: _FileIdentity):
             _kernel32.CloseHandle(handle)
         return
 
-    identity = _path_identity(root, expect_directory=True)
+    try:
+        identity = _path_identity(root, expect_directory=True)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("diagnostic spool root is unavailable") from exc
     if identity.key != expected.key:
         raise RuntimeError("diagnostic spool root identity changed unexpectedly")
     yield
@@ -581,12 +584,20 @@ class DiagnosticSpool:
     @contextmanager
     def _exclusive(self):
         with self._lock:
-            with _process_lock(self.root):
+            if os.name == "nt":
+                with _process_lock(self.root):
+                    with _pin_verified_root(
+                        self.root,
+                        expected=self._root_identity,
+                    ):
+                        yield
+            else:
                 with _pin_verified_root(
                     self.root,
                     expected=self._root_identity,
                 ):
-                    yield
+                    with _process_lock(self.root):
+                        yield
 
     def _owned_regular_files(
         self,

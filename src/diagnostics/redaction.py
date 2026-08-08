@@ -107,15 +107,16 @@ def _safe_function(value: object) -> str:
 def _safe_relative_path(filename: object, source_root: Path) -> str:
     if not isinstance(filename, str) or not filename:
         return "unknown"
+    portable_basename = filename.replace("\\", "/").rsplit("/", 1)[-1]
     try:
         candidate = Path(filename).resolve(strict=False)
         root = source_root.resolve(strict=False)
         try:
             raw_path = candidate.relative_to(root).as_posix()
         except ValueError:
-            raw_path = candidate.name
+            raw_path = portable_basename
     except (OSError, RuntimeError, ValueError):
-        raw_path = Path(filename).name
+        raw_path = portable_basename
 
     normalized = _PATH_UNSAFE.sub("_", raw_path.replace("\\", "/"))
     normalized = normalized.lstrip("/.") or "unknown"

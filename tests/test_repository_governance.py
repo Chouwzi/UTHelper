@@ -33,6 +33,12 @@ def test_security_ci_fails_closed_and_has_a_finite_deadline():
     workflow = _read(".github/workflows/ci.yml")
 
     assert "pip-audit --strict --desc" in workflow
+    assert "pip freeze --exclude-editable > audit-requirements.txt" in workflow
+    assert (
+        "pip-audit --strict --desc --requirement audit-requirements.txt" in workflow
+    )
+    assert "for attempt in 1 2 3" in workflow
+    assert 'exit "$audit_status"' in workflow
     assert "pip-audit --strict --desc 2>&1 || true" not in workflow
     assert "security:" in workflow
     assert "timeout-minutes:" in workflow.split("  security:", 1)[1]
