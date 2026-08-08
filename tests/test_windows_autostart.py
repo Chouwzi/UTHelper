@@ -226,7 +226,12 @@ def test_current_process_lookup_uses_windows_api_not_parent(monkeypatch):
             buffer.value = r"C:\Apps\UTHelper.exe"
             return len(buffer.value)
 
-    monkeypatch.setattr(autostart.ctypes, "windll", SimpleNamespace(kernel32=Kernel32()))
+    monkeypatch.setattr(
+        autostart.ctypes,
+        "windll",
+        SimpleNamespace(kernel32=Kernel32()),
+        raising=False,
+    )
 
     assert autostart.get_current_process_executable(platform_name="win32") == Path(
         r"C:\Apps\UTHelper.exe"
