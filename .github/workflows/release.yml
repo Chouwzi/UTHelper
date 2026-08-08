@@ -127,8 +127,8 @@ jobs:
           grep -q "ActionBroadcastReceiver" "$MANIFEST"
           grep -q "DeadlineAlarmReceiver" "$MANIFEST"
           grep -q "RescheduleReceiver" "$MANIFEST"
-          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
-          grep -R -q "androidx.room:room-runtime:2.8.4" build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.room:room-runtime:2.8.4" build/flutter-packages/flet_uth_background_sync/android/build.gradle
 
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
           if [ "${#APK_CANDIDATES[@]}" -ne 1 ]; then

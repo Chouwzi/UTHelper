@@ -420,6 +420,21 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
     assert "$env:SENTRY_DSN" in _read("scripts/build_android.ps1")
 
 
+def test_android_workflows_verify_the_materialized_flet_plugin_location():
+    expected = (
+        "build/flutter-packages/flet_uth_background_sync/android/build.gradle"
+    )
+    stale = "build/flutter/flutter-packages/flet_uth_background_sync"
+
+    for relative_path in (
+        ".github/workflows/build-android.yml",
+        ".github/workflows/release.yml",
+    ):
+        workflow = _read(relative_path).replace("\\", "/")
+        assert workflow.count(expected) == 2
+        assert stale not in workflow
+
+
 def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_template():
     official_url = (
         "https://github.com/flet-dev/flet/releases/download/"

@@ -98,9 +98,9 @@ jobs:
           grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
           grep -q "RescheduleReceiver" final-android-manifest.xml
           grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
-            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+            build/flutter-packages/flet_uth_background_sync/android/build.gradle
           grep -R -q "androidx.room:room-runtime:2.8.4" \
-            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+            build/flutter-packages/flet_uth_background_sync/android/build.gradle
           DIAGNOSTIC_APK="UTHelper-${{ github.sha }}-unsigned-diagnostic.apk"
           mv "$APK" "$DIAGNOSTIC_APK"
           python - "$DIAGNOSTIC_APK" <<'PY'
