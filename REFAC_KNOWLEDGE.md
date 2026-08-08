@@ -854,3 +854,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   and can never authorize automatic installation.
 - The new manifest suite plus legacy updater compatibility suite passes **20
   tests**; focused Ruff and whitespace gates pass.
+
+## Bounded verified update transport (2026-08-08)
+
+- GitHub discovery now requires exactly one manifest asset from a stable
+  release, uses a 20-second timeout and 1-MiB JSON bound on every request, and
+  rejects invalid tags, duplicate manifests, unapproved hosts, and malformed or
+  mismatched manifests without guessing a release asset. Schema 1 candidates
+  remain visible for release notes but expose no downloadable installer.
+- `VerifiedDownloader` writes to a unique `.part` path, enforces a 180-second
+  total deadline, checks cooperative cancellation before connect and every
+  chunk, caps bytes at the manifest size, fsyncs, verifies exact size and
+  SHA-256, and only then atomically replaces the destination. Every failure
+  removes the partial file; the legacy callback API delegates to this boundary.
+- Manifest and transport compatibility verification passes **23 tests**;
+  focused Ruff passes.
