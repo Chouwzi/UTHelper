@@ -840,3 +840,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   forbidden-field documentation, rejection/redaction code, and GitHub Actions
   references to encrypted signing secrets; no diagnostic payload or CI DSN is
   present. Two legacy manual test scripts received only mechanical Ruff fixes.
+
+## Trusted update manifest domain (2026-08-08)
+
+- Update discovery now has immutable `RuntimeTarget`, `ReleasePackage`,
+  `ReleaseManifest`, and `UpdateCandidate` domain types. Schema 2 parsing is
+  allow-list based: unknown/missing fields, nonnumeric versions, unsupported
+  target triples, unsafe URLs, mismatched extensions/strategies, invalid sizes,
+  digests, and signer fingerprints fail closed.
+- Selection matches platform, architecture, and installed channel exactly;
+  duplicate matches are rejected and current/older releases produce no
+  candidate. Schema 1 is retained for one discovery-only compatibility window
+  and can never authorize automatic installation.
+- The new manifest suite plus legacy updater compatibility suite passes **20
+  tests**; focused Ruff and whitespace gates pass.
