@@ -539,11 +539,6 @@ def test_assignment_always_mounts_status_control_before_snapshot(details):
             456,
             "Không thể kết nối Moodle trong ứng dụng. Hãy mở bài tập trong trình duyệt.",
         ),
-        (
-            lambda: object(),
-            None,
-            "Thiếu thông tin học phần nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
-        ),
     ],
 )
 def test_assignment_without_native_context_explains_browser_fallback(
@@ -567,6 +562,37 @@ def test_assignment_without_native_context_explains_browser_fallback(
     assert view._pick_btn.visible is False
     assert view._submit_btn.visible is False
     assert view._finalize_btn.visible is False
+
+
+def test_assignment_without_course_id_resolves_native_submission_context() -> None:
+    class Workflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            return SubmissionSnapshotResult.success(snapshot())
+
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: client,
+        submission_workflow_factory=lambda _: Workflow(),
+    )
+
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    page.run_task.assert_called_once()
+    scheduled = page.run_task.call_args.args
+    assert scheduled[3] is None
 
 
 @pytest.mark.parametrize(

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class SubmissionTarget:
     url: str
-    course_id: int
+    course_id: int | None
 
 
 @dataclass(frozen=True)
@@ -391,19 +391,41 @@ class SubmissionWorkflow:
             return _error(SubmissionErrorCode.INVALID_TARGET)
         if not self._client_matches_selected_site():
             return _error(SubmissionErrorCode.CLIENT_ORIGIN_MISMATCH)
-        try:
-            assignment_id = self.moodle_service.resolve_cmid_to_assign_id(
-                cmid, target.course_id
-            )
-        except Exception:
-            logger.exception("Could not resolve Moodle assignment")
-            return _error(SubmissionErrorCode.ASSIGNMENT_NOT_FOUND)
-        if not assignment_id:
+        if target.course_id is None:
+            try:
+                response = self.moodle_service.get_assignments([])
+            except Exception:
+                logger.exception("Could not load Moodle assignment list")
+                return _error(SubmissionErrorCode.SNAPSHOT_LOAD_FAILED)
+            resolved = self._find_assignment_by_cmid(response, cmid)
+            if resolved is None:
+                return _error(SubmissionErrorCode.ASSIGNMENT_NOT_FOUND)
+            assignment, course_id = resolved
+            try:
+                assignment_id = int(assignment.get("id", 0))
+            except (TypeError, ValueError):
+                assignment_id = 0
+        else:
+            try:
+                course_id = int(target.course_id)
+                assignment_id = self.moodle_service.resolve_cmid_to_assign_id(
+                    cmid, course_id
+                )
+            except Exception:
+                logger.exception("Could not resolve Moodle assignment")
+                return _error(SubmissionErrorCode.ASSIGNMENT_NOT_FOUND)
+            if not assignment_id:
+                return _error(SubmissionErrorCode.ASSIGNMENT_NOT_FOUND)
+            try:
+                response = self.moodle_service.get_assignments([course_id])
+                assignment = self._find_assignment(response, int(assignment_id))
+            except Exception:
+                logger.exception("Could not load Moodle assignment list")
+                return _error(SubmissionErrorCode.SNAPSHOT_LOAD_FAILED)
+        if not assignment_id or course_id <= 0:
             return _error(SubmissionErrorCode.ASSIGNMENT_NOT_FOUND)
 
         try:
-            response = self.moodle_service.get_assignments([target.course_id])
-            assignment = self._find_assignment(response, int(assignment_id))
             status = prefetched_status
             if status is None:
                 status = self.moodle_service.get_submission_status(int(assignment_id))
@@ -414,7 +436,7 @@ class SubmissionWorkflow:
             return _error(SubmissionErrorCode.SNAPSHOT_LOAD_FAILED)
         snapshot = parse_submission_snapshot(int(assignment_id), assignment, status)
         return _SnapshotContext(
-            int(assignment_id), int(target.course_id), assignment, snapshot
+            int(assignment_id), course_id, assignment, snapshot
         )
 
     def _client_matches_selected_site(self) -> bool:
@@ -475,6 +497,48 @@ class SubmissionWorkflow:
         elif isinstance(response, (list, tuple)):
             for item in response:
                 found = cls._find_assignment(item, assignment_id)
+                if found is not None:
+                    return found
+        return None
+
+    @classmethod
+    def _find_assignment_by_cmid(
+        cls,
+        response: object,
+        cmid: int,
+        inherited_course_id: int | None = None,
+    ) -> tuple[dict[str, Any], int] | None:
+        if isinstance(response, dict):
+            course_id = inherited_course_id
+            if "assignments" in response:
+                try:
+                    candidate = int(response.get("id", 0))
+                except (TypeError, ValueError):
+                    candidate = 0
+                if candidate > 0:
+                    course_id = candidate
+            try:
+                is_assignment = int(response.get("cmid", 0)) == cmid
+            except (TypeError, ValueError):
+                is_assignment = False
+            if is_assignment and "assignments" not in response:
+                try:
+                    resolved_course = int(response.get("course") or course_id or 0)
+                except (TypeError, ValueError):
+                    resolved_course = 0
+                if resolved_course > 0:
+                    return response, resolved_course
+            for key in ("assignments", "courses"):
+                found = cls._find_assignment_by_cmid(
+                    response.get(key), cmid, course_id
+                )
+                if found is not None:
+                    return found
+        elif isinstance(response, (list, tuple)):
+            for item in response:
+                found = cls._find_assignment_by_cmid(
+                    item, cmid, inherited_course_id
+                )
                 if found is not None:
                     return found
         return None

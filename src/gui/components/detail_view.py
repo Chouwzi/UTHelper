@@ -126,7 +126,9 @@ class DetailView(ft.Container):
             logger.exception("Submission workflow factory failed")
             return False
 
-    def _submission_target(self, url: str, course_id: int) -> SubmissionTarget:
+    def _submission_target(
+        self, url: str, course_id: int | None
+    ) -> SubmissionTarget:
         return SubmissionTarget(url=url, course_id=course_id)
 
     @staticmethod
@@ -143,6 +145,15 @@ class DetailView(ft.Container):
         else:
             return None
         return course_id if course_id > 0 else None
+
+    @classmethod
+    def _course_context(cls, value) -> tuple[bool, int | None]:
+        """Accept missing course metadata, but reject malformed supplied values."""
+
+        if value in (None, ""):
+            return True, None
+        course_id = cls._positive_course_id(value)
+        return course_id is not None, course_id
 
     @staticmethod
     def _is_safe_browser_url(url) -> bool:
@@ -831,7 +842,7 @@ class DetailView(ft.Container):
         if is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
-            course_id = self._positive_course_id(raw_course_id)
+            course_context_valid, course_id = self._course_context(raw_course_id)
             client = None
             if not browser_available:
                 submission_context_reason = (
@@ -842,12 +853,7 @@ class DetailView(ft.Container):
                     "Đường dẫn này không phải bài tập Moodle. "
                     "Hãy mở trong trình duyệt."
                 )
-            elif raw_course_id in (None, ""):
-                submission_context_reason = (
-                    "Thiếu thông tin học phần nên không thể đồng bộ bài nộp. "
-                    "Hãy mở bài tập trong trình duyệt."
-                )
-            elif course_id is None:
+            elif not course_context_valid:
                 submission_context_reason = (
                     "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
                     "Hãy mở bài tập trong trình duyệt."
@@ -1517,11 +1523,13 @@ class DetailView(ft.Container):
         client = self._get_client() if self._get_client else None
         data = self._current_data
         url = data.get("url", "")
-        course_id = self._positive_course_id(data.get("course_id"))
+        course_context_valid, course_id = self._course_context(
+            data.get("course_id")
+        )
         if not client:
             self._show_upload_status("Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
             return
-        if not self._is_native_submission_url(url) or course_id is None:
+        if not self._is_native_submission_url(url) or not course_context_valid:
             self._show_upload_status("Không thể xác định bài tập trên Moodle.", C.CRITICAL)
             return
 
@@ -1586,13 +1594,15 @@ class DetailView(ft.Container):
         client = self._get_client() if self._get_client else None
         data = self._current_data
         url = data.get("url", "")
-        course_id = self._positive_course_id(data.get("course_id"))
+        course_context_valid, course_id = self._course_context(
+            data.get("course_id")
+        )
         if not client:
             self._show_upload_status(
                 "Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL
             )
             return
-        if not self._is_native_submission_url(url) or course_id is None:
+        if not self._is_native_submission_url(url) or not course_context_valid:
             self._show_upload_status(
                 "Không thể xác định bài tập trên Moodle.", C.CRITICAL
             )
@@ -1649,16 +1659,17 @@ class DetailView(ft.Container):
                 self._page.update()
 
     def _is_current_mutation_context(
-        self, generation: int, target_url: str, target_course_id: int
+        self, generation: int, target_url: str, target_course_id: int | None
     ) -> bool:
         try:
-            current_course_id = self._positive_course_id(
+            valid, current_course_id = self._course_context(
                 self._current_data.get("course_id")
             )
         except AttributeError:
             return False
         return (
-            self._view_generation == generation
+            valid
+            and self._view_generation == generation
             and self._current_url == target_url
             and current_course_id == target_course_id
         )
@@ -1667,7 +1678,7 @@ class DetailView(ft.Container):
         self,
         client,
         url: str,
-        course_id: int,
+        course_id: int | None,
         intent: FileMutationIntent,
         selected_files: tuple[SelectedSubmissionFile, ...] = (),
     ) -> SubmissionMutationResult:
@@ -1681,7 +1692,7 @@ class DetailView(ft.Container):
         self,
         client,
         url: str,
-        course_id: int,
+        course_id: int | None,
         intent: FinalizeSubmissionIntent,
     ) -> SubmissionMutationResult:
         return self._submission_workflow(client).finalize_submission(
@@ -1703,7 +1714,7 @@ class DetailView(ft.Container):
         self,
         client,
         url: str,
-        course_id: int,
+        course_id: int | None,
         prefetched_status: Optional[dict],
         load_generation: int,
         view_generation: int,
@@ -1749,20 +1760,23 @@ class DetailView(ft.Container):
         load_generation: int,
         view_generation: int,
         url: str,
-        course_id: int,
+        course_id: int | None,
     ) -> bool:
         try:
-            current_course_id = int(self._current_data.get("course_id"))
-        except (TypeError, ValueError):
+            valid, current_course_id = self._course_context(
+                self._current_data.get("course_id")
+            )
+        except AttributeError:
             return False
         return (
-            self._snapshot_load_generation == load_generation
+            valid
+            and self._snapshot_load_generation == load_generation
             and self._view_generation == view_generation
             and self._current_url == url
             and current_course_id == course_id
         )
 
-    def _load_submission_snapshot(self, client, url: str, course_id: int,
+    def _load_submission_snapshot(self, client, url: str, course_id: int | None,
                                   prefetched_status: Optional[dict] = None):
         return self._submission_workflow(client).load_snapshot(
             target=self._submission_target(url, course_id),
