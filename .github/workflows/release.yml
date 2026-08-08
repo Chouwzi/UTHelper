@@ -1,56 +1,97 @@
-name: Release Android and Windows
+name: Trusted Exact Release
 
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
 
-permissions:
-  contents: write
-  pages: write
-  id-token: write
+concurrency:
+  group: trusted-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  validate:
+  validate-release-source:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      PYTHONPATH: src:extensions/flet_uth_background_sync/src:.
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      build_number: ${{ steps.version.outputs.build_number }}
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      build_number: ${{ steps.metadata.outputs.build_number }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        timeout-minutes: 5
         with:
           python-version: '3.13'
           cache: pip
-      - run: pip install -e . pytest ruff
-      - run: ruff check src tests
-      - run: python -m pytest tests -q --tb=short
-      - id: version
+      - name: Install validation dependencies
+        timeout-minutes: 10
+        run: pip install -e ".[dev,windows]"
+      - name: Run complete Python suite
+        timeout-minutes: 15
+        run: python -m pytest tests extensions/flet_uth_background_sync/tests -q --tb=short
+      - name: Validate tag ancestry and release metadata
+        id: metadata
+        timeout-minutes: 5
         shell: bash
         run: |
-          python scripts/release_metadata.py --pyproject pyproject.toml \
-            --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"
+          python scripts/release_metadata.py \
+            --pyproject pyproject.toml \
+            --tag "$GITHUB_REF_NAME" \
+            --github-output "$GITHUB_OUTPUT"
 
-  android:
-    needs: validate
+  build-signed-android:
+    needs: validate-release-source
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        timeout-minutes: 5
         with:
           python-version: '3.13'
           cache: pip
-      - uses: actions/setup-java@v4
+      - name: Set up Java
+        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07
+        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: '17'
-      - run: pip install -e ".[android-build]"
-      - name: Build, sign, and verify canonical Android APK
+      - name: Install Android build dependencies
+        timeout-minutes: 10
+        run: pip install -e ".[android-build]"
+      - name: Build and natively verify signed APK
+        timeout-minutes: 45
         shell: bash
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          BUILD_NUMBER: ${{ needs.validate.outputs.build_number }}
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -65,8 +106,10 @@ jobs:
           test -n "$ANDROID_SIGNING_CERT_SHA256"
           umask 077
           KEYSTORE="$RUNNER_TEMP/uthelper-release.jks"
+          cleanup() { rm -f -- "$KEYSTORE"; }
+          trap cleanup EXIT
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
-          trap 'rm -f "$KEYSTORE"' EXIT
+          unset ANDROID_KEYSTORE_BASE64
           export FLET_ANDROID_SIGNING_KEY_STORE="$KEYSTORE"
           export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
           export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
@@ -77,16 +120,15 @@ jobs:
           flet-android-notifications-patch --project-root build/flutter
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+
           MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
           grep -q "ScheduledNotificationReceiver" "$MANIFEST"
           grep -q "ScheduledNotificationBootReceiver" "$MANIFEST"
           grep -q "ActionBroadcastReceiver" "$MANIFEST"
           grep -q "DeadlineAlarmReceiver" "$MANIFEST"
           grep -q "RescheduleReceiver" "$MANIFEST"
-          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
-            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
-          grep -R -q "androidx.room:room-runtime:2.8.4" \
-            build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.room:room-runtime:2.8.4" build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
 
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
           if [ "${#APK_CANDIDATES[@]}" -ne 1 ]; then
@@ -99,41 +141,66 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
-          test "$($APKANALYZER manifest version-name "$APK")" = "$VERSION"
-          test "$($APKANALYZER manifest version-code "$APK")" = "$BUILD_NUMBER"
+          test "$("$APKANALYZER" manifest application-id "$APK")" = "com.uthelper.uthelper"
+          test "$("$APKANALYZER" manifest version-name "$APK")" = "$VERSION"
+          test "$("$APKANALYZER" manifest version-code "$APK")" = "$BUILD_NUMBER"
           "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
+
           mkdir -p release evidence
           FINAL_APK="release/UTHelper-$VERSION.apk"
           mv "$APK" "$FINAL_APK"
           python scripts/verify_android_release.py \
-            --apk "$FINAL_APK" --version "$VERSION" --build-number "$BUILD_NUMBER" \
+            --apk "$FINAL_APK" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
             --package-id com.uthelper.uthelper \
             --certificate-sha256 "$ANDROID_SIGNING_CERT_SHA256" \
-            --commit-sha "$GITHUB_SHA" --workflow-run-id "$GITHUB_RUN_ID" \
+            --commit-sha "$GITHUB_SHA" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
             --output "evidence/UTHelper-$VERSION.apk.verification.json"
-      - uses: actions/upload-artifact@v4
+      - name: Attest signed APK
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        timeout-minutes: 5
+        with:
+          subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk
+      - name: Upload signed Android package and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
         with:
           name: release-android
           path: |
-            release/UTHelper-${{ needs.validate.outputs.version }}.apk
-            evidence/UTHelper-${{ needs.validate.outputs.version }}.apk.verification.json
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk
+            evidence/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk.verification.json
           if-no-files-found: error
+          retention-days: 7
 
-  ios:
-    needs: validate
+  build-signed-ios:
+    needs: validate-release-source
     runs-on: macos-latest
     timeout-minutes: 90
     environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        timeout-minutes: 5
         with:
           python-version: '3.13'
           cache: pip
-      - run: pip install -e .
+      - name: Install iOS build dependencies
+        timeout-minutes: 10
+        run: pip install -e .
       - name: Import ephemeral Apple distribution credentials
         id: credentials
+        timeout-minutes: 5
         shell: bash
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
@@ -155,6 +222,7 @@ jobs:
           printf '%s' "$KEYCHAIN_PASSWORD" > "$RUNNER_TEMP/keychain-password"
           printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$P12"
           printf '%s' "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE"
+          unset APPLE_CERTIFICATE_P12_BASE64 APPLE_PROVISIONING_PROFILE_BASE64
           security list-keychains -d user | sed -E 's/^[[:space:]]*"(.*)"$/\1/' > "$RUNNER_TEMP/original-keychains.txt"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 7200 "$KEYCHAIN"
@@ -173,12 +241,13 @@ jobs:
           test ! -e "$PROFILE_DEST"
           cp "$PROFILE" "$PROFILE_DEST"
           echo "profile_uuid=$PROFILE_UUID" >> "$GITHUB_OUTPUT"
-      - name: Build and verify genuine distribution IPA
+      - name: Build and natively verify signed IPA
+        timeout-minutes: 55
         shell: bash
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          BUILD_NUMBER: ${{ needs.validate.outputs.build_number }}
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
           APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
           APPLE_SIGNING_CERT_SHA256: ${{ vars.APPLE_SIGNING_CERT_SHA256 }}
@@ -210,9 +279,10 @@ jobs:
             "$GITHUB_SHA" "$GITHUB_RUN_ID" \
             "evidence/UTHelper-$VERSION.ipa.verification.json"
       - name: Upload verified IPA to App Store Connect
+        timeout-minutes: 15
         shell: bash
         env:
-          VERSION: ${{ needs.validate.outputs.version }}
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
           APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
           APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
           APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
@@ -227,18 +297,29 @@ jobs:
           printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | base64 --decode > "$PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
           chmod 0600 "$PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
           unset APPLE_API_PRIVATE_KEY_BASE64
-          python scripts/upload_ipa_release.py --ipa "release/UTHelper-$VERSION.ipa" \
-            --api-issuer "$APPLE_API_ISSUER_ID" --api-key-id "$APPLE_API_KEY_ID" \
+          python scripts/upload_ipa_release.py \
+            --ipa "release/UTHelper-$VERSION.ipa" \
+            --api-issuer "$APPLE_API_ISSUER_ID" \
+            --api-key-id "$APPLE_API_KEY_ID" \
             --private-keys-dir "$PRIVATE_KEYS_DIR"
-      - uses: actions/upload-artifact@v4
+      - name: Attest signed IPA
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        timeout-minutes: 5
+        with:
+          subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa
+      - name: Upload signed iOS package and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 5
         with:
           name: release-ios
           path: |
-            release/UTHelper-${{ needs.validate.outputs.version }}.ipa
-            evidence/UTHelper-${{ needs.validate.outputs.version }}.ipa.verification.json
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa
+            evidence/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa.verification.json
           if-no-files-found: error
+          retention-days: 7
       - name: Remove imported Apple credentials
         if: always()
+        timeout-minutes: 5
         shell: bash
         env:
           PROFILE_UUID: ${{ steps.credentials.outputs.profile_uuid }}
@@ -261,172 +342,370 @@ jobs:
           rm -f -- "$RUNNER_TEMP/apple-distribution.p12" "$RUNNER_TEMP/apple-distribution.mobileprovision" "$RUNNER_TEMP/apple-distribution.plist" "$RUNNER_TEMP/keychain-password" "$RUNNER_TEMP/original-keychains.txt"
           if [[ -d "$RUNNER_TEMP/transporter" ]]; then rm -rf -- "$RUNNER_TEMP/transporter"; fi
 
-  windows:
-    needs: validate
+  build-signed-windows:
+    needs: validate-release-source
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         timeout-minutes: 5
-      - uses: actions/setup-python@v5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         timeout-minutes: 5
         with:
           python-version: '3.13'
           cache: pip
-      - run: pip install -e ".[windows]"
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        timeout-minutes: 5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install Windows build dependencies and WiX
         timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pip install -e ".[windows]"
+          if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed" }
+          dotnet tool install --global wix --version 7.0.0
+          if ($LASTEXITCODE -ne 0) { throw "WiX CLI installation failed" }
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Prepare reviewed Flet diagnostics template
         timeout-minutes: 5
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $support = "build\support"
-          $source = "$support\flet-build-template-0.86.5.zip"
+          $support = "build/support"
+          $source = "$support/flet-build-template-0.86.5.zip"
           $download = "$source.download"
           $expected = "8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73"
           New-Item -ItemType Directory -Path $support -Force | Out-Null
-          if (Test-Path -LiteralPath $source) {
-            $actual = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $expected) {
-              Remove-Item -LiteralPath $source -Force
-            }
+          try {
+            Invoke-WebRequest -Uri "https://github.com/flet-dev/flet/releases/download/v0.86.5/flet-build-template.zip" -OutFile $download -TimeoutSec 30
+            $actual = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "Downloaded Flet template hash changed" }
+            Move-Item -LiteralPath $download -Destination $source -Force
+          } finally {
+            Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
           }
-          if (-not (Test-Path -LiteralPath $source)) {
-            try {
-              Invoke-WebRequest -Uri "https://github.com/flet-dev/flet/releases/download/v0.86.5/flet-build-template.zip" -OutFile $download -TimeoutSec 30
-              $actual = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
-              if ($actual -ne $expected) { throw "Downloaded Flet template hash changed" }
-              Move-Item -LiteralPath $download -Destination $source -Force
-            } finally {
-              Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
-            }
-          }
-          python scripts/prepare_flet_diagnostics_template.py --source $source --output "$support\flet-build-template-0.86.5-diagnostics.zip"
+          python scripts/prepare_flet_diagnostics_template.py --source build/support/flet-build-template-0.86.5.zip --output build/support/flet-build-template-0.86.5-diagnostics.zip
           if ($LASTEXITCODE -ne 0) { throw "Flet diagnostics template preparation failed" }
-      - name: Generate public diagnostics config and build Windows bundle
-        timeout-minutes: 30
+      - name: Build and smoke-test the exact Windows application bundle
+        timeout-minutes: 35
         shell: pwsh
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
         run: |
+          $ErrorActionPreference = "Stop"
           python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
-          flet build windows --template build\support\flet-build-template-0.86.5-diagnostics.zip --output dist\flet-build --verbose
+          flet build windows --build-version "$env:VERSION" --build-number "$env:BUILD_NUMBER" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
           if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed" }
-          python scripts/verify_flutter_diagnostics.py --template build\support\flet-build-template-0.86.5-diagnostics.zip --project-root build\flutter
+          python scripts/verify_flutter_diagnostics.py --template build/support/flet-build-template-0.86.5-diagnostics.zip --project-root build/flutter
           if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
-      - name: Prepare Flet Windows bundle
-        timeout-minutes: 5
-        run: python scripts\prepare_windows_bundle.py dist\flet-build
-      - name: Verify Flet Windows bundle
-        timeout-minutes: 5
-        run: python scripts\verify_windows_bundle.py dist\flet-build
-      - name: Decode Windows signing certificate
+          python scripts/prepare_windows_bundle.py build/windows
+          if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
+          python scripts/verify_windows_bundle.py build/windows
+          if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test_windows_bundle_e2e.ps1 -BundleDir build/windows -ObservationSeconds 8
+          if ($LASTEXITCODE -ne 0) { throw "Windows bundle E2E failed" }
+      - name: Decode and validate Windows signing certificate
         timeout-minutes: 5
         shell: pwsh
         env:
-          PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+          WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
         run: |
-          if (-not $env:PFX_BASE64) { throw "WINDOWS_PFX_BASE64 is required" }
-          [IO.File]::WriteAllBytes("release.pfx", [Convert]::FromBase64String($env:PFX_BASE64))
-      - name: Package signed MSIX and AppInstaller
-        timeout-minutes: 15
-        shell: pwsh
-        env:
-          PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
-          MSIX_PUBLISHER: ${{ secrets.WINDOWS_MSIX_PUBLISHER }}
-          EXPECTED_CERT_SHA256: ${{ secrets.WINDOWS_SIGNING_CERT_SHA256 }}
-        run: |
-          if (-not $env:MSIX_PUBLISHER -or -not $env:EXPECTED_CERT_SHA256) {
-            throw "WINDOWS_MSIX_PUBLISHER and WINDOWS_SIGNING_CERT_SHA256 are required"
+          $ErrorActionPreference = "Stop"
+          foreach ($value in @($env:WINDOWS_PFX_BASE64, $env:WINDOWS_PFX_PASSWORD, $env:WINDOWS_SIGNING_CERT_SHA256, $env:WINDOWS_SIGNER_SUBJECT)) {
+            if (-not $value) { throw "All Windows signing inputs are required" }
           }
+          $pfx = Join-Path $env:RUNNER_TEMP "uthelper-release.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
+          Remove-Item Env:WINDOWS_PFX_BASE64
           $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            (Resolve-Path release.pfx).Path,
-            $env:PFX_PASSWORD,
-            $flags
-          )
-          $actualThumbprint = $certificate.GetCertHashString(
-            [Security.Cryptography.HashAlgorithmName]::SHA256
-          ).Replace(":", "").ToUpperInvariant()
-          $expectedThumbprint = $env:EXPECTED_CERT_SHA256.Replace(":", "").Replace(" ", "").ToUpperInvariant()
-          if ($actualThumbprint -ne $expectedThumbprint) {
-            throw "Windows signing certificate fingerprint does not match the pinned release certificate"
+          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:WINDOWS_PFX_PASSWORD, $flags)
+          $actual = $certificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).Replace(":", "").ToUpperInvariant()
+          $expected = $env:WINDOWS_SIGNING_CERT_SHA256.Replace(":", "").Replace(" ", "").ToUpperInvariant()
+          if ($actual -ne $expected -or $certificate.Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
+            throw "Windows signing certificate identity does not match protected variables"
           }
-          $version = "${{ needs.validate.outputs.version }}"
-          $version4 = "$version.0"
-          .\scripts\package_msix.ps1 -BundleDir dist\flet-build -Version $version4 `
-            -Publisher $env:MSIX_PUBLISHER -Output "UTHelper-$version-x64.msix" `
-            -CertificatePath release.pfx -CertificatePassword $env:PFX_PASSWORD
-          .\scripts\generate_appinstaller.ps1 -Version $version `
-            -Publisher $env:MSIX_PUBLISHER -Repository "${{ github.repository }}" `
-            -Output UTHelper.appinstaller
-
-          [xml]$packageManifest = Get-Content -Raw build\msix-stage\AppxManifest.xml
-          $identity = $packageManifest.Package.Identity
-          if ($identity.Name -ne "com.uthelper.UTHelper" -or
-              $identity.Publisher -ne $env:MSIX_PUBLISHER -or
-              $identity.Version -ne $version4 -or
-              $identity.ProcessorArchitecture -ne "x64") {
-            throw "Packaged MSIX identity does not match release metadata"
+          "WINDOWS_SIGNING_PFX_PATH=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build, sign, and natively verify MSI and Burn EXE
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+          WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          WIX_EULA_ACCEPTED: ${{ vars.WIX_EULA_ACCEPTED }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:WIX_EULA_ACCEPTED -ne "wix7") { throw "Owner-confirmed WIX_EULA_ACCEPTED=wix7 is required" }
+          if (-not $env:WINDOWS_TIMESTAMP_URL) { throw "WINDOWS_TIMESTAMP_URL is required" }
+          ./scripts/build_windows_release.ps1 -BundleDir build/windows -Version "$env:VERSION" -OutputDir release
+          foreach ($path in @("release/UTHelper-$env:VERSION.msi", "release/UTHelper-Setup-$env:VERSION.exe")) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Release Authenticode signature is not trusted: $path"
+            }
           }
-          [xml]$appInstaller = Get-Content -Raw UTHelper.appinstaller
-          if ($appInstaller.AppInstaller.MainPackage.Version -ne $version4 -or
-              $appInstaller.AppInstaller.MainPackage.Publisher -ne $env:MSIX_PUBLISHER) {
-            throw "AppInstaller metadata does not match the signed MSIX"
-          }
-          $signature = Get-AuthenticodeSignature "UTHelper-$version-x64.msix"
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "MSIX Authenticode signature is not trusted: $($signature.StatusMessage)"
-          }
-      - uses: actions/upload-artifact@v4
+          New-Item -ItemType Directory -Path evidence -Force | Out-Null
+          ./scripts/verify_windows_release.ps1 `
+            -MsiPath "release/UTHelper-$env:VERSION.msi" `
+            -ExePath "release/UTHelper-Setup-$env:VERSION.exe" `
+            -Version "$env:VERSION" `
+            -ExpectedSubject "$env:WINDOWS_SIGNER_SUBJECT" `
+            -ExpectedCertificateSha256 "$env:WINDOWS_SIGNING_CERT_SHA256" `
+            -CommitSha "$env:GITHUB_SHA" `
+            -WorkflowRunId "$env:GITHUB_RUN_ID" `
+            -EvidenceDir evidence
+      - name: Attest signed Windows installers
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        timeout-minutes: 5
+        with:
+          subject-path: |
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.msi
+            release/UTHelper-Setup-${{ needs['validate-release-source'].outputs.version }}.exe
+      - name: Upload signed Windows packages and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         timeout-minutes: 5
         with:
           name: release-windows
           path: |
-            UTHelper-${{ needs.validate.outputs.version }}-x64.msix
-            UTHelper.appinstaller
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.msi
+            release/UTHelper-Setup-${{ needs['validate-release-source'].outputs.version }}.exe
+            evidence/UTHelper-${{ needs['validate-release-source'].outputs.version }}.msi.verification.json
+            evidence/UTHelper-Setup-${{ needs['validate-release-source'].outputs.version }}.exe.verification.json
           if-no-files-found: error
-
-  publish:
-    needs: [validate, android, ios, windows]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: release
-          merge-multiple: true
-      - name: Generate verified release manifest
+          retention-days: 7
+      - name: Remove Windows signing certificate
+        if: always()
+        timeout-minutes: 5
+        shell: pwsh
         run: |
+          $expected = Join-Path $env:RUNNER_TEMP "uthelper-release.pfx"
+          if ($env:WINDOWS_SIGNING_PFX_PATH -and $env:WINDOWS_SIGNING_PFX_PATH -ne $expected) {
+            throw "Refusing to remove an unexpected signing path"
+          }
+          Remove-Item -LiteralPath $expected -Force -ErrorAction SilentlyContinue
+
+  publish-exact-release:
+    needs: [validate-release-source, build-signed-android, build-signed-ios, build-signed-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        timeout-minutes: 5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install inventory dependencies
+        timeout-minutes: 5
+        run: pip install -e .
+      - name: Download Android release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 5
+        with:
+          name: release-android
+          path: incoming/android
+      - name: Download iOS release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 5
+        with:
+          name: release-ios
+          path: incoming/ios
+      - name: Download Windows release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 5
+        with:
+          name: release-windows
+          path: incoming/windows
+      - name: Assemble and verify exact signed inventory
+        timeout-minutes: 5
+        shell: bash
+        env:
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
+          IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p release evidence
+          cp incoming/android/release/*.apk release/
+          cp incoming/android/evidence/*.json evidence/
+          cp incoming/ios/release/*.ipa release/
+          cp incoming/ios/evidence/*.json evidence/
+          cp incoming/windows/release/*.msi incoming/windows/release/*.exe release/
+          cp incoming/windows/evidence/*.json evidence/
+          INVENTORY=(python scripts/release_inventory.py --release-dir release --evidence-dir evidence --version "$VERSION" --repository "$GITHUB_REPOSITORY")
+          "${INVENTORY[@]}"
           python scripts/generate_release_manifest.py \
-            --version "${{ needs.validate.outputs.version }}" \
-            --repository "${{ github.repository }}" \
+            --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY" \
             --release-dir release \
             --evidence-dir evidence \
-            --ios-install-url "${{ vars.IOS_DISTRIBUTION_URL }}" \
-            --minimum-supported-version "2.1.0" \
+            --ios-install-url "$IOS_DISTRIBUTION_URL" \
+            --minimum-supported-version "$VERSION" \
             --output release/release-manifest.json
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+          "${INVENTORY[@]}" --manifest release/release-manifest.json
+          "${INVENTORY[@]}" --manifest release/release-manifest.json --write-checksums release/SHA256SUMS
+          "${INVENTORY[@]}" --manifest release/release-manifest.json --checksums release/SHA256SUMS
+      - name: Attest exact public inventory
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        timeout-minutes: 5
         with:
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: release/*
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v4
-        with:
-          path: release
+          subject-path: |
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk
+            release/UTHelper-Setup-${{ needs['validate-release-source'].outputs.version }}.exe
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.msi
+            release/release-manifest.json
+            release/SHA256SUMS
+      - name: Verify attestations and atomically publish six assets
+        timeout-minutes: 10
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs['validate-release-source'].outputs.version }}
+          TAG: ${{ needs['validate-release-source'].outputs.tag }}
+        run: |
+          set -euo pipefail
+          ASSETS=(
+            "release/UTHelper-$VERSION.ipa"
+            "release/UTHelper-$VERSION.apk"
+            "release/UTHelper-Setup-$VERSION.exe"
+            "release/UTHelper-$VERSION.msi"
+            "release/release-manifest.json"
+            "release/SHA256SUMS"
+          )
+          for asset in "${ASSETS[@]}"; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
+          done
 
-  deploy-pages:
-    needs: publish
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy AppInstaller and release metadata
-        id: deployment
-        uses: actions/deploy-pages@v4
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > existing-release.json 2> existing-release.err; then
+            echo "A release already exists for $TAG; refusing to mutate it"
+            exit 1
+          fi
+          if ! grep -q "HTTP 404" existing-release.err; then
+            echo "Release preflight failed for a reason other than exact HTTP 404"
+            sed -n '1,5p' existing-release.err
+            exit 1
+          fi
+
+          CREATED_RELEASE_ID=""
+          cleanup_draft() {
+            status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ] && [[ "$CREATED_RELEASE_ID" =~ ^[0-9]+$ ]]; then
+              if record=$(gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" 2>/dev/null); then
+                if printf '%s' "$record" | jq -e --arg tag "$TAG" --arg id "$CREATED_RELEASE_ID" 'select(.id == ($id | tonumber) and .draft == true and .tag_name == $tag)' >/dev/null; then
+                  gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" || echo "Draft cleanup failed; manual audit required"
+                else
+                  echo "Refusing draft cleanup because release identity/state changed"
+                fi
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_draft EXIT
+
+          gh release create "$TAG" --draft --verify-tag --title "UTHelper $VERSION" --generate-notes
+          CREATED_RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.id')
+          [[ "$CREATED_RELEASE_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" | \
+            jq -e --arg tag "$TAG" 'select(.draft == true and .tag_name == $tag)' >/dev/null
+
+          gh release upload "$TAG" \
+            "release/UTHelper-$VERSION.ipa" \
+            "release/UTHelper-$VERSION.apk" \
+            "release/UTHelper-Setup-$VERSION.exe" \
+            "release/UTHelper-$VERSION.msi" \
+            "release/release-manifest.json" \
+            "release/SHA256SUMS"
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" > remote-release.json
+          mkdir -p remote-audit
+          python - "$VERSION" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          version = sys.argv[1]
+          expected = {
+              f"UTHelper-{version}.ipa",
+              f"UTHelper-{version}.apk",
+              f"UTHelper-Setup-{version}.exe",
+              f"UTHelper-{version}.msi",
+              "release-manifest.json",
+              "SHA256SUMS",
+          }
+          record = json.loads(Path("remote-release.json").read_text(encoding="utf-8"))
+          assets = record.get("assets", [])
+          names = {asset.get("name") for asset in assets}
+          if names != expected or len(assets) != 6:
+              raise SystemExit(f"remote draft asset names mismatch: {sorted(names)}")
+          lines = []
+          for asset in sorted(assets, key=lambda item: item["name"]):
+              path = Path("release") / asset["name"]
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              if asset.get("size") != path.stat().st_size:
+                  raise SystemExit(f"remote size mismatch: {asset['name']}")
+              if asset.get("digest") != f"sha256:{digest}":
+                  raise SystemExit(f"remote API digest mismatch: {asset['name']}")
+              lines.append(f"{asset['id']}\t{asset['name']}")
+          Path("remote-assets.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+          while IFS=$'\t' read -r asset_id asset_name; do
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            [[ "$asset_name" != */* ]]
+            gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "remote-audit/$asset_name"
+          done < remote-assets.tsv
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          local = Path("release")
+          remote = Path("remote-audit")
+          for path in sorted(local.iterdir()):
+              peer = remote / path.name
+              if not peer.is_file():
+                  raise SystemExit(f"remote download missing: {path.name}")
+              if hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(peer.read_bytes()).digest():
+                  raise SystemExit(f"remote digest mismatch: {path.name}")
+          sums = (local / "SHA256SUMS").read_text(encoding="utf-8")
+          if not sums.endswith("\n") or "\r" in sums or len(sums.splitlines()) != 5:
+              raise SystemExit("SHA256SUMS is not the exact deterministic five-entry inventory")
+          PY
+
+          gh release edit "$TAG" --draft=false --latest
+          CREATED_RELEASE_ID=""

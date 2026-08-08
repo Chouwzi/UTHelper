@@ -1048,3 +1048,26 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   1 platform-mode test skipped on Windows**; Bash syntax, Ruff, YAML, whitespace,
   and independent re-review pass. The full repository suite passes **1173 tests
   with 25 skipped in 34.18 seconds**.
+
+## Atomic exact release transaction (2026-08-08)
+
+- The tag workflow now has five stable job IDs: source validation, three native
+  signed builds, and one final exact publication job. Every third-party action
+  is full-SHA pinned, permissions are job-local, signing jobs use only the
+  protected `release` environment, and every job/step has a finite timeout.
+- A tag must equal the canonical project version and be contained in `main`.
+  Validation runs the complete Python and extension suite before any signing
+  job can begin. Android deliberately retains its two-pass patched Flet build,
+  so public diagnostics config is regenerated immediately before both passes.
+- Each native job verifies package identity/signature and emits SHA-bound
+  evidence before attesting and uploading a named current-run artifact. The
+  final job reconstructs exactly one IPA, APK, MSI, and Burn EXE, creates the
+  schema-2 manifest and deterministic five-entry `SHA256SUMS`, then attests and
+  verifies all six public files against the exact release workflow and source.
+- Publication starts only after all local gates pass. It requires an exact 404
+  preflight, creates an empty draft, records its numeric ID, uploads six explicit
+  names, validates the remote name/size/API-digest set, downloads every asset
+  again, and compares bytes before publishing. Failure cleanup can delete only
+  that same numeric record while it remains a draft with the same tag.
+- Task 10 focused policy/metadata/inventory/manifest verification passes **80
+  tests**; Ruff, YAML loading, `git diff --check`, and actionlint 1.7.12 pass.

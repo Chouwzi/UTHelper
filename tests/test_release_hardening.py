@@ -450,7 +450,9 @@ def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_templat
     assert "-TimeoutSec 30" in workflow
     assert "timeout-minutes: 5" in workflow
     assert "timeout-minutes: 30" in workflow
-    windows_job = workflow.split("  windows:\n", 1)[1].split("\n  publish:\n", 1)[0]
+    windows_job = workflow.split("  build-signed-windows:\n", 1)[1].split(
+        "\n  publish-exact-release:\n", 1
+    )[0]
     windows_steps = [
         block
         for block in re.split(r"(?m)(?=^      - )", windows_job)
@@ -468,3 +470,141 @@ def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_templat
         assert prepared_name not in content
         assert patcher not in content
         assert verifier not in content
+
+
+def test_release_workflow_has_native_signed_jobs_and_one_final_publication_job():
+    workflow = _read(".github/workflows/release.yml")
+    for job in (
+        "validate-release-source:",
+        "build-signed-android:",
+        "build-signed-ios:",
+        "build-signed-windows:",
+        "publish-exact-release:",
+    ):
+        assert job in workflow
+    assert "environment: release" in workflow
+    assert "gh attestation verify" in workflow
+    assert "release_inventory.py" in workflow
+    assert "--draft" in workflow
+    assert 'gh release edit "$TAG" --draft=false --latest' in workflow
+
+
+def test_release_actions_are_full_sha_pinned_and_permissions_are_job_local():
+    workflow = _read(".github/workflows/release.yml")
+    for action in (
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+        "actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07",
+        "actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
+    ):
+        assert action in workflow
+    assert "actions/checkout@v4" not in workflow
+    assert "softprops/action-gh-release" not in workflow
+    assert "\npermissions:\n  contents: write" not in workflow
+    assert workflow.count("    permissions:\n") == 5
+
+
+def test_release_final_job_requires_all_builds_and_exact_inventory():
+    workflow = _read(".github/workflows/release.yml")
+    assert (
+        "needs: [validate-release-source, build-signed-android, "
+        "build-signed-ios, build-signed-windows]"
+    ) in workflow
+    for asset in (
+        "UTHelper-$VERSION.ipa",
+        "UTHelper-$VERSION.apk",
+        "UTHelper-Setup-$VERSION.exe",
+        "UTHelper-$VERSION.msi",
+        "release-manifest.json",
+        "SHA256SUMS",
+    ):
+        assert asset in workflow
+
+
+def test_publication_creates_empty_draft_records_id_then_uploads_six_assets():
+    workflow = _read(".github/workflows/release.yml")
+    create = 'gh release create "$TAG" --draft --verify-tag'
+    lookup = (
+        'CREATED_RELEASE_ID=$(gh api '
+        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG"'
+    )
+    upload = 'gh release upload "$TAG"'
+    publish = 'gh release edit "$TAG" --draft=false --latest'
+    assert (
+        workflow.index(create)
+        < workflow.index(lookup)
+        < workflow.index(upload)
+        < workflow.index(publish)
+    )
+    assert "select(.draft == true and .tag_name == $tag)" in workflow
+    assert "releases/$CREATED_RELEASE_ID" in workflow
+    assert "gh release delete" not in workflow
+
+
+def test_windows_release_builds_and_verifies_bundle_before_wix():
+    workflow = _read(".github/workflows/release.yml")
+    commands = (
+        "prepare_flet_diagnostics_template.py",
+        "flet build windows",
+        "verify_flutter_diagnostics.py",
+        "prepare_windows_bundle.py build/windows",
+        "verify_windows_bundle.py build/windows",
+        "test_windows_bundle_e2e.ps1 -BundleDir build/windows -ObservationSeconds 8",
+        "build_windows_release.ps1 -BundleDir build/windows",
+    )
+    positions = [workflow.index(command) for command in commands]
+    assert positions == sorted(positions)
+    assert "--template build/support/flet-build-template-0.86.5-diagnostics.zip" in workflow
+    assert "test_windows_single_instance_e2e.ps1" in _read(
+        "scripts/test_windows_bundle_e2e.ps1"
+    )
+    assert "single_instance_fail_open" in _read(
+        "scripts/test_windows_bundle_e2e.ps1"
+    )
+    assert "build/flutter/lib/main.dart" not in workflow
+
+
+def test_release_inputs_use_secrets_only_for_private_key_material():
+    workflow = _read(".github/workflows/release.yml")
+    for name in (
+        "ANDROID_KEYSTORE_BASE64",
+        "ANDROID_KEYSTORE_PASSWORD",
+        "ANDROID_KEY_PASSWORD",
+        "APPLE_CERTIFICATE_P12_BASE64",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "APPLE_PROVISIONING_PROFILE_BASE64",
+        "APPLE_API_PRIVATE_KEY_BASE64",
+        "WINDOWS_PFX_BASE64",
+        "WINDOWS_PFX_PASSWORD",
+    ):
+        assert f"{name}: ${{{{ secrets.{name} }}}}" in workflow
+    for name in (
+        "ANDROID_KEY_ALIAS",
+        "ANDROID_SIGNING_CERT_SHA256",
+        "APPLE_TEAM_ID",
+        "APPLE_SIGNING_IDENTITY",
+        "APPLE_SIGNING_CERT_SHA256",
+        "APPLE_API_ISSUER_ID",
+        "APPLE_API_KEY_ID",
+        "IOS_DISTRIBUTION_URL",
+        "WINDOWS_SIGNING_CERT_SHA256",
+        "WINDOWS_SIGNER_SUBJECT",
+        "WINDOWS_TIMESTAMP_URL",
+        "WIX_EULA_ACCEPTED",
+        "SENTRY_DSN",
+    ):
+        assert f"{name}: ${{{{ vars.{name} }}}}" in workflow
+        assert f"secrets.{name}" not in workflow
+
+
+def test_validate_job_runs_full_suite_with_workspace_import_paths():
+    workflow = _read(".github/workflows/release.yml")
+    assert "PYTHONPATH: src:extensions/flet_uth_background_sync/src:." in workflow
+    assert (
+        "python -m pytest tests extensions/flet_uth_background_sync/tests "
+        "-q --tb=short"
+    ) in workflow
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
