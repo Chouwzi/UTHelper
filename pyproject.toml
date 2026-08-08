@@ -69,6 +69,7 @@ dependencies = [
 ]
 
 [tool.flet.android]
+bundle_id = "com.uthelper.uthelper"
 adaptive_icon_background = "#0F172A"
 dependencies = [
     "flet-android-notifications==0.10.0",

@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,16 +27,8 @@ jobs:
       - id: version
         shell: bash
         run: |
-          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release version must be numeric X.Y.Z, got $VERSION"
-            exit 1
-          fi
-          if [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match pyproject version $VERSION"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          python scripts/release_metadata.py --pyproject pyproject.toml \
+            --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
 
   android:
     needs: validate
@@ -52,16 +45,38 @@ jobs:
           distribution: temurin
           java-version: '17'
       - run: pip install -e ".[android-build]"
-      - name: Build and patch Android notifications
+      - name: Build, sign, and verify canonical Android APK
         shell: bash
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_NUMBER: ${{ needs.validate.outputs.build_number }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_SIGNING_CERT_SHA256"
+          umask 077
+          KEYSTORE="$RUNNER_TEMP/uthelper-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          trap 'rm -f "$KEYSTORE"' EXIT
+          export FLET_ANDROID_SIGNING_KEY_STORE="$KEYSTORE"
+          export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+          export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+          export FLET_ANDROID_SIGNING_KEY_ALIAS="$ANDROID_KEY_ALIAS"
+
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          yes | flet build apk --verbose || test -d build/flutter
+          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          yes | flet build apk --verbose
+          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
           MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
           grep -q "ScheduledNotificationReceiver" "$MANIFEST"
           grep -q "ScheduledNotificationBootReceiver" "$MANIFEST"
@@ -72,17 +87,7 @@ jobs:
             build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
           grep -R -q "androidx.room:room-runtime:2.8.4" \
             build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
-      - name: Sign release APK
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_SIGNING_CERT_SHA256 }}
-        run: |
-          test -n "$KEYSTORE_BASE64" && test -n "$KEY_ALIAS" && test -n "$EXPECTED_CERT_SHA256"
-          echo "$KEYSTORE_BASE64" | base64 --decode > release.jks
+
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
           if [ "${#APK_CANDIDATES[@]}" -ne 1 ]; then
             echo "Expected exactly one Flet release APK in build/apk, found ${#APK_CANDIDATES[@]}"
@@ -91,29 +96,28 @@ jobs:
           fi
           APK="${APK_CANDIDATES[0]}"
           BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
-          "$BUILD_TOOLS/zipalign" -f 4 "$APK" aligned.apk
-          "$BUILD_TOOLS/apksigner" sign --ks release.jks \
-            --ks-pass "pass:$KEYSTORE_PASSWORD" --ks-key-alias "$KEY_ALIAS" \
-            --key-pass "pass:$KEY_PASSWORD" aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs aligned.apk | tee apk-signature.txt
-          ACTUAL_CERT_SHA256=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apk-signature.txt | head -1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
-          EXPECTED_CERT_SHA256=$(echo "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
-          test -n "$ACTUAL_CERT_SHA256" && test "$ACTUAL_CERT_SHA256" = "$EXPECTED_CERT_SHA256"
-
-          FINAL_APK="UTHelper-${{ needs.validate.outputs.version }}.apk"
-          mv aligned.apk "$FINAL_APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          test "$($APKANALYZER manifest application-id "$FINAL_APK")" = "com.uthelper.UTHelper"
-          test "$($APKANALYZER manifest version-name "$FINAL_APK")" = "${{ needs.validate.outputs.version }}"
-          "$APKANALYZER" manifest print "$FINAL_APK" > final-android-manifest.xml
-          grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
-          grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml
-          grep -q "ActionBroadcastReceiver" final-android-manifest.xml
+          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
+          test "$($APKANALYZER manifest version-name "$APK")" = "$VERSION"
+          test "$($APKANALYZER manifest version-code "$APK")" = "$BUILD_NUMBER"
+          "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
+          mkdir -p release evidence
+          FINAL_APK="release/UTHelper-$VERSION.apk"
+          mv "$APK" "$FINAL_APK"
+          python scripts/verify_android_release.py \
+            --apk "$FINAL_APK" --version "$VERSION" --build-number "$BUILD_NUMBER" \
+            --package-id com.uthelper.uthelper \
+            --certificate-sha256 "$ANDROID_SIGNING_CERT_SHA256" \
+            --commit-sha "$GITHUB_SHA" --workflow-run-id "$GITHUB_RUN_ID" \
+            --output "evidence/UTHelper-$VERSION.apk.verification.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-android
-          path: UTHelper-${{ needs.validate.outputs.version }}.apk
+          path: |
+            release/UTHelper-${{ needs.validate.outputs.version }}.apk
+            evidence/UTHelper-${{ needs.validate.outputs.version }}.apk.verification.json
           if-no-files-found: error
 
   windows:

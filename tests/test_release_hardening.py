@@ -120,6 +120,34 @@ def test_android_build_workflows_install_the_notification_patcher():
     assert 'application-id "$APK")" = "com.uthelper.uthelper"' in build_workflow
 
 
+def test_android_release_uses_canonical_version_code_and_signing_inputs():
+    workflow = _read(".github/workflows/release.yml")
+    config = tomllib.loads(_read("pyproject.toml"))
+
+    assert '--build-version "$VERSION" --build-number "$BUILD_NUMBER"' in workflow
+    assert "ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}" in workflow
+    assert "ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" in workflow
+    assert "ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}" in workflow
+    assert "ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}" in workflow
+    assert "ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}" in workflow
+    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in workflow
+    assert 'version-code "$APK")" = "$BUILD_NUMBER"' in workflow
+    assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
+    assert "yes | flet build apk" not in workflow
+    assert "--yes --verbose" in workflow
+
+
+def test_android_pr_artifact_cannot_be_confused_with_release():
+    workflow = _read(".github/workflows/build-android.yml")
+
+    assert "unsigned-diagnostic" in workflow
+    assert "UTHelper-${{ github.sha }}-unsigned-diagnostic.apk" in workflow
+    assert "UTHelper-${{ needs.validate.outputs.version }}.apk" not in workflow
+    assert "yes | flet build apk" not in workflow
+    assert "UNSIGNED_DIAGNOSTIC_ONLY.txt" in workflow
+    assert 'if "$APKSIGNER" verify "$DIAGNOSTIC_APK"' in workflow
+
+
 def test_ios_build_bundles_the_native_background_sync_plugin():
     config = tomllib.loads(_read("pyproject.toml"))
     ios_config = config["tool"]["flet"]["ios"]

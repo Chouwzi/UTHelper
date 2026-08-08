@@ -996,3 +996,29 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   workspace has neither the protected signing certificate nor a signed baseline.
   Task 7 focused tests pass **25/25**; the full suite passes **1157 tests with 24
   skipped in 40.29 seconds**, and focused Ruff plus PowerShell parsing pass.
+
+## Monotonic signed Android release package (2026-08-08)
+
+- Android now has the explicit lowercase package identity
+  `com.uthelper.uthelper`. Release `versionCode` is not an independent input: the
+  native verifier derives `major*1_000_000 + minor*1_000 + patch` again and
+  rejects a caller-supplied mismatch before invoking Android SDK tooling.
+- The protected release workflow decodes one backed-up keystore only beneath
+  `RUNNER_TEMP`, passes passwords solely through Flet signing environment
+  variables, uses the public alias/fingerprint as GitHub variables, and runs the
+  notification-patcher two-pass build with exact versionName/versionCode.
+  `--yes` replaces an unbounded stdin pipe.
+- Verification invokes the newest numeric Android build-tools `apksigner` and
+  SDK `apkanalyzer` with 60-second deadlines. It requires canonical ZIP magic,
+  exactly one pinned signer, package/version/build identity, and parses manifest
+  XML so all five notification components must be exact `<receiver
+  android:name=...>` entries. Evidence SHA-256 is streamed and atomically
+  written with the expanded Android native-check set consumed by the exact
+  release inventory.
+- Unprivileged Android CI cannot emit a release-looking file. It renames output
+  to a commit-bound `unsigned-diagnostic` APK, appends a unique diagnostic marker
+  to invalidate Flet's debug signature, and requires `apksigner verify` to fail
+  before upload. It never receives release signing inputs or attestation.
+- Task 8 focused verification passes **60 tests**; the full suite passes **1166
+  tests with 24 skipped in 30.72 seconds**. Focused Ruff, YAML parsing,
+  whitespace checks, and independent re-review pass.

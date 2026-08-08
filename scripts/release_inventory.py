@@ -60,7 +60,16 @@ _EXPECTED = {
         "android",
         "com.uthelper.uthelper",
         "universal",
-        frozenset({"apk_zip", "package_identity", "signer_certificate", "version_code"}),
+        frozenset(
+            {
+                "apk_signature",
+                "notification_receivers",
+                "package_id",
+                "sha256",
+                "version_code",
+                "version_name",
+            }
+        ),
     ),
     ".exe": (
         "windows",

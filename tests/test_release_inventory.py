@@ -30,7 +30,14 @@ PRODUCT = {".ipa": "com.uthelper.UTHelper", ".apk": "com.uthelper.uthelper", ".e
 ARCH = {".ipa": "arm64", ".apk": "universal", ".exe": "x64", ".msi": "x64"}
 CHECKS = {
     ".ipa": ["bundle_identity", "code_signature", "ipa_zip"],
-    ".apk": ["apk_zip", "package_identity", "signer_certificate", "version_code"],
+    ".apk": [
+        "apk_signature",
+        "notification_receivers",
+        "package_id",
+        "sha256",
+        "version_code",
+        "version_name",
+    ],
     ".exe": ["authenticode", "burn_payload", "pe_header", "product_version", "timestamp"],
     ".msi": ["authenticode", "msi_ole", "product_version", "template", "timestamp", "upgrade_code"],
 }

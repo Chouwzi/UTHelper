@@ -6,13 +6,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: 'Build type'
-        required: false
-        default: 'apk'
-        type: choice
-        options: [apk, aab]
 
 concurrency:
   group: build-android-${{ github.ref }}
@@ -49,8 +42,8 @@ jobs:
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
         run: |
-          BUILD_TYPE=${{ github.event.inputs.build_type || 'apk' }}
-          echo "Building $BUILD_TYPE..."
+          PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
+          BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
 
           # Install Gradle init script for core library desugaring
           # This applies to ALL Android subprojects automatically,
@@ -80,10 +73,10 @@ jobs:
           # First pass materializes Flet's Flutter project. The notification
           # extension patcher then registers AlarmManager receivers/services.
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          yes | flet build $BUILD_TYPE --verbose || test -d build/flutter
+          flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          yes | flet build $BUILD_TYPE --verbose
+          flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 
       - name: 🔎 Verify notification manifest wiring
         run: |
@@ -103,23 +96,29 @@ jobs:
             build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
           grep -R -q "androidx.room:room-runtime:2.8.4" \
             build/flutter/flutter-packages/flet_uth_background_sync/android/build.gradle
+          DIAGNOSTIC_APK="UTHelper-${{ github.sha }}-unsigned-diagnostic.apk"
+          mv "$APK" "$DIAGNOSTIC_APK"
+          python - "$DIAGNOSTIC_APK" <<'PY'
+          import sys
+          import zipfile
+          with zipfile.ZipFile(sys.argv[1], "a") as archive:
+              archive.writestr(
+                  "UNSIGNED_DIAGNOSTIC_ONLY.txt",
+                  "Signature intentionally invalidated; never distribute as a release.",
+              )
+          PY
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          test -x "$APKSIGNER"
+          if "$APKSIGNER" verify "$DIAGNOSTIC_APK"; then
+            echo "Diagnostic APK unexpectedly retained a valid install signature"
+            exit 1
+          fi
 
-      - name: 📋 List build outputs
-        if: always()
-        run: |
-          echo "=== APK ==="
-          find build/ -name "*.apk" -exec ls -lh {} \; 2>/dev/null
-          echo "=== AAB ==="
-          find build/ -name "*.aab" -exec ls -lh {} \; 2>/dev/null
-
-      - name: 📤 Upload APK
+      - name: 📤 Upload unsigned diagnostic APK
         uses: actions/upload-artifact@v4
         with:
-          name: UTHelper-Android-${{ github.sha }}
-          path: |
-            build/apk/*.apk
-            build/aab/*.aab
-            build/flutter/build/app/outputs/**/*.apk
-            build/flutter/build/app/outputs/**/*.aab
+          name: android-unsigned-diagnostic-${{ github.sha }}
+          path: UTHelper-${{ github.sha }}-unsigned-diagnostic.apk
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
