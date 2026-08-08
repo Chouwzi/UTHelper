@@ -6,13 +6,15 @@ import asyncio
 from collections.abc import Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import faulthandler
 import json
+import logging
 import math
 import os
 from pathlib import Path
 import platform
+import re
 import secrets
 import stat
 import sys
@@ -20,9 +22,16 @@ import threading
 from typing import Any, Protocol, TextIO
 
 from diagnostics.models import AppPhase, CrashConsent, DiagnosticContext
-from diagnostics.redaction import build_report
+from diagnostics.redaction import build_report, sanitize_log_text
 from diagnostics.release_config import load_runtime_public_dsn
-from diagnostics.spool import DiagnosticSpool
+from diagnostics.spool import (
+    DiagnosticSpool,
+    _delete_exact_regular,
+    _FileIdentity,
+    _open_binary_no_follow,
+    _path_identity,
+    MAX_AGE,
+)
 from diagnostics.transport import DiagnosticDeliveryWorker
 from diagnostics.windows_evidence import (
     RUN_STATE_SCHEMA_VERSION,
@@ -36,6 +45,10 @@ from diagnostics.windows_evidence import (
 
 MAX_RUN_STATE_BYTES = 4096
 MAX_FAULT_LOG_BYTES = 256 * 1024
+MAX_FLUTTER_BRIDGE_BYTES = 64 * 1024
+MAX_FLUTTER_RECORD_BYTES = 4096
+MAX_FLUTTER_RECORDS = 64
+FLUTTER_FUTURE_TOLERANCE = timedelta(minutes=10)
 HEARTBEAT_INTERVAL_SECONDS = 60.0
 HEARTBEAT_JOIN_SECONDS = 0.5
 
@@ -50,6 +63,15 @@ _RUN_STATE_KEYS = frozenset(
         "started_at",
     )
 )
+
+_FLUTTER_RECORD_KEYS = frozenset(
+    ("occurred_at", "phase", "runtime_type", "symbols")
+)
+_FLUTTER_SYMBOL = re.compile(r"^[A-Za-z_][A-Za-z0-9_.<>-]{0,127}$")
+_FLUTTER_MINUTE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$"
+)
+_LOGGER = logging.getLogger(__name__)
 
 if os.name == "nt":
     import ctypes
@@ -128,6 +150,22 @@ class _AsyncHook:
     loop: asyncio.AbstractEventLoop
     previous: Any
     owned: Any
+
+
+@dataclass(frozen=True, slots=True)
+class FlutterErrorEvidence:
+    """One strictly parsed, path-free Flutter runner error record."""
+
+    runtime_type: str
+    symbols: tuple[str, ...]
+    phase: AppPhase
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedFlutterRecords:
+    evidence: tuple[FlutterErrorEvidence, ...]
+    identity: _FileIdentity
 
 
 def _identity(path: Path) -> tuple[int, int] | None:
@@ -248,6 +286,123 @@ def _open_fresh_fault_file(path: Path) -> TextIO:
         raise
 
 
+def _parse_flutter_record(payload: object) -> FlutterErrorEvidence:
+    if not isinstance(payload, dict) or set(payload) != _FLUTTER_RECORD_KEYS:
+        raise ValueError("invalid Flutter bridge fields")
+    runtime_type = payload["runtime_type"]
+    raw_symbols = payload["symbols"]
+    phase = payload["phase"]
+    raw_time = payload["occurred_at"]
+    if not isinstance(runtime_type, str) or _FLUTTER_SYMBOL.fullmatch(runtime_type) is None:
+        raise ValueError("invalid Flutter runtime type")
+    if (
+        not isinstance(raw_symbols, list)
+        or len(raw_symbols) > 16
+        or any(
+            not isinstance(symbol, str) or _FLUTTER_SYMBOL.fullmatch(symbol) is None
+            for symbol in raw_symbols
+        )
+    ):
+        raise ValueError("invalid Flutter stack symbols")
+    if phase not in (AppPhase.BOOT.value, AppPhase.GUI.value):
+        raise ValueError("invalid Flutter phase")
+    if not isinstance(raw_time, str) or _FLUTTER_MINUTE.fullmatch(raw_time) is None:
+        raise ValueError("invalid Flutter occurrence time")
+    try:
+        occurred_at = datetime.strptime(
+            raw_time,
+            "%Y-%m-%dT%H:%M:00.000Z",
+        ).replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise ValueError("invalid Flutter occurrence time") from exc
+    return FlutterErrorEvidence(
+        runtime_type=runtime_type,
+        symbols=tuple(raw_symbols),
+        phase=AppPhase(phase),
+        occurred_at=occurred_at,
+    )
+
+
+def _parse_flutter_payload(payload: bytes) -> tuple[FlutterErrorEvidence, ...]:
+    if not payload or len(payload) > MAX_FLUTTER_BRIDGE_BYTES or not payload.endswith(b"\n"):
+        raise ValueError("invalid Flutter bridge size")
+    lines = payload.splitlines()
+    if not lines or len(lines) > MAX_FLUTTER_RECORDS:
+        raise ValueError("invalid Flutter bridge record count")
+    evidence: list[FlutterErrorEvidence] = []
+    seen: set[FlutterErrorEvidence] = set()
+    for line in lines:
+        if not line or len(line) > MAX_FLUTTER_RECORD_BYTES:
+            raise ValueError("invalid Flutter bridge record size")
+        try:
+            decoded = json.loads(line.decode("ascii"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid Flutter bridge JSON") from exc
+        record = _parse_flutter_record(decoded)
+        if record not in seen:
+            evidence.append(record)
+            seen.add(record)
+    return tuple(evidence)
+
+
+def _discard_invalid_flutter_bridge(
+    path: Path,
+    identity: _FileIdentity,
+    reason: str,
+) -> None:
+    if _delete_exact_regular(path, expected=identity):
+        _LOGGER.warning(
+            "%s",
+            sanitize_log_text(
+                f"discarded invalid Flutter diagnostics bridge ({reason})"
+            ),
+        )
+
+
+def _load_flutter_records(path: Path) -> _LoadedFlutterRecords | None:
+    candidate = Path(path)
+    try:
+        identity = _path_identity(candidate, expect_directory=False)
+    except (OSError, ValueError):
+        return None
+    if identity.size > MAX_FLUTTER_BRIDGE_BYTES:
+        _discard_invalid_flutter_bridge(candidate, identity, "oversized")
+        return None
+    opened = _open_binary_no_follow(candidate, expected=identity)
+    if opened is None:
+        return None
+    stream, opened_identity = opened
+    try:
+        with stream:
+            payload = stream.read(MAX_FLUTTER_BRIDGE_BYTES + 1)
+        current = _path_identity(candidate, expect_directory=False)
+    except (OSError, ValueError):
+        return None
+    if (
+        opened_identity.key != current.key
+        or opened_identity.size != current.size
+        or len(payload) != opened_identity.size
+    ):
+        return None
+    try:
+        evidence = _parse_flutter_payload(payload)
+    except ValueError:
+        _discard_invalid_flutter_bridge(candidate, opened_identity, "malformed")
+        return None
+    return _LoadedFlutterRecords(evidence=evidence, identity=opened_identity)
+
+
+def consume_flutter_records(path: Path) -> tuple[FlutterErrorEvidence, ...]:
+    """Strictly consume one direct regular Flutter bridge file exactly once."""
+
+    loaded = _load_flutter_records(Path(path))
+    if loaded is None:
+        return ()
+    if not _delete_exact_regular(Path(path), expected=loaded.identity):
+        return ()
+    return loaded.evidence
+
+
 class DiagnosticRuntime:
     """Own global diagnostic hooks for exactly one bounded application run."""
 
@@ -270,6 +425,7 @@ class DiagnosticRuntime:
         self.diagnostics_dir = self.data_dir / "diagnostics"
         self.run_state_path = self.diagnostics_dir / "run-state.json"
         self.fault_path = self.diagnostics_dir / "native-fault.log"
+        self.flutter_bridge_path = self.diagnostics_dir / "flutter-errors.jsonl"
         self._guard_path = self.diagnostics_dir / ".diagnostic-runtime.operation"
         self.spool = spool
         self.delivery = delivery
@@ -349,6 +505,7 @@ class DiagnosticRuntime:
             self._previous = _HookSet.capture()
             self._install_hooks()
             self._enable_faulthandler()
+            self._import_flutter_records()
             try:
                 consent = self._consent_provider()
             except Exception:
@@ -364,6 +521,15 @@ class DiagnosticRuntime:
         phase: AppPhase = AppPhase.GUI,
     ) -> str | None:
         """Persist one scrubbed report and return its ephemeral event reference."""
+        return self._record_exception(exc, phase, occurred_at=None)
+
+    def _record_exception(
+        self,
+        exc: BaseException,
+        phase: AppPhase,
+        *,
+        occurred_at: datetime | None,
+    ) -> str | None:
         if not isinstance(exc, BaseException):
             return None
         if getattr(self._local, "capturing", False):
@@ -376,6 +542,7 @@ class DiagnosticRuntime:
                 report = build_report(
                     exc,
                     context,
+                    occurred_at=occurred_at,
                     native_exception_code=(
                         evidence.exception_code if evidence is not None else None
                     ),
@@ -415,6 +582,43 @@ class DiagnosticRuntime:
             return None
         finally:
             self._local.capturing = False
+
+    def _import_flutter_records(self) -> None:
+        if not self._root_is_owned():
+            return
+        loaded = _load_flutter_records(self.flutter_bridge_path)
+        if loaded is None:
+            return
+        now = _normalized_utc(self._clock())
+        if any(
+            evidence.occurred_at < now - MAX_AGE
+            or evidence.occurred_at > now + FLUTTER_FUTURE_TOLERANCE
+            for evidence in loaded.evidence
+        ):
+            _delete_exact_regular(
+                self.flutter_bridge_path,
+                expected=loaded.identity,
+            )
+            return
+        durable = True
+        for evidence in loaded.evidence:
+            top_symbol = evidence.symbols[0] if evidence.symbols else "unknown"
+            exception_name = (
+                f"Flutter.{evidence.runtime_type[:56]}.{top_symbol[:56]}"
+            )
+            flutter_exception = type(exception_name, (RuntimeError,), {})()
+            reference = self._record_exception(
+                flutter_exception,
+                evidence.phase,
+                occurred_at=evidence.occurred_at,
+            )
+            if reference is None:
+                durable = False
+        if durable:
+            _delete_exact_regular(
+                self.flutter_bridge_path,
+                expected=loaded.identity,
+            )
 
     def mark_phase(self, phase: AppPhase) -> None:
         if not isinstance(phase, AppPhase):

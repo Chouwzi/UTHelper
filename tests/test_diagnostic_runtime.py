@@ -17,7 +17,7 @@ from unittest.mock import Mock
 import pytest
 
 from diagnostics.models import AppPhase, CrashConsent, DiagnosticContext
-from diagnostics.runtime import DiagnosticRuntime
+from diagnostics.runtime import DiagnosticRuntime, consume_flutter_records
 from diagnostics.spool import DiagnosticSpool
 from diagnostics.windows_evidence import ApplicationErrorEvent
 
@@ -113,6 +113,173 @@ def _unraisable_args(exc: BaseException):
 
 def _record_identical_failure(runtime: DiagnosticRuntime) -> str | None:
     return runtime.record_exception(RuntimeError("private identical"), AppPhase.GUI)
+
+
+def _write_flutter_bridge(path: Path, *records: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = "".join(
+        json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
+        for record in records
+    )
+    path.write_bytes(payload.encode("ascii"))
+
+
+def _flutter_record(**overrides: object) -> dict[str, object]:
+    record: dict[str, object] = {
+        "runtime_type": "StateError",
+        "symbols": ["BootHost.build", "WidgetsBinding.drawFrame"],
+        "phase": "boot",
+        "occurred_at": "2026-08-04T05:07:00.000Z",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_flutter_bridge_parser_is_strict_bounded_and_one_shot(tmp_path):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    _write_flutter_bridge(bridge, _flutter_record())
+
+    evidence = consume_flutter_records(bridge)
+
+    assert len(evidence) == 1
+    assert evidence[0].runtime_type == "StateError"
+    assert evidence[0].symbols == (
+        "BootHost.build",
+        "WidgetsBinding.drawFrame",
+    )
+    assert evidence[0].phase is AppPhase.BOOT
+    assert evidence[0].occurred_at == NOW.replace(second=0)
+    assert not bridge.exists()
+    assert consume_flutter_records(bridge) == ()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        _flutter_record(message="student@ut.edu.vn token=secret"),
+        _flutter_record(runtime_type=r"C:\\Users\\Student\\private"),
+        _flutter_record(symbols=["safe", "https://moodle.invalid/private"]),
+        _flutter_record(phase="update"),
+        _flutter_record(occurred_at="2026-08-04T05:07:39Z"),
+    ],
+)
+def test_malformed_flutter_bridge_is_deleted_without_import(tmp_path, record, caplog):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    _write_flutter_bridge(bridge, record)
+
+    assert consume_flutter_records(bridge) == ()
+    assert not bridge.exists()
+    assert "discarded invalid Flutter diagnostics bridge" in caplog.text
+    assert "student@ut.edu.vn" not in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_largest_emitter_record_remains_valid_and_bounded(tmp_path):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    record = _flutter_record(
+        runtime_type="R" * 128,
+        symbols=[f"S{index:02d}." + "f" * 123 for index in range(16)],
+    )
+    _write_flutter_bridge(bridge, record)
+
+    assert bridge.stat().st_size < 4096
+    evidence = consume_flutter_records(bridge)
+    assert len(evidence) == 1
+    assert len(evidence[0].symbols) == 16
+
+
+def test_oversized_flutter_bridge_is_deleted_without_reading_unbounded(tmp_path):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_bytes(b"x" * (64 * 1024 + 1))
+
+    assert consume_flutter_records(bridge) == ()
+    assert not bridge.exists()
+
+
+def test_flutter_bridge_symlink_target_is_never_read_or_deleted(tmp_path):
+    outside = tmp_path / "outside-private.txt"
+    outside.write_text("student@ut.edu.vn token=secret", "utf-8")
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    bridge.parent.mkdir(parents=True)
+    try:
+        bridge.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    assert consume_flutter_records(bridge) == ()
+    assert outside.read_text("utf-8") == "student@ut.edu.vn token=secret"
+    assert bridge.is_symlink()
+
+
+def test_runtime_imports_flutter_bridge_through_sanitized_report_path(tmp_path):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    _write_flutter_bridge(
+        bridge,
+        _flutter_record(),
+        _flutter_record(
+            runtime_type="LateError",
+            symbols=["DashboardState.render"],
+            phase="gui",
+        ),
+    )
+    runtime = _runtime(tmp_path)
+
+    runtime.start()
+
+    reports = tuple(item.report for item in runtime.spool.pending())
+    assert len(reports) == 2
+    assert {report.exception_type for report in reports} == {
+        "Flutter.StateError.BootHost.build",
+        "Flutter.LateError.DashboardState.render",
+    }
+    assert {report.phase for report in reports} == {AppPhase.BOOT, AppPhase.GUI}
+    assert {report.occurred_at for report in reports} == {NOW.replace(second=0)}
+    assert all(report.frames == () for report in reports)
+    assert not bridge.exists()
+    serialized = b"".join(item.path.read_bytes() for item in runtime.spool.pending())
+    assert b"student@ut.edu.vn" not in serialized
+    assert b"token=" not in serialized
+    runtime.close(clean=True)
+
+
+def test_flutter_bridge_is_retained_until_every_report_is_durable(tmp_path):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    _write_flutter_bridge(bridge, _flutter_record())
+    runtime = _runtime(tmp_path)
+    runtime.spool.enqueue = lambda _report: SimpleNamespace(
+        stored=False,
+        deduplicated=False,
+        too_large=True,
+    )
+
+    runtime.start()
+
+    assert bridge.is_file()
+    assert runtime.spool.pending() == ()
+    runtime.close(clean=True)
+
+
+@pytest.mark.parametrize(
+    "occurred_at",
+    ["2026-07-01T05:07:00.000Z", "2026-08-04T05:18:00.000Z"],
+)
+def test_runtime_discards_stale_or_future_flutter_evidence(
+    tmp_path,
+    occurred_at,
+):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    _write_flutter_bridge(
+        bridge,
+        _flutter_record(occurred_at=occurred_at),
+    )
+    runtime = _runtime(tmp_path)
+
+    runtime.start()
+
+    assert runtime.spool.pending() == ()
+    assert not bridge.exists()
+    runtime.close(clean=True)
 
 
 @pytest.fixture(autouse=True)

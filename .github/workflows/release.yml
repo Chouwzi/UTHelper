@@ -122,24 +122,62 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
       - uses: actions/setup-python@v5
+        timeout-minutes: 5
         with:
           python-version: '3.13'
           cache: pip
       - run: pip install -e ".[windows]"
+        timeout-minutes: 10
+      - name: Prepare reviewed Flet diagnostics template
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $support = "build\support"
+          $source = "$support\flet-build-template-0.86.5.zip"
+          $download = "$source.download"
+          $expected = "8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73"
+          New-Item -ItemType Directory -Path $support -Force | Out-Null
+          if (Test-Path -LiteralPath $source) {
+            $actual = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              Remove-Item -LiteralPath $source -Force
+            }
+          }
+          if (-not (Test-Path -LiteralPath $source)) {
+            try {
+              Invoke-WebRequest -Uri "https://github.com/flet-dev/flet/releases/download/v0.86.5/flet-build-template.zip" -OutFile $download -TimeoutSec 30
+              $actual = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $expected) { throw "Downloaded Flet template hash changed" }
+              Move-Item -LiteralPath $download -Destination $source -Force
+            } finally {
+              Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
+            }
+          }
+          python scripts/prepare_flet_diagnostics_template.py --source $source --output "$support\flet-build-template-0.86.5-diagnostics.zip"
+          if ($LASTEXITCODE -ne 0) { throw "Flet diagnostics template preparation failed" }
       - name: Generate public diagnostics config and build Windows bundle
+        timeout-minutes: 30
         shell: pwsh
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
         run: |
           python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
-          flet build windows --output dist\flet-build --verbose
+          flet build windows --template build\support\flet-build-template-0.86.5-diagnostics.zip --output dist\flet-build --verbose
+          if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed" }
+          python scripts/verify_flutter_diagnostics.py --template build\support\flet-build-template-0.86.5-diagnostics.zip --project-root build\flutter
+          if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
       - name: Prepare Flet Windows bundle
+        timeout-minutes: 5
         run: python scripts\prepare_windows_bundle.py dist\flet-build
       - name: Verify Flet Windows bundle
+        timeout-minutes: 5
         run: python scripts\verify_windows_bundle.py dist\flet-build
       - name: Decode Windows signing certificate
+        timeout-minutes: 5
         shell: pwsh
         env:
           PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
@@ -147,6 +185,7 @@ jobs:
           if (-not $env:PFX_BASE64) { throw "WINDOWS_PFX_BASE64 is required" }
           [IO.File]::WriteAllBytes("release.pfx", [Convert]::FromBase64String($env:PFX_BASE64))
       - name: Package signed MSIX and AppInstaller
+        timeout-minutes: 15
         shell: pwsh
         env:
           PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
@@ -196,6 +235,7 @@ jobs:
             throw "MSIX Authenticode signature is not trusted: $($signature.StatusMessage)"
           }
       - uses: actions/upload-artifact@v4
+        timeout-minutes: 5
         with:
           name: release-windows
           path: |

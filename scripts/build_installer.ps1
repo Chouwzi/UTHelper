@@ -20,10 +20,47 @@ Write-Host "2. Chạy Flet Build (Windows)..." -ForegroundColor Cyan
 $env:PYTHONIOENCODING="utf-8"
 $env:PYTHONUTF8=1
 $env:FLET_CLI_NO_RICH_OUTPUT="true"
+$supportDir = Join-Path $workspaceRoot "build\support"
+$officialTemplate = Join-Path $supportDir "flet-build-template-0.86.5.zip"
+$diagnosticsTemplate = Join-Path $supportDir "flet-build-template-0.86.5-diagnostics.zip"
+$templateDownload = "$officialTemplate.download"
+$expectedTemplateHash = "8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73"
+New-Item -ItemType Directory -Path $supportDir -Force | Out-Null
+if (Test-Path -LiteralPath $officialTemplate) {
+    $actualTemplateHash = (Get-FileHash -LiteralPath $officialTemplate -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualTemplateHash -ne $expectedTemplateHash) {
+        Remove-Item -LiteralPath $officialTemplate -Force
+    }
+}
+if (-not (Test-Path -LiteralPath $officialTemplate)) {
+    try {
+        Invoke-WebRequest `
+            -Uri "https://github.com/flet-dev/flet/releases/download/v0.86.5/flet-build-template.zip" `
+            -OutFile $templateDownload `
+            -TimeoutSec 30 `
+            -UseBasicParsing
+        $actualTemplateHash = (Get-FileHash -LiteralPath $templateDownload -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualTemplateHash -ne $expectedTemplateHash) {
+            throw "Downloaded Flet template hash changed"
+        }
+        Move-Item -LiteralPath $templateDownload -Destination $officialTemplate -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $templateDownload -Force -ErrorAction SilentlyContinue
+    }
+}
+python (Join-Path $workspaceRoot "scripts\prepare_flet_diagnostics_template.py") `
+    --source $officialTemplate `
+    --output $diagnosticsTemplate
+if ($LASTEXITCODE -ne 0) { throw "Flet diagnostics template preparation failed" }
 python (Join-Path $workspaceRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $workspaceRoot "src\assets\diagnostics-config.json")
 if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
-flet build windows --output $resolvedBundle
+flet build windows --template $diagnosticsTemplate --output $resolvedBundle
 if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed with exit code $LASTEXITCODE" }
+python (Join-Path $workspaceRoot "scripts\verify_flutter_diagnostics.py") `
+    --template $diagnosticsTemplate `
+    --project-root (Join-Path $workspaceRoot "build\flutter")
+if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
 
 Write-Host "3. Tạo runner alias dành cho Windows autostart..." -ForegroundColor Cyan
 python (Join-Path $PSScriptRoot "prepare_windows_bundle.py") $resolvedBundle

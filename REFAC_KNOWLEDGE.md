@@ -767,3 +767,41 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   tests with 24 skipped in 48.01 seconds**. `ruff check src tests` and `git diff
   --check` pass, and the full runner exited normally with no helper process or
   heartbeat thread left behind.
+
+## Verified Flutter runner diagnostic bridge (2026-08-08)
+
+- Windows release builds now accept only the immutable official Flet 0.86.5
+  build template whose SHA-256 is
+  `8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73`.
+  The patcher rejects unknown hashes, changed anchors, duplicate/traversal/link
+  ZIP members, and non-atomic output. It writes a stored, normalized ZIP whose
+  reviewed deterministic SHA-256 is
+  `f44e29a58394f7e5a47a72bee1a54033106cef2a43b94e7b06e58bb464630a00`.
+- The generated Dart runner installs Windows-only `FlutterError.onError` and
+  `PlatformDispatcher.instance.onError` wrappers. Each wrapper synchronously
+  flushes a bounded record before invoking the prior handler. Records contain
+  only normalized runtime type, at most sixteen normalized symbols, boot/GUI
+  phase, and a UTC minute; no exception message, raw stack, path, account, URL,
+  or Moodle value crosses the bridge. The JSONL bridge never exceeds 64 KiB and
+  direct links/non-files are rejected before writing.
+- Python startup reads only the exact direct regular bridge file through the
+  existing no-follow identity boundary. Unknown fields, unsafe identifiers,
+  malformed JSON, non-minute timestamps, oversized files/records, stale/future
+  evidence, and unsafe replacements fail closed. Invalid owned files are
+  deleted with an exact-file operation and only a constant redacted reason is
+  logged. Valid evidence uses the existing sanitized report builder; the bridge
+  is deleted only after every report is durable, so a partial spool failure is
+  retried safely and deduplicated on the next start.
+- Windows CI and the local installer builder download with a finite timeout,
+  verify the official hash, prepare the pinned template before Flet, pass it via
+  `--template`, and verify generated `build/flutter/lib/main.dart` immediately
+  afterward. Android and iOS builds never receive this Windows-only patch. All
+  Windows release workflow steps now have explicit finite timeouts.
+- The final focused fixture/runtime/release set passes **75 tests**. A bounded
+  full suite passes **1053 tests with 24 skipped in 20.10 seconds**; `ruff check
+  src tests` plus both new scripts, PowerShell/YAML parsing, and `git diff
+  --check` pass. A real bounded Flet 0.86.5 Windows build completed in **354.6
+  seconds**, generated `uthelper.exe`, and the generated-source verifier passed.
+  Flutter analysis of the final synchronous patch had no errors (only the two
+  existing official-template unused-import notices). Independent re-review
+  reported no remaining Critical or Important findings.

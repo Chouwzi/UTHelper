@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -238,3 +239,54 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
         assert "secrets.SENTRY_DSN" not in workflow
     assert "$env:SENTRY_DSN" in _read("scripts/build_installer.ps1")
     assert "$env:SENTRY_DSN" in _read("scripts/build_android.ps1")
+
+
+def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_template():
+    official_url = (
+        "https://github.com/flet-dev/flet/releases/download/"
+        "v0.86.5/flet-build-template.zip"
+    )
+    prepared_name = "flet-build-template-0.86.5-diagnostics.zip"
+    patcher = "prepare_flet_diagnostics_template.py"
+    verifier = "verify_flutter_diagnostics.py"
+
+    for relative_path in (
+        ".github/workflows/release.yml",
+        "scripts/build_installer.ps1",
+    ):
+        content = _read(relative_path).replace("\\", "/")
+        build_index = content.index("flet build windows")
+        assert official_url in content
+        assert prepared_name in content
+        assert patcher in content[:build_index]
+        if relative_path.endswith("release.yml"):
+            assert f"--template build/support/{prepared_name}" in content
+        else:
+            assert "--template $diagnosticsTemplate" in content
+        assert verifier in content[build_index:]
+        assert "--project-root" in content[build_index:]
+        assert "build/flutter" in content[build_index:]
+
+    workflow = _read(".github/workflows/release.yml")
+    assert "Invoke-WebRequest" in workflow
+    assert "-TimeoutSec 30" in workflow
+    assert "timeout-minutes: 5" in workflow
+    assert "timeout-minutes: 30" in workflow
+    windows_job = workflow.split("  windows:\n", 1)[1].split("\n  publish:\n", 1)[0]
+    windows_steps = [
+        block
+        for block in re.split(r"(?m)(?=^      - )", windows_job)
+        if block.startswith("      - ")
+    ]
+    assert windows_steps
+    assert all("timeout-minutes:" in step for step in windows_steps)
+
+    for relative_path in (
+        ".github/workflows/build-android.yml",
+        ".github/workflows/build-ios.yml",
+        "scripts/build_android.ps1",
+    ):
+        content = _read(relative_path)
+        assert prepared_name not in content
+        assert patcher not in content
+        assert verifier not in content
