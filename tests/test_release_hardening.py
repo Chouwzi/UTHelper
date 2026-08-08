@@ -608,3 +608,12 @@ def test_validate_job_runs_full_suite_with_workspace_import_paths():
         "-q --tb=short"
     ) in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
+    assert 'pip install -e ".[dev,windows]"' not in workflow
+    assert 'pip install -e . "pytest>=9.0.2" "pytest-timeout>=2.3,<3"' in workflow
+
+
+def test_release_manifest_preserves_the_supported_2_1_floor():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert '--minimum-supported-version "2.1.0"' in workflow
+    assert '--minimum-supported-version "$VERSION"' not in workflow

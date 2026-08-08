@@ -1069,5 +1069,7 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   names, validates the remote name/size/API-digest set, downloads every asset
   again, and compares bytes before publishing. Failure cleanup can delete only
   that same numeric record while it remains a draft with the same tag.
-- Task 10 focused policy/metadata/inventory/manifest verification passes **80
-  tests**; Ruff, YAML loading, `git diff --check`, and actionlint 1.7.12 pass.
+- Task 10 focused policy/metadata/inventory/manifest verification passes **81
+  tests** after review caught and removed a Linux-incompatible Windows extra from
+  source validation and restored the supported-version floor to `2.1.0`. Ruff,
+  YAML loading, `git diff --check`, and actionlint 1.7.12 pass.

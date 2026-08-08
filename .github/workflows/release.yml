@@ -38,7 +38,7 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e ".[dev,windows]"
+        run: pip install -e . "pytest>=9.0.2" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
         run: python -m pytest tests extensions/flet_uth_background_sync/tests -q --tb=short
@@ -569,7 +569,7 @@ jobs:
             --release-dir release \
             --evidence-dir evidence \
             --ios-install-url "$IOS_DISTRIBUTION_URL" \
-            --minimum-supported-version "$VERSION" \
+            --minimum-supported-version "2.1.0" \
             --output release/release-manifest.json
           "${INVENTORY[@]}" --manifest release/release-manifest.json
           "${INVENTORY[@]}" --manifest release/release-manifest.json --write-checksums release/SHA256SUMS
