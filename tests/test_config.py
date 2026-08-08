@@ -164,7 +164,7 @@ class TestSettingsSerialization:
     def test_legacy_poll_interval_migrates_when_check_missing(self):
         migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 2
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 3
 
     def test_legacy_notification_milestones_migrate_to_minutes(self):
         migrated = migrate_settings_data({
@@ -180,6 +180,17 @@ class TestSettingsSerialization:
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 1})
 
         assert migrated["CRASH_REPORTING_CONSENT"] == "not_asked"
+
+    def test_schema_two_settings_enable_trusted_update_checks_by_default(self):
+        migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})
+
+        assert migrated["AUTO_UPDATE_ENABLED"] is True
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 3
+        assert Settings(**migrated).AUTO_UPDATE_ENABLED is True
+        assert (
+            Settings.model_fields["AUTO_UPDATE_ENABLED"].description
+            == "Tự động kiểm tra cập nhật"
+        )
 
 
 class TestSecretFieldsMapping:

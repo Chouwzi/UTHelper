@@ -12,7 +12,11 @@ from core.update_models import (
     ReleasePackage,
     UpdateCandidate,
 )
-from platform_utils.update_packages import RuntimeTarget, detect_runtime_target
+from platform_utils.update_packages import (
+    DownloadedPackageVerifier,
+    RuntimeTarget,
+    detect_runtime_target,
+)
 from platform_utils.windows_update import (
     BURN_UPGRADE_CODE,
     MSI_UPGRADE_CODE,
@@ -187,3 +191,47 @@ def test_windows_launcher_uses_msi_and_acknowledges_without_waiting_forever(tmp_
     assert created == [
         ["msiexec.exe", "/i", str(path), "/passive", "/norestart"]
     ]
+
+
+def test_windows_launcher_releases_successfully_acknowledged_installer(tmp_path):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    process = _RunningProcess()
+    launcher = WindowsPackageLauncher(process_factory=lambda _argv: process)
+
+    assert launcher.launch(path, _candidate(path).package).acknowledged
+    launcher.cancel()
+
+    assert process.returncode is None
+
+
+def test_portable_verifier_rechecks_size_hash_and_extension(tmp_path):
+    path = tmp_path / "UTHelper-2.2.0.apk"
+    payload = b"PK\x03\x04apk"
+    path.write_bytes(payload)
+    package = ReleasePackage(
+        platform="android",
+        architecture="universal",
+        package_type="apk",
+        install_channel="sideload",
+        url="https://github.com/Chouwzi/UTHelper/releases/download/v2.2.0/UTHelper-2.2.0.apk",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size=len(payload),
+        signer_identity="com.uthelper.uthelper",
+        certificate_fingerprint="AB" * 32,
+        install_strategy={"kind": "android_package_installer"},
+    )
+    manifest = ReleaseManifest(
+        schema_version=2,
+        release_version="2.2.0",
+        minimum_supported_version="2.1.0",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        release_notes_url="https://github.com/Chouwzi/UTHelper/releases/tag/v2.2.0",
+        packages=(package,),
+    )
+    candidate = UpdateCandidate(manifest, package, True, False)
+    verifier = DownloadedPackageVerifier()
+
+    assert verifier.verify(path, candidate).verified
+    path.write_bytes(payload + b"tampered")
+    assert not verifier.verify(path, candidate).verified

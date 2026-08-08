@@ -1,11 +1,19 @@
 import os
 import sys
+import asyncio
 from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import gui.app_controller as app_controller_module
-from gui.app_controller import AppController
+from core.update_models import ReleasePackage
+from gui.app_controller import (
+    AppController,
+    _AndroidPackageLauncher,
+    _android_release_build_number,
+)
 
 
 def test_render_cards_refreshes_current_filters():
@@ -98,3 +106,64 @@ def test_toggle_today_schedule_flips_state_and_refreshes():
 
     assert controller._today_schedule_expanded is True
     assert calls == [True]
+
+
+def test_android_build_number_is_deterministic_and_strict():
+    assert _android_release_build_number("2.2.3") == 2_002_003
+
+
+def test_android_launcher_forwards_native_identity_version_and_signer():
+    calls = []
+
+    class Bridge:
+        available = True
+
+        async def install_update(self, *args):
+            calls.append(args)
+            return {"status": "installer_opened"}
+
+        async def cancel_update(self):
+            pass
+
+    def run_task(handler, *args):
+        asyncio.run(handler(*args))
+        return object()
+
+    package = ReleasePackage(
+        platform="android",
+        architecture="universal",
+        package_type="apk",
+        install_channel="sideload",
+        url="https://github.com/Chouwzi/UTHelper/releases/download/v2.2.3/UTHelper-2.2.3.apk",
+        sha256="a" * 64,
+        size=123,
+        signer_identity="com.uthelper.uthelper",
+        certificate_fingerprint="b" * 64,
+        install_strategy={"kind": "android_package_installer"},
+    )
+    launcher = _AndroidPackageLauncher(Bridge(), run_task, lambda: "2.2.3")
+
+    assert launcher.launch(Path("UTHelper.apk"), package).acknowledged
+    assert calls == [
+        (
+            package.url,
+            package.sha256,
+            package.size,
+            "com.uthelper.uthelper",
+            2_002_003,
+            package.certificate_fingerprint,
+        )
+    ]
+
+
+def test_update_confirmation_uses_required_windows_affirmative_copy(monkeypatch):
+    controller = AppController.__new__(AppController)
+    shown = []
+    controller.page = SimpleNamespace(show_dialog=shown.append)
+    controller._update_coordinator = SimpleNamespace(confirm_install=lambda: None)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", False)
+
+    controller._show_update_confirmation()
+
+    assert shown[0].actions[1].content == "Cài đặt và thoát"

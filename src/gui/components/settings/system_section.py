@@ -11,6 +11,13 @@ def init_system_controls(view):
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
         label="Tự động kiểm tra cập nhật",
     )
+    view._check_update_btn = ft.Button(
+        "Kiểm tra ngay",
+        icon=ft.Icons.REFRESH_ROUNDED,
+        on_click=getattr(view, "_handle_check_update", None),
+        bgcolor=C.SURFACE,
+        color=C.ACCENT,
+    )
     # Thiết lập riêng trên Desktop (Windows)
     view._sw_start_with_windows = ft.Switch(
         value=settings.START_WITH_WINDOWS, active_color=C.ACCENT,
@@ -78,6 +85,7 @@ def build_system_section(view) -> ft.Container:
             view._autostart_status,
             view._sw_minimize_to_tray,
             view._sw_auto_update,
+            view._check_update_btn,
             view._build_hint("Chỉ kiểm tra phiên bản mới; cài đặt và khởi động lại luôn cần xác nhận."),
             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._interval_field,
@@ -90,6 +98,7 @@ def build_system_section(view) -> ft.Container:
     else:
         controls = [
             view._sw_auto_update,
+            view._check_update_btn,
             view._build_hint("Chỉ kiểm tra phiên bản mới; cài đặt và khởi động lại luôn cần xác nhận."),
             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
             view._interval_field,

@@ -371,6 +371,11 @@ class WindowsPackageLauncher:
         try:
             code = process.wait(timeout=self.acknowledgement_seconds)
         except subprocess.TimeoutExpired:
+            # The installer accepted the hand-off.  It is no longer owned by
+            # the app, so a later coordinator shutdown must not terminate it.
+            with self._lock:
+                if self._process is process:
+                    self._process = None
             return LaunchResult(True, "installer acknowledged")
         finally:
             if process.poll() is not None:

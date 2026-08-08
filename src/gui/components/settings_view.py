@@ -34,13 +34,13 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update)
         self._init_controls()
         self._init_layout()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -51,6 +51,7 @@ class SettingsView(ft.Container):
         self._on_test_discord = on_test_discord
         self._on_test_mail = on_test_mail
         self._on_theme_preview = on_theme_preview
+        self._on_check_update = on_check_update
         self.visible  = False
         self.expand   = True
         self.bgcolor  = C.BG
@@ -1400,8 +1401,15 @@ class SettingsView(ft.Container):
         self._page.run_task(_send)
 
     # Update checker
+    def _handle_check_update(self, _event):
+        if self._on_check_update:
+            self._on_check_update()
+
     def _do_force_check_update(self):
         """Force check for app updates."""
+        if self._on_check_update:
+            self._on_check_update()
+            return
         import threading
         self._debug_update_text.value = "Đang kiểm tra cập nhật..."
         self._debug_update_text.color = C.TEXT_SECONDARY

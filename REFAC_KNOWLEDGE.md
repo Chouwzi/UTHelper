@@ -908,3 +908,30 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   standalone test invocation receives the official cached Flutter embedding JAR
   through an optional Gradle property; packaged builds keep their host-provided
   Flutter dependency.
+
+## Default-on trusted update coordinator (2026-08-08)
+
+- Settings schema 3 migrates an absent `AUTO_UPDATE_ENABLED` key to `True` and
+  exposes both the default-on switch and a manual `Kiểm tra ngay` action. The
+  controller delegates both paths to one coordinator rather than retaining a
+  second legacy download/install implementation.
+- One daemon worker owns discovery, download, verification, readiness, and
+  confirmation state. Its command queue is fixed at eight entries with
+  coalesced manual/automatic/preference commands; every wait, network boundary,
+  cancellation, and shutdown join is bounded. Automatic checks queued before a
+  preference disable and all queued checks after shutdown are rejected before
+  network I/O, while manual checks remain available when automation is off.
+- A verified installer is never launched before explicit confirmation. Schema
+  1 opens only GitHub release notes, iOS opens only an allow-listed Apple store
+  URL, Windows exits only after the installer acknowledges handoff, and Android
+  forwards exact package ID, derived monotonic versionCode, byte size, SHA-256,
+  and certificate fingerprint to the native installed-signer verifier.
+- Downloaded packages are deleted for every verifier rejection or exception.
+  Preference disable cancels an in-flight download but cannot cancel a user-
+  confirmed installer; shutdown retains exact-process cancellation only until
+  a successful handoff. Independent review found and verified fixes for queued
+  check races, pre-start download stalls, unbounded command growth, rejected
+  cache cleanup, and post-shutdown network dispatch.
+- The final repository suite passes **1110 tests with 24 skipped in 22.15
+  seconds**. Full Ruff, bytecode compilation, and whitespace gates pass, and
+  the final independent Task 5 re-review reports PASS.

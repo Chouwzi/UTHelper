@@ -16,6 +16,9 @@ import platform_utils
 from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
+from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 from core.data_orchestrator import DataOrchestrator
 from core.moodle_service import MoodleService
@@ -23,7 +26,14 @@ from core.moodle_sites import moodle_site_from_origin
 from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
+from core.update_checker import GitHubReleaseClient, VerifiedDownloader
+from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
+from core.update_models import LaunchResult, ReleasePackage
 from config import get_sync_interval_minutes, save_settings, settings
+from platform_utils.update_packages import (
+    DownloadedPackageVerifier,
+    detect_runtime_target,
+)
 
 from gui.core.theme import C
 from core.filter_service import FilterService
@@ -56,6 +66,90 @@ def _save_setting(key: str, value):
         save_settings()
     except Exception as e:
         logging.getLogger(__name__).warning(f"Failed to save setting {key}: {e}")
+
+
+def _android_release_build_number(version: str) -> int:
+    """Derive the Flet Android build number from a strict X.Y.Z version."""
+    try:
+        parsed = Version(version)
+    except InvalidVersion as exc:
+        raise ValueError("invalid Android release version") from exc
+    if (
+        str(parsed) != version
+        or len(parsed.release) != 3
+        or parsed.pre
+        or parsed.post
+        or parsed.dev
+        or parsed.local
+        or any(part < 0 or part > 999 for part in parsed.release)
+    ):
+        raise ValueError("Android release version must be numeric X.Y.Z")
+    major, minor, patch = parsed.release
+    return major * 1_000_000 + minor * 1_000 + patch
+
+
+class _UnavailablePackageLauncher:
+    def launch(self, _path: Path, _package: ReleasePackage) -> LaunchResult:
+        return LaunchResult(False, "installer is unavailable on this platform")
+
+    def cancel(self) -> None:
+        return None
+
+
+class _AndroidPackageLauncher:
+    """Thin adapter from the synchronous coordinator to the native bridge."""
+
+    PACKAGE_ID = "com.uthelper.uthelper"
+
+    def __init__(self, bridge, task_runner, release_version_provider, result_sink=None):
+        self._bridge = bridge
+        self._task_runner = task_runner
+        self._release_version_provider = release_version_provider
+        self._result_sink = result_sink
+
+    def launch(self, _path: Path, package: ReleasePackage) -> LaunchResult:
+        if (
+            package.platform != "android"
+            or package.package_type != "apk"
+            or self._bridge is None
+            or not self._bridge.available
+        ):
+            return LaunchResult(False, "Android installer bridge is unavailable")
+        try:
+            version_code = _android_release_build_number(
+                self._release_version_provider()
+            )
+            task = self._task_runner(self._install, package, version_code)
+        except (RuntimeError, TypeError, ValueError):
+            logger.warning("Android installer scheduling failed", exc_info=True)
+            return LaunchResult(False, "Android installer scheduling failed")
+        return LaunchResult(task is not None, "Android installer scheduled")
+
+    async def _install(self, package: ReleasePackage, version_code: int) -> None:
+        try:
+            result = await self._bridge.install_update(
+                package.url,
+                package.sha256,
+                package.size,
+                self.PACKAGE_ID,
+                version_code,
+                package.certificate_fingerprint,
+            )
+        except Exception:
+            logger.warning("Android installer bridge failed", exc_info=True)
+            result = {"status": "bridge_failed"}
+        if self._result_sink is not None:
+            self._result_sink(result)
+        if result.get("status") not in {"installer_opened", "permission_required"}:
+            logger.warning("Android installer rejected update: %s", result.get("status"))
+
+    def cancel(self) -> None:
+        if self._bridge is None or not self._bridge.available:
+            return
+        try:
+            self._task_runner(self._bridge.cancel_update)
+        except (RuntimeError, TypeError):
+            logger.debug("Android installer cancellation scheduling failed", exc_info=True)
 
 
 class AppController:
@@ -104,6 +198,9 @@ class AppController:
         self._android_background = None
 
         self._init_window()
+        self._update_candidate = None
+        self._manual_update_check_requested = False
+        self._update_coordinator = self._create_update_coordinator()
         self._init_ui()
         self._crash_consent_dialog = CrashConsentDialog(
             self.page, self._persist_crash_consent
@@ -132,10 +229,7 @@ class AppController:
             self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
         
-        # Check update in background
-        if settings.AUTO_UPDATE_ENABLED:
-            from core.update_checker import check_for_update_async
-            check_for_update_async(APP_VERSION, self._on_update_check)
+        self._update_coordinator.start()
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
@@ -177,6 +271,73 @@ class AppController:
         if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
             return None
         return self.page.run_task(handler, *args, **kwargs)
+
+    def _create_update_coordinator(self) -> UpdateCoordinator:
+        target = detect_runtime_target()
+        if target.platform == "windows":
+            from platform_utils.windows_update import (
+                WindowsPackageLauncher,
+                WindowsPackageVerifier,
+            )
+
+            verifier = WindowsPackageVerifier()
+            launcher = WindowsPackageLauncher()
+        elif target.platform == "android":
+            verifier = DownloadedPackageVerifier()
+            launcher = _AndroidPackageLauncher(
+                self._android_background,
+                self._safe_run_task,
+                lambda: self._update_candidate.manifest.release_version,
+                self._on_android_update_result,
+            )
+        else:
+            verifier = DownloadedPackageVerifier()
+            launcher = _UnavailablePackageLauncher()
+        return UpdateCoordinator(
+            GitHubReleaseClient(),
+            VerifiedDownloader(),
+            verifier,
+            launcher,
+            target,
+            _APP_VERSION,
+            self._on_update_event,
+            automatic_enabled=settings.AUTO_UPDATE_ENABLED,
+            check_interval_seconds=86400,
+            external_opener=self._open_external_update_url,
+        )
+
+    def _open_external_update_url(self, url: str) -> bool:
+        async def _open():
+            self.page.launch_url(url)
+
+        return self._safe_run_task(_open) is not None
+
+    def _check_updates_now(self) -> None:
+        self._manual_update_check_requested = True
+        self._update_coordinator.check_now()
+
+    def _on_android_update_result(self, result: dict) -> None:
+        status = result.get("status")
+        if status == "permission_required":
+            self._update_banner.visible = True
+            self._update_btn.disabled = False
+            self._update_btn.content = "Mở trình cài đặt"
+            self._show_snackbar(
+                "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
+                ft.Icons.SECURITY_ROUNDED,
+                C.WARNING,
+            )
+            self.page.update()
+        elif status != "installer_opened":
+            self._update_banner.visible = True
+            self._update_btn.disabled = False
+            self._update_btn.content = "Thử lại"
+            self._show_snackbar(
+                "Android đã từ chối gói cập nhật",
+                ft.Icons.ERROR_OUTLINE_ROUNDED,
+                C.CRITICAL,
+            )
+            self.page.update()
 
     def _submission_workflow_factory(self, client):
         """Build a fresh workflow only for the orchestrator's current client."""
@@ -463,7 +624,7 @@ class AppController:
             "Cập nhật",
             icon=ft.Icons.DOWNLOAD_ROUNDED,
             style=ft.ButtonStyle(color="#FCD34D"),
-            on_click=self._open_update_url,
+            on_click=self._request_update_download,
         )
         self._update_banner = ft.Container(
             content=ft.Column([
@@ -688,6 +849,7 @@ class AppController:
             on_test_discord=self._on_test_discord,
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
+            on_check_update=self._check_updates_now,
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
@@ -1988,84 +2150,119 @@ class AppController:
         from notifiers.email import EmailNotifier
         EmailNotifier().notify([dummy])
 
-    def _on_update_check(self, has_update: bool, version: str, release_url: str, asset_url: str = None):
-        """Callback từ background thread khi kiểm tra update xong."""
-        if has_update and version:
-            async def _update_ui():
-                self._update_asset_url = asset_url or ""
-                self._update_release_url = release_url or ""
-                self._update_url = asset_url or release_url or ""
-                self._update_version = version
-                self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
-                self._update_icon.color = "#FCD34D"
-                self._update_text.value = f"Phiên bản mới v{version} đã sẵn sàng!"
-                self._update_btn.visible = True
-                self._update_btn.text = "Cập nhật"
-                self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
-                self._update_progress.visible = False
-                self._update_banner.visible = True
-                self.page.update()
-            try:
-                self._safe_run_task(_update_ui)
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+    def _on_update_event(self, event: UpdateEvent) -> None:
+        self._safe_run_task(self._apply_update_event, event)
 
-    async def _open_update_url(self, e):
-        """Open a platform installer from a verified published release."""
-        asset_url = getattr(self, "_update_asset_url", "")
-        release_url = getattr(self, "_update_release_url", "")
-        url = asset_url or release_url
-        if (
-            platform_utils.IS_ANDROID
-            and asset_url
-            and self._android_background
-            and self._android_background.available
-        ):
-            from core.update_checker import get_update_asset
+    def _request_update_download(self, _event=None) -> None:
+        candidate = getattr(self, "_update_candidate", None)
+        if candidate is not None:
+            self._update_coordinator.request_download(candidate)
 
-            metadata = get_update_asset(asset_url)
-            if not metadata or not metadata.sha256:
+    async def _apply_update_event(self, event: UpdateEvent) -> None:
+        candidate = event.candidate
+        if candidate is not None:
+            self._update_candidate = candidate
+        check_button = getattr(self.settings_view, "_check_update_btn", None)
+        if event.kind is UpdateEventKind.CHECKING:
+            if check_button is not None:
+                check_button.disabled = True
+                check_button.content = "Đang kiểm tra..."
+        elif event.kind is UpdateEventKind.UP_TO_DATE:
+            if check_button is not None:
+                check_button.disabled = False
+                check_button.content = "Kiểm tra ngay"
+            if self._manual_update_check_requested:
                 self._show_snackbar(
-                    "Bản cập nhật thiếu checksum hợp lệ",
-                    ft.Icons.ERROR_OUTLINE_ROUNDED,
-                    C.CRITICAL,
+                    "Bạn đang dùng phiên bản mới nhất",
+                    ft.Icons.CHECK_CIRCLE_ROUNDED,
+                    C.SAFE,
                 )
-                return
+            self._manual_update_check_requested = False
+        elif event.kind is UpdateEventKind.UPDATE_AVAILABLE and candidate is not None:
+            self._manual_update_check_requested = False
+            if check_button is not None:
+                check_button.disabled = False
+                check_button.content = "Kiểm tra ngay"
+            self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
+            self._update_icon.color = "#FCD34D"
+            self._update_text.value = (
+                f"Phiên bản mới v{candidate.manifest.release_version} đã sẵn sàng!"
+            )
+            self._update_btn.visible = True
+            self._update_btn.disabled = False
+            self._update_btn.content = "Cập nhật"
+            self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
+            self._update_progress.visible = False
+            self._update_banner.visible = True
+        elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
             self._update_btn.disabled = True
-            self._update_btn.text = "Đang tải và xác minh..."
-            self.page.update()
-            try:
-                result = await self._android_background.install_update(
-                    asset_url,
-                    metadata.sha256,
-                    metadata.size,
-                )
-                if result.get("status") == "permission_required":
-                    self._show_snackbar(
-                        "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
-                        ft.Icons.SECURITY_ROUNDED,
-                        C.WARNING,
-                    )
-                elif result.get("status") != "installer_opened":
-                    raise RuntimeError(str(result.get("status", "update failed")))
-            except Exception as exc:
-                logger.error("Android update failed: %s", exc)
+            self._update_btn.content = "Đang tải và xác minh..."
+            self._update_progress.visible = True
+            self._update_progress.value = event.progress or 0.0
+        elif event.kind in {
+            UpdateEventKind.READY_TO_INSTALL,
+            UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
+        }:
+            self._update_btn.disabled = False
+            self._update_btn.content = "Cập nhật"
+            self._update_progress.visible = False
+            self._show_update_confirmation()
+        elif event.kind is UpdateEventKind.FAILED:
+            should_notify = (
+                self._manual_update_check_requested or self._update_banner.visible
+            )
+            self._manual_update_check_requested = False
+            if check_button is not None:
+                check_button.disabled = False
+                check_button.content = "Kiểm tra ngay"
+            self._update_btn.disabled = False
+            self._update_btn.content = "Thử lại"
+            self._update_progress.visible = False
+            if should_notify:
                 self._show_snackbar(
                     "Không thể tải hoặc xác minh bản cập nhật",
                     ft.Icons.ERROR_OUTLINE_ROUNDED,
                     C.CRITICAL,
                 )
-            finally:
-                self._update_btn.disabled = False
-                self._update_btn.text = "Cập nhật"
-                self.page.update()
-            return
-        if url:
-            try:
-                self.page.launch_url(url)
-            except Exception:
-                import webbrowser; webbrowser.open(url)
+        elif event.kind is UpdateEventKind.CANCELLED:
+            self._update_btn.disabled = False
+            self._update_btn.content = "Cập nhật"
+            self._update_progress.visible = False
+        elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
+            self._update_banner.visible = False
+        self.page.update()
+        if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
+            await self.page.window.destroy()
+
+    def _show_update_confirmation(self) -> None:
+        if platform_utils.IS_WINDOWS:
+            affirmative = "Cài đặt và thoát"
+        elif platform_utils.IS_ANDROID:
+            affirmative = "Mở trình cài đặt"
+        else:
+            affirmative = "Mở TestFlight/App Store"
+
+        def cancel(_event):
+            self.page.pop_dialog()
+
+        def confirm(_event):
+            self.page.pop_dialog()
+            self._update_coordinator.confirm_install()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Xác nhận cập nhật"),
+            content=ft.Text(
+                "UTHelper sẽ chỉ mở trình cài đặt sau khi bạn xác nhận."
+            ),
+            actions=[
+                ft.TextButton("Hủy", on_click=cancel),
+                ft.TextButton(affirmative, on_click=confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=C.BG,
+        )
+        self.page.show_dialog(dialog)
 
 
     def _on_settings_saved(self):
@@ -2104,6 +2301,9 @@ class AppController:
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.wake()
+        update_coordinator = getattr(self, "_update_coordinator", None)
+        if update_coordinator is not None:
+            update_coordinator.set_automatic_enabled(settings.AUTO_UPDATE_ENABLED)
         if self._android_background and self._android_background.available:
             if credentials_changed:
                 # Prevent the previous account token/Room snapshot from being
@@ -2295,6 +2495,9 @@ class AppController:
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.close()
+        update_coordinator = getattr(self, "_update_coordinator", None)
+        if update_coordinator is not None:
+            update_coordinator.shutdown(timeout_seconds=5.0)
         try:
             self.orchestrator.client.close()
         except Exception:

@@ -208,7 +208,7 @@ class Settings(BaseModel):
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
-    SETTINGS_SCHEMA_VERSION: int = Field(default=2, description="Phiên bản schema cài đặt")
+    SETTINGS_SCHEMA_VERSION: int = Field(default=3, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
     # Deprecated compatibility fields. Runtime scheduling uses only
     # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
@@ -302,6 +302,7 @@ def migrate_settings_data(raw: dict) -> dict:
     """
     data = dict(raw or {})
     data.setdefault("CRASH_REPORTING_CONSENT", "not_asked")
+    data.setdefault("AUTO_UPDATE_ENABLED", True)
     if "CHECK_INTERVAL_MINUTES" not in data:
         legacy_value = data.get("POLL_INTERVAL_MINUTES")
         if legacy_value is None:
@@ -329,7 +330,7 @@ def migrate_settings_data(raw: dict) -> dict:
             except (TypeError, ValueError):
                 pass
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
-    data["SETTINGS_SCHEMA_VERSION"] = 2
+    data["SETTINGS_SCHEMA_VERSION"] = 3
     return data
 
 
