@@ -178,4 +178,14 @@ jobs:
           pip install pip-audit
           pip install -e "${{ matrix.extras }}"
           pip freeze --exclude-editable > audit-requirements.txt
-          pip-audit --strict --desc --requirement audit-requirements.txt
+          audit_status=1
+          for attempt in 1 2 3; do
+            if pip-audit --strict --desc --requirement audit-requirements.txt; then
+              audit_status=0
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+          exit "$audit_status"
