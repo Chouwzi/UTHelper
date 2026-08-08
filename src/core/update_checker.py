@@ -9,7 +9,6 @@ import logging
 import math
 import os
 from pathlib import Path
-import platform
 import tempfile
 import threading
 import time
@@ -20,9 +19,9 @@ import urllib.request
 
 from packaging.version import InvalidVersion, Version
 
-import platform_utils
 from core.update_manifest import ManifestError, parse_manifest, select_candidate
 from core.update_models import ReleasePackage, RuntimeTarget, UpdateCandidate
+from platform_utils.update_packages import detect_runtime_target
 
 
 logger = logging.getLogger(__name__)
@@ -80,26 +79,6 @@ _PACKAGE_METADATA: dict[str, ReleasePackage] = {}
 def get_update_asset(url: str) -> UpdateAsset | None:
     """Return verified release metadata retained by the latest update check."""
     return _ASSET_METADATA.get(url)
-
-
-def _platform_name() -> str:
-    if platform_utils.IS_ANDROID:
-        return "android"
-    if platform_utils.IS_WINDOWS:
-        return "windows"
-    if platform_utils.IS_IOS:
-        return "ios"
-    return "other"
-
-
-def _runtime_target() -> RuntimeTarget:
-    platform_name = _platform_name()
-    if platform_name == "android":
-        return RuntimeTarget("android", "universal", "sideload")
-    if platform_name == "ios":
-        return RuntimeTarget("ios", "arm64", "app-store")
-    architecture = "x64" if platform.machine().lower() in {"amd64", "x86_64"} else "arm64"
-    return RuntimeTarget(platform_name, architecture, "bootstrapper")
 
 
 def _get_update_temp_dir() -> Path:
@@ -337,7 +316,7 @@ def get_update_info(current_version: str) -> UpdateInfo:
     """Return a compatibility result backed only by a parsed manifest."""
     candidate = GitHubReleaseClient().fetch_candidate(
         current_version,
-        _runtime_target(),
+        detect_runtime_target(),
     )
     if candidate is None:
         return UpdateInfo(False)

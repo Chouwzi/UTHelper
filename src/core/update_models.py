@@ -46,9 +46,23 @@ class UpdateCandidate:
     required_update: bool
 
 
+@dataclass(frozen=True, slots=True)
+class VerificationResult:
+    verified: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchResult:
+    acknowledged: bool
+    reason: str = ""
+
+
 __all__ = [
     "ReleaseManifest",
     "ReleasePackage",
     "RuntimeTarget",
     "UpdateCandidate",
+    "VerificationResult",
+    "LaunchResult",
 ]

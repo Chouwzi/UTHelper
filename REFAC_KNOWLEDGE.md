@@ -869,3 +869,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   removes the partial file; the legacy callback API delegates to this boundary.
 - Manifest and transport compatibility verification passes **23 tests**;
   focused Ruff passes.
+
+## Windows update trust and channel boundary (2026-08-08)
+
+- Runtime targeting checks Windows package identity first, otherwise reads only
+  the machine-scoped MSI channel marker and defaults an absent marker to the
+  bootstrapper channel. It never infers the installed channel from the current
+  filename. Android/iOS targets remain isolated behind the cross-platform
+  adapter.
+- Windows verification binds exact size/SHA-256 and MSI/EXE container magic to
+  a valid, timestamped Authenticode signature. Both manifest signer identity
+  and fingerprint must match native evidence, and the fingerprint must also be
+  present in the signed application's source-owned trust set. MSI product,
+  version, UpgradeCode, and x64 template or Burn product/version are probed by
+  bounded, argument-safe PowerShell processes.
+- Installer launch accepts only the manifest-approved MSI or Burn strategy,
+  waits at most two seconds for immediate failure, and owns bounded exact-
+  process cancellation. Tasks 1-3 plus architecture boundaries pass **35
+  tests**; focused Ruff passes. The production trust set intentionally remains
+  empty until the release certificate fingerprint is reviewed and pre-shipped.

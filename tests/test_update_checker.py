@@ -72,8 +72,11 @@ def test_manifest_selects_exact_platform_asset_and_semver():
         ],
     }
     with (
-        patch.object(update_checker.platform_utils, "IS_ANDROID", True),
-        patch.object(update_checker.platform_utils, "IS_WINDOWS", False),
+        patch.object(
+            update_checker,
+            "detect_runtime_target",
+            return_value=RuntimeTarget("android", "universal", "sideload"),
+        ),
         patch.object(
             update_checker,
             "_request_json",
@@ -101,8 +104,11 @@ def test_draft_and_prerelease_are_not_offered():
 def test_manifest_version_mismatch_never_falls_back_to_release_digest():
     manifest = {"schema": 1, "version": "9.9.9", "assets": {}}
     with (
-        patch.object(update_checker.platform_utils, "IS_ANDROID", True),
-        patch.object(update_checker.platform_utils, "IS_WINDOWS", False),
+        patch.object(
+            update_checker,
+            "detect_runtime_target",
+            return_value=RuntimeTarget("android", "universal", "sideload"),
+        ),
         patch.object(
             update_checker,
             "_request_json",
