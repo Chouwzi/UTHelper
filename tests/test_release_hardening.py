@@ -79,6 +79,36 @@ def test_flet_build_version_and_compilation_are_reproducible():
     )
 
 
+def test_release_manifest_is_generated_only_from_exact_verified_inventory():
+    generator = _read("scripts/generate_release_manifest.py")
+    inventory = _read("scripts/release_inventory.py")
+
+    assert "verify_release_inventory(" in generator
+    assert '"schema_version": 2' in generator
+    assert '"schema": 1' not in generator
+    assert "REQUIRED_PACKAGE_NAMES" in inventory
+    for pattern in (
+        "UTHelper-{version}.ipa",
+        "UTHelper-{version}.apk",
+        "UTHelper-Setup-{version}.exe",
+        "UTHelper-{version}.msi",
+    ):
+        assert pattern in inventory
+    assert "required inventory is missing or contains unexpected assets" in inventory
+    assert "manifest certificate fingerprint evidence mismatch" in inventory
+
+
+def test_legacy_installer_cannot_author_a_competing_application_version():
+    inno = _read("scripts/UTHelper_Setup.iss")
+    wrapper = _read("scripts/build_installer.ps1")
+
+    assert '#define MyAppVersion "' not in inno
+    assert "MyAppVersion must be injected from pyproject.toml" in inno
+    assert "release_metadata.py" in wrapper
+    assert "--print-version" in wrapper
+    assert '"/DMyAppVersion=$releaseVersion"' in wrapper
+
+
 def test_android_build_workflows_install_the_notification_patcher():
     for workflow_path in (
         ".github/workflows/build-android.yml",

@@ -258,8 +258,9 @@ jobs:
           python scripts/generate_release_manifest.py \
             --version "${{ needs.validate.outputs.version }}" \
             --repository "${{ github.repository }}" \
-            --android "release/UTHelper-${{ needs.validate.outputs.version }}.apk" \
-            --windows "release/UTHelper.appinstaller" \
+            --release-dir release \
+            --evidence-dir evidence \
+            --ios-install-url "${{ vars.IOS_DISTRIBUTION_URL }}" \
             --minimum-supported-version "2.1.0" \
             --output release/release-manifest.json
       - name: Publish GitHub Release

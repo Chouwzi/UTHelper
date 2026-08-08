@@ -2,7 +2,9 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "UTHelper"
-#define MyAppVersion "2.1.0"
+#ifndef MyAppVersion
+  #error MyAppVersion must be injected from pyproject.toml
+#endif
 #define MyAppPublisher "Chouwzi"
 #define MyAppURL "https://github.com/Chouwzi/UTHelper"
 #define MyAppExeName "UTHelper.exe"

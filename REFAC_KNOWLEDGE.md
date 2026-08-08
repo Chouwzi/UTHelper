@@ -935,3 +935,30 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - The final repository suite passes **1110 tests with 24 skipped in 22.15
   seconds**. Full Ruff, bytecode compilation, and whitespace gates pass, and
   the final independent Task 5 re-review reports PASS.
+
+## Exact signed release inventory (2026-08-08)
+
+- `pyproject.toml` is the sole authored application version and is now 2.2.0.
+  Release tags must exactly equal `vX.Y.Z`; Android/iOS build numbers derive as
+  `major*1_000_000 + minor*1_000 + patch`, with every component restricted to
+  0..999. The transitional Inno wrapper receives this value mechanically and
+  cannot author a competing version.
+- A release is valid only when its external file set is exactly IPA, APK, Burn
+  EXE, and MSI with canonical versioned names. Container magic, byte hash,
+  native product identity, architecture, signer identity/fingerprint,
+  signature, Windows timestamp, platform-specific check names, commit SHA, and
+  workflow run ID are bound by one exact evidence record per package. Unknown
+  assets, evidence fields, MSIX/AppInstaller leftovers, renamed ZIPs, and
+  missing formats fail closed.
+- Schema 2 manifests can only be generated from that verified inventory. Each
+  GitHub asset URL must exactly equal its canonical quoted release URL; manifest
+  bytes, architecture, signer, and fingerprint must equal native evidence. iOS
+  alone carries an external install strategy and accepts only exact HTTPS
+  `apps.apple.com` or `testflight.apple.com` hosts.
+- `SHA256SUMS` is deterministic LF-only output over the four packages plus the
+  manifest. Its parser rejects malformed, duplicate, missing, extra,
+  self-referential, traversal, reordered, or mismatched entries. Both canonical
+  CLIs bootstrap correctly under isolated Python execution.
+- Task 6 focused verification passes **48 tests**, and the full suite passes
+  **1143 tests with 24 skipped in 36.63 seconds**. Ruff, release YAML parsing,
+  whitespace checks, and the final independent review all pass.

@@ -79,6 +79,13 @@ if (-not $SkipE2E) {
 }
 
 Write-Host "6. Chạy Inno Setup đóng gói (ISCC)..." -ForegroundColor Cyan
+$releaseVersion = python (Join-Path $workspaceRoot "scripts\release_metadata.py") `
+    --pyproject (Join-Path $workspaceRoot "pyproject.toml") `
+    --print-version
+if ($LASTEXITCODE -ne 0 -or $releaseVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Canonical release version resolution failed"
+}
+$releaseVersion = $releaseVersion.Trim()
 $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 
 if (-Not (Test-Path $isccPath)) {
@@ -97,7 +104,7 @@ if (-Not (Test-Path $isccPath)) {
     }
 }
 
-& $isccPath (Join-Path $PSScriptRoot "UTHelper_Setup.iss")
+& $isccPath "/DMyAppVersion=$releaseVersion" (Join-Path $PSScriptRoot "UTHelper_Setup.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
 
 Write-Host "Hoàn tất! Bộ cài UTHelper_Setup_*.exe đã được tạo trong thư mục dist." -ForegroundColor Green
