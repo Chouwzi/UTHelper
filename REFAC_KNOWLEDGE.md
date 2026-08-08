@@ -1022,3 +1022,29 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Task 8 focused verification passes **60 tests**; the full suite passes **1166
   tests with 24 skipped in 30.72 seconds**. Focused Ruff, YAML parsing,
   whitespace checks, and independent re-review pass.
+
+## Genuine Apple Distribution IPA path (2026-08-08)
+
+- Unprivileged iOS CI now builds only `ios-simulator` and publishes a
+  commit-bound diagnostic ZIP; it never uses the `.ipa` extension. The protected
+  release job alone imports a P12 into a unique ephemeral keychain, installs one
+  exact provisioning profile UUID, and runs Flet's `app-store-connect` export
+  with canonical version/build number, team, profile, and signing identity.
+- IPA verification requires one Payload app, strict deep code-sign validation,
+  arm64 Mach-O, exact bundle/version/build identity, App Store distribution
+  profile with no provisioned devices, future expiration, `get-task-allow=false`,
+  and exact application/team entitlements in both profile and signed app. The
+  extracted leaf certificate SHA-256 must be pinned and present in the profile's
+  `DeveloperCertificates`; evidence is atomically emitted with the expanded
+  native check set consumed by release inventory.
+- Upload uses the Xcode-bundled Transporter with a 1,200-second hard deadline,
+  one exact `private_keys/AuthKey_<id>.p8` at POSIX mode 0600, and fail-closed
+  return/output checks. The base64 key is unset after decode and the Python
+  launcher strips all known signing secrets from the Transporter child
+  environment. It never prints Transporter output or private material.
+- An `always()` cleanup restores the original user keychain list and removes
+  only the exact imported profile, ephemeral keychain, P12/profile files, and
+  Transporter key directory. Task 9 focused verification passes **52 tests with
+  1 platform-mode test skipped on Windows**; Bash syntax, Ruff, YAML, whitespace,
+  and independent re-review pass. The full repository suite passes **1173 tests
+  with 25 skipped in 34.18 seconds**.

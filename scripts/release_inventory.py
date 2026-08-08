@@ -54,7 +54,19 @@ _EXPECTED = {
         "ios",
         "com.uthelper.UTHelper",
         "arm64",
-        frozenset({"bundle_identity", "code_signature", "ipa_zip"}),
+        frozenset(
+            {
+                "build_number",
+                "bundle_id",
+                "certificate_fingerprint",
+                "codesign",
+                "distribution_profile",
+                "entitlements",
+                "ipa_container",
+                "sha256",
+                "version",
+            }
+        ),
     ),
     ".apk": (
         "android",

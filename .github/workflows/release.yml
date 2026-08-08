@@ -120,6 +120,147 @@ jobs:
             evidence/UTHelper-${{ needs.validate.outputs.version }}.apk.verification.json
           if-no-files-found: error
 
+  ios:
+    needs: validate
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: pip install -e .
+      - name: Import ephemeral Apple distribution credentials
+        id: credentials
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_P12_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_PROVISIONING_PROFILE_BASE64"
+          test -n "$APPLE_TEAM_ID"
+          umask 077
+          P12="$RUNNER_TEMP/apple-distribution.p12"
+          PROFILE="$RUNNER_TEMP/apple-distribution.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/apple-distribution.plist"
+          KEYCHAIN="$RUNNER_TEMP/uthelper-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          printf '%s' "$KEYCHAIN_PASSWORD" > "$RUNNER_TEMP/keychain-password"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$P12"
+          printf '%s' "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE"
+          security list-keychains -d user | sed -E 's/^[[:space:]]*"(.*)"$/\1/' > "$RUNNER_TEMP/original-keychains.txt"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          ORIGINAL_KEYCHAINS=()
+          while IFS= read -r item; do ORIGINAL_KEYCHAINS+=("$item"); done < "$RUNNER_TEMP/original-keychains.txt"
+          security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
+          security cms -D -i "$PROFILE" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")
+          [[ "$PROFILE_UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_DEST="$PROFILE_DIR/$PROFILE_UUID.mobileprovision"
+          mkdir -p "$PROFILE_DIR"
+          test ! -e "$PROFILE_DEST"
+          cp "$PROFILE" "$PROFILE_DEST"
+          echo "profile_uuid=$PROFILE_UUID" >> "$GITHUB_OUTPUT"
+      - name: Build and verify genuine distribution IPA
+        shell: bash
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_NUMBER: ${{ needs.validate.outputs.build_number }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_CERT_SHA256: ${{ vars.APPLE_SIGNING_CERT_SHA256 }}
+          IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}
+          PROFILE_UUID: ${{ steps.credentials.outputs.profile_uuid }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_TEAM_ID"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_SIGNING_CERT_SHA256"
+          test -n "$PROFILE_UUID"
+          python - "$IOS_DISTRIBUTION_URL" <<'PY'
+          import sys
+          from urllib.parse import urlparse
+          parsed = urlparse(sys.argv[1])
+          if parsed.scheme != "https" or parsed.hostname not in {"apps.apple.com", "testflight.apple.com"}:
+              raise SystemExit("IOS_DISTRIBUTION_URL must be an approved Apple HTTPS URL")
+          PY
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --ios-team-id "$APPLE_TEAM_ID" --ios-export-method app-store-connect --ios-provisioning-profile "$PROFILE_UUID" --ios-signing-certificate "$APPLE_SIGNING_IDENTITY" --yes --verbose
+          find build/ipa -type f -name '*.ipa' -print | sort > "$RUNNER_TEMP/ipa-candidates.txt"
+          test "$(wc -l < "$RUNNER_TEMP/ipa-candidates.txt" | tr -d ' ')" -eq 1
+          IPA=$(sed -n '1p' "$RUNNER_TEMP/ipa-candidates.txt")
+          mkdir -p release evidence
+          FINAL_IPA="release/UTHelper-$VERSION.ipa"
+          mv "$IPA" "$FINAL_IPA"
+          bash scripts/verify_ipa_release.sh "$FINAL_IPA" "$VERSION" "$BUILD_NUMBER" \
+            com.uthelper.UTHelper "$APPLE_TEAM_ID" "$APPLE_SIGNING_CERT_SHA256" \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" \
+            "evidence/UTHelper-$VERSION.ipa.verification.json"
+      - name: Upload verified IPA to App Store Connect
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+          APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_API_PRIVATE_KEY_BASE64"
+          test -n "$APPLE_API_ISSUER_ID"
+          test -n "$APPLE_API_KEY_ID"
+          umask 077
+          PRIVATE_KEYS_DIR="$RUNNER_TEMP/transporter/private_keys"
+          mkdir -p "$PRIVATE_KEYS_DIR"
+          printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | base64 --decode > "$PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
+          chmod 0600 "$PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
+          unset APPLE_API_PRIVATE_KEY_BASE64
+          python scripts/upload_ipa_release.py --ipa "release/UTHelper-$VERSION.ipa" \
+            --api-issuer "$APPLE_API_ISSUER_ID" --api-key-id "$APPLE_API_KEY_ID" \
+            --private-keys-dir "$PRIVATE_KEYS_DIR"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ios
+          path: |
+            release/UTHelper-${{ needs.validate.outputs.version }}.ipa
+            evidence/UTHelper-${{ needs.validate.outputs.version }}.ipa.verification.json
+          if-no-files-found: error
+      - name: Remove imported Apple credentials
+        if: always()
+        shell: bash
+        env:
+          PROFILE_UUID: ${{ steps.credentials.outputs.profile_uuid }}
+        run: |
+          set +e
+          KEYCHAIN="$RUNNER_TEMP/uthelper-signing.keychain-db"
+          if [[ -f "$RUNNER_TEMP/original-keychains.txt" ]]; then
+            ORIGINAL_KEYCHAINS=()
+            while IFS= read -r item; do ORIGINAL_KEYCHAINS+=("$item"); done < "$RUNNER_TEMP/original-keychains.txt"
+            if [[ "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]]; then
+              security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"
+            fi
+          fi
+          if [[ "$KEYCHAIN" == "$RUNNER_TEMP/uthelper-signing.keychain-db" && -e "$KEYCHAIN" ]]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+          if [[ "$PROFILE_UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]; then
+            rm -f -- "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          fi
+          rm -f -- "$RUNNER_TEMP/apple-distribution.p12" "$RUNNER_TEMP/apple-distribution.mobileprovision" "$RUNNER_TEMP/apple-distribution.plist" "$RUNNER_TEMP/keychain-password" "$RUNNER_TEMP/original-keychains.txt"
+          if [[ -d "$RUNNER_TEMP/transporter" ]]; then rm -rf -- "$RUNNER_TEMP/transporter"; fi
+
   windows:
     needs: validate
     runs-on: windows-latest
@@ -248,7 +389,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [validate, android, windows]
+    needs: [validate, android, ios, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

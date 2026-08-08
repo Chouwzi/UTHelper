@@ -29,7 +29,17 @@ PLATFORM = {".ipa": "ios", ".apk": "android", ".exe": "windows", ".msi": "window
 PRODUCT = {".ipa": "com.uthelper.UTHelper", ".apk": "com.uthelper.uthelper", ".exe": "UTHelper", ".msi": "UTHelper"}
 ARCH = {".ipa": "arm64", ".apk": "universal", ".exe": "x64", ".msi": "x64"}
 CHECKS = {
-    ".ipa": ["bundle_identity", "code_signature", "ipa_zip"],
+    ".ipa": [
+        "build_number",
+        "bundle_id",
+        "certificate_fingerprint",
+        "codesign",
+        "distribution_profile",
+        "entitlements",
+        "ipa_container",
+        "sha256",
+        "version",
+    ],
     ".apk": [
         "apk_signature",
         "notification_receivers",

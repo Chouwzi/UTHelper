@@ -158,6 +158,58 @@ def test_ios_build_bundles_the_native_background_sync_plugin():
     )
 
 
+def test_release_ipa_uses_distribution_identity_profile_and_native_verifier():
+    workflow = _read(".github/workflows/release.yml")
+    for name in (
+        "APPLE_CERTIFICATE_P12_BASE64",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "APPLE_PROVISIONING_PROFILE_BASE64",
+        "APPLE_API_PRIVATE_KEY_BASE64",
+    ):
+        assert f"{name}: ${{{{ secrets.{name} }}}}" in workflow
+    for name in (
+        "APPLE_TEAM_ID",
+        "APPLE_SIGNING_IDENTITY",
+        "APPLE_SIGNING_CERT_SHA256",
+        "APPLE_API_ISSUER_ID",
+        "APPLE_API_KEY_ID",
+    ):
+        assert f"{name}: ${{{{ vars.{name} }}}}" in workflow
+    assert "IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}" in workflow
+    assert "--ios-export-method app-store-connect" in workflow
+    assert "verify_ipa_release.sh" in workflow
+    assert "zip -r -q UTHelper.ipa Payload" not in workflow
+    assert "yes | flet build ipa" not in workflow
+
+
+def test_pull_request_ios_artifact_never_uses_ipa_extension():
+    workflow = _read(".github/workflows/build-ios.yml")
+
+    assert "ios-unsigned-diagnostic" in workflow
+    assert "output/UTHelper.ipa" not in workflow
+    assert "flet build ios-simulator" in workflow
+    assert "*.ipa" not in workflow
+
+
+def test_ipa_verifier_checks_distribution_profile_entitlements_and_leaf_cert():
+    script = _read("scripts/verify_ipa_release.sh")
+
+    assert "codesign --verify --deep --strict --verbose=4" in script
+    assert "codesign -d --entitlements :-" in script
+    assert "security cms -D" in script
+    assert "ProvisionedDevices" in script
+    assert "get-task-allow" in script
+    assert "com.apple.developer.team-identifier" in script
+    assert "DeveloperCertificates" in script
+    assert "major * 1_000_000 + minor * 1_000 + patch" in script
+    assert "codesign -d --extract-certificates" in script
+    assert "openssl x509" in script
+    assert "trap cleanup EXIT" in script
+    assert 'test "${#APPS[@]}" -eq 1' in script
+    workflow = _read(".github/workflows/release.yml")
+    assert "unset APPLE_API_PRIVATE_KEY_BASE64" in workflow
+
+
 def test_local_android_build_script_applies_the_native_notification_patch():
     script = _read("scripts/build_android.ps1")
 
@@ -355,7 +407,7 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
             assert output in matching[0]
             previous_build = build_index
 
-    assert total_builds == 8
+    assert total_builds == 9
 
     for workflow_path in (
         ".github/workflows/release.yml",
