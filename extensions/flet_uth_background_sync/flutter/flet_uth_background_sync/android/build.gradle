@@ -2,7 +2,7 @@ group = 'com.uthelper.backgroundsync'
 version = '0.1.0'
 
 buildscript {
-    ext.kotlin_version = '2.1.10'
+    ext.kotlin_version = '2.4.10'
     repositories {
         google()
         mavenCentral()
