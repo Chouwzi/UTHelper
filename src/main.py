@@ -3,7 +3,11 @@ import os
 import sys
 from pathlib import Path
 
-from diagnostics.logging_setup import configure_logging
+from diagnostics.logging_setup import (
+    configure_dependency_logging,
+    configure_logging,
+    startup_debug_enabled,
+)
 from diagnostics.models import AppPhase
 from diagnostics.runtime import create_default_runtime
 from gui.controllers.startup_visibility import is_autostart_launch
@@ -67,7 +71,11 @@ except Exception as exc:
 
 # Set up the sole owned file logger after the platform data directory exists.
 try:
-    _LOGGING_RUNTIME = configure_logging(_APPDATA_DIR, debug=True)
+    _LOGGING_RUNTIME = configure_logging(
+        _APPDATA_DIR,
+        debug=startup_debug_enabled(os.environ),
+    )
+    configure_dependency_logging()
     _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
 except Exception as exc:
     _LOGGING_RUNTIME = None
@@ -87,9 +95,7 @@ if _LOGGING_RUNTIME is None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-logging.getLogger("flet_core").setLevel(logging.DEBUG)
-logging.getLogger("flet").setLevel(logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+configure_dependency_logging()
 # Suppress known harmless Flet web session teardown errors
 # (NoneType.put_nowait race condition during disconnect)
 # logging.getLogger("flet_core.session").setLevel(logging.CRITICAL)
@@ -193,6 +199,15 @@ def main() -> int:
             logger.info("Flet compat patched OK")
             
             # Import config first (may fail on Android if keyring is missing)
+            from config import settings as app_settings
+            configure_logging(
+                _APPDATA_DIR,
+                debug=(
+                    bool(app_settings.DEBUG_MODE)
+                    or startup_debug_enabled(os.environ)
+                ),
+            )
+            configure_dependency_logging()
             logger.info("Config loaded OK")
             
             # Import GUI 
