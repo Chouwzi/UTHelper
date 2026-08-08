@@ -1,0 +1,12 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="UTHelper" Manufacturer="UTHelper" Version="$(Version)"
+          UpgradeCode="EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense" LicenseUrl="" />
+    </BootstrapperApplication>
+    <Chain>
+      <MsiPackage SourceFile="$(MsiPath)" Compressed="yes" Visible="no" />
+    </Chain>
+  </Bundle>
+</Wix>

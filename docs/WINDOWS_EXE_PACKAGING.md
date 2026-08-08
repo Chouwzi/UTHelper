@@ -2,7 +2,7 @@
 
 This project is a Flet desktop app with Windows tray, toast notification, autostart, keyring, and bundled assets. Build on Windows for Windows artifacts.
 
-## Recommended Build Path
+## Canonical Windows Release Path
 
 Use `flet build windows` for the most robust desktop package. Current Flet docs recommend `flet build` for platform executables/bundles, while `flet pack` remains the PyInstaller-based path when a single-file `.exe` is required.
 
@@ -36,7 +36,7 @@ launch and does not start the embedded production Python app. Packaged autostart
 therefore uses the byte-identical `UTHelperAutostart.exe` sibling with no
 arguments. `--autostart` is retained only for direct Python development runs.
 
-Verify the bundle before any installer or MSIX step:
+Verify the bundle before the canonical WiX installer step:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\verify_windows_bundle.py dist\flet-build
@@ -54,20 +54,22 @@ The harness uses a temporary `APPDATA`, tests manual-visible,
 autostart-visible, and autostart-hidden launches, and terminates only the process
 it created. Every wait has a fixed deadline.
 
-Build the per-user Inno installer and run the installed-bundle gate:
+Package the verified bundle as the only supported Windows release pair: a
+machine-scoped WiX 7 MSI and a Burn bootstrapper EXE. Review and accept the WiX
+7 OSMF EULA before setting the required process variable; the build refuses to
+restore or execute WiX otherwise.
 
 ```powershell
-.\scripts\build_installer.ps1
-.\scripts\test_windows_installer_e2e.ps1 `
-  -InstallerPath .\dist\UTHelper_Setup_v2.1.0.exe `
-  -InstallDir build\installer-e2e\UTHelper `
-  -ObservationSeconds 8
+$env:WIX_EULA_ACCEPTED = "wix7"
+.\scripts\build_installer.ps1 -BundleDir dist\flet-build -OutputDir dist
 ```
 
-The installer harness refuses to overwrite an existing current-user UTHelper
-installation. Install and uninstall processes have explicit deadlines; the
-installed bundle is verified and runs the same visibility matrix before it is
-uninstalled.
+Release signing requires the PFX path/password and RFC3161 timestamp URL in the
+process environment. Verification requires valid timestamped Authenticode on
+both files, exact MSI tables, and byte equality between the canonical MSI and
+the MSI embedded in Burn. The upgrade harness uses bounded exact-PID processes,
+proves failed-upgrade rollback, preserves `%APPDATA%\UTHelper`, rejects
+downgrades, and verifies MSI and Burn uninstall.
 
 Validate the output on a clean Windows profile or VM:
 
@@ -76,10 +78,8 @@ Validate the output on a clean Windows profile or VM:
 - Open detail view and browser deep link.
 - Test tray minimize/restore/exit.
 - Test Windows toast/tray notification.
-- For an Inno/portable build, enable/disable autostart and confirm the Run value
-  points to installed `UTHelperAutostart.exe` with no arguments.
-- For MSIX, confirm the manifest StartupTask is visible in Windows Startup Apps;
-  do not expect a classic Run value.
+- Enable/disable autostart and confirm the Run value points to installed
+  `UTHelperAutostart.exe` with no arguments.
 - Confirm settings are written under `%APPDATA%\UTHelper`, not beside the exe.
 
 ## Single-File EXE Path
@@ -126,11 +126,12 @@ If the executable starts but a dynamic dependency fails, repeat the debug build 
   Source development targets `pythonw.exe`, the real entry script, and
   `--autostart`.
 - Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHelper`.
-- Do not request UAC/admin unless the app truly needs it; autostart uses HKCU and does not require elevation.
-- `makeappx pack` validates the manifest while creating the package. The packaging
-  script then unpacks the result and verifies the manifest and both runners;
-  `makeappx validate` is not a supported Windows SDK command.
-- Code signing is recommended for distribution to reduce SmartScreen friction, but signing requires a certificate and should happen after reproducible local builds.
+- The machine-scoped MSI requires elevation to install under Program Files. The
+  application and its HKCU autostart switch do not request elevation at runtime.
+- MSI and Burn are the sole canonical Windows release packages. Legacy MSIX and
+  AppInstaller helpers are not part of the exact release inventory.
+- Code signing with an RFC3161 timestamp is mandatory for release inventory;
+  unsigned local output cannot pass the publication gate.
 
 ## Sources
 

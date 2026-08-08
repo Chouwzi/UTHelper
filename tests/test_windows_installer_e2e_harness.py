@@ -47,3 +47,29 @@ def test_installer_harness_has_bounded_install_uninstall_and_pid_cleanup():
     assert "test_windows_bundle_e2e.ps1" in script
     assert "verify_windows_bundle.py" in script
     assert "finally" in script
+
+
+def test_msi_upgrade_harness_covers_failure_rollback_upgrade_and_burn():
+    script = (ROOT / "scripts" / "test_windows_msi_upgrade_e2e.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Invoke-BoundedProcess" in script
+    assert "WaitForExit($TimeoutSeconds * 1000)" in script
+    assert "Stop-Process -Id $process.Id" in script
+    assert "WIXFAILWHENDEFERRED=1" in script
+    assert '@("/i", $CurrentMsi, "WIXFAILWHENDEFERRED=1"' in script
+    assert '@{ APPDATA=$isolatedAppData; LOCALAPPDATA=$isolatedLocalAppData }' in script
+    assert "B1EB1032-5ACD-497D-8FD2-AB760218CBE3" in script
+    assert "BaselineProductCode" in script
+    assert "CurrentProductCode" in script
+    assert "sentinel" in script.lower()
+    assert "Assert-InstalledState" in script
+    assert "InstallChannel" in script
+    assert "InstallVersion" in script
+    assert "UTHelper.exe" in script
+    assert "StartMenuUTHelper" in script
+    assert "1605" in script
+    assert "1618" in script
+    assert "$primaryFailure" in script
+    assert "finally" in script

@@ -962,3 +962,37 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Task 6 focused verification passes **48 tests**, and the full suite passes
   **1143 tests with 24 skipped in 36.63 seconds**. Ruff, release YAML parsing,
   whitespace checks, and the final independent review all pass.
+
+## WiX MSI and Burn release path (2026-08-08)
+
+- WiX 7 is now the sole Windows installer authoring path: a machine-scoped x64
+  MSI with one stable UpgradeCode and an x64 Burn bootstrapper with a separate
+  stable UpgradeCode. The legacy Inno source was removed and its wrapper now
+  delegates to the canonical, version-derived WiX build under a 30-minute
+  exact-process deadline.
+- The build fails before restore unless the owner explicitly supplies
+  `WIX_EULA_ACCEPTED=wix7`. MSI/Burn builds, WiX validation/extraction, Burn
+  detach/reattach, and every SignTool call are bounded. Signing follows the
+  required MSI, detached engine, reattached bundle, outer bundle sequence with
+  SHA-256 and RFC3161 timestamping.
+- Native verification requires exact Authenticode subject/fingerprint and
+  timestamp, MSI ProductName/ProductVersion/UpgradeCode/x64 tables, and Burn
+  Registration version/scope/stable PrimaryUpgradeCode/x64 engine metadata.
+  WiX extracts the embedded MSI under an extensionless payload ID, so the gate
+  identifies exactly one MSI by its OLE header and then requires byte-for-byte
+  SHA-256 equality with the canonical signed MSI.
+- The bounded upgrade harness verifies distinct ProductCodes with one stable
+  UpgradeCode, baseline install, injected deferred-action rollback, exact
+  `InstallVersion` preservation, successful major upgrade, downgrade rejection,
+  settings preservation, removal of both exact HKCU Run values, MSI and Burn
+  uninstall, and clean final state. Cleanup accepts only success/already-absent,
+  retries installer-busy three times with fixed sleeps, and does not mask the
+  primary test failure.
+- Real unsigned smoke authoring produced and ICE-validated
+  `UTHelper-2.2.0.msi` and `UTHelper-Setup-2.2.0.exe` with zero warnings. A real
+  Burn extraction confirmed `Win64=yes`, version 2.2.0, the stable bundle
+  UpgradeCode, and extensionless embedded-MSI hash equality. Certificate gates
+  and destructive install/upgrade E2E remain release-runner checks because this
+  workspace has neither the protected signing certificate nor a signed baseline.
+  Task 7 focused tests pass **25/25**; the full suite passes **1157 tests with 24
+  skipped in 40.29 seconds**, and focused Ruff plus PowerShell parsing pass.

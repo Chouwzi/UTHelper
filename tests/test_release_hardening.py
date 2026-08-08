@@ -99,14 +99,12 @@ def test_release_manifest_is_generated_only_from_exact_verified_inventory():
 
 
 def test_legacy_installer_cannot_author_a_competing_application_version():
-    inno = _read("scripts/UTHelper_Setup.iss")
     wrapper = _read("scripts/build_installer.ps1")
 
-    assert '#define MyAppVersion "' not in inno
-    assert "MyAppVersion must be injected from pyproject.toml" in inno
+    assert not (ROOT / "scripts/UTHelper_Setup.iss").exists()
     assert "release_metadata.py" in wrapper
     assert "--print-version" in wrapper
-    assert '"/DMyAppVersion=$releaseVersion"' in wrapper
+    assert "build_windows_release.ps1" in wrapper
 
 
 def test_android_build_workflows_install_the_notification_patcher():
@@ -140,22 +138,95 @@ def test_local_android_build_script_applies_the_native_notification_patch():
     assert script.count("build $Target --verbose") == 2
 
 
-def test_inno_uninstall_scopes_autostart_cleanup_to_known_values():
-    script = _read("scripts/UTHelper_Setup.iss")
-    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+def test_wix7_build_requires_owner_confirmed_eula_variable():
+    script = _read("scripts/build_windows_release.ps1")
 
-    assert script.count(run_key) == 2
-    assert 'ValueName: "UTHelper"' in script
-    assert 'ValueName: "UTHElearningAlert"' in script
-    assert script.count("uninsdeletevalue") == 2
-    assert "uninsdeletekey" not in script
-    assert "PrivilegesRequired=lowest" in script
-    assert "PrivilegesRequired=admin" not in script
+    assert '$env:WIX_EULA_ACCEPTED -ne "wix7"' in script
+    assert "owner must review and accept the WiX v7 OSMF EULA" in script
+    assert "-p:AcceptEula=$env:WIX_EULA_ACCEPTED" in script
+    for project in (
+        "packaging/windows/UTHelper.Package.wixproj",
+        "packaging/windows/UTHelper.Bundle.wixproj",
+    ):
+        assert "<AcceptEula>" not in _read(project)
+    for helper in (
+        "scripts/sign_windows_release.ps1",
+        "scripts/verify_windows_release.ps1",
+    ):
+        content = _read(helper)
+        assert '$env:WIX_EULA_ACCEPTED -ne "wix7"' in content
+        assert '"-acceptEula", $env:WIX_EULA_ACCEPTED' in content
+
+
+def test_wix_authoring_has_stable_upgrade_codes_and_exact_msi_chain():
+    package = _read("packaging/windows/Package.wxs")
+    bundle = _read("packaging/windows/Bundle.wxs")
+    project = _read("packaging/windows/UTHelper.Package.wixproj")
+    bundle_project = _read("packaging/windows/UTHelper.Bundle.wixproj")
+
+    assert "B1EB1032-5ACD-497D-8FD2-AB760218CBE3" in package
+    assert "EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0" in bundle
+    assert '<MsiPackage SourceFile="$(MsiPath)"' in bundle
+    assert "UTHelperAutostart.exe" in package
+    assert 'Value="msi"' in package
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    assert package.count(run_key) == 2
+    assert 'Name="UTHelper"' in package
+    assert "/v UTHElearningAlert /f" in package
+    assert 'BindName="AppBundle"' in project
+    assert "<InstallerPlatform>x64</InstallerPlatform>" in bundle_project
+
+
+def test_burn_signing_detaches_signs_reattaches_and_signs_outer_bundle():
+    script = _read("scripts/sign_windows_release.ps1")
+
+    assert "wix burn detach" in script
+    assert "wix burn reattach" in script
+    assert script.count("Invoke-SignTool") >= 3
+    assert "/tr $TimestampUrl /td SHA256" in script
+    assert "WaitForExit($TimeoutSeconds * 1000)" in script
+    assert "Stop-Process -Id $process.Id" in script
+    assert 'Invoke-BoundedProcess "wix"' in script
+    assert not re.search(r"(?m)^\s*wix burn (?:detach|reattach)\b", script)
+
+
+def test_burn_verifier_identifies_extensionless_embedded_msi_by_ole_magic():
+    script = _read("scripts/verify_windows_release.ps1")
+
+    assert "Test-MsiOleMagic" in script
+    assert "D0-CF-11-E0-A1-B1-1A-E1" in script
+    assert "-Filter *.msi" not in script
+    assert '"-oba", $baRoot' in script
+    assert "manifest.xml" in script
+    assert "PrimaryUpgradeCode" in script
+    assert "Registration" in script
+
+
+def test_windows_release_build_invocations_are_bounded_and_cwd_independent():
+    script = _read("scripts/build_windows_release.ps1")
+
+    assert "Invoke-BoundedProcess" in script
+    assert "WaitForExit($TimeoutSeconds * 1000)" in script
+    assert "Stop-Process -Id $process.Id" in script
+    assert 'Join-Path $workspaceRoot "packaging\\windows\\UTHelper.Package.wixproj"' in script
+    assert 'Join-Path $workspaceRoot "packaging\\windows\\UTHelper.Bundle.wixproj"' in script
+
+
+def test_legacy_inno_path_is_removed_and_wrapper_delegates_only_to_wix():
+    assert not (ROOT / "scripts/UTHelper_Setup.iss").exists()
+    wrapper = _read("scripts/build_installer.ps1")
+
+    assert "build_windows_release.ps1" in wrapper
+    assert "release_metadata.py --pyproject pyproject.toml --print-version" in wrapper
+    assert "ISCC.exe" not in wrapper
+    assert "Inno Setup" not in wrapper
+    assert "WaitForExit($TimeoutSeconds * 1000)" in wrapper
+    assert "Stop-Process -Id $process.Id" in wrapper
 
 
 def test_windows_release_prepares_alias_before_verification_and_packaging():
     workflow = _read(".github/workflows/release.yml")
-    installer = _read("scripts/build_installer.ps1")
+    installer = _read("scripts/build_windows_release.ps1")
 
     for script in (workflow, installer):
         assert "prepare_windows_bundle.py" in script
@@ -225,7 +296,6 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
         "scripts/build_android.ps1",
-        "scripts/build_installer.ps1",
     }
     generator = "scripts/generate_public_runtime_config.py"
     output = "src/assets/diagnostics-config.json"
@@ -257,7 +327,7 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
             assert output in matching[0]
             previous_build = build_index
 
-    assert total_builds == 9
+    assert total_builds == 8
 
     for workflow_path in (
         ".github/workflows/release.yml",
@@ -267,7 +337,6 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
         workflow = _read(workflow_path)
         assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
         assert "secrets.SENTRY_DSN" not in workflow
-    assert "$env:SENTRY_DSN" in _read("scripts/build_installer.ps1")
     assert "$env:SENTRY_DSN" in _read("scripts/build_android.ps1")
 
 
@@ -282,7 +351,6 @@ def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_templat
 
     for relative_path in (
         ".github/workflows/release.yml",
-        "scripts/build_installer.ps1",
     ):
         content = _read(relative_path).replace("\\", "/")
         build_index = content.index("flet build windows")

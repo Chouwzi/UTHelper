@@ -117,6 +117,8 @@ benchmark_*.py
 
 # ── Installer output ──
 Output/
+packaging/windows/bin/
+packaging/windows/obj/
 *.exe
 !scripts/*.exe
 
