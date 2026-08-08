@@ -35,6 +35,32 @@ FORBIDDEN_PAYLOAD_FRAGMENTS = (
 )
 
 
+def test_ci_has_bounded_private_diagnostics_job_without_sentry_configuration():
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        "utf-8"
+    )
+    private_job = workflow.split("  private_diagnostics:\n", 1)[1]
+
+    assert "name: Private diagnostics" in private_job
+    assert "permissions:\n      contents: read" in private_job
+    assert "timeout-minutes: 10" in private_job
+    assert "pytest-timeout" in private_job
+    assert "--timeout=60" in private_job
+    assert "SENTRY_DSN" not in private_job
+    for filename in (
+        "test_diagnostic_redaction.py",
+        "test_diagnostic_logging.py",
+        "test_diagnostic_spool.py",
+        "test_diagnostic_transport.py",
+        "test_diagnostic_release_config.py",
+        "test_diagnostic_runtime.py",
+        "test_diagnostic_subprocess.py",
+        "test_windows_crash_evidence.py",
+        "test_flutter_diagnostics_patch.py",
+    ):
+        assert filename in private_job
+
+
 class _ChildResult(NamedTuple):
     returncode: int
     stdout_bytes: int

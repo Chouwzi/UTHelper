@@ -24,6 +24,30 @@ SYNTHETIC_SECRETS = (
 )
 
 
+def test_privacy_document_states_consent_retention_and_forbidden_data():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "docs" / "PRIVACY.md").read_text("utf-8").lower()
+    for phrase in (
+        "explicit consent",
+        "20 reports",
+        "7 days",
+        "ip address",
+        "password",
+        "moodle",
+        "raw log",
+        "stable device identifier",
+        "disable",
+        "delete",
+        "unclean exit",
+        "sentry retention",
+        "synthetic test report",
+    ):
+        assert phrase in text
+
+    readme = (root / "README.md").read_text("utf-8")
+    assert "docs/PRIVACY.md" in readme
+
+
 def valid_report_dict() -> dict[str, object]:
     return {
         "schema_version": 1,

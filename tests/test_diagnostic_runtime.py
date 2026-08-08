@@ -75,6 +75,7 @@ def _runtime(
     evidence_reader=lambda **_kwargs: (),
     clock=lambda: NOW,
     heartbeat_interval_seconds: float = 60.0,
+    consent_provider=lambda: CrashConsent.ENABLED,
 ) -> DiagnosticRuntime:
     spool = DiagnosticSpool(tmp_path / "telemetry" / "pending", clock=clock)
     return DiagnosticRuntime(
@@ -82,7 +83,7 @@ def _runtime(
         spool=spool,
         delivery=delivery or _Delivery(),
         context_provider=_context,
-        consent_provider=lambda: CrashConsent.DISABLED,
+        consent_provider=consent_provider,
         delivery_executor=executor or _Executor(),
         clock=clock,
         emergency_writer=emergency_writer,
@@ -240,6 +241,21 @@ def test_runtime_imports_flutter_bridge_through_sanitized_report_path(tmp_path):
     serialized = b"".join(item.path.read_bytes() for item in runtime.spool.pending())
     assert b"student@ut.edu.vn" not in serialized
     assert b"token=" not in serialized
+    runtime.close(clean=True)
+
+
+def test_runtime_discards_flutter_bridge_before_opt_in(tmp_path):
+    bridge = tmp_path / "diagnostics" / "flutter-errors.jsonl"
+    _write_flutter_bridge(bridge, _flutter_record())
+    runtime = _runtime(
+        tmp_path,
+        consent_provider=lambda: CrashConsent.NOT_ASKED,
+    )
+
+    runtime.start()
+
+    assert not bridge.exists()
+    assert runtime.spool.pending() == ()
     runtime.close(clean=True)
 
 
@@ -419,6 +435,63 @@ def test_start_and_close_are_idempotent(tmp_path):
     assert len(executor.submissions) == 1
     assert executor.shutdown_calls == [(False, True)]
     assert runtime.shutdown_event.is_set()
+
+
+def test_applying_disabled_consent_clears_spool_immediately_without_network(tmp_path):
+    delivery = _Delivery()
+    runtime = _runtime(tmp_path, delivery=delivery)
+    runtime.start()
+    assert runtime.record_exception(RuntimeError("private"), AppPhase.GUI)
+    assert len(runtime.spool.pending()) == 1
+
+    runtime.apply_consent(CrashConsent.DISABLED)
+
+    assert runtime.spool.pending() == ()
+    assert runtime.record_exception(RuntimeError("after revoke"), AppPhase.GUI) is None
+    assert runtime.spool.pending() == ()
+    assert delivery.calls == [CrashConsent.ENABLED]
+    runtime.close(clean=True)
+
+
+def test_not_asked_consent_never_captures_a_report(tmp_path):
+    executor = _Executor()
+    delivery = _Delivery()
+    runtime = _runtime(
+        tmp_path,
+        executor=executor,
+        delivery=delivery,
+        consent_provider=lambda: CrashConsent.NOT_ASKED,
+    )
+    runtime.start()
+
+    assert runtime.record_exception(RuntimeError("before opt in"), AppPhase.GUI) is None
+    assert runtime.spool.pending() == ()
+    assert executor.submissions == []
+    assert delivery.calls == []
+    runtime.close(clean=True)
+
+
+def test_settings_consent_subscription_is_removed_on_close(tmp_path):
+    callbacks = []
+    unsubscribe_calls = []
+
+    def subscribe(callback):
+        callbacks.append(callback)
+        return lambda: unsubscribe_calls.append(True)
+
+    selected = [CrashConsent.ENABLED]
+    runtime = _runtime(tmp_path, consent_provider=lambda: selected[0])
+    runtime.bind_consent_changes(subscribe)
+    runtime.start()
+    assert runtime.record_exception(RuntimeError("private"), AppPhase.GUI)
+
+    selected[0] = CrashConsent.DISABLED
+    callbacks[0]()
+
+    assert runtime.spool.pending() == ()
+    runtime.close(clean=True)
+    runtime.close(clean=True)
+    assert unsubscribe_calls == [True]
 
 
 def test_unclean_marker_is_reported_but_clean_close_removes_it(tmp_path):

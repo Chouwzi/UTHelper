@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 import math
 import socket
 import ssl
+import threading
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -122,6 +123,44 @@ class FlushSummary:
     skipped_backoff: bool = False
     deadline_exhausted: bool = False
     retry_after_seconds: float = 0.0
+
+
+class DiagnosticConsentGate:
+    """Serialize live consent changes with capture and request boundaries."""
+
+    def __init__(
+        self,
+        initial: CrashConsent = CrashConsent.NOT_ASKED,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._consent = CrashConsent(initial)
+
+    @property
+    def current(self) -> CrashConsent:
+        with self._lock:
+            return self._consent
+
+    def set(
+        self,
+        consent: CrashConsent | str,
+        *,
+        while_locked: Callable[[], None] | None = None,
+    ) -> None:
+        selected = CrashConsent(consent)
+        with self._lock:
+            self._consent = selected
+            if while_locked is not None:
+                while_locked()
+
+    def run_if_enabled(
+        self,
+        operation: Callable[[], Any],
+    ) -> tuple[bool, Any]:
+        """Run one operation atomically with respect to consent revocation."""
+        with self._lock:
+            if self._consent is not CrashConsent.ENABLED:
+                return False, None
+            return True, operation()
 
 
 def _validated_report(report: object) -> DiagnosticReport:
@@ -393,11 +432,13 @@ class DiagnosticDeliveryWorker:
         transport_factory: Callable[[str], SentryDiagnosticTransport] = (
             SentryDiagnosticTransport
         ),
+        consent_gate: DiagnosticConsentGate | None = None,
     ) -> None:
         self.spool = spool
         self.dsn = dsn
         self.monotonic = monotonic
         self.transport_factory = transport_factory
+        self.consent_gate = consent_gate
         self._failure_count = 0
         self._next_attempt_at = 0.0
 
@@ -407,9 +448,20 @@ class DiagnosticDeliveryWorker:
         deadline_seconds: float = _MAX_DELIVERY_SECONDS,
     ) -> FlushSummary:
         if consent is not CrashConsent.ENABLED:
-            if consent is CrashConsent.DISABLED:
+            if (
+                self.consent_gate is None
+                and consent is CrashConsent.DISABLED
+            ):
                 self.spool.clear()
             return FlushSummary(skipped_consent=True)
+        if (
+            self.consent_gate is not None
+            and self.consent_gate.current is not CrashConsent.ENABLED
+        ):
+            return FlushSummary(
+                retained=len(self.spool.pending()),
+                skipped_consent=True,
+            )
         if not self.dsn:
             return FlushSummary(
                 retained=len(self.spool.pending()),
@@ -434,7 +486,17 @@ class DiagnosticDeliveryWorker:
         if self.monotonic() >= deadline:
             return FlushSummary(retained=retained, deadline_exhausted=True)
         try:
-            transport = self.transport_factory(self.dsn or "")
+            if self.consent_gate is None:
+                transport = self.transport_factory(self.dsn or "")
+            else:
+                allowed, transport = self.consent_gate.run_if_enabled(
+                    lambda: self.transport_factory(self.dsn or "")
+                )
+                if not allowed:
+                    return FlushSummary(
+                        retained=retained,
+                        skipped_consent=True,
+                    )
         except (PublicConfigError, ValueError):
             return FlushSummary(retained=retained, skipped_unconfigured=True)
 
@@ -449,10 +511,25 @@ class DiagnosticDeliveryWorker:
                     attempted=attempted,
                     deadline_exhausted=True,
                 )
-            outcome = transport.send(
-                queued.report,
-                timeout_seconds=min(remaining, _MAX_DELIVERY_SECONDS),
-            )
+            if self.consent_gate is None:
+                outcome = transport.send(
+                    queued.report,
+                    timeout_seconds=min(remaining, _MAX_DELIVERY_SECONDS),
+                )
+            else:
+                allowed, outcome = self.consent_gate.run_if_enabled(
+                    lambda: transport.send(
+                        queued.report,
+                        timeout_seconds=min(remaining, _MAX_DELIVERY_SECONDS),
+                    )
+                )
+                if not allowed:
+                    return FlushSummary(
+                        sent=sent,
+                        retained=max(retained - sent, 0),
+                        attempted=attempted,
+                        skipped_consent=True,
+                    )
             attempted += 1
             if outcome.confirmed:
                 self.spool.acknowledge(queued.report.event_id)
@@ -476,6 +553,7 @@ class DiagnosticDeliveryWorker:
 
 
 __all__ = [
+    "DiagnosticConsentGate",
     "DeliveryOutcome",
     "DiagnosticDeliveryWorker",
     "FlushSummary",

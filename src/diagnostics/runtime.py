@@ -32,7 +32,7 @@ from diagnostics.spool import (
     _path_identity,
     MAX_AGE,
 )
-from diagnostics.transport import DiagnosticDeliveryWorker
+from diagnostics.transport import DiagnosticConsentGate, DiagnosticDeliveryWorker
 from diagnostics.windows_evidence import (
     RUN_STATE_SCHEMA_VERSION,
     EventReader,
@@ -420,6 +420,7 @@ class DiagnosticRuntime:
         executable_basename: str | None = None,
         evidence_reader: EventReader = read_windows_application_errors,
         heartbeat_interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
+        consent_gate: DiagnosticConsentGate | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.diagnostics_dir = self.data_dir / "diagnostics"
@@ -431,6 +432,7 @@ class DiagnosticRuntime:
         self.delivery = delivery
         self._context_provider = context_provider
         self._consent_provider = consent_provider
+        self._consent_gate = consent_gate or DiagnosticConsentGate()
         self._executor = delivery_executor or ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="uthelper-diagnostics",
@@ -470,6 +472,7 @@ class DiagnosticRuntime:
         self._owned_fault_enable: Any = None
         self._started = False
         self._closed = False
+        self._consent_unsubscribe: Callable[[], None] | None = None
 
     @property
     def started(self) -> bool:
@@ -482,6 +485,56 @@ class DiagnosticRuntime:
             selected_phase,
             self._unclean_previous_exit,
         )
+
+    def bind_consent_changes(
+        self,
+        subscribe: Callable[[Callable[[], None]], Callable[[], None]],
+    ) -> None:
+        """Bind successful Settings saves to the live consent boundary once."""
+        if not callable(subscribe):
+            return
+        with self._lifecycle_lock:
+            if self._closed or self._consent_unsubscribe is not None:
+                return
+        try:
+            unsubscribe = subscribe(
+                lambda: self.apply_consent(self._consent_provider())
+            )
+        except Exception:
+            self._write_emergency("diagnostic consent subscription failed\n")
+            return
+        if not callable(unsubscribe):
+            self._write_emergency("diagnostic consent subscription failed\n")
+            return
+        release_immediately = False
+        with self._lifecycle_lock:
+            if self._closed or self._consent_unsubscribe is not None:
+                release_immediately = True
+            else:
+                self._consent_unsubscribe = unsubscribe
+        if release_immediately:
+            try:
+                unsubscribe()
+            except Exception:
+                self._write_emergency("diagnostic consent unsubscribe failed\n")
+
+    def apply_consent(self, consent: CrashConsent | str) -> None:
+        """Apply a newly persisted choice without waiting for process restart."""
+        try:
+            selected = CrashConsent(consent)
+        except (TypeError, ValueError):
+            return
+        with self._lifecycle_lock:
+            if not self._started or self._closed:
+                return
+        if selected is not CrashConsent.ENABLED:
+            self._set_live_consent(selected, delete_pending=True)
+            return
+        self._set_live_consent(selected, delete_pending=False)
+        try:
+            self._executor.submit(self.delivery.flush_once, selected)
+        except Exception:
+            self._write_emergency("diagnostic delivery unavailable\n")
 
     def start(self) -> None:
         """Install hooks and submit one non-blocking delivery attempt."""
@@ -505,15 +558,21 @@ class DiagnosticRuntime:
             self._previous = _HookSet.capture()
             self._install_hooks()
             self._enable_faulthandler()
-            self._import_flutter_records()
             try:
                 consent = self._consent_provider()
             except Exception:
                 consent = CrashConsent.NOT_ASKED
-            try:
-                self._executor.submit(self.delivery.flush_once, consent)
-            except Exception:
-                self._write_emergency("diagnostic delivery unavailable\n")
+            self._set_live_consent(
+                consent,
+                delete_pending=consent is not CrashConsent.ENABLED,
+            )
+            if consent is CrashConsent.ENABLED:
+                self._import_flutter_records()
+            if consent is CrashConsent.ENABLED:
+                try:
+                    self._executor.submit(self.delivery.flush_once, consent)
+                except Exception:
+                    self._write_emergency("diagnostic delivery unavailable\n")
 
     def record_exception(
         self,
@@ -537,51 +596,98 @@ class DiagnosticRuntime:
         self._local.capturing = True
         try:
             with self._capture_lock:
-                context = self.context(phase)
-                evidence = self._peek_windows_evidence(context)
-                report = build_report(
-                    exc,
-                    context,
-                    occurred_at=occurred_at,
-                    native_exception_code=(
-                        evidence.exception_code if evidence is not None else None
-                    ),
-                    faulting_module=(
-                        evidence.faulting_module_basename
-                        if evidence is not None
-                        else None
-                    ),
+                allowed, reference = self._consent_gate.run_if_enabled(
+                    lambda: self._capture_enabled_exception(
+                        exc,
+                        phase,
+                        occurred_at=occurred_at,
+                    )
                 )
-                outcome = self.spool.enqueue(report)
-                pending = self.spool.pending()
-                if outcome.stored:
-                    durable = next(
-                        (
-                            item.report
-                            for item in pending
-                            if item.report.event_id == report.event_id
-                        ),
-                        None,
-                    )
-                elif outcome.deduplicated:
-                    durable = next(
-                        (
-                            item.report
-                            for item in pending
-                            if item.report.fingerprint == report.fingerprint
-                        ),
-                        None,
-                    )
-                else:
-                    durable = None
-                if durable is not None and evidence is not None:
-                    self._commit_windows_evidence(evidence)
-                return durable.event_id.hex if durable is not None else None
+                return reference if allowed else None
         except Exception:
             self._write_emergency("diagnostic capture failed\n")
             return None
         finally:
             self._local.capturing = False
+
+    def _capture_enabled_exception(
+        self,
+        exc: BaseException,
+        phase: AppPhase,
+        *,
+        occurred_at: datetime | None,
+    ) -> str | None:
+        context = self.context(phase)
+        evidence = self._peek_windows_evidence(context)
+        report = build_report(
+            exc,
+            context,
+            occurred_at=occurred_at,
+            native_exception_code=(
+                evidence.exception_code if evidence is not None else None
+            ),
+            faulting_module=(
+                evidence.faulting_module_basename if evidence is not None else None
+            ),
+        )
+        outcome = self.spool.enqueue(report)
+        pending = self.spool.pending()
+        if outcome.stored:
+            durable = next(
+                (
+                    item.report
+                    for item in pending
+                    if item.report.event_id == report.event_id
+                ),
+                None,
+            )
+        elif outcome.deduplicated:
+            durable = next(
+                (
+                    item.report
+                    for item in pending
+                    if item.report.fingerprint == report.fingerprint
+                ),
+                None,
+            )
+        else:
+            durable = None
+        if durable is not None and evidence is not None:
+            self._commit_windows_evidence(evidence)
+        return durable.event_id.hex if durable is not None else None
+
+    def _set_live_consent(
+        self,
+        consent: CrashConsent,
+        *,
+        delete_pending: bool,
+    ) -> None:
+        def cleanup() -> None:
+            try:
+                self.spool.clear()
+            except Exception:
+                self._write_emergency("diagnostic consent cleanup failed\n")
+            self._discard_flutter_bridge()
+
+        try:
+            self._consent_gate.set(
+                consent,
+                while_locked=cleanup if delete_pending else None,
+            )
+        except Exception:
+            self._write_emergency("diagnostic consent update failed\n")
+
+    def _discard_flutter_bridge(self) -> None:
+        if not self._root_is_owned():
+            return
+        try:
+            identity = _path_identity(
+                self.flutter_bridge_path,
+                expect_directory=False,
+            )
+        except (OSError, ValueError):
+            return
+        _delete_exact_regular(self.flutter_bridge_path, expected=identity)
 
     def _import_flutter_records(self) -> None:
         if not self._root_is_owned():
@@ -684,10 +790,13 @@ class DiagnosticRuntime:
     def close(self, clean: bool) -> None:
         """Restore owned hooks and release resources without waiting on delivery."""
         heartbeat: threading.Thread | None = None
+        consent_unsubscribe: Callable[[], None] | None = None
         with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
+            consent_unsubscribe = self._consent_unsubscribe
+            self._consent_unsubscribe = None
             self.shutdown_event.set()
             heartbeat = self._heartbeat_thread
             self._heartbeat_thread = None
@@ -703,6 +812,11 @@ class DiagnosticRuntime:
                 self._write_emergency("diagnostic delivery shutdown failed\n")
             self._release_operation_guard()
             self._release_root_pin()
+        if consent_unsubscribe is not None:
+            try:
+                consent_unsubscribe()
+            except Exception:
+                self._write_emergency("diagnostic consent unsubscribe failed\n")
         if heartbeat is not None and heartbeat is not threading.current_thread():
             heartbeat.join(timeout=HEARTBEAT_JOIN_SECONDS)
 
@@ -1043,7 +1157,7 @@ def create_default_runtime(
     """Build the production runtime without importing the Flet UI runtime."""
     from importlib.metadata import PackageNotFoundError, version
 
-    from config import settings
+    from config import settings, subscribe_settings_saved
     from core.version import APP_VERSION
 
     try:
@@ -1074,11 +1188,13 @@ def create_default_runtime(
         )
 
     spool = DiagnosticSpool(Path(data_dir) / "telemetry" / "pending")
+    consent_gate = DiagnosticConsentGate()
     delivery = DiagnosticDeliveryWorker(
         spool,
         dsn=load_runtime_public_dsn(development=development),
+        consent_gate=consent_gate,
     )
-    return DiagnosticRuntime(
+    runtime = DiagnosticRuntime(
         data_dir=Path(data_dir),
         spool=spool,
         delivery=delivery,
@@ -1089,7 +1205,10 @@ def create_default_runtime(
             if sys.platform == "win32" and not development
             else None
         ),
+        consent_gate=consent_gate,
     )
+    runtime.bind_consent_changes(subscribe_settings_saved)
+    return runtime
 
 
 __all__ = [

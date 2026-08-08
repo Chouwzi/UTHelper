@@ -805,3 +805,38 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   Flutter analysis of the final synchronous patch had no errors (only the two
   existing official-template unused-import notices). Independent re-review
   reported no remaining Critical or Important findings.
+
+## Published diagnostic privacy and live-consent boundary (2026-08-08)
+
+- `docs/PRIVACY.md` is the public contract for anonymous crash diagnostics. It
+  states the explicit opt-in boundary, the remote allow-list and forbidden
+  Moodle/account data, the lack of a stable device identifier, the local
+  20-report/1-MiB/7-day limits, disable/delete behavior, the unclean-exit
+  caveat, and the network-visible IP/Sentry-retention limitations. The README
+  links to this contract rather than implying diagnostics are unconditional.
+- Successful durable Settings saves now publish an in-process notification
+  through a small config-owned subscription boundary. The diagnostic runtime
+  subscribes once and unsubscribes on close: disabling clears its owned spool
+  synchronously without a network request, while enabling schedules only the
+  existing bounded delivery attempt. Failed saves do not change live consent.
+  Subscriber failures are isolated and logged without values.
+- CI has a least-privilege, ten-minute `Private diagnostics` job that installs
+  no release DSN and executes the complete diagnostic boundary set with a
+  per-test timeout. A contract test guards the job name, permissions, timeout,
+  file list, and absence of Sentry configuration.
+- Independent review found that a consented flush could outlive revocation and
+  that post-revoke exceptions could recreate the queue. A shared live-consent
+  gate now serializes revocation with report capture, lazy transport creation,
+  and every bounded send. Revocation waits only for an already-started bounded
+  request, then atomically blocks later sends/captures and clears the queue and
+  Flutter bridge. Before opt-in, no report is captured or delivery task queued.
+  A blocking two-report concurrency test proves that the second request never
+  starts after revoke returns.
+- The exact diagnostic release gate passes **212 tests in 11.89 seconds**. The
+  focused config/runtime/privacy set passes **130 tests in 3.94 seconds**, and
+  the bounded full suite passes **1062 tests with 24 skipped in 22.15 seconds**.
+  `ruff check src tests scripts`, YAML parsing, `git diff --check`, and the
+  reviewed forbidden-term scan pass. The only scan matches are the public
+  forbidden-field documentation, rejection/redaction code, and GitHub Actions
+  references to encrypted signing secrets; no diagnostic payload or CI DSN is
+  present. Two legacy manual test scripts received only mechanical Ruff fixes.

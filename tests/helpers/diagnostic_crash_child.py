@@ -25,14 +25,14 @@ class BoundarySecretError(RuntimeError):
     """Synthetic exception whose args exercise the privacy boundary."""
 
 
-class _DisabledDelivery:
+class _NoNetworkDelivery:
     def flush_once(self, consent: CrashConsent) -> None:
-        if consent is not CrashConsent.DISABLED:
-            raise AssertionError("subprocess diagnostics consent must stay disabled")
+        if consent is not CrashConsent.ENABLED:
+            raise AssertionError("subprocess diagnostics consent must be explicit")
 
 
 class _InlineExecutor:
-    """Run disabled delivery before faults, without owning a worker thread."""
+    """Run the no-network delivery stub without owning a worker thread."""
 
     def submit(self, function, *args):
         function(*args)
@@ -67,9 +67,9 @@ def _runtime(root: Path) -> DiagnosticRuntime:
             root / "telemetry" / "pending",
             clock=lambda: NOW,
         ),
-        delivery=_DisabledDelivery(),
+        delivery=_NoNetworkDelivery(),
         context_provider=_context,
-        consent_provider=lambda: CrashConsent.DISABLED,
+        consent_provider=lambda: CrashConsent.ENABLED,
         delivery_executor=_InlineExecutor(),
         clock=lambda: NOW,
     )

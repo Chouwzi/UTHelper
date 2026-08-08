@@ -180,6 +180,7 @@ src/
 - ✅ SSL verification luôn bật, timeout trên mọi request
 - ✅ Zero dependency HTTP client (stdlib `urllib.request`)
 - ✅ Không lưu credentials trong source code
+- ✅ Chẩn đoán sự cố chỉ gửi sau khi đồng ý rõ ràng; xem [chính sách quyền riêng tư](docs/PRIVACY.md)
 
 ## 🧪 Testing
 
@@ -206,7 +207,7 @@ python -m pytest ../tests/ --cov=. --cov-report=html
 
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
-| **CI** (`ci.yml`) | Push/PR to `develop`, `main` | 🔍 Lint (Ruff) · 🧪 Test (3.12/3.13/3.14) · 🔒 Security (pip-audit) |
+| **CI** (`ci.yml`) | Push/PR to `develop`, `main` | 🔍 Lint (Ruff) · 🧪 Test (3.12/3.13/3.14) · 🔐 Private diagnostics · 🔒 Security (pip-audit) |
 | **Build Android** (`build-android.yml`) | Push to `main`, tags `v*` | 📱 Build APK/AAB · 📤 Upload artifact · 🏷️ Release |
 
 ## 🌿 Git Workflow

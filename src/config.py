@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from collections.abc import Callable
 from typing import Literal
 import os
 from pathlib import Path
@@ -125,6 +126,35 @@ def _has_any_secure_backend() -> bool:
 
 
 _settings_save_lock = threading.RLock()
+_settings_subscriber_lock = threading.RLock()
+_settings_saved_subscribers: dict[object, Callable[[], None]] = {}
+
+
+def subscribe_settings_saved(listener: Callable[[], None]) -> Callable[[], None]:
+    """Subscribe to successful durable saves and return an idempotent unsubscribe."""
+    if not callable(listener):
+        raise TypeError("settings listener must be callable")
+    token = object()
+    with _settings_subscriber_lock:
+        _settings_saved_subscribers[token] = listener
+
+    def unsubscribe() -> None:
+        with _settings_subscriber_lock:
+            _settings_saved_subscribers.pop(token, None)
+
+    return unsubscribe
+
+
+def _notify_settings_saved() -> None:
+    with _settings_subscriber_lock:
+        subscribers = tuple(_settings_saved_subscribers.values())
+    for listener in subscribers:
+        try:
+            listener()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "A settings-save subscriber failed"
+            )
 
 
 def _snapshot_secure_secrets() -> dict[str, str] | None:
@@ -397,6 +427,8 @@ def save_settings() -> bool:
 
         if not json_ok and previous_secrets is not None:
             _restore_secure_secrets(previous_secrets)
-        return json_ok
+    if json_ok:
+        _notify_settings_saved()
+    return json_ok
 
 

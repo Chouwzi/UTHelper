@@ -24,12 +24,10 @@ import os
 import json
 import tempfile
 import shutil
-import asyncio
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock, call
-from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 # Suppress noisy logs during test
 logging.basicConfig(level=logging.WARNING)
@@ -108,7 +106,7 @@ def make_dict_assignment(**overrides):
 def test_windows_notifier():
     section("1. WindowsNotifier")
 
-    from notifiers.windows import WindowsNotifier, _get
+    from notifiers.windows import WindowsNotifier
 
     # 1a. Single assignment toast
     try:
@@ -281,7 +279,7 @@ def test_telegram_notifier():
             mock_cfg.TELEGRAM_BOT_TOKEN = ""
             mock_cfg.TELEGRAM_CHAT_ID = ""
             result = notifier.notify([make_assignment()])
-            P("Telegram: disabled -> False", result == False)
+            P("Telegram: disabled -> False", not result)
     except Exception as ex:
         P("Telegram: disabled -> False", False, str(ex))
 
@@ -316,7 +314,7 @@ def test_telegram_notifier():
             mock_cfg.TELEGRAM_CHAT_ID = "999"
             with patch('httpx.post', side_effect=Exception("Connection refused")):
                 result = notifier.notify([make_assignment()])
-                P("Telegram: network error -> False", result == False)
+                P("Telegram: network error -> False", not result)
     except Exception as ex:
         P("Telegram: network error -> False", False, str(ex))
 
@@ -382,7 +380,7 @@ def test_discord_notifier():
             mock_cfg.ENABLE_DISCORD = False
             mock_cfg.DISCORD_WEBHOOK_URL = ""
             result = notifier.notify([make_assignment()])
-            P("Discord: disabled -> False", result == False)
+            P("Discord: disabled -> False", not result)
     except Exception as ex:
         P("Discord: disabled -> False", False, str(ex))
 
@@ -461,7 +459,7 @@ def test_email_notifier():
             mock_cfg.GMAIL_ADDRESS = "test@gmail.com"
             mock_cfg.GMAIL_APP_PASSWORD = ""
             result = notifier.notify([make_assignment()])
-            P("Email: no password -> False", result == False)
+            P("Email: no password -> False", not result)
     except Exception as ex:
         P("Email: no password -> False", False, str(ex))
 

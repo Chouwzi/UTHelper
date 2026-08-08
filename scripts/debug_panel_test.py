@@ -10,8 +10,7 @@ import json
 import tempfile
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
-from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Setup path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -65,7 +64,6 @@ _TEST_DIR = Path(tempfile.mkdtemp(prefix="uth_debug_test_"))
 
 # Now import our code
 from config import settings, _USER_DATA_DIR
-from gui.core.theme import C
 
 # ============================================================
 # Test Helper: Build a minimal SettingsView with all debug fields
@@ -141,7 +139,7 @@ def test_show_device_info(tester):
         lines = [
             f"Python: {sys.version.split()[0]}",
             f"Platform: {pf.system()} {pf.release()} ({pf.machine()})",
-            f"Flet: unknown",
+            "Flet: unknown",
             f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
             f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
         ]
@@ -156,7 +154,7 @@ def test_show_device_info(tester):
 def test_moodle_connection(tester):
     """Test _do_test_moodle_connection logic."""
     try:
-        ok = tester._orchestrator.client.login(
+        assert tester._orchestrator.client.login(
             username=settings.UTH_USERNAME,
             password=settings.UTH_PASSWORD,
             force=True,
@@ -257,7 +255,7 @@ def test_show_notif_history(tester):
         assert len(lines) == 10  # Max 10 displayed
         
         history.clear()
-        return print_result("_do_show_notif_history", True, f"12 entries, showed 10")
+        return print_result("_do_show_notif_history", True, "12 entries, showed 10")
     except Exception as ex:
         return print_result("_do_show_notif_history", False, str(ex))
 
@@ -265,7 +263,7 @@ def test_show_notif_history(tester):
 def test_scheduler_status(tester):
     """Test _do_show_scheduler_status."""
     try:
-        from core.background_scheduler import get_scheduler, BackgroundScheduler
+        from core.background_scheduler import get_scheduler
         scheduler = get_scheduler()
         
         lines = [
@@ -302,7 +300,6 @@ def test_broadcast(tester):
                 fn(t)
                 sent.append(name)
         
-        result = f"Broadcast [{t}] tới: {', '.join(sent)}"
         assert len(sent) >= 1
         tester._on_test_tray.assert_called_once_with(t)
         return print_result("_do_test_broadcast", True, f"sent to: {', '.join(sent)}")

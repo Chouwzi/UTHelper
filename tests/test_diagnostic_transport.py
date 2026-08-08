@@ -20,6 +20,7 @@ import pytest
 from diagnostics.models import AppPhase, CrashConsent, DiagnosticFrame, DiagnosticReport
 from diagnostics.spool import DiagnosticSpool
 from diagnostics.transport import (
+    DiagnosticConsentGate,
     DeliveryOutcome,
     DiagnosticDeliveryWorker,
     SentryDiagnosticTransport,
@@ -99,6 +100,61 @@ def test_enabled_without_dsn_constructs_no_client_or_network(tmp_path, monkeypat
     assert summary.skipped_unconfigured
     assert calls == []
     assert len(spool.pending()) == 1
+
+
+def test_live_revoke_waits_for_inflight_send_and_blocks_the_next_report(tmp_path):
+    spool = DiagnosticSpool(tmp_path / "spool", clock=lambda: NOW)
+    first = _report()
+    second = first.model_copy(
+        update={
+            "event_id": UUID("00000000-0000-0000-0000-000000000124"),
+            "fingerprint": "b" * 64,
+        }
+    )
+    assert spool.enqueue(first).stored
+    assert spool.enqueue(second).stored
+    gate = DiagnosticConsentGate(CrashConsent.ENABLED)
+    send_started = threading.Event()
+    release_send = threading.Event()
+    revoke_finished = threading.Event()
+    send_calls = []
+
+    class BlockingTransport:
+        def send(self, report, *, timeout_seconds):
+            send_calls.append(report.event_id)
+            send_started.set()
+            assert release_send.wait(2)
+            return DeliveryOutcome.confirmed_success(status_code=200)
+
+    worker = DiagnosticDeliveryWorker(
+        spool,
+        dsn=VALID_DSN,
+        consent_gate=gate,
+        transport_factory=lambda _dsn: BlockingTransport(),
+    )
+    delivery_thread = threading.Thread(
+        target=worker.flush_once,
+        args=(CrashConsent.ENABLED,),
+    )
+    delivery_thread.start()
+    assert send_started.wait(1)
+
+    def revoke():
+        gate.set(CrashConsent.DISABLED, while_locked=spool.clear)
+        revoke_finished.set()
+
+    revoke_thread = threading.Thread(target=revoke)
+    revoke_thread.start()
+    assert not revoke_finished.wait(0.05)
+    release_send.set()
+    delivery_thread.join(2)
+    revoke_thread.join(2)
+
+    assert not delivery_thread.is_alive()
+    assert not revoke_thread.is_alive()
+    assert revoke_finished.is_set()
+    assert send_calls == [first.event_id]
+    assert spool.pending() == ()
 
 
 def test_strict_before_send_reconstructs_only_allowlisted_event():

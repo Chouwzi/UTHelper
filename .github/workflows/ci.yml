@@ -11,6 +11,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  private_diagnostics:
+    name: Private diagnostics
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src:extensions/flet_uth_background_sync/src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install diagnostics test dependencies
+        run: pip install -e . pytest pytest-timeout
+
+      - name: Verify private diagnostic boundaries
+        run: >-
+          python -m pytest
+          tests/test_diagnostic_redaction.py
+          tests/test_diagnostic_logging.py
+          tests/test_diagnostic_spool.py
+          tests/test_diagnostic_transport.py
+          tests/test_diagnostic_release_config.py
+          tests/test_diagnostic_runtime.py
+          tests/test_diagnostic_subprocess.py
+          tests/test_windows_crash_evidence.py
+          tests/test_flutter_diagnostics_patch.py
+          -v --timeout=60
+
   lint:
     name: 🔍 Lint
     runs-on: ubuntu-latest

@@ -307,6 +307,44 @@ def test_save_settings_reports_complete_success(monkeypatch):
     assert len(writes) == 1
 
 
+def test_successful_save_notifies_subscribers_and_unsubscribe_is_exact(monkeypatch):
+    import config
+
+    calls = []
+    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: False)
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic",
+        lambda *_args, **_kwargs: True,
+    )
+    unsubscribe = config.subscribe_settings_saved(lambda: calls.append("saved"))
+    try:
+        assert config.save_settings() is True
+        assert calls == ["saved"]
+        unsubscribe()
+        unsubscribe()
+        assert config.save_settings() is True
+        assert calls == ["saved"]
+    finally:
+        unsubscribe()
+
+
+def test_failed_save_does_not_notify_subscribers(monkeypatch):
+    import config
+
+    calls = []
+    monkeypatch.setattr(config, "_has_any_secure_backend", lambda: False)
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic",
+        lambda *_args, **_kwargs: False,
+    )
+    unsubscribe = config.subscribe_settings_saved(lambda: calls.append("saved"))
+    try:
+        assert config.save_settings() is False
+        assert calls == []
+    finally:
+        unsubscribe()
+
+
 @pytest.mark.parametrize(
     "settings_values",
     [
