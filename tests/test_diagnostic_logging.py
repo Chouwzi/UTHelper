@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from diagnostics.logging_setup import configure_logging
+from diagnostics.logging_setup import (
+    configure_dependency_logging,
+    configure_logging,
+    startup_debug_enabled,
+)
 
 
 @pytest.fixture
@@ -208,6 +212,112 @@ def test_legacy_oversized_logs_are_safely_removed_before_handler_opens(
     runtime.close()
 
 
+def test_locked_oversized_legacy_debug_log_does_not_disable_current_logging(
+    tmp_path: Path,
+    isolated_root_logger: logging.Logger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = tmp_path / "debug_app.log"
+    legacy.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    original_unlink = Path.unlink
+
+    def locked_legacy_unlink(path: Path, *args, **kwargs):
+        if path == legacy:
+            raise PermissionError("synthetic Windows sharing violation")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_legacy_unlink)
+
+    runtime = configure_logging(tmp_path, debug=False)
+    logging.getLogger("current-runtime").error("current log remains available")
+    _flush_root_handlers(isolated_root_logger)
+
+    assert legacy.exists()
+    assert b"current log remains available" in _read_log_bytes(tmp_path)
+    runtime.close()
+
+
+def test_locked_oversized_active_log_uses_bounded_recovery_log(
+    tmp_path: Path,
+    isolated_root_logger: logging.Logger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    active = log_dir / "app.log"
+    active.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    original_unlink = Path.unlink
+
+    def locked_active_unlink(path: Path, *args, **kwargs):
+        if path == active:
+            raise PermissionError("synthetic Windows sharing violation")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_active_unlink)
+
+    runtime = configure_logging(tmp_path, debug=False)
+    logging.getLogger("recovery-runtime").error("bounded recovery log works")
+    _flush_root_handlers(isolated_root_logger)
+
+    recovery = log_dir / "app-recovery.log"
+    assert active.stat().st_size > 2 * 1024 * 1024
+    assert recovery.is_file()
+    assert recovery.stat().st_size < 2 * 1024 * 1024
+    assert b"bounded recovery log works" in recovery.read_bytes()
+    runtime.close()
+
+
+def test_locked_oversized_recovery_log_cannot_abort_startup_cleanup(
+    tmp_path: Path,
+    isolated_root_logger: logging.Logger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    active = log_dir / "app.log"
+    recovery = log_dir / "app-recovery.log"
+    oversized = b"x" * (2 * 1024 * 1024 + 1)
+    active.write_bytes(oversized)
+    recovery.write_bytes(oversized)
+    original_unlink = Path.unlink
+
+    def locked_log_unlink(path: Path, *args, **kwargs):
+        if path in (active, recovery):
+            raise PermissionError("synthetic Windows sharing violation")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_log_unlink)
+
+    runtime = configure_logging(tmp_path, debug=False)
+    logging.getLogger("locked-recovery-runtime").error("startup continues")
+    _flush_root_handlers(isolated_root_logger)
+
+    assert recovery.exists()
+    assert b"startup continues" in recovery.read_bytes()
+    runtime.close()
+
+
+def test_dependency_logging_never_persists_flet_transport_patch_payloads() -> None:
+    names = ("flet", "flet_core", "flet_transport", "httpx", "httpcore")
+    original = {name: logging.getLogger(name).level for name in names}
+    try:
+        configure_dependency_logging()
+        assert all(logging.getLogger(name).level >= logging.WARNING for name in names)
+    finally:
+        for name, level in original.items():
+            logging.getLogger(name).setLevel(level)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, False), ("", False), ("0", False), ("false", False), ("1", True)],
+)
+def test_startup_debug_logging_requires_explicit_environment_opt_in(value, expected):
+    environment = {} if value is None else {"UTH_DEBUG_LOGGING": value}
+
+    assert startup_debug_enabled(environment) is expected
+
+
 @pytest.mark.skipif(
     not hasattr(os, "symlink"),
     reason="platform has no symlink support",
@@ -265,6 +375,7 @@ def test_main_import_owns_one_rotating_log_without_legacy_debug_file(
     env["APPDATA"] = str(tmp_path)
     env["FLET_APP_STORAGE_DATA"] = str(tmp_path / "UTHelper")
     env["FLET_APP_STORAGE_TEMP"] = str(tmp_path / "UTHelper" / "flet" / "temp")
+    env.pop("UTH_DEBUG_LOGGING", None)
     completed = subprocess.run(
         [
             sys.executable,
@@ -273,7 +384,9 @@ def test_main_import_owns_one_rotating_log_without_legacy_debug_file(
                 "import logging; import main; "
                 "from logging.handlers import RotatingFileHandler; "
                 "print(sum(isinstance(h, RotatingFileHandler) "
-                "for h in logging.getLogger().handlers))"
+                "for h in logging.getLogger().handlers), "
+                "logging.getLogger().level, "
+                "logging.getLogger('flet_transport').level)"
             ),
         ],
         cwd=Path(__file__).resolve().parents[1],
@@ -285,6 +398,8 @@ def test_main_import_owns_one_rotating_log_without_legacy_debug_file(
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip().endswith("1")
+    assert completed.stdout.strip().endswith(
+        f"1 {logging.INFO} {logging.WARNING}"
+    )
     assert (tmp_path / "UTHelper" / "logs" / "app.log").is_file()
     assert not (tmp_path / "UTHelper" / "debug_app.log").exists()

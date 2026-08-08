@@ -7,6 +7,7 @@ import logging
 import stat
 import threading
 import traceback
+from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import TracebackType
@@ -21,6 +22,26 @@ _RUNTIME_ATTRIBUTE = "_uthelper_logging_runtime"
 _CONFIGURE_LOCK = threading.RLock()
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+_NOISY_DEPENDENCY_LOGGERS = (
+    "flet",
+    "flet_core",
+    "flet_transport",
+    "httpcore",
+    "httpx",
+)
+
+
+def startup_debug_enabled(environ: Mapping[str, str]) -> bool:
+    """Enable early debug logging only through one explicit developer switch."""
+
+    return environ.get("UTH_DEBUG_LOGGING") == "1"
+
+
+def configure_dependency_logging() -> None:
+    """Keep verbose dependency payloads out of the application-owned log."""
+
+    for name in _NOISY_DEPENDENCY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 class _RedactingFormatter(logging.Formatter):
@@ -107,9 +128,9 @@ def configure_logging(data_dir: Path, *, debug: bool) -> LoggingRuntime:
         data_path = Path(data_dir)
         log_dir = data_path / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        _remove_unsafe_or_oversized_legacy_logs(data_path, log_dir)
+        log_path = _remove_unsafe_or_oversized_legacy_logs(data_path, log_dir)
         handler = RotatingFileHandler(
-            log_dir / "app.log",
+            log_path,
             maxBytes=MAX_LOG_BYTES,
             backupCount=BACKUP_COUNT,
             encoding="utf-8",
@@ -127,8 +148,12 @@ def configure_logging(data_dir: Path, *, debug: bool) -> LoggingRuntime:
 def _remove_unsafe_or_oversized_legacy_logs(
     data_dir: Path,
     log_dir: Path,
-) -> None:
-    paths = [data_dir / "debug_app.log", log_dir / "app.log"]
+) -> Path:
+    legacy_path = data_dir / "debug_app.log"
+    active_path = log_dir / "app.log"
+    recovery_path = log_dir / "app-recovery.log"
+    selected_path = active_path
+    paths = [legacy_path, active_path]
     paths.extend(
         log_dir / f"app.log.{index}"
         for index in range(1, BACKUP_COUNT + 1)
@@ -138,8 +163,42 @@ def _remove_unsafe_or_oversized_legacy_logs(
             metadata = path.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISLNK(metadata.st_mode):
-            path.unlink(missing_ok=True)
-            continue
-        if stat.S_ISREG(metadata.st_mode) and metadata.st_size >= MAX_LOG_BYTES:
-            path.unlink(missing_ok=True)
+        try:
+            if stat.S_ISLNK(metadata.st_mode):
+                path.unlink(missing_ok=True)
+                continue
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_size >= MAX_LOG_BYTES:
+                path.unlink(missing_ok=True)
+        except OSError:
+            # Previous packaged builds can keep files open with Windows delete
+            # sharing disabled. A locked legacy file is never our destination.
+            if path == legacy_path or path != active_path:
+                continue
+            # Never append to an already-oversized active file. Keep this run
+            # bounded in a separate rotating recovery slot instead.
+            selected_path = recovery_path
+
+    if selected_path == recovery_path:
+        recovery_paths = [recovery_path]
+        recovery_paths.extend(
+            log_dir / f"app-recovery.log.{index}"
+            for index in range(1, BACKUP_COUNT + 1)
+        )
+        for path in recovery_paths:
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                continue
+            try:
+                if stat.S_ISLNK(metadata.st_mode):
+                    path.unlink(missing_ok=True)
+                elif (
+                    stat.S_ISREG(metadata.st_mode)
+                    and metadata.st_size >= MAX_LOG_BYTES
+                ):
+                    path.unlink(missing_ok=True)
+            except OSError:
+                # Startup and activation hand-off must remain available even
+                # while another Windows process still owns the recovery slot.
+                continue
+    return selected_path

@@ -353,6 +353,54 @@ def test_load_snapshot_resolves_config_and_uses_prefetched_status_for_display():
     assert service.status_calls == 0
 
 
+def test_load_snapshot_resolves_cmid_across_enrolled_courses_when_course_id_missing():
+    current = editable_snapshot()
+    client = FakeClient(current, "https://courses.ut.edu.vn")
+
+    class MissingCourseService(FakeService):
+        def resolve_cmid_to_assign_id(self, cmid: int, course_id: int):
+            raise AssertionError("a missing course id must be resolved from assignments")
+
+        def get_assignments(self, course_ids: list[int]):
+            self.assignment_calls += 1
+            assert course_ids == []
+            assignment = {
+                **assignment_mapping(self.current),
+                "cmid": 123,
+                "course": 456,
+            }
+            return {"courses": [{"id": 456, "assignments": [assignment]}]}
+
+    service = MissingCourseService(current, client)
+    workflow = SubmissionWorkflow(
+        client,
+        service,
+        site_origin="https://courses.ut.edu.vn",
+    )
+
+    result = workflow.load_snapshot(SubmissionTarget(ASSIGN_URL, None))
+
+    assert result.ok is True
+    assert result.snapshot.assignment_id == 77
+    assert service.assignment_calls == 1
+    assert service.status_calls == 1
+
+
+@pytest.mark.parametrize("course_id", [456, None])
+def test_assignment_list_failure_is_reported_as_snapshot_load_failure(course_id):
+    workflow, _, service = workflow_fixture()
+
+    def fail_assignment_list(_course_ids):
+        raise RuntimeError("synthetic assignment list failure")
+
+    service.get_assignments = fail_assignment_list
+
+    result = workflow.load_snapshot(SubmissionTarget(ASSIGN_URL, course_id))
+
+    assert result.ok is False
+    assert result.issue.code is SubmissionErrorCode.SNAPSHOT_LOAD_FAILED
+
+
 def test_add_rebuilds_existing_and_new_files_without_finalizing_non_draft(tmp_path):
     workflow, client, service = workflow_fixture(snapshot=editable_snapshot(submission_drafts=False))
 
