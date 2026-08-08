@@ -14,9 +14,10 @@ import urllib.parse
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _SOURCE_ROOT = _REPOSITORY_ROOT / "src"
-for _import_root in (_REPOSITORY_ROOT, _SOURCE_ROOT):
-    if str(_import_root) not in sys.path:
-        sys.path.insert(0, str(_import_root))
+for _import_root in reversed((_REPOSITORY_ROOT, _SOURCE_ROOT)):
+    _import_path = str(_import_root)
+    sys.path[:] = [entry for entry in sys.path if entry != _import_path]
+    sys.path.insert(0, _import_path)
 
 from core.update_manifest import ManifestError, parse_manifest
 try:

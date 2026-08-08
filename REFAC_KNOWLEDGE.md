@@ -1096,3 +1096,10 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   real advisories. Android JVM execution is not claimed:
   the extension source contains no Gradle wrapper and this machine has no global
   Gradle installation, so the bounded command failed immediately before tests.
+- The first clean post-merge run exposed a path-order bug that the linked
+  worktree could not reproduce: an editable install already placed the main
+  repository root behind site-packages, so isolated release CLIs imported an
+  unrelated installed `scripts` package. Both CLI bootstraps now remove stale
+  occurrences and place the current repository/source roots first
+  deterministically. The original two failures then pass, and the complete
+  post-merge suite passes **1184 tests with 25 skipped in 40.39 seconds**.
