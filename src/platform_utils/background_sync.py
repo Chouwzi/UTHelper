@@ -43,13 +43,23 @@ class AndroidBackgroundBridge:
             "dnd_end": int(settings.NOTIFY_DND_END),
         }
 
-    async def configure(self, token: str = "") -> dict[str, Any]:
+    async def configure(
+        self,
+        token: str = "",
+        *,
+        token_origin: str = "",
+    ) -> dict[str, Any]:
         if not self.service:
             return {}
         from config import settings
+        from core.moodle_sites import moodle_site_from_origin
 
-        if token:
-            await self.service.set_credentials(settings.MOODLE_BASE_URL, token)
+        configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+        issuing_site = moodle_site_from_origin(token_origin)
+        if token and configured_site is not None and issuing_site == configured_site:
+            await self.service.set_credentials(configured_site.origin, token)
+        else:
+            await self.service.logout()
         return await self.service.configure(self.settings_payload())
 
     async def import_activities(
@@ -91,11 +101,28 @@ class AndroidBackgroundBridge:
         return bool(await self.service.request_exact_alarm_access())
 
     async def install_update(
-        self, url: str, sha256: str, expected_size: int = 0
+        self,
+        url: str,
+        sha256: str,
+        expected_size: int,
+        expected_package_id: str,
+        expected_version_code: int,
+        expected_certificate_sha256: str,
     ) -> dict[str, Any]:
         if not self.service:
             return {"status": "unavailable"}
-        return await self.service.install_update(url, sha256, expected_size)
+        return await self.service.install_update(
+            url,
+            sha256,
+            expected_size,
+            expected_package_id,
+            expected_version_code,
+            expected_certificate_sha256,
+        )
+
+    async def cancel_update(self) -> None:
+        if self.service:
+            await self.service.cancel_update()
 
     async def show_notification(
         self,

@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:30"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "gradle"
+    directory: "/extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5

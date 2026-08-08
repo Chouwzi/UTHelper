@@ -1,0 +1,9 @@
+# The owner reviews changes to application and release-sensitive paths.
+* @Chouwzi
+/.github/workflows/ @Chouwzi
+/packaging/ @Chouwzi
+/scripts/release_* @Chouwzi
+/scripts/*windows*release* @Chouwzi
+/src/core/update_* @Chouwzi
+/src/platform_utils/*update* @Chouwzi
+

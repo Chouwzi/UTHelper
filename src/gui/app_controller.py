@@ -1,5 +1,6 @@
 import os
 import sys
+from math import pi
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -7,7 +8,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import flet as ft
-from datetime import datetime
+from datetime import date, datetime
 from core.time_utils import parse_datetime
 import asyncio
 import logging
@@ -15,11 +16,24 @@ import platform_utils
 from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
+from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 from core.data_orchestrator import DataOrchestrator
+from core.moodle_service import MoodleService
+from core.moodle_sites import moodle_site_from_origin
+from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
-from config import get_sync_interval_minutes, settings
+from core.update_checker import GitHubReleaseClient, VerifiedDownloader
+from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
+from core.update_models import LaunchResult, ReleasePackage
+from config import get_sync_interval_minutes, save_settings, settings
+from platform_utils.update_packages import (
+    DownloadedPackageVerifier,
+    detect_runtime_target,
+)
 
 from gui.core.theme import C
 from core.filter_service import FilterService
@@ -29,10 +43,13 @@ from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.view_manager import ViewManager
+from gui.core.utils import clean_course_name, format_deadline, get_type_color, get_urgency_color
 from gui.controllers.startup_visibility import (
     is_autostart_launch,
     should_hide_startup_window,
 )
+from gui.controllers.window_activator import WindowActivator
+from gui.components.crash_consent_dialog import CrashConsentDialog
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +68,97 @@ def _save_setting(key: str, value):
         logging.getLogger(__name__).warning(f"Failed to save setting {key}: {e}")
 
 
+def _android_release_build_number(version: str) -> int:
+    """Derive the Flet Android build number from a strict X.Y.Z version."""
+    try:
+        parsed = Version(version)
+    except InvalidVersion as exc:
+        raise ValueError("invalid Android release version") from exc
+    if (
+        str(parsed) != version
+        or len(parsed.release) != 3
+        or parsed.pre
+        or parsed.post
+        or parsed.dev
+        or parsed.local
+        or any(part < 0 or part > 999 for part in parsed.release)
+    ):
+        raise ValueError("Android release version must be numeric X.Y.Z")
+    major, minor, patch = parsed.release
+    return major * 1_000_000 + minor * 1_000 + patch
+
+
+class _UnavailablePackageLauncher:
+    def launch(self, _path: Path, _package: ReleasePackage) -> LaunchResult:
+        return LaunchResult(False, "installer is unavailable on this platform")
+
+    def cancel(self) -> None:
+        return None
+
+
+class _AndroidPackageLauncher:
+    """Thin adapter from the synchronous coordinator to the native bridge."""
+
+    PACKAGE_ID = "com.uthelper.uthelper"
+
+    def __init__(self, bridge, task_runner, release_version_provider, result_sink=None):
+        self._bridge = bridge
+        self._task_runner = task_runner
+        self._release_version_provider = release_version_provider
+        self._result_sink = result_sink
+
+    def launch(self, _path: Path, package: ReleasePackage) -> LaunchResult:
+        if (
+            package.platform != "android"
+            or package.package_type != "apk"
+            or self._bridge is None
+            or not self._bridge.available
+        ):
+            return LaunchResult(False, "Android installer bridge is unavailable")
+        try:
+            version_code = _android_release_build_number(
+                self._release_version_provider()
+            )
+            task = self._task_runner(self._install, package, version_code)
+        except (RuntimeError, TypeError, ValueError):
+            logger.warning("Android installer scheduling failed", exc_info=True)
+            return LaunchResult(False, "Android installer scheduling failed")
+        return LaunchResult(task is not None, "Android installer scheduled")
+
+    async def _install(self, package: ReleasePackage, version_code: int) -> None:
+        try:
+            result = await self._bridge.install_update(
+                package.url,
+                package.sha256,
+                package.size,
+                self.PACKAGE_ID,
+                version_code,
+                package.certificate_fingerprint,
+            )
+        except Exception:
+            logger.warning("Android installer bridge failed", exc_info=True)
+            result = {"status": "bridge_failed"}
+        if self._result_sink is not None:
+            self._result_sink(result)
+        if result.get("status") not in {"installer_opened", "permission_required"}:
+            logger.warning("Android installer rejected update: %s", result.get("status"))
+
+    def cancel(self) -> None:
+        if self._bridge is None or not self._bridge.available:
+            return
+        try:
+            self._task_runner(self._bridge.cancel_update)
+        except (RuntimeError, TypeError):
+            logger.debug("Android installer cancellation scheduling failed", exc_info=True)
+
+
 class AppController:
-    def __init__(self, page: ft.Page):
+    def __init__(
+        self, page: ft.Page, *, activation_broker=None, force_visible: bool = False
+    ):
         self.page = page
+        self.activation_broker = activation_broker
+        self.force_visible = force_visible
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
         self._page_alive = threading.Event()
@@ -93,7 +198,16 @@ class AppController:
         self._android_background = None
 
         self._init_window()
+        self._update_candidate = None
+        self._manual_update_check_requested = False
+        self._update_coordinator = self._create_update_coordinator()
         self._init_ui()
+        self._crash_consent_dialog = CrashConsentDialog(
+            self.page, self._persist_crash_consent
+        )
+        self._crash_consent_dialog.present_if_needed(
+            settings.CRASH_REPORTING_CONSENT
+        )
         self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
@@ -115,9 +229,7 @@ class AppController:
             self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
         
-        # Check update in background
-        from core.update_checker import check_for_update_async
-        check_for_update_async(APP_VERSION, self._on_update_check)
+        self._update_coordinator.start()
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
@@ -132,6 +244,27 @@ class AppController:
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
+    def _persist_crash_consent(self, decision) -> bool:
+        """Persist explicit consent without mutating any open Settings draft."""
+        if decision not in {"enabled", "disabled"}:
+            return False
+        previous = settings.CRASH_REPORTING_CONSENT
+        settings.CRASH_REPORTING_CONSENT = decision
+        try:
+            persisted = bool(save_settings())
+        except Exception:
+            persisted = False
+            logger.warning("Crash-consent persistence raised", exc_info=True)
+        if persisted:
+            return True
+        settings.CRASH_REPORTING_CONSENT = previous
+        self._show_snackbar(
+            "Không thể lưu lựa chọn chẩn đoán sự cố. Vui lòng thử lại.",
+            ft.Icons.ERROR_OUTLINE_ROUNDED,
+            C.CRITICAL,
+        )
+        return False
+
     def _safe_run_task(self, handler, *args, **kwargs):
         if not hasattr(self.page, "session") or self.page.session is None:
             return None
@@ -139,7 +272,110 @@ class AppController:
             return None
         return self.page.run_task(handler, *args, **kwargs)
 
+    def _create_update_coordinator(self) -> UpdateCoordinator:
+        target = detect_runtime_target()
+        if target.platform == "windows":
+            from platform_utils.windows_update import (
+                WindowsPackageLauncher,
+                WindowsPackageVerifier,
+            )
+
+            verifier = WindowsPackageVerifier()
+            launcher = WindowsPackageLauncher()
+        elif target.platform == "android":
+            verifier = DownloadedPackageVerifier()
+            launcher = _AndroidPackageLauncher(
+                self._android_background,
+                self._safe_run_task,
+                lambda: self._update_candidate.manifest.release_version,
+                self._on_android_update_result,
+            )
+        else:
+            verifier = DownloadedPackageVerifier()
+            launcher = _UnavailablePackageLauncher()
+        return UpdateCoordinator(
+            GitHubReleaseClient(),
+            VerifiedDownloader(),
+            verifier,
+            launcher,
+            target,
+            _APP_VERSION,
+            self._on_update_event,
+            automatic_enabled=settings.AUTO_UPDATE_ENABLED,
+            check_interval_seconds=86400,
+            external_opener=self._open_external_update_url,
+        )
+
+    def _open_external_update_url(self, url: str) -> bool:
+        async def _open():
+            self.page.launch_url(url)
+
+        return self._safe_run_task(_open) is not None
+
+    def _check_updates_now(self) -> None:
+        self._manual_update_check_requested = True
+        self._update_coordinator.check_now()
+
+    def _on_android_update_result(self, result: dict) -> None:
+        status = result.get("status")
+        if status == "permission_required":
+            self._update_banner.visible = True
+            self._update_btn.disabled = False
+            self._update_btn.content = "Mở trình cài đặt"
+            self._show_snackbar(
+                "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
+                ft.Icons.SECURITY_ROUNDED,
+                C.WARNING,
+            )
+            self.page.update()
+        elif status != "installer_opened":
+            self._update_banner.visible = True
+            self._update_btn.disabled = False
+            self._update_btn.content = "Thử lại"
+            self._show_snackbar(
+                "Android đã từ chối gói cập nhật",
+                ft.Icons.ERROR_OUTLINE_ROUNDED,
+                C.CRITICAL,
+            )
+            self.page.update()
+
+    def _submission_workflow_factory(self, client):
+        """Build a fresh workflow only for the orchestrator's current client."""
+        if client is not getattr(self.orchestrator, "client", None):
+            return None
+        configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+        site = moodle_site_from_origin(getattr(client, "moodle_site_origin", None))
+        call_ws_api = getattr(client, "call_ws_api", None)
+        if (
+            configured_site is None
+            or configured_site != site
+            or not callable(call_ws_api)
+        ):
+            return None
+        return SubmissionWorkflow(
+            client,
+            MoodleService(call_ws_api),
+            site_origin=site,
+        )
+
+    def _native_background_credentials(self) -> tuple[str, str]:
+        """Return only a token proven to belong to the active Moodle client."""
+        configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+        client_site = moodle_site_from_origin(
+            getattr(getattr(self.orchestrator, "client", None), "moodle_site_origin", None)
+        )
+        token_site = moodle_site_from_origin(settings.MOODLE_WS_TOKEN_ORIGIN)
+        token = settings.MOODLE_WS_TOKEN
+        if (
+            token
+            and configured_site is not None
+            and configured_site == client_site == token_site
+        ):
+            return token, token_site.origin
+        return "", ""
+
     def _init_window(self):
+        self.window_activator = WindowActivator(self.page)
         # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
         detect_platform(self.page)
         # Đọc lại các cờ sau khi phát hiện lúc runtime (chúng có thể đã thay đổi)
@@ -178,7 +414,9 @@ class AppController:
         tray_ready = False
         if _is_windows:
             from gui.tray import TrayApp
-            self.tray = TrayApp(self.page)
+            self.tray = TrayApp(
+                self.page, on_show=self.window_activator.request_show
+            )
             tray_ready = self.tray.setup()
             self.notifier = NotificationManager(self.tray)
         else:
@@ -192,27 +430,35 @@ class AppController:
         # on Flet's event loop, after accurate platform detection.
         self._safe_run_task(self.notifier.initialize, self.page)
         
-        autostart_launch = is_autostart_launch()
-        hide_window = should_hide_startup_window(
-            autostart_launch=autostart_launch,
-            start_minimized=settings.START_MINIMIZED,
-            tray_ready=tray_ready,
-            is_mobile=_is_mobile,
-        )
-        if (
-            autostart_launch
-            and settings.START_MINIMIZED
-            and not _is_mobile
-            and not tray_ready
-        ):
-            logger.warning(
-                "Autostart requested a hidden window, but the tray was unavailable; "
-                "keeping the main window visible"
-            )
         if not _is_mobile:
-            self.page.window.visible = not hide_window
-            
+            if self.force_visible:
+                self.page.window.visible = True
+            else:
+                autostart_launch = is_autostart_launch()
+                hide_window = should_hide_startup_window(
+                    autostart_launch=autostart_launch,
+                    start_minimized=settings.START_MINIMIZED,
+                    tray_ready=tray_ready,
+                    is_mobile=_is_mobile,
+                )
+                if (
+                    autostart_launch
+                    and settings.START_MINIMIZED
+                    and not tray_ready
+                ):
+                    logger.warning(
+                        "Autostart requested a hidden window, but the tray was unavailable; "
+                        "keeping the main window visible"
+                    )
+                self.page.window.visible = not hide_window
+
         self.page.update()
+        if self.force_visible and not _is_mobile:
+            self.window_activator.request_show()
+        if self.activation_broker is not None:
+            self.activation_broker.bind_show_handler(
+                self.window_activator.request_show
+            )
 
     async def _on_window_event(self, e):
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
@@ -378,7 +624,7 @@ class AppController:
             "Cập nhật",
             icon=ft.Icons.DOWNLOAD_ROUNDED,
             style=ft.ButtonStyle(color="#FCD34D"),
-            on_click=self._open_update_url,
+            on_click=self._request_update_download,
         )
         self._update_banner = ft.Container(
             content=ft.Column([
@@ -429,6 +675,92 @@ class AppController:
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
 
+        self._today_schedule_expanded = False
+        self._today_schedule_toggle_icon = ft.Icon(
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            size=18,
+            color=C.TEXT_SECONDARY,
+            rotate=ft.Rotate(angle=0, alignment=ft.Alignment.CENTER),
+            animate_rotation=ft.Animation(duration=260, curve=ft.AnimationCurve.EASE_OUT_CUBIC),
+        )
+        self._today_schedule_count = ft.Text("", size=11, color=C.TEXT_SECONDARY, expand=True)
+        self._today_schedule_items_column = ft.Column(controls=[], spacing=6)
+        self._today_schedule_empty = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Icon(ft.Icons.CALENDAR_MONTH_ROUNDED, size=24, color=C.BORDER),
+                    ft.Text("Không có hoạt động nào đến hạn hôm nay", size=11, color=C.TEXT_SECONDARY),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+            ),
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.only(top=4, bottom=4),
+        )
+        self._today_schedule_body = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Container(height=1, bgcolor=C.BORDER),
+                    self._today_schedule_empty,
+                    self._today_schedule_items_column,
+                ],
+                spacing=8,
+            ),
+            padding=ft.Padding.only(left=12, right=12, top=0, bottom=12),
+            visible=False,
+        )
+        self._today_schedule_header = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.CALENDAR_TODAY_ROUNDED, size=18, color=C.ACCENT),
+                    ft.Column(
+                        controls=[
+                            ft.Text(
+                                "Lịch học hôm nay",
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                            ),
+                            self._today_schedule_count,
+                        ],
+                        spacing=1,
+                        expand=True,
+                    ),
+                    self._today_schedule_toggle_icon,
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(left=12, right=12, top=12, bottom=12),
+            on_click=lambda _: self._toggle_today_schedule(),
+            ink=True,
+        )
+        self._today_schedule_bar = ft.Container(
+            width=3,
+            border_radius=ft.BorderRadius.only(top_left=10, bottom_left=10),
+            bgcolor=C.ACCENT,
+        )
+        self.today_schedule_panel = ft.Container(
+            content=ft.Row(
+                controls=[
+                    self._today_schedule_bar,
+                    ft.Container(
+                        content=ft.Column(
+                            controls=[self._today_schedule_header, self._today_schedule_body],
+                            spacing=0,
+                        ),
+                        expand=True,
+                    ),
+                ],
+                spacing=0,
+            ),
+            margin=ft.Margin(left=10, right=10, top=0, bottom=0),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+        )
+        self._refresh_today_schedule_panel([])
+
     def _init_views_and_transitions(self):
         header_container = ft.Container(
             content=ft.Column(controls=[
@@ -477,9 +809,11 @@ class AppController:
         )
 
         content_area = ft.Container(
-            content=ft.Stack(controls=[
-                ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
-            ], expand=True),
+            content=ft.Column(controls=[
+                ft.Stack(controls=[
+                    ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
+                ], expand=True),
+            ], spacing=8, expand=True),
             padding=ft.Padding.only(left=4, right=4, bottom=8),
             expand=True, clip_behavior=ft.ClipBehavior.NONE,
         )
@@ -498,7 +832,7 @@ class AppController:
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
-        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed)
+        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed, submission_workflow_factory=self._submission_workflow_factory)
         self.calendar_view = CalendarView(
             self.page,
             on_close=lambda: self._safe_run_task(self._close_calendar),
@@ -515,6 +849,7 @@ class AppController:
             on_test_discord=self._on_test_discord,
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
+            on_check_update=self._check_updates_now,
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
@@ -721,6 +1056,7 @@ class AppController:
         is_empty = (len(filtered_items) == 0 and not self.loading_bar.visible)
         self.empty_state.visible = is_empty
         self.error_state.visible = False
+        self._refresh_today_schedule_panel(base)
 
         # P2/P6: Contextual empty state messaging
         if is_empty:
@@ -775,12 +1111,107 @@ class AppController:
             
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
+        render_cards = [self.today_schedule_panel] + render_cards
             
         with self._cards_lock:
             self.active_cards = render_cards
         
         self.cards_column.controls = render_cards
         self.page.update()
+
+    def _get_today_schedule_items(self, activities: list[dict] | None = None) -> list[dict]:
+        """Return activities that fall on today's date, sorted by deadline time."""
+        source = activities if activities is not None else list(self.all_data)
+        today = date.today()
+        timed_items: list[tuple[datetime, dict]] = []
+        for activity in source:
+            deadline_str = activity.get("deadline", "")
+            deadline_dt = parse_datetime(deadline_str)
+            if not deadline_dt or deadline_dt.year >= 2099:
+                continue
+            if deadline_dt.date() != today:
+                continue
+            timed_items.append((deadline_dt, activity))
+
+        timed_items.sort(key=lambda item: (item[0], item[1].get("title", "")))
+        return [activity for _, activity in timed_items]
+
+    def _make_today_schedule_item(self, activity: dict) -> ft.Container:
+        deadline_str = activity.get("deadline", "")
+        deadline_dt = parse_datetime(deadline_str)
+        time_text = deadline_dt.strftime("%H:%M") if deadline_dt else "Hôm nay"
+        course_name = clean_course_name(
+            activity.get("course_name", "")
+            or activity.get("course", "")
+            or activity.get("details", {}).get("course_full_name", "")
+        )
+        title = activity.get("title", "Không có tiêu đề")
+        urgency_color = get_urgency_color(activity.get("urgency", "safe"))
+        type_color = get_type_color(activity.get("type", "other"))
+
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Container(width=3, height=34, bgcolor=type_color or urgency_color, border_radius=3),
+                    ft.Column(
+                        controls=[
+                            ft.Text(
+                                title,
+                                size=12,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            ft.Text(
+                                f"{course_name} · {format_deadline(deadline_str)}" if course_name else format_deadline(deadline_str),
+                                size=10,
+                                color=C.TEXT_SECONDARY,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.Container(
+                        content=ft.Text(time_text, size=10, color=type_color or urgency_color, weight=ft.FontWeight.W_600),
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                        border=ft.Border.all(1, type_color or urgency_color),
+                        border_radius=999,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.BG,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=8,
+            padding=ft.Padding.only(left=10, right=10, top=8, bottom=8),
+            ink=True,
+            on_click=lambda _: self._show_detail(activity),
+        )
+
+    def _toggle_today_schedule(self):
+        self._today_schedule_expanded = not self._today_schedule_expanded
+        self._refresh_today_schedule_panel()
+
+    def _refresh_today_schedule_panel(self, activities: list[dict] | None = None):
+        items = self._get_today_schedule_items(activities if activities is not None else list(self.all_data))
+        count = len(items)
+
+        self._today_schedule_toggle_icon.rotate = ft.Rotate(
+            angle=pi / 2 if self._today_schedule_expanded else 0,
+            alignment=ft.Alignment.CENTER,
+        )
+        self._today_schedule_bar.bgcolor = C.ACCENT if self._today_schedule_expanded else C.BORDER
+        self._today_schedule_count.value = f"{count} mục" if count else "Không có lịch học hôm nay"
+
+        body_items = [self._make_today_schedule_item(item) for item in items]
+        self._today_schedule_items_column.controls = body_items
+        self._today_schedule_empty.visible = len(body_items) == 0
+        self._today_schedule_items_column.visible = len(body_items) > 0
+        self._today_schedule_body.visible = self._today_schedule_expanded
 
     def _update_footer(self):
         self._refresh_ui()
@@ -823,6 +1254,7 @@ class AppController:
 
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
+        render_cards = [self.today_schedule_panel] + render_cards
 
         with self._cards_lock:
             self.active_cards = render_cards
@@ -1016,11 +1448,8 @@ class AppController:
         if not bridge or not bridge.available:
             return
         try:
-            token = (
-                getattr(self.orchestrator.client, "token", "")
-                or getattr(settings, "MOODLE_WS_TOKEN", "")
-            )
-            await bridge.configure(token)
+            token, token_origin = self._native_background_credentials()
+            await bridge.configure(token, token_origin=token_origin)
             native_data = await bridge.cached_activities()
             if native_data:
                 diagnostics = await bridge.diagnostics()
@@ -1174,11 +1603,10 @@ class AppController:
             native_schedule_result = None
             if self._android_background and self._android_background.available:
                 try:
-                    token = (
-                        getattr(self.orchestrator.client, "token", "")
-                        or getattr(settings, "MOODLE_WS_TOKEN", "")
+                    token, token_origin = self._native_background_credentials()
+                    await self._android_background.configure(
+                        token, token_origin=token_origin
                     )
-                    await self._android_background.configure(token)
                     native_schedule_result = await self._android_background.import_activities(
                         data_copy,
                         authoritative=True,
@@ -1298,7 +1726,7 @@ class AppController:
         await self.view_manager.close_calendar()
 
     async def _show_settings(self):
-        self.view_manager.show_settings()
+        await self.view_manager.show_settings()
 
     async def _toggle_grades(self):
         """Toggle the grade overview panel."""
@@ -1520,6 +1948,47 @@ class AppController:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
+        # Today schedule card follows the same live theme refresh path.
+        if hasattr(self, 'today_schedule_panel'):
+            self.today_schedule_panel.bgcolor = _C.SURFACE
+            self.today_schedule_panel.border = ft.Border.all(1, _C.BORDER)
+        if hasattr(self, '_today_schedule_bar'):
+            self._today_schedule_bar.bgcolor = _C.ACCENT if self._today_schedule_expanded else _C.BORDER
+        if hasattr(self, '_today_schedule_header'):
+            try:
+                header_row = self._today_schedule_header.content
+                header_row.controls[0].color = _C.ACCENT
+                header_row.controls[1].controls[0].color = _C.TEXT_PRIMARY
+                header_row.controls[1].controls[1].color = _C.TEXT_SECONDARY
+                header_row.controls[2].color = _C.TEXT_SECONDARY
+                self._today_schedule_header.bgcolor = _C.SURFACE
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if hasattr(self, '_today_schedule_empty'):
+            try:
+                empty_col = self._today_schedule_empty.content
+                empty_col.controls[0].color = _C.BORDER
+                empty_col.controls[1].color = _C.TEXT_SECONDARY
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if hasattr(self, '_today_schedule_body'):
+            self._today_schedule_body.bgcolor = _C.SURFACE
+            try:
+                body_col = self._today_schedule_body.content
+                body_col.controls[0].color = _C.BORDER
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        # Rebuild schedule items so their type/urgency colors follow the new theme.
+        try:
+            self._refresh_today_schedule_panel(list(self.all_data))
+        except Exception:
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
         # Icon buttons
         buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
 
@@ -1547,6 +2016,7 @@ class AppController:
 
 
     async def _close_settings(self):
+        self.settings_view.cancel_pending_load()
         from gui.core.theme import load_theme_from_settings, set_page_theme
         load_theme_from_settings()
         set_page_theme(self.page)
@@ -1680,84 +2150,119 @@ class AppController:
         from notifiers.email import EmailNotifier
         EmailNotifier().notify([dummy])
 
-    def _on_update_check(self, has_update: bool, version: str, release_url: str, asset_url: str = None):
-        """Callback từ background thread khi kiểm tra update xong."""
-        if has_update and version:
-            async def _update_ui():
-                self._update_asset_url = asset_url or ""
-                self._update_release_url = release_url or ""
-                self._update_url = asset_url or release_url or ""
-                self._update_version = version
-                self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
-                self._update_icon.color = "#FCD34D"
-                self._update_text.value = f"Phiên bản mới v{version} đã sẵn sàng!"
-                self._update_btn.visible = True
-                self._update_btn.text = "Cập nhật"
-                self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
-                self._update_progress.visible = False
-                self._update_banner.visible = True
-                self.page.update()
-            try:
-                self._safe_run_task(_update_ui)
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+    def _on_update_event(self, event: UpdateEvent) -> None:
+        self._safe_run_task(self._apply_update_event, event)
 
-    async def _open_update_url(self, e):
-        """Open a platform installer from a verified published release."""
-        asset_url = getattr(self, "_update_asset_url", "")
-        release_url = getattr(self, "_update_release_url", "")
-        url = asset_url or release_url
-        if (
-            platform_utils.IS_ANDROID
-            and asset_url
-            and self._android_background
-            and self._android_background.available
-        ):
-            from core.update_checker import get_update_asset
+    def _request_update_download(self, _event=None) -> None:
+        candidate = getattr(self, "_update_candidate", None)
+        if candidate is not None:
+            self._update_coordinator.request_download(candidate)
 
-            metadata = get_update_asset(asset_url)
-            if not metadata or not metadata.sha256:
+    async def _apply_update_event(self, event: UpdateEvent) -> None:
+        candidate = event.candidate
+        if candidate is not None:
+            self._update_candidate = candidate
+        check_button = getattr(self.settings_view, "_check_update_btn", None)
+        if event.kind is UpdateEventKind.CHECKING:
+            if check_button is not None:
+                check_button.disabled = True
+                check_button.content = "Đang kiểm tra..."
+        elif event.kind is UpdateEventKind.UP_TO_DATE:
+            if check_button is not None:
+                check_button.disabled = False
+                check_button.content = "Kiểm tra ngay"
+            if self._manual_update_check_requested:
                 self._show_snackbar(
-                    "Bản cập nhật thiếu checksum hợp lệ",
-                    ft.Icons.ERROR_OUTLINE_ROUNDED,
-                    C.CRITICAL,
+                    "Bạn đang dùng phiên bản mới nhất",
+                    ft.Icons.CHECK_CIRCLE_ROUNDED,
+                    C.SAFE,
                 )
-                return
+            self._manual_update_check_requested = False
+        elif event.kind is UpdateEventKind.UPDATE_AVAILABLE and candidate is not None:
+            self._manual_update_check_requested = False
+            if check_button is not None:
+                check_button.disabled = False
+                check_button.content = "Kiểm tra ngay"
+            self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
+            self._update_icon.color = "#FCD34D"
+            self._update_text.value = (
+                f"Phiên bản mới v{candidate.manifest.release_version} đã sẵn sàng!"
+            )
+            self._update_btn.visible = True
+            self._update_btn.disabled = False
+            self._update_btn.content = "Cập nhật"
+            self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
+            self._update_progress.visible = False
+            self._update_banner.visible = True
+        elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
             self._update_btn.disabled = True
-            self._update_btn.text = "Đang tải và xác minh..."
-            self.page.update()
-            try:
-                result = await self._android_background.install_update(
-                    asset_url,
-                    metadata.sha256,
-                    metadata.size,
-                )
-                if result.get("status") == "permission_required":
-                    self._show_snackbar(
-                        "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
-                        ft.Icons.SECURITY_ROUNDED,
-                        C.WARNING,
-                    )
-                elif result.get("status") != "installer_opened":
-                    raise RuntimeError(str(result.get("status", "update failed")))
-            except Exception as exc:
-                logger.error("Android update failed: %s", exc)
+            self._update_btn.content = "Đang tải và xác minh..."
+            self._update_progress.visible = True
+            self._update_progress.value = event.progress or 0.0
+        elif event.kind in {
+            UpdateEventKind.READY_TO_INSTALL,
+            UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
+        }:
+            self._update_btn.disabled = False
+            self._update_btn.content = "Cập nhật"
+            self._update_progress.visible = False
+            self._show_update_confirmation()
+        elif event.kind is UpdateEventKind.FAILED:
+            should_notify = (
+                self._manual_update_check_requested or self._update_banner.visible
+            )
+            self._manual_update_check_requested = False
+            if check_button is not None:
+                check_button.disabled = False
+                check_button.content = "Kiểm tra ngay"
+            self._update_btn.disabled = False
+            self._update_btn.content = "Thử lại"
+            self._update_progress.visible = False
+            if should_notify:
                 self._show_snackbar(
                     "Không thể tải hoặc xác minh bản cập nhật",
                     ft.Icons.ERROR_OUTLINE_ROUNDED,
                     C.CRITICAL,
                 )
-            finally:
-                self._update_btn.disabled = False
-                self._update_btn.text = "Cập nhật"
-                self.page.update()
-            return
-        if url:
-            try:
-                self.page.launch_url(url)
-            except Exception:
-                import webbrowser; webbrowser.open(url)
+        elif event.kind is UpdateEventKind.CANCELLED:
+            self._update_btn.disabled = False
+            self._update_btn.content = "Cập nhật"
+            self._update_progress.visible = False
+        elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
+            self._update_banner.visible = False
+        self.page.update()
+        if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
+            await self.page.window.destroy()
+
+    def _show_update_confirmation(self) -> None:
+        if platform_utils.IS_WINDOWS:
+            affirmative = "Cài đặt và thoát"
+        elif platform_utils.IS_ANDROID:
+            affirmative = "Mở trình cài đặt"
+        else:
+            affirmative = "Mở TestFlight/App Store"
+
+        def cancel(_event):
+            self.page.pop_dialog()
+
+        def confirm(_event):
+            self.page.pop_dialog()
+            self._update_coordinator.confirm_install()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Xác nhận cập nhật"),
+            content=ft.Text(
+                "UTHelper sẽ chỉ mở trình cài đặt sau khi bạn xác nhận."
+            ),
+            actions=[
+                ft.TextButton("Hủy", on_click=cancel),
+                ft.TextButton(affirmative, on_click=confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=C.BG,
+        )
+        self.page.show_dialog(dialog)
 
 
     def _on_settings_saved(self):
@@ -1796,6 +2301,9 @@ class AppController:
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.wake()
+        update_coordinator = getattr(self, "_update_coordinator", None)
+        if update_coordinator is not None:
+            update_coordinator.set_automatic_enabled(settings.AUTO_UPDATE_ENABLED)
         if self._android_background and self._android_background.available:
             if credentials_changed:
                 # Prevent the previous account token/Room snapshot from being
@@ -1803,9 +2311,9 @@ class AppController:
                 self._safe_run_task(self._android_background.logout)
             else:
                 async def _apply_android_settings():
+                    token, token_origin = self._native_background_credentials()
                     await self._android_background.configure(
-                        getattr(self.orchestrator.client, "token", "")
-                        or getattr(settings, "MOODLE_WS_TOKEN", ""),
+                        token, token_origin=token_origin
                     )
                     if milestones_changed and any(
                         int(value) <= 60
@@ -1970,11 +2478,26 @@ class AppController:
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _on_disconnect(self, e):
+        view_manager = getattr(self, "view_manager", None)
+        if view_manager is not None:
+            view_manager.cancel_pending_settings_navigation()
+        else:
+            settings_view = getattr(self, "settings_view", None)
+            if settings_view is not None:
+                settings_view.cancel_pending_load()
+        if self.activation_broker is not None:
+            self.activation_broker.close(timeout_seconds=1.0)
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            tray.close(timeout_seconds=1.0)
         self._page_alive.clear()
         self._prefetch_cancel_event.set()
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.close()
+        update_coordinator = getattr(self, "_update_coordinator", None)
+        if update_coordinator is not None:
+            update_coordinator.shutdown(timeout_seconds=5.0)
         try:
             self.orchestrator.client.close()
         except Exception:

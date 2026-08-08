@@ -20,6 +20,7 @@ import pytest
 import config
 from config import settings
 from core.client import DraftUploadResult, MoodleClient
+from core.moodle_sites import moodle_site_from_origin
 from core.moodle_service import MoodleService
 from core.submission_models import (
     FileMutationIntent,
@@ -75,8 +76,12 @@ class _LiveAuthUnavailable(RuntimeError):
 class _IsolatedLiveMoodleClient(MoodleClient):
     """In-memory WS token client with no global cache read, refresh, or write."""
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, site_origin: str):
         super().__init__()
+        site = moodle_site_from_origin(site_origin)
+        if site is None:
+            raise _LiveAuthUnavailable("live Moodle origin is not trusted")
+        self._moodle_site = site
         self.__live_token = token
 
     def _get_ws_token(self, *args: Any, **kwargs: Any) -> str:
@@ -90,7 +95,7 @@ class _IsolatedLiveMoodleClient(MoodleClient):
             **params,
         }
         _, result = self._post(
-            f"{settings.MOODLE_BASE_URL}/webservice/rest/server.php",
+            f"{self.moodle_site_origin}/webservice/rest/server.php",
             request_params,
             timeout=20,
         )
@@ -112,8 +117,10 @@ def live_call_spy(monkeypatch: pytest.MonkeyPatch) -> _LiveCallSpy:
     return spy
 
 
-def _verified_isolated_client(token: str, expected_username: str) -> _IsolatedLiveMoodleClient:
-    client = _IsolatedLiveMoodleClient(token)
+def _verified_isolated_client(
+    token: str, expected_username: str, site_origin: str
+) -> _IsolatedLiveMoodleClient:
+    client = _IsolatedLiveMoodleClient(token, site_origin)
     site_info = client.call_ws_api("core_webservice_get_site_info")
     actual_username = site_info.get("username") if isinstance(site_info, dict) else None
     if not isinstance(actual_username, str) or actual_username != expected_username:
@@ -123,6 +130,9 @@ def _verified_isolated_client(token: str, expected_username: str) -> _IsolatedLi
 
 def _create_isolated_live_client() -> _IsolatedLiveMoodleClient:
     """Use env credentials first, otherwise a verified secure-keyring token only."""
+    configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
+    if configured_site is None:
+        raise _LiveAuthUnavailable("configured live Moodle origin is not trusted")
     user = os.environ.get("UTH_TEST_USER", "")
     password = os.environ.get("UTH_TEST_PASS", "")
     if bool(user) != bool(password):
@@ -131,22 +141,29 @@ def _create_isolated_live_client() -> _IsolatedLiveMoodleClient:
     if user and password:
         bootstrap = MoodleClient()
         _, result = bootstrap._post(  # noqa: SLF001
-            f"{settings.MOODLE_BASE_URL}/login/token.php",
+            f"{configured_site.origin}/login/token.php",
             {"username": user, "password": password, "service": "moodle_mobile_app"},
             timeout=15,
         )
         token = result.get("token") if isinstance(result, dict) else None
         if not isinstance(token, str) or not token:
             raise _LiveAuthUnavailable("environment credential authentication failed")
-        return _verified_isolated_client(token, user)
+        return _verified_isolated_client(token, user, configured_site.origin)
 
     if not config._HAS_KEYRING:  # noqa: SLF001
         raise _LiveAuthUnavailable("secure keyring is unavailable")
     expected_username = settings.UTH_USERNAME
     token = config._read_secret("ws_token")  # noqa: SLF001
+    token_site = moodle_site_from_origin(
+        config._read_secret("ws_token_origin")  # noqa: SLF001
+    )
     if not expected_username or not token:
         raise _LiveAuthUnavailable("verified secure live authentication is unavailable")
-    return _verified_isolated_client(token, expected_username)
+    if token_site is None or token_site != configured_site:
+        raise _LiveAuthUnavailable("secure live token origin does not match configured Moodle")
+    return _verified_isolated_client(
+        token, expected_username, configured_site.origin
+    )
 
 
 def _live_client() -> _IsolatedLiveMoodleClient:
@@ -259,18 +276,12 @@ def _coarse_assignment_reasons(assignment: dict[str, Any], now: int) -> tuple[st
     if raw_submission_drafts is None:
         raw_submission_drafts = configs.get(("assign", "submissiondrafts"))
     submission_drafts = _as_int(raw_submission_drafts) == 1
-    file_enabled = _as_int(
-        configs.get(("file", "enabled"), configs.get(("assignsubmission_file", "enabled")))
-    ) == 1
-
     if _as_int(assignment.get("nosubmissions")):
         reasons.append("submissions-disabled")
     if _as_int(assignment.get("teamsubmission")):
         reasons.append("team-submission")
     if not submission_drafts:
         reasons.append("repeated-editing-not-confirmed")
-    if not file_enabled:
-        reasons.append("file-plugin-not-confirmed")
     if opens and opens > now:
         reasons.append("not-open")
     if due and due < now + _MINIMUM_LEAD_SECONDS:
@@ -568,11 +579,87 @@ def test_assignment_auth_rejects_plaintext_settings_fallback(monkeypatch):
         _create_isolated_live_client()
 
 
+@pytest.mark.parametrize(
+    ("configured_base", "stored_origin"),
+    [
+        ("https://courses.ut.edu.vn", "https://thnn.ut.edu.vn"),
+        ("https://thnn.ut.edu.vn", "https://courses.ut.edu.vn"),
+    ],
+)
+def test_secure_token_from_the_other_trusted_site_makes_zero_requests(
+    monkeypatch, configured_base, stored_origin
+):
+    monkeypatch.delenv("UTH_TEST_USER", raising=False)
+    monkeypatch.delenv("UTH_TEST_PASS", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", configured_base)
+    monkeypatch.setattr(settings, "UTH_USERNAME", "expected-user")
+    secrets = {
+        "ws_token": "secure-test-token",
+        "ws_token_origin": stored_origin,
+    }
+    monkeypatch.setattr(config, "_read_secret", secrets.get)
+    requests: list[str] = []
+
+    def record_request(_client, url, _data, timeout):
+        del timeout
+        requests.append(url)
+        return 200, {"username": "expected-user"}
+
+    monkeypatch.setattr(MoodleClient, "_post", record_request)
+
+    with pytest.raises(_LiveAuthUnavailable, match="origin"):
+        _create_isolated_live_client()
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "stored_origin",
+    ["", "not-an-origin", "https://moodle.example.edu"],
+)
+def test_missing_or_untrusted_secure_token_origin_makes_zero_requests(
+    monkeypatch, stored_origin
+):
+    monkeypatch.delenv("UTH_TEST_USER", raising=False)
+    monkeypatch.delenv("UTH_TEST_PASS", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    monkeypatch.setattr(
+        settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn"
+    )
+    monkeypatch.setattr(settings, "UTH_USERNAME", "expected-user")
+    secrets = {
+        "ws_token": "secure-test-token",
+        "ws_token_origin": stored_origin,
+    }
+    monkeypatch.setattr(config, "_read_secret", secrets.get)
+    requests: list[str] = []
+
+    def record_request(_client, url, _data, timeout):
+        del timeout
+        requests.append(url)
+        return 200, {"username": "expected-user"}
+
+    monkeypatch.setattr(MoodleClient, "_post", record_request)
+
+    with pytest.raises(_LiveAuthUnavailable, match="origin"):
+        _create_isolated_live_client()
+
+    assert requests == []
+
+
 def test_secure_token_account_identity_must_match_expected_username(monkeypatch):
     monkeypatch.delenv("UTH_TEST_USER", raising=False)
     monkeypatch.delenv("UTH_TEST_PASS", raising=False)
     monkeypatch.setattr(config, "_HAS_KEYRING", True)
-    monkeypatch.setattr(config, "_read_secret", lambda key: "secure-test-token")
+    secrets = {
+        "ws_token": "secure-test-token",
+        "ws_token_origin": "https://courses.ut.edu.vn",
+    }
+    monkeypatch.setattr(config, "_read_secret", secrets.get)
+    monkeypatch.setattr(
+        settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn"
+    )
     monkeypatch.setattr(settings, "UTH_USERNAME", "expected-user")
     monkeypatch.setattr(
         MoodleClient,
@@ -592,8 +679,30 @@ def _real_shape_candidate(
     top_level_drafts: int | None = 1,
     config_drafts: int = 0,
     file_enabled: int | None = 1,
+    file_hidden: int | None = None,
+    include_file_plugin_configs: bool = True,
     include_status_file_plugin: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    file_plugin_configs = [
+        {
+            "subtype": "assignsubmission",
+            "plugin": "file",
+            "name": "maxfilesubmission",
+            "value": 1,
+        },
+        {
+            "subtype": "assignsubmission",
+            "plugin": "file",
+            "name": "maxsubmissionsizebytes",
+            "value": 1024,
+        },
+        {
+            "subtype": "assignsubmission",
+            "plugin": "file",
+            "name": "acceptedfiletypes",
+            "value": ".txt",
+        },
+    ]
     assignment: dict[str, Any] = {
         "id": 77,
         "cmid": 123,
@@ -610,25 +719,8 @@ def _real_shape_candidate(
                 "name": "submissiondrafts",
                 "value": config_drafts,
             },
-            {
-                "subtype": "assignsubmission",
-                "plugin": "file",
-                "name": "maxfilesubmission",
-                "value": 1,
-            },
-            {
-                "subtype": "assignsubmission",
-                "plugin": "file",
-                "name": "maxsubmissionsizebytes",
-                "value": 1024,
-            },
-            {
-                "subtype": "assignsubmission",
-                "plugin": "file",
-                "name": "acceptedfiletypes",
-                "value": ".txt",
-            },
-        ],
+        ]
+        + (file_plugin_configs if include_file_plugin_configs else []),
     }
     if top_level_drafts is not None:
         assignment["submissiondrafts"] = top_level_drafts
@@ -639,6 +731,15 @@ def _real_shape_candidate(
                 "plugin": "file",
                 "name": "enabled",
                 "value": file_enabled,
+            }
+        )
+    if file_hidden is not None:
+        assignment["configs"].append(
+            {
+                "subtype": "assignsubmission",
+                "plugin": "file",
+                "name": "hidden",
+                "value": file_hidden,
             }
         )
     plugins = []
@@ -688,12 +789,21 @@ def test_candidate_deadline_zero_means_unbounded_and_nonzero_respects_window(
     [
         ({"top_level_drafts": 1, "config_drafts": 0}, True),
         ({"top_level_drafts": None, "config_drafts": 1}, True),
-        ({"file_enabled": None}, False),
+        ({"file_enabled": None}, True),
         ({"file_enabled": 0}, False),
-        ({"include_status_file_plugin": False}, False),
+        ({"file_hidden": 1}, False),
+        ({"include_status_file_plugin": False}, True),
+        (
+            {
+                "file_enabled": None,
+                "include_file_plugin_configs": False,
+                "include_status_file_plugin": False,
+            },
+            False,
+        ),
     ],
 )
-def test_candidate_requires_explicit_file_enablement_and_fresh_status_capability(
+def test_candidate_uses_real_file_plugin_capability_evidence(
     shape_changes, eligible
 ):
     now = 1_800_000_000

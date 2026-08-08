@@ -117,6 +117,8 @@ benchmark_*.py
 
 # ── Installer output ──
 Output/
+packaging/windows/bin/
+packaging/windows/obj/
 *.exe
 !scripts/*.exe
 
@@ -127,3 +129,4 @@ test-results/
 
 # ── Dynamic cache ──
 src/assets/cache/
+src/assets/diagnostics-config.json

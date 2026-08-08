@@ -19,17 +19,152 @@ class TestWSToken:
     def test_cached_token_returned(self, mock_settings):
         """Nếu đã có token trong settings, không gọi API."""
         mock_settings.MOODLE_WS_TOKEN = "cached_token_abc"
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = "https://courses.ut.edu.vn"
         mock_settings.MOODLE_BASE_URL = "https://courses.ut.edu.vn"
         mock_settings.UTH_USERNAME = "test"
         mock_settings.UTH_PASSWORD = "pass"
         mock_settings.PREFETCH_WORKERS = 4
         
         from core.client import MoodleClient
-        with patch.object(MoodleClient, '__init__', lambda self: None):
-            client = MoodleClient()
+        client = MoodleClient()
         
         token = client._get_ws_token()
         assert token == "cached_token_abc"
+
+    @patch('core.client.settings')
+    def test_token_from_another_moodle_origin_is_not_reused(self, mock_settings):
+        mock_settings.MOODLE_WS_TOKEN = "courses-token"
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = "https://courses.ut.edu.vn"
+        mock_settings.MOODLE_BASE_URL = "https://thnn.ut.edu.vn"
+        mock_settings.UTH_USERNAME = ""
+        mock_settings.UTH_PASSWORD = ""
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+
+        assert client.moodle_site_origin == "https://thnn.ut.edu.vn"
+        assert client.has_site_credentials is False
+        assert client._get_ws_token() == ""
+
+    @patch('core.client.settings')
+    def test_legacy_unstamped_credentials_are_not_sent_to_thnn(self, mock_settings):
+        mock_settings.MOODLE_WS_TOKEN = ""
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        mock_settings.MOODLE_BASE_URL = "https://thnn.ut.edu.vn"
+        mock_settings.UTH_USERNAME = "legacy-user"
+        mock_settings.UTH_PASSWORD = "legacy-pass"
+        mock_settings.UTH_CREDENTIALS_ORIGIN = ""
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+        client._post = MagicMock()
+
+        assert client.has_site_credentials is False
+        assert client._get_ws_token() == ""
+        client._post.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("credential_origin", "expects_auth"),
+        (
+            ("", True),
+            ("not-a-moodle-origin", False),
+            ("https://moodle.example.edu", False),
+            ("https://courses.ut.edu.vn:443", False),
+            ("https://thnn.ut.edu.vn", False),
+        ),
+    )
+    @patch("core.client.settings")
+    def test_courses_legacy_credentials_require_an_exactly_empty_origin_stamp(
+        self, mock_settings, credential_origin, expects_auth
+    ):
+        mock_settings.MOODLE_WS_TOKEN = ""
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        mock_settings.MOODLE_BASE_URL = "https://courses.ut.edu.vn"
+        mock_settings.UTH_USERNAME = "legacy-user"
+        mock_settings.UTH_PASSWORD = "legacy-pass"
+        mock_settings.UTH_CREDENTIALS_ORIGIN = credential_origin
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+        client._post = MagicMock(return_value=(200, {"token": "courses-token"}))
+
+        assert client.has_site_credentials is expects_auth
+        with patch("config.save_settings"):
+            token = client._get_ws_token()
+        assert token == ("courses-token" if expects_auth else "")
+        if expects_auth:
+            client._post.assert_called_once()
+        else:
+            client._post.assert_not_called()
+
+    @patch('core.client.settings')
+    def test_matching_stamped_credentials_authenticate_only_their_site(
+        self, mock_settings
+    ):
+        mock_settings.MOODLE_WS_TOKEN = ""
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        mock_settings.MOODLE_BASE_URL = "https://thnn.ut.edu.vn"
+        mock_settings.UTH_USERNAME = "thnn-user"
+        mock_settings.UTH_PASSWORD = "thnn-pass"
+        mock_settings.UTH_CREDENTIALS_ORIGIN = "https://thnn.ut.edu.vn"
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+        client._post = MagicMock(return_value=(200, {"token": "thnn-token"}))
+        with patch("config.save_settings"):
+            assert client._get_ws_token() == "thnn-token"
+
+        assert client.has_site_credentials is True
+        assert client._post.call_args.args[0] == (
+            "https://thnn.ut.edu.vn/login/token.php"
+        )
+        assert mock_settings.UTH_CREDENTIALS_ORIGIN == "https://thnn.ut.edu.vn"
+
+    @patch('core.client.settings')
+    def test_mismatched_stamped_credentials_make_zero_auth_requests(
+        self, mock_settings
+    ):
+        mock_settings.MOODLE_WS_TOKEN = ""
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        mock_settings.MOODLE_BASE_URL = "https://thnn.ut.edu.vn"
+        mock_settings.UTH_USERNAME = "courses-user"
+        mock_settings.UTH_PASSWORD = "courses-pass"
+        mock_settings.UTH_CREDENTIALS_ORIGIN = "https://courses.ut.edu.vn"
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+        client._post = MagicMock()
+
+        assert client.has_site_credentials is False
+        assert client._get_ws_token() == ""
+        client._post.assert_not_called()
+
+    @patch('core.client.settings')
+    def test_explicit_successful_login_stamps_stored_credential_origin(
+        self, mock_settings
+    ):
+        mock_settings.MOODLE_WS_TOKEN = ""
+        mock_settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        mock_settings.MOODLE_BASE_URL = "https://thnn.ut.edu.vn"
+        mock_settings.UTH_USERNAME = ""
+        mock_settings.UTH_PASSWORD = ""
+        mock_settings.UTH_CREDENTIALS_ORIGIN = ""
+
+        from core.client import MoodleClient
+
+        client = MoodleClient()
+        client._post = MagicMock(return_value=(200, {"token": "thnn-token"}))
+        with patch("config.save_settings"):
+            assert client.login("thnn-user", "thnn-pass", force=True) is True
+
+        assert mock_settings.UTH_USERNAME == "thnn-user"
+        assert mock_settings.UTH_PASSWORD == "thnn-pass"
+        assert mock_settings.UTH_CREDENTIALS_ORIGIN == "https://thnn.ut.edu.vn"
     
 
 

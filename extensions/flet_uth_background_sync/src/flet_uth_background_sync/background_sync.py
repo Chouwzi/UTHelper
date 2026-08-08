@@ -72,12 +72,28 @@ class AndroidBackgroundSync(Service):
         )
 
     async def install_update(
-        self, url: str, sha256: str, expected_size: int = 0
+        self,
+        url: str,
+        sha256: str,
+        expected_size: int,
+        expected_package_id: str,
+        expected_version_code: int,
+        expected_certificate_sha256: str,
     ) -> dict[str, Any]:
         return await self._invoke_method(
             "install_update",
-            {"url": url, "sha256": sha256, "expected_size": expected_size},
+            {
+                "url": url,
+                "sha256": sha256,
+                "expected_size": expected_size,
+                "expected_package_id": expected_package_id,
+                "expected_version_code": expected_version_code,
+                "expected_certificate_sha256": expected_certificate_sha256,
+            },
         )
+
+    async def cancel_update(self) -> None:
+        await self._invoke_method("cancel_update")
 
     async def cancel_periodic(self) -> None:
         await self._invoke_method("cancel_periodic")

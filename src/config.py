@@ -1,10 +1,13 @@
 from pydantic import BaseModel, Field
+from collections.abc import Callable
+from typing import Literal
 import os
 from pathlib import Path
 import sys
 import logging
 import tempfile
 import platform
+import threading
 # Secure storage import chain
 # Tier 1: keyring (Windows Credential Manager)
 # Tier 2: plaintext JSON (last resort, not recommended)
@@ -72,6 +75,7 @@ _SECRET_FIELDS = {
     'UTH_PASSWORD': 'password',
     'MOODLE_SESSION': 'moodle_session',
     'MOODLE_WS_TOKEN': 'ws_token',
+    'MOODLE_WS_TOKEN_ORIGIN': 'ws_token_origin',
     'GMAIL_APP_PASSWORD': 'gmail_app_password',
     'DISCORD_WEBHOOK_URL': 'discord_webhook',
     'TELEGRAM_BOT_TOKEN': 'telegram_bot_token',
@@ -91,20 +95,97 @@ def _read_secret(key: str) -> str:
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
     return ""
 
-def _write_secret(key: str, value: str):
-    """Ghi secret vào secure storage (keyring)."""
+def _write_secret(key: str, value: str) -> bool:
+    """Persist one secret, deleting its keyring entry when it is cleared.
+
+    Every caller represents an absent secret with the empty string.  Keeping
+    the delete at this boundary prevents a later ``load_settings()`` from
+    resurrecting credentials that the in-memory settings intentionally
+    invalidated.
+    """
     _logger = logging.getLogger(__name__)
     if _HAS_KEYRING:
         try:
             if value:
                 keyring.set_password(KEYRING_SERVICE_NAME, key, value)
-            return
+            else:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, key)
+                except keyring.errors.PasswordDeleteError:
+                    # Deleting an already-absent secret is the desired state.
+                    pass
+            return True
         except Exception as e:
             _logger.warning(f"Keyring write failed for {key}: {e}")
+            return False
+    return False
 
 def _has_any_secure_backend() -> bool:
     """Kiểm tra có backend nào an toàn hay không."""
     return _HAS_KEYRING
+
+
+_settings_save_lock = threading.RLock()
+_settings_subscriber_lock = threading.RLock()
+_settings_saved_subscribers: dict[object, Callable[[], None]] = {}
+
+
+def subscribe_settings_saved(listener: Callable[[], None]) -> Callable[[], None]:
+    """Subscribe to successful durable saves and return an idempotent unsubscribe."""
+    if not callable(listener):
+        raise TypeError("settings listener must be callable")
+    token = object()
+    with _settings_subscriber_lock:
+        _settings_saved_subscribers[token] = listener
+
+    def unsubscribe() -> None:
+        with _settings_subscriber_lock:
+            _settings_saved_subscribers.pop(token, None)
+
+    return unsubscribe
+
+
+def _notify_settings_saved() -> None:
+    with _settings_subscriber_lock:
+        subscribers = tuple(_settings_saved_subscribers.values())
+    for listener in subscribers:
+        try:
+            listener()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "A settings-save subscriber failed"
+            )
+
+
+def _snapshot_secure_secrets() -> dict[str, str] | None:
+    """Capture all keyring values before starting a settings transaction."""
+    if not _HAS_KEYRING:
+        return None
+    snapshot: dict[str, str] = {}
+    try:
+        for key_suffix in _SECRET_FIELDS.values():
+            snapshot[key_suffix] = (
+                keyring.get_password(KEYRING_SERVICE_NAME, key_suffix) or ""
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Cannot snapshot secure settings before save: %s", exc
+        )
+        return None
+    return snapshot
+
+
+def _restore_secure_secrets(snapshot: dict[str, str]) -> bool:
+    """Compensate keyring mutations after a failed settings transaction."""
+    restored = True
+    for key_suffix, value in snapshot.items():
+        if not _write_secret(key_suffix, value):
+            restored = False
+    if not restored:
+        logging.getLogger(__name__).critical(
+            "Secure settings rollback was incomplete; JSON was not committed"
+        )
+    return restored
 
 class Settings(BaseModel):
     """
@@ -115,8 +196,10 @@ class Settings(BaseModel):
     # Thông tin đăng nhập UTH
     UTH_USERNAME: str = Field(default="", description="Mã số sinh viên (MSSV)")
     UTH_PASSWORD: str = Field(default="", description="Mật khẩu đăng nhập", exclude=True)
+    UTH_CREDENTIALS_ORIGIN: str = Field(default="", description="Trusted Moodle origin verified for stored UTH credentials")
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
+    MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
@@ -125,7 +208,7 @@ class Settings(BaseModel):
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
-    SETTINGS_SCHEMA_VERSION: int = Field(default=2, description="Phiên bản schema cài đặt")
+    SETTINGS_SCHEMA_VERSION: int = Field(default=3, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
     # Deprecated compatibility fields. Runtime scheduling uses only
     # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
@@ -147,6 +230,14 @@ class Settings(BaseModel):
     # Android background notifications (AlarmManager)
     BACKGROUND_CHECK_ANDROID: bool = Field(default=True, description="Kiểm tra deadline nền trên Android (AlarmManager)")
     BACKGROUND_CHECK_INTERVAL: int = Field(default=30, description="[Deprecated] Tần suất Android cũ (phút)")
+    AUTO_UPDATE_ENABLED: bool = Field(
+        default=True,
+        description="Tự động kiểm tra cập nhật",
+    )
+    CRASH_REPORTING_CONSENT: Literal["not_asked", "enabled", "disabled"] = Field(
+        default="not_asked",
+        description="Quyết định gửi chẩn đoán sự cố của người dùng",
+    )
 
     # Mấy kênh thông báo khác (đang phát triển)
     ENABLE_DISCORD: bool = Field(default=False, description="Bật thông báo qua Discord")
@@ -210,6 +301,8 @@ def migrate_settings_data(raw: dict) -> dict:
     Legacy keys are intentionally preserved during this compatibility window.
     """
     data = dict(raw or {})
+    data.setdefault("CRASH_REPORTING_CONSENT", "not_asked")
+    data.setdefault("AUTO_UPDATE_ENABLED", True)
     if "CHECK_INTERVAL_MINUTES" not in data:
         legacy_value = data.get("POLL_INTERVAL_MINUTES")
         if legacy_value is None:
@@ -237,7 +330,7 @@ def migrate_settings_data(raw: dict) -> dict:
             except (TypeError, ValueError):
                 pass
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
-    data["SETTINGS_SCHEMA_VERSION"] = 2
+    data["SETTINGS_SCHEMA_VERSION"] = 3
     return data
 
 
@@ -297,51 +390,46 @@ def load_settings() -> Settings:
 
 settings = load_settings()
 
-def save_settings():
-    """Tiện tay lưu luôn đống setting hiện tại xuống ổ cứng an toàn."""
+def save_settings() -> bool:
+    """Persist settings transactionally across keyring and JSON storage."""
     _logger = logging.getLogger(__name__)
-    has_secure = _has_any_secure_backend()
+    with _settings_save_lock:
+        has_secure = _has_any_secure_backend()
+        data = settings.model_dump()
+        if not has_secure:
+            for attr in _SECRET_FIELDS:
+                value = getattr(settings, attr, "")
+                if value:
+                    data[attr] = value
+            _logger.warning(
+                "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
+            )
 
-    # --- Step 1: Save non-secret settings to JSON ---
-    json_ok = False
-    try:
-        def get_data_to_write():
-            data = settings.model_dump()
-            if not has_secure:
-                for attr in _SECRET_FIELDS:
-                    val = getattr(settings, attr, '')
-                    if val:
-                        data[attr] = val
-            return data
-            
-        from core.safe_file_io import SafeFileIO
-        json_ok = SafeFileIO.write_json_atomic(CONFIG_FILE, get_data_to_write())
-    except Exception as e:
-        _logger.error(f"Failed to save settings: {e}")
+        previous_secrets: dict[str, str] | None = None
+        if has_secure:
+            previous_secrets = _snapshot_secure_secrets()
+            if previous_secrets is None:
+                return False
+            for attr, key_suffix in _SECRET_FIELDS.items():
+                value = getattr(settings, attr, "")
+                if previous_secrets.get(key_suffix, "") == value:
+                    continue
+                if not _write_secret(key_suffix, value):
+                    _restore_secure_secrets(previous_secrets)
+                    return False
 
-    # --- Step 2: Save all secrets to secure storage ---
-    if has_secure:
-        for attr, key_suffix in _SECRET_FIELDS.items():
-            try:
-                val = getattr(settings, attr, '')
-                _write_secret(key_suffix, val)
-            except Exception as e:
-                _logger.warning(f"Failed to write {attr} to secure storage: {e}")
-    else:
-        _logger.warning(
-            "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
-        )
-
-    # --- Step 3: Cleanup legacy secrets from JSON file ---
-    if json_ok and has_secure:
         try:
             from core.safe_file_io import SafeFileIO
-            data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
-            stripped = {k: v for k, v in data.items() if k not in _SECRET_FIELDS}
-            if len(stripped) < len(data):
-                SafeFileIO.write_json_atomic(CONFIG_FILE, stripped)
-                _logger.info("Cleaned legacy secrets from settings JSON file")
-        except Exception as e:
-            _logger.warning(f"Failed to clean legacy secrets from JSON: {e}")
+
+            json_ok = bool(SafeFileIO.write_json_atomic(CONFIG_FILE, data))
+        except Exception as exc:
+            json_ok = False
+            _logger.error("Failed to save settings: %s", exc)
+
+        if not json_ok and previous_secrets is not None:
+            _restore_secure_secrets(previous_secrets)
+    if json_ok:
+        _notify_settings_saved()
+    return json_ok
 
 

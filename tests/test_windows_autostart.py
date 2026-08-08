@@ -60,6 +60,21 @@ def test_development_command_rejects_missing_entry_script(tmp_path):
         raise AssertionError("missing development entry script was accepted")
 
 
+def test_default_development_command_falls_back_to_repo_entry_for_host_launcher(
+    monkeypatch, tmp_path
+):
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"")
+    monkeypatch.setattr(autostart.sys, "argv", [str(tmp_path / "missing-pytest")])
+
+    command = build_autostart_command(executable=python)
+
+    repo_entry = Path(autostart.__file__).resolve().parents[2] / "main.py"
+    assert command == subprocess.list2cmdline(
+        [str(python), str(repo_entry), "--autostart"]
+    )
+
+
 def backend(values, command='"C:\\Program Files\\UTHelper\\UTHelperAutostart.exe"'):
     def delete(name):
         values.pop(name, None)

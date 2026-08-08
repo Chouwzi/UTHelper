@@ -1,35 +1,19 @@
 import logging
 import os
 import sys
-import traceback
 from pathlib import Path
 
-# ===== SETUP DEBUG LOGGER =====
-# Force stdout/stderr to be unbuffered/line-buffered
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(line_buffering=True)
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(line_buffering=True)
+from diagnostics.logging_setup import configure_logging
+from diagnostics.models import AppPhase
+from diagnostics.runtime import create_default_runtime
+from gui.controllers.startup_visibility import is_autostart_launch
+from platform_utils.single_instance import bootstrap_windows_instance
 
-try:
-    _appdata = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "UTHelper")
-    os.makedirs(_appdata, exist_ok=True)
-    log_path = os.path.join(_appdata, "debug_app.log")
-    file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
-    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-    root_logger.addHandler(file_handler)
-    
-    for log_name in ["flet", "flet_transport", "gui", "core"]:
-        l = logging.getLogger(log_name)
-        l.setLevel(logging.DEBUG)
-        l.addHandler(file_handler)
-except Exception:
-    import logging as _fb_log
-    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-# ==============================
+# Force stdout/stderr to be unbuffered/line-buffered
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 # iOS/mobile SSL fix: must be set BEFORE any httpx/ssl import
 # Python in sandboxed iOS/Android apps cannot locate system CA certificates.
@@ -81,24 +65,12 @@ except Exception as exc:
     _boot_log(f"Data dir init failed: {exc}")
     _APPDATA_DIR = Path.home()
 
-# Setup logging to file BEFORE imports
+# Set up the sole owned file logger after the platform data directory exists.
 try:
-    _LOG_DIR = _APPDATA_DIR / "logs"
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    
-    _file_handler = logging.FileHandler(
-        _LOG_DIR / "app.log",
-        mode='a',
-        encoding="utf-8",
-    )
-    _file_handler.setLevel(logging.DEBUG)
-    _file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    logging.getLogger().addHandler(_file_handler)
-    _boot_log(f"Log file: {_LOG_DIR / 'app.log'}")
+    _LOGGING_RUNTIME = configure_logging(_APPDATA_DIR, debug=True)
+    _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
 except Exception as exc:
+    _LOGGING_RUNTIME = None
     _boot_log(f"Log setup failed: {exc}")
 
 # Console encoding fix (Windows-only, harmless on other platforms)
@@ -109,11 +81,12 @@ for _stream in (sys.stdout, sys.stderr):
         import logging as _fb_log
         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+if _LOGGING_RUNTIME is None:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 logging.getLogger("flet_core").setLevel(logging.DEBUG)
 logging.getLogger("flet").setLevel(logging.DEBUG)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -128,9 +101,9 @@ for msg in _BOOT_LOG:
     logger.info("[BOOT] %s", msg)
 
 
-def _show_crash_screen(page, error_msg: str):
-    """Show error details on screen instead of black screen."""
-    import flet as ft
+def _show_crash_screen(page, ft, reference: str | None):
+    """Show a reference-only failure screen without exception-owned text."""
+    safe_reference = reference or "không khả dụng"
     page.bgcolor = "#0F172A"
     page.padding = 20
     page.scroll = ft.ScrollMode.AUTO
@@ -140,11 +113,11 @@ def _show_crash_screen(page, error_msg: str):
             ft.Icon(ft.Icons.ERROR_OUTLINE, color="#EF4444", size=48),
             ft.Text("UTHelper - Khởi động lỗi", size=20, color="#F8FAFC",
                      weight=ft.FontWeight.BOLD),
-            ft.Text("Ứng dụng gặp lỗi khi khởi động. Chi tiết:", 
+            ft.Text("Ứng dụng gặp lỗi khi khởi động.",
                      size=14, color="#94A3B8"),
             ft.Container(
                 content=ft.Text(
-                    error_msg,
+                    f"Mã tham chiếu: {safe_reference}",
                     size=11,
                     color="#FCA5A5",
                     selectable=True,
@@ -154,7 +127,7 @@ def _show_crash_screen(page, error_msg: str):
                 border_radius=8,
                 padding=12,
             ),
-            ft.Text("Vui lòng chụp màn hình và gửi cho nhà phát triển.", 
+            ft.Text("Vui lòng gửi mã tham chiếu cho nhà phát triển.",
                      size=12, color="#64748B"),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -164,10 +137,53 @@ def _show_crash_screen(page, error_msg: str):
     page.update()
 
 
-def main():
+def _is_web_mode(argv, environ) -> bool:
+    return environ.get("FLET_WEB") == "1" or "--web" in argv
+
+
+def _is_source_checkout(module_path: Path) -> bool:
+    try:
+        return (module_path.resolve().parents[1] / "pyproject.toml").is_file()
+    except IndexError:
+        return False
+
+
+def main() -> int:
+    web_mode = _is_web_mode(sys.argv, os.environ)
+    result = None
+    development = _is_source_checkout(Path(__file__))
+    if sys.platform == "win32" and not web_mode:
+        result = bootstrap_windows_instance(
+            autostart_launch=is_autostart_launch(),
+            release_channel="stable",
+            development=development,
+        )
+        if result.exit_code is not None:
+            return result.exit_code
+
+    runtime = None
+    try:
+        runtime = create_default_runtime(
+            _APPDATA_DIR,
+            development=development,
+        )
+        runtime.start()
+    except Exception:
+        _boot_log("Diagnostic runtime unavailable")
+
+    # Desktop ownership must be decided before loading the heavyweight Flet
+    # runtime. A secondary process can then hand off and exit without starting
+    # a second Flutter/Python UI stack.
     import flet as ft
-    
+
+    active_page = None
+
     def _app_target(page: ft.Page):
+        nonlocal active_page
+        active_page = page
+        if runtime is not None:
+            runtime.attach_page(page)
+            runtime.mark_phase(AppPhase.GUI)
         try:
             logger.info("Starting app imports...")
             
@@ -184,16 +200,22 @@ def main():
             logger.info("GUI module imported OK")
             
             # Run the app
-            app_main(page)
+            app_main(
+                page,
+                activation_broker=result.broker if result else None,
+                force_visible=result.force_visible if result else False,
+            )
             logger.info("App started successfully")
             
-        except Exception:
-            error_msg = traceback.format_exc()
-            logger.critical("App crashed during startup:\n%s", error_msg)
+        except Exception as exc:
+            reference = None
+            if runtime is not None:
+                reference = runtime.record_exception(exc, AppPhase.GUI)
+            logger.critical("App startup failed; reference=%s", reference or "none")
             try:
-                _show_crash_screen(page, error_msg)
-            except Exception as render_exc:
-                logger.critical("Even crash screen failed: %s", render_exc)
+                _show_crash_screen(page, ft, reference)
+            except Exception:
+                logger.critical("Reference-only crash screen failed")
     
     # On Android, Flet bundles assets automatically and sets FLET_ASSETS_DIR
     _assets = os.environ.get("FLET_ASSETS_DIR") or os.path.abspath(
@@ -201,7 +223,6 @@ def main():
     )
     
     # Support web mode for testing: set FLET_WEB=1 or pass --web
-    web_mode = os.environ.get("FLET_WEB") == "1" or "--web" in sys.argv
     try:
         web_port = int(os.environ.get("FLET_WEB_PORT", "8561"))
         if not (1 <= web_port <= 65535):
@@ -217,7 +238,37 @@ def main():
         # Flet >= 0.82 workaround removed to test if it's causing the issue in 0.85.3
         pass
     
-    ft.run(**run_kwargs)
+    clean_exit = False
+    exit_code = 0
+    try:
+        run_kwargs["main"] = _app_target
+        run_kwargs.pop("target", None)
+        ft.run(**run_kwargs)
+        clean_exit = True
+    except Exception as exc:
+        reference = None
+        if runtime is not None:
+            reference = runtime.record_exception(exc, AppPhase.GUI)
+        logger.critical("Flet runner failed; reference=%s", reference or "none")
+        if active_page is not None:
+            try:
+                _show_crash_screen(active_page, ft, reference)
+            except Exception:
+                logger.critical("Reference-only crash screen failed")
+        clean_exit = True
+        exit_code = 1
+    finally:
+        try:
+            if result and result.broker:
+                result.broker.close(timeout_seconds=1.0)
+        finally:
+            if runtime is not None:
+                runtime.mark_phase(AppPhase.SHUTDOWN)
+                if clean_exit:
+                    runtime.close(clean=True)
+                else:
+                    runtime.close(clean=False)
+    return exit_code
 
 
 if __name__ == "__main__":
@@ -225,4 +276,4 @@ if __name__ == "__main__":
     if sys.platform == 'win32':
         import multiprocessing
         multiprocessing.freeze_support()
-    main()
+    raise SystemExit(main())

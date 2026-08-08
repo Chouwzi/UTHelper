@@ -136,13 +136,52 @@ def _online_text(plugins: object) -> tuple[str, int]:
     return "", 0
 
 
-def _has_submission_plugin(plugins: object, plugin_type: str) -> bool:
+def _file_plugin_config_state(
+    index: Mapping[tuple[str, str, str], object],
+) -> bool | None:
+    """Return explicit file-plugin configuration state, if Moodle supplied it."""
+    found = False
+    for (subtype, plugin, name), value in index.items():
+        if (
+            plugin not in {"file", "assignsubmission_file"}
+            or subtype not in {"assign", "assignsubmission", ""}
+        ):
+            continue
+        found = True
+        if name in {"enabled", "visible"} and not _as_bool(value):
+            return False
+        if name == "hidden" and _as_bool(value):
+            return False
+    return found if found else None
+
+
+def _status_file_plugin_state(plugins: object) -> bool | None:
+    """Return explicit status-plugin file capability, if Moodle supplied it."""
     if not isinstance(plugins, Iterable) or isinstance(plugins, (str, bytes, Mapping)):
+        return None
+    found = False
+    for item in plugins:
+        plugin = _as_mapping(item)
+        if str(plugin.get("type", "")).strip().lower() != "file":
+            continue
+        found = True
+        if (
+            ("enabled" in plugin and not _as_bool(plugin["enabled"]))
+            or ("visible" in plugin and not _as_bool(plugin["visible"]))
+            or ("hidden" in plugin and _as_bool(plugin["hidden"]))
+        ):
+            return False
+    return found if found else None
+
+
+def _file_submission_enabled(
+    configs: Mapping[tuple[str, str, str], object], plugins: object
+) -> bool:
+    config_state = _file_plugin_config_state(configs)
+    status_state = _status_file_plugin_state(plugins)
+    if config_state is False or status_state is False:
         return False
-    return any(
-        str(_as_mapping(item).get("type", "")).strip().lower() == plugin_type
-        for item in plugins
-    )
+    return config_state is True or status_state is True
 
 
 def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], status: Mapping[str, object]) -> SubmissionSnapshot:
@@ -157,7 +196,10 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
     if raw_submission_drafts is None:
         raw_submission_drafts = _config_value(configs, ("submissiondrafts",))
     submission_drafts = _as_bool(raw_submission_drafts)
-    statement_required = _as_bool(_config_value(configs, ("requiresubmissionstatement",)))
+    raw_statement_required = assignment.get("requiresubmissionstatement")
+    if raw_statement_required is None:
+        raw_statement_required = _config_value(configs, ("requiresubmissionstatement",))
+    statement_required = _as_bool(raw_statement_required)
     maximum_file_count = max(0, _as_int(_config_value(configs, ("maxfilesubmission", "maxfiles"))))
     maximum_file_bytes = max(0, _as_int(_config_value(configs, ("maxsubmissionsizebytes", "maxbytes"))))
     assignment_submissions_enabled = not _as_bool(assignment.get("nosubmissions"))
@@ -167,13 +209,6 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
     )
 
     online_text, online_text_format = _online_text(plugins)
-    file_plugin_enabled = _as_bool(
-        _config_value(
-            configs,
-            ("enabled",),
-            plugins=("file", "assignsubmission_file"),
-        )
-    )
     return SubmissionSnapshot(
         assignment_id=assign_id,
         raw_status=str(submission.get("status", "")),
@@ -184,9 +219,7 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
         submissions_enabled=submissions_enabled,
         submission_drafts=submission_drafts,
         statement_required=statement_required,
-        file_submission_enabled=(
-            file_plugin_enabled and _has_submission_plugin(plugins, "file")
-        ),
+        file_submission_enabled=_file_submission_enabled(configs, plugins),
         team_submission=_as_bool(assignment.get("teamsubmission")),
         due_date=max(0, _as_int(assignment.get("duedate", 0))),
         cutoff_date=max(0, _as_int(assignment.get("cutoffdate", 0))),

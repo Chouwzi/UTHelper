@@ -14,6 +14,10 @@ from core.use_cases.submission_workflow import (
 
 _ERROR_MESSAGES = {
     SubmissionErrorCode.INVALID_TARGET: "Không thể xác định bài tập trên Moodle.",
+    SubmissionErrorCode.CLIENT_ORIGIN_MISMATCH: (
+        "Moodle cho trang bài tập này chưa được cấu hình. "
+        "Hãy mở bài tập trong trình duyệt."
+    ),
     SubmissionErrorCode.ASSIGNMENT_NOT_FOUND: "Không tìm thấy bài tập trên Moodle.",
     SubmissionErrorCode.SNAPSHOT_LOAD_FAILED: "Không thể kiểm tra trạng thái bài nộp mới nhất.",
     SubmissionErrorCode.SUBMISSIONS_CLOSED: "Moodle hiện không cho phép nộp bài này.",

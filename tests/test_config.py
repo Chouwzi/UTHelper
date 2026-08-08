@@ -15,6 +15,41 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from config import Settings, _SECRET_FIELDS, migrate_settings_data
+from core.moodle_sites import TRUSTED_MOODLE_SITES, moodle_site_from_origin
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "https://courses.ut.edu.vn",
+        "https://thnn.ut.edu.vn",
+    ),
+)
+def test_moodle_site_config_accepts_only_explicit_trusted_https_origins(origin):
+    site = moodle_site_from_origin(origin)
+
+    assert site is not None
+    assert site.origin == origin
+    assert site in TRUSTED_MOODLE_SITES
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (
+        "http://courses.ut.edu.vn",
+        "https://courses.ut.edu.vn:443",
+        "https://courses.ut.edu.vn:444",
+        "https://user:pass@courses.ut.edu.vn",
+        "https://child.courses.ut.edu.vn",
+        "https://ut.edu.vn",
+        "https://evil.example",
+        "https://courses.ut.edu.vn/moodle",
+        "https://courses.ut.edu.vn?site=thnn",
+        "https://courses.ut.edu.vn#fragment",
+    ),
+)
+def test_moodle_site_config_rejects_non_exact_origins(origin):
+    assert moodle_site_from_origin(origin) is None
 
 
 class TestSettingsDefaults:
@@ -60,6 +95,9 @@ class TestSettingsDefaults:
         s = Settings()
         assert s.MINIMIZE_TO_TRAY is True
 
+    def test_crash_consent_defaults_to_not_asked(self):
+        assert Settings().CRASH_REPORTING_CONSENT == "not_asked"
+
 
 class TestSettingsSecretExclusion:
     """Secret fields are excluded from JSON dumps."""
@@ -85,6 +123,15 @@ class TestSettingsSecretExclusion:
         assert "UTH_USERNAME" in dumped
         assert "THEME" in dumped
         assert "CHECK_INTERVAL_MINUTES" in dumped
+
+    def test_credential_origin_is_persisted_without_exposing_password(self):
+        dumped = Settings(
+            UTH_PASSWORD="secret",
+            UTH_CREDENTIALS_ORIGIN="https://thnn.ut.edu.vn",
+        ).model_dump()
+
+        assert dumped["UTH_CREDENTIALS_ORIGIN"] == "https://thnn.ut.edu.vn"
+        assert "UTH_PASSWORD" not in dumped
 
 
 class TestSettingsSerialization:
@@ -117,7 +164,7 @@ class TestSettingsSerialization:
     def test_legacy_poll_interval_migrates_when_check_missing(self):
         migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 2
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 3
 
     def test_legacy_notification_milestones_migrate_to_minutes(self):
         migrated = migrate_settings_data({
@@ -128,6 +175,22 @@ class TestSettingsSerialization:
 
     def test_new_install_has_all_default_notification_milestones(self):
         assert Settings().NOTIFY_MILESTONES_MINUTES == [4320, 1440, 180, 60, 30, 5]
+
+    def test_legacy_settings_without_crash_consent_migrate_to_not_asked(self):
+        migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 1})
+
+        assert migrated["CRASH_REPORTING_CONSENT"] == "not_asked"
+
+    def test_schema_two_settings_enable_trusted_update_checks_by_default(self):
+        migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})
+
+        assert migrated["AUTO_UPDATE_ENABLED"] is True
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 3
+        assert Settings(**migrated).AUTO_UPDATE_ENABLED is True
+        assert (
+            Settings.model_fields["AUTO_UPDATE_ENABLED"].description
+            == "Tự động kiểm tra cập nhật"
+        )
 
 
 class TestSecretFieldsMapping:

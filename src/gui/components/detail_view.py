@@ -1,6 +1,8 @@
 import os
+import re
 import sys
 from typing import Optional
+from urllib.parse import parse_qsl, urlsplit
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -27,6 +29,7 @@ from core.submission_models import (
     SubmissionSnapshot,
     normalize_filepath,
 )
+from core.moodle_sites import moodle_site_from_origin, moodle_site_from_url
 from core.use_cases.submission_workflow import (
     FinalizeSubmissionIntent,
     SelectedSubmissionFile,
@@ -109,11 +112,99 @@ class DetailView(ft.Container):
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
-            return self._submission_workflow_factory(client)
+            workflow = self._submission_workflow_factory(client)
+            if workflow is not None:
+                return workflow
         raise RuntimeError("Submission workflow factory is not configured.")
+
+    def _has_submission_workflow(self, client) -> bool:
+        if not self._submission_workflow_factory:
+            return False
+        try:
+            return self._submission_workflow_factory(client) is not None
+        except Exception:
+            logger.exception("Submission workflow factory failed")
+            return False
 
     def _submission_target(self, url: str, course_id: int) -> SubmissionTarget:
         return SubmissionTarget(url=url, course_id=course_id)
+
+    @staticmethod
+    def _positive_course_id(value) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            course_id = value
+        elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+            try:
+                course_id = int(value)
+            except ValueError:
+                return None
+        else:
+            return None
+        return course_id if course_id > 0 else None
+
+    @staticmethod
+    def _is_safe_browser_url(url) -> bool:
+        if not isinstance(url, str) or url != url.strip():
+            return False
+        try:
+            parsed = urlsplit(url)
+            _ = parsed.port
+        except (TypeError, ValueError):
+            return False
+        return (
+            parsed.scheme.lower() in ("http", "https")
+            and parsed.hostname is not None
+            and parsed.username is None
+            and parsed.password is None
+        )
+
+    @classmethod
+    def _is_native_submission_url(cls, url) -> bool:
+        if not cls._is_safe_browser_url(url):
+            return False
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+            query = parse_qsl(
+                parsed.query, keep_blank_values=True, strict_parsing=True
+            )
+        except (TypeError, ValueError):
+            return False
+        if (
+            len(query) != 1
+            or query[0][0] != "id"
+            or re.fullmatch(r"[0-9]+", query[0][1]) is None
+        ):
+            return False
+        try:
+            cmid = int(query[0][1])
+        except ValueError:
+            return False
+        return (
+            parsed.scheme.lower() == "https"
+            and moodle_site_from_url(url) is not None
+            and port is None
+            and parsed.path == "/mod/assign/view.php"
+            and not parsed.fragment
+            and cmid > 0
+        )
+
+    @staticmethod
+    def _client_matches_native_submission_site(client, url: str) -> bool:
+        """Require a bound client before using its native Moodle credentials."""
+        assignment_site = moodle_site_from_url(url)
+        client_origin = getattr(client, "moodle_site_origin", None)
+        if client_origin is None:
+            # Test adapters that do not represent a real client remain usable;
+            # SubmissionWorkflow itself still fails closed before any mutation.
+            return True
+        return bool(
+            assignment_site is not None
+            and moodle_site_from_origin(client_origin) == assignment_site
+            and getattr(client, "has_site_credentials", True)
+        )
 
     @staticmethod
     def _submitted_file_dicts(files: tuple[RemoteFile, ...]) -> list[dict]:
@@ -675,6 +766,9 @@ class DetailView(ft.Container):
         self._title_text.value     = data.get("title", "Không có tiêu đề")
         self._current_url          = data.get("url", "")
         self._current_data         = data
+        browser_available = self._is_safe_browser_url(self._current_url)
+        self._open_btn.visible = browser_available
+        self._header_open_btn.visible = browser_available
         self._content_col.controls.clear()
 
         # UX-8: Dynamic CTA based on submission status and type
@@ -699,6 +793,7 @@ class DetailView(ft.Container):
         self._submission_statement.value = False
         self._submission_statement.visible = False
         self._submission_policy_text.visible = False
+        self._submission_area.visible = False
         self._pick_btn.visible = False
         self._submit_btn.visible = False
         self._finalize_btn.visible = False
@@ -730,23 +825,75 @@ class DetailView(ft.Container):
             self._cta_text.color = C.ACCENT
             self._cta_icon.color = C.ACCENT
 
+        submission_context_reason = ""
+
         # Load submitted files in background (for assignments)
         if is_assignment:
             url = data.get("url", "")
-            course_id = data.get("course_id")
-            if url and course_id and '/mod/assign/' in url:
-                client = None
+            raw_course_id = data.get("course_id")
+            course_id = self._positive_course_id(raw_course_id)
+            client = None
+            if not browser_available:
+                submission_context_reason = (
+                    "Không thể xác định đường dẫn bài tập an toàn trên Moodle."
+                )
+            elif not self._is_native_submission_url(url):
+                submission_context_reason = (
+                    "Đường dẫn này không phải bài tập Moodle. "
+                    "Hãy mở trong trình duyệt."
+                )
+            elif raw_course_id in (None, ""):
+                submission_context_reason = (
+                    "Thiếu thông tin học phần nên không thể đồng bộ bài nộp. "
+                    "Hãy mở bài tập trong trình duyệt."
+                )
+            elif course_id is None:
+                submission_context_reason = (
+                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
+                    "Hãy mở bài tập trong trình duyệt."
+                )
+            else:
                 try:
                     client = self._get_client() if self._get_client else None
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                if client:
+                client_is_bound = getattr(client, "moodle_site_origin", None) is not None
+                if (
+                    client
+                    and self._client_matches_native_submission_site(client, url)
+                    and (not client_is_bound or self._has_submission_workflow(client))
+                ):
                     prefetched = data.get("details", {}).get("raw_submission_status")
+                    load_generation, view_generation = (
+                        self._reserve_submission_snapshot_load()
+                    )
                     self._page.run_task(
                         self._async_load_submitted_files,
-                        client, url, int(course_id), prefetched
+                        client,
+                        url,
+                        course_id,
+                        prefetched,
+                        load_generation,
+                        view_generation,
                     )
+                elif client:
+                    submission_context_reason = (
+                        "Moodle cho trang bài tập này chưa được cấu hình. "
+                        "Hãy mở bài tập trong trình duyệt."
+                    )
+                else:
+                    submission_context_reason = (
+                        "Không thể kết nối Moodle trong ứng dụng. "
+                        "Hãy mở bài tập trong trình duyệt."
+                    )
+            if submission_context_reason:
+                self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
+                self._cta_text.value = "Mở trong trình duyệt"
+                self._open_btn.bgcolor = C.SURFACE
+                self._open_btn.border = ft.Border.all(1, C.ACCENT)
+                self._cta_text.color = C.ACCENT
+                self._cta_icon.color = C.ACCENT
         else:
             self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
@@ -865,6 +1012,10 @@ class DetailView(ft.Container):
                     spacing=8,
                 ),
             )
+        if submission_context_reason:
+            self._submission_status_value.value = submission_context_reason
+            self._submission_status_value.color = C.WARNING
+            self._submission_status_value.weight = ft.FontWeight.W_600
         if rows:
             self._content_col.controls.append(self._section("Trạng thái", rows))
 
@@ -982,7 +1133,7 @@ class DetailView(ft.Container):
         )
 
     async def _open_browser(self, e):
-        if not self._current_url:
+        if not self._is_safe_browser_url(self._current_url):
             return
 
         # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
@@ -1366,17 +1517,17 @@ class DetailView(ft.Container):
         client = self._get_client() if self._get_client else None
         data = self._current_data
         url = data.get("url", "")
-        course_id = data.get("course_id")
+        course_id = self._positive_course_id(data.get("course_id"))
         if not client:
             self._show_upload_status("Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL)
             return
-        if not url or not course_id or "/mod/assign/" not in url:
+        if not self._is_native_submission_url(url) or course_id is None:
             self._show_upload_status("Không thể xác định bài tập trên Moodle.", C.CRITICAL)
             return
 
         generation = self._view_generation
         target_url = url
-        target_course_id = int(course_id)
+        target_course_id = course_id
         intent = self._build_file_intent(
             operation,
             finalize=finalize,
@@ -1435,13 +1586,13 @@ class DetailView(ft.Container):
         client = self._get_client() if self._get_client else None
         data = self._current_data
         url = data.get("url", "")
-        course_id = data.get("course_id")
+        course_id = self._positive_course_id(data.get("course_id"))
         if not client:
             self._show_upload_status(
                 "Chưa đăng nhập. Vui lòng đăng nhập lại.", C.CRITICAL
             )
             return
-        if not url or not course_id:
+        if not self._is_native_submission_url(url) or course_id is None:
             self._show_upload_status(
                 "Không thể xác định bài tập trên Moodle.", C.CRITICAL
             )
@@ -1449,7 +1600,7 @@ class DetailView(ft.Container):
 
         generation = self._view_generation
         target_url = url
-        target_course_id = int(course_id)
+        target_course_id = course_id
         finalize_intent = FinalizeSubmissionIntent(
             accept_statement=(
                 getattr(self._submission_statement, "value", False) is True
@@ -1501,8 +1652,10 @@ class DetailView(ft.Container):
         self, generation: int, target_url: str, target_course_id: int
     ) -> bool:
         try:
-            current_course_id = int(self._current_data.get("course_id"))
-        except (TypeError, ValueError):
+            current_course_id = self._positive_course_id(
+                self._current_data.get("course_id")
+            )
+        except AttributeError:
             return False
         return (
             self._view_generation == generation
@@ -1541,11 +1694,21 @@ class DetailView(ft.Container):
         self._upload_status.color = color
         self._upload_status.visible = True
 
-    async def _async_load_submitted_files(self, client, url: str, course_id: int, prefetched_status: Optional[dict] = None):
-        """Async wrapper: load submitted files in bg thread, then update UI."""
+    def _reserve_submission_snapshot_load(self) -> tuple[int, int]:
+        """Reserve load/view generations synchronously at scheduling time."""
         self._snapshot_load_generation += 1
-        load_generation = self._snapshot_load_generation
-        view_generation = self._view_generation
+        return self._snapshot_load_generation, self._view_generation
+
+    async def _async_load_submitted_files(
+        self,
+        client,
+        url: str,
+        course_id: int,
+        prefetched_status: Optional[dict],
+        load_generation: int,
+        view_generation: int,
+    ):
+        """Load one already-reserved snapshot request and apply it if current."""
         try:
             result = await asyncio.to_thread(
                 self._load_submission_snapshot,

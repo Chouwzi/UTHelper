@@ -14,6 +14,7 @@ class FakeMoodle43:
     cmid = 123
 
     def __init__(self, *, drafts: bool, statement: bool):
+        self.moodle_site_origin = "https://courses.ut.edu.vn"
         self.remote_files: dict[tuple[str, str], bytes] = {}
         self.drafts: dict[int, dict[tuple[str, str], bytes]] = {}
         self.submission_status = "new"
@@ -297,6 +298,38 @@ def assignment_fixture():
             },
         ],
     }
+
+
+def captured_real_submission_shape_fixture():
+    """Captured Moodle 4.3 shape with no assignment plugin configs exposed."""
+    return (
+        {
+            "id": 77,
+            "submissiondrafts": 1,
+            "requiresubmissionstatement": 1,
+            "teamsubmission": 0,
+            "duedate": 0,
+            "cutoffdate": 0,
+            "allowsubmissionsfromdate": 0,
+            "configs": [],
+        },
+        {
+            "lastattempt": {
+                "submission": {
+                    "id": 333,
+                    "status": "draft",
+                    "timemodified": 1_700_000_000,
+                    "plugins": [{"type": "file", "fileareas": []}],
+                },
+                "attemptnumber": 0,
+                "canedit": True,
+                "cansubmit": True,
+                "locked": False,
+                "graded": False,
+                "submissionsenabled": True,
+            }
+        },
+    )
 
 
 def editable_status_fixture(url_query: str = ""):

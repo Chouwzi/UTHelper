@@ -63,10 +63,15 @@ def test_foreground_import_is_revision_and_submission_safe():
 
 def test_android_updater_requires_https_checksum_and_package_installer():
     updater = next(ANDROID.rglob("ApkUpdateInstaller.kt")).read_text(encoding="utf-8")
-    assert 'url.startsWith("https://")' in updater
+    assert 'initialUri.scheme == "https"' in updater
     assert "Update SHA-256 mismatch" in updater
     assert "canRequestPackageInstalls" in updater
     assert "application/vnd.android.package-archive" in updater
+    assert "validateArchiveMetadata" in updater
+    assert "expectedPackageId" in updater
+    assert "expectedVersionCode" in updater
+    assert "expectedCertificateSha256" in updater
+    assert "AtomicBoolean" in updater
 
 
 def test_python_service_forwards_configuration(monkeypatch):
@@ -95,6 +100,37 @@ def test_python_service_forwards_configuration(monkeypatch):
     assert imported == {"enabled": True}
     assert captured["name"] == "import_activities"
     assert captured["arguments"]["authoritative"] is True
+
+    updated = asyncio.run(
+        service.install_update(
+            "https://github.com/Chouwzi/UTHelper/releases/download/"
+            "v2.2.0/UTHelper-2.2.0.apk",
+            "ab" * 32,
+            123,
+            "com.uthelper.uthelper",
+            2_002_000,
+            "cd" * 32,
+        )
+    )
+    assert updated == {"enabled": True}
+    assert captured == {
+        "name": "install_update",
+        "arguments": {
+            "url": (
+                "https://github.com/Chouwzi/UTHelper/releases/download/"
+                "v2.2.0/UTHelper-2.2.0.apk"
+            ),
+            "sha256": "ab" * 32,
+            "expected_size": 123,
+            "expected_package_id": "com.uthelper.uthelper",
+            "expected_version_code": 2_002_000,
+            "expected_certificate_sha256": "cd" * 32,
+        },
+    }
+
+    asyncio.run(service.cancel_update())
+    assert captured["name"] == "cancel_update"
+    assert captured["arguments"] is None
 
 
 def test_flutter_package_registers_ios_user_notifications_adapter():

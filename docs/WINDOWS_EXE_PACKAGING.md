@@ -2,9 +2,12 @@
 
 This project is a Flet desktop app with Windows tray, toast notification, autostart, keyring, and bundled assets. Build on Windows for Windows artifacts.
 
-## Recommended Build Path
+## Canonical Windows Release Path
 
-Use `flet build windows` for the most robust desktop package. Current Flet docs recommend `flet build` for platform executables/bundles, while `flet pack` remains the PyInstaller-based path when a single-file `.exe` is required.
+Use `flet build windows` for the desktop application bundle, then package that
+exact verified directory as the canonical machine-scoped MSI and Burn EXE.
+`flet pack` remains a development-only PyInstaller alternative and is not a
+release channel.
 
 Prerequisites:
 
@@ -23,8 +26,8 @@ Fresh verification before build:
 Build and prepare the argument-free autostart alias:
 
 ```powershell
-flet build windows --output dist\flet-build --verbose
-.\.venv\Scripts\python.exe scripts\prepare_windows_bundle.py dist\flet-build
+flet build windows --verbose
+.\.venv\Scripts\python.exe scripts\prepare_windows_bundle.py build\windows
 ```
 
 Flet 0.86 compiles the application and installed Python packages to `.pyc` by
@@ -36,17 +39,17 @@ launch and does not start the embedded production Python app. Packaged autostart
 therefore uses the byte-identical `UTHelperAutostart.exe` sibling with no
 arguments. `--autostart` is retained only for direct Python development runs.
 
-Verify the bundle before any installer or MSIX step:
+Verify the bundle before the canonical WiX installer step:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\verify_windows_bundle.py dist\flet-build
+.\.venv\Scripts\python.exe scripts\verify_windows_bundle.py build\windows
 ```
 
 Run the bounded, isolated window/tray smoke matrix:
 
 ```powershell
 .\scripts\test_windows_bundle_e2e.ps1 `
-  -BundleDir dist\flet-build `
+  -BundleDir build\windows `
   -ObservationSeconds 8
 ```
 
@@ -54,20 +57,23 @@ The harness uses a temporary `APPDATA`, tests manual-visible,
 autostart-visible, and autostart-hidden launches, and terminates only the process
 it created. Every wait has a fixed deadline.
 
-Build the per-user Inno installer and run the installed-bundle gate:
+Package the verified bundle as the only supported Windows release pair: a
+machine-scoped WiX 7 MSI and a Burn bootstrapper EXE. Review and accept the WiX
+7 OSMF EULA before setting the required process variable; the build refuses to
+restore or execute WiX otherwise.
 
 ```powershell
-.\scripts\build_installer.ps1
-.\scripts\test_windows_installer_e2e.ps1 `
-  -InstallerPath .\dist\UTHelper_Setup_v2.1.0.exe `
-  -InstallDir build\installer-e2e\UTHelper `
-  -ObservationSeconds 8
+$env:WIX_EULA_ACCEPTED = "wix7"
+.\scripts\build_installer.ps1 -BundleDir build\windows -OutputDir dist
 ```
 
-The installer harness refuses to overwrite an existing current-user UTHelper
-installation. Install and uninstall processes have explicit deadlines; the
-installed bundle is verified and runs the same visibility matrix before it is
-uninstalled.
+Release signing requires `WINDOWS_SIGNING_PFX_PATH`,
+`WINDOWS_SIGNING_PFX_PASSWORD`, and `WINDOWS_TIMESTAMP_URL` in the process
+environment. Verification requires valid timestamped Authenticode on
+both files, exact MSI tables, and byte equality between the canonical MSI and
+the MSI embedded in Burn. The upgrade harness uses bounded exact-PID processes,
+proves failed-upgrade rollback, preserves `%APPDATA%\UTHelper`, rejects
+downgrades, and verifies MSI and Burn uninstall.
 
 Validate the output on a clean Windows profile or VM:
 
@@ -76,10 +82,8 @@ Validate the output on a clean Windows profile or VM:
 - Open detail view and browser deep link.
 - Test tray minimize/restore/exit.
 - Test Windows toast/tray notification.
-- For an Inno/portable build, enable/disable autostart and confirm the Run value
-  points to installed `UTHelperAutostart.exe` with no arguments.
-- For MSIX, confirm the manifest StartupTask is visible in Windows Startup Apps;
-  do not expect a classic Run value.
+- Enable/disable autostart and confirm the Run value points to installed
+  `UTHelperAutostart.exe` with no arguments.
 - Confirm settings are written under `%APPDATA%\UTHelper`, not beside the exe.
 
 ## Single-File EXE Path
@@ -126,11 +130,70 @@ If the executable starts but a dynamic dependency fails, repeat the debug build 
   Source development targets `pythonw.exe`, the real entry script, and
   `--autostart`.
 - Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHelper`.
-- Do not request UAC/admin unless the app truly needs it; autostart uses HKCU and does not require elevation.
-- `makeappx pack` validates the manifest while creating the package. The packaging
-  script then unpacks the result and verifies the manifest and both runners;
-  `makeappx validate` is not a supported Windows SDK command.
-- Code signing is recommended for distribution to reduce SmartScreen friction, but signing requires a certificate and should happen after reproducible local builds.
+- The machine-scoped MSI requires elevation to install under Program Files. The
+  application and its HKCU autostart switch do not request elevation at runtime.
+- MSI and Burn are the sole canonical Windows release packages. Legacy MSIX and
+  AppInstaller helpers are not part of the exact release inventory.
+- Code signing with an RFC3161 timestamp is mandatory for release inventory;
+  unsigned local output cannot pass the publication gate.
+
+## Protected release environment
+
+The tag workflow is fail-closed and does not synthesize credentials. Configure
+these values only in the GitHub `release` environment:
+
+- Secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+  `ANDROID_KEY_PASSWORD`, `APPLE_CERTIFICATE_P12_BASE64`,
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_PROVISIONING_PROFILE_BASE64`,
+  `APPLE_API_PRIVATE_KEY_BASE64`, `WINDOWS_PFX_BASE64`, and
+  `WINDOWS_PFX_PASSWORD`.
+- Public variables: `ANDROID_KEY_ALIAS`, `ANDROID_SIGNING_CERT_SHA256`,
+  `APPLE_TEAM_ID`, `APPLE_SIGNING_IDENTITY`, `APPLE_SIGNING_CERT_SHA256`,
+  `APPLE_API_ISSUER_ID`, `APPLE_API_KEY_ID`, `IOS_DISTRIBUTION_URL`,
+  `WINDOWS_SIGNING_CERT_SHA256`, `WINDOWS_SIGNER_SUBJECT`,
+  `WINDOWS_TIMESTAMP_URL`, `WIX_EULA_ACCEPTED`, and optional `SENTRY_DSN`.
+
+`WIX_EULA_ACCEPTED=wix7` may be set only after the owner reviews and accepts the
+WiX v7 OSMF EULA v1.1 and its applicable revenue threshold. A missing signing
+identity, invalid Apple URL, wrong fingerprint, absent EULA acceptance, native
+verification failure, or any inventory mismatch stops before public release.
+
+The protected tag must be `vX.Y.Z`, equal the `pyproject.toml` version, and point
+to a commit contained in `main`. A successful public release has exactly:
+
+```text
+UTHelper-X.Y.Z.ipa
+UTHelper-X.Y.Z.apk
+UTHelper-Setup-X.Y.Z.exe
+UTHelper-X.Y.Z.msi
+release-manifest.json
+SHA256SUMS
+```
+
+Do not push a release tag until all named environment inputs exist. The current
+repository has no valid platform signing material by default; an unsigned local
+rehearsal proves structure only and must never be renamed to one of these assets.
+
+### GitHub external governance checklist
+
+Repository files cannot enforce these settings by themselves. Before enabling a
+production tag, verify in GitHub or through the REST API that:
+
+- repository **Rulesets** actively protect `main` and `develop`: pull request,
+  one fresh CODEOWNER approval, resolved conversations, required CI checks,
+  linear history, no force-push, and no deletion;
+- a tag ruleset blocks deletion and force-update of `v*` and restricts tag
+  creation to the owner/admin bypass role;
+- the `release` environment has a required owner review and accepts only tag
+  deployments matching `v*`;
+- Private Vulnerability Reporting and Dependabot vulnerability alerts are
+  enabled, and the repository is configured to delete merged branches;
+- all secret names and identity variables above exist, without printing their
+  values. `WIX_EULA_ACCEPTED` remains absent until the owner separately accepts
+  the applicable WiX license.
+
+If any check is absent, the repository is not yet a protected release source;
+the workflow file and CODEOWNERS entry alone are not evidence of enforcement.
 
 ## Sources
 

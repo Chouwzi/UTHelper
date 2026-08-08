@@ -16,6 +16,7 @@ from core.submission_models import (
     RemoteFile,
     SubmissionSnapshot,
 )
+from core.submission_snapshot import parse_submission_snapshot
 from core.use_cases.submission_workflow import (
     MutationOutcome,
     SelectedSubmissionFile,
@@ -23,6 +24,11 @@ from core.use_cases.submission_workflow import (
     SubmissionErrorCode,
     SubmissionMutationResult,
     SubmissionSnapshotResult,
+    SubmissionTarget,
+)
+from tests.fixtures.moodle_submission_responses import (
+    FakeMoodle43,
+    captured_real_submission_shape_fixture,
 )
 import flet as ft
 
@@ -321,12 +327,14 @@ async def test_newest_same_assignment_snapshot_load_wins_when_older_finishes_las
     url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
     view.update_detail({"url": url, "course_id": 456, "type": "other"})
 
+    first_ticket = view._reserve_submission_snapshot_load()
     first = asyncio.create_task(
-        view._async_load_submitted_files(object(), url, 456)
+        view._async_load_submitted_files(object(), url, 456, None, *first_ticket)
     )
     assert await asyncio.to_thread(first_started.wait, 2)
+    second_ticket = view._reserve_submission_snapshot_load()
     second = asyncio.create_task(
-        view._async_load_submitted_files(object(), url, 456)
+        view._async_load_submitted_files(object(), url, 456, None, *second_ticket)
     )
     await second
     release_first.set()
@@ -337,6 +345,129 @@ async def test_newest_same_assignment_snapshot_load_wins_when_older_finishes_las
     assert [item["name"] for item in view._submitted_files] == ["newer.pdf"]
     assert view._last_server_status == "Bản nháp"
     assert callbacks == [(url, "Bản nháp")]
+
+
+@pytest.mark.anyio
+async def test_older_queued_same_assignment_load_cannot_start_after_newer_and_repaint():
+    older = snapshot(
+        files=(remote("older.pdf"),),
+        raw_status="submitted",
+        submission_modified_time=1_700_000_001,
+    )
+    newer = snapshot(
+        files=(remote("newer.pdf"),),
+        raw_status="draft",
+        submission_modified_time=1_700_000_002,
+    )
+
+    class PrefetchedWorkflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            del target
+            selected = older if prefetched_status["revision"] == "old" else newer
+            return SubmissionSnapshotResult.success(selected)
+
+    class QueuedPage(MockPage):
+        def __init__(self):
+            super().__init__()
+            self.queued = []
+
+        def run_task(self, func, *args, **kwargs):
+            self.queued.append((func, args, kwargs))
+
+        async def run_queued(self, index):
+            func, args, kwargs = self.queued[index]
+            await func(*args, **kwargs)
+
+    page = QueuedPage()
+    workflow = PrefetchedWorkflow()
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: object(),
+        submission_workflow_factory=lambda _: workflow,
+    )
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
+    base = {"url": url, "course_id": 456, "type": "assignment"}
+
+    view.update_detail(
+        {**base, "details": {"raw_submission_status": {"revision": "old"}}}
+    )
+    view.update_detail(
+        {**base, "details": {"raw_submission_status": {"revision": "new"}}}
+    )
+
+    assert len(page.queued) == 2
+    await page.run_queued(1)
+    await page.run_queued(0)
+
+    assert view._submission_snapshot is newer
+    assert [item["name"] for item in view._submitted_files] == ["newer.pdf"]
+
+
+@pytest.mark.anyio
+async def test_real_shape_snapshot_renders_submission_area_and_picker_after_load():
+    assignment, status = captured_real_submission_shape_fixture()
+    real_snapshot = parse_submission_snapshot(77, assignment, status)
+
+    class Workflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            return SubmissionSnapshotResult.success(real_snapshot)
+
+    view = DetailView(
+        MockPage(),
+        lambda: None,
+        submission_workflow_factory=lambda _: Workflow(),
+    )
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=77"
+    view.update_detail({"url": url, "course_id": 456, "type": "assignment"})
+
+    ticket = view._reserve_submission_snapshot_load()
+    await view._async_load_submitted_files(object(), url, 456, None, *ticket)
+
+    assert view._submission_area.visible is True
+    assert view._pick_btn.visible is True
+    assert view._submit_btn.visible is False
+
+
+@pytest.mark.anyio
+async def test_late_previous_assignment_snapshot_cannot_expose_new_picker():
+    started = threading.Event()
+    release = threading.Event()
+    assignment, status = captured_real_submission_shape_fixture()
+    eligible_a = parse_submission_snapshot(77, assignment, status)
+    ineligible_b = snapshot(
+        assignment_id=202,
+        file_submission_enabled=False,
+        submission_id=202,
+    )
+
+    class SlowWorkflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            started.set()
+            assert release.wait(5)
+            return SubmissionSnapshotResult.success(eligible_a)
+
+    view = DetailView(
+        MockPage(),
+        lambda: None,
+        submission_workflow_factory=lambda _: SlowWorkflow(),
+    )
+    url_a = "https://courses.ut.edu.vn/mod/assign/view.php?id=77"
+    url_b = "https://courses.ut.edu.vn/mod/assign/view.php?id=202"
+    view.update_detail({"url": url_a, "course_id": 1, "type": "assignment"})
+    ticket = view._reserve_submission_snapshot_load()
+    first = asyncio.create_task(
+        view._async_load_submitted_files(object(), url_a, 1, None, *ticket)
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+
+    view.update_detail({"url": url_b, "course_id": 2, "type": "assignment"})
+    view._apply_submission_snapshot(ineligible_b)
+    release.set()
+    await first
+
+    assert view._submission_snapshot is ineligible_b
+    assert view._pick_btn.visible is False
 
 
 def test_visible_submission_status_tracks_each_server_snapshot():
@@ -369,7 +500,9 @@ def test_visible_submission_status_tracks_each_server_snapshot():
 
 @pytest.mark.parametrize("details", [{}, {"status_data": {}}])
 def test_assignment_always_mounts_status_control_before_snapshot(details):
-    view = DetailView(MockPage(), lambda: None)
+    page = MockPage()
+    page.run_task = MagicMock()
+    view = DetailView(page, lambda: None, get_client=lambda: object())
     view.update_detail(
         {
             "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
@@ -396,6 +529,336 @@ def test_assignment_always_mounts_status_control_before_snapshot(details):
     view._apply_submission_snapshot(snapshot(raw_status="submitted"))
 
     assert submission_rows[0].controls[1].value == "Đã nộp"
+
+
+@pytest.mark.parametrize(
+    ("get_client", "course_id", "reason"),
+    [
+        (
+            lambda: None,
+            456,
+            "Không thể kết nối Moodle trong ứng dụng. Hãy mở bài tập trong trình duyệt.",
+        ),
+        (
+            lambda: object(),
+            None,
+            "Thiếu thông tin học phần nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+        ),
+    ],
+)
+def test_assignment_without_native_context_explains_browser_fallback(
+    get_client, course_id, reason
+):
+    view = DetailView(MockPage(), lambda: None, get_client=get_client)
+
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": course_id,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == reason
+    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert callable(view._open_btn.on_click)
+    assert view._submission_area.visible is False
+    assert view._pick_btn.visible is False
+    assert view._submit_btn.visible is False
+    assert view._finalize_btn.visible is False
+
+
+@pytest.mark.parametrize(
+    ("url", "course_id", "reason", "browser_available"),
+    [
+        (
+            "",
+            456,
+            "Không thể xác định đường dẫn bài tập an toàn trên Moodle.",
+            False,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/quiz/view.php?id=123",
+            456,
+            "Đường dẫn này không phải bài tập Moodle. Hãy mở trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "unknown",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            0,
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            -1,
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            1.5,
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+        (
+            "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "1.5",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            True,
+        ),
+    ],
+)
+def test_assignment_with_untrusted_native_target_uses_safe_fallback(
+    url, course_id, reason, browser_available
+):
+    page = MockPage()
+    page.run_task = MagicMock()
+    view = DetailView(page, lambda: None, get_client=lambda: object())
+
+    view.update_detail(
+        {
+            "url": url,
+            "course_id": course_id,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == reason
+    assert view._open_btn.visible is browser_available
+    assert view._header_open_btn.visible is browser_available
+    page.run_task.assert_not_called()
+    assert view._submission_area.visible is False
+    assert view._pick_btn.visible is False
+    assert view._submit_btn.visible is False
+    assert view._finalize_btn.visible is False
+
+
+def test_thnn_assignment_uses_native_loading_when_the_client_is_bound_to_thnn():
+    class Workflow:
+        def load_snapshot(self, target, prefetched_status=None):
+            return SubmissionSnapshotResult.success(snapshot())
+
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://thnn.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: client,
+        submission_workflow_factory=lambda _: Workflow(),
+    )
+
+    view.update_detail(
+        {
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    page.run_task.assert_called_once()
+
+
+def test_thnn_assignment_with_courses_client_uses_browser_fallback():
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(page, lambda: None, get_client=lambda: client)
+
+    view.update_detail(
+        {
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == (
+        "Moodle cho trang bài tập này chưa được cấu hình. "
+        "Hãy mở bài tập trong trình duyệt."
+    )
+    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._submission_area.visible is False
+    page.run_task.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ("https://courses.ut.edu.vn", "https://thnn.ut.edu.vn"),
+)
+def test_app_controller_binds_real_workflow_to_the_current_moodle_client(
+    origin, monkeypatch
+):
+    server = FakeMoodle43(drafts=True, statement=False)
+    server.moodle_site_origin = origin
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=server)
+
+    monkeypatch.setattr("gui.app_controller.settings.MOODLE_BASE_URL", origin)
+    workflow = controller._submission_workflow_factory(server)
+    result = workflow.load_snapshot(
+        SubmissionTarget(f"{origin}/mod/assign/view.php?id=123", 456)
+    )
+
+    assert result.ok is True
+    assert workflow.client is server
+    assert workflow.moodle_service.call_ws_api == server.call_ws_api
+
+    page = MockPage()
+    page.run_task = MagicMock()
+    view = DetailView(
+        page,
+        lambda: None,
+        get_client=lambda: server,
+        submission_workflow_factory=controller._submission_workflow_factory,
+    )
+    view.update_detail(
+        {
+            "url": f"{origin}/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    page.run_task.assert_called_once()
+
+
+def test_app_controller_never_builds_workflow_for_a_stale_or_other_site_client():
+    current = FakeMoodle43(drafts=True, statement=False)
+    current.moodle_site_origin = "https://courses.ut.edu.vn"
+    stale = FakeMoodle43(drafts=True, statement=False)
+    stale.moodle_site_origin = "https://thnn.ut.edu.vn"
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=current)
+
+    assert controller._submission_workflow_factory(stale) is None
+
+
+def test_app_controller_rejects_when_both_configured_and_client_sites_are_invalid():
+    current = FakeMoodle43(drafts=True, statement=False)
+    current.moodle_site_origin = "https://moodle.example.edu"
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=current)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "gui.app_controller.settings.MOODLE_BASE_URL",
+            "https://moodle.example.edu",
+        )
+
+        assert controller._submission_workflow_factory(current) is None
+
+
+@pytest.mark.parametrize(
+    "configured_base",
+    ("https://thnn.ut.edu.vn", "https://moodle.example.edu"),
+)
+def test_app_controller_rejects_current_client_after_configured_moodle_site_changes(
+    configured_base,
+):
+    current = FakeMoodle43(drafts=True, statement=False)
+    current.moodle_site_origin = "https://courses.ut.edu.vn"
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(client=current)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "gui.app_controller.settings.MOODLE_BASE_URL",
+            configured_base,
+        )
+
+        assert controller._submission_workflow_factory(current) is None
+
+        page = MockPage()
+        page.run_task = MagicMock()
+        view = DetailView(
+            page,
+            lambda: None,
+            get_client=lambda: current,
+            submission_workflow_factory=controller._submission_workflow_factory,
+        )
+        view.update_detail(
+            {
+                "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+                "course_id": 456,
+                "type": "assignment",
+                "details": {},
+            }
+        )
+
+    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._submission_area.visible is False
+    page.run_task.assert_not_called()
+
+
+def test_bound_client_without_workflow_factory_uses_immediate_browser_fallback():
+    page = MockPage()
+    page.run_task = MagicMock()
+    client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        has_site_credentials=True,
+    )
+    view = DetailView(page, lambda: None, get_client=lambda: client)
+
+    view.update_detail(
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+            "course_id": 456,
+            "type": "assignment",
+            "details": {},
+        }
+    )
+
+    assert view._submission_status_value.value == (
+        "Moodle cho trang bài tập này chưa được cấu hình. "
+        "Hãy mở bài tập trong trình duyệt."
+    )
+    page.run_task.assert_not_called()
+
+
+def test_detail_view_rejects_assignment_urls_with_explicit_https_port():
+    assert DetailView._is_native_submission_url(
+        "https://courses.ut.edu.vn:443/mod/assign/view.php?id=123"
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1, 1),
+        ("456", 456),
+        (True, None),
+        (1.5, None),
+        (-1.5, None),
+        (float("inf"), None),
+        (float("nan"), None),
+        ("1.5", None),
+        ("+1", None),
+        (" 1", None),
+    ],
+)
+def test_positive_course_id_accepts_only_canonical_positive_integers(
+    value, expected
+):
+    assert DetailView._positive_course_id(value) == expected
 
 
 def test_non_assignment_does_not_mount_submission_status_row():

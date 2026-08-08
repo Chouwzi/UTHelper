@@ -153,7 +153,7 @@ class DataOrchestrator:
             logger.error("Chưa cấu hình MSSV hoặc mật khẩu trong Settings.")
             return False
         
-        self.is_logged_in = self.client.login(username, password)
+        self.is_logged_in = self.client.login()
         if self.is_logged_in:
             logger.info("Đăng nhập WS token thành công.")
         return self.is_logged_in
@@ -383,6 +383,8 @@ class DataOrchestrator:
                     _idx = cmid_to_index.get(cmid)
                     if _idx is not None and _idx < len(calendar_results):
                         _existing = calendar_results[_idx]
+                        if not _existing.get('course_id') and course_id:
+                            _existing['course_id'] = course_id
                         _cutoff = assign.get('cutoffdate', 0)
                         _due = assign.get('duedate', 0)
                         if _cutoff > 0 and _cutoff != _due:

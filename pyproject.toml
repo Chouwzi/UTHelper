@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.1.0"
+version = "2.2.0"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dependencies = [
     "flet==0.86.5",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
+    "sentry-sdk>=2,<3",
 ]
 
 [project.optional-dependencies]
@@ -68,6 +69,7 @@ dependencies = [
 ]
 
 [tool.flet.android]
+bundle_id = "com.uthelper.uthelper"
 adaptive_icon_background = "#0F172A"
 dependencies = [
     "flet-android-notifications==0.10.0",
@@ -107,6 +109,7 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-timeout>=2.3,<3",
 ]
 
 [tool.pytest.ini_options]

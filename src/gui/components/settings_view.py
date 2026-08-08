@@ -9,6 +9,7 @@ if _project_root not in sys.path:
 import flet as ft
 import asyncio
 import logging
+from dataclasses import replace
 from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
@@ -20,21 +21,26 @@ from gui.components.color_picker import open_color_picker
 from gui.components.settings.account_section import init_account_controls, build_account_section
 from gui.components.settings.display_section import init_display_controls, build_display_section
 from gui.components.settings.system_section import init_system_controls, build_system_section
+from gui.components.settings.privacy_section import init_privacy_controls, build_privacy_section
 from gui.components.settings.urgency_section import init_urgency_controls, build_urgency_section
 from gui.components.settings.theme_section import init_theme_controls, build_theme_section
 from gui.components.settings.notification_section import init_notification_controls, build_notification_section, build_advanced_section
 from gui.components.settings.integration_section import init_integration_controls, build_integration_section
 from gui.components.settings.debug_section import init_debug_controls, build_debug_section
-from gui.controllers.autostart_settings import AutostartSettingsCoordinator
+from gui.controllers.autostart_settings import (
+    AutostartSettingsCoordinator,
+    AutostartUiState,
+)
+from gui.view_models.settings_form import SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update)
         self._init_controls()
         self._init_layout()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -45,6 +51,7 @@ class SettingsView(ft.Container):
         self._on_test_discord = on_test_discord
         self._on_test_mail = on_test_mail
         self._on_theme_preview = on_theme_preview
+        self._on_check_update = on_check_update
         self.visible  = False
         self.expand   = True
         self.bgcolor  = C.BG
@@ -55,6 +62,9 @@ class SettingsView(ft.Container):
         self._tiles = []
         self._section_containers = []
         self._autostart_coordinator = autostart_coordinator
+        self._loading = False
+        self._load_generation = 0
+        self._baseline_snapshot = None
         if self._autostart_coordinator is None and not _pu.IS_MOBILE:
             from platform_utils.autostart import create_autostart_service
 
@@ -105,6 +115,7 @@ class SettingsView(ft.Container):
         init_account_controls(self)
         init_display_controls(self)
         init_system_controls(self)
+        init_privacy_controls(self)
         init_urgency_controls(self)
         init_theme_controls(self)
         init_notification_controls(self)
@@ -239,6 +250,7 @@ class SettingsView(ft.Container):
         sec_account = build_account_section(self)
         sec_display = build_display_section(self)
         sec_system = build_system_section(self)
+        sec_privacy = build_privacy_section(self)
         sec_urgency = build_urgency_section(self)
         sec_theme = build_theme_section(self)
         sec_notify = build_notification_section(self)
@@ -259,6 +271,7 @@ class SettingsView(ft.Container):
                 sec_account,
                 sec_display,
                 sec_system,
+                sec_privacy,
                 sec_urgency,
                 sec_theme,
                 sec_notify,
@@ -662,17 +675,23 @@ class SettingsView(ft.Container):
                 field.bgcolor = C.BG
                 field.label_style = ft.TextStyle(size=13, color=C.TEXT_SECONDARY)
 
-        # Dropdown
-        if hasattr(self, '_mock_type_drp'):
-            self._mock_type_drp.border_color = C.BORDER
-            self._mock_type_drp.focused_border_color = C.ACCENT
-            self._mock_type_drp.color = C.TEXT_PRIMARY
-            self._mock_type_drp.bgcolor = C.BG
+        # Dropdowns
+        for dropdown_name in (
+            '_mock_type_drp',
+            '_dd_crash_reporting_consent',
+        ):
+            dropdown = getattr(self, dropdown_name, None)
+            if dropdown:
+                dropdown.border_color = C.BORDER
+                dropdown.focused_border_color = C.ACCENT
+                dropdown.color = C.TEXT_PRIMARY
+                dropdown.bgcolor = C.BG
 
         # ALL switches - update active_color + label text style
         _all_switches = [
             '_sw_always_on_top', '_sw_submitted', '_sw_graded',
             '_sw_start_with_windows', '_sw_start_minimized', '_sw_minimize_to_tray',
+            '_sw_auto_update', '_sw_bg_check',
             '_sw_email', '_sw_discord', '_sw_telegram',
             '_sw_dnd_enable', '_sw_ignore_sub', '_sw_debug',
         ]
@@ -1025,11 +1044,7 @@ class SettingsView(ft.Container):
 
         def _worker():
             try:
-                ok = self._orchestrator.client.login(
-                    username=settings.UTH_USERNAME,
-                    password=settings.UTH_PASSWORD,
-                    force=True,
-                )
+                ok = self._orchestrator.client.login(force=True)
                 if ok:
                     token = self._orchestrator.client.token or "?"
                     masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
@@ -1386,8 +1401,15 @@ class SettingsView(ft.Container):
         self._page.run_task(_send)
 
     # Update checker
+    def _handle_check_update(self, _event):
+        if self._on_check_update:
+            self._on_check_update()
+
     def _do_force_check_update(self):
         """Force check for app updates."""
+        if self._on_check_update:
+            self._on_check_update()
+            return
         import threading
         self._debug_update_text.value = "Đang kiểm tra cập nhật..."
         self._debug_update_text.color = C.TEXT_SECONDARY
@@ -1659,218 +1681,309 @@ class SettingsView(ft.Container):
         self._autostart_status.value = result.message
         self._autostart_status.color = C.SAFE if result.success else C.WARNING
 
-    async def _reconcile_autostart(self):
+    async def _load_autostart_state(
+        self, generation: int
+    ) -> AutostartUiState | None:
         if self._autostart_coordinator is None:
-            return
-        result = await self._autostart_coordinator.load()
-        self._apply_autostart_ui(result)
-        if result.confirmed and settings.START_WITH_WINDOWS != result.enabled:
-            settings.START_WITH_WINDOWS = result.enabled
-            save_settings()
+            return None
         try:
-            self.update()
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Settings view is not mounted during autostart reconciliation",
-                exc_info=True,
+            result = await asyncio.wait_for(
+                self._autostart_coordinator.load(), timeout=2.0
             )
+        except asyncio.TimeoutError:
+            result = AutostartUiState(
+                enabled=False,
+                editable=False,
+                success=False,
+                message=(
+                    "Không thể xác nhận trạng thái Khởi động cùng Windows. "
+                    "Vui lòng thử lại."
+                ),
+                confirmed=False,
+            )
+        except Exception:
+            # Keep this diagnostic deliberately free of adapter/native error text.
+            logging.getLogger(__name__).warning(
+                "settings_autostart_load_failed"
+            )
+            result = AutostartUiState(
+                enabled=False,
+                editable=False,
+                success=False,
+                message=(
+                    "Không thể xác nhận trạng thái Khởi động cùng Windows. "
+                    "Vui lòng thử lại."
+                ),
+                confirmed=False,
+            )
+        if generation != self._load_generation:
+            return None
+        return result
 
-    async def _apply_autostart_change(self) -> bool:
-        if self._autostart_coordinator is None:
-            return True
-        requested = bool(self._sw_start_with_windows.value)
-        current = await self._autostart_coordinator.load()
-        if not current.confirmed:
-            self._apply_autostart_ui(current)
-            return requested == settings.START_WITH_WINDOWS
-        if current.enabled == requested:
-            result = current
-        elif current.editable:
-            result = await self._autostart_coordinator.change(requested)
-        else:
-            result = current
-        self._apply_autostart_ui(result)
-        return result.confirmed and result.enabled == requested
+    def _capture_form_snapshot(self) -> SettingsFormSnapshot:
+        """Map controls to the canonical form model in exactly one place."""
+        return SettingsFormSnapshot.from_form_values(
+            {
+                "theme": self._selected_theme,
+                "color_critical": self._c_tb_critical.value,
+                "color_warning": self._c_tb_warning.value,
+                "color_safe": self._c_tb_safe.value,
+                "color_quiz": self._c_tb_quiz.value,
+                "color_assignment": self._c_tb_ass.value,
+                "color_attendance": self._c_tb_att.value,
+                "color_open": self._c_tb_open.value,
+                "color_other": self._c_tb_other.value,
+                "uth_username": self._username_field.value,
+                "uth_password": self._password_field.value,
+                "always_on_top": self._sw_always_on_top.value,
+                "include_submitted": self._sw_submitted.value,
+                "include_graded": self._sw_graded.value,
+                "start_with_windows": self._sw_start_with_windows.value,
+                "start_minimized": self._sw_start_minimized.value,
+                "minimize_to_tray": self._sw_minimize_to_tray.value,
+                "auto_update_enabled": self._sw_auto_update.value,
+                "crash_reporting_consent": self._dd_crash_reporting_consent.value,
+                "background_check_android": self._sw_bg_check.value,
+                "enable_gmail": self._sw_email.value,
+                "gmail_address": self._gmail_addr_field.value,
+                "gmail_app_password": self._gmail_pw_field.value,
+                "enable_discord": self._sw_discord.value,
+                "discord_webhook_url": self._discord_wh_field.value,
+                "enable_telegram": self._sw_telegram.value,
+                "telegram_bot_token": self._tel_token_field.value,
+                "telegram_chat_id": self._tel_chat_field.value,
+                "debug_mode": self._sw_debug.value,
+                "check_interval_minutes": self._interval_field.value,
+                "fetch_months": self._fetch_months_field.value,
+                "urgency_critical_hours": self._critical_hours_field.value,
+                "urgency_warning_hours": self._warning_hours_field.value,
+                "opening_soon_hours": self._opening_soon_hours_field.value,
+                "prefetch_workers": self._workers_field.value,
+                "notify_dnd_enable": self._sw_dnd_enable.value,
+                "notify_dnd_start": self._dnd_start_field.value,
+                "notify_dnd_end": self._dnd_end_field.value,
+                "notify_ignore_submitted": self._sw_ignore_sub.value,
+                "notification_profile": self._current_profile,
+                "notify_types": [
+                    key for key, control in self._notify_type_checks.items()
+                    if control.value
+                ],
+                "notify_milestones_minutes": self._milestones_field.value,
+                "notify_muted_courses": self._muted_courses_field.value,
+            }
+        )
 
-    def load_current_settings(self):
-        for tile in getattr(self, '_tiles', []):
-            tile.expanded = False
+    def _apply_snapshot_to_controls(self, snapshot: SettingsFormSnapshot) -> None:
+        """Map the canonical form model to controls and all derived UI state."""
+        self._selected_theme = snapshot.theme
+        self._c_tb_critical.value = snapshot.color_critical
+        self._c_tb_warning.value = snapshot.color_warning
+        self._c_tb_safe.value = snapshot.color_safe
+        self._c_tb_quiz.value = snapshot.color_quiz
+        self._c_tb_ass.value = snapshot.color_assignment
+        self._c_tb_att.value = snapshot.color_attendance
+        self._c_tb_open.value = snapshot.color_open
+        self._c_tb_other.value = snapshot.color_other
+        self._username_field.value = snapshot.uth_username
+        self._password_field.value = snapshot.uth_password
+        self._sw_always_on_top.value = snapshot.always_on_top
+        self._sw_submitted.value = snapshot.include_submitted
+        self._sw_graded.value = snapshot.include_graded
+        self._sw_start_with_windows.value = snapshot.start_with_windows
+        self._sw_start_minimized.value = snapshot.start_minimized
+        self._sw_minimize_to_tray.value = snapshot.minimize_to_tray
+        self._sw_auto_update.value = snapshot.auto_update_enabled
+        self._dd_crash_reporting_consent.value = snapshot.crash_reporting_consent
+        self._sw_bg_check.value = snapshot.background_check_android
+        self._sw_email.value = snapshot.enable_gmail
+        self._gmail_addr_field.value = snapshot.gmail_address
+        self._gmail_pw_field.value = snapshot.gmail_app_password
+        self._sw_discord.value = snapshot.enable_discord
+        self._discord_wh_field.value = snapshot.discord_webhook_url
+        self._sw_telegram.value = snapshot.enable_telegram
+        self._tel_token_field.value = snapshot.telegram_bot_token
+        self._tel_chat_field.value = snapshot.telegram_chat_id
+        self._sw_debug.value = snapshot.debug_mode
+        self._interval_field.value = str(snapshot.check_interval_minutes)
+        self._fetch_months_field.value = str(snapshot.fetch_months)
+        self._critical_hours_field.value = str(snapshot.urgency_critical_hours)
+        self._warning_hours_field.value = str(snapshot.urgency_warning_hours)
+        self._opening_soon_hours_field.value = str(snapshot.opening_soon_hours)
+        self._workers_field.value = str(snapshot.prefetch_workers)
+        self._sw_dnd_enable.value = snapshot.notify_dnd_enable
+        self._dnd_start_field.value = str(snapshot.notify_dnd_start)
+        self._dnd_end_field.value = str(snapshot.notify_dnd_end)
+        self._sw_ignore_sub.value = snapshot.notify_ignore_submitted
+        self._current_profile = snapshot.notification_profile
+        for key, control in self._notify_type_checks.items():
+            control.value = key in snapshot.notify_types
+        self._milestones_field.value = ", ".join(
+            str(value) for value in snapshot.notify_milestones_minutes
+        )
+        for minutes, chip in self._milestone_chips.items():
+            chip.selected = minutes in snapshot.notify_milestones_minutes
+        active_count = sum(
+            minutes in snapshot.notify_milestones_minutes
+            for minutes in self._milestone_chips
+        )
+        self._milestone_summary.value = (
+            f"Bạn sẽ nhận {active_count} lần nhắc cho mỗi deadline"
+            if active_count
+            else "Không có mốc nhắc nhở nào"
+        )
+        self._muted_courses_field.value = ", ".join(snapshot.notify_muted_courses)
+        for key, card in self._profile_cards.items():
+            selected = key == snapshot.notification_profile
+            card.border = (
+                ft.Border.all(2, C.ACCENT)
+                if selected
+                else ft.Border.all(1, C.BORDER)
+            )
+            card.bgcolor = C.ACCENT + "15" if selected else C.SURFACE
 
-        self._test_login_status.value = ""
-        self._test_login_btn.text = "Kiểm tra kết nối"
-        self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
-        self._test_loading_bar.visible = False
-
-        # Reset unsaved indicator
-        if hasattr(self, '_unsaved_dot'):
-            self._unsaved_dot.visible = False
-
-        # Reload theme selection and store original for revert
-        self._selected_theme = getattr(settings, 'THEME', 'midnight_blue')
-        self._original_theme = self._selected_theme
         self._rebuild_theme_cards()
-        # Repaint all section UI controls with current theme colors
-        self._refresh_section_colors()
-
-        if hasattr(self, '_c_tb_critical'):
-            self._c_tb_critical.value = getattr(settings, 'COLOR_CRITICAL', '#EF4444')
-            self._c_tb_warning.value = getattr(settings, 'COLOR_WARNING', '#F59E0B')
-            self._c_tb_safe.value = getattr(settings, 'COLOR_SAFE', '#10B981')
-            self._c_tb_quiz.value = getattr(settings, 'COLOR_QUIZ', '#7C3AED')
-            self._c_tb_ass.value = getattr(settings, 'COLOR_ASSIGNMENT', '#2563EB')
-            self._c_tb_att.value = getattr(settings, 'COLOR_ATTENDANCE', '#D97706')
-            self._c_tb_open.value = getattr(settings, 'COLOR_OPEN', '#0891B2')
-            self._c_tb_other.value = getattr(settings, 'COLOR_OTHER', '#6B7280')
-
-        self._username_field.value = settings.UTH_USERNAME
-        self._password_field.value = settings.UTH_PASSWORD
-        if not _pu.IS_MOBILE:
-            self._sw_always_on_top.value = settings.ALWAYS_ON_TOP
-        self._sw_submitted.value = settings.INCLUDE_SUBMITTED
-        self._sw_graded.value = settings.INCLUDE_GRADED
-        if not _pu.IS_MOBILE:
-            self._sw_start_with_windows.value = settings.START_WITH_WINDOWS
-            self._sw_start_minimized.value = settings.START_MINIMIZED
-            self._sw_minimize_to_tray.value = settings.MINIMIZE_TO_TRAY
-            self._sync_autostart_dependency()
-        self._sw_bg_check.value = settings.BACKGROUND_CHECK_ANDROID
+        self._sync_autostart_dependency()
         self._toggle_bg_check_ui()
-        self._sw_email.value = settings.ENABLE_GMAIL
-        self._sw_discord.value = getattr(settings, 'ENABLE_DISCORD', False)
-        self._gmail_addr_field.value = getattr(settings, 'GMAIL_ADDRESS', '')
-        self._gmail_pw_field.value = getattr(settings, 'GMAIL_APP_PASSWORD', '')
-        self._discord_wh_field.value = getattr(settings, 'DISCORD_WEBHOOK_URL', '')
         self._toggle_integration_ui()
-        self._sw_telegram.value = settings.ENABLE_TELEGRAM
-        self._tel_token_field.value = settings.TELEGRAM_BOT_TOKEN
-        self._tel_chat_field.value = settings.TELEGRAM_CHAT_ID
         self._toggle_telegram_ui()
-        self._interval_field.value = str(settings.CHECK_INTERVAL_MINUTES)
-        self._fetch_months_field.value = str(settings.FETCH_MONTHS)
-        self._critical_hours_field.value = str(settings.URGENCY_CRITICAL_HOURS)
-        self._warning_hours_field.value = str(settings.URGENCY_WARNING_HOURS)
-        self._opening_soon_hours_field.value = str(settings.OPENING_SOON_HOURS)
-        self._notify_min_field.value = "0"
-        self._workers_field.value = str(settings.PREFETCH_WORKERS)
-        
-        self._sw_dnd_enable.value = getattr(settings, 'NOTIFY_DND_ENABLE', False)
-        self._dnd_start_field.value = str(getattr(settings, 'NOTIFY_DND_START', 22))
-        self._dnd_end_field.value = str(getattr(settings, 'NOTIFY_DND_END', 7))
-        self._sw_ignore_sub.value = getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True)
-        _saved_types = getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"])
-        for key, cb in self._notify_type_checks.items():
-            cb.value = (key in _saved_types)
-        _saved_milestones = getattr(settings, 'NOTIFY_MILESTONES_MINUTES', [4320, 1440, 180, 60, 30, 5])
-        self._milestones_field.value = ", ".join(map(str, _saved_milestones))
-        # Sync milestone chips
-        for h, chip in self._milestone_chips.items():
-            chip.selected = h in _saved_milestones
-        _active_count = sum(1 for h in _saved_milestones if h in self._milestone_chips)
-        self._milestone_summary.value = f"Bạn sẽ nhận {_active_count} lần nhắc cho mỗi deadline" if _active_count else "Không có mốc nhắc nhở nào"
-        # Sync profile cards
-        self._current_profile = getattr(settings, 'NOTIFICATION_PROFILE', 'balanced')
-        for k, card in self._profile_cards.items():
-            is_sel = (k == self._current_profile)
-            card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+        self._toggle_debug_ui()
         self._update_profile_summary()
         self._update_dnd_summary()
-        self._muted_courses_field.value = ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', []))
 
-        # Cập nhật danh sách môn học cho ExpansionTile
-        self._known_courses = set()
-        if hasattr(self, '_orchestrator'):
-            cache = (
-                self._orchestrator.get_cached_details_snapshot()
-                if hasattr(self._orchestrator, "get_cached_details_snapshot")
-                else getattr(self._orchestrator, "_detail_cache", {})
+    def _persist_snapshot_to_settings(self, snapshot: SettingsFormSnapshot) -> bool:
+        """Persist a complete snapshot and restore in-memory state on failure."""
+        previous = SettingsFormSnapshot.from_settings(settings)
+        previous_provenance = {
+            "UTH_CREDENTIALS_ORIGIN": settings.UTH_CREDENTIALS_ORIGIN,
+            "MOODLE_WS_TOKEN": settings.MOODLE_WS_TOKEN,
+            "MOODLE_WS_TOKEN_ORIGIN": settings.MOODLE_WS_TOKEN_ORIGIN,
+        }
+        credentials_changed = (
+            snapshot.uth_username != previous.uth_username
+            or snapshot.uth_password != previous.uth_password
+        )
+        for name, value in snapshot.to_settings_values().items():
+            setattr(settings, name, value)
+        if credentials_changed:
+            settings.UTH_CREDENTIALS_ORIGIN = ""
+            settings.MOODLE_WS_TOKEN = ""
+            settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        try:
+            if save_settings():
+                return True
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Settings persistence raised unexpectedly", exc_info=True
             )
-            for cached in cache.values():
-                c = cached.get('course')
-                if c:
-                    from gui.core.utils import clean_course_name
-                    c_name = clean_course_name(c)
-                    if c_name: self._known_courses.add(c_name)
+        for name, value in previous.to_settings_values().items():
+            setattr(settings, name, value)
+        for name, value in previous_provenance.items():
+            setattr(settings, name, value)
+        return False
 
-        if getattr(self, '_known_courses', None):
-            current = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
-            
-            def make_toggle(course):
-                def _on_check(e):
-                    curr = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
-                    if e.control.value and course not in curr:
-                        curr.append(course)
-                    elif not e.control.value and course in curr:
-                        curr.remove(course)
-                    self._muted_courses_field.value = ", ".join(curr)
-                    self._muted_courses_field.update()
-                return ft.Checkbox(label=course, value=(course in current), on_change=_on_check, fill_color=C.ACCENT)
-            
-            self._muted_courses_list.controls = [make_toggle(c) for c in sorted(list(self._known_courses))]
-            if hasattr(self._muted_courses_list, "page") and self._muted_courses_list.page:
-                self._muted_courses_list.update()
-                
-            self._muted_courses_drp.visible = True
-        else:
-            self._muted_courses_drp.visible = False
+    async def load_current_settings(self) -> None:
+        self._load_generation += 1
+        generation = self._load_generation
+        self._loading = True
+        snapshot = SettingsFormSnapshot.from_settings(settings)
+        try:
+            autostart = await self._load_autostart_state(generation)
+            if generation != self._load_generation:
+                return
 
-        self._save_status.value = ""
-        self.update()
-        if not _pu.IS_MOBILE and self._autostart_coordinator is not None:
-            try:
-                self._page.run_task(self._reconcile_autostart)
-            except Exception:
-                logging.getLogger(__name__).warning(
-                    "Cannot schedule Windows autostart reconciliation",
-                    exc_info=True,
+            resolved = snapshot
+            if autostart is not None and autostart.confirmed:
+                resolved = replace(
+                    snapshot,
+                    start_with_windows=autostart.enabled,
                 )
 
+            for tile in getattr(self, '_tiles', []):
+                tile.expanded = False
+
+            self._test_login_status.value = ""
+            self._test_login_btn.text = "Kiểm tra kết nối"
+            self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
+            self._test_loading_bar.visible = False
+            if hasattr(self, '_unsaved_dot'):
+                self._unsaved_dot.visible = False
+
+            self._original_theme = resolved.theme
+            self._apply_snapshot_to_controls(resolved)
+            self._refresh_section_colors()
+
+            self._known_courses = set()
+            if hasattr(self, '_orchestrator'):
+                cache = (
+                    self._orchestrator.get_cached_details_snapshot()
+                    if hasattr(self._orchestrator, "get_cached_details_snapshot")
+                    else getattr(self._orchestrator, "_detail_cache", {})
+                )
+                for cached in cache.values():
+                    course = cached.get('course')
+                    if course:
+                        from gui.core.utils import clean_course_name
+                        course_name = clean_course_name(course)
+                        if course_name:
+                            self._known_courses.add(course_name)
+            self._update_drp_options()
+
+            self._save_status.value = ""
+            self._baseline_snapshot = self._capture_form_snapshot()
+            if autostart is not None:
+                display_state = autostart
+                if not autostart.confirmed:
+                    display_state = replace(
+                        autostart,
+                        enabled=resolved.start_with_windows,
+                    )
+                self._apply_autostart_ui(display_state)
+            self.update()
+        finally:
+            if generation == self._load_generation:
+                self._loading = False
+
+    def cancel_pending_load(self) -> None:
+        self._load_generation += 1
+        self._loading = False
+
     def has_changes(self):
-        if self._selected_theme != getattr(settings, 'THEME', 'midnight_blue'): return True
-        if self._username_field.value != settings.UTH_USERNAME: return True
-        if self._password_field.value != settings.UTH_PASSWORD: return True
-        if not _pu.IS_MOBILE:
-            if self._sw_always_on_top.value != settings.ALWAYS_ON_TOP: return True
-        if self._sw_submitted.value != settings.INCLUDE_SUBMITTED: return True
-        if self._sw_graded.value != settings.INCLUDE_GRADED: return True
-        if not _pu.IS_MOBILE:
-            if self._sw_start_with_windows.value != settings.START_WITH_WINDOWS: return True
-            if self._sw_start_minimized.value != settings.START_MINIMIZED: return True
-            if self._sw_minimize_to_tray.value != settings.MINIMIZE_TO_TRAY: return True
-        if self._sw_bg_check.value != settings.BACKGROUND_CHECK_ANDROID: return True
-        if self._sw_email.value != getattr(settings, 'ENABLE_GMAIL', False): return True
-        if self._sw_discord.value != getattr(settings, 'ENABLE_DISCORD', False): return True
-        if getattr(self, '_gmail_addr_field', None) and self._gmail_addr_field.value != getattr(settings, 'GMAIL_ADDRESS', ''): return True
-        if getattr(self, '_gmail_pw_field', None) and self._gmail_pw_field.value != getattr(settings, 'GMAIL_APP_PASSWORD', ''): return True
-        if getattr(self, '_discord_wh_field', None) and self._discord_wh_field.value != getattr(settings, 'DISCORD_WEBHOOK_URL', ''): return True
-        if self._sw_telegram.value != settings.ENABLE_TELEGRAM: return True
-        if self._tel_token_field.value != settings.TELEGRAM_BOT_TOKEN: return True
-        if self._tel_chat_field.value != settings.TELEGRAM_CHAT_ID: return True
-        if self._sw_debug.value != settings.DEBUG_MODE: return True
-        if self._interval_field.value != str(settings.CHECK_INTERVAL_MINUTES): return True
-        if self._fetch_months_field.value != str(settings.FETCH_MONTHS): return True
-        if self._critical_hours_field.value != str(settings.URGENCY_CRITICAL_HOURS): return True
-        if self._warning_hours_field.value != str(settings.URGENCY_WARNING_HOURS): return True
-        if self._opening_soon_hours_field.value != str(settings.OPENING_SOON_HOURS): return True
-        if self._workers_field.value != str(settings.PREFETCH_WORKERS): return True
-        
-        if self._sw_dnd_enable.value != getattr(settings, 'NOTIFY_DND_ENABLE', False): return True
-        if self._dnd_start_field.value != str(getattr(settings, 'NOTIFY_DND_START', 22)): return True
-        if self._dnd_end_field.value != str(getattr(settings, 'NOTIFY_DND_END', 7)): return True
-        if self._sw_ignore_sub.value != getattr(settings, 'NOTIFY_IGNORE_SUBMITTED', True): return True
-        if getattr(self, '_current_profile', 'balanced') != getattr(settings, 'NOTIFICATION_PROFILE', 'balanced'): return True
-        _saved_types = set(getattr(settings, 'NOTIFY_TYPES', ["quiz", "assignment", "attendance"]))
-        _current_types = set(k for k, cb in self._notify_type_checks.items() if cb.value)
-        if _saved_types != _current_types: return True
-        if self._milestones_field.value != ", ".join(map(str, getattr(settings, 'NOTIFY_MILESTONES_MINUTES', [4320, 1440, 180, 60, 30, 5]))): return True
-        if self._muted_courses_field.value != ", ".join(getattr(settings, 'NOTIFY_MUTED_COURSES', [])): return True
-        
-        return False
+        if self._loading or self._baseline_snapshot is None:
+            return False
+        try:
+            return self._capture_form_snapshot() != self._baseline_snapshot
+        except ValueError:
+            # Invalid form input is necessarily unsaved. Do not include supplied
+            # values in diagnostics; Back must still offer the safe discard path.
+            return True
+
+    def _discard_and_close(self) -> None:
+        """Restore the complete persisted baseline before closing Settings."""
+        if self._baseline_snapshot is not None:
+            baseline = self._baseline_snapshot
+            self._apply_snapshot_to_controls(baseline)
+            self._original_theme = baseline.theme
+            apply_theme(baseline.theme)
+            from gui.core.theme import set_page_theme
+
+            set_page_theme(self._page)
+            if self._on_theme_preview:
+                self._on_theme_preview()
+            if hasattr(self, "_unsaved_dot"):
+                self._unsaved_dot.visible = False
+            if hasattr(self, "_save_status"):
+                self._save_status.value = ""
+            self.update()
+        self._on_close_cb()
 
     async def _handle_back(self, e):
         import logging
         _log = logging.getLogger("settings.dialog")
         _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
+        if self._loading:
+            self.cancel_pending_load()
+            self._on_close_cb()
+            return
         if self.has_changes():
             def close_dlg(e):
                 _log.warning(">>> CANCEL button clicked!")
@@ -1880,16 +1993,7 @@ class SettingsView(ft.Container):
             def discard_and_close(e):
                 _log.warning(">>> DISCARD button clicked!")
                 self._page.pop_dialog()
-                # Revert theme to original if it was changed
-                if self._selected_theme != self._original_theme:
-                    apply_theme(self._original_theme)
-                    from gui.core.theme import set_page_theme
-                    set_page_theme(self._page)
-                    if self._on_theme_preview:
-                        self._on_theme_preview()
-                # Reset internal state so next open sees the original theme
-                self._selected_theme = self._original_theme
-                self._on_close_cb()
+                self._discard_and_close()
                 _log.warning("  discard done")
 
             def save_and_close(e):
@@ -1930,91 +2034,248 @@ class SettingsView(ft.Container):
 
     async def _save(self, e) -> bool:
         try:
-            # Save theme preset
-            settings.THEME                   = self._selected_theme
-            settings.COLOR_CRITICAL          = getattr(self, '_c_tb_critical', ft.TextField(value='#EF4444')).value
-            settings.COLOR_WARNING           = getattr(self, '_c_tb_warning', ft.TextField(value='#F59E0B')).value
-            settings.COLOR_SAFE              = getattr(self, '_c_tb_safe', ft.TextField(value='#10B981')).value
-            settings.COLOR_QUIZ              = getattr(self, '_c_tb_quiz', ft.TextField(value='#7C3AED')).value
-            settings.COLOR_ASSIGNMENT        = getattr(self, '_c_tb_ass', ft.TextField(value='#2563EB')).value
-            settings.COLOR_ATTENDANCE        = getattr(self, '_c_tb_att', ft.TextField(value='#D97706')).value
-            settings.COLOR_OPEN              = getattr(self, '_c_tb_open', ft.TextField(value='#0891B2')).value
-            settings.COLOR_OTHER             = getattr(self, '_c_tb_other', ft.TextField(value='#6B7280')).value
-            settings.UTH_USERNAME            = self._username_field.value
-            settings.UTH_PASSWORD            = self._password_field.value
-            if not _pu.IS_MOBILE:
-                settings.ALWAYS_ON_TOP           = self._sw_always_on_top.value
-            settings.INCLUDE_SUBMITTED       = self._sw_submitted.value
-            settings.INCLUDE_GRADED          = self._sw_graded.value
-            settings.CHECK_INTERVAL_MINUTES  = max(0, int(self._interval_field.value or "60"))
-            settings.FETCH_MONTHS            = max(1, min(int(self._fetch_months_field.value or "1"), 3))
-            settings.URGENCY_CRITICAL_HOURS  = max(1, int(self._critical_hours_field.value or "24"))
-            settings.URGENCY_WARNING_HOURS   = max(1, int(self._warning_hours_field.value or "72"))
-            settings.OPENING_SOON_HOURS      = max(1, int(self._opening_soon_hours_field.value or "72"))
-            workers = int(self._workers_field.value or "4")
-            settings.PREFETCH_WORKERS        = max(1, min(workers, 10))
-            self._workers_field.value        = str(settings.PREFETCH_WORKERS)
-            
-            # Desktop-only settings (autostart, tray, always on top)
-            if not _pu.IS_MOBILE:
-                if not await self._apply_autostart_change():
-                    self._save_status.value = self._autostart_status.value
-                    self._save_status.color = C.CRITICAL
-                    self.update()
-                    return False
-                settings.START_WITH_WINDOWS = self._sw_start_with_windows.value
-                settings.START_MINIMIZED = self._sw_start_minimized.value
-                settings.MINIMIZE_TO_TRAY = self._sw_minimize_to_tray.value
+            requested = self._capture_form_snapshot()
+            baseline = self._baseline_snapshot
+            if baseline is None:
+                raise RuntimeError("Settings baseline is unavailable")
 
-            settings.BACKGROUND_CHECK_ANDROID = self._sw_bg_check.value
+            persisted = requested
+            autostart_ok = True
+            autostart_may_need_compensation = False
+            if (
+                not _pu.IS_MOBILE
+                and requested.start_with_windows != baseline.start_with_windows
+            ):
+                mutation_attempted = self._autostart_coordinator is not None
+                mutation_uncertain = False
+                compensation_attempted = False
+                if self._autostart_coordinator is None:
+                    result = AutostartUiState(
+                        enabled=baseline.start_with_windows,
+                        editable=False,
+                        success=False,
+                        message="Khởi động cùng Windows không khả dụng.",
+                        confirmed=False,
+                    )
+                else:
+                    try:
+                        result = await asyncio.wait_for(
+                            self._autostart_coordinator.change(
+                                requested.start_with_windows
+                            ),
+                            timeout=2.0,
+                        )
+                    except asyncio.TimeoutError:
+                        mutation_uncertain = True
+                        result = AutostartUiState(
+                            enabled=baseline.start_with_windows,
+                            editable=False,
+                            success=False,
+                            message=(
+                                "Thay đổi Khởi động cùng Windows đã quá thời gian. "
+                                "Chưa thể xác nhận trạng thái; vui lòng thử lại."
+                            ),
+                            confirmed=False,
+                        )
+                    except Exception:
+                        mutation_uncertain = True
+                        logging.getLogger(__name__).warning(
+                            "settings_autostart_change_failed"
+                        )
+                        result = AutostartUiState(
+                            enabled=baseline.start_with_windows,
+                            editable=False,
+                            success=False,
+                            message=(
+                                "Không thể xác nhận thay đổi Khởi động cùng "
+                                "Windows; vui lòng thử lại."
+                            ),
+                            confirmed=False,
+                        )
 
-            settings.ENABLE_GMAIL            = self._sw_email.value
-            settings.ENABLE_DISCORD          = self._sw_discord.value
-            settings.NOTIFY_DND_ENABLE       = self._sw_dnd_enable.value
-            settings.NOTIFY_DND_START        = max(0, min(23, int(self._dnd_start_field.value or "22")))
-            settings.NOTIFY_DND_END          = max(0, min(23, int(self._dnd_end_field.value or "7")))
-            settings.NOTIFY_IGNORE_SUBMITTED = self._sw_ignore_sub.value
-            settings.NOTIFICATION_PROFILE    = getattr(self, '_current_profile', 'balanced')
-            settings.NOTIFY_TYPES = [k for k, cb in self._notify_type_checks.items() if cb.value]
-            
-            try:
-                settings.NOTIFY_MILESTONES_MINUTES = sorted(
-                    {
-                        int(x.strip())
-                        for x in self._milestones_field.value.split(",")
-                        if x.strip() and int(x.strip()) > 0
-                    },
-                    reverse=True,
+                    if not result.confirmed:
+                        mutation_uncertain = True
+                        uncertainty_warning = result.message or (
+                            "Không thể xác nhận thay đổi Khởi động cùng "
+                            "Windows; vui lòng thử lại."
+                        )
+                        try:
+                            readback = await asyncio.wait_for(
+                                self._autostart_coordinator.load(),
+                                timeout=2.0,
+                            )
+                        except asyncio.TimeoutError:
+                            readback = AutostartUiState(
+                                enabled=baseline.start_with_windows,
+                                editable=False,
+                                success=False,
+                                message=uncertainty_warning,
+                                confirmed=False,
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "settings_autostart_readback_failed"
+                            )
+                            readback = AutostartUiState(
+                                enabled=baseline.start_with_windows,
+                                editable=False,
+                                success=False,
+                                message=uncertainty_warning,
+                                confirmed=False,
+                            )
+
+                        if (
+                            readback.confirmed
+                            and readback.enabled == requested.start_with_windows
+                        ):
+                            result = readback
+                            mutation_uncertain = False
+                        else:
+                            compensation_attempted = True
+                            try:
+                                compensation = await asyncio.wait_for(
+                                    self._autostart_coordinator.change(
+                                        baseline.start_with_windows
+                                    ),
+                                    timeout=2.0,
+                                )
+                            except asyncio.TimeoutError:
+                                compensation = AutostartUiState(
+                                    enabled=baseline.start_with_windows,
+                                    editable=False,
+                                    success=False,
+                                    message="",
+                                    confirmed=False,
+                                )
+                            except Exception:
+                                logging.getLogger(__name__).warning(
+                                    "settings_autostart_compensation_failed"
+                                )
+                                compensation = AutostartUiState(
+                                    enabled=baseline.start_with_windows,
+                                    editable=False,
+                                    success=False,
+                                    message="",
+                                    confirmed=False,
+                                )
+
+                            mutation_uncertain = not compensation.confirmed
+                            if compensation.confirmed:
+                                result = replace(
+                                    compensation,
+                                    success=False,
+                                    message=uncertainty_warning,
+                                )
+                            else:
+                                result = AutostartUiState(
+                                    enabled=baseline.start_with_windows,
+                                    editable=False,
+                                    success=False,
+                                    message=(
+                                        f"{uncertainty_warning} Không thể xác "
+                                        "nhận trạng thái sau khôi phục; vui lòng "
+                                        "thử lại."
+                                    ),
+                                    confirmed=False,
+                                )
+
+                actual = (
+                    result.enabled
+                    if result.confirmed
+                    else baseline.start_with_windows
                 )
-            except ValueError:
-                settings.NOTIFY_MILESTONES_MINUTES = [4320, 1440, 180, 60, 30, 5]
-            
-            settings.NOTIFY_MUTED_COURSES = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
+                persisted = replace(
+                    requested,
+                    start_with_windows=actual,
+                )
+                autostart_ok = (
+                    result.confirmed
+                    and actual == requested.start_with_windows
+                    and not compensation_attempted
+                )
+                autostart_may_need_compensation = (
+                    mutation_attempted
+                    and (
+                        mutation_uncertain
+                        or actual != baseline.start_with_windows
+                    )
+                )
+                display_result = result
+                if not result.confirmed:
+                    display_result = replace(result, enabled=actual)
+                self._apply_autostart_ui(display_result)
 
-            save_settings()
+            if not self._persist_snapshot_to_settings(persisted):
+                autostart_restored = True
+                if (
+                    autostart_may_need_compensation
+                    and self._autostart_coordinator is not None
+                ):
+                    try:
+                        restored = await asyncio.wait_for(
+                            self._autostart_coordinator.change(
+                                baseline.start_with_windows
+                            ),
+                            timeout=2.0,
+                        )
+                        autostart_restored = (
+                            restored.confirmed
+                            and restored.enabled == baseline.start_with_windows
+                        )
+                        self._apply_autostart_ui(restored)
+                    except asyncio.TimeoutError:
+                        autostart_restored = False
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "settings_autostart_rollback_failed"
+                        )
+                        autostart_restored = False
+                if autostart_restored:
+                    self._save_status.value = (
+                        "Lỗi: Không thể lưu cài đặt. Vui lòng thử lại."
+                    )
+                else:
+                    self._save_status.value = (
+                        "Lỗi: Không thể lưu và chưa thể khôi phục Khởi động cùng "
+                        "Windows. Vui lòng kiểm tra lại trong Task Manager."
+                    )
+                self._save_status.color = C.CRITICAL
+                self.update()
+                return False
 
-            # Update original theme reference so discard won't revert
-            self._original_theme = self._selected_theme
+            self._apply_snapshot_to_controls(persisted)
+            self._original_theme = persisted.theme
+            self._baseline_snapshot = persisted
 
-            self._save_status.value   = "Đã lưu cài đặt thành công"
-            self._save_status.color   = C.SAFE
+            if autostart_ok:
+                self._save_status.value = "Đã lưu cài đặt thành công"
+                self._save_status.color = C.SAFE
+            else:
+                warning = self._autostart_status.value or (
+                    "Khởi động cùng Windows chưa đạt trạng thái đã yêu cầu."
+                )
+                self._save_status.value = (
+                    f"Đã lưu các cài đặt khác. {warning}"
+                )
+                self._save_status.color = C.WARNING
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
             
             if not _pu.IS_MOBILE:
-                self._page.window.always_on_top = settings.ALWAYS_ON_TOP
+                self._page.window.always_on_top = persisted.always_on_top
             self.update()
 
             if self._on_saved:
                 self._on_saved()
-            return True
+            return autostart_ok
         except ValueError:
             self._save_status.value = "Lỗi: Vui lòng nhập số hợp lệ!"
             self._save_status.color = C.CRITICAL
             self.update()
             return False
-        except Exception as e_err:
-            self._save_status.value = f"Lỗi không xác định: {str(e_err)}"
+        except Exception:
+            logging.getLogger(__name__).warning("settings_save_failed")
+            self._save_status.value = "Lỗi không xác định khi lưu cài đặt."
             self._save_status.color = C.CRITICAL
             self.update()
             return False

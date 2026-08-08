@@ -13,6 +13,7 @@ class ViewManager:
         self.calendar_view = calendar_view
         self.grade_overview_view = grade_overview_view
         self.controller = controller
+        self._settings_navigation_generation = 0
 
     def show_dashboard(self):
         """Hiển thị màn hình chính (Dashboard) và ẩn các view phụ."""
@@ -56,14 +57,19 @@ class ViewManager:
         self.controller.calendar_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
-    def show_settings(self):
+    async def show_settings(self):
         """Tải các thiết lập hiện tại và chuyển sang màn hình Cấu hình (Settings)."""
+        self._settings_navigation_generation += 1
+        generation = self._settings_navigation_generation
+
+        await self.settings_view.load_current_settings()
+        if generation != self._settings_navigation_generation:
+            return
+
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.detail_view.visible = False
         self.grade_overview_view.visible = False
-        
-        self.settings_view.load_current_settings()
         self.settings_view.visible = True
         self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
@@ -134,6 +140,7 @@ class ViewManager:
 
     async def close_settings(self):
         """Đóng màn hình cấu hình với hiệu ứng và hiển thị lại màn hình Dashboard chính."""
+        self.cancel_pending_settings_navigation()
         self.settings_view.offset = ft.Offset(1, 0)
         self.settings_view.opacity = 0.0
         self.page.update()
@@ -142,3 +149,8 @@ class ViewManager:
         self.dashboard.opacity = 1.0
         self.dashboard.visible = True
         self.page.update()
+
+    def cancel_pending_settings_navigation(self) -> None:
+        """Invalidate an in-flight Settings reveal without awaiting its I/O."""
+        self._settings_navigation_generation += 1
+        self.settings_view.cancel_pending_load()
