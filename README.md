@@ -35,16 +35,17 @@
 
 | Tính năng | Mô tả |
 |-----------|-------|
-| 📋 **Theo dõi deadline** | Tự động lấy bài tập, quiz, điểm danh từ Moodle WS API |
+| 📋 **Theo dõi deadline** | Lấy bài tập, quiz, điểm danh từ `courses.ut.edu.vn` và `thnn.ut.edu.vn` qua Moodle WS hoặc phiên web an toàn khi site không cấp WS |
 | 📊 **Theo dõi điểm** | Giám sát thay đổi điểm theo thời gian thực, thông báo khi có điểm mới |
 | 🔔 **Cảnh báo thông minh** | Phân loại `Khẩn cấp` · `Sắp hạn` · `An toàn` · `Quá hạn` |
 | 📅 **Lịch học** | Xem lịch học theo tuần với deadline trực quan |
 | ⚡ **Hiệu suất cao** | Startup ~4s, parallel API, grade N+1 optimization |
-| 📱 **Đa nền tảng** | Windows desktop · Android APK · Web browser |
+| 📱 **Đa nền tảng** | Windows MSI/EXE · Android APK · iOS IPA · Web browser |
 | 🎨 **6 Theme** | Midnight Blue · Ocean Teal · Sakura Pink · Nord Frost · Monokai Pro · Solarized Dark |
 | 📣 **Đa kênh thông báo** | Windows Toast · Discord · Telegram · Email |
 | 🔐 **Bảo mật** | Mật khẩu lưu trong Credential Manager / Keychain |
-| 🖥️ **System Tray** | Chạy nền, tự động cập nhật theo lịch |
+| 🖥️ **System Tray** | Chạy nền; mở lại shortcut/Start Menu sẽ hiện cửa sổ đang ẩn |
+| 🔄 **Cập nhật tin cậy** | Kiểm tra cập nhật mặc định bật; chỉ tải package đúng nền tảng sau xác minh và luôn hỏi trước khi cài |
 | 🔍 **Bộ lọc nâng cao** | Lọc theo môn, loại, mức cấp bách, tìm kiếm full-text |
 | 🔄 **Smart Polling** | Tự động làm mới với interval tùy chỉnh |
 
@@ -110,9 +111,9 @@ $env:PYTHONUTF8 = '1'
 ```
 
 Lệnh trên build bundle Flet, tạo runner autostart không tham số, chạy verifier,
-kiểm thử ba chế độ cửa sổ và đóng gói Inno. Xem
+kiểm thử cửa sổ/tray và đóng gói cặp MSI + Burn EXE bằng WiX 7. Xem
 [`docs/WINDOWS_EXE_PACKAGING.md`](docs/WINDOWS_EXE_PACKAGING.md) để chạy riêng từng
-cổng bundle, installer hoặc MSIX.
+cổng bundle, verifier và installer.
 
 ### Yêu cầu build
 
@@ -208,7 +209,23 @@ python -m pytest ../tests/ --cov=. --cov-report=html
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
 | **CI** (`ci.yml`) | Push/PR to `develop`, `main` | 🔍 Lint (Ruff) · 🧪 Test (3.12/3.13/3.14) · 🔐 Private diagnostics · 🔒 Security (pip-audit) |
-| **Build Android** (`build-android.yml`) | Push to `main`, tags `v*` | 📱 Build APK/AAB · 📤 Upload artifact · 🏷️ Release |
+| **Build Android** (`build-android.yml`) | Push/PR to `main` | 📱 Diagnostic APK cố ý không cài được · 📤 Upload artifact |
+| **Build iOS** (`build-ios.yml`) | Push/PR to `main` | 🍎 Simulator diagnostic ZIP, không giả dạng IPA |
+| **Trusted Release** (`release.yml`) | Protected tag `v*` | ✅ Test đầy đủ · ký/xác minh IPA/APK/MSI/EXE · attestation · phát hành đúng 6 asset |
+
+### Phát hành và tự động cập nhật
+
+`Tự động kiểm tra cập nhật` mặc định bật, kể cả khi nâng cấp từ settings schema
+cũ không có khóa này. Ứng dụng có thể kiểm tra và tải package đã xác minh, nhưng
+không tự cài, tự thoát, tự khởi động lại hoặc tự mở App Store/TestFlight nếu chưa
+có xác nhận rõ ràng của người dùng.
+
+Release production chỉ được tạo từ protected `release` environment khi đủ chứng
+thư Android, Apple và Windows. Inventory công khai bắt buộc đúng một IPA, APK,
+MSI, Burn EXE, `release-manifest.json` và `SHA256SUMS`; thiếu một file hoặc chữ ký
+sai sẽ không có release công khai. Xem
+[`docs/WINDOWS_EXE_PACKAGING.md`](docs/WINDOWS_EXE_PACKAGING.md#protected-release-environment)
+và [`ADR 0003`](docs/adr/0003-signed-release-update-channel.md).
 
 ## 🌿 Git Workflow
 
@@ -245,7 +262,7 @@ docs: update README with build instructions
 - [x] Notification badge with unread count
 - [x] Performance optimization (startup 15s → 4s)
 - [x] CI/CD pipeline (lint + test + security)
-- [ ] iOS TestFlight build
+- [x] iOS App Store Connect/TestFlight release pipeline (cần credential của owner)
 - [ ] File download & re-upload workflow
 - [ ] Welcome screen for first-time users
 - [ ] Offline mode with local cache

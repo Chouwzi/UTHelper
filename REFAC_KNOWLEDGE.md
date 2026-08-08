@@ -1073,3 +1073,23 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   tests** after review caught and removed a Linux-incompatible Windows extra from
   source validation and restored the supported-version floor to `2.1.0`. Ruff,
   YAML loading, `git diff --check`, and actionlint 1.7.12 pass.
+
+## Repository governance and final local gate (2026-08-08)
+
+- All workflows now pin every third-party Action to a 40-character commit SHA,
+  disable checkout credential persistence, and use read-only/default-deny token
+  permissions outside the release publisher. CI dependency auditing is
+  fail-closed rather than an informational `|| true` command.
+- CODEOWNERS covers the repository and names release/update-sensitive paths;
+  structured contributor, pull-request, private security-reporting, and weekly
+  Dependabot policies are committed so serious fork-based contributions have a
+  clear review/test boundary without exposing secrets or student data.
+- Production operator documentation names the exact protected environment
+  secrets/variables and six assets. It explicitly distinguishes a local unsigned
+  structure rehearsal from native signed release evidence and does not claim an
+  absent Apple/Windows identity has passed.
+- Final local Python regression passes **1183 tests with 25 skipped in 41.38
+  seconds**; repository-wide Ruff, governance tests, release policy tests, YAML,
+  whitespace, and actionlint 1.7.12 pass. Android JVM execution is not claimed:
+  the extension source contains no Gradle wrapper and this machine has no global
+  Gradle installation, so the bounded command failed immediately before tests.

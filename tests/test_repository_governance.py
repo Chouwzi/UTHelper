@@ -1,0 +1,48 @@
+from pathlib import Path
+import re
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOWS = ROOT / ".github" / "workflows"
+
+
+def _read(relative_path: str) -> str:
+    return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def test_all_third_party_actions_are_immutable_and_workflows_are_least_privilege():
+    action = re.compile(r"(?m)^\s*uses:\s*[^\s]+@([^\s#]+)")
+    for path in WORKFLOWS.glob("*.yml"):
+        workflow = path.read_text(encoding="utf-8")
+        references = action.findall(workflow)
+        assert references, path.name
+        assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in references), path.name
+        assert "pull_request_target:" not in workflow
+        assert "permissions: {}" in workflow or "permissions:\n  contents: read" in workflow
+        assert "persist-credentials: false" in workflow
+
+
+def test_security_ci_fails_closed_and_has_a_finite_deadline():
+    workflow = _read(".github/workflows/ci.yml")
+
+    assert "pip-audit --strict --desc" in workflow
+    assert "pip-audit --strict --desc 2>&1 || true" not in workflow
+    assert "security:" in workflow
+    assert "timeout-minutes:" in workflow.split("  security:", 1)[1]
+
+
+def test_repository_has_actionable_contributor_and_security_controls():
+    codeowners = _read(".github/CODEOWNERS")
+    contributing = _read("CONTRIBUTING.md")
+    security = _read("SECURITY.md")
+    pull_request = _read(".github/pull_request_template.md")
+    dependabot = _read(".github/dependabot.yml")
+
+    assert "* @Chouwzi" in codeowners
+    assert "/.github/workflows/ @Chouwzi" in codeowners
+    assert "develop" in contributing and "pull request" in contributing.lower()
+    assert "https://github.com/Chouwzi/UTHelper/security/advisories/new" in security
+    assert "Không đăng" in security
+    assert "pytest" in pull_request and "Bảo mật" in pull_request
+    assert 'package-ecosystem: "github-actions"' in dependabot
+    assert 'package-ecosystem: "pip"' in dependabot
