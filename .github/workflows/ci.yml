@@ -123,11 +123,24 @@ jobs:
           retention-days: 7
 
   security:
-    name: 🔒 Security
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    name: 🔒 Security (${{ matrix.surface }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - surface: core
+            os: ubuntu-latest
+            extras: "."
+          - surface: android
+            os: ubuntu-latest
+            extras: ".[android-build]"
+          - surface: windows
+            os: windows-latest
+            extras: ".[windows]"
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -141,7 +154,8 @@ jobs:
           cache: 'pip'
 
       - name: Check for known vulnerabilities
+        shell: bash
         run: |
           pip install pip-audit
-          pip install -e .
+          pip install -e "${{ matrix.extras }}"
           pip-audit --strict --desc

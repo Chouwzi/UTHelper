@@ -10,7 +10,6 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
-      - "security"
 
   - package-ecosystem: "pip"
     directory: "/"
@@ -22,5 +21,3 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
-      - "security"
-

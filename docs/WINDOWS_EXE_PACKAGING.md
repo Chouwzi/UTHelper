@@ -174,6 +174,27 @@ Do not push a release tag until all named environment inputs exist. The current
 repository has no valid platform signing material by default; an unsigned local
 rehearsal proves structure only and must never be renamed to one of these assets.
 
+### GitHub external governance checklist
+
+Repository files cannot enforce these settings by themselves. Before enabling a
+production tag, verify in GitHub or through the REST API that:
+
+- repository **Rulesets** actively protect `main` and `develop`: pull request,
+  one fresh CODEOWNER approval, resolved conversations, required CI checks,
+  linear history, no force-push, and no deletion;
+- a tag ruleset blocks deletion and force-update of `v*` and restricts tag
+  creation to the owner/admin bypass role;
+- the `release` environment has a required owner review and accepts only tag
+  deployments matching `v*`;
+- Private Vulnerability Reporting and Dependabot vulnerability alerts are
+  enabled, and the repository is configured to delete merged branches;
+- all secret names and identity variables above exist, without printing their
+  values. `WIX_EULA_ACCEPTED` remains absent until the owner separately accepts
+  the applicable WiX license.
+
+If any check is absent, the repository is not yet a protected release source;
+the workflow file and CODEOWNERS entry alone are not evidence of enforcement.
+
 ## Sources
 
 - Flet publishing guide: https://flet.dev/docs/publish/

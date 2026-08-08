@@ -29,6 +29,12 @@ def test_security_ci_fails_closed_and_has_a_finite_deadline():
     assert "pip-audit --strict --desc 2>&1 || true" not in workflow
     assert "security:" in workflow
     assert "timeout-minutes:" in workflow.split("  security:", 1)[1]
+    assert "surface: core" in workflow
+    assert "surface: android" in workflow
+    assert "surface: windows" in workflow
+    assert 'extras: ".[android-build]"' in workflow
+    assert 'extras: ".[windows]"' in workflow
+    assert "runs-on: ${{ matrix.os }}" in workflow
 
 
 def test_repository_has_actionable_contributor_and_security_controls():
@@ -43,6 +49,9 @@ def test_repository_has_actionable_contributor_and_security_controls():
     assert "develop" in contributing and "pull request" in contributing.lower()
     assert "https://github.com/Chouwzi/UTHelper/security/advisories/new" in security
     assert "Không đăng" in security
+    assert "Security contact request" in security
     assert "pytest" in pull_request and "Bảo mật" in pull_request
     assert 'package-ecosystem: "github-actions"' in dependabot
     assert 'package-ecosystem: "pip"' in dependabot
+    assert '      - "security"' not in dependabot
+    assert "Rulesets" in _read("docs/WINDOWS_EXE_PACKAGING.md")

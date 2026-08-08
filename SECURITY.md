@@ -13,6 +13,10 @@ concept có thể khai thác lên issue/discussion công khai.
 Hãy tạo báo cáo riêng tư tại:
 [GitHub Private Vulnerability Reporting](https://github.com/Chouwzi/UTHelper/security/advisories/new).
 
+Nếu nút báo cáo riêng tư tạm thời không xuất hiện, hãy mở một issue chỉ có tiêu
+đề `Security contact request`, không đưa chi tiết lỗ hổng vào nội dung. Maintainer
+sẽ khôi phục/kích hoạt kênh advisory riêng tư rồi đóng issue điều phối công khai.
+
 Báo cáo nên có phiên bản/commit, nền tảng, điều kiện tái hiện, mức ảnh hưởng và
 biện pháp giảm thiểu tạm thời. Không cần gửi dữ liệu thật hoặc khóa bí mật.
 

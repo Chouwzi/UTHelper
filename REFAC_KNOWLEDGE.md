@@ -1088,8 +1088,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   secrets/variables and six assets. It explicitly distinguishes a local unsigned
   structure rehearsal from native signed release evidence and does not claim an
   absent Apple/Windows identity has passed.
-- Final local Python regression passes **1183 tests with 25 skipped in 41.38
+- Final local Python regression passes **1184 tests with 25 skipped in 44.07
   seconds**; repository-wide Ruff, governance tests, release policy tests, YAML,
-  whitespace, and actionlint 1.7.12 pass. Android JVM execution is not claimed:
+  whitespace, and actionlint 1.7.12 pass. Review expanded dependency auditing
+  into compatible core, Android-build, and Windows matrices, added the safe PVR
+  fallback/external enforcement checklist, and reserved the security label for
+  real advisories. Android JVM execution is not claimed:
   the extension source contains no Gradle wrapper and this machine has no global
   Gradle installation, so the bounded command failed immediately before tests.

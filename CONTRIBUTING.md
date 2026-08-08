@@ -32,12 +32,12 @@ tiêu, có test và tôn trọng dữ liệu riêng tư của sinh viên.
   nó tạo ra.
 - Không sửa file Flutter/Dart sinh ra sau compile để né quy trình nguồn.
 - Không dùng action GitHub dạng tag mutable; pin full commit SHA đã review.
-- Thay đổi workflow release, installer, updater, credential hoặc security cần
-  CODEOWNER review và test fail-closed.
+- Thay đổi workflow release, installer, updater, credential hoặc security được
+  tự động gán CODEOWNER; repository production phải bật ruleset để biến review
+  đó thành điều kiện merge, đồng thời giữ các test ở trạng thái fail-closed.
 - Tuân thủ giấy phép PolyForm Noncommercial 1.0.0 của repository.
 
 ## Báo cáo lỗ hổng
 
 Không mở issue công khai cho lỗ hổng chưa vá. Dùng hướng dẫn trong
 [`SECURITY.md`](SECURITY.md).
-

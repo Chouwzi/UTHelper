@@ -220,8 +220,9 @@ cũ không có khóa này. Ứng dụng có thể kiểm tra và tải package �
 không tự cài, tự thoát, tự khởi động lại hoặc tự mở App Store/TestFlight nếu chưa
 có xác nhận rõ ràng của người dùng.
 
-Release production chỉ được tạo từ protected `release` environment khi đủ chứng
-thư Android, Apple và Windows. Inventory công khai bắt buộc đúng một IPA, APK,
+Workflow production được thiết kế để chỉ chạy qua `release` environment đã được
+owner bảo vệ và có đủ chứng thư Android, Apple, Windows; cấu hình GitHub bên
+ngoài phải được kiểm theo checklist vận hành. Inventory công khai bắt buộc một IPA, APK,
 MSI, Burn EXE, `release-manifest.json` và `SHA256SUMS`; thiếu một file hoặc chữ ký
 sai sẽ không có release công khai. Xem
 [`docs/WINDOWS_EXE_PACKAGING.md`](docs/WINDOWS_EXE_PACKAGING.md#protected-release-environment)
