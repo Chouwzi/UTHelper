@@ -269,6 +269,10 @@ def test_wix_authoring_has_stable_upgrade_codes_and_exact_msi_chain():
     assert "B1EB1032-5ACD-497D-8FD2-AB760218CBE3" in package
     assert "EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0" in bundle
     assert '<MsiPackage SourceFile="$(MsiPath)"' in bundle
+    assert (
+        'LaunchTarget="[ProgramFiles64Folder]UTHelper\\UTHelper.exe"' in bundle
+    )
+    assert 'LaunchWorkingFolder="[ProgramFiles64Folder]UTHelper"' in bundle
     assert "UTHelperAutostart.exe" in package
     assert 'Value="msi"' in package
     run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -395,7 +399,7 @@ def test_single_instance_e2e_embedded_csharp_targets_windows_powershell_51():
     assert script.count("out owner") == 4
 
 
-def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
+def test_every_release_flet_build_generates_packaged_runtime_assets_first():
     candidates = tuple((ROOT / ".github" / "workflows").glob("*.y*ml")) + tuple(
         (ROOT / "scripts").glob("*.ps1")
     )
@@ -414,6 +418,8 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
     }
     generator = "scripts/generate_public_runtime_config.py"
     output = "src/assets/diagnostics-config.json"
+    version_generator = "scripts/release_metadata.py"
+    version_output = "src/assets/release-version"
     total_builds = 0
 
     for relative_path in build_files:
@@ -428,18 +434,34 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
         generator_indexes = [
             index for index, line in enumerate(lines) if generator in line
         ]
+        version_generator_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if version_generator in line and "--runtime-output" in line
+        ]
 
         assert build_indexes, relative_path
         assert len(generator_indexes) == len(build_indexes), relative_path
+        assert len(version_generator_indexes) == len(build_indexes), relative_path
         previous_build = -1
         for build_index in build_indexes:
             prebuild = lines[previous_build + 1 : build_index]
             matching = [line for line in prebuild if generator in line]
+            version_matching = [
+                line
+                for line in prebuild
+                if version_generator in line and "--runtime-output" in line
+            ]
             assert len(matching) == 1, (
                 f"{relative_path}:{build_index + 1} must generate config once "
                 "after the prior build and before this Flet build"
             )
             assert output in matching[0]
+            assert len(version_matching) == 1, (
+                f"{relative_path}:{build_index + 1} must generate the runtime "
+                "version after the prior build and before this Flet build"
+            )
+            assert version_output in version_matching[0]
             previous_build = build_index
 
     assert total_builds == 9
@@ -556,6 +578,22 @@ def test_windows_release_job_forces_utf8_for_flet_cli_output():
 
     assert "PYTHONUTF8: '1'" in windows_job
     assert "PYTHONIOENCODING: utf-8" in windows_job
+
+
+def test_windows_release_fails_closed_when_runtime_version_generation_fails():
+    workflow = _read(".github/workflows/release.yml")
+    windows_job = workflow.split("  build-signed-windows:\n", 1)[1].split(
+        "\n  publish-exact-release:\n", 1
+    )[0]
+    generator = (
+        "python scripts/release_metadata.py --pyproject pyproject.toml "
+        "--runtime-output src/assets/release-version"
+    )
+    failure = 'if ($LASTEXITCODE -ne 0) { throw "Runtime version generation failed" }'
+    diagnostics = "python scripts/generate_public_runtime_config.py"
+
+    assert windows_job.index(generator) < windows_job.index(failure)
+    assert windows_job.index(failure) < windows_job.index(diagnostics)
 
 
 def test_release_credentials_are_preflighted_before_native_runner_jobs():
