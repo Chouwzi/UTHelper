@@ -120,6 +120,24 @@ def test_cli_accepts_missing_powershell_empty_value_as_unconfigured(tmp_path):
     }
 
 
+def test_cli_release_gate_rejects_an_unconfigured_dsn(tmp_path, capsys):
+    output = tmp_path / "diagnostics-config.json"
+
+    with pytest.raises(SystemExit) as exc_info:
+        generate_config_main(
+            [
+                "--require-configured",
+                "--sentry-dsn",
+                "--output",
+                str(output),
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    assert "configured Sentry DSN is required" in capsys.readouterr().err
+    assert not output.exists()
+
+
 def test_atomic_generator_failure_preserves_previous_asset(tmp_path, monkeypatch):
     output = tmp_path / "diagnostics-config.json"
     output.write_text("previous", encoding="utf-8")

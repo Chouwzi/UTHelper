@@ -420,6 +420,15 @@ def test_every_release_flet_build_generates_packaged_diagnostics_config_first():
     assert "$env:SENTRY_DSN" in _read("scripts/build_android.ps1")
 
 
+def test_trusted_release_refuses_to_package_without_diagnostics_ingestion():
+    workflow = _read(".github/workflows/release.yml")
+    generator = "scripts/generate_public_runtime_config.py"
+    invocations = [line for line in workflow.splitlines() if generator in line]
+
+    assert len(invocations) == 4
+    assert all("--require-configured" in line for line in invocations)
+
+
 def test_android_workflows_verify_the_materialized_flet_plugin_location():
     expected = (
         "build/flutter-packages/flet_uth_background_sync/android/build.gradle"
