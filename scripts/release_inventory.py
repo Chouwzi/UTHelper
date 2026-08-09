@@ -41,6 +41,7 @@ _EVIDENCE_KEYS = frozenset(
         "version",
         "product_id",
         "architecture",
+        "signature_kind",
         "signer_identity",
         "certificate_fingerprint",
         "signature_valid",
@@ -57,13 +58,12 @@ _EXPECTED = {
         "arm64",
         frozenset(
             {
+                "arm64",
                 "build_number",
                 "bundle_id",
-                "certificate_fingerprint",
-                "codesign",
-                "distribution_profile",
-                "entitlements",
+                "iphoneos",
                 "ipa_container",
+                "no_embedded_profile",
                 "sha256",
                 "version",
             }
@@ -97,6 +97,12 @@ _EXPECTED = {
         frozenset({"authenticode", "msi_ole", "product_version", "template", "timestamp", "upgrade_code"}),
     ),
 }
+_SIGNATURE_KIND = {
+    ".ipa": "unsigned-resign-required",
+    ".apk": "apk-pinned",
+    ".exe": "self-signed-pinned",
+    ".msi": "self-signed-pinned",
+}
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -116,6 +122,7 @@ class VerificationEvidence:
     version: str
     product_id: str
     architecture: str
+    signature_kind: str
     signer_identity: str
     certificate_fingerprint: str
     signature_valid: bool
@@ -193,21 +200,32 @@ def _read_evidence(path: Path, package: Path, version: str) -> VerificationEvide
     evidence_hash = raw["sha256"]
     if not isinstance(evidence_hash, str) or evidence_hash.lower() != actual_hash:
         raise InventoryError("evidence hash does not match package")
+    signature_kind = _SIGNATURE_KIND[suffix]
+    if raw["signature_kind"] != signature_kind:
+        raise InventoryError("verification signature kind is invalid")
+    signer = raw["signer_identity"]
     fingerprint = raw["certificate_fingerprint"]
-    if not isinstance(fingerprint, str) or not _HEX64.fullmatch(fingerprint):
-        raise InventoryError("verification certificate fingerprint is invalid")
+    signature_valid = raw["signature_valid"]
+    if signature_kind == "unsigned-resign-required":
+        if signer != "" or fingerprint != "" or signature_valid is not False:
+            raise InventoryError("unsigned iOS signature evidence is invalid")
+    elif (
+        not isinstance(signer, str)
+        or not signer.strip()
+        or not isinstance(fingerprint, str)
+        or not _HEX64.fullmatch(fingerprint)
+        or signature_valid is not True
+    ):
+        raise InventoryError("pinned signature evidence is invalid")
     timestamp = raw["timestamp_valid"]
     expected_timestamp = True if platform_name == "windows" else None
     if (
-        raw["schema_version"] != 1
+        raw["schema_version"] != 2
         or raw["platform"] != platform_name
         or raw["asset_name"] != package.name
         or raw["version"] != version
         or raw["product_id"] != product_id
         or raw["architecture"] != architecture
-        or not isinstance(raw["signer_identity"], str)
-        or not raw["signer_identity"].strip()
-        or raw["signature_valid"] is not True
         or timestamp is not expected_timestamp
         or not isinstance(raw["commit_sha"], str)
         or not _COMMIT.fullmatch(raw["commit_sha"])
@@ -216,16 +234,17 @@ def _read_evidence(path: Path, package: Path, version: str) -> VerificationEvide
     ):
         raise InventoryError("verification evidence identity is invalid")
     return VerificationEvidence(
-        schema_version=1,
+        schema_version=2,
         platform=platform_name,
         asset_name=package.name,
         sha256=actual_hash,
         version=version,
         product_id=product_id,
         architecture=architecture,
-        signer_identity=raw["signer_identity"].strip(),
+        signature_kind=signature_kind,
+        signer_identity=signer.strip(),
         certificate_fingerprint=fingerprint.upper(),
-        signature_valid=True,
+        signature_valid=signature_valid,
         timestamp_valid=expected_timestamp,
         checks=tuple(sorted(checks)),
         commit_sha=raw["commit_sha"].lower(),
@@ -241,8 +260,8 @@ def _validate_manifest(path: Path, inventory: ReleaseInventory) -> None:
         manifest = parse_manifest(raw, expected_release_version=inventory.version)
     except (OSError, UnicodeError, json.JSONDecodeError, ManifestError) as exc:
         raise InventoryError("release manifest is invalid") from exc
-    if manifest.schema_version != 2 or len(manifest.packages) != 4:
-        raise InventoryError("release manifest must contain schema 2 exact inventory")
+    if manifest.schema_version != 3 or len(manifest.packages) != 4:
+        raise InventoryError("release manifest must contain schema 3 exact inventory")
     expected_by_name = {item.name: item for item in inventory.packages}
     seen = set()
     expected_prefix = (
@@ -264,6 +283,8 @@ def _validate_manifest(path: Path, inventory: ReleaseInventory) -> None:
             raise InventoryError("manifest package bytes do not match evidence")
         if package.architecture != item.evidence.architecture:
             raise InventoryError("manifest architecture does not match native evidence")
+        if package.signature_kind != item.evidence.signature_kind:
+            raise InventoryError("manifest signature kind does not match native evidence")
         if package.signer_identity != item.evidence.signer_identity:
             raise InventoryError("manifest signer identity does not match native evidence")
         if package.certificate_fingerprint.upper() != item.evidence.certificate_fingerprint:

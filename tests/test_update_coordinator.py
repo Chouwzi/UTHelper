@@ -23,16 +23,23 @@ from core.update_models import (
 
 
 def _candidate(*, schema: int = 2, platform: str = "windows") -> UpdateCandidate:
+    ios_sideload = platform == "ios" and schema == 3
     strategy = (
-        {"kind": "open-url", "url": "https://apps.apple.com/app/id123"}
-        if platform == "ios"
-        else {"kind": "msi", "product": "UTHelper"}
+        {"kind": "manual_sideload"}
+        if ios_sideload
+        else (
+            {"kind": "app_store", "url": "https://apps.apple.com/app/id123"}
+            if platform == "ios"
+            else {"kind": "msi", "product": "UTHelper"}
+        )
     )
     package = ReleasePackage(
         platform=platform,
         architecture="arm64" if platform == "ios" else "x64",
         package_type="ipa" if platform == "ios" else "msi",
-        install_channel="app-store" if platform == "ios" else "bootstrapper",
+        install_channel=(
+            "sideload" if ios_sideload else "app-store"
+        ) if platform == "ios" else "bootstrapper",
         url=(
             "https://github.com/Chouwzi/UTHelper/releases/download/v2.3.0/UTHelper.ipa"
             if platform == "ios"
@@ -40,9 +47,12 @@ def _candidate(*, schema: int = 2, platform: str = "windows") -> UpdateCandidate
         ),
         sha256="a" * 64,
         size=7,
-        signer_identity="UTHelper",
-        certificate_fingerprint="b" * 64,
+        signer_identity="" if ios_sideload else "UTHelper",
+        certificate_fingerprint="" if ios_sideload else "b" * 64,
         install_strategy=strategy,
+        signature_kind=(
+            "unsigned-resign-required" if ios_sideload else "certificate-pinned"
+        ),
     )
     manifest = ReleaseManifest(
         schema_version=schema,
@@ -246,9 +256,9 @@ def test_schema_one_is_release_notes_only_and_requires_confirmation(tmp_path):
     assert coordinator.shutdown(timeout_seconds=1.0) is True
 
 
-def test_ios_opens_store_url_only_after_confirmation(tmp_path):
+def test_ios_sideload_opens_release_page_only_after_confirmation(tmp_path):
     opened = []
-    candidate = _candidate(platform="ios")
+    candidate = _candidate(schema=3, platform="ios")
     coordinator, _, downloader, _, events = _coordinator(
         tmp_path,
         candidate=candidate,
@@ -258,13 +268,40 @@ def test_ios_opens_store_url_only_after_confirmation(tmp_path):
     _wait_for(events, UpdateEventKind.UPDATE_AVAILABLE)
 
     coordinator.request_download()
-    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    _wait_for(events, UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED)
     assert downloader.calls == 0
     assert opened == []
 
     coordinator.confirm_install()
     _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
-    assert opened == ["https://apps.apple.com/app/id123"]
+    assert opened == [candidate.manifest.release_notes_url]
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+@pytest.mark.parametrize(
+    "release_notes_url",
+    [
+        "https://example.com/Chouwzi/UTHelper/releases/tag/v2.3.0",
+        "https://github.com/Other/Repo/releases/tag/v2.3.0",
+        "https://user@github.com/Chouwzi/UTHelper/releases/tag/v2.3.0",
+        "https://github.com:444/Chouwzi/UTHelper/releases/tag/v2.3.0",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.3.0?asset=ipa",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.3.0#ipa",
+        "https://github.com/Chouwzi/UTHelper/releases/download/v2.3.0/UTHelper.ipa",
+    ],
+)
+def test_ios_sideload_rejects_noncanonical_release_page(tmp_path, release_notes_url):
+    candidate = _candidate(schema=3, platform="ios")
+    object.__setattr__(candidate.manifest, "release_notes_url", release_notes_url)
+    coordinator, _, downloader, _, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.FAILED)
+
+    assert downloader.calls == 0
     assert coordinator.shutdown(timeout_seconds=1.0) is True
 
 

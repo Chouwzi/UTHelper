@@ -30,13 +30,12 @@ PRODUCT = {".ipa": "com.uthelper.UTHelper", ".apk": "com.uthelper.uthelper", ".e
 ARCH = {".ipa": "arm64", ".apk": "universal", ".exe": "x64", ".msi": "x64"}
 CHECKS = {
     ".ipa": [
+        "arm64",
         "build_number",
         "bundle_id",
-        "certificate_fingerprint",
-        "codesign",
-        "distribution_profile",
-        "entitlements",
+        "iphoneos",
         "ipa_container",
+        "no_embedded_profile",
         "sha256",
         "version",
     ],
@@ -50,6 +49,12 @@ CHECKS = {
     ],
     ".exe": ["authenticode", "burn_payload", "pe_header", "product_version", "timestamp"],
     ".msi": ["authenticode", "msi_ole", "product_version", "template", "timestamp", "upgrade_code"],
+}
+SIGNATURE_KIND = {
+    ".ipa": "unsigned-resign-required",
+    ".apk": "apk-pinned",
+    ".exe": "self-signed-pinned",
+    ".msi": "self-signed-pinned",
 }
 
 
@@ -67,16 +72,17 @@ def write_valid_release(tmp_path, *, version=VERSION, with_manifest=False, with_
         path = release / name
         path.write_bytes(MAGIC[path.suffix])
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "platform": PLATFORM[path.suffix],
             "asset_name": name,
             "sha256": _sha(path),
             "version": version,
             "product_id": PRODUCT[path.suffix],
             "architecture": ARCH[path.suffix],
-            "signer_identity": PRODUCT[path.suffix],
-            "certificate_fingerprint": "AB" * 32,
-            "signature_valid": True,
+            "signature_kind": SIGNATURE_KIND[path.suffix],
+            "signer_identity": "" if path.suffix == ".ipa" else PRODUCT[path.suffix],
+            "certificate_fingerprint": "" if path.suffix == ".ipa" else "AB" * 32,
+            "signature_valid": path.suffix != ".ipa",
             "timestamp_valid": True if path.suffix in {".exe", ".msi"} else None,
             "checks": CHECKS[path.suffix],
             "commit_sha": "1" * 40,
@@ -91,7 +97,6 @@ def write_valid_release(tmp_path, *, version=VERSION, with_manifest=False, with_
             evidence,
             version=version,
             repository=REPOSITORY,
-            ios_install_url="https://apps.apple.com/app/id123",
             minimum_supported_version="2.1.0",
         )
         (release / "release-manifest.json").write_text(
@@ -166,7 +171,7 @@ def test_manifest_signer_fingerprint_must_equal_native_evidence(tmp_path):
     release, evidence = write_valid_release(tmp_path, with_manifest=True)
     path = release / "release-manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    manifest["packages"][0]["certificate_fingerprint"] = "CD" * 32
+    manifest["packages"][1]["certificate_fingerprint"] = "CD" * 32
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(InventoryError, match="certificate fingerprint evidence"):
@@ -246,7 +251,7 @@ def test_checksum_gate_rejects_invalid_entries(tmp_path, mutation):
         )
 
 
-def test_generator_emits_schema_two_and_only_apple_strategy_has_external_url(tmp_path):
+def test_generator_emits_schema_three_with_manual_ios_sideload(tmp_path):
     release, evidence = write_valid_release(tmp_path)
 
     manifest = generate_manifest_from_verified_inventory(
@@ -254,32 +259,41 @@ def test_generator_emits_schema_two_and_only_apple_strategy_has_external_url(tmp
         evidence,
         version=VERSION,
         repository=REPOSITORY,
-        ios_install_url="https://testflight.apple.com/join/abc",
         minimum_supported_version="2.1.0",
     )
 
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert len(manifest["packages"]) == 4
-    assert ["url" in item["install_strategy"] for item in manifest["packages"]] == [
-        True,
-        False,
-        False,
-        False,
-    ]
+    ios = manifest["packages"][0]
+    assert ios["install_channel"] == "sideload"
+    assert ios["install_strategy"] == {"kind": "manual_sideload"}
+    assert ios["signature_kind"] == "unsigned-resign-required"
+    assert ios["signer_identity"] == ""
+    assert ios["certificate_fingerprint"] == ""
 
 
-def test_generator_rejects_non_apple_install_url(tmp_path):
+def test_inventory_rejects_signed_identity_for_unsigned_ios(tmp_path):
     release, evidence = write_valid_release(tmp_path)
+    record_path = evidence / "UTHelper-2.2.0.ipa.verification.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["signer_identity"] = "CN=Unexpected"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
 
-    with pytest.raises(InventoryError, match="Apple"):
-        generate_manifest_from_verified_inventory(
-            release,
-            evidence,
-            version=VERSION,
-            repository=REPOSITORY,
-            ios_install_url="https://example.com/app",
-            minimum_supported_version="2.1.0",
-        )
+    with pytest.raises(InventoryError, match="unsigned iOS"):
+        verify_release_inventory(release, evidence, VERSION, REPOSITORY)
+
+
+@pytest.mark.parametrize("suffix", [".apk", ".exe", ".msi"])
+def test_inventory_rejects_missing_pinned_identity(tmp_path, suffix):
+    release, evidence = write_valid_release(tmp_path)
+    name = next(path.name for path in release.iterdir() if path.suffix == suffix)
+    record_path = evidence / f"{name}.verification.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["certificate_fingerprint"] = ""
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(InventoryError, match="pinned signature"):
+        verify_release_inventory(release, evidence, VERSION, REPOSITORY)
 
 
 @pytest.mark.parametrize(

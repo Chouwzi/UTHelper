@@ -1,8 +1,8 @@
-# ADR 0003: Signed platform release update channel
+# ADR 0003: Platform release update channel
 
-- Status: Accepted (superseded in part by the schema-2 exact inventory below)
+- Status: Accepted (iOS and Windows trust model superseded by the 2026-08-09 sideload/self-signed design)
 - Date: 2026-07-19
-- Updated: 2026-08-08
+- Updated: 2026-08-09
 
 ## Context
 
@@ -17,22 +17,27 @@ stable package identity, deterministic selection, or end-to-end verification.
 
 - `pyproject.toml` is the only authored application version. A protected
   `vX.Y.Z` tag must equal it and point to a commit contained in `main`.
-- A public release contains exactly six assets: one signed IPA, APK, x64 Burn
+- A public release contains exactly six assets: one unsigned device IPA, signed APK, x64 Burn
   EXE, x64 machine-scoped MSI, `release-manifest.json`, and `SHA256SUMS`.
   MSIX, AppInstaller, ZIP, and GitHub Pages are not production release paths.
-- Schema 2 identifies platform, architecture, package type, install channel,
+- Schema 3 identifies platform, architecture, package type, install channel,
   trusted signer identity/fingerprint, byte size, SHA-256, and the explicit
-  install strategy. Schema 1 remains discoverable for one compatibility window
-  but never permits automatic download or installation.
+  install strategy. It declares iOS as `unsigned-resign-required`, Android as
+  `apk-pinned`, and Windows as `self-signed-pinned`. Schema 1 remains manual-only
+  and schema 2 remains readable for compatibility.
 - Automatic update checks default on. A package may be downloaded only after
-  exact target selection and verification; installation, opening an Apple
-  distribution URL, exiting, and restarting always require user confirmation.
+  exact target selection and verification; installation, opening the GitHub
+  sideload page, exiting, and restarting always require user confirmation.
 - Windows uses MSI as the canonical installed channel. Both MSI and Burn EXE
-  must have valid timestamped Authenticode signatures from an application-
-  compiled trust allow-list, and Burn must embed the exact signed MSI.
+  must have timestamped Authenticode signatures from the exact application-
+  compiled self-signed leaf, and Burn must embed the exact signed MSI. The leaf
+  is temporarily trusted only inside native CI verification; end-user Windows
+  trust/SmartScreen warnings are not bypassed.
 - Android requires a higher `versionCode`, the canonical package ID, and signer
   equality between the installed application, manifest, and verified APK.
-  Android PackageInstaller remains interactive. iOS never self-installs an IPA.
+  Android PackageInstaller remains interactive. The IPA must be an iPhoneOS
+  arm64 device archive with no embedded profile; users re-sign it themselves
+  with Sideloadly/AltStore, and iOS never self-installs it.
 - Each native release job builds, verifies, emits SHA-bound evidence, and
   creates a GitHub artifact attestation. The final protected job reconstructs
   only the three named current-run artifacts and verifies the exact inventory.
@@ -48,17 +53,17 @@ stable package identity, deterministic selection, or end-to-end verification.
 
 ## Consequences
 
-Production release is intentionally blocked unless all Android, Apple, and
-Windows signing credentials and public identity variables exist. An unsigned,
-renamed, stale, ambiguously selected, or incompletely evidenced package cannot
-be substituted for a mandatory asset. An existing draft or public release for
-the tag also blocks reruns so an operator must audit unexpected remote state.
+Production release is intentionally blocked unless all Android and Windows
+signing credentials, public identity variables, crash-delivery configuration,
+and owner-confirmed WiX acceptance exist. A wrongly signed, stale, simulator,
+ambiguously selected, or incompletely evidenced package cannot be substituted
+for a mandatory asset. An existing draft or public release for the tag also
+blocks reruns so an operator must audit unexpected remote state.
 
 Windows users installed by MSI stay on the MSI channel; Burn is a signed
 interactive bootstrapper for first install. Android and iOS distribution retain
-their platform confirmation/review requirements. The iOS IPA is also uploaded
-to App Store Connect before GitHub publication, and the manifest links only to
-an approved Apple HTTPS distribution URL.
+their platform confirmation requirements. The iOS manifest links only to the
+canonical GitHub release page and makes no App Store availability claim.
 
 The Flet Python runtime still cannot promise arbitrary Moodle polling after
 process death. Native deadline schedules and the bounded background extension

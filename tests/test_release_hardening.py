@@ -96,7 +96,7 @@ def test_release_manifest_is_generated_only_from_exact_verified_inventory():
     inventory = _read("scripts/release_inventory.py")
 
     assert "verify_release_inventory(" in generator
-    assert '"schema_version": 2' in generator
+    assert '"schema_version": 3' in generator
     assert '"schema": 1' not in generator
     assert "REQUIRED_PACKAGE_NAMES" in inventory
     for pattern in (
@@ -170,27 +170,29 @@ def test_ios_build_bundles_the_native_background_sync_plugin():
     )
 
 
-def test_release_ipa_uses_distribution_identity_profile_and_native_verifier():
+def test_release_ipa_is_unsigned_device_archive_for_manual_resigning():
     workflow = _read(".github/workflows/release.yml")
     for name in (
         "APPLE_CERTIFICATE_P12_BASE64",
         "APPLE_CERTIFICATE_PASSWORD",
         "APPLE_PROVISIONING_PROFILE_BASE64",
         "APPLE_API_PRIVATE_KEY_BASE64",
-    ):
-        assert f"{name}: ${{{{ secrets.{name} }}}}" in workflow
-    for name in (
         "APPLE_TEAM_ID",
         "APPLE_SIGNING_IDENTITY",
         "APPLE_SIGNING_CERT_SHA256",
         "APPLE_API_ISSUER_ID",
         "APPLE_API_KEY_ID",
+        "IOS_DISTRIBUTION_URL",
+        "upload_ipa_release.py",
+        "verify_ipa_release.sh",
     ):
-        assert f"{name}: ${{{{ vars.{name} }}}}" in workflow
-    assert "IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}" in workflow
-    assert "--ios-export-method app-store-connect" in workflow
-    assert "verify_ipa_release.sh" in workflow
-    assert "zip -r -q UTHelper.ipa Payload" not in workflow
+        assert name not in workflow
+    assert "flet build ipa" in workflow
+    assert "package_unsigned_ipa.py" in workflow
+    assert "find build/ios/archive" in workflow
+    assert "--ios-export-method" not in workflow
+    assert "--ios-provisioning-profile" not in workflow
+    assert "--ios-signing-certificate" not in workflow
     assert "yes | flet build ipa" not in workflow
 
 
@@ -203,23 +205,16 @@ def test_pull_request_ios_artifact_never_uses_ipa_extension():
     assert "*.ipa" not in workflow
 
 
-def test_ipa_verifier_checks_distribution_profile_entitlements_and_leaf_cert():
-    script = _read("scripts/verify_ipa_release.sh")
+def test_ipa_verifier_checks_device_architecture_and_unsigned_identity():
+    script = _read("scripts/package_unsigned_ipa.py")
 
-    assert "codesign --verify --deep --strict --verbose=4" in script
-    assert "codesign -d --entitlements :-" in script
-    assert "security cms -D" in script
-    assert "ProvisionedDevices" in script
-    assert "get-task-allow" in script
-    assert "com.apple.developer.team-identifier" in script
-    assert "DeveloperCertificates" in script
-    assert "major * 1_000_000 + minor * 1_000 + patch" in script
-    assert "codesign -d --extract-certificates" in script
-    assert "openssl x509" in script
-    assert "trap cleanup EXIT" in script
-    assert 'test "${#APPS[@]}" -eq 1' in script
-    workflow = _read(".github/workflows/release.yml")
-    assert "unset APPLE_API_PRIVATE_KEY_BASE64" in workflow
+    assert 'platforms != ["iPhoneOS"]' in script
+    assert "_CPU_TYPE_ARM64" in script
+    assert "embedded.mobileprovision" in script
+    assert '"signature_kind": "unsigned-resign-required"' in script
+    assert '"signature_valid": False' in script
+    assert "_safe_ipa_members" in script
+    assert "timeout=120" in script
 
 
 def test_local_android_build_script_applies_the_native_notification_patch():
@@ -292,6 +287,8 @@ def test_burn_verifier_identifies_extensionless_embedded_msi_by_ole_magic():
     assert "manifest.xml" in script
     assert "PrimaryUpgradeCode" in script
     assert "Registration" in script
+    assert "schema_version=2" in script
+    assert 'signature_kind="self-signed-pinned"' in script
 
 
 def test_windows_release_build_invocations_are_bounded_and_cwd_independent():
@@ -513,7 +510,7 @@ def test_release_workflow_has_native_signed_jobs_and_one_final_publication_job()
     for job in (
         "validate-release-source:",
         "build-signed-android:",
-        "build-signed-ios:",
+        "build-unsigned-ios:",
         "build-signed-windows:",
         "publish-exact-release:",
     ):
@@ -536,8 +533,8 @@ def test_release_credentials_are_preflighted_before_native_runner_jobs():
     assert "python3 scripts/validate_release_credentials.py" in preflight
 
     for job, next_job in (
-        ("build-signed-android", "build-signed-ios"),
-        ("build-signed-ios", "build-signed-windows"),
+        ("build-signed-android", "build-unsigned-ios"),
+        ("build-unsigned-ios", "build-signed-windows"),
         ("build-signed-windows", "publish-exact-release"),
     ):
         body = workflow.split(f"  {job}:\n", 1)[1].split(
@@ -570,7 +567,7 @@ def test_release_final_job_requires_all_builds_and_exact_inventory():
     workflow = _read(".github/workflows/release.yml")
     assert (
         "needs: [validate-release-source, build-signed-android, "
-        "build-signed-ios, build-signed-windows]"
+        "build-unsigned-ios, build-signed-windows]"
     ) in workflow
     for asset in (
         "UTHelper-$VERSION.ipa",
@@ -626,16 +623,24 @@ def test_windows_release_builds_and_verifies_bundle_before_wix():
     assert "build/flutter/lib/main.dart" not in workflow
 
 
+def test_windows_release_temporarily_trusts_and_removes_exact_self_signed_leaf():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert 'Import-Certificate -FilePath $publicCertificate -CertStoreLocation "Cert:\\CurrentUser\\Root"' in workflow
+    assert "WINDOWS_TRUSTED_CERT_THUMBPRINT" in workflow
+    assert "Temporary Windows trust import identity mismatch" in workflow
+    assert "Compiled Windows release pin mismatch" in workflow
+    assert "TRUSTED_WINDOWS_SIGNER_SHA256" in workflow
+    assert 'Remove-Item -LiteralPath "Cert:\\CurrentUser\\Root\\$env:WINDOWS_TRUSTED_CERT_THUMBPRINT"' in workflow
+    assert "if: always()" in workflow
+
+
 def test_release_inputs_use_secrets_only_for_private_key_material():
     workflow = _read(".github/workflows/release.yml")
     for name in (
         "ANDROID_KEYSTORE_BASE64",
         "ANDROID_KEYSTORE_PASSWORD",
         "ANDROID_KEY_PASSWORD",
-        "APPLE_CERTIFICATE_P12_BASE64",
-        "APPLE_CERTIFICATE_PASSWORD",
-        "APPLE_PROVISIONING_PROFILE_BASE64",
-        "APPLE_API_PRIVATE_KEY_BASE64",
         "WINDOWS_PFX_BASE64",
         "WINDOWS_PFX_PASSWORD",
     ):
@@ -643,12 +648,6 @@ def test_release_inputs_use_secrets_only_for_private_key_material():
     for name in (
         "ANDROID_KEY_ALIAS",
         "ANDROID_SIGNING_CERT_SHA256",
-        "APPLE_TEAM_ID",
-        "APPLE_SIGNING_IDENTITY",
-        "APPLE_SIGNING_CERT_SHA256",
-        "APPLE_API_ISSUER_ID",
-        "APPLE_API_KEY_ID",
-        "IOS_DISTRIBUTION_URL",
         "WINDOWS_SIGNING_CERT_SHA256",
         "WINDOWS_SIGNER_SUBJECT",
         "WINDOWS_TIMESTAMP_URL",
@@ -657,6 +656,14 @@ def test_release_inputs_use_secrets_only_for_private_key_material():
     ):
         assert f"{name}: ${{{{ vars.{name} }}}}" in workflow
         assert f"secrets.{name}" not in workflow
+    for removed in (
+        "APPLE_CERTIFICATE_P12_BASE64",
+        "APPLE_PROVISIONING_PROFILE_BASE64",
+        "APPLE_API_PRIVATE_KEY_BASE64",
+        "APPLE_TEAM_ID",
+        "IOS_DISTRIBUTION_URL",
+    ):
+        assert removed not in workflow
 
 
 def test_validate_job_runs_full_suite_with_workspace_import_paths():

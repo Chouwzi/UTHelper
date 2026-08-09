@@ -167,3 +167,19 @@ def test_update_confirmation_uses_required_windows_affirmative_copy(monkeypatch)
     controller._show_update_confirmation()
 
     assert shown[0].actions[1].content == "Cài đặt và thoát"
+
+
+def test_update_confirmation_explains_ios_sideload_and_resigning(monkeypatch):
+    controller = AppController.__new__(AppController)
+    shown = []
+    controller.page = SimpleNamespace(show_dialog=shown.append)
+    controller._update_coordinator = SimpleNamespace(confirm_install=lambda: None)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", False)
+
+    controller._show_update_confirmation()
+
+    dialog = shown[0]
+    assert dialog.actions[1].content == "Mở trang tải IPA"
+    assert "Sideloadly/AltStore" in dialog.content.value
+    assert "cùng Apple ID" in dialog.content.value

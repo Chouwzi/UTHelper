@@ -26,7 +26,9 @@ from platform_utils.autostart import has_package_identity
 MSI_UPGRADE_CODE = "{B1EB1032-5ACD-497D-8FD2-AB760218CBE3}"
 BURN_UPGRADE_CODE = "{EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0}"
 INSTALL_CHANNEL_KEY = r"Software\UTHelper"
-TRUSTED_WINDOWS_SIGNER_SHA256: frozenset[str] = frozenset()
+TRUSTED_WINDOWS_SIGNER_SHA256: frozenset[str] = frozenset(
+    {"7E3547EE6A31325A47BE22049E238BA83CA1D90AFB8A30D053060D02678A0B3C"}
+)
 _MSI_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
 
 _SIGNATURE_SCRIPT = r"""
@@ -286,7 +288,14 @@ class WindowsPackageVerifier:
 
             signature = self.signature_probe(candidate_path, self.timeout_seconds)
             fingerprint = normalize_fingerprint(signature.fingerprint)
-            if signature.status != "Valid" or not signature.timestamped:
+            self_signed_pinned = (
+                candidate.manifest.schema_version == 3
+                and package.signature_kind == "self-signed-pinned"
+            )
+            allowed_status = signature.status == "Valid" or (
+                self_signed_pinned and signature.status == "UnknownError"
+            )
+            if not allowed_status or not signature.timestamped:
                 return VerificationResult(False, "Authenticode validation failed")
             if not _same_subject(signature.subject, package.signer_identity):
                 return VerificationResult(False, "signer subject mismatch")

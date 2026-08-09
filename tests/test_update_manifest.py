@@ -43,6 +43,28 @@ def _schema2(packages):
     }
 
 
+def _schema3(package):
+    return {
+        "schema_version": 3,
+        "release_version": "2.2.0",
+        "minimum_supported_version": "2.1.0",
+        "published_at": "2026-08-09T00:00:00Z",
+        "release_notes_url": (
+            "https://github.com/Chouwzi/UTHelper/releases/tag/v2.2.0"
+        ),
+        "packages": [package],
+    }
+
+
+def _schema3_package(**changes):
+    value = {
+        **_package(),
+        "signature_kind": "self-signed-pinned",
+    }
+    value.update(changes)
+    return value
+
+
 def test_schema2_selects_only_exact_runtime_target():
     manifest = parse_manifest(
         _schema2([_package()]),
@@ -59,6 +81,96 @@ def test_schema2_selects_only_exact_runtime_target():
     assert candidate.package.package_type == "msi"
     assert candidate.automatic_install_allowed is True
     assert isinstance(candidate.package.install_strategy, MappingProxyType)
+    assert candidate.package.signature_kind == "certificate-pinned"
+
+
+def test_schema3_accepts_unsigned_ios_sideload_package():
+    package = _schema3_package(
+        platform="ios",
+        architecture="arm64",
+        package_type="ipa",
+        install_channel="sideload",
+        url=(
+            "https://github.com/Chouwzi/UTHelper/releases/download/"
+            "v2.2.0/UTHelper-2.2.0.ipa"
+        ),
+        signer_identity="",
+        certificate_fingerprint="",
+        signature_kind="unsigned-resign-required",
+        install_strategy={"kind": "manual_sideload"},
+    )
+
+    manifest = parse_manifest(
+        _schema3(package),
+        expected_release_version="2.2.0",
+    )
+
+    assert manifest.schema_version == 3
+    assert manifest.packages[0].signature_kind == "unsigned-resign-required"
+
+
+@pytest.mark.parametrize("kind", ["apk-pinned", "self-signed-pinned"])
+def test_schema3_pinned_signatures_require_identity_and_fingerprint(kind):
+    target = (
+        {
+            "platform": "android",
+            "architecture": "universal",
+            "package_type": "apk",
+            "install_channel": "sideload",
+            "url": (
+                "https://github.com/Chouwzi/UTHelper/releases/download/"
+                "v2.2.0/UTHelper-2.2.0.apk"
+            ),
+            "install_strategy": {"kind": "android_package_installer"},
+        }
+        if kind == "apk-pinned"
+        else {}
+    )
+    package = _schema3_package(
+        **target,
+        signature_kind=kind,
+        signer_identity="",
+        certificate_fingerprint="",
+    )
+
+    with pytest.raises(ManifestError, match="pinned signature identity"):
+        parse_manifest(
+            _schema3(package),
+            expected_release_version="2.2.0",
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        (
+            {"signature_kind": "unsigned-resign-required"},
+            "signature kind does not match package target",
+        ),
+        (
+            {
+                "platform": "ios",
+                "architecture": "arm64",
+                "package_type": "ipa",
+                "install_channel": "sideload",
+                "url": (
+                    "https://github.com/Chouwzi/UTHelper/releases/download/"
+                    "v2.2.0/UTHelper-2.2.0.ipa"
+                ),
+                "signature_kind": "unsigned-resign-required",
+                "install_strategy": {"kind": "manual_sideload"},
+            },
+            "unsigned package identity",
+        ),
+        ({"signature_kind": "unknown"}, "signature_kind is invalid"),
+    ],
+)
+def test_schema3_rejects_mismatched_signature_contract(changes, message):
+    with pytest.raises(ManifestError, match=message):
+        parse_manifest(
+            _schema3(_schema3_package(**changes)),
+            expected_release_version="2.2.0",
+        )
 
 
 def test_schema2_rejects_duplicate_candidates():
