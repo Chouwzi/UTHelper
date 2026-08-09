@@ -522,6 +522,16 @@ def test_release_workflow_has_native_signed_jobs_and_one_final_publication_job()
     assert 'gh release edit "$TAG" --draft=false --latest' in workflow
 
 
+def test_windows_release_job_forces_utf8_for_flet_cli_output():
+    workflow = _read(".github/workflows/release.yml")
+    windows_job = workflow.split("  build-signed-windows:\n", 1)[1].split(
+        "\n  publish-exact-release:\n", 1
+    )[0]
+
+    assert "PYTHONUTF8: '1'" in windows_job
+    assert "PYTHONIOENCODING: utf-8" in windows_job
+
+
 def test_release_credentials_are_preflighted_before_native_runner_jobs():
     workflow = _read(".github/workflows/release.yml")
 

@@ -1114,3 +1114,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Release-source validation now installs `keyring>=25.0.0` explicitly and a
   workflow contract test locks that dependency parity. The project version is
   `2.2.1` because the failed `v2.2.0` tag remains immutable and is not rewritten.
+
+## Windows release console UTF-8 boundary (2026-08-09)
+
+- The immutable `v2.2.1` release passed source and credential validation, then
+  the Windows runner stopped before compilation when Flet printed its Unicode
+  success marker through a CP1252 Python console. Android and iOS were cancelled
+  after the Windows failure because exact publication could no longer proceed.
+- The Windows release job now forces Python UTF-8 mode and UTF-8 standard-stream
+  encoding for Flet and all Python subprocesses. A workflow contract test locks
+  both variables. The next immutable release version is `2.2.2`.
