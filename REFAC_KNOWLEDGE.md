@@ -1211,3 +1211,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   from the same store. Progress markers bracket PFX decode, identity validation,
   public export, and trust import so any future timeout is attributable without
   weakening verification. The next immutable release version is `2.2.9`.
+
+## Hosted Windows SDK SignTool discovery (2026-08-09)
+
+- The immutable `v2.2.9` run proved the machine-root change: certificate decode,
+  pinned identity validation, trust import, and exact cleanup all completed.
+  Android and iOS also completed, but Windows then failed because the hosted
+  runner provides `signtool.exe` in the Windows SDK without adding it to PATH.
+- Release signing now prefers a PATH-resolved SignTool and otherwise discovers
+  the newest x64 candidate under `Program Files (x86)\Windows Kits\10\bin`, the
+  same hosted-runner-compatible pattern already used by the MSIX packager. A
+  release contract test rejects regression to an unqualified executable name.
+  The next immutable release version is `2.2.10`.

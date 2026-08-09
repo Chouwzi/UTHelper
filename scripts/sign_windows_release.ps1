@@ -28,10 +28,28 @@ function Invoke-BoundedProcess {
         $process.Dispose()
     }
 }
+function Resolve-SignToolPath {
+    $onPath = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+
+    $sdkBinRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+    $candidate = if (Test-Path -LiteralPath $sdkBinRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $sdkBinRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+    }
+    if ($null -eq $candidate) {
+        throw "signtool.exe was not found on PATH or in the Windows SDK"
+    }
+    return $candidate.FullName
+}
+$signToolPath = Resolve-SignToolPath
+Write-Output "Resolved Windows SignTool: $signToolPath"
 function Invoke-SignTool([string]$Path) {
     $signingPolicy = "/fd SHA256 /tr $TimestampUrl /td SHA256"
     if (-not $signingPolicy) { throw "Signing policy is unavailable" }
-    Invoke-BoundedProcess "signtool.exe" @("sign", "/fd", "SHA256", "/f", $PfxPath, "/p", $PfxPassword, "/tr", $TimestampUrl, "/td", "SHA256", $Path)
+    Invoke-BoundedProcess $signToolPath @("sign", "/fd", "SHA256", "/f", $PfxPath, "/p", $PfxPassword, "/tr", $TimestampUrl, "/td", "SHA256", $Path)
 }
 
 if ($Mode -eq "Msi") {

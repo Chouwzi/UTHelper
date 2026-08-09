@@ -292,6 +292,17 @@ def test_burn_signing_detaches_signs_reattaches_and_signs_outer_bundle():
     assert not re.search(r"(?m)^\s*wix burn (?:detach|reattach)\b", script)
 
 
+def test_windows_release_signing_resolves_sdk_signtool_when_it_is_not_on_path():
+    script = _read("scripts/sign_windows_release.ps1")
+
+    assert "Get-Command signtool.exe -ErrorAction SilentlyContinue" in script
+    assert '"${env:ProgramFiles(x86)}\\Windows Kits\\10\\bin"' in script
+    assert "\\\\x64\\\\signtool\\.exe$" in script
+    assert "signtool.exe was not found on PATH or in the Windows SDK" in script
+    assert "Invoke-BoundedProcess $signToolPath" in script
+    assert 'Invoke-BoundedProcess "signtool.exe"' not in script
+
+
 def test_burn_verifier_identifies_extensionless_embedded_msi_by_ole_magic():
     script = _read("scripts/verify_windows_release.ps1")
 
