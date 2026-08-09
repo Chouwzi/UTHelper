@@ -1134,3 +1134,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - The release workflow now requires exactly one `.xcarchive` directly beneath
   `build/ipa`, and its contract test rejects the stale source-build path. The
   next immutable release version is `2.2.3`.
+
+## Android successful-output exit-code boundary (2026-08-09)
+
+- The immutable `v2.2.3` run produced the signed 162.3 MB release APK and Flet
+  reported a successful build, but Flet CLI still returned exit code 1. Bash
+  consequently stopped before the manifest, package metadata, certificate, and
+  release-evidence checks; the other native job was cancelled to limit cost.
+- A non-zero Flet exit is now tolerated only when exactly one APK exists in the
+  expected `build/apk` output directory. All native manifest, `apkanalyzer`,
+  `apksigner`, certificate fingerprint, and evidence checks remain mandatory;
+  a missing or ambiguous output still fails immediately. A workflow contract
+  test locks this boundary. The next immutable release version is `2.2.4`.
