@@ -1,4 +1,4 @@
-"""Generate schema 2 only from the exact native-verified release inventory."""
+"""Generate schema 3 only from the exact native-verified release inventory."""
 
 from __future__ import annotations
 
@@ -23,36 +23,12 @@ except ModuleNotFoundError:  # Direct ``python scripts/generate_release_manifest
     from release_metadata import ReleaseMetadataError, release_build_number
 
 
-_APPLE_HOSTS = frozenset({"apps.apple.com", "testflight.apple.com"})
-
-
-def _apple_install_url(value: str) -> str:
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except (TypeError, ValueError) as exc:
-        raise InventoryError("iOS install URL must use an approved Apple host") from exc
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname not in _APPLE_HOSTS
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in (None, 443)
-        or not parsed.path.startswith("/")
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise InventoryError("iOS install URL must use an approved Apple host")
-    return value
-
-
 def generate_manifest_from_verified_inventory(
     release_dir: Path,
     evidence_dir: Path,
     *,
     version: str,
     repository: str = "Chouwzi/UTHelper",
-    ios_install_url: str = "https://apps.apple.com/app/id123",
     minimum_supported_version: str | None = None,
 ) -> dict:
     inventory = verify_release_inventory(
@@ -66,7 +42,6 @@ def generate_manifest_from_verified_inventory(
         release_build_number(minimum)
     except ReleaseMetadataError as exc:
         raise InventoryError("minimum supported version must be numeric X.Y.Z") from exc
-    apple_url = _apple_install_url(ios_install_url)
     base = f"https://github.com/{repository}/releases/download/v{version}"
     packages = []
     for item in inventory.packages:
@@ -74,8 +49,8 @@ def generate_manifest_from_verified_inventory(
         suffix = item.path.suffix.lower()
         if evidence.platform == "ios":
             package_type = "ipa"
-            install_channel = "app-store"
-            strategy = {"kind": "app_store", "url": apple_url}
+            install_channel = "sideload"
+            strategy = {"kind": "manual_sideload"}
         elif evidence.platform == "android":
             package_type = "apk"
             install_channel = "sideload"
@@ -97,13 +72,14 @@ def generate_manifest_from_verified_inventory(
                 "url": f"{base}/{urllib.parse.quote(item.name)}",
                 "sha256": item.sha256,
                 "size": item.size,
+                "signature_kind": evidence.signature_kind,
                 "signer_identity": evidence.signer_identity,
                 "certificate_fingerprint": evidence.certificate_fingerprint,
                 "install_strategy": strategy,
             }
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "release_version": version,
         "minimum_supported_version": minimum,
         "published_at": "1970-01-01T00:00:00Z",
@@ -120,7 +96,6 @@ def main() -> None:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--release-dir", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
-    parser.add_argument("--ios-install-url", required=True)
     parser.add_argument("--minimum-supported-version", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -129,7 +104,6 @@ def main() -> None:
         args.evidence_dir,
         version=args.version,
         repository=args.repository,
-        ios_install_url=args.ios_install_url,
         minimum_supported_version=args.minimum_supported_version,
     )
     args.output.write_text(
