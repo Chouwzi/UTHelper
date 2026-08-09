@@ -173,13 +173,14 @@ def verify_android_release(
     with apk.open("rb") as stream:
         apk_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     evidence: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "platform": "android",
         "asset_name": apk.name,
         "sha256": apk_sha256,
         "version": version,
         "product_id": package_id,
         "architecture": "universal",
+        "signature_kind": "apk-pinned",
         "signer_identity": package_id,
         "certificate_fingerprint": expected_fingerprint,
         "signature_valid": True,

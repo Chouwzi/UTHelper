@@ -7,6 +7,8 @@ import hashlib
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from core.update_models import (
     ReleaseManifest,
     ReleasePackage,
@@ -28,7 +30,13 @@ from platform_utils.windows_update import (
 )
 
 
-def _candidate(path: Path, *, fingerprint: str = "AB" * 32, signer: str = "CN=UTHelper"):
+def _candidate(
+    path: Path,
+    *,
+    fingerprint: str = "AB" * 32,
+    signer: str = "CN=UTHelper",
+    schema: int = 2,
+):
     payload = path.read_bytes()
     package_type = path.suffix.lstrip(".").lower()
     channel = "msi" if package_type == "msi" else "bootstrapper"
@@ -47,9 +55,12 @@ def _candidate(path: Path, *, fingerprint: str = "AB" * 32, signer: str = "CN=UT
         signer_identity=signer,
         certificate_fingerprint=fingerprint,
         install_strategy={"kind": strategy},
+        signature_kind=(
+            "self-signed-pinned" if schema == 3 else "certificate-pinned"
+        ),
     )
     manifest = ReleaseManifest(
-        schema_version=2,
+        schema_version=schema,
         release_version="2.2.0",
         minimum_supported_version="2.1.0",
         published_at=datetime(2026, 8, 4, tzinfo=UTC),
@@ -133,6 +144,78 @@ def test_windows_verifier_requires_chain_fingerprint_subject_and_msi_identity(tm
         msi_probe=lambda _path, _timeout: metadata,
     )
     assert not bad_subject.verify(path, candidate).verified
+
+
+def test_self_signed_pinned_package_accepts_untrusted_root_with_exact_pin(tmp_path):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"self-signed-msi")
+    candidate = _candidate(path, schema=3)
+    verifier = WindowsPackageVerifier(
+        signature_probe=lambda _path, _timeout: SignatureDetails(
+            "UnknownError",
+            "CN=UTHelper",
+            "AB" * 32,
+            True,
+        ),
+        trusted_fingerprints=frozenset({"AB" * 32}),
+        msi_probe=lambda _path, _timeout: MsiDetails(
+            "UTHelper",
+            "2.2.0",
+            MSI_UPGRADE_CODE,
+            "x64",
+        ),
+    )
+
+    assert verifier.verify(path, candidate).verified
+
+
+@pytest.mark.parametrize("status", ["HashMismatch", "NotSigned", "NotTrusted"])
+def test_self_signed_pinned_package_rejects_invalid_signature_status(
+    tmp_path,
+    status,
+):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"self-signed-msi")
+    candidate = _candidate(path, schema=3)
+    verifier = WindowsPackageVerifier(
+        signature_probe=lambda _path, _timeout: SignatureDetails(
+            status,
+            "CN=UTHelper",
+            "AB" * 32,
+            True,
+        ),
+        trusted_fingerprints=frozenset({"AB" * 32}),
+        msi_probe=lambda _path, _timeout: MsiDetails(
+            "UTHelper",
+            "2.2.0",
+            MSI_UPGRADE_CODE,
+            "x64",
+        ),
+    )
+
+    assert not verifier.verify(path, candidate).verified
+
+
+def test_schema_two_package_still_rejects_untrusted_self_signed_root(tmp_path):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"legacy-msi")
+    verifier = WindowsPackageVerifier(
+        signature_probe=lambda _path, _timeout: SignatureDetails(
+            "UnknownError",
+            "CN=UTHelper",
+            "AB" * 32,
+            True,
+        ),
+        trusted_fingerprints=frozenset({"AB" * 32}),
+        msi_probe=lambda _path, _timeout: MsiDetails(
+            "UTHelper",
+            "2.2.0",
+            MSI_UPGRADE_CODE,
+            "x64",
+        ),
+    )
+
+    assert not verifier.verify(path, _candidate(path, schema=2)).verified
 
 
 def test_tampered_manifest_and_attacker_package_cannot_redefine_windows_trust(tmp_path):

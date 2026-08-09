@@ -286,7 +286,14 @@ class WindowsPackageVerifier:
 
             signature = self.signature_probe(candidate_path, self.timeout_seconds)
             fingerprint = normalize_fingerprint(signature.fingerprint)
-            if signature.status != "Valid" or not signature.timestamped:
+            self_signed_pinned = (
+                candidate.manifest.schema_version == 3
+                and package.signature_kind == "self-signed-pinned"
+            )
+            allowed_status = signature.status == "Valid" or (
+                self_signed_pinned and signature.status == "UnknownError"
+            )
+            if not allowed_status or not signature.timestamped:
                 return VerificationResult(False, "Authenticode validation failed")
             if not _same_subject(signature.subject, package.signer_identity):
                 return VerificationResult(False, "signer subject mismatch")

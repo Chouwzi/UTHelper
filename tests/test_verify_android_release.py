@@ -79,6 +79,8 @@ def test_verify_android_release_emits_exact_native_evidence(tmp_path, monkeypatc
 
     assert json.loads(output.read_text(encoding="utf-8")) == evidence
     assert evidence["asset_name"] == apk.name
+    assert evidence["schema_version"] == 2
+    assert evidence["signature_kind"] == "apk-pinned"
     assert evidence["certificate_fingerprint"] == FINGERPRINT
     assert evidence["checks"] == [
         "apk_signature",

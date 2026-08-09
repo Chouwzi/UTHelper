@@ -96,7 +96,7 @@ def test_release_manifest_is_generated_only_from_exact_verified_inventory():
     inventory = _read("scripts/release_inventory.py")
 
     assert "verify_release_inventory(" in generator
-    assert '"schema_version": 2' in generator
+    assert '"schema_version": 3' in generator
     assert '"schema": 1' not in generator
     assert "REQUIRED_PACKAGE_NAMES" in inventory
     for pattern in (
@@ -292,6 +292,8 @@ def test_burn_verifier_identifies_extensionless_embedded_msi_by_ole_magic():
     assert "manifest.xml" in script
     assert "PrimaryUpgradeCode" in script
     assert "Registration" in script
+    assert "schema_version=2" in script
+    assert 'signature_kind="self-signed-pinned"' in script
 
 
 def test_windows_release_build_invocations_are_bounded_and_cwd_independent():
