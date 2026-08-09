@@ -17,8 +17,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Generate UTHelper's public diagnostics runtime config",
     )
     parser.add_argument("--sentry-dsn", nargs="?", const="", default="")
+    parser.add_argument("--require-configured", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.require_configured and not args.sentry_dsn.strip():
+        parser.error("a configured Sentry DSN is required")
     try:
         generate_public_config(args.output, args.sentry_dsn)
     except PublicConfigError as exc:
