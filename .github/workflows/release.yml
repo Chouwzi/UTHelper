@@ -115,10 +115,10 @@ jobs:
           export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
           export FLET_ANDROID_SIGNING_KEY_ALIAS="$ANDROID_KEY_ALIAS"
 
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 
           MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
@@ -266,7 +266,7 @@ jobs:
           if parsed.scheme != "https" or parsed.hostname not in {"apps.apple.com", "testflight.apple.com"}:
               raise SystemExit("IOS_DISTRIBUTION_URL must be an approved Apple HTTPS URL")
           PY
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --ios-team-id "$APPLE_TEAM_ID" --ios-export-method app-store-connect --ios-provisioning-profile "$PROFILE_UUID" --ios-signing-certificate "$APPLE_SIGNING_IDENTITY" --yes --verbose
           find build/ipa -type f -name '*.ipa' -print | sort > "$RUNNER_TEMP/ipa-candidates.txt"
           test "$(wc -l < "$RUNNER_TEMP/ipa-candidates.txt" | tr -d ' ')" -eq 1
@@ -407,7 +407,7 @@ jobs:
           BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
         run: |
           $ErrorActionPreference = "Stop"
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
           flet build windows --build-version "$env:VERSION" --build-number "$env:BUILD_NUMBER" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
           if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed" }
