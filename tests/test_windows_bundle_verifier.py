@@ -13,6 +13,7 @@ from scripts.prepare_windows_bundle import prepare_windows_bundle
 def _write_valid_bundle(root: Path) -> None:
     (root / "Lib" / "encodings").mkdir(parents=True)
     (root / "app").mkdir()
+    (root / "app" / "assets").mkdir()
     (root / "site-packages").mkdir()
     (root / "site-packages" / "winrt").mkdir()
     (root / "site-packages" / "win32" / "lib").mkdir(parents=True)
@@ -36,6 +37,7 @@ def _write_valid_bundle(root: Path) -> None:
     ).write_bytes(b"dll")
     (root / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
     (root / "app" / "main.pyc").write_bytes(b"pyc")
+    (root / "app" / "assets" / "release-version").write_bytes(b"2.2.11\n")
 
 
 def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
@@ -54,6 +56,7 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
         ("flutter_windows.dll", "Flutter runtime DLL"),
         ("Lib/encodings/__init__.pyc", "filesystem encodings"),
         ("app/main.pyc", "compiled application entry"),
+        ("app/assets/release-version", "packaged release version"),
         (
             "site-packages/winrt/_winrt_windows_applicationmodel.cp314-win_amd64.pyd",
             "Windows.ApplicationModel projection",
@@ -83,6 +86,13 @@ def test_source_fallbacks_are_accepted_when_compilation_is_disabled(tmp_path):
     (tmp_path / "app" / "main.pyc").rename(tmp_path / "app" / "main.py")
 
     verify_bundle(tmp_path)
+
+
+def test_bundle_version_must_match_the_release_being_packaged(tmp_path):
+    _write_valid_bundle(tmp_path)
+
+    with pytest.raises(BundleVerificationError, match="release version mismatch"):
+        verify_bundle(tmp_path, expected_version="2.2.12")
 
 
 def test_cli_reports_all_detected_issues(tmp_path, capsys):
