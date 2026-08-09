@@ -1103,3 +1103,14 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   occurrences and place the current repository/source roots first
   deterministically. The original two failures then pass, and the complete
   post-merge suite passes **1184 tests with 25 skipped in 40.39 seconds**.
+
+## Release-source keyring parity (2026-08-09)
+
+- The first immutable `v2.2.0` release attempt stopped in the Linux source
+  validation job before any native runner started. The release job installed
+  the base project while the complete config tests require the same `keyring`
+  test dependency that normal CI already installs; ten secure-storage tests
+  therefore failed only in that clean release environment.
+- Release-source validation now installs `keyring>=25.0.0` explicitly and a
+  workflow contract test locks that dependency parity. The project version is
+  `2.2.1` because the failed `v2.2.0` tag remains immutable and is not rewritten.

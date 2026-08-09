@@ -675,7 +675,10 @@ def test_validate_job_runs_full_suite_with_workspace_import_paths():
     ) in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
     assert 'pip install -e ".[dev,windows]"' not in workflow
-    assert 'pip install -e . "pytest>=9.0.3" "pytest-timeout>=2.3,<3"' in workflow
+    assert (
+        'pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" '
+        '"pytest-timeout>=2.3,<3"'
+    ) in workflow
 
 
 def test_release_manifest_preserves_the_supported_2_1_floor():
