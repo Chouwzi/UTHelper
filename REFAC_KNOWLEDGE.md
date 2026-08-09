@@ -1135,14 +1135,19 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `build/ipa`, and its contract test rejects the stale source-build path. The
   next immutable release version is `2.2.3`.
 
-## Android successful-output exit-code boundary (2026-08-09)
+## Android merged-manifest verification boundary (2026-08-09)
 
-- The immutable `v2.2.3` run produced the signed 162.3 MB release APK and Flet
-  reported a successful build, but Flet CLI still returned exit code 1. Bash
-  consequently stopped before the manifest, package metadata, certificate, and
-  release-evidence checks; the other native job was cancelled to limit cost.
-- A non-zero Flet exit is now tolerated only when exactly one APK exists in the
-  expected `build/apk` output directory. All native manifest, `apkanalyzer`,
-  `apksigner`, certificate fingerprint, and evidence checks remain mandatory;
-  a missing or ambiguous output still fails immediately. A workflow contract
-  test locks this boundary. The next immutable release version is `2.2.4`.
+- The immutable `v2.2.3` and `v2.2.4` runs both produced the signed 162.3 MB
+  release APK. The apparent post-build Flet exit was diagnosed more precisely
+  in `v2.2.4`: Flet returned successfully, then the first silent `grep` failed
+  because the release workflow inspected the app source manifest. Plugin
+  receivers are contributed by Android libraries and only exist in the final
+  Gradle-merged APK manifest.
+- Release verification now matches the already-passing Android PR workflow: it
+  extracts the final APK manifest with `apkanalyzer` before checking every
+  notification/background receiver. The independent Python release verifier
+  repeats the merged-manifest check alongside the package version and pinned
+  signing-certificate checks. The temporary non-zero-Flet workaround was
+  removed because the evidence did not support that diagnosis. A workflow
+  contract test rejects the source-manifest check. The next immutable release
+  version is `2.2.5`.
