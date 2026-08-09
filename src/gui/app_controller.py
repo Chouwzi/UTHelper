@@ -452,13 +452,16 @@ class AppController:
                     )
                 self.page.window.visible = not hide_window
 
-        self.page.update()
-        if self.force_visible and not _is_mobile:
-            self.window_activator.request_show()
+        # Publish the initial window state only after the activation receiver is
+        # ready. Otherwise an autostart window can become observably hidden in
+        # the small gap before a manual second launch is able to hand off SHOW.
         if self.activation_broker is not None:
             self.activation_broker.bind_show_handler(
                 self.window_activator.request_show
             )
+        self.page.update()
+        if self.force_visible and not _is_mobile:
+            self.window_activator.request_show()
 
     async def _on_window_event(self, e):
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data

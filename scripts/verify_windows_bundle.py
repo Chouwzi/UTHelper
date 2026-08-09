@@ -45,10 +45,24 @@ def inspect_bundle(bundle_dir: Path) -> tuple[str, ...]:
     site_packages = root / "site-packages"
     if not site_packages.is_dir():
         issues.append("site-packages directory is missing")
-    elif not any(
-        (site_packages / "winrt").glob("_winrt_windows_applicationmodel*.pyd")
-    ):
-        issues.append("Windows.ApplicationModel projection is missing")
+    else:
+        if not any(
+            (site_packages / "winrt").glob("_winrt_windows_applicationmodel*.pyd")
+        ):
+            issues.append("Windows.ApplicationModel projection is missing")
+        win32 = site_packages / "win32"
+        for module in ("win32api", "win32event", "win32security"):
+            if not any(win32.glob(f"{module}*.pyd")):
+                issues.append(f"packaged {module} extension is missing")
+        for module, label in (
+            ("win32con", "win32con"),
+            ("winerror", "winerror"),
+            ("pywintypes", "pywintypes loader"),
+        ):
+            if not any((win32 / "lib").glob(f"{module}.py*")):
+                issues.append(f"packaged {label} module is missing")
+        if not any((site_packages / "pywin32_system32").glob("pywintypes3*.dll")):
+            issues.append("packaged pywintypes runtime is missing")
 
     return tuple(issues)
 

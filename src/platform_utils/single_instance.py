@@ -5,12 +5,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
+from pathlib import Path
 import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
 from threading import Event, Lock, Thread
 from typing import Callable, Protocol
+
+from platform_utils.autostart import get_current_process_executable
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +23,66 @@ WAIT_TIMEOUT = 258
 # Every manual handoff is bounded to this duration, regardless of caller input.
 MAX_ACKNOWLEDGEMENT_TIMEOUT_SECONDS = 1.5
 RECEIVER_WAIT_TIMEOUT_MS = 250
+
+_BUNDLED_PYWIN32_DIRECTORIES = (
+    Path("win32"),
+    Path("win32") / "lib",
+    Path("pywin32_system32"),
+)
+
+
+def prepare_bundled_pywin32_imports(
+    *,
+    executable: str | os.PathLike[str] | None = None,
+    module_file: str | os.PathLike[str] | None = None,
+    module_search_path: list[str] | None = None,
+) -> tuple[str, ...]:
+    """Restore pywin32 ``.pth`` entries omitted by packaged Flet runtimes.
+
+    Serious Python places pywin32 under a sibling ``site-packages`` directory
+    but does not process ``pywin32.pth``.  Only the three reviewed directory
+    entries are restored; executable lines from a ``.pth`` file are never run.
+    Development interpreters have no sibling layout and remain unchanged.
+    """
+
+    # Flet/Serious Python can expose its extracted embedded interpreter through
+    # ``sys.executable``.  The Windows process image is the authoritative bundle
+    # location and is already used by the autostart implementation for the same
+    # packaging reason.
+    executable_path = Path(executable or get_current_process_executable()).resolve()
+    module_path = Path(module_file or __file__).resolve()
+    package_roots: list[Path] = [executable_path.parent / "site-packages"]
+    # Flet's embedded interpreter can expose a temporary Python executable.
+    # The compiled module remains under <bundle>/app, so inspect only its
+    # nearest ancestors for the sibling package directory.
+    package_roots.extend(parent / "site-packages" for parent in module_path.parents[:4])
+    package_root = next(
+        (
+            root
+            for root in package_roots
+            if all((root / relative).is_dir() for relative in _BUNDLED_PYWIN32_DIRECTORIES)
+        ),
+        None,
+    )
+    if package_root is None:
+        return ()
+    search_path = module_search_path if module_search_path is not None else sys.path
+    restored = tuple(
+        str((package_root / relative).resolve())
+        for relative in _BUNDLED_PYWIN32_DIRECTORIES
+    )
+
+    existing = {
+        os.path.normcase(os.path.abspath(entry))
+        for entry in search_path
+        if isinstance(entry, str) and entry
+    }
+    for entry in reversed(restored):
+        normalized = os.path.normcase(os.path.abspath(entry))
+        if normalized not in existing:
+            search_path.insert(0, entry)
+            existing.add(normalized)
+    return restored
 
 
 class InstanceRole(str, Enum):
@@ -413,6 +477,8 @@ def bootstrap_windows_instance(
     api: KernelObjectApi | None = None
     secondary_mutex: object | None = None
     try:
+        if kernel is None:
+            prepare_bundled_pywin32_imports()
         api = kernel or PyWin32KernelObjectApi()
         user_sid = api.current_user_sid()
         names = build_instance_object_names(

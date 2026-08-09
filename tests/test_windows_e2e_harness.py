@@ -6,6 +6,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_e2e_harness_establishes_app_readiness_before_manual_handoff():
+    script = (ROOT / "scripts" / "test_windows_single_instance_e2e.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    readiness = script.index("App started successfully")
+    manual_handoff = script.index("# 2. A manual second launch")
+
+    assert readiness < manual_handoff
+
+
 def test_e2e_harness_rejects_missing_executable_without_waiting():
     test_root = ROOT / "build" / "test-harness"
     test_root.mkdir(parents=True, exist_ok=True)
