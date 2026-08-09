@@ -147,6 +147,17 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
     assert "yes | flet build apk" not in workflow
     assert "--yes --verbose" in workflow
+    assert "COMPLETED_APKS" not in workflow
+    assert "MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml" not in workflow
+    for receiver in (
+        "ScheduledNotificationReceiver",
+        "ScheduledNotificationBootReceiver",
+        "ActionBroadcastReceiver",
+        "DeadlineAlarmReceiver",
+        "RescheduleReceiver",
+    ):
+        assert f'grep -q "{receiver}" final-android-manifest.xml' in workflow
+    assert '"$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"' in workflow
 
 
 def test_android_pr_artifact_cannot_be_confused_with_release():
@@ -189,7 +200,11 @@ def test_release_ipa_is_unsigned_device_archive_for_manual_resigning():
         assert name not in workflow
     assert "flet build ipa" in workflow
     assert "package_unsigned_ipa.py" in workflow
-    assert "find build/ios/archive" in workflow
+    assert (
+        "find build/ipa -mindepth 1 -maxdepth 1 -type d "
+        "-name '*.xcarchive'"
+    ) in workflow
+    assert "find build/ios/archive" not in workflow
     assert "--ios-export-method" not in workflow
     assert "--ios-provisioning-profile" not in workflow
     assert "--ios-signing-certificate" not in workflow
@@ -275,6 +290,17 @@ def test_burn_signing_detaches_signs_reattaches_and_signs_outer_bundle():
     assert "Stop-Process -Id $process.Id" in script
     assert 'Invoke-BoundedProcess "wix"' in script
     assert not re.search(r"(?m)^\s*wix burn (?:detach|reattach)\b", script)
+
+
+def test_windows_release_signing_resolves_sdk_signtool_when_it_is_not_on_path():
+    script = _read("scripts/sign_windows_release.ps1")
+
+    assert "Get-Command signtool.exe -ErrorAction SilentlyContinue" in script
+    assert '"${env:ProgramFiles(x86)}\\Windows Kits\\10\\bin"' in script
+    assert "\\\\x64\\\\signtool\\.exe$" in script
+    assert "signtool.exe was not found on PATH or in the Windows SDK" in script
+    assert "Invoke-BoundedProcess $signToolPath" in script
+    assert 'Invoke-BoundedProcess "signtool.exe"' not in script
 
 
 def test_burn_verifier_identifies_extensionless_embedded_msi_by_ole_magic():
@@ -522,6 +548,16 @@ def test_release_workflow_has_native_signed_jobs_and_one_final_publication_job()
     assert 'gh release edit "$TAG" --draft=false --latest' in workflow
 
 
+def test_windows_release_job_forces_utf8_for_flet_cli_output():
+    workflow = _read(".github/workflows/release.yml")
+    windows_job = workflow.split("  build-signed-windows:\n", 1)[1].split(
+        "\n  publish-exact-release:\n", 1
+    )[0]
+
+    assert "PYTHONUTF8: '1'" in windows_job
+    assert "PYTHONIOENCODING: utf-8" in windows_job
+
+
 def test_release_credentials_are_preflighted_before_native_runner_jobs():
     workflow = _read(".github/workflows/release.yml")
 
@@ -582,19 +618,22 @@ def test_release_final_job_requires_all_builds_and_exact_inventory():
 
 def test_publication_creates_empty_draft_records_id_then_uploads_six_assets():
     workflow = _read(".github/workflows/release.yml")
-    create = 'gh release create "$TAG" --draft --verify-tag'
-    lookup = (
-        'CREATED_RELEASE_ID=$(gh api '
-        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG"'
-    )
+    preflight = 'existing_release_ids=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100"'
+    create = 'release_record=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases"'
+    capture = "CREATED_RELEASE_ID=$(printf '%s' \"$release_record\" | jq -er '.id')"
     upload = 'gh release upload "$TAG"'
     publish = 'gh release edit "$TAG" --draft=false --latest'
     assert (
-        workflow.index(create)
-        < workflow.index(lookup)
+        workflow.index(preflight)
+        < workflow.index(create)
+        < workflow.index(capture)
         < workflow.index(upload)
         < workflow.index(publish)
     )
+    assert '-F draft=true' in workflow
+    assert '-F generate_release_notes=true' in workflow
+    assert 'gh release create "$TAG"' not in workflow
+    assert 'releases/tags/$TAG" --jq' not in workflow
     assert "select(.draft == true and .tag_name == $tag)" in workflow
     assert "releases/$CREATED_RELEASE_ID" in workflow
     assert "gh release delete" not in workflow
@@ -626,12 +665,20 @@ def test_windows_release_builds_and_verifies_bundle_before_wix():
 def test_windows_release_temporarily_trusts_and_removes_exact_self_signed_leaf():
     workflow = _read(".github/workflows/release.yml")
 
-    assert 'Import-Certificate -FilePath $publicCertificate -CertStoreLocation "Cert:\\CurrentUser\\Root"' in workflow
+    assert "Import-Certificate" not in workflow
+    assert "certutil.exe -f -addstore Root $publicCertificate" in workflow
+    assert "Headless Windows trust import failed" in workflow
+    assert 'Get-ChildItem -LiteralPath "Cert:\\LocalMachine\\Root\\$($certificate.Thumbprint)"' in workflow
+    assert "Windows signing PFX decoded" in workflow
+    assert "Windows signing PFX identity validated" in workflow
+    assert "Windows machine-root trust imported" in workflow
     assert "WINDOWS_TRUSTED_CERT_THUMBPRINT" in workflow
     assert "Temporary Windows trust import identity mismatch" in workflow
     assert "Compiled Windows release pin mismatch" in workflow
     assert "TRUSTED_WINDOWS_SIGNER_SHA256" in workflow
-    assert 'Remove-Item -LiteralPath "Cert:\\CurrentUser\\Root\\$env:WINDOWS_TRUSTED_CERT_THUMBPRINT"' in workflow
+    assert "certutil.exe -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT" in workflow
+    assert "Headless Windows trust cleanup failed" in workflow
+    assert 'Remove-Item -LiteralPath "Cert:\\LocalMachine\\Root' not in workflow
     assert "if: always()" in workflow
 
 
@@ -675,7 +722,10 @@ def test_validate_job_runs_full_suite_with_workspace_import_paths():
     ) in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
     assert 'pip install -e ".[dev,windows]"' not in workflow
-    assert 'pip install -e . "pytest>=9.0.3" "pytest-timeout>=2.3,<3"' in workflow
+    assert (
+        'pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" '
+        '"pytest-timeout>=2.3,<3"'
+    ) in workflow
 
 
 def test_release_manifest_preserves_the_supported_2_1_floor():

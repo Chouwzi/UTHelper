@@ -38,7 +38,7 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e . "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
+        run: pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
         run: python -m pytest tests extensions/flet_uth_background_sync/tests -q --tb=short
@@ -151,12 +151,6 @@ jobs:
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 
-          MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
-          grep -q "ScheduledNotificationReceiver" "$MANIFEST"
-          grep -q "ScheduledNotificationBootReceiver" "$MANIFEST"
-          grep -q "ActionBroadcastReceiver" "$MANIFEST"
-          grep -q "DeadlineAlarmReceiver" "$MANIFEST"
-          grep -q "RescheduleReceiver" "$MANIFEST"
           grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter-packages/flet_uth_background_sync/android/build.gradle
           grep -R -q "androidx.room:room-runtime:2.8.4" build/flutter-packages/flet_uth_background_sync/android/build.gradle
 
@@ -175,6 +169,11 @@ jobs:
           test "$("$APKANALYZER" manifest version-name "$APK")" = "$VERSION"
           test "$("$APKANALYZER" manifest version-code "$APK")" = "$BUILD_NUMBER"
           "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
+          grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
+          grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml
+          grep -q "ActionBroadcastReceiver" final-android-manifest.xml
+          grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
+          grep -q "RescheduleReceiver" final-android-manifest.xml
 
           mkdir -p release evidence
           FINAL_APK="release/UTHelper-$VERSION.apk"
@@ -239,7 +238,7 @@ jobs:
           set -euo pipefail
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
-          find build/ios/archive -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
+          find build/ipa -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
           test "$(wc -l < "$RUNNER_TEMP/xcarchive-candidates.txt" | tr -d ' ')" -eq 1
           XCARCHIVE=$(sed -n '1p' "$RUNNER_TEMP/xcarchive-candidates.txt")
           mkdir -p release evidence
@@ -273,6 +272,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 75
     environment: release
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
     permissions:
       contents: read
       id-token: write
@@ -366,6 +368,7 @@ jobs:
           $pfx = Join-Path $env:RUNNER_TEMP "uthelper-release.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
           Remove-Item Env:WINDOWS_PFX_BASE64
+          Write-Output "Windows signing PFX decoded"
           $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
           $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:WINDOWS_PFX_PASSWORD, $flags)
           $actual = $certificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).Replace(":", "").ToUpperInvariant()
@@ -373,9 +376,14 @@ jobs:
           if ($actual -ne $expected -or $certificate.Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
             throw "Windows signing certificate identity does not match protected variables"
           }
+          Write-Output "Windows signing PFX identity validated"
           $publicCertificate = Join-Path $env:RUNNER_TEMP "uthelper-release.cer"
           Export-Certificate -Cert $certificate -FilePath $publicCertificate | Out-Null
-          $trusted = Import-Certificate -FilePath $publicCertificate -CertStoreLocation "Cert:\CurrentUser\Root"
+          Write-Output "Windows public signing certificate exported"
+          & certutil.exe -f -addstore Root $publicCertificate
+          if ($LASTEXITCODE -ne 0) { throw "Headless Windows trust import failed" }
+          Write-Output "Windows machine-root trust imported"
+          $trusted = @(Get-ChildItem -LiteralPath "Cert:\LocalMachine\Root\$($certificate.Thumbprint)" -ErrorAction Stop)
           if ($trusted.Count -ne 1 -or
               $trusted[0].GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant() -ne $expected -or
               $trusted[0].Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
@@ -446,7 +454,8 @@ jobs:
             if ($env:WINDOWS_TRUSTED_CERT_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
               throw "Refusing to remove an unexpected certificate identity"
             }
-            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$env:WINDOWS_TRUSTED_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+            & certutil.exe -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Headless Windows trust cleanup failed" }
           }
           Remove-Item -LiteralPath $expected -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "uthelper-release.cer") -Force -ErrorAction SilentlyContinue
@@ -556,13 +565,11 @@ jobs:
               --deny-self-hosted-runners
           done
 
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > existing-release.json 2> existing-release.err; then
-            echo "A release already exists for $TAG; refusing to mutate it"
-            exit 1
-          fi
-          if ! grep -q "HTTP 404" existing-release.err; then
-            echo "Release preflight failed for a reason other than exact HTTP 404"
-            sed -n '1,5p' existing-release.err
+          existing_release_ids=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --paginate \
+            --jq '.[] | select(.tag_name == "'"$TAG"'") | .id')
+          if [ -n "$existing_release_ids" ]; then
+            echo "A draft or published release already exists for $TAG; refusing to mutate it"
             exit 1
           fi
 
@@ -583,8 +590,14 @@ jobs:
           }
           trap cleanup_draft EXIT
 
-          gh release create "$TAG" --draft --verify-tag --title "UTHelper $VERSION" --generate-notes
-          CREATED_RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.id')
+          release_record=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            -f name="UTHelper $VERSION" \
+            -F draft=true \
+            -F prerelease=false \
+            -F generate_release_notes=true)
+          CREATED_RELEASE_ID=$(printf '%s' "$release_record" | jq -er '.id')
           [[ "$CREATED_RELEASE_ID" =~ ^[0-9]+$ ]]
           gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" | \
             jq -e --arg tag "$TAG" 'select(.draft == true and .tag_name == $tag)' >/dev/null

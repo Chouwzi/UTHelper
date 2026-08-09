@@ -22,14 +22,16 @@ _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _HEX64 = re.compile(r"^[0-9A-F]{64}$")
 _COMMIT = re.compile(r"^[0-9A-Fa-f]{40}$")
 _CERTIFICATE_LINE = re.compile(
-    r"^Signer #\d+ certificate SHA-256 digest:\s*(.+?)\s*$", re.MULTILINE
+    r"^(?:Signer #\d+|V\d+(?:\.\d+)? Signer:)\s+"
+    r"certificate SHA-256 digest:\s*(.+?)\s*$",
+    re.MULTILINE,
 )
 _RECEIVERS = (
-    "ScheduledNotificationReceiver",
-    "ScheduledNotificationBootReceiver",
-    "ActionBroadcastReceiver",
-    "DeadlineAlarmReceiver",
-    "RescheduleReceiver",
+    "com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver",
+    "com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver",
+    "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
+    "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
+    "com.uthelper.backgroundsync.notification.RescheduleReceiver",
 )
 
 
@@ -135,7 +137,7 @@ def verify_android_release(
         _normalize_fingerprint(match.group(1))
         for match in _CERTIFICATE_LINE.finditer(signature_output)
     ]
-    if signer_fingerprints != [expected_fingerprint]:
+    if not signer_fingerprints or set(signer_fingerprints) != {expected_fingerprint}:
         raise AndroidVerificationError("APK signing certificate does not match pinned identity")
 
     actual_package = _run((apkanalyzer, "manifest", "application-id", apk))
@@ -161,11 +163,7 @@ def verify_android_release(
     invalid_receivers = [
         name
         for name in _RECEIVERS
-        if sum(
-            candidate == name or candidate.endswith(f".{name}")
-            for candidate in receiver_names
-        )
-        != 1
+        if receiver_names.count(name) != 1
     ]
     if invalid_receivers:
         raise AndroidVerificationError("APK notification receiver wiring is incomplete")

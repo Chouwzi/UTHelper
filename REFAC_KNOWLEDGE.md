@@ -1103,3 +1103,136 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   occurrences and place the current repository/source roots first
   deterministically. The original two failures then pass, and the complete
   post-merge suite passes **1184 tests with 25 skipped in 40.39 seconds**.
+
+## Release-source keyring parity (2026-08-09)
+
+- The first immutable `v2.2.0` release attempt stopped in the Linux source
+  validation job before any native runner started. The release job installed
+  the base project while the complete config tests require the same `keyring`
+  test dependency that normal CI already installs; ten secure-storage tests
+  therefore failed only in that clean release environment.
+- Release-source validation now installs `keyring>=25.0.0` explicitly and a
+  workflow contract test locks that dependency parity. The project version is
+  `2.2.1` because the failed `v2.2.0` tag remains immutable and is not rewritten.
+
+## Windows release console UTF-8 boundary (2026-08-09)
+
+- The immutable `v2.2.1` release passed source and credential validation, then
+  the Windows runner stopped before compilation when Flet printed its Unicode
+  success marker through a CP1252 Python console. Android and iOS were cancelled
+  after the Windows failure because exact publication could no longer proceed.
+- The Windows release job now forces Python UTF-8 mode and UTF-8 standard-stream
+  encoding for Flet and all Python subprocesses. A workflow contract test locks
+  both variables. The next immutable release version is `2.2.2`.
+
+## Unsigned iOS archive output path (2026-08-09)
+
+- The immutable `v2.2.2` run built a valid no-codesign iPhoneOS archive, then
+  failed before packaging because the workflow searched `build/ios/archive`.
+  Flet copies the archive output into the project-level `build/ipa` directory;
+  the run log confirmed `UTHelper.xcarchive` was produced before that mismatch.
+- The release workflow now requires exactly one `.xcarchive` directly beneath
+  `build/ipa`, and its contract test rejects the stale source-build path. The
+  next immutable release version is `2.2.3`.
+
+## Android merged-manifest verification boundary (2026-08-09)
+
+- The immutable `v2.2.3` and `v2.2.4` runs both produced the signed 162.3 MB
+  release APK. The apparent post-build Flet exit was diagnosed more precisely
+  in `v2.2.4`: Flet returned successfully, then the first silent `grep` failed
+  because the release workflow inspected the app source manifest. Plugin
+  receivers are contributed by Android libraries and only exist in the final
+  Gradle-merged APK manifest.
+- Release verification now matches the already-passing Android PR workflow: it
+  extracts the final APK manifest with `apkanalyzer` before checking every
+  notification/background receiver. The independent Python release verifier
+  repeats the merged-manifest check alongside the package version and pinned
+  signing-certificate checks. The temporary non-zero-Flet workaround was
+  removed because the evidence did not support that diagnosis. A workflow
+  contract test rejects the source-manifest check. The next immutable release
+  version is `2.2.5`.
+
+## Android apksigner output compatibility (2026-08-09)
+
+- The immutable `v2.2.5` run passed the merged-manifest checks and proved the
+  APK had one valid V2 signature with the pinned certificate fingerprint. The
+  independent evidence script nevertheless rejected it because newer Android
+  Build Tools label the digest line `V2 Signer:` while its parser recognized
+  only the older `Signer #1` label.
+- The verifier now accepts both documented output families, including dotted
+  scheme labels such as `V3.1 Signer:`, normalizes the digest, and requires at
+  least one parsed identity with the complete distinct-identity set exactly
+  equal to the pinned fingerprint. Regression tests cover old/current labels
+  and reject mixed expected/unexpected fingerprints. The next immutable release
+  version is `2.2.6`.
+
+## Android receiver identity disambiguation (2026-08-09)
+
+- The immutable `v2.2.6` run passed signing-certificate parsing, then the
+  evidence verifier rejected receiver wiring even though the workflow's merged
+  manifest checks passed. Offline inspection of the successful Android PR APK
+  showed all five intended receivers plus WorkManager's separate
+  `androidx.work.impl.background.systemalarm.RescheduleReceiver`. The verifier
+  matched simple-name suffixes, so it incorrectly counted two receivers named
+  `RescheduleReceiver`.
+- Verification now requires each of the five exact fully-qualified receiver
+  class names exactly once. Unrelated AndroidX receivers no longer collide,
+  while missing, duplicated, or lookalike UTHelper/plugin identities still
+  fail. The regression fixture includes the real WorkManager collision. The
+  next immutable release version is `2.2.7`.
+
+## Headless Windows trust import (2026-08-09)
+
+- The immutable `v2.2.7` run completed Android and iOS successfully and passed
+  the packaged Windows single-instance E2E, then timed out for five minutes in
+  the certificate step. Its log stopped at `Import-Certificate` into the
+  current-user Root store, consistent with a root-trust confirmation UI that a
+  hosted runner cannot answer.
+- The release job now imports the already SHA-256/subject-validated public leaf
+  with non-interactive `certutil.exe -user -f -addstore`, checks the command exit
+  code, resolves the exact SHA-1 thumbprint from the store, and repeats the
+  SHA-256/subject validation before exporting cleanup state. The always-run
+  cleanup uses headless `certutil -delstore` to remove only that exact
+  thumbprint; a local import/identity/delete round trip passed and confirmed the
+  PowerShell provider removal is subject to the same UI restriction. A workflow
+  contract test rejects both interactive cmdlet paths. The next immutable
+  release version is `2.2.8`.
+
+## Hosted Windows machine-root trust scope (2026-08-09)
+
+- The immutable `v2.2.8` run completed Android and iOS, but `certutil -user`
+  still timed out for five minutes in the same current-user Root store. The
+  local round trip proves the certificate and command are valid; the repeated
+  hosted-only behavior isolates the blocker to current-user root policy/UI.
+- GitHub's disposable Windows runner executes as Administrator, so release
+  verification now installs the already-pinned public leaf temporarily into
+  `LocalMachine\Root` with non-interactive `certutil`, resolves and revalidates
+  the exact machine-store thumbprint, then always deletes that exact identity
+  from the same store. Progress markers bracket PFX decode, identity validation,
+  public export, and trust import so any future timeout is attributable without
+  weakening verification. The next immutable release version is `2.2.9`.
+
+## Hosted Windows SDK SignTool discovery (2026-08-09)
+
+- The immutable `v2.2.9` run proved the machine-root change: certificate decode,
+  pinned identity validation, trust import, and exact cleanup all completed.
+  Android and iOS also completed, but Windows then failed because the hosted
+  runner provides `signtool.exe` in the Windows SDK without adding it to PATH.
+- Release signing now prefers a PATH-resolved SignTool and otherwise discovers
+  the newest x64 candidate under `Program Files (x86)\Windows Kits\10\bin`, the
+  same hosted-runner-compatible pattern already used by the MSIX packager. A
+  release contract test rejects regression to an unqualified executable name.
+  The next immutable release version is `2.2.10`.
+
+## Draft release identity capture (2026-08-09)
+
+- The immutable `v2.2.10` run completed Android, iOS, Windows signing, native
+  verification, attestations, and exact inventory assembly. Publishing stopped
+  safely before any assets were public because GitHub's release-by-tag endpoint
+  returned 404 for the newly created draft, so its numeric ID was never stored.
+- Publication preflight now enumerates all releases, including drafts, for the
+  exact tag. Draft creation uses the REST endpoint directly and captures the ID
+  from the creation response before upload. The cleanup trap therefore retains
+  an exact immutable identity even while the release is still a draft. The lone
+  empty `v2.2.10` draft was identity-checked and removed. The next immutable
+  release version is `2.2.11`.

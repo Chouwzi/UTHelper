@@ -42,15 +42,16 @@ def _fake_run(command, **kwargs):
     elif "version-code" in command:
         output = f"{BUILD_NUMBER}\n"
     else:
+        receiver_names = (
+            "com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver",
+            "com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver",
+            "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
+            "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
+            "com.uthelper.backgroundsync.notification.RescheduleReceiver",
+            "androidx.work.impl.background.systemalarm.RescheduleReceiver",
+        )
         receivers = "".join(
-            f'<receiver android:name="com.example.{name}" />'
-            for name in (
-                "ScheduledNotificationReceiver",
-                "ScheduledNotificationBootReceiver",
-                "ActionBroadcastReceiver",
-                "DeadlineAlarmReceiver",
-                "RescheduleReceiver",
-            )
+            f'<receiver android:name="{name}" />' for name in receiver_names
         )
         output = (
             '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
@@ -122,6 +123,72 @@ def test_verify_android_release_rejects_wrong_signer(tmp_path, monkeypatch):
         return result
 
     monkeypatch.setattr(subprocess, "run", wrong_signer)
+    with pytest.raises(AndroidVerificationError, match="certificate"):
+        verify_android_release(
+            apk=apk,
+            version=VERSION,
+            build_number=BUILD_NUMBER,
+            package_id=PACKAGE_ID,
+            certificate_sha256=FINGERPRINT,
+            commit_sha=COMMIT_SHA,
+            workflow_run_id="12345",
+            output=tmp_path / "evidence.json",
+            android_home=_sdk(tmp_path),
+        )
+
+
+@pytest.mark.parametrize(
+    "certificate_line",
+    (
+        f"Signer #1 certificate SHA-256 digest: {FINGERPRINT}\n",
+        f"V2 Signer: certificate SHA-256 digest: {FINGERPRINT.lower()}\n",
+        f"V3.1 Signer: certificate SHA-256 digest: {FINGERPRINT}\n",
+    ),
+)
+def test_verify_android_release_accepts_supported_apksigner_labels(
+    tmp_path, monkeypatch, certificate_line
+):
+    apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    apk.write_bytes(b"PK\x03\x04signed-apk")
+
+    def labelled_signer(command, **kwargs):
+        result = _fake_run(command, **kwargs)
+        if "apksigner" in Path(command[0]).name:
+            result.stdout = certificate_line
+        return result
+
+    monkeypatch.setattr(subprocess, "run", labelled_signer)
+    evidence = verify_android_release(
+        apk=apk,
+        version=VERSION,
+        build_number=BUILD_NUMBER,
+        package_id=PACKAGE_ID,
+        certificate_sha256=FINGERPRINT,
+        commit_sha=COMMIT_SHA,
+        workflow_run_id="12345",
+        output=tmp_path / "evidence.json",
+        android_home=_sdk(tmp_path),
+    )
+
+    assert evidence["certificate_fingerprint"] == FINGERPRINT
+
+
+def test_verify_android_release_rejects_any_additional_signer_identity(
+    tmp_path, monkeypatch
+):
+    apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    apk.write_bytes(b"PK\x03\x04signed-apk")
+
+    def mixed_signers(command, **kwargs):
+        result = _fake_run(command, **kwargs)
+        if "apksigner" in Path(command[0]).name:
+            result.stdout = (
+                f"V2 Signer: certificate SHA-256 digest: {FINGERPRINT}\n"
+                f"V3 Signer: certificate SHA-256 digest: {'CD' * 32}\n"
+            )
+        return result
+
+    monkeypatch.setattr(subprocess, "run", mixed_signers)
     with pytest.raises(AndroidVerificationError, match="certificate"):
         verify_android_release(
             apk=apk,
