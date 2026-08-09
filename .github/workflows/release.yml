@@ -565,13 +565,11 @@ jobs:
               --deny-self-hosted-runners
           done
 
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > existing-release.json 2> existing-release.err; then
-            echo "A release already exists for $TAG; refusing to mutate it"
-            exit 1
-          fi
-          if ! grep -q "HTTP 404" existing-release.err; then
-            echo "Release preflight failed for a reason other than exact HTTP 404"
-            sed -n '1,5p' existing-release.err
+          existing_release_ids=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --paginate \
+            --jq '.[] | select(.tag_name == "'"$TAG"'") | .id')
+          if [ -n "$existing_release_ids" ]; then
+            echo "A draft or published release already exists for $TAG; refusing to mutate it"
             exit 1
           fi
 
@@ -592,8 +590,14 @@ jobs:
           }
           trap cleanup_draft EXIT
 
-          gh release create "$TAG" --draft --verify-tag --title "UTHelper $VERSION" --generate-notes
-          CREATED_RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.id')
+          release_record=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            -f name="UTHelper $VERSION" \
+            -F draft=true \
+            -F prerelease=false \
+            -F generate_release_notes=true)
+          CREATED_RELEASE_ID=$(printf '%s' "$release_record" | jq -er '.id')
           [[ "$CREATED_RELEASE_ID" =~ ^[0-9]+$ ]]
           gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" | \
             jq -e --arg tag "$TAG" 'select(.draft == true and .tag_name == $tag)' >/dev/null

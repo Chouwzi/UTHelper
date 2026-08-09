@@ -24,7 +24,7 @@ def test_project_version_is_only_authored_version(tmp_path):
 
 
 def test_this_feature_release_bumps_the_single_authored_version():
-    assert read_project_version(ROOT / "pyproject.toml") == "2.2.10"
+    assert read_project_version(ROOT / "pyproject.toml") == "2.2.11"
 
 
 @pytest.mark.parametrize("tag", ["v2.2.4", "2.2.3", "v2.2.3-rc1"])

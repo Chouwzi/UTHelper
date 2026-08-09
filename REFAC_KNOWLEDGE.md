@@ -1223,3 +1223,16 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   same hosted-runner-compatible pattern already used by the MSIX packager. A
   release contract test rejects regression to an unqualified executable name.
   The next immutable release version is `2.2.10`.
+
+## Draft release identity capture (2026-08-09)
+
+- The immutable `v2.2.10` run completed Android, iOS, Windows signing, native
+  verification, attestations, and exact inventory assembly. Publishing stopped
+  safely before any assets were public because GitHub's release-by-tag endpoint
+  returned 404 for the newly created draft, so its numeric ID was never stored.
+- Publication preflight now enumerates all releases, including drafts, for the
+  exact tag. Draft creation uses the REST endpoint directly and captures the ID
+  from the creation response before upload. The cleanup trap therefore retains
+  an exact immutable identity even while the release is still a draft. The lone
+  empty `v2.2.10` draft was identity-checked and removed. The next immutable
+  release version is `2.2.11`.
