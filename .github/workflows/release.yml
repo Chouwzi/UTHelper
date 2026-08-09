@@ -368,6 +368,7 @@ jobs:
           $pfx = Join-Path $env:RUNNER_TEMP "uthelper-release.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
           Remove-Item Env:WINDOWS_PFX_BASE64
+          Write-Output "Windows signing PFX decoded"
           $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
           $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:WINDOWS_PFX_PASSWORD, $flags)
           $actual = $certificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).Replace(":", "").ToUpperInvariant()
@@ -375,11 +376,14 @@ jobs:
           if ($actual -ne $expected -or $certificate.Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
             throw "Windows signing certificate identity does not match protected variables"
           }
+          Write-Output "Windows signing PFX identity validated"
           $publicCertificate = Join-Path $env:RUNNER_TEMP "uthelper-release.cer"
           Export-Certificate -Cert $certificate -FilePath $publicCertificate | Out-Null
-          & certutil.exe -user -f -addstore Root $publicCertificate
+          Write-Output "Windows public signing certificate exported"
+          & certutil.exe -f -addstore Root $publicCertificate
           if ($LASTEXITCODE -ne 0) { throw "Headless Windows trust import failed" }
-          $trusted = @(Get-ChildItem -LiteralPath "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -ErrorAction Stop)
+          Write-Output "Windows machine-root trust imported"
+          $trusted = @(Get-ChildItem -LiteralPath "Cert:\LocalMachine\Root\$($certificate.Thumbprint)" -ErrorAction Stop)
           if ($trusted.Count -ne 1 -or
               $trusted[0].GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant() -ne $expected -or
               $trusted[0].Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
@@ -450,7 +454,7 @@ jobs:
             if ($env:WINDOWS_TRUSTED_CERT_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
               throw "Refusing to remove an unexpected certificate identity"
             }
-            & certutil.exe -user -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT | Out-Null
+            & certutil.exe -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Headless Windows trust cleanup failed" }
           }
           Remove-Item -LiteralPath $expected -Force -ErrorAction SilentlyContinue
