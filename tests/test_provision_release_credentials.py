@@ -80,7 +80,8 @@ def test_script_keeps_secrets_off_process_arguments_and_plaintext_files():
     assert "WaitForExit($TimeoutSeconds * 1000)" in source
     assert "-storepass:env" in source
     assert "-keypass:env" in source
-    assert "PasswordVault" in source
+    assert "CredWriteW" in source
+    assert "CredDeleteW" in source
     assert "Export-PfxCertificate" in source
     assert "RandomNumberGenerator" in source
     assert "ANDROID_KEYSTORE_PASSWORD" in source

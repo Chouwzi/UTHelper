@@ -25,9 +25,16 @@ from platform_utils.windows_update import (
     ExecutableDetails,
     MsiDetails,
     SignatureDetails,
+    TRUSTED_WINDOWS_SIGNER_SHA256,
     WindowsPackageLauncher,
     WindowsPackageVerifier,
 )
+
+
+def test_compiled_windows_release_pin_is_exact_sha256_identity():
+    assert TRUSTED_WINDOWS_SIGNER_SHA256 == frozenset(
+        {"7E3547EE6A31325A47BE22049E238BA83CA1D90AFB8A30D053060D02678A0B3C"}
+    )
 
 
 def _candidate(

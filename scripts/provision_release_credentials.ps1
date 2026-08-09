@@ -136,7 +136,7 @@ if ($collision.Count -gt 0) {
 $createdBackup = $false
 $createdSecrets = [Collections.Generic.List[string]]::new()
 $createdVariables = [Collections.Generic.List[string]]::new()
-$vaultCredentials = [Collections.Generic.List[object]]::new()
+$credentialTargets = [Collections.Generic.List[string]]::new()
 $windowsCertificate = $null
 try {
     if (-not (Test-Path -LiteralPath $backupPath)) {
@@ -234,17 +234,71 @@ try {
         $createdVariables.Add($entry.Key)
     }
 
-    Add-Type -AssemblyName System.Runtime.WindowsRuntime
-    $vault = [Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]::new()
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class UTHelperCredentialManager {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct NativeCredential {
+        public UInt32 Flags;
+        public UInt32 Type;
+        public string TargetName;
+        public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public UInt32 CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public UInt32 Persist;
+        public UInt32 AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+
+    [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredWrite(ref NativeCredential credential, UInt32 flags);
+
+    [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CredDelete(string target, UInt32 type, UInt32 flags);
+
+    public static void Write(string target, string userName, string secret) {
+        byte[] bytes = Encoding.Unicode.GetBytes(secret);
+        if (bytes.Length == 0 || bytes.Length > 5120) throw new ArgumentException("Credential secret size is invalid");
+        IntPtr blob = Marshal.AllocCoTaskMem(bytes.Length);
+        try {
+            Marshal.Copy(bytes, 0, blob, bytes.Length);
+            var credential = new NativeCredential {
+                Type = 1,
+                TargetName = target,
+                CredentialBlobSize = (UInt32)bytes.Length,
+                CredentialBlob = blob,
+                Persist = 2,
+                UserName = userName
+            };
+            if (!CredWrite(ref credential, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        } finally {
+            for (int index = 0; index < bytes.Length; index++) Marshal.WriteByte(blob, index, 0);
+            Array.Clear(bytes, 0, bytes.Length);
+            Marshal.FreeCoTaskMem(blob);
+        }
+    }
+
+    public static void Delete(string target) {
+        if (!CredDelete(target, 1, 0)) {
+            int error = Marshal.GetLastWin32Error();
+            if (error != 1168) throw new Win32Exception(error);
+        }
+    }
+}
+'@
     foreach ($entry in @(
-        @{ Resource="UTHelper/Release/Android"; UserName="keystore"; Secret="$androidStoreSecret`n$androidKeySecret" },
-        @{ Resource="UTHelper/Release/Windows"; UserName="pfx"; Secret=$windowsPfxSecret }
+        @{ Target="UTHelper/Release/Android"; UserName="keystore"; Secret="$androidStoreSecret`n$androidKeySecret" },
+        @{ Target="UTHelper/Release/Windows"; UserName="pfx"; Secret=$windowsPfxSecret }
     )) {
-        $credential = [Windows.Security.Credentials.PasswordCredential,Windows.Security.Credentials,ContentType=WindowsRuntime]::new(
-            $entry.Resource, $entry.UserName, $entry.Secret
-        )
-        $vault.Add($credential)
-        $vaultCredentials.Add($credential)
+        [UTHelperCredentialManager]::Write($entry.Target, $entry.UserName, $entry.Secret)
+        $credentialTargets.Add($entry.Target)
     }
 
     Write-Output "Release identities provisioned successfully."
@@ -259,8 +313,8 @@ try {
     foreach ($name in $createdVariables) {
         try { [void](Invoke-BoundedProcess -FilePath $resolvedGh -Arguments @("variable", "delete", $name, "--repo", $Repository, "--env", $Environment) -TimeoutSeconds 60) } catch {}
     }
-    if ($null -ne $vault) {
-        foreach ($credential in $vaultCredentials) { try { $vault.Remove($credential) } catch {} }
+    foreach ($target in $credentialTargets) {
+        try { [UTHelperCredentialManager]::Delete($target) } catch {}
     }
     if ($createdBackup -and (Test-Path -LiteralPath $backupPath)) {
         Remove-Item -LiteralPath $backupPath -Recurse -Force

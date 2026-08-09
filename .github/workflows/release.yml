@@ -68,16 +68,6 @@ jobs:
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
       ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
-      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-      APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
-      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-      APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
-      APPLE_SIGNING_CERT_SHA256: ${{ vars.APPLE_SIGNING_CERT_SHA256 }}
-      APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
-      APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
-      IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}
       WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
       WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
       WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
@@ -214,7 +204,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-signed-ios:
+  build-unsigned-ios:
     needs: [validate-release-source, validate-release-credentials]
     runs-on: macos-latest
     timeout-minutes: 90
@@ -238,116 +228,37 @@ jobs:
       - name: Install iOS build dependencies
         timeout-minutes: 10
         run: pip install -e .
-      - name: Import ephemeral Apple distribution credentials
-        id: credentials
-        timeout-minutes: 5
-        shell: bash
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          test -n "$APPLE_CERTIFICATE_P12_BASE64"
-          test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$APPLE_PROVISIONING_PROFILE_BASE64"
-          test -n "$APPLE_TEAM_ID"
-          umask 077
-          P12="$RUNNER_TEMP/apple-distribution.p12"
-          PROFILE="$RUNNER_TEMP/apple-distribution.mobileprovision"
-          PROFILE_PLIST="$RUNNER_TEMP/apple-distribution.plist"
-          KEYCHAIN="$RUNNER_TEMP/uthelper-signing.keychain-db"
-          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
-          printf '%s' "$KEYCHAIN_PASSWORD" > "$RUNNER_TEMP/keychain-password"
-          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$P12"
-          printf '%s' "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE"
-          unset APPLE_CERTIFICATE_P12_BASE64 APPLE_PROVISIONING_PROFILE_BASE64
-          security list-keychains -d user | sed -E 's/^[[:space:]]*"(.*)"$/\1/' > "$RUNNER_TEMP/original-keychains.txt"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 7200 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$P12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          ORIGINAL_KEYCHAINS=()
-          while IFS= read -r item; do ORIGINAL_KEYCHAINS+=("$item"); done < "$RUNNER_TEMP/original-keychains.txt"
-          security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
-          security cms -D -i "$PROFILE" > "$PROFILE_PLIST"
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")
-          [[ "$PROFILE_UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]
-          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-          PROFILE_DEST="$PROFILE_DIR/$PROFILE_UUID.mobileprovision"
-          mkdir -p "$PROFILE_DIR"
-          test ! -e "$PROFILE_DEST"
-          cp "$PROFILE" "$PROFILE_DEST"
-          echo "profile_uuid=$PROFILE_UUID" >> "$GITHUB_OUTPUT"
-      - name: Build and natively verify signed IPA
+      - name: Build and natively verify unsigned device IPA
         timeout-minutes: 55
         shell: bash
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
           VERSION: ${{ needs['validate-release-source'].outputs.version }}
           BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
-          APPLE_SIGNING_CERT_SHA256: ${{ vars.APPLE_SIGNING_CERT_SHA256 }}
-          IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}
-          PROFILE_UUID: ${{ steps.credentials.outputs.profile_uuid }}
         run: |
           set -euo pipefail
-          test -n "$APPLE_TEAM_ID"
-          test -n "$APPLE_SIGNING_IDENTITY"
-          test -n "$APPLE_SIGNING_CERT_SHA256"
-          test -n "$PROFILE_UUID"
-          python - "$IOS_DISTRIBUTION_URL" <<'PY'
-          import sys
-          from urllib.parse import urlparse
-          parsed = urlparse(sys.argv[1])
-          if parsed.scheme != "https" or parsed.hostname not in {"apps.apple.com", "testflight.apple.com"}:
-              raise SystemExit("IOS_DISTRIBUTION_URL must be an approved Apple HTTPS URL")
-          PY
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --ios-team-id "$APPLE_TEAM_ID" --ios-export-method app-store-connect --ios-provisioning-profile "$PROFILE_UUID" --ios-signing-certificate "$APPLE_SIGNING_IDENTITY" --yes --verbose
-          find build/ipa -type f -name '*.ipa' -print | sort > "$RUNNER_TEMP/ipa-candidates.txt"
-          test "$(wc -l < "$RUNNER_TEMP/ipa-candidates.txt" | tr -d ' ')" -eq 1
-          IPA=$(sed -n '1p' "$RUNNER_TEMP/ipa-candidates.txt")
+          flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+          find build/ios/archive -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
+          test "$(wc -l < "$RUNNER_TEMP/xcarchive-candidates.txt" | tr -d ' ')" -eq 1
+          XCARCHIVE=$(sed -n '1p' "$RUNNER_TEMP/xcarchive-candidates.txt")
           mkdir -p release evidence
           FINAL_IPA="release/UTHelper-$VERSION.ipa"
-          mv "$IPA" "$FINAL_IPA"
-          bash scripts/verify_ipa_release.sh "$FINAL_IPA" "$VERSION" "$BUILD_NUMBER" \
-            com.uthelper.UTHelper "$APPLE_TEAM_ID" "$APPLE_SIGNING_CERT_SHA256" \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" \
-            "evidence/UTHelper-$VERSION.ipa.verification.json"
-      - name: Upload verified IPA to App Store Connect
-        timeout-minutes: 15
-        shell: bash
-        env:
-          VERSION: ${{ needs['validate-release-source'].outputs.version }}
-          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
-          APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
-          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
-        run: |
-          set -euo pipefail
-          test -n "$APPLE_API_PRIVATE_KEY_BASE64"
-          test -n "$APPLE_API_ISSUER_ID"
-          test -n "$APPLE_API_KEY_ID"
-          umask 077
-          PRIVATE_KEYS_DIR="$RUNNER_TEMP/transporter/private_keys"
-          mkdir -p "$PRIVATE_KEYS_DIR"
-          printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | base64 --decode > "$PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
-          chmod 0600 "$PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
-          unset APPLE_API_PRIVATE_KEY_BASE64
-          python scripts/upload_ipa_release.py \
-            --ipa "release/UTHelper-$VERSION.ipa" \
-            --api-issuer "$APPLE_API_ISSUER_ID" \
-            --api-key-id "$APPLE_API_KEY_ID" \
-            --private-keys-dir "$PRIVATE_KEYS_DIR"
-      - name: Attest signed IPA
+          python scripts/package_unsigned_ipa.py \
+            --archive "$XCARCHIVE" \
+            --output "$FINAL_IPA" \
+            --evidence "evidence/UTHelper-$VERSION.ipa.verification.json" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --bundle-id com.uthelper.UTHelper \
+            --commit-sha "$GITHUB_SHA" \
+            --workflow-run-id "$GITHUB_RUN_ID"
+      - name: Attest unsigned device IPA
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
         timeout-minutes: 5
         with:
           subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa
-      - name: Upload signed iOS package and evidence
+      - name: Upload unsigned iOS package and evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         timeout-minutes: 5
         with:
@@ -357,31 +268,6 @@ jobs:
             evidence/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa.verification.json
           if-no-files-found: error
           retention-days: 7
-      - name: Remove imported Apple credentials
-        if: always()
-        timeout-minutes: 5
-        shell: bash
-        env:
-          PROFILE_UUID: ${{ steps.credentials.outputs.profile_uuid }}
-        run: |
-          set +e
-          KEYCHAIN="$RUNNER_TEMP/uthelper-signing.keychain-db"
-          if [[ -f "$RUNNER_TEMP/original-keychains.txt" ]]; then
-            ORIGINAL_KEYCHAINS=()
-            while IFS= read -r item; do ORIGINAL_KEYCHAINS+=("$item"); done < "$RUNNER_TEMP/original-keychains.txt"
-            if [[ "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]]; then
-              security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"
-            fi
-          fi
-          if [[ "$KEYCHAIN" == "$RUNNER_TEMP/uthelper-signing.keychain-db" && -e "$KEYCHAIN" ]]; then
-            security delete-keychain "$KEYCHAIN"
-          fi
-          if [[ "$PROFILE_UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]; then
-            rm -f -- "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
-          fi
-          rm -f -- "$RUNNER_TEMP/apple-distribution.p12" "$RUNNER_TEMP/apple-distribution.mobileprovision" "$RUNNER_TEMP/apple-distribution.plist" "$RUNNER_TEMP/keychain-password" "$RUNNER_TEMP/original-keychains.txt"
-          if [[ -d "$RUNNER_TEMP/transporter" ]]; then rm -rf -- "$RUNNER_TEMP/transporter"; fi
-
   build-signed-windows:
     needs: [validate-release-source, validate-release-credentials]
     runs-on: windows-latest
@@ -445,8 +331,13 @@ jobs:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
           VERSION: ${{ needs['validate-release-source'].outputs.version }}
           BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
         run: |
           $ErrorActionPreference = "Stop"
+          $env:PYTHONPATH = "src"
+          $compiledPin = python -c "from platform_utils.windows_update import TRUSTED_WINDOWS_SIGNER_SHA256; print(','.join(sorted(TRUSTED_WINDOWS_SIGNER_SHA256)))"
+          $expectedPin = $env:WINDOWS_SIGNING_CERT_SHA256.Replace(":", "").Replace(" ", "").ToUpperInvariant()
+          if ($LASTEXITCODE -ne 0 -or $compiledPin.Trim() -ne $expectedPin) { throw "Compiled Windows release pin mismatch" }
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
           flet build windows --build-version "$env:VERSION" --build-number "$env:BUILD_NUMBER" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
@@ -482,7 +373,16 @@ jobs:
           if ($actual -ne $expected -or $certificate.Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
             throw "Windows signing certificate identity does not match protected variables"
           }
+          $publicCertificate = Join-Path $env:RUNNER_TEMP "uthelper-release.cer"
+          Export-Certificate -Cert $certificate -FilePath $publicCertificate | Out-Null
+          $trusted = Import-Certificate -FilePath $publicCertificate -CertStoreLocation "Cert:\CurrentUser\Root"
+          if ($trusted.Count -ne 1 -or
+              $trusted[0].GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant() -ne $expected -or
+              $trusted[0].Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
+            throw "Temporary Windows trust import identity mismatch"
+          }
           "WINDOWS_SIGNING_PFX_PATH=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WINDOWS_TRUSTED_CERT_THUMBPRINT=$($trusted[0].Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build, sign, and natively verify MSI and Burn EXE
         timeout-minutes: 20
         shell: pwsh
@@ -533,7 +433,7 @@ jobs:
             evidence/UTHelper-Setup-${{ needs['validate-release-source'].outputs.version }}.exe.verification.json
           if-no-files-found: error
           retention-days: 7
-      - name: Remove Windows signing certificate
+      - name: Remove temporary Windows release identity
         if: always()
         timeout-minutes: 5
         shell: pwsh
@@ -542,10 +442,17 @@ jobs:
           if ($env:WINDOWS_SIGNING_PFX_PATH -and $env:WINDOWS_SIGNING_PFX_PATH -ne $expected) {
             throw "Refusing to remove an unexpected signing path"
           }
+          if ($env:WINDOWS_TRUSTED_CERT_THUMBPRINT) {
+            if ($env:WINDOWS_TRUSTED_CERT_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
+              throw "Refusing to remove an unexpected certificate identity"
+            }
+            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$env:WINDOWS_TRUSTED_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
           Remove-Item -LiteralPath $expected -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "uthelper-release.cer") -Force -ErrorAction SilentlyContinue
 
   publish-exact-release:
-    needs: [validate-release-source, build-signed-android, build-signed-ios, build-signed-windows]
+    needs: [validate-release-source, build-signed-android, build-unsigned-ios, build-signed-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
@@ -591,7 +498,6 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs['validate-release-source'].outputs.version }}
-          IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}
         run: |
           set -euo pipefail
           mkdir -p release evidence
@@ -608,7 +514,6 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --release-dir release \
             --evidence-dir evidence \
-            --ios-install-url "$IOS_DISTRIBUTION_URL" \
             --minimum-supported-version "2.1.0" \
             --output release/release-manifest.json
           "${INVENTORY[@]}" --manifest release/release-manifest.json

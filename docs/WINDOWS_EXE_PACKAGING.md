@@ -162,19 +162,14 @@ The tag workflow is fail-closed and does not synthesize credentials. Configure
 these values only in the GitHub `release` environment:
 
 - Secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-  `ANDROID_KEY_PASSWORD`, `APPLE_CERTIFICATE_P12_BASE64`,
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_PROVISIONING_PROFILE_BASE64`,
-  `APPLE_API_PRIVATE_KEY_BASE64`, `WINDOWS_PFX_BASE64`, and
-  `WINDOWS_PFX_PASSWORD`.
+  `ANDROID_KEY_PASSWORD`, `WINDOWS_PFX_BASE64`, and `WINDOWS_PFX_PASSWORD`.
 - Public variables: `ANDROID_KEY_ALIAS`, `ANDROID_SIGNING_CERT_SHA256`,
-  `APPLE_TEAM_ID`, `APPLE_SIGNING_IDENTITY`, `APPLE_SIGNING_CERT_SHA256`,
-  `APPLE_API_ISSUER_ID`, `APPLE_API_KEY_ID`, `IOS_DISTRIBUTION_URL`,
   `WINDOWS_SIGNING_CERT_SHA256`, `WINDOWS_SIGNER_SUBJECT`,
-  `WINDOWS_TIMESTAMP_URL`, `WIX_EULA_ACCEPTED`, and optional `SENTRY_DSN`.
+  `WINDOWS_TIMESTAMP_URL`, `WIX_EULA_ACCEPTED`, and `SENTRY_DSN`.
 
 `WIX_EULA_ACCEPTED=wix7` may be set only after the owner reviews and accepts the
 WiX v7 OSMF EULA v1.1 and its applicable revenue threshold. A missing signing
-identity, invalid Apple URL, wrong fingerprint, absent EULA acceptance, native
+identity, wrong fingerprint, absent EULA acceptance, native
 verification failure, or any inventory mismatch stops before public release.
 
 The protected tag must be `vX.Y.Z`, equal the `pyproject.toml` version, and point
@@ -189,9 +184,9 @@ release-manifest.json
 SHA256SUMS
 ```
 
-Do not push a release tag until all named environment inputs exist. The current
-repository has no valid platform signing material by default; an unsigned local
-rehearsal proves structure only and must never be renamed to one of these assets.
+Do not push a release tag until all named environment inputs exist. The IPA is
+intentionally unsigned but must pass the iPhoneOS arm64/no-profile verifier; an
+unsigned simulator build must never be renamed to the canonical IPA asset.
 
 ### GitHub external governance checklist
 
