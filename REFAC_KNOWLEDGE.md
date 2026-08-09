@@ -1180,3 +1180,20 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   while missing, duplicated, or lookalike UTHelper/plugin identities still
   fail. The regression fixture includes the real WorkManager collision. The
   next immutable release version is `2.2.7`.
+
+## Headless Windows trust import (2026-08-09)
+
+- The immutable `v2.2.7` run completed Android and iOS successfully and passed
+  the packaged Windows single-instance E2E, then timed out for five minutes in
+  the certificate step. Its log stopped at `Import-Certificate` into the
+  current-user Root store, consistent with a root-trust confirmation UI that a
+  hosted runner cannot answer.
+- The release job now imports the already SHA-256/subject-validated public leaf
+  with non-interactive `certutil.exe -user -f -addstore`, checks the command exit
+  code, resolves the exact SHA-1 thumbprint from the store, and repeats the
+  SHA-256/subject validation before exporting cleanup state. The always-run
+  cleanup uses headless `certutil -delstore` to remove only that exact
+  thumbprint; a local import/identity/delete round trip passed and confirmed the
+  PowerShell provider removal is subject to the same UI restriction. A workflow
+  contract test rejects both interactive cmdlet paths. The next immutable
+  release version is `2.2.8`.
