@@ -102,9 +102,10 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 foreach ($item in @(@{ Path=$msi; Platform="windows"; Checks=@("authenticode","msi_ole","product_version","template","timestamp","upgrade_code") },
                      @{ Path=$exe; Platform="windows"; Checks=@("authenticode","burn_payload","pe_header","product_version","timestamp") })) {
     $record = [ordered]@{
-        schema_version=1; platform=$item.Platform; asset_name=[IO.Path]::GetFileName($item.Path)
+        schema_version=2; platform=$item.Platform; asset_name=[IO.Path]::GetFileName($item.Path)
         sha256=(Get-FileHash -LiteralPath $item.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-        version=$Version; product_id="UTHelper"; architecture="x64"; signer_identity=$ExpectedSubject
+        version=$Version; product_id="UTHelper"; architecture="x64"; signature_kind="self-signed-pinned"
+        signer_identity=$ExpectedSubject
         certificate_fingerprint=(Normalize-Hex $ExpectedCertificateSha256); signature_valid=$true
         timestamp_valid=$true; checks=$item.Checks; commit_sha=$CommitSha; workflow_run_id=$WorkflowRunId
     }

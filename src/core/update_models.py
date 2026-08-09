@@ -26,6 +26,7 @@ class ReleasePackage:
     signer_identity: str
     certificate_fingerprint: str
     install_strategy: Mapping[str, str]
+    signature_kind: str = "certificate-pinned"
 
 
 @dataclass(frozen=True, slots=True)

@@ -46,6 +46,7 @@ _PACKAGE_KEYS = frozenset(
         "install_strategy",
     }
 )
+_SCHEMA3_PACKAGE_KEYS = _PACKAGE_KEYS | {"signature_kind"}
 _ALLOWED_RELEASE_HOSTS = frozenset(
     {"github.com", "objects.githubusercontent.com"}
 )
@@ -60,10 +61,28 @@ _ALLOWED_TARGETS = frozenset(
         ("ios", "ipa", "app-store"),
     }
 )
+_SCHEMA3_TARGETS = {
+    ("ios", "ipa", "sideload"): (
+        "manual_sideload",
+        "unsigned-resign-required",
+    ),
+    ("android", "apk", "sideload"): (
+        "android_package_installer",
+        "apk-pinned",
+    ),
+    ("windows", "msi", "msi"): ("launch_msi", "self-signed-pinned"),
+    ("windows", "exe", "bootstrapper"): (
+        "launch_bootstrapper",
+        "self-signed-pinned",
+    ),
+}
+_SCHEMA3_SIGNATURES = frozenset(
+    {"unsigned-resign-required", "apk-pinned", "self-signed-pinned"}
+)
 _ALLOWED_STRATEGIES = {
     "windows": frozenset({"launch_msi", "launch_bootstrapper"}),
     "android": frozenset({"android_package_installer"}),
-    "ios": frozenset({"app_store"}),
+    "ios": frozenset({"app_store", "manual_sideload"}),
 }
 _EXPECTED_STRATEGY = {
     ("windows", "msi", "msi"): "launch_msi",
@@ -168,15 +187,16 @@ def _strategy(raw: object, platform_name: str) -> MappingProxyType:
     return MappingProxyType(result)
 
 
-def _validated_package(raw: object) -> ReleasePackage:
+def _validated_package(raw: object, *, schema_version: int = 2) -> ReleasePackage:
     if not isinstance(raw, Mapping):
         raise ManifestError("package must be an object")
     if any(not isinstance(key, str) for key in raw):
         raise ManifestError("package field names must be text")
-    unknown = set(raw) - _PACKAGE_KEYS
+    package_keys = _SCHEMA3_PACKAGE_KEYS if schema_version == 3 else _PACKAGE_KEYS
+    unknown = set(raw) - package_keys
     if unknown:
         raise ManifestError(f"unknown package fields: {sorted(unknown)}")
-    missing = _PACKAGE_KEYS - set(raw)
+    missing = package_keys - set(raw)
     if missing:
         raise ManifestError(f"missing package fields: {sorted(missing)}")
 
@@ -184,17 +204,55 @@ def _validated_package(raw: object) -> ReleasePackage:
     architecture = _token(raw.get("architecture"), "architecture")
     package_type = _token(raw.get("package_type"), "package_type")
     install_channel = _token(raw.get("install_channel"), "install_channel")
-    if (platform_name, package_type, install_channel) not in _ALLOWED_TARGETS:
+    target = (platform_name, package_type, install_channel)
+    allowed_targets = _SCHEMA3_TARGETS if schema_version == 3 else _ALLOWED_TARGETS
+    if target not in allowed_targets:
         raise ManifestError("package target is not supported")
-    fingerprint = normalize_fingerprint(
-        _bounded_text(
-            raw.get("certificate_fingerprint"),
-            "certificate_fingerprint",
-            128,
+
+    if schema_version == 3:
+        signature_kind = _token(raw.get("signature_kind"), "signature_kind")
+        if signature_kind not in _SCHEMA3_SIGNATURES:
+            raise ManifestError("signature_kind is invalid")
+        expected_strategy, expected_signature = _SCHEMA3_TARGETS[target]
+        if signature_kind != expected_signature:
+            raise ManifestError("signature kind does not match package target")
+        raw_signer = raw.get("signer_identity")
+        raw_fingerprint = raw.get("certificate_fingerprint")
+        if signature_kind == "unsigned-resign-required":
+            if raw_signer != "" or raw_fingerprint != "":
+                raise ManifestError("unsigned package identity must be empty")
+            signer_identity = ""
+            fingerprint = ""
+        else:
+            try:
+                signer_identity = _bounded_text(raw_signer, "signer_identity")
+                fingerprint = normalize_fingerprint(
+                    _bounded_text(
+                        raw_fingerprint,
+                        "certificate_fingerprint",
+                        128,
+                    )
+                )
+            except ManifestError as exc:
+                raise ManifestError(
+                    "pinned signature identity and fingerprint are required"
+                ) from exc
+            if not _HEX_64.fullmatch(fingerprint):
+                raise ManifestError(
+                    "pinned signature identity and fingerprint are required"
+                )
+    else:
+        signature_kind = "certificate-pinned"
+        signer_identity = _bounded_text(raw.get("signer_identity"), "signer_identity")
+        fingerprint = normalize_fingerprint(
+            _bounded_text(
+                raw.get("certificate_fingerprint"),
+                "certificate_fingerprint",
+                128,
+            )
         )
-    )
-    if not _HEX_64.fullmatch(fingerprint):
-        raise ManifestError("certificate fingerprint must be SHA-256")
+        if not _HEX_64.fullmatch(fingerprint):
+            raise ManifestError("certificate fingerprint must be SHA-256")
 
     package_url = _https_url(
         raw.get("url"),
@@ -206,8 +264,10 @@ def _validated_package(raw: object) -> ReleasePackage:
     ).lower().endswith(f".{package_type}"):
         raise ManifestError("package URL extension does not match package type")
     strategy = _strategy(raw.get("install_strategy"), platform_name)
-    expected_strategy = _EXPECTED_STRATEGY.get(
-        (platform_name, package_type, install_channel)
+    expected_strategy = (
+        _SCHEMA3_TARGETS[target][0]
+        if schema_version == 3
+        else _EXPECTED_STRATEGY.get(target)
     )
     if expected_strategy is None or strategy.get("kind") != expected_strategy:
         raise ManifestError("install strategy does not match package target")
@@ -220,9 +280,10 @@ def _validated_package(raw: object) -> ReleasePackage:
         url=package_url,
         sha256=_sha256(raw.get("sha256"), "package sha256"),
         size=_positive_size(raw.get("size")),
-        signer_identity=_bounded_text(raw.get("signer_identity"), "signer_identity"),
+        signer_identity=signer_identity,
         certificate_fingerprint=fingerprint,
         install_strategy=strategy,
+        signature_kind=signature_kind,
     )
 
 
@@ -262,8 +323,9 @@ def _parse_schema2(
     raw_packages = document.get("packages")
     if not isinstance(raw_packages, list) or not raw_packages:
         raise ManifestError("packages must be a non-empty array")
+    schema_version = int(document["schema_version"])
     return ReleaseManifest(
-        schema_version=2,
+        schema_version=schema_version,
         release_version=release_version,
         minimum_supported_version=minimum,
         published_at=_published_at(document.get("published_at")),
@@ -272,7 +334,10 @@ def _parse_schema2(
             "release notes URL",
             frozenset({"github.com"}),
         ),
-        packages=tuple(_validated_package(item) for item in raw_packages),
+        packages=tuple(
+            _validated_package(item, schema_version=schema_version)
+            for item in raw_packages
+        ),
     )
 
 
@@ -363,7 +428,7 @@ def parse_manifest(
     if not isinstance(document, Mapping):
         raise ManifestError("release manifest must be an object")
     expected = _version(expected_release_version, "expected_release_version")
-    if document.get("schema_version") == 2:
+    if document.get("schema_version") in {2, 3}:
         return _parse_schema2(document, expected)
     if document.get("schema") == 1:
         return _parse_schema1(document, expected)
