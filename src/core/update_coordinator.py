@@ -316,6 +316,33 @@ class UpdateCoordinator:
             )
             return
         if candidate.package.platform == "ios":
+            if candidate.manifest.schema_version == 3:
+                expected_url = (
+                    "https://github.com/Chouwzi/UTHelper/releases/tag/"
+                    f"v{candidate.manifest.release_version}"
+                )
+                package = candidate.package
+                if (
+                    package.install_channel != "sideload"
+                    or package.signature_kind != "unsigned-resign-required"
+                    or package.install_strategy.get("kind") != "manual_sideload"
+                    or set(package.install_strategy) != {"kind"}
+                    or candidate.manifest.release_notes_url != expected_url
+                ):
+                    self._emit(
+                        UpdateEventKind.FAILED,
+                        candidate=candidate,
+                        message="invalid iOS sideload release page",
+                    )
+                    return
+                with self._lock:
+                    self._ready_external_url = expected_url
+                self._emit(
+                    UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
+                    candidate=candidate,
+                )
+                return
+
             store_url = candidate.package.install_strategy.get("url", "")
             try:
                 parsed = urllib.parse.urlsplit(store_url)

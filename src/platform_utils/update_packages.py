@@ -78,7 +78,7 @@ def detect_runtime_target() -> RuntimeTarget:
     if platform_utils.IS_ANDROID:
         return RuntimeTarget("android", "universal", "sideload")
     if platform_utils.IS_IOS:
-        return RuntimeTarget("ios", "arm64", "app-store")
+        return RuntimeTarget("ios", "arm64", "sideload")
     return RuntimeTarget("other", "unknown", "source")
 
 
