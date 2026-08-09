@@ -2243,7 +2243,7 @@ class AppController:
         elif platform_utils.IS_ANDROID:
             affirmative = "Mở trình cài đặt"
         else:
-            affirmative = "Mở TestFlight/App Store"
+            affirmative = "Mở trang tải IPA"
 
         def cancel(_event):
             self.page.pop_dialog()
@@ -2252,12 +2252,17 @@ class AppController:
             self.page.pop_dialog()
             self._update_coordinator.confirm_install()
 
+        content = (
+            "Tải IPA trên máy tính, sau đó ký lại bằng cùng Apple ID và bundle ID "
+            "qua Sideloadly/AltStore. Chứng thực cá nhân có thể cần được làm mới "
+            "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
+            if not platform_utils.IS_WINDOWS and not platform_utils.IS_ANDROID
+            else "UTHelper sẽ chỉ mở trình cài đặt sau khi bạn xác nhận."
+        )
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Xác nhận cập nhật"),
-            content=ft.Text(
-                "UTHelper sẽ chỉ mở trình cài đặt sau khi bạn xác nhận."
-            ),
+            content=ft.Text(content),
             actions=[
                 ft.TextButton("Hủy", on_click=cancel),
                 ft.TextButton(affirmative, on_click=confirm),
