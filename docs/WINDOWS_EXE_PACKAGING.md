@@ -75,6 +75,25 @@ the MSI embedded in Burn. The upgrade harness uses bounded exact-PID processes,
 proves failed-upgrade rollback, preserves `%APPDATA%\UTHelper`, rejects
 downgrades, and verifies MSI and Burn uninstall.
 
+For the project-owned release identities, provision once from a trusted Windows
+maintainer machine. The backup path must be absolute, outside every checkout,
+new or empty, and included in the maintainer's encrypted offline backup:
+
+```powershell
+.\scripts\provision_release_credentials.ps1 `
+  -BackupDirectory "D:\UTHelper-release-recovery" `
+  -Repository "Chouwzi/UTHelper" `
+  -Environment "release"
+```
+
+The command uploads encrypted key material through standard input, records only
+public identity variables, applies a user-only ACL, and stores recovery secrets
+in Windows Credential Manager. It deliberately does not accept the WiX EULA or
+configure crash telemetry. The Windows certificate is self-signed and pinned by
+SHA-256; installation remains possible, but an untrusted machine may display
+Unknown publisher/SmartScreen until the project obtains a publicly trusted code
+signing certificate.
+
 Validate the output on a clean Windows profile or VM:
 
 - Launch the built `UTHelper.exe`.

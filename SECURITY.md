@@ -24,3 +24,16 @@ Maintainer sẽ xác nhận khi nhận được báo cáo, đánh giá phạm vi
 điểm công bố. Không có cam kết bounty. Các bản sửa liên quan release/update phải
 giữ kiểm tra chữ ký, inventory, timeout và xác nhận người dùng ở trạng thái
 fail-closed.
+
+## Khóa phát hành
+
+Khóa Android và Windows phải được tạo một lần bằng
+`scripts/provision_release_credentials.ps1`, sao lưu trong thư mục tuyệt đối nằm
+ngoài repository và chỉ cấp quyền cho tài khoản maintainer hiện tại. Mật khẩu khôi
+phục được giữ trong Windows Credential Manager; không ghi plaintext, không đưa vào
+issue, log CI hoặc commit. Fingerprint và subject là dữ liệu công khai, được ghim
+trong updater/manifest để thay khóa luôn là một thay đổi có review.
+
+IPA công khai không chứa khóa Apple hoặc provisioning profile. Người dùng tự ký
+lại gói iPhoneOS bằng Apple ID của họ qua công cụ sideload; dự án không yêu cầu và
+không lưu Apple ID, mật khẩu hay UDID của người dùng.
