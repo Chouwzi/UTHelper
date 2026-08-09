@@ -1151,3 +1151,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   removed because the evidence did not support that diagnosis. A workflow
   contract test rejects the source-manifest check. The next immutable release
   version is `2.2.5`.
+
+## Android apksigner output compatibility (2026-08-09)
+
+- The immutable `v2.2.5` run passed the merged-manifest checks and proved the
+  APK had one valid V2 signature with the pinned certificate fingerprint. The
+  independent evidence script nevertheless rejected it because newer Android
+  Build Tools label the digest line `V2 Signer:` while its parser recognized
+  only the older `Signer #1` label.
+- The verifier now accepts both documented output families, including dotted
+  scheme labels such as `V3.1 Signer:`, normalizes the digest, and requires at
+  least one parsed identity with the complete distinct-identity set exactly
+  equal to the pinned fingerprint. Regression tests cover old/current labels
+  and reject mixed expected/unexpected fingerprints. The next immutable release
+  version is `2.2.6`.
