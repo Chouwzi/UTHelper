@@ -618,19 +618,22 @@ def test_release_final_job_requires_all_builds_and_exact_inventory():
 
 def test_publication_creates_empty_draft_records_id_then_uploads_six_assets():
     workflow = _read(".github/workflows/release.yml")
-    create = 'gh release create "$TAG" --draft --verify-tag'
-    lookup = (
-        'CREATED_RELEASE_ID=$(gh api '
-        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG"'
-    )
+    preflight = 'existing_release_ids=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100"'
+    create = 'release_record=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases"'
+    capture = "CREATED_RELEASE_ID=$(printf '%s' \"$release_record\" | jq -er '.id')"
     upload = 'gh release upload "$TAG"'
     publish = 'gh release edit "$TAG" --draft=false --latest'
     assert (
-        workflow.index(create)
-        < workflow.index(lookup)
+        workflow.index(preflight)
+        < workflow.index(create)
+        < workflow.index(capture)
         < workflow.index(upload)
         < workflow.index(publish)
     )
+    assert '-F draft=true' in workflow
+    assert '-F generate_release_notes=true' in workflow
+    assert 'gh release create "$TAG"' not in workflow
+    assert 'releases/tags/$TAG" --jq' not in workflow
     assert "select(.draft == true and .tag_name == $tag)" in workflow
     assert "releases/$CREATED_RELEASE_ID" in workflow
     assert "gh release delete" not in workflow
