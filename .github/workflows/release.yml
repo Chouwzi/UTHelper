@@ -377,7 +377,9 @@ jobs:
           }
           $publicCertificate = Join-Path $env:RUNNER_TEMP "uthelper-release.cer"
           Export-Certificate -Cert $certificate -FilePath $publicCertificate | Out-Null
-          $trusted = Import-Certificate -FilePath $publicCertificate -CertStoreLocation "Cert:\CurrentUser\Root"
+          & certutil.exe -user -f -addstore Root $publicCertificate
+          if ($LASTEXITCODE -ne 0) { throw "Headless Windows trust import failed" }
+          $trusted = @(Get-ChildItem -LiteralPath "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -ErrorAction Stop)
           if ($trusted.Count -ne 1 -or
               $trusted[0].GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant() -ne $expected -or
               $trusted[0].Subject -ne $env:WINDOWS_SIGNER_SUBJECT) {
@@ -448,7 +450,8 @@ jobs:
             if ($env:WINDOWS_TRUSTED_CERT_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$') {
               throw "Refusing to remove an unexpected certificate identity"
             }
-            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$env:WINDOWS_TRUSTED_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+            & certutil.exe -user -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Headless Windows trust cleanup failed" }
           }
           Remove-Item -LiteralPath $expected -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "uthelper-release.cer") -Force -ErrorAction SilentlyContinue
