@@ -57,6 +57,18 @@ def test_cross_compiled_targets_do_not_receive_windows_only_dependencies():
     assert android_build_dependencies == ["flet-android-notifications==0.10.0"]
 
 
+def test_patched_security_floors_are_consistent_across_build_surfaces():
+    config = tomllib.loads(_read("pyproject.toml"))
+    release_workflow = _read(".github/workflows/release.yml")
+
+    assert "pillow>=12.3.0" in config["project"]["optional-dependencies"]["windows"]
+    assert "pillow>=12.3.0" in config["tool"]["flet"]["windows"]["dependencies"]
+    assert "lxml>=6.1.0" in config["project"]["optional-dependencies"]["windows"]
+    assert "lxml>=6.1.0" in config["tool"]["flet"]["windows"]["dependencies"]
+    assert "pytest>=9.0.3" in config["dependency-groups"]["dev"]
+    assert '"pytest>=9.0.3"' in release_workflow
+
+
 def test_flet_build_version_and_compilation_are_reproducible():
     config = tomllib.loads(_read("pyproject.toml"))
 
@@ -633,7 +645,7 @@ def test_validate_job_runs_full_suite_with_workspace_import_paths():
     ) in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
     assert 'pip install -e ".[dev,windows]"' not in workflow
-    assert 'pip install -e . "pytest>=9.0.2" "pytest-timeout>=2.3,<3"' in workflow
+    assert 'pip install -e . "pytest>=9.0.3" "pytest-timeout>=2.3,<3"' in workflow
 
 
 def test_release_manifest_preserves_the_supported_2_1_floor():

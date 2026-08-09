@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import threading
 import time
 
 import pytest
 
+import platform_utils.single_instance as single_instance
 from platform_utils.single_instance import (
     WAIT_OBJECT_0,
     WAIT_TIMEOUT,
@@ -221,6 +223,101 @@ def _bootstrap(kernel: FakeKernelObjectApi, **overrides):
         platform_name="win32",
         kernel=kernel,
     )
+
+
+def _packaged_pywin32_layout(tmp_path: Path) -> tuple[Path, tuple[Path, ...]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    executable = tmp_path / "UTHelper.exe"
+    executable.write_bytes(b"MZ")
+    site_packages = tmp_path / "site-packages"
+    paths = (
+        site_packages / "win32",
+        site_packages / "win32" / "lib",
+        site_packages / "pywin32_system32",
+    )
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+    return executable, paths
+
+
+def _packaged_module(bundle_root: Path) -> Path:
+    module = bundle_root / "app" / "platform_utils" / "single_instance.pyc"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_bytes(b"pyc")
+    return module
+
+
+def test_packaged_pywin32_paths_are_restored_without_executing_pth(tmp_path):
+    executable, expected_paths = _packaged_pywin32_layout(tmp_path)
+    search_path = ["existing-runtime-path"]
+
+    restored = single_instance.prepare_bundled_pywin32_imports(
+        executable=executable,
+        module_search_path=search_path,
+    )
+
+    expected = tuple(str(path.resolve()) for path in expected_paths)
+    assert restored == expected
+    assert search_path == [*expected, "existing-runtime-path"]
+
+
+def test_packaged_pywin32_paths_use_module_bundle_when_executable_is_embedded(
+    tmp_path,
+):
+    executable, expected_paths = _packaged_pywin32_layout(tmp_path / "bundle")
+    module = _packaged_module(executable.parent)
+    embedded_executable = tmp_path / "serious-python" / "python.exe"
+    embedded_executable.parent.mkdir()
+    embedded_executable.write_bytes(b"MZ")
+    search_path = ["existing-runtime-path"]
+
+    restored = single_instance.prepare_bundled_pywin32_imports(
+        executable=embedded_executable,
+        module_file=module,
+        module_search_path=search_path,
+    )
+
+    expected = tuple(str(path.resolve()) for path in expected_paths)
+    assert restored == expected
+    assert search_path == [*expected, "existing-runtime-path"]
+
+
+def test_default_windows_adapter_restores_packaged_pywin32_before_import(
+    tmp_path, monkeypatch
+):
+    executable, expected_paths = _packaged_pywin32_layout(tmp_path / "bundle")
+    embedded_executable = tmp_path / "serious-python" / "python.exe"
+    embedded_executable.parent.mkdir()
+    embedded_executable.write_bytes(b"MZ")
+    embedded_module = _packaged_module(tmp_path / "serious-python")
+    expected = [str(path.resolve()) for path in expected_paths]
+    kernel = FakeKernelObjectApi()
+    monkeypatch.setattr(single_instance.sys, "executable", str(embedded_executable))
+    monkeypatch.setattr(single_instance.sys, "path", ["existing-runtime-path"])
+    monkeypatch.setattr(single_instance, "__file__", str(embedded_module))
+    monkeypatch.setattr(
+        single_instance,
+        "get_current_process_executable",
+        lambda: executable,
+        raising=False,
+    )
+
+    def packaged_adapter():
+        if single_instance.sys.path[:3] != expected:
+            raise ImportError("bundled pywin32 paths were not restored")
+        return kernel
+
+    monkeypatch.setattr(single_instance, "PyWin32KernelObjectApi", packaged_adapter)
+
+    result = bootstrap_windows_instance(
+        autostart_launch=False,
+        development=False,
+        platform_name="win32",
+    )
+
+    assert result.role is InstanceRole.PRIMARY
+    assert result.broker is not None
+    assert result.broker.close(timeout_seconds=1.0)
 
 
 def test_object_names_are_stable_private_and_environment_scoped():
