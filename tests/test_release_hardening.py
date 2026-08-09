@@ -189,7 +189,11 @@ def test_release_ipa_is_unsigned_device_archive_for_manual_resigning():
         assert name not in workflow
     assert "flet build ipa" in workflow
     assert "package_unsigned_ipa.py" in workflow
-    assert "find build/ios/archive" in workflow
+    assert (
+        "find build/ipa -mindepth 1 -maxdepth 1 -type d "
+        "-name '*.xcarchive'"
+    ) in workflow
+    assert "find build/ios/archive" not in workflow
     assert "--ios-export-method" not in workflow
     assert "--ios-provisioning-profile" not in workflow
     assert "--ios-signing-certificate" not in workflow

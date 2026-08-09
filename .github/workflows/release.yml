@@ -239,7 +239,7 @@ jobs:
           set -euo pipefail
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
-          find build/ios/archive -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
+          find build/ipa -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
           test "$(wc -l < "$RUNNER_TEMP/xcarchive-candidates.txt" | tr -d ' ')" -eq 1
           XCARCHIVE=$(sed -n '1p' "$RUNNER_TEMP/xcarchive-candidates.txt")
           mkdir -p release evidence

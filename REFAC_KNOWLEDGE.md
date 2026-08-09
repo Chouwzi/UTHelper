@@ -1124,3 +1124,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - The Windows release job now forces Python UTF-8 mode and UTF-8 standard-stream
   encoding for Flet and all Python subprocesses. A workflow contract test locks
   both variables. The next immutable release version is `2.2.2`.
+
+## Unsigned iOS archive output path (2026-08-09)
+
+- The immutable `v2.2.2` run built a valid no-codesign iPhoneOS archive, then
+  failed before packaging because the workflow searched `build/ios/archive`.
+  Flet copies the archive output into the project-level `build/ipa` directory;
+  the run log confirmed `UTHelper.xcarchive` was produced before that mismatch.
+- The release workflow now requires exactly one `.xcarchive` directly beneath
+  `build/ipa`, and its contract test rejects the stale source-build path. The
+  next immutable release version is `2.2.3`.
