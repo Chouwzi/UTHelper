@@ -1165,3 +1165,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   equal to the pinned fingerprint. Regression tests cover old/current labels
   and reject mixed expected/unexpected fingerprints. The next immutable release
   version is `2.2.6`.
+
+## Android receiver identity disambiguation (2026-08-09)
+
+- The immutable `v2.2.6` run passed signing-certificate parsing, then the
+  evidence verifier rejected receiver wiring even though the workflow's merged
+  manifest checks passed. Offline inspection of the successful Android PR APK
+  showed all five intended receivers plus WorkManager's separate
+  `androidx.work.impl.background.systemalarm.RescheduleReceiver`. The verifier
+  matched simple-name suffixes, so it incorrectly counted two receivers named
+  `RescheduleReceiver`.
+- Verification now requires each of the five exact fully-qualified receiver
+  class names exactly once. Unrelated AndroidX receivers no longer collide,
+  while missing, duplicated, or lookalike UTHelper/plugin identities still
+  fail. The regression fixture includes the real WorkManager collision. The
+  next immutable release version is `2.2.7`.

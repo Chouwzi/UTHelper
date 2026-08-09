@@ -27,11 +27,11 @@ _CERTIFICATE_LINE = re.compile(
     re.MULTILINE,
 )
 _RECEIVERS = (
-    "ScheduledNotificationReceiver",
-    "ScheduledNotificationBootReceiver",
-    "ActionBroadcastReceiver",
-    "DeadlineAlarmReceiver",
-    "RescheduleReceiver",
+    "com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver",
+    "com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver",
+    "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
+    "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
+    "com.uthelper.backgroundsync.notification.RescheduleReceiver",
 )
 
 
@@ -163,11 +163,7 @@ def verify_android_release(
     invalid_receivers = [
         name
         for name in _RECEIVERS
-        if sum(
-            candidate == name or candidate.endswith(f".{name}")
-            for candidate in receiver_names
-        )
-        != 1
+        if receiver_names.count(name) != 1
     ]
     if invalid_receivers:
         raise AndroidVerificationError("APK notification receiver wiring is incomplete")
