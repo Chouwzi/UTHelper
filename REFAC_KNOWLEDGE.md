@@ -1197,3 +1197,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   PowerShell provider removal is subject to the same UI restriction. A workflow
   contract test rejects both interactive cmdlet paths. The next immutable
   release version is `2.2.8`.
+
+## Hosted Windows machine-root trust scope (2026-08-09)
+
+- The immutable `v2.2.8` run completed Android and iOS, but `certutil -user`
+  still timed out for five minutes in the same current-user Root store. The
+  local round trip proves the certificate and command are valid; the repeated
+  hosted-only behavior isolates the blocker to current-user root policy/UI.
+- GitHub's disposable Windows runner executes as Administrator, so release
+  verification now installs the already-pinned public leaf temporarily into
+  `LocalMachine\Root` with non-interactive `certutil`, resolves and revalidates
+  the exact machine-store thumbprint, then always deletes that exact identity
+  from the same store. Progress markers bracket PFX decode, identity validation,
+  public export, and trust import so any future timeout is attributable without
+  weakening verification. The next immutable release version is `2.2.9`.

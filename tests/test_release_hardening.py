@@ -652,16 +652,19 @@ def test_windows_release_temporarily_trusts_and_removes_exact_self_signed_leaf()
     workflow = _read(".github/workflows/release.yml")
 
     assert "Import-Certificate" not in workflow
-    assert "certutil.exe -user -f -addstore Root $publicCertificate" in workflow
+    assert "certutil.exe -f -addstore Root $publicCertificate" in workflow
     assert "Headless Windows trust import failed" in workflow
-    assert 'Get-ChildItem -LiteralPath "Cert:\\CurrentUser\\Root\\$($certificate.Thumbprint)"' in workflow
+    assert 'Get-ChildItem -LiteralPath "Cert:\\LocalMachine\\Root\\$($certificate.Thumbprint)"' in workflow
+    assert "Windows signing PFX decoded" in workflow
+    assert "Windows signing PFX identity validated" in workflow
+    assert "Windows machine-root trust imported" in workflow
     assert "WINDOWS_TRUSTED_CERT_THUMBPRINT" in workflow
     assert "Temporary Windows trust import identity mismatch" in workflow
     assert "Compiled Windows release pin mismatch" in workflow
     assert "TRUSTED_WINDOWS_SIGNER_SHA256" in workflow
-    assert "certutil.exe -user -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT" in workflow
+    assert "certutil.exe -delstore Root $env:WINDOWS_TRUSTED_CERT_THUMBPRINT" in workflow
     assert "Headless Windows trust cleanup failed" in workflow
-    assert 'Remove-Item -LiteralPath "Cert:\\CurrentUser\\Root' not in workflow
+    assert 'Remove-Item -LiteralPath "Cert:\\LocalMachine\\Root' not in workflow
     assert "if: always()" in workflow
 
 
