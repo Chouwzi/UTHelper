@@ -38,7 +38,7 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e . "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
+        run: pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
         run: python -m pytest tests extensions/flet_uth_background_sync/tests -q --tb=short
