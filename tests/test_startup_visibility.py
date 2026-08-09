@@ -82,8 +82,23 @@ def test_compact_desktop_forwards_activation_dependencies(monkeypatch):
     assert created == [(page, broker, True)]
 
 
-def test_force_visible_startup_skips_minimize_policy_and_binds_activation(monkeypatch):
+@pytest.mark.parametrize(
+    ("force_visible", "expected_visible", "expected_events"),
+    [
+        (
+            True,
+            True,
+            ["broker-ready", "window-published", "show-scheduled"],
+        ),
+        (False, False, ["broker-ready", "window-published"]),
+    ],
+)
+def test_activation_broker_is_ready_before_initial_window_state_is_published(
+    monkeypatch, force_visible, expected_visible, expected_events
+):
     import gui.app_controller as app_controller
+
+    events: list[str] = []
 
     class Window:
         def __init__(self):
@@ -111,9 +126,11 @@ def test_force_visible_startup_skips_minimize_policy_and_binds_activation(monkey
 
         def update(self):
             self.update_calls += 1
+            events.append("window-published")
 
         def run_task(self, task, *args):
             self.scheduled.append(task)
+            events.append("show-scheduled")
 
     class Broker:
         def __init__(self):
@@ -121,6 +138,7 @@ def test_force_visible_startup_skips_minimize_policy_and_binds_activation(monkey
 
         def bind_show_handler(self, handler):
             self.handler = handler
+            events.append("broker-ready")
 
     class Tray:
         def __init__(self, page, *, on_show):
@@ -142,7 +160,7 @@ def test_force_visible_startup_skips_minimize_policy_and_binds_activation(monkey
     controller = app_controller.AppController.__new__(app_controller.AppController)
     controller.page = page
     controller.activation_broker = broker
-    controller.force_visible = True
+    controller.force_visible = force_visible
     controller.orchestrator = type("Orchestrator", (), {})()
     controller._android_background = None
     controller._safe_run_task = lambda task, *args: None
@@ -156,16 +174,27 @@ def test_force_visible_startup_skips_minimize_policy_and_binds_activation(monkey
     monkeypatch.setattr(app_controller, "NotificationManager", Notifier)
     monkeypatch.setattr(app_controller.settings, "START_MINIMIZED", True)
     monkeypatch.setattr(app_controller, "is_autostart_launch", lambda: True)
-    monkeypatch.setattr(app_controller, "should_hide_startup_window", lambda **kwargs: pytest.fail("force-visible launch must not use minimize policy"))
+    monkeypatch.setattr(
+        app_controller,
+        "should_hide_startup_window",
+        lambda **kwargs: (
+            pytest.fail("force-visible launch must not use minimize policy")
+            if force_visible
+            else True
+        ),
+    )
     monkeypatch.setattr("gui.tray.TrayApp", Tray)
     monkeypatch.setattr("gui.core.theme.set_page_theme", lambda page: None)
 
     controller._init_window()
 
-    assert page.window.visible is True
-    assert page.scheduled == [controller.window_activator.show]
+    assert page.window.visible is expected_visible
+    assert page.scheduled == (
+        [controller.window_activator.show] if force_visible else []
+    )
     assert controller.tray.on_show == controller.window_activator.request_show
     assert broker.handler == controller.window_activator.request_show
+    assert events == expected_events
 
 
 def test_disconnect_closes_activation_broker_before_page_resources():
