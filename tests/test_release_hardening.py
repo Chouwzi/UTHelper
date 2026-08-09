@@ -525,6 +525,29 @@ def test_release_workflow_has_native_signed_jobs_and_one_final_publication_job()
     assert 'gh release edit "$TAG" --draft=false --latest' in workflow
 
 
+def test_release_credentials_are_preflighted_before_native_runner_jobs():
+    workflow = _read(".github/workflows/release.yml")
+
+    preflight = workflow.split("  validate-release-credentials:\n", 1)[1].split(
+        "\n  build-signed-android:\n", 1
+    )[0]
+    assert "needs: validate-release-source" in preflight
+    assert "environment: release" in preflight
+    assert "python3 scripts/validate_release_credentials.py" in preflight
+
+    for job, next_job in (
+        ("build-signed-android", "build-signed-ios"),
+        ("build-signed-ios", "build-signed-windows"),
+        ("build-signed-windows", "publish-exact-release"),
+    ):
+        body = workflow.split(f"  {job}:\n", 1)[1].split(
+            f"\n  {next_job}:\n", 1
+        )[0]
+        assert (
+            "needs: [validate-release-source, validate-release-credentials]" in body
+        )
+
+
 def test_release_actions_are_full_sha_pinned_and_permissions_are_job_local():
     workflow = _read(".github/workflows/release.yml")
     for action in (
@@ -540,7 +563,7 @@ def test_release_actions_are_full_sha_pinned_and_permissions_are_job_local():
     assert "actions/checkout@v4" not in workflow
     assert "softprops/action-gh-release" not in workflow
     assert "\npermissions:\n  contents: write" not in workflow
-    assert workflow.count("    permissions:\n") == 5
+    assert workflow.count("    permissions:\n") == 6
 
 
 def test_release_final_job_requires_all_builds_and_exact_inventory():
