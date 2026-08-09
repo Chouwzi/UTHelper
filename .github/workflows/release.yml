@@ -149,7 +149,15 @@ jobs:
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+          if ! flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose; then
+            mapfile -t COMPLETED_APKS < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
+            if [ "${#COMPLETED_APKS[@]}" -ne 1 ]; then
+              echo "Flet returned non-zero and did not produce exactly one release APK"
+              printf '%s\n' "${COMPLETED_APKS[@]}"
+              exit 1
+            fi
+            echo "::warning::Flet returned non-zero after producing ${COMPLETED_APKS[0]}; continuing with mandatory native verification"
+          fi
 
           MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml
           grep -q "ScheduledNotificationReceiver" "$MANIFEST"
