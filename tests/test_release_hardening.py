@@ -147,9 +147,16 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
     assert "yes | flet build apk" not in workflow
     assert "--yes --verbose" in workflow
-    assert "if ! flet build apk" in workflow
-    assert 'if [ "${#COMPLETED_APKS[@]}" -ne 1 ]; then' in workflow
-    assert "continuing with mandatory native verification" in workflow
+    assert "COMPLETED_APKS" not in workflow
+    assert "MANIFEST=build/flutter/android/app/src/main/AndroidManifest.xml" not in workflow
+    for receiver in (
+        "ScheduledNotificationReceiver",
+        "ScheduledNotificationBootReceiver",
+        "ActionBroadcastReceiver",
+        "DeadlineAlarmReceiver",
+        "RescheduleReceiver",
+    ):
+        assert f'grep -q "{receiver}" final-android-manifest.xml' in workflow
     assert '"$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"' in workflow
 
 
