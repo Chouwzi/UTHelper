@@ -273,6 +273,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 75
     environment: release
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
     permissions:
       contents: read
       id-token: write
