@@ -55,8 +55,48 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --github-output "$GITHUB_OUTPUT"
 
-  build-signed-android:
+  validate-release-credentials:
     needs: validate-release-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    permissions:
+      contents: read
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+      ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+      APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+      APPLE_SIGNING_CERT_SHA256: ${{ vars.APPLE_SIGNING_CERT_SHA256 }}
+      APPLE_API_ISSUER_ID: ${{ vars.APPLE_API_ISSUER_ID }}
+      APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+      IOS_DISTRIBUTION_URL: ${{ vars.IOS_DISTRIBUTION_URL }}
+      WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+      WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+      WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+      WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
+      WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+      WIX_EULA_ACCEPTED: ${{ vars.WIX_EULA_ACCEPTED }}
+      SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+    steps:
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 3
+        with:
+          persist-credentials: false
+      - name: Reject incomplete release configuration before native runners
+        timeout-minutes: 1
+        run: python3 scripts/validate_release_credentials.py
+
+  build-signed-android:
+    needs: [validate-release-source, validate-release-credentials]
     runs-on: ubuntu-latest
     timeout-minutes: 75
     environment: release
@@ -175,7 +215,7 @@ jobs:
           retention-days: 7
 
   build-signed-ios:
-    needs: validate-release-source
+    needs: [validate-release-source, validate-release-credentials]
     runs-on: macos-latest
     timeout-minutes: 90
     environment: release
@@ -343,7 +383,7 @@ jobs:
           if [[ -d "$RUNNER_TEMP/transporter" ]]; then rm -rf -- "$RUNNER_TEMP/transporter"; fi
 
   build-signed-windows:
-    needs: validate-release-source
+    needs: [validate-release-source, validate-release-credentials]
     runs-on: windows-latest
     timeout-minutes: 75
     environment: release
