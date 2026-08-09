@@ -42,15 +42,16 @@ def _fake_run(command, **kwargs):
     elif "version-code" in command:
         output = f"{BUILD_NUMBER}\n"
     else:
+        receiver_names = (
+            "com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver",
+            "com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver",
+            "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
+            "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
+            "com.uthelper.backgroundsync.notification.RescheduleReceiver",
+            "androidx.work.impl.background.systemalarm.RescheduleReceiver",
+        )
         receivers = "".join(
-            f'<receiver android:name="com.example.{name}" />'
-            for name in (
-                "ScheduledNotificationReceiver",
-                "ScheduledNotificationBootReceiver",
-                "ActionBroadcastReceiver",
-                "DeadlineAlarmReceiver",
-                "RescheduleReceiver",
-            )
+            f'<receiver android:name="{name}" />' for name in receiver_names
         )
         output = (
             '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
