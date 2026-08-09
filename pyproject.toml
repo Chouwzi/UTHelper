@@ -28,8 +28,8 @@ windows = [
     "windows-toasts>=1.3.1",
     "winrt-Windows.ApplicationModel==3.2.1",
     "keyring>=25.0.0",
-    "pillow>=12.2.0",
-    "lxml>=6.0.4",
+    "pillow>=12.3.0",
+    "lxml>=6.1.0",
 ]
 android-build = [
     "flet-android-notifications==0.10.0",
@@ -64,8 +64,8 @@ dependencies = [
     "windows-toasts>=1.3.1",
     "winrt-Windows.ApplicationModel==3.2.1",
     "keyring>=25.0.0",
-    "pillow>=12.2.0",
-    "lxml>=6.0.4",
+    "pillow>=12.3.0",
+    "lxml>=6.1.0",
 ]
 
 [tool.flet.android]
@@ -108,7 +108,7 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.2",
+    "pytest>=9.0.3",
     "pytest-timeout>=2.3,<3",
 ]
 

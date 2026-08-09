@@ -15,6 +15,8 @@ def _write_valid_bundle(root: Path) -> None:
     (root / "app").mkdir()
     (root / "site-packages").mkdir()
     (root / "site-packages" / "winrt").mkdir()
+    (root / "site-packages" / "win32" / "lib").mkdir(parents=True)
+    (root / "site-packages" / "pywin32_system32").mkdir()
     (root / "UTHelper.exe").write_bytes(b"MZ")
     (root / "UTHelperAutostart.exe").write_bytes(b"MZ")
     (root / "python314.dll").write_bytes(b"dll")
@@ -25,6 +27,13 @@ def _write_valid_bundle(root: Path) -> None:
         / "winrt"
         / "_winrt_windows_applicationmodel.cp314-win_amd64.pyd"
     ).write_bytes(b"pyd")
+    for module in ("win32api.pyd", "win32event.pyd", "win32security.pyd"):
+        (root / "site-packages" / "win32" / module).write_bytes(b"pyd")
+    for module in ("win32con.pyc", "winerror.pyc", "pywintypes.pyc"):
+        (root / "site-packages" / "win32" / "lib" / module).write_bytes(b"pyc")
+    (
+        root / "site-packages" / "pywin32_system32" / "pywintypes314.dll"
+    ).write_bytes(b"dll")
     (root / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
     (root / "app" / "main.pyc").write_bytes(b"pyc")
 
@@ -49,6 +58,13 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
             "site-packages/winrt/_winrt_windows_applicationmodel.cp314-win_amd64.pyd",
             "Windows.ApplicationModel projection",
         ),
+        ("site-packages/win32/win32api.pyd", "win32api"),
+        ("site-packages/win32/win32event.pyd", "win32event"),
+        ("site-packages/win32/win32security.pyd", "win32security"),
+        ("site-packages/win32/lib/win32con.pyc", "win32con"),
+        ("site-packages/win32/lib/winerror.pyc", "winerror"),
+        ("site-packages/win32/lib/pywintypes.pyc", "pywintypes loader"),
+        ("site-packages/pywin32_system32/pywintypes314.dll", "pywintypes"),
     ],
 )
 def test_missing_runtime_artifact_fails_closed(tmp_path, relative_path, message):

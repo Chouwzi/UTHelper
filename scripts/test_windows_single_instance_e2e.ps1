@@ -134,6 +134,7 @@ $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $profileRoot = Join-Path $tempRoot ("UTHelper-e2e-" + [guid]::NewGuid().ToString("N"))
 $settingsDirectory = Join-Path $profileRoot "UTHelper"
 $settingsFile = Join-Path $settingsDirectory "settings.json"
+$appLog = Join-Path $settingsDirectory "logs\app.log"
 $originalAppData = $env:APPDATA
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalFletData = $env:FLET_APP_STORAGE_DATA
@@ -256,14 +257,18 @@ try {
     $env:FLET_APP_STORAGE_DATA = $null
     $env:FLET_APP_STORAGE_TEMP = $null
 
-    # 1. The argument-free startup alias owns the hidden primary.
+    # 1. Establish an actual Python/UI primary, not merely a runner whose
+    # initial native window happens to be hidden before the mutex exists.
     $primary = Start-OwnedProcess -FilePath $resolvedAlias
     Wait-Until `
         -TimeoutSeconds $WindowTimeoutSeconds `
-        -Description "Startup alias hidden readiness" `
+        -Description "Startup alias broker-ready hidden state" `
         -Predicate {
             $primary.Refresh()
-            -not $primary.HasExited -and [UTHelperWindowProbe]::IsHidden([uint32]$primary.Id)
+            -not $primary.HasExited -and
+                [UTHelperWindowProbe]::IsHidden([uint32]$primary.Id) -and
+                (Test-Path -LiteralPath $appLog -PathType Leaf) -and
+                ((Get-Content -LiteralPath $appLog -Raw) -match "App started successfully")
         }
     Write-Host "[PASS] startup alias primary is ready and hidden (PID $($primary.Id))"
 
