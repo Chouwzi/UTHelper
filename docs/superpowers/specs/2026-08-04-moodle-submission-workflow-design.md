@@ -23,8 +23,12 @@ Read-only discovery against the target site established that it runs Moodle 4.3.
 and exposes the relevant assignment read/save/finalize functions plus the dedicated
 `/webservice/upload.php` draft-file endpoint. It does not expose
 `mod_assign_remove_submission`, which was added in a later Moodle release. Therefore
-"delete all" can clear the file area while an editable submission exists, but the app
-must not promise that it can erase the submission record itself.
+the original design assumed that "delete all" could clear the file area while an
+editable submission exists without removing its record. Production verification on
+2026-08-10 corrected that assumption: an empty file-manager save is rejected, while
+Moodle's same-origin web confirmation action can remove the submission and reset it
+to `new`. The implemented fallback uses that action and verifies the result through
+the web service.
 
 ## Goals
 
@@ -47,11 +51,12 @@ must not promise that it can erase the submission record itself.
 
 - Supporting `thnn.ut.edu.vn`.
 - Automating browser sessions or scraping Moodle HTML when an official web-service
-  operation exists.
+  operation exists. The narrowly scoped removal confirmation is allowed because the
+  installed student web-service contract has no equivalent operation.
 - Editing author or license metadata. Moodle 4.3's upload endpoint ignores the fields
   the current client sends, so those controls will be removed rather than simulated.
-- Removing a Moodle submission record on this server. The required web-service
-  function is unavailable.
+- Removing a submission through an unavailable web-service function. File-only
+  removal uses Moodle's own authenticated, same-origin confirmation form instead.
 - Mutating an already-submitted, graded, locked, expired, near-due, or otherwise
   sensitive real assignment during testing.
 - Claiming byte-for-byte atomicity across draft uploads. Atomicity begins when the

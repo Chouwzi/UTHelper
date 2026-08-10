@@ -86,6 +86,11 @@ def detail_view_shell():
         _submission_statement=SimpleNamespace(value=False),
         _submission_status_value=SimpleNamespace(value="", color=None),
         _upload_status=SimpleNamespace(value="", color=None, visible=False),
+        _delete_confirm_text=SimpleNamespace(value=""),
+        _delete_confirm_dialog=SimpleNamespace(open=False),
+        _pending_delete_indices=[],
+        _selected_file_indices=set(),
+        _page=SimpleNamespace(overlay=[], update=lambda: None),
         _last_server_status=None,
         _on_status_changed=None,
         _current_url="",
@@ -102,9 +107,34 @@ def detail_view_shell():
         "_on_finalize",
         "_confirm_replace_mutation",
         "_selected_submission_files",
+        "_confirm_single_delete",
+        "_confirm_batch_delete",
     ):
         setattr(shell, name, MethodType(getattr(DetailView, name), shell))
     return shell
+
+
+def test_delete_last_file_warns_that_file_only_submission_is_removed(detail_view_shell):
+    detail_view_shell._submitted_files = [{"name": "answer.pdf"}]
+    detail_view_shell._submission_snapshot = snapshot(
+        files=(remote("answer.pdf"),), online_text=""
+    )
+
+    detail_view_shell._confirm_single_delete(0)
+
+    assert "xóa toàn bộ bài nộp" in detail_view_shell._delete_confirm_text.value
+
+
+def test_delete_last_file_says_online_text_is_preserved(detail_view_shell):
+    detail_view_shell._submitted_files = [{"name": "answer.pdf"}]
+    detail_view_shell._submission_snapshot = snapshot(
+        files=(remote("answer.pdf"),), online_text="<p>Keep me</p>"
+    )
+
+    detail_view_shell._confirm_single_delete(0)
+
+    assert "chỉ xóa toàn bộ file" in detail_view_shell._delete_confirm_text.value
+    assert "Nội dung văn bản vẫn được giữ lại" in detail_view_shell._delete_confirm_text.value
 
 
 def test_loaded_snapshot_replaces_server_file_list_and_stores_fingerprint(

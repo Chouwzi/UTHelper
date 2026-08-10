@@ -808,13 +808,26 @@ code-like value and must not inspect or infer from free-form `error`, `message`,
 `filename`, `filepath`, or `size` fields.
 
 `mod_assign_save_submission` treats the supplied file-manager draft item as the
-complete replacement set. Consequently, add, remove, rename, path-move, replace,
-and clear operations rebuild the exact desired set in a fresh draft and save it as
-one state transition. Existing files that must remain are downloaded, bounded by
-the assignment limits, and re-uploaded. Online text is preserved from the same
-fresh status snapshot. A successful empty-set save clears submission files but does
-not delete the Moodle submission database record; that record-removal operation is
-not supported by this workflow or the available student web-service contract.
+complete replacement set. Consequently, add, partial remove, rename, path-move,
+and replace operations rebuild the exact desired set in a fresh draft and save it
+as one state transition. Existing files that must remain are downloaded, bounded
+by the assignment limits, and re-uploaded. Online text is preserved from the same
+fresh status snapshot. Moodle 4.3 reports the file limit under
+`maxfilesubmissions` (plural); older aliases remain accepted by the parser.
+
+UTH production rejects an empty file-manager save for a file-only submission with
+the structured warning `couldnotsavesubmission` ("Could not save submission").
+Deleting the final file therefore follows Moodle's authenticated web confirmation
+flow: open `action=removesubmissionconfirm`, parse the same-origin POST form, submit
+`action=removesubmission` with its server-issued `userid` and `sesskey`, then verify
+through `mod_assign_get_submission_status` that the file set is empty and status is
+`new` or `reopened`. Before the destructive POST, the form `userid` must match a
+fresh `core_webservice_get_site_info.userid` from the active WS token, and the
+assignment fingerprint and safety policy are re-read once more. This uses a
+short-lived cookie session and is required because
+the site's student web-service contract does not expose
+`mod_assign_remove_submission`. If online text is present, the workflow instead
+keeps using an empty file draft so that deleting files does not delete that text.
 
 Assignments with `submissiondrafts=1` remain in `draft` after save. They move to
 `submitted` only through the separate `mod_assign_submit_for_grading` transition,

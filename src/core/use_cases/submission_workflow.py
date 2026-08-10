@@ -96,6 +96,7 @@ class SubmissionErrorCode(str, Enum):
     DRAFT_ALLOCATION_FAILED = "draft_allocation_failed"
     UPLOAD_FAILED = "upload_failed"
     SAVE_REJECTED = "save_rejected"
+    REMOVE_REJECTED = "remove_rejected"
     FINALIZE_REJECTED = "finalize_rejected"
     STATEMENT_NOT_ACCEPTED = "statement_not_accepted"
     VERIFICATION_FAILED = "verification_failed"
@@ -111,6 +112,7 @@ class SubmissionError:
 class MutationOutcome(str, Enum):
     DRAFT_SAVED = "draft_saved"
     SUBMISSION_SAVED = "submission_saved"
+    SUBMISSION_REMOVED = "submission_removed"
     SUBMITTED_FOR_GRADING = "submitted_for_grading"
 
 
@@ -184,6 +186,7 @@ _ERROR_MESSAGES = {
     SubmissionErrorCode.DRAFT_ALLOCATION_FAILED: "Moodle could not allocate a draft area.",
     SubmissionErrorCode.UPLOAD_FAILED: "A file could not be uploaded to the Moodle draft area.",
     SubmissionErrorCode.SAVE_REJECTED: "Moodle rejected the submission save.",
+    SubmissionErrorCode.REMOVE_REJECTED: "Moodle rejected removal of the submission.",
     SubmissionErrorCode.FINALIZE_REJECTED: "The draft was saved, but Moodle did not finalize it.",
     SubmissionErrorCode.STATEMENT_NOT_ACCEPTED: "The submission statement must be accepted explicitly.",
     SubmissionErrorCode.VERIFICATION_FAILED: "Moodle's refreshed submission does not match the requested files.",
@@ -377,8 +380,111 @@ class SubmissionWorkflow:
         materialized = self._materialize(plan, selected_bytes)
         if isinstance(materialized, SubmissionError):
             return SubmissionMutationResult.failure(materialized, snapshot)
+        if (
+            intent.operation is MutationOperation.CLEAR
+            and not plan
+            and not snapshot.online_text.strip()
+        ):
+            return self._remove_submission_verify(
+                loaded, target, safety_guard
+            )
         return self._upload_save_verify(
             loaded, plan, materialized, intent, safety_guard
+        )
+
+    def _remove_submission_verify(
+        self,
+        context: _SnapshotContext,
+        target: SubmissionTarget,
+        safety_guard: Callable[[SubmissionSnapshot], bool] | None,
+    ) -> SubmissionMutationResult:
+        snapshot = context.snapshot
+        fresh = self._reload_context(context)
+        if isinstance(fresh, SubmissionError):
+            return SubmissionMutationResult.failure(fresh, None)
+        issue = self._permission_issue(fresh.snapshot)
+        if issue is None:
+            issue = self._file_mutation_issue(fresh.snapshot)
+        if issue is not None:
+            return SubmissionMutationResult.failure(issue, fresh.snapshot)
+        if fresh.snapshot.fingerprint != snapshot.fingerprint or not self._passes_safety_guard(
+            fresh.snapshot, safety_guard
+        ):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.STALE_SNAPSHOT), fresh.snapshot
+            )
+
+        cmid = self._extract_cmid(target.url)
+        if cmid is None:
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.INVALID_TARGET), fresh.snapshot
+            )
+        try:
+            expected_user_id = self.client.get_user_id(refresh=True)
+        except Exception:
+            logger.exception("Could not verify the active Moodle account")
+            expected_user_id = None
+        if not isinstance(expected_user_id, int) or isinstance(expected_user_id, bool):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.REMOVE_REJECTED), fresh.snapshot
+            )
+
+        pre_commit_issue: SubmissionError | None = None
+        pre_commit_snapshot = fresh.snapshot
+
+        def revalidate_before_commit() -> bool:
+            nonlocal pre_commit_issue, pre_commit_snapshot
+            latest = self._reload_context(fresh)
+            if isinstance(latest, SubmissionError):
+                pre_commit_issue = latest
+                return False
+            pre_commit_snapshot = latest.snapshot
+            pre_commit_issue = self._permission_issue(latest.snapshot)
+            if pre_commit_issue is None:
+                pre_commit_issue = self._file_mutation_issue(latest.snapshot)
+            if pre_commit_issue is not None:
+                return False
+            if latest.snapshot.fingerprint != fresh.snapshot.fingerprint:
+                pre_commit_issue = _error(SubmissionErrorCode.STALE_SNAPSHOT)
+                return False
+            if not self._passes_safety_guard(latest.snapshot, safety_guard):
+                pre_commit_issue = _error(SubmissionErrorCode.STALE_SNAPSHOT)
+                return False
+            return True
+
+        try:
+            removed = bool(
+                self.client.remove_assignment_submission(
+                    cmid,
+                    expected_user_id=expected_user_id,
+                    before_commit=revalidate_before_commit,
+                )
+            )
+        except Exception:
+            logger.exception("Moodle web submission removal failed")
+            removed = False
+        if pre_commit_issue is not None:
+            return SubmissionMutationResult.failure(
+                pre_commit_issue, pre_commit_snapshot
+            )
+        if not removed:
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.REMOVE_REJECTED), fresh.snapshot
+            )
+
+        refreshed = self._refresh_snapshot(fresh)
+        if isinstance(refreshed, SubmissionError):
+            return SubmissionMutationResult.failure(
+                refreshed, None, partial=True
+            )
+        if refreshed.remote_files or refreshed.raw_status not in {"new", "reopened"}:
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.VERIFICATION_FAILED),
+                refreshed,
+                partial=True,
+            )
+        return SubmissionMutationResult.success(
+            refreshed, MutationOutcome.SUBMISSION_REMOVED
         )
 
     def _load_context(
