@@ -51,6 +51,9 @@ trong `docs/`.
 - Ưu tiên làm việc trên nhánh refactor riêng, ví dụ `feature/refactor-clean` hoặc nhánh `codex/...` nếu tạo bởi Codex.
 - Không commit trực tiếp vào `main` hoặc `develop`.
 - Không revert thay đổi của người khác nếu không được yêu cầu rõ ràng.
+- Tuân thủ `docs/guides/gitflow.md`: topic branch vào `develop`, phát hành
+  `develop -> main`, hotfix quay lại cả hai nhánh, và PR vào nhánh sống lâu dài
+  dùng merge commit thay vì squash/rebase.
 
 ---
 

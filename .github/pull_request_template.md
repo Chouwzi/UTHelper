@@ -2,6 +2,13 @@
 
 Mô tả ngắn vấn đề và kết quả của thay đổi.
 
+## Gitflow
+
+- [ ] Nhánh nguồn/đích đúng theo `docs/guides/gitflow.md`.
+- [ ] PR vào `main`/`develop` sẽ dùng merge commit, không squash/rebase.
+- [ ] Nếu là release: nguồn là `develop` hoặc `release/*`; nếu là hotfix, thay
+      đổi cũng được đưa về `develop`.
+
 ## Kiểm thử
 
 - [ ] Đã thêm/cập nhật test hồi quy phù hợp.

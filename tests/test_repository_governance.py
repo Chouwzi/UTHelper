@@ -61,6 +61,8 @@ def test_repository_has_actionable_contributor_and_security_controls():
 
     assert "* @Chouwzi" in codeowners
     assert "/.github/workflows/ @Chouwzi" in codeowners
+    assert "/scripts/github_branch_policy.py @Chouwzi" in codeowners
+    assert "/docs/guides/gitflow.md @Chouwzi" in codeowners
     assert "develop" in contributing and "pull request" in contributing.lower()
     assert "https://github.com/Chouwzi/UTHelper/security/advisories/new" in security
     assert "Không đăng" in security
@@ -75,6 +77,17 @@ def test_repository_has_actionable_contributor_and_security_controls():
     ) in dependabot
     assert '      - "security"' not in dependabot
     assert "Rulesets" in _read("docs/guides/windows-packaging.md")
+    assert "develop -> main" in _read("docs/guides/gitflow.md")
+
+
+def test_ci_enforces_gitflow_direction_as_a_named_required_check():
+    workflow = _read(".github/workflows/ci.yml")
+
+    assert "gitflow-policy:" in workflow
+    assert "name: 🌿 Gitflow policy" in workflow
+    assert "python scripts/validate_gitflow_pr.py" in workflow
+    assert '--base "${{ github.base_ref }}"' in workflow
+    assert '--head "${{ github.head_ref }}"' in workflow
 
 
 def test_repository_documentation_is_indexed_and_separates_history():

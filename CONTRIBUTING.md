@@ -5,9 +5,9 @@ tiêu, có test và tôn trọng dữ liệu riêng tư của sinh viên.
 
 ## Quy trình
 
-1. Fork repository và tạo nhánh nhỏ từ `develop` (`feature/...`, `fix/...` hoặc
-   `docs/...`). Không mở thay đổi tính năng trực tiếp vào `main`; `main` chỉ nhận
-   phiên bản đã được kiểm chứng để phát hành.
+1. Fork repository và tạo nhánh nhỏ từ `develop` (`feature/...`, `bugfix/...`,
+   `fix/...` hoặc `docs/...`). Không mở thay đổi tính năng trực tiếp vào `main`;
+   `main` chỉ nhận `develop`, `release/*` hoặc `hotfix/*` đã được kiểm chứng.
 2. Mỗi pull request nên giải quyết một vấn đề. Mô tả hành vi trước/sau, rủi ro,
    migration và cách hoàn tác khi có thay đổi trạng thái bền vững.
 3. Viết test hồi quy trước thay đổi hành vi. Mock dịch vụ trường ở biên mạng;
@@ -23,6 +23,9 @@ tiêu, có test và tôn trọng dữ liệu riêng tư của sinh viên.
 5. Giải quyết toàn bộ review và giữ CI xanh. Maintainer có thể yêu cầu tách pull
    request quá rộng hoặc đóng thay đổi cố tình bỏ qua trust boundary, timeout,
    kiểm tra chữ ký hay quyền riêng tư.
+6. PR vào `main` hoặc `develop` phải dùng **Create a merge commit**. Không squash
+   hoặc rebase hai nhánh sống lâu dài; quy trình đầy đủ nằm tại
+   [`docs/guides/gitflow.md`](docs/guides/gitflow.md).
 
 ## Quy tắc kỹ thuật
 
@@ -32,6 +35,9 @@ tiêu, có test và tôn trọng dữ liệu riêng tư của sinh viên.
   nó tạo ra.
 - Không sửa file Flutter/Dart sinh ra sau compile để né quy trình nguồn.
 - Không dùng action GitHub dạng tag mutable; pin full commit SHA đã review.
+- Không push trực tiếp, force-push hoặc xóa `main`/`develop`. Phát hành thông
+  thường đi theo `develop -> main`; hotfix từ `main` phải merge lại vào
+  `develop`.
 - Thay đổi workflow release, installer, updater, credential hoặc security được
   tự động gán CODEOWNER; repository production phải bật ruleset để biến review
   đó thành điều kiện merge, đồng thời giữ các test ở trạng thái fail-closed.

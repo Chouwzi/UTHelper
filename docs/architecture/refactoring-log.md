@@ -1258,3 +1258,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   and `git diff --check` passed. A wider local run reached 1269 passed and 25
   skipped; its seven failures were isolated to optional dependencies absent from
   the shell environment (`flet_uth_background_sync` and the diagnostics SDK).
+
+## Gitflow governance correction (2026-08-11)
+
+- Research against Vincent Driessen's original versioned-release model and
+  GitHub's current ruleset/merge documentation confirmed that long-lived
+  `main`/`develop` integration requires merge ancestry. The previous linear,
+  squash/rebase policy duplicated equivalent release commits and made a later
+  `develop -> main` promotion conflict.
+- The repository policy now treats `main` as production, `develop` as integration,
+  sends routine work to `develop`, promotes releases from `develop` to `main`, and
+  sends hotfixes from `main` back to `develop`. Protected PRs use merge commits.
+- Policy-as-code renders and audits repository merge settings plus the protected
+  branch ruleset. CI validates PR direction. Review, CODEOWNER approval, resolved
+  threads, strict checks, deletion protection, and non-fast-forward protection
+  remain fail-closed; only the incompatible linear-history rule is removed.
