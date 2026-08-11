@@ -37,6 +37,40 @@ def test_compiled_windows_release_pin_is_exact_sha256_identity():
     )
 
 
+def test_windows_probe_isolates_native_modules_and_passes_literal_path(
+    tmp_path,
+    monkeypatch,
+):
+    from platform_utils import windows_update
+
+    package = tmp_path / "update [verified]; package.msi"
+    package.write_bytes(b"package")
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(argv, 0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setattr(windows_update.subprocess, "run", fake_run)
+
+    assert windows_update._powershell_json("probe-script", package, 10) == {
+        "ok": True
+    }
+
+    assert captured["argv"][-1] == "probe-script"
+    assert str(package.resolve()) not in captured["argv"]
+    child_environment = captured["kwargs"]["env"]
+    assert child_environment["UTHELPER_UPDATE_PACKAGE_PATH"] == str(
+        package.resolve()
+    )
+    assert "PowerShell\\7\\Modules" not in child_environment["PSModulePath"]
+    assert "WindowsPowerShell" in child_environment["PSModulePath"]
+    assert "$null = $view.Execute($record)" in windows_update._MSI_SCRIPT
+
+
 def _candidate(
     path: Path,
     *,
