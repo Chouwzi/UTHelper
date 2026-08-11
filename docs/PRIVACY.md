@@ -38,8 +38,9 @@ the local native-fault file.
 
 It also does not upload a name, email address, username, account ID, password,
 token, sesskey, cookie, MoodleSession, Authorization value, absolute home path,
-course name, activity title, submission, grade, file content, or any other
-Moodle data. Unknown fields are rejected before a report is written to disk.
+course name, activity title, class schedule, room, campus, submission, grade,
+file content, or any other Moodle/Portal data. Unknown fields are rejected
+before a report is written to disk.
 
 ## Local files, limits, and deletion
 

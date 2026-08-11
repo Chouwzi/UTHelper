@@ -65,6 +65,13 @@ machine-scoped WiX 7 MSI and a Burn bootstrapper EXE. Review and accept the WiX
 7 OSMF EULA before setting the required process variable; the build refuses to
 restore or execute WiX otherwise.
 
+Burn branding is sourced from the application assets rather than duplicated in
+the packaging directory. `src/assets/icon.ico` supplies the executable,
+Explorer, Programs and Features, and title-bar icon through `IconSourceFile`;
+`src/assets/icon.png` supplies the WixStdBA content logo through `LogoFile`.
+Keep the ICO multi-resolution, including 16, 32, 48, and 256 pixel square
+frames, so Windows can select a native frame at each shell DPI.
+
 ```powershell
 $env:WIX_EULA_ACCEPTED = "wix7"
 .\scripts\build_installer.ps1 -BundleDir build\windows -OutputDir dist

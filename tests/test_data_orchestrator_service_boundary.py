@@ -56,3 +56,27 @@ def test_fetch_detail_via_ws_uses_moodle_service_boundary():
     assert fake_service.detail_calls == [(77, 12, "assign")]
     assert result["details"]["description_html"] == "<p>Chi tiết</p>"
     assert result["submission_status"] == "Đã nộp"
+
+
+def test_fetch_quiz_detail_promotes_normalized_attempt_status():
+    orchestrator = DataOrchestrator()
+    fake_service = _FakeMoodleService()
+    fake_service.get_assign_details_via_ws = lambda **_kwargs: {
+        "status_data": {},
+        "quiz_info": [],
+        "quiz_attempt_status": "not_submitted",
+    }
+    orchestrator.moodle_service = fake_service
+
+    result = orchestrator._fetch_detail_via_ws(
+        {
+            "url": "https://example.test/mod/quiz/view.php?id=77",
+            "type": "quiz",
+            "course_id": "12",
+            "submission_status": "unknown",
+            "details": {},
+        }
+    )
+
+    assert result["submission_status"] == "not_submitted"
+    assert result["details"]["quiz_attempt_status"] == "not_submitted"

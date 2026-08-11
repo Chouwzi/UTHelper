@@ -299,6 +299,7 @@ def get_assign_details_via_ws(
         'course_full_name': str,
         'open_time': str (ISO),
         'quiz_info': list,
+        'quiz_attempt_status': str | None,
         'attempts_allowed': str,
         'time_limit': str,
     }
@@ -309,6 +310,7 @@ def get_assign_details_via_ws(
         'course_full_name': '',
         'open_time': None,
         'quiz_info': [],
+        'quiz_attempt_status': None,
         'attempts_allowed': None,
         'time_limit': None,
     }
@@ -500,6 +502,12 @@ def _get_quiz_detail(
     # Attempts
     if quiz_id:
         attempts = get_quiz_attempts(call_api, quiz_id)
+        if attempts is not None:
+            if not attempts:
+                # An authoritative empty list is different from an API error:
+                # the student has not started this quiz yet.
+                details['quiz_attempt_status'] = 'not_submitted'
+
         if attempts:
             for att in attempts:
                 state = att.get('state', '')
@@ -513,7 +521,13 @@ def _get_quiz_detail(
             
             # Status data
             last = attempts[-1]
-            last_state = last.get('state', '')
+            last_state = str(last.get('state', '') or '').lower()
+            details['quiz_attempt_status'] = {
+                'finished': 'submitted',
+                'inprogress': 'in_progress',
+                'overdue': 'overdue',
+                'abandoned': 'abandoned',
+            }.get(last_state, 'attempted')
             details['status_data']['Trạng thái'] = {
                 'finished': 'Đã hoàn thành',
                 'inprogress': 'Đang làm',

@@ -204,7 +204,7 @@ class Settings(BaseModel):
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
     MOODLE_LOGIN_URL: str = "https://courses.ut.edu.vn/login/index.php"
-    PORTAL_API_BASE: str = "https://portal.ut.edu.vn/api/v1"
+    PORTAL_API_BASE: str = "https://portal-publicapp.ut.edu.vn/api/v1"
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")

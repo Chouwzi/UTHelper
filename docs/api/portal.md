@@ -3,9 +3,10 @@
 > **Status**: Maintained reference. Captures and credentials must remain outside
 > Git; only redacted endpoint contracts belong in this document.
 
-> **Source**: `https://portal.ut.edu.vn`
+> **Frontend**: `https://portal.ut.edu.vn`
+> **API base**: `https://portal-publicapp.ut.edu.vn/api/v1`
 > **Method**: Chrome DevTools network traffic capture (live session)
-> **Date**: 2026-06-22
+> **Last verified**: 2026-08-11
 > **Auth**: JWT Bearer Token (HS256, 30-day expiry)
 > **SPA Framework**: React Router
 > **Backend**: Spring Boot (Java) — inferred from response headers
@@ -36,8 +37,7 @@
 
 ### `POST /api/v1/user/login`
 
-**Query Params:**
-- `g-recaptcha-response` (string, required) — reCAPTCHA v2/v3 token
+**Query Params:** none in the verified native-client flow.
 
 **Request Headers:**
 ```
@@ -95,7 +95,9 @@ Referer: https://portal.ut.edu.vn/
 **Notes:**
 - Token hết hạn sau **30 ngày** (`exp - iat = 2592000s`)
 - `body` field chứa role: `"sv"` = sinh viên, có thể có `"gv"` = giảng viên
-- reCAPTCHA token có thể lấy từ browser session hoặc reCAPTCHA Enterprise API
+- Live native-client verification on 2026-08-11 succeeded without a cookie,
+  browser token, or reCAPTCHA query value. Treat browser-only challenge fields
+  as capability-driven rather than part of the native contract.
 - Algorithm: HS256 (HMAC-SHA256)
 
 ---
@@ -260,6 +262,45 @@ Referer: https://portal.ut.edu.vn/
 
 ## 📅 4. Lịch học (Schedule)
 
+### `GET /api/v1/lichhoc/ngay?date={YYYY-MM-DD}`
+
+**Description:** Nguồn chính xác cho lịch học của một ngày. UTHelper dùng endpoint
+này cho card "Lịch học hôm nay" vì response có trực tiếp môn, giờ bắt đầu/kết
+thúc, tiết, phòng, cơ sở, ghi chú và trạng thái tạm ngưng.
+
+**Authentication:** `Authorization: Bearer {jwt_token}`. Capture và live probe
+đều thành công mà không cần cookie hoặc `X-Browser-Token`.
+
+**Redacted response contract:**
+
+```json
+{
+  "success": true,
+  "status": 200,
+  "body": [
+    {
+      "id": 123,
+      "tenMonHoc": "Tên môn học",
+      "maLopHocPhan": "Mã lớp học phần",
+      "tenPhong": "Phòng học",
+      "coSoToDisplay": "Cơ sở",
+      "tuTiet": 1,
+      "denTiet": 3,
+      "tuGio": "07:00",
+      "denGio": "09:30",
+      "isTamNgung": false,
+      "ghiChu": ""
+    }
+  ]
+}
+```
+
+### `GET /api/v1/lichhoc/tuan?date={YYYY-MM-DD}`
+
+**Description:** Lịch tuần; thêm `ngayBatDauHoc` và `giangVien` (có thể null).
+Endpoint này phù hợp cho màn hình tuần, nhưng card hôm nay ưu tiên `/ngay` để
+tránh lọc và suy diễn ngày ở client.
+
 ### `GET /api/v1/lichhoc/thang?date={YYYY-MM-DD}`
 
 **Description:** Lịch học theo tháng (dùng ngày đầu tháng)
@@ -296,6 +337,9 @@ Referer: https://portal.ut.edu.vn/
 **Description:** Lịch học theo tuần (chi tiết hơn — có tiết, phòng, giảng viên)
 
 **Params:** `date` — Ngày bất kỳ trong tuần, format `YYYY-MM-DD`
+
+Legacy-compatible variant of the weekly contract; the verified backend also
+exposes the shorter `/lichhoc/tuan` route.
 
 ### `GET /api/v1/lichhoc/songayhoc`
 

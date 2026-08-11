@@ -38,7 +38,7 @@
 | 📋 **Theo dõi deadline** | Lấy bài tập, quiz, điểm danh từ `courses.ut.edu.vn` và `thnn.ut.edu.vn` qua Moodle WS hoặc phiên web an toàn khi site không cấp WS |
 | 📊 **Theo dõi điểm** | Giám sát thay đổi điểm theo thời gian thực, thông báo khi có điểm mới |
 | 🔔 **Cảnh báo thông minh** | Phân loại `Khẩn cấp` · `Sắp hạn` · `An toàn` · `Quá hạn` |
-| 📅 **Lịch học** | Xem lịch học theo tuần với deadline trực quan |
+| 📅 **Lịch học hôm nay** | Đồng bộ lớp học từ UTH Portal với giờ học, tiết, phòng, cơ sở và trạng thái theo thời gian thực |
 | ⚡ **Hiệu suất cao** | Startup ~4s, parallel API, grade N+1 optimization |
 | 📱 **Đa nền tảng** | Windows MSI/EXE · Android APK · iOS IPA · Web browser |
 | 🎨 **6 Theme** | Midnight Blue · Ocean Teal · Sakura Pink · Nord Frost · Monokai Pro · Solarized Dark |
