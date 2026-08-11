@@ -110,6 +110,7 @@ local.properties
 # ── Project-specific ──
 parsepage/
 benchmark_*.py
+test_flet/
 
 # ── Agent workspace (skill configs, not source) ──
 .agent/
