@@ -1,6 +1,7 @@
 # Windows Activation and Deterministic Settings Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Archived:** Planning snapshot retained for provenance. It is not the current
+> task tracker; use tests and current operator documentation as the source of truth.
 
 **Goal:** Guarantee one packaged UTHelper instance per signed-in Windows user, make every explicit second launch reveal and focus the existing window while autostart launches stay silent, and make Settings loading, change detection, saving, and discard deterministic for every editable field.
 

@@ -1,8 +1,10 @@
 # Moodle assignment submission workflow design
 
+> **Archived:** Design snapshot retained for provenance; not a live status page.
+
 Date: 2026-08-04
 
-Status: Approved with live-data safety restriction
+Original status: Approved with live-data safety restriction
 
 Branch: `codex/moodle-submission-workflow`
 

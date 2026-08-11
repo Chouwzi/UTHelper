@@ -1,7 +1,10 @@
 # UTHelper Codebase Architecture Review & Refactoring Plan
 
+Trạng thái: baseline và kế hoạch kiến trúc lịch sử từ đợt audit 2026-07-01.
+Quyết định kiến trúc có hiệu lực lâu dài được lưu trong `docs/adr/`.
+
 Ngày audit: 2026-07-01
-Phạm vi: `src/`, `tests/`, `.github/workflows/ci.yml`, `.agents/AGENTS.md`, `REFAC_KNOWLEDGE.md`
+Phạm vi: `src/`, `tests/`, `.github/workflows/ci.yml`, `.agents/AGENTS.md`, `docs/architecture/refactoring-log.md`
 Mục tiêu: đánh giá theo Clean Code, SOLID/OOP, Clean Architecture, C4/ADR và đề xuất kế hoạch refactor có thể thực thi từng bước.
 
 ---
@@ -176,7 +179,7 @@ flowchart LR
 | ISP | 3/5 | `BaseNotifier` gọn; nhưng UI callbacks/orchestrator surface chưa rõ, `MoodleService` facade quá rộng |
 | DIP | 2/5 | Core facade đang có nhưng presentation vẫn gọi concrete `ws_functions`/client; DI còn bằng callback ad-hoc |
 | Testability | 3/5 | Test nhiều và pass, nhưng controller/view test phải dùng `__new__`, fake page, monkeypatch global |
-| Architecture docs | 2/5 | README có tree, REFAC_KNOWLEDGE có log; thiếu ADR/C4 và nguồn sự thật trong repo |
+| Architecture docs | 2/5 | README có tree, refactoring log có log; thiếu ADR/C4 và nguồn sự thật trong repo |
 
 Kết luận: codebase đang ở trạng thái "functional but transitional". Nó có nhiều dấu vết refactor đúng hướng, nhưng chưa hoàn tất boundary giữa presentation, application service, infrastructure.
 
@@ -237,7 +240,7 @@ Mục tiêu: không đổi behavior, chỉ làm cho repo có baseline rõ.
 - [x] Sửa lỗi lint nhỏ trong `tests` để `ruff check src tests` pass.
 - [x] Cập nhật README test count từ `314 passed` sang baseline mới.
 - [x] Thêm ADR đầu tiên: `docs/adr/0001-refactoring-boundaries.md`.
-- [x] Chốt rule agent trong `.agents/AGENTS.md`: mọi agent phải đọc plan này, `REFAC_KNOWLEDGE.md`, chạy test/lint baseline trước/sau refactor.
+- [x] Chốt rule agent trong `.agents/AGENTS.md`: mọi agent phải đọc plan này, `docs/architecture/refactoring-log.md`, chạy test/lint baseline trước/sau refactor.
 
 Điều kiện nghiệm thu:
 
@@ -387,5 +390,5 @@ Mục tiêu: tránh tái phát architectural drift.
 - `python -m pytest tests -q --tb=short` pass.
 - `ruff check src tests` pass.
 - Nếu chạm UI: manual smoke `python src/main.py --web` hoặc desktop theo docs hiện hành.
-- Cập nhật `REFAC_KNOWLEDGE.md` với ngày, phase, files touched, test status.
+- Cập nhật `docs/architecture/refactoring-log.md` với ngày, phase, files touched, test status.
 - Nếu thay đổi boundary: thêm/cập nhật ADR.

@@ -1,6 +1,7 @@
 # Windows Autostart and Launch Visibility Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Archived:** Planning snapshot retained for provenance. It is not the current
+> task tracker; use tests and current operator documentation as the source of truth.
 
 **Goal:** Make the Settings UI truthfully enable/disable Windows autostart for both Inno and MSIX distributions and let users choose a visible or tray-hidden autostart launch.
 

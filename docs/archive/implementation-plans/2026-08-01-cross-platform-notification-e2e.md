@@ -1,6 +1,7 @@
 # Cross-platform Notification E2E Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Archived:** Planning snapshot retained for provenance. It is not the current
+> task tracker; use tests and current operator documentation as the source of truth.
 
 **Goal:** Make deadline reminders and related notification channels behave consistently on Windows, Android, and iOS, with automated evidence for the shared contract and platform adapters.
 

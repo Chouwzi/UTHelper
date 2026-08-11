@@ -1,7 +1,9 @@
 # Windows build stability and autostart design
 
+> **Archived:** Design snapshot retained for provenance; not a live status page.
+
 Date: 2026-08-03  
-Status: Approved revision, implementation in progress  
+Original status: Approved revision, implementation in progress
 Branch: `feature/windows-startup-stability`
 
 ## Context

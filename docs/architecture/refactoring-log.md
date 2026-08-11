@@ -1,5 +1,8 @@
 # Cơ sở tri thức Tái cấu trúc (Refactoring Knowledge Base)
 
+Trạng thái: nhật ký kiến trúc lịch sử. Đây là nguồn tra cứu quyết định và bằng
+chứng đã thực hiện, không phải danh sách công việc đang chờ xử lý.
+
 Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ thuật và tiến độ thực tế trong quá trình tái cấu trúc codebase `UTHelper` theo các nguyên lý Clean Code và SOLID.
 
 ---
@@ -45,7 +48,7 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-07-01 | `feature/refactor-clean` | Giai đoạn 4 | Phân chia các Tab cài đặt của `SettingsView` thành các file độc lập trong thư mục `settings/` | Đạt 296/296 |
 | 2026-07-01 | `feature/refactor-clean` | Giai đoạn 5 | Trích xuất `theme_presets.py` và triển khai `ViewManager` để giảm ghép cặp cho `AppController` | Đạt 296/296 |
 | 2026-07-01 | `feature/refactor-clean` | Giai đoạn 6 | Trích xuất bảng danh sách file đã nộp (`SubmittedFilesTable`) của `DetailView` thành component riêng | Đạt 296/296 |
-| 2026-07-01 | workspace hiện tại | Audit senior | Nghiên cứu Clean Code/SOLID/OOP/Architecture, tạo `docs/CODEBASE_ARCHITECTURE_REVIEW_PLAN.md`, cập nhật `.agents/AGENTS.md` làm rule nguồn trong repo | Test đạt 296 passed, 22 skipped; `ruff check src` còn 13 lỗi |
+| 2026-07-01 | workspace hiện tại | Audit senior | Nghiên cứu Clean Code/SOLID/OOP/Architecture, tạo `docs/architecture/refactoring-plan.md`, cập nhật `.agents/AGENTS.md` làm rule nguồn trong repo | Test đạt 296 passed, 22 skipped; `ruff check src` còn 13 lỗi |
 | 2026-07-01 | workspace hiện tại | Phase 0 | Sửa Ruff baseline, cập nhật README test count, tạo ADR boundary, thêm `tests/test_architecture_boundaries.py` để khóa dependency debt hiện hữu | Đạt 300 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 1 một phần | Trích `SubmissionWorkflow` khỏi `DetailView`, thêm tests service, siết architecture allowlist để xóa nợ `DetailView -> core.ws_functions` | Đạt 305 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 2/3 một phần | Thêm `GradeRefreshService`, mở rộng `MoodleService`, chuyển `AppController` khỏi import trực tiếp `ws_functions`, thêm tests service | Đạt 311 passed, 22 skipped; `ruff check src tests` pass |
@@ -98,7 +101,7 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 2.  `DetailView` còn trực tiếp xử lý workflow Moodle submit/upload/re-upload/delete metadata; nên trích sang use case/service.
 3.  `MoodleService` hiện là boundary chính cho Moodle WS; `ws_functions` được giữ như adapter thấp tầng phía sau service.
 4.  `models.py` còn phụ thuộc `config.settings` để tính urgency; nên chuyển sang policy inject được.
-5.  `.agents/AGENTS.md` cũ trỏ tới đường dẫn ngoài repo; đã cập nhật để dùng `docs/CODEBASE_ARCHITECTURE_REVIEW_PLAN.md` làm nguồn sự thật.
+5.  `.agents/AGENTS.md` cũ trỏ tới đường dẫn ngoài repo; đã cập nhật để dùng `docs/architecture/refactoring-plan.md` làm nguồn sự thật.
 
 ### Ưu tiên refactor tiếp theo
 
@@ -1236,3 +1239,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   an exact immutable identity even while the release is still a draft. The lone
   empty `v2.2.10` draft was identity-checked and removed. The next immutable
   release version is `2.2.11`.
+
+## Repository documentation and diagnostics hygiene (2026-08-11)
+
+- Maintained documentation is now indexed in `docs/README.md` and separated into
+  API, architecture, guides, testing, ADRs, and historical archives. Completed
+  tool-specific plans were preserved under `docs/archive/` with explicit archive
+  notices instead of appearing to be active work.
+- The refactoring log moved out of the repository root, and all live references
+  in agent rules, README, and governance tests were updated. Two unreferenced
+  v2.1.0 screenshots were removed from Git history's current tree.
+- `scripts/debug_panel_test.py` and `scripts/notification_system_test.py` were
+  removed after bounded execution proved they were stale, outside pytest
+  collection, and failing against current async/module boundaries. Repeatable
+  script entry points are now catalogued in `scripts/README.md`.
+- Verification: 47 focused governance/redaction tests passed; `ruff check .`,
+  `python -m compileall -q src tests scripts`, Markdown relative-link validation,
+  and `git diff --check` passed. A wider local run reached 1269 passed and 25
+  skipped; its seven failures were isolated to optional dependencies absent from
+  the shell environment (`flet_uth_background_sync` and the diagnostics SDK).
