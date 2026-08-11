@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -33,7 +34,14 @@ _MSI_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
 
 _SIGNATURE_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
-$sig = Get-AuthenticodeSignature -LiteralPath $args[0]
+$packagePath = [Environment]::GetEnvironmentVariable(
+  'UTHELPER_UPDATE_PACKAGE_PATH',
+  'Process'
+)
+if ([string]::IsNullOrWhiteSpace($packagePath)) {
+  throw 'Missing update package path'
+}
+$sig = Get-AuthenticodeSignature -LiteralPath $packagePath
 $sha256 = if ($sig.SignerCertificate) {
   $sig.SignerCertificate.GetCertHashString(
     [Security.Cryptography.HashAlgorithmName]::SHA256
@@ -49,13 +57,20 @@ $sha256 = if ($sig.SignerCertificate) {
 
 _MSI_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
+$packagePath = [Environment]::GetEnvironmentVariable(
+  'UTHELPER_UPDATE_PACKAGE_PATH',
+  'Process'
+)
+if ([string]::IsNullOrWhiteSpace($packagePath)) {
+  throw 'Missing update package path'
+}
 $installer = New-Object -ComObject WindowsInstaller.Installer
-$database = $installer.OpenDatabase($args[0], 0)
+$database = $installer.OpenDatabase($packagePath, 0)
 function Read-Property([string]$name) {
   $view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``=?")
   $record = $installer.CreateRecord(1)
   $record.StringData(1) = $name
-  $view.Execute($record)
+  $null = $view.Execute($record)
   $row = $view.Fetch()
   if ($null -eq $row) { throw "Missing MSI property" }
   return [string]$row.StringData(1)
@@ -70,7 +85,14 @@ function Read-Property([string]$name) {
 
 _EXE_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
-$version = (Get-Item -LiteralPath $args[0]).VersionInfo
+$packagePath = [Environment]::GetEnvironmentVariable(
+  'UTHELPER_UPDATE_PACKAGE_PATH',
+  'Process'
+)
+if ([string]::IsNullOrWhiteSpace($packagePath)) {
+  throw 'Missing update package path'
+}
+$version = (Get-Item -LiteralPath $packagePath).VersionInfo
 [ordered]@{
   product_name = [string]$version.ProductName
   product_version = [string]$version.ProductVersion
@@ -122,6 +144,23 @@ def _bounded_timeout(value: float) -> float:
 
 
 def _powershell_json(script: str, path: Path, timeout_seconds: float) -> dict:
+    resolved_path = Path(path).resolve(strict=True)
+    child_environment = os.environ.copy()
+    # A packaged app can inherit PowerShell 7's PSModulePath. Windows
+    # PowerShell 5.1 then imports incompatible Core modules and cannot load
+    # Get-AuthenticodeSignature. Give the verifier only the native module roots.
+    system_root = child_environment.get("SystemRoot", r"C:\Windows")
+    native_module_root = str(
+        Path(system_root)
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "Modules"
+    )
+    child_environment["PSModulePath"] = native_module_root
+    # Pass the literal path out-of-band so spaces and PowerShell metacharacters
+    # can never alter the command text.
+    child_environment["UTHELPER_UPDATE_PACKAGE_PATH"] = str(resolved_path)
     completed = subprocess.run(
         [
             "powershell.exe",
@@ -130,8 +169,8 @@ def _powershell_json(script: str, path: Path, timeout_seconds: float) -> dict:
             "-NonInteractive",
             "-Command",
             script,
-            str(Path(path).resolve()),
         ],
+        env=child_environment,
         capture_output=True,
         text=True,
         timeout=_bounded_timeout(timeout_seconds),

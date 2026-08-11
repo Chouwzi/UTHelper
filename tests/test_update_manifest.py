@@ -108,6 +108,31 @@ def test_schema3_accepts_unsigned_ios_sideload_package():
     assert manifest.schema_version == 3
     assert manifest.packages[0].signature_kind == "unsigned-resign-required"
 
+    candidate = select_candidate(
+        manifest,
+        current_version="2.1.0",
+        target=RuntimeTarget("ios", "arm64", "sideload"),
+    )
+
+    assert candidate is not None
+    assert candidate.automatic_install_allowed is False
+
+
+def test_schema3_pinned_windows_package_allows_verified_in_app_install():
+    manifest = parse_manifest(
+        _schema3(_schema3_package()),
+        expected_release_version="2.2.0",
+    )
+
+    candidate = select_candidate(
+        manifest,
+        current_version="2.1.0",
+        target=RuntimeTarget("windows", "x64", "msi"),
+    )
+
+    assert candidate is not None
+    assert candidate.automatic_install_allowed is True
+
 
 @pytest.mark.parametrize("kind", ["apk-pinned", "self-signed-pinned"])
 def test_schema3_pinned_signatures_require_identity_and_fingerprint(kind):

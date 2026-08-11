@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 import gui.app_controller as app_controller_module
 from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
+from core.update_coordinator import UpdateEvent, UpdateEventKind
 from core.update_models import ReleasePackage
 from gui.app_controller import (
     AppController,
@@ -183,3 +184,50 @@ def test_update_confirmation_explains_ios_sideload_and_resigning(monkeypatch):
     assert dialog.actions[1].content == "Mở trang tải IPA"
     assert "Sideloadly/AltStore" in dialog.content.value
     assert "cùng Apple ID" in dialog.content.value
+
+
+def _update_event_controller():
+    controller = AppController.__new__(AppController)
+    controller.settings_view = SimpleNamespace(_check_update_btn=None)
+    controller._manual_update_check_requested = False
+    controller._update_candidate = SimpleNamespace(
+        manifest=SimpleNamespace(release_version="2.3.0")
+    )
+    controller._update_text = SimpleNamespace(value="")
+    controller._update_btn = SimpleNamespace(disabled=False, content="")
+    controller._update_progress = SimpleNamespace(visible=False, value=0.0)
+    controller._update_banner = SimpleNamespace(visible=False)
+    controller.page = _FakePage()
+    return controller
+
+
+def test_update_download_replaces_stale_available_copy_with_progress_state():
+    controller = _update_event_controller()
+    candidate = controller._update_candidate
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.DOWNLOADING, candidate, progress=0.0)
+        )
+    )
+
+    assert controller._update_text.value == "Đang tải và xác minh v2.3.0..."
+    assert controller._update_btn.content == "Đang tải và xác minh..."
+    assert controller._update_btn.disabled is True
+    assert controller._update_progress.visible is True
+
+
+def test_update_failure_explains_retry_in_banner_instead_of_stale_ready_copy():
+    controller = _update_event_controller()
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.FAILED, controller._update_candidate)
+        )
+    )
+
+    assert controller._update_text.value == (
+        "Không thể tải hoặc xác minh v2.3.0. Hãy thử lại."
+    )
+    assert controller._update_btn.content == "Thử lại"
+    assert controller._update_btn.disabled is False

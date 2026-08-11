@@ -2031,6 +2031,10 @@ class AppController:
             self._update_progress.visible = False
             self._update_banner.visible = True
         elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
+            if candidate is not None:
+                self._update_text.value = (
+                    f"Đang tải và xác minh v{candidate.manifest.release_version}..."
+                )
             self._update_btn.disabled = True
             self._update_btn.content = "Đang tải và xác minh..."
             self._update_progress.visible = True
@@ -2054,6 +2058,12 @@ class AppController:
             self._update_btn.disabled = False
             self._update_btn.content = "Thử lại"
             self._update_progress.visible = False
+            failed_candidate = candidate or getattr(self, "_update_candidate", None)
+            if failed_candidate is not None:
+                self._update_text.value = (
+                    "Không thể tải hoặc xác minh "
+                    f"v{failed_candidate.manifest.release_version}. Hãy thử lại."
+                )
             if should_notify:
                 self._show_snackbar(
                     "Không thể tải hoặc xác minh bản cập nhật",
