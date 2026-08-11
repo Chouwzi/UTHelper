@@ -1392,3 +1392,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Verification: **1325 tests passed with 25 skipped**; repository-wide Ruff,
   bytecode compilation, focused live package verification, and
   `git diff --check` pass.
+
+## v2.3.1 updater hotfix preparation (2026-08-11)
+
+- The v2.3.0 production updater can discover and download its release package,
+  but the Windows metadata probe rejects it before the explicit install
+  confirmation. The compatible verifier repair therefore increments only the
+  patch component from `2.3.0` to `2.3.1` under Semantic Versioning.
+- `pyproject.toml` remains the sole authored version source; release metadata
+  resolves `v2.3.1` to monotonic build number `2003001`.
+- This is a production hotfix branched from `main`. The same `hotfix/2.3.1`
+  branch must merge into both `main` and `develop` before the protected main
+  result is tagged.
