@@ -1368,3 +1368,39 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Verification: the complete suite passes **1321 tests with 25 skipped**;
   repository-wide Ruff, bytecode compilation, release tag/build metadata
   validation, and `git diff --check` pass.
+
+## Windows updater verification repair (2026-08-11)
+
+- The updater now passes the selected Windows package path to its metadata
+  probes through a process-scoped environment variable instead of relying on
+  PowerShell's empty `$args` collection. Literal paths containing spaces or
+  metacharacters therefore cannot change the command text.
+- Windows PowerShell probes receive only the native Windows PowerShell module
+  root, preventing an inherited PowerShell 7 `PSModulePath` from loading an
+  incompatible `Microsoft.PowerShell.Security` module. MSI property reads also
+  suppress the COM `Execute` return value so product fields remain scalar.
+- Schema 3 pinned Windows and Android packages are eligible for the verified
+  in-app handoff; unsigned iOS sideload releases remain manual-only. Download
+  and failure states now replace the stale "version ready" banner copy with an
+  explicit progress or retry message.
+- A live, non-installing probe downloaded the public 46,878,720-byte
+  `UTHelper-2.3.0.msi`, verified its hash, pinned signer fingerprint,
+  timestamp, product version, x64 template, and upgrade code, then exercised
+  the coordinator through `checking -> update_available -> downloading ->
+  download_progress -> ready_to_install`. The installer launcher was not
+  invoked before confirmation.
+- Verification: **1325 tests passed with 25 skipped**; repository-wide Ruff,
+  bytecode compilation, focused live package verification, and
+  `git diff --check` pass.
+
+## v2.3.1 updater hotfix preparation (2026-08-11)
+
+- The v2.3.0 production updater can discover and download its release package,
+  but the Windows metadata probe rejects it before the explicit install
+  confirmation. The compatible verifier repair therefore increments only the
+  patch component from `2.3.0` to `2.3.1` under Semantic Versioning.
+- `pyproject.toml` remains the sole authored version source; release metadata
+  resolves `v2.3.1` to monotonic build number `2003001`.
+- This is a production hotfix branched from `main`. The same `hotfix/2.3.1`
+  branch must merge into both `main` and `develop` before the protected main
+  result is tagged.
