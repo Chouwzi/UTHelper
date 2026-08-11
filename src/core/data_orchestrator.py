@@ -584,6 +584,8 @@ class DataOrchestrator:
             details['open_time'] = ws_details['open_time']
         if ws_details.get('quiz_info'):
             details['quiz_info'] = ws_details['quiz_info']
+        if ws_details.get('quiz_attempt_status'):
+            details['quiz_attempt_status'] = ws_details['quiz_attempt_status']
         if ws_details.get('attempts_allowed'):
             details['attempts_allowed'] = ws_details['attempts_allowed']
         if ws_details.get('time_limit'):
@@ -593,7 +595,10 @@ class DataOrchestrator:
         
         # Cập nhật submission_status ở top level nếu có
         status_data = ws_details.get('status_data', {})
-        if 'Trạng thái nộp bài' in status_data:
+        quiz_attempt_status = ws_details.get('quiz_attempt_status')
+        if activity_type == 'quiz' and quiz_attempt_status:
+            result['submission_status'] = quiz_attempt_status
+        elif 'Trạng thái nộp bài' in status_data:
             result['submission_status'] = status_data['Trạng thái nộp bài']
         elif 'Trạng thái' in status_data:
             result['submission_status'] = status_data['Trạng thái']

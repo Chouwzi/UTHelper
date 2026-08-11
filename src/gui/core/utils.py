@@ -228,6 +228,15 @@ def get_submission_badge(data: dict):
         return ("Đã nộp" if act_type != "quiz" else "Đã làm"), C.SAFE
     if ss == "not_submitted":
         return ("Chưa nộp" if act_type != "quiz" else "Chưa làm"), C.TEXT_SECONDARY
+    if act_type == "quiz":
+        if ss == "in_progress":
+            return "Đang làm", C.WARNING
+        if ss == "overdue":
+            return "Quá hạn", C.CRITICAL
+        if ss == "abandoned":
+            return "Chưa hoàn thành", C.WARNING
+        if ss == "attempted":
+            return "Đã bắt đầu", C.WARNING
 
     submission  = ""
     grading     = ""

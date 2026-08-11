@@ -63,6 +63,58 @@ class TestGetQuizzesByCourses:
         assert ws_functions.get_quizzes_by_courses(mock_api, [1]) is None
 
 
+class TestQuizAttemptStatus:
+    @staticmethod
+    def _details_for_attempts(attempts):
+        def mock_api(function, **_params):
+            if function == "mod_quiz_get_quizzes_by_courses":
+                return {"quizzes": [{"id": 7, "coursemodule": 77}]}
+            if function == "mod_quiz_get_user_attempts":
+                return {"attempts": attempts}
+            if function == "core_enrol_get_users_courses":
+                return []
+            return None
+
+        ws_functions.clear_all_caches()
+        return ws_functions.get_assign_details_via_ws(mock_api, 77, 12, "quiz")
+
+    def test_empty_authoritative_attempt_list_means_quiz_not_started(self):
+        details = self._details_for_attempts([])
+
+        assert details["quiz_attempt_status"] == "not_submitted"
+        assert details["quiz_info"] == []
+
+    @pytest.mark.parametrize(
+        ("state", "expected"),
+        [
+            ("finished", "submitted"),
+            ("inprogress", "in_progress"),
+            ("overdue", "overdue"),
+            ("abandoned", "abandoned"),
+            ("unexpected", "attempted"),
+        ],
+    )
+    def test_last_attempt_state_is_normalized(self, state, expected):
+        details = self._details_for_attempts([{"attempt": 1, "state": state}])
+
+        assert details["quiz_attempt_status"] == expected
+
+    def test_attempt_api_failure_does_not_claim_quiz_is_not_started(self):
+        def mock_api(function, **_params):
+            if function == "mod_quiz_get_quizzes_by_courses":
+                return {"quizzes": [{"id": 7, "coursemodule": 77}]}
+            if function == "mod_quiz_get_user_attempts":
+                raise RuntimeError("temporary failure")
+            if function == "core_enrol_get_users_courses":
+                return []
+            return None
+
+        ws_functions.clear_all_caches()
+        details = ws_functions.get_assign_details_via_ws(mock_api, 77, 12, "quiz")
+
+        assert details["quiz_attempt_status"] is None
+
+
 class TestGetCourseUpdatesSince:
     """get_course_updates_since() tests."""
 
