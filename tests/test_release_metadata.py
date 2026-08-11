@@ -24,8 +24,8 @@ def test_project_version_is_only_authored_version(tmp_path):
     )
 
 
-def test_this_feature_release_bumps_the_single_authored_version():
-    assert read_project_version(ROOT / "pyproject.toml") == "2.2.11"
+def test_this_release_bumps_the_single_authored_version():
+    assert read_project_version(ROOT / "pyproject.toml") == "2.2.12"
 
 
 def test_runtime_version_is_generated_from_the_single_authored_version(tmp_path):

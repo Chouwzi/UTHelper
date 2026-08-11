@@ -1273,3 +1273,19 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   branch ruleset. CI validates PR direction. Review, CODEOWNER approval, resolved
   threads, strict checks, deletion protection, and non-fast-forward protection
   remain fail-closed; only the incompatible linear-history rule is removed.
+
+## v2.2.12 patch release preparation (2026-08-11)
+
+- The released `v2.2.11` tree was compared with `main` under Semantic
+  Versioning 2.0.0. The user-visible delta contains backward-compatible fixes
+  for packaged version discovery, post-install application launch, and Moodle
+  submission upload/delete behavior, plus clearer Vietnamese labels. It adds no
+  incompatible public API and no new public feature, so the canonical version
+  advances by one patch to `2.2.12` rather than a minor or major release.
+- `pyproject.toml` remains the sole authored version source. Release metadata
+  resolves `v2.2.12` to build number `2002012`; runtime version files and native
+  package versions continue to be generated mechanically from that source.
+- Release-focused verification passes **89 tests**. The complete source and
+  background-extension suite passes **1291 tests with 25 skipped in 27.35
+  seconds**; repository-wide Ruff, bytecode compilation, and `git diff --check`
+  pass.
