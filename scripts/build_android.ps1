@@ -20,6 +20,10 @@ $env:PYTHONUTF8 = "1"
 
 Push-Location $projectRoot
 try {
+    python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime version generation failed before initial Android build."
+    }
     python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json")
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics config generation failed before initial Android build."
@@ -35,6 +39,10 @@ try {
         throw "Notification patcher failed with exit code $LASTEXITCODE."
     }
 
+    python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime version generation failed before final Android build."
+    }
     python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json")
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics config generation failed before final Android build."

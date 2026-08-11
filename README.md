@@ -21,10 +21,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.0-blue?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/github/v/release/Chouwzi/UTHelper?style=flat-square" alt="Latest release" />
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/flet-0.86.5-7C4DFF?style=flat-square" alt="Flet" />
-  <img src="https://img.shields.io/badge/tests-448%20passed%20%7C%2022%20skipped-22C55E?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-pytest%20%2B%20CI-22C55E?style=flat-square" alt="Tests: pytest and CI" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android%20%7C%20iOS%20%7C%20Web-E8710A?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20NC-red?style=flat-square" alt="License: PolyForm Noncommercial" /></a>
 </p>
@@ -112,8 +112,10 @@ $env:PYTHONUTF8 = '1'
 
 Lệnh trên build bundle Flet, tạo runner autostart không tham số, chạy verifier,
 kiểm thử cửa sổ/tray và đóng gói cặp MSI + Burn EXE bằng WiX 7. Xem
-[`docs/WINDOWS_EXE_PACKAGING.md`](docs/WINDOWS_EXE_PACKAGING.md) để chạy riêng từng
+[`docs/guides/windows-packaging.md`](docs/guides/windows-packaging.md) để chạy riêng từng
 cổng bundle, verifier và installer.
+Danh mục và phạm vi của các entry point được ghi tại
+[`scripts/README.md`](scripts/README.md).
 
 ### Yêu cầu build
 
@@ -142,9 +144,9 @@ src/
 │   ├── display_utils.py         # Display formatters
 │   ├── security.py              # HTML sanitizer
 │   ├── network_utils.py         # Network connectivity check
-│   ├── notification_history.py  # Notification dedup + history
-│   ├── update_checker.py        # GitHub release auto-update
-│   └── background_scheduler.py  # Periodic background tasks
+│   ├── notification_policy.py   # Notification scheduling policy
+│   ├── sync_coordinator.py      # Periodic/background synchronization
+│   └── update_coordinator.py    # Verified update workflow
 │
 ├── gui/                         # UI layer (Flet 0.85+)
 │   ├── app_controller.py        # Main controller + navigation
@@ -170,8 +172,9 @@ src/
 │   └── mobile.py                # Android/iOS push notifications
 │
 └── platform_utils/              # Platform abstraction
-    ├── android.py               # Android-specific (storage, etc.)
-    └── credentials.py           # Cross-platform credential store
+    ├── background_sync.py       # Android/iOS background bridge
+    ├── single_instance.py       # Windows activation/single-instance boundary
+    └── update_packages.py       # Platform update package behavior
 ```
 
 ## 🔐 Bảo mật
@@ -186,14 +189,16 @@ src/
 ## 🧪 Testing
 
 ```bash
-# Chạy unit tests
-cd src && python -m pytest ../tests/ -q
+# Cài project, test tools và extension native dùng bởi test contract
+python -m pip install -e . pytest pytest-timeout
+python -m pip install -e extensions/flet_uth_background_sync
+
+# Chạy toàn bộ test từ repository root
+python -m pytest tests -q
 
 # Với coverage
-python -m pytest ../tests/ --cov=. --cov-report=html
+python -m pytest tests --cov=src --cov-report=html
 
-# Current local baseline: 322 passed, 22 skipped.
-#
 # Test coverage includes:
 #   ├── Core modules (client, orchestrator, ws_functions)
 #   ├── Grade monitoring & change detection
@@ -225,8 +230,11 @@ owner bảo vệ và có đủ chứng thư Android, Apple, Windows; cấu hình
 ngoài phải được kiểm theo checklist vận hành. Inventory công khai bắt buộc một IPA, APK,
 MSI, Burn EXE, `release-manifest.json` và `SHA256SUMS`; thiếu một file hoặc chữ ký
 sai sẽ không có release công khai. Xem
-[`docs/WINDOWS_EXE_PACKAGING.md`](docs/WINDOWS_EXE_PACKAGING.md#protected-release-environment)
+[`docs/guides/windows-packaging.md`](docs/guides/windows-packaging.md#protected-release-environment)
 và [`ADR 0003`](docs/adr/0003-signed-release-update-channel.md).
+
+Toàn bộ tài liệu kỹ thuật, API, kiểm thử và hồ sơ lịch sử được lập chỉ mục tại
+[`docs/README.md`](docs/README.md).
 
 ## 🌿 Git Workflow
 

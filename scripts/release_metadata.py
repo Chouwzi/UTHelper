@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
+import secrets
 import tomllib
 
 
@@ -54,13 +56,43 @@ def read_release_metadata(pyproject: Path, tag: str) -> ReleaseMetadata:
     return ReleaseMetadata(version, expected_tag, release_build_number(version))
 
 
+def write_runtime_version(pyproject: Path, output_path: Path) -> Path:
+    """Atomically generate the version asset bundled by Flet."""
+    version = read_project_version(pyproject)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.parent / f".{output.name}.{secrets.token_hex(8)}.tmp"
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(f"{version}\n".encode("ascii"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+    except OSError as exc:
+        raise ReleaseMetadataError("cannot write runtime release version") from exc
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pyproject", type=Path, default=Path("pyproject.toml"))
     parser.add_argument("--print-version", action="store_true")
+    parser.add_argument("--runtime-output", type=Path)
     parser.add_argument("--tag")
     parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
+    if args.runtime_output is not None:
+        if args.print_version or args.tag or args.github_output:
+            parser.error("--runtime-output cannot be combined with other output modes")
+        write_runtime_version(args.pyproject, args.runtime_output)
+        return
     if args.print_version:
         if args.tag or args.github_output:
             parser.error("--print-version cannot be combined with release output options")

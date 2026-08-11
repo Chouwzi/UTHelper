@@ -32,6 +32,18 @@ def test_parse_snapshot_uses_lastattempt_permissions_and_file_limits():
     assert snapshot.online_text == "<p>Keep <em>this</em></p>"
 
 
+def test_parse_snapshot_uses_moodle_43_plural_max_file_config_key():
+    assignment = assignment_fixture()
+    for config in assignment["configs"]:
+        if config.get("name") == "maxfilesubmission":
+            config["name"] = "maxfilesubmissions"
+            config["value"] = "1"
+
+    snapshot = parse_submission_snapshot(77, assignment, editable_status_fixture())
+
+    assert snapshot.maximum_file_count == 1
+
+
 def test_parse_snapshot_captures_complete_live_safety_state_from_real_shapes():
     assignment = assignment_fixture()
     assignment.update(

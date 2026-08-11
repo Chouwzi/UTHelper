@@ -148,6 +148,12 @@ class FakeClient:
         self.downloads_requested: list[str] = []
         self.fail_upload_at = 0
         self.moodle_site_origin = moodle_site_origin
+        self.removed_submission_cmids: list[int] = []
+        self.remove_submission_result = True
+        self.on_remove_submission = None
+        self.on_before_remove_commit = None
+        self.fresh_user_id = 42
+        self.user_id_refreshes = 0
 
     def download_file(self, url: str):
         self.downloads_requested.append(url)
@@ -158,6 +164,28 @@ class FakeClient:
         if self.fail_upload_at == len(self.uploads):
             return None
         return DraftFileRecord(itemid=itemid, filepath=filepath, filename=name)
+
+    def get_user_id(self, *, refresh: bool = False) -> int | None:
+        assert refresh is True
+        self.user_id_refreshes += 1
+        return self.fresh_user_id
+
+    def remove_assignment_submission(
+        self,
+        cmid: int,
+        *,
+        expected_user_id: int,
+        before_commit=None,
+    ) -> bool:
+        assert expected_user_id == self.fresh_user_id
+        if self.on_before_remove_commit is not None:
+            self.on_before_remove_commit()
+        if before_commit is not None and not before_commit():
+            return False
+        self.removed_submission_cmids.append(cmid)
+        if self.remove_submission_result and self.on_remove_submission is not None:
+            self.on_remove_submission()
+        return self.remove_submission_result
 
     def call_ws_api(self, *args, **kwargs):
         raise AssertionError("The fake service owns WS calls")
@@ -853,7 +881,7 @@ def test_remove_one_reuploads_only_remaining_remote_files():
     assert service.saved
 
 
-def test_clear_allocates_empty_draft_and_saves_it():
+def test_clear_preserves_online_text_by_saving_an_empty_file_draft():
     workflow, client, service = workflow_fixture()
 
     result = workflow.mutate_files(target(), intent(MutationOperation.CLEAR))
@@ -862,6 +890,57 @@ def test_clear_allocates_empty_draft_and_saves_it():
     assert client.uploads == []
     assert service.saved == [(77, service.allocated_draft_id)]
     assert result.snapshot.remote_files == ()
+
+
+def test_clear_file_only_submission_uses_moodle_remove_action_and_verifies_new_state():
+    snapshot = editable_snapshot(raw_status="submitted", online_text="")
+    workflow, client, service = workflow_fixture(snapshot=snapshot)
+    client.on_remove_submission = lambda: setattr(
+        service,
+        "current",
+        replace(service.current, raw_status="new", remote_files=()),
+    )
+
+    result = workflow.mutate_files(target(), intent(MutationOperation.CLEAR))
+
+    assert result.ok is True
+    assert result.outcome.value == "submission_removed"
+    assert result.snapshot.raw_status == "new"
+    assert result.snapshot.remote_files == ()
+    assert client.removed_submission_cmids == [123]
+    assert service.allocation_calls == 0
+    assert service.saved == []
+
+
+def test_clear_revalidates_snapshot_immediately_before_destructive_post():
+    snapshot = editable_snapshot(raw_status="submitted", online_text="")
+    workflow, client, service = workflow_fixture(snapshot=snapshot)
+    client.on_before_remove_commit = lambda: setattr(
+        service,
+        "current",
+        replace(service.current, submission_modified_time=1_800_000_000),
+    )
+
+    result = workflow.mutate_files(target(), intent(MutationOperation.CLEAR))
+
+    assert result.ok is False
+    assert result.issue.code is SubmissionErrorCode.STALE_SNAPSHOT
+    assert client.removed_submission_cmids == []
+    assert service.saved == []
+
+
+def test_clear_fails_closed_before_web_login_when_ws_identity_is_unavailable():
+    snapshot = editable_snapshot(raw_status="submitted", online_text="")
+    workflow, client, service = workflow_fixture(snapshot=snapshot)
+    client.fresh_user_id = None
+
+    result = workflow.mutate_files(target(), intent(MutationOperation.CLEAR))
+
+    assert result.ok is False
+    assert result.issue.code is SubmissionErrorCode.REMOVE_REJECTED
+    assert client.user_id_refreshes == 1
+    assert client.removed_submission_cmids == []
+    assert service.saved == []
 
 
 def test_rename_changes_only_target_identity_and_preserves_bytes():

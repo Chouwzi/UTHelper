@@ -1,7 +1,12 @@
 """Draft file transport tests without a live Moodle server."""
+import urllib.error
+import urllib.request
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import Mock
 
-from core.client import MoodleClient
+import pytest
+
+from core.client import MoodleClient, _SameMoodleOriginRedirectHandler
 from core.moodle_service import MoodleService
 
 
@@ -16,10 +21,174 @@ LIVE_DUPLICATE_RESPONSE_ENVELOPE = [
 ]
 
 
+class _HtmlResponse:
+    def __init__(self, url: str, body: str, status: int = 200):
+        self.url = url
+        self.body = body.encode()
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def geturl(self):
+        return self.url
+
+    def read(self, _limit: int = -1):
+        return self.body
+
+
+class _MoodleWebOpener:
+    def __init__(self):
+        self.requests = []
+        self.responses = iter(
+            (
+                _HtmlResponse(
+                    "https://courses.ut.edu.vn/login/index.php",
+                    '<input type="hidden" name="logintoken" value="login-csrf">',
+                ),
+                _HtmlResponse(
+                    "https://courses.ut.edu.vn/my/",
+                    '<a href="/login/logout.php?sesskey=sessionkey">Logout</a>',
+                ),
+                _HtmlResponse(
+                    "https://courses.ut.edu.vn/mod/assign/view.php?id=123&action=removesubmissionconfirm",
+                    """
+                    <form method="post" action="/mod/assign/view.php">
+                      <input name="id" value="123">
+                      <input name="action" value="removesubmission">
+                      <input name="userid" value="42">
+                      <input name="sesskey" value="sessionkey">
+                    </form>
+                    """,
+                ),
+                _HtmlResponse(
+                    "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
+                    "removed",
+                ),
+            )
+        )
+
+    def open(self, request, timeout):
+        self.requests.append((request, timeout))
+        return next(self.responses)
+
+
+def test_moodle_web_redirect_handler_rejects_cross_origin_location():
+    handler = _SameMoodleOriginRedirectHandler("https://courses.ut.edu.vn")
+
+    with pytest.raises(urllib.error.HTTPError, match="Untrusted Moodle redirect"):
+        handler.redirect_request(
+            urllib.request.Request("https://courses.ut.edu.vn/login/index.php"),
+            None,
+            302,
+            "redirect",
+            {},
+            "https://attacker.invalid/collect",
+        )
+
+
 def configured_client(monkeypatch):
     client = MoodleClient()
     monkeypatch.setattr(client, "_get_ws_token", Mock(return_value="test-token"))
     return client
+
+
+def test_get_user_id_refresh_bypasses_stale_cached_ws_identity(monkeypatch):
+    client = MoodleClient()
+    client._cached_user_id = 41
+    site_info = Mock(return_value={"userid": 42})
+    monkeypatch.setattr(client, "call_ws_api", site_info)
+
+    assert client.get_user_id() == 41
+    assert client.get_user_id(refresh=True) == 42
+    assert client.get_user_id() == 42
+    site_info.assert_called_once_with("core_webservice_get_site_info")
+
+
+def test_remove_assignment_submission_replays_confirmed_moodle_web_action(monkeypatch):
+    client = MoodleClient()
+    opener = _MoodleWebOpener()
+    monkeypatch.setattr("core.client.urllib.request.build_opener", lambda *_: opener)
+    monkeypatch.setattr("core.client.settings.UTH_USERNAME", "student")
+    monkeypatch.setattr("core.client.settings.UTH_PASSWORD", "secret")
+    monkeypatch.setattr(
+        "core.client.settings.UTH_CREDENTIALS_ORIGIN",
+        "https://courses.ut.edu.vn",
+    )
+
+    assert hasattr(client, "remove_assignment_submission")
+    assert client.remove_assignment_submission(123, expected_user_id=42) is True
+
+    requests = [item[0] for item in opener.requests]
+    assert [request.get_method() for request in requests] == ["GET", "POST", "GET", "POST"]
+    assert [urlsplit(request.full_url).path for request in requests] == [
+        "/login/index.php",
+        "/login/index.php",
+        "/mod/assign/view.php",
+        "/mod/assign/view.php",
+    ]
+    login = parse_qs(requests[1].data.decode(), keep_blank_values=True)
+    assert login == {
+        "logintoken": ["login-csrf"],
+        "username": ["student"],
+        "password": ["secret"],
+        "anchor": [""],
+    }
+    remove = parse_qs(requests[3].data.decode())
+    assert remove == {
+        "id": ["123"],
+        "action": ["removesubmission"],
+        "userid": ["42"],
+        "sesskey": ["sessionkey"],
+    }
+    assert all(timeout == 20 for _, timeout in opener.requests)
+
+
+def test_remove_assignment_submission_rejects_web_account_mismatch_before_post(monkeypatch):
+    client = MoodleClient()
+    opener = _MoodleWebOpener()
+    monkeypatch.setattr("core.client.urllib.request.build_opener", lambda *_: opener)
+    monkeypatch.setattr("core.client.settings.UTH_USERNAME", "student")
+    monkeypatch.setattr("core.client.settings.UTH_PASSWORD", "secret")
+    monkeypatch.setattr(
+        "core.client.settings.UTH_CREDENTIALS_ORIGIN",
+        "https://courses.ut.edu.vn",
+    )
+
+    assert client.remove_assignment_submission(123, expected_user_id=41) is False
+    assert [request.get_method() for request, _ in opener.requests] == [
+        "GET",
+        "POST",
+        "GET",
+    ]
+
+
+def test_remove_assignment_submission_revalidates_immediately_before_post(monkeypatch):
+    client = MoodleClient()
+    opener = _MoodleWebOpener()
+    monkeypatch.setattr("core.client.urllib.request.build_opener", lambda *_: opener)
+    monkeypatch.setattr("core.client.settings.UTH_USERNAME", "student")
+    monkeypatch.setattr("core.client.settings.UTH_PASSWORD", "secret")
+    monkeypatch.setattr(
+        "core.client.settings.UTH_CREDENTIALS_ORIGIN",
+        "https://courses.ut.edu.vn",
+    )
+    checks = []
+
+    assert client.remove_assignment_submission(
+        123,
+        expected_user_id=42,
+        before_commit=lambda: checks.append("checked") or False,
+    ) is False
+    assert checks == ["checked"]
+    assert [request.get_method() for request, _ in opener.requests] == [
+        "GET",
+        "POST",
+        "GET",
+    ]
 
 
 def test_upload_draft_file_record_sends_normalized_filepath(monkeypatch):

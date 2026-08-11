@@ -42,7 +42,7 @@ if (-not $resolvedBundle.StartsWith($workspaceRoot, [StringComparison]::OrdinalI
 }
 $python = (Get-Command python -ErrorAction Stop).Source
 Invoke-BoundedProcess $python @((Join-Path $PSScriptRoot "prepare_windows_bundle.py"), $resolvedBundle) $workspaceRoot 120
-Invoke-BoundedProcess $python @((Join-Path $PSScriptRoot "verify_windows_bundle.py"), $resolvedBundle) $workspaceRoot 120
+Invoke-BoundedProcess $python @((Join-Path $PSScriptRoot "verify_windows_bundle.py"), $resolvedBundle, "--expected-version", $Version) $workspaceRoot 120
 New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
 
 $packageProject = Join-Path $workspaceRoot "packaging\windows\UTHelper.Package.wixproj"

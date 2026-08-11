@@ -74,4 +74,35 @@ def test_repository_has_actionable_contributor_and_security_controls():
         'flet_uth_background_sync/android"'
     ) in dependabot
     assert '      - "security"' not in dependabot
-    assert "Rulesets" in _read("docs/WINDOWS_EXE_PACKAGING.md")
+    assert "Rulesets" in _read("docs/guides/windows-packaging.md")
+
+
+def test_repository_documentation_is_indexed_and_separates_history():
+    docs = ROOT / "docs"
+    top_level_files = {path.name for path in docs.iterdir() if path.is_file()}
+
+    assert top_level_files == {"PRIVACY.md", "README.md"}
+    assert not (docs / "superpowers").exists()
+    assert not (ROOT / "REFAC_KNOWLEDGE.md").exists()
+
+    maintained = (
+        "docs/api/moodle-web-services.md",
+        "docs/api/portal.md",
+        "docs/guides/windows-packaging.md",
+        "docs/testing/notification-e2e-matrix.md",
+        "docs/architecture/refactoring-plan.md",
+        "docs/architecture/refactoring-log.md",
+    )
+    index = _read("docs/README.md")
+    for relative_path in maintained:
+        path = ROOT / relative_path
+        assert path.is_file(), relative_path
+        assert path.name in index
+
+    assert (docs / "archive" / "designs").is_dir()
+    assert (docs / "archive" / "implementation-plans").is_dir()
+
+
+def test_scripts_directory_contains_no_uncollected_python_test_programs():
+    assert _read("scripts/README.md")
+    assert not tuple((ROOT / "scripts").glob("test_*.py"))

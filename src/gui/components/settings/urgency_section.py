@@ -36,7 +36,7 @@ def build_urgency_section(view) -> ft.Container:
     """Xây dựng Container cấu hình ngưỡng thời gian mức độ cảnh báo."""
     return view._build_setting_group(
         "Cảnh báo",
-        "Ngưỡng thời gian màu sắc",
+        "Mức độ cảnh báo theo thời gian",
         [
             view._make_themed_label("Mức độ"),
             view._critical_hours_field,

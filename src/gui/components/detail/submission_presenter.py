@@ -36,6 +36,9 @@ _ERROR_MESSAGES = {
     SubmissionErrorCode.DRAFT_ALLOCATION_FAILED: "Moodle không thể tạo vùng lưu tạm.",
     SubmissionErrorCode.UPLOAD_FAILED: "Không thể tải một file lên Moodle.",
     SubmissionErrorCode.SAVE_REJECTED: "Moodle từ chối lưu bài nộp.",
+    SubmissionErrorCode.REMOVE_REJECTED: (
+        "Moodle từ chối xóa toàn bộ bài nộp. Hãy đăng nhập lại và thử lại."
+    ),
     SubmissionErrorCode.FINALIZE_REJECTED: "Đã lưu bản nháp nhưng Moodle chưa nhận nộp bài.",
     SubmissionErrorCode.STATEMENT_NOT_ACCEPTED: "Bạn cần xác nhận cam kết trước khi nộp bài.",
     SubmissionErrorCode.VERIFICATION_FAILED: "Moodle trả về danh sách file khác với thay đổi yêu cầu.",
@@ -44,6 +47,7 @@ _ERROR_MESSAGES = {
 _OUTCOME_MESSAGES = {
     MutationOutcome.DRAFT_SAVED: "Đã lưu bản nháp trên Moodle.",
     MutationOutcome.SUBMISSION_SAVED: "Đã lưu bài nộp trên Moodle.",
+    MutationOutcome.SUBMISSION_REMOVED: "Đã xóa bài nộp khỏi Moodle.",
     MutationOutcome.SUBMITTED_FOR_GRADING: "Đã nộp bài để chấm trên Moodle.",
 }
 

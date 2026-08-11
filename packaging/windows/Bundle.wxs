@@ -3,7 +3,11 @@
   <Bundle Name="UTHelper" Manufacturer="UTHelper" Version="$(Version)"
           UpgradeCode="EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0">
     <BootstrapperApplication>
-      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense" LicenseUrl="" />
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          LicenseUrl=""
+          LaunchTarget="[ProgramFiles64Folder]UTHelper\UTHelper.exe"
+          LaunchWorkingFolder="[ProgramFiles64Folder]UTHelper" />
     </BootstrapperApplication>
     <Chain>
       <MsiPackage SourceFile="$(MsiPath)" Compressed="yes" Visible="no" />

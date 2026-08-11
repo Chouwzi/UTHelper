@@ -145,9 +145,11 @@ jobs:
           export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
           export FLET_ANDROID_SIGNING_KEY_ALIAS="$ANDROID_KEY_ALIAS"
 
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 
@@ -236,6 +238,7 @@ jobs:
           BUILD_NUMBER: ${{ needs['validate-release-source'].outputs.build_number }}
         run: |
           set -euo pipefail
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
           find build/ipa -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
@@ -340,6 +343,8 @@ jobs:
           $compiledPin = python -c "from platform_utils.windows_update import TRUSTED_WINDOWS_SIGNER_SHA256; print(','.join(sorted(TRUSTED_WINDOWS_SIGNER_SHA256)))"
           $expectedPin = $env:WINDOWS_SIGNING_CERT_SHA256.Replace(":", "").Replace(" ", "").ToUpperInvariant()
           if ($LASTEXITCODE -ne 0 -or $compiledPin.Trim() -ne $expectedPin) { throw "Compiled Windows release pin mismatch" }
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+          if ($LASTEXITCODE -ne 0) { throw "Runtime version generation failed" }
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
           flet build windows --build-version "$env:VERSION" --build-number "$env:BUILD_NUMBER" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
@@ -348,7 +353,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
           python scripts/prepare_windows_bundle.py build/windows
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
-          python scripts/verify_windows_bundle.py build/windows
+          python scripts/verify_windows_bundle.py build/windows --expected-version "$env:VERSION"
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
           powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test_windows_bundle_e2e.ps1 -BundleDir build/windows -ObservationSeconds 8
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle E2E failed" }

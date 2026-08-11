@@ -8,12 +8,14 @@ Tài liệu này là nguồn quy tắc bắt buộc cho mọi Agent/AI làm vi�
 
 Trước bất kỳ thay đổi nào, Agent phải đọc:
 
-1. `docs/CODEBASE_ARCHITECTURE_REVIEW_PLAN.md`
-2. `REFAC_KNOWLEDGE.md`
+1. `docs/architecture/refactoring-plan.md`
+2. `docs/architecture/refactoring-log.md`
 3. File/module liên quan trực tiếp tới task
 4. Test hiện có tương ứng trong `tests/`
 
-Không dùng đường dẫn kế hoạch ngoài repo làm nguồn sự thật. Nếu tài liệu trong `.agent/learning/` mâu thuẫn với `docs/CODEBASE_ARCHITECTURE_REVIEW_PLAN.md`, ưu tiên tài liệu trong `docs/`.
+Không dùng đường dẫn kế hoạch ngoài repo làm nguồn sự thật. Nếu tài liệu ngoài
+repo mâu thuẫn với `docs/architecture/refactoring-plan.md`, ưu tiên tài liệu
+trong `docs/`.
 
 ---
 
@@ -38,7 +40,8 @@ Không dùng đường dẫn kế hoạch ngoài repo làm nguồn sự thật. 
    ```
 2. Refactor theo bước nhỏ, giữ nguyên hành vi.
 3. Với thay đổi boundary lớn, thêm hoặc cập nhật ADR trong `docs/adr/`.
-4. Sau mỗi giai đoạn, cập nhật `REFAC_KNOWLEDGE.md` gồm ngày, phạm vi, file đã chạm, trạng thái test/lint.
+4. Sau mỗi giai đoạn, cập nhật `docs/architecture/refactoring-log.md` gồm ngày,
+   phạm vi, file đã chạm, trạng thái test/lint.
 5. Nếu task chạm UI Flet, chạy smoke thủ công bằng desktop/web mode khi môi trường cho phép.
 
 ---
