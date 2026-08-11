@@ -1428,3 +1428,24 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   the ignored 0.13 GB worktree build directory were removed. Physical Android
   frame-time validation remains required because no ADB/device is available on
   this host.
+
+## Bounded Android release build resources (2026-08-12)
+
+- A canonical local `scripts/build_android.ps1 -Target apk` retry reproduced a
+  Gradle daemon crash on the 16 GB Windows host. The generated Flet template
+  reserved an 8 GiB Gradle heap, 4 GiB metaspace, and a separate 8 GiB Kotlin
+  daemon; the JVM crash report showed only 582 MiB physical RAM and 1.49 GiB
+  pagefile remaining when a 1.56 GiB native allocation failed.
+- The Android build entry point now rewrites generated `gradle.properties`
+  before both retry and final packaging: Gradle heap is capped at 3 GiB,
+  metaspace at 1 GiB, workers at two, Kotlin compilation runs in-process, and
+  incremental caches remain disabled for the C:/E: cross-drive build.
+- The complete two-pass native-patched build then exited 0. The final
+  `build/apk/UTHelper.apk` is 163,635,530 bytes, has a valid ZIP and APK v2
+  signature, includes `arm64-v8a`, `armeabi-v7a`, and `x86_64`, declares
+  package `com.uthelper.uthelper`, version `2.3.1`, min/target SDK 24/36, an app
+  icon resource, and all required notification/background-sync receivers.
+- This local smoke artifact uses the Android debug certificate and build code
+  1; production signing and canonical build code remain the release workflow's
+  responsibility. No install/runtime test was performed because ADB reported
+  no connected Android device.
