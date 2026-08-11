@@ -13,6 +13,25 @@ concurrency:
 permissions: {}
 
 jobs:
+  gitflow-policy:
+    name: 🌿 Gitflow policy
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate pull request direction
+        run: >-
+          python scripts/validate_gitflow_pr.py
+          --event-name "${{ github.event_name }}"
+          --base "${{ github.base_ref }}"
+          --head "${{ github.head_ref }}"
+
   private_diagnostics:
     name: Private diagnostics
     permissions:

@@ -198,7 +198,7 @@ production tag, verify in GitHub or through the REST API that:
 
 - repository **Rulesets** actively protect `main` and `develop`: pull request,
   one fresh CODEOWNER approval, resolved conversations, required CI checks,
-  linear history, no force-push, and no deletion;
+  merge-commit-only Gitflow history, no force-push, and no deletion;
 - a tag ruleset blocks deletion and force-update of `v*` and restricts tag
   creation to the owner/admin bypass role;
 - the `release` environment has a required owner review and accepts only tag

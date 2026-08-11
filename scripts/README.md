@@ -45,6 +45,12 @@ this directory. Product tests belong in `tests/` so pytest and CI collect them.
 - `measure_windows_performance.py` — bounded CPU and memory sampling for a selected
   Windows launch mode; it is not part of CI.
 
+## Repository governance
+
+- `validate_gitflow_pr.py` — CI check for allowed protected-branch directions.
+- `github_branch_policy.py` — bounded audit/apply client for repository merge
+  settings and the protected `main`/`develop` ruleset.
+
 Do not add one-off rewrite scripts, hard-coded local paths, generated build trees, or
 ad-hoc `test_*.py` programs here. Promote reusable checks into `tests/` or a bounded
 platform harness above, and keep disposable research under the ignored local research

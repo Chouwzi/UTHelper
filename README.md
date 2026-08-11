@@ -248,6 +248,12 @@ main          ← Production releases (tagged)
        └─ hotfix/*    ← Critical production fixes
 ```
 
+PR tính năng/sửa lỗi đi vào `develop`; bản phát hành ổn định đi từ
+`develop → main`; hotfix từ `main` phải merge lại vào `develop`. Hai nhánh sống
+lâu dài chỉ dùng merge commit, không squash/rebase. Xem
+[`docs/guides/gitflow.md`](docs/guides/gitflow.md) để biết ma trận nhánh và
+ruleset bắt buộc.
+
 ### Quy ước commit
 
 [Conventional Commits](https://www.conventionalcommits.org/):

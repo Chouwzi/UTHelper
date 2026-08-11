@@ -11,6 +11,8 @@ records. Start here instead of searching by filename.
 - [UTH Portal API](api/portal.md) — redacted reverse-engineered Portal contracts.
 - [Windows packaging](guides/windows-packaging.md) — build, verify, sign, and package
   the Windows release.
+- [Gitflow policy](guides/gitflow.md) — branch direction, merge contract, and
+  GitHub ruleset enforcement.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.
