@@ -1289,3 +1289,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   background-extension suite passes **1291 tests with 25 skipped in 27.35
   seconds**; repository-wide Ruff, bytecode compilation, and `git diff --check`
   pass.
+
+## Quiz attempt badge normalization (2026-08-11)
+
+- Moodle quiz detail responses now distinguish an authoritative empty attempt
+  list from an unavailable attempt endpoint. An empty list maps to `Chưa làm`;
+  finished, in-progress, overdue, abandoned, and unknown non-empty attempt
+  states receive explicit normalized progress states.
+- `DataOrchestrator` promotes that normalized state to the existing activity
+  status field, while the dashboard badge presenter keeps assignment wording
+  unchanged and renders quiz-specific labels.
+- A live read-only check against the reported quiz confirmed the original API
+  response contained zero attempts while the previous UI retained `unknown`.
+  Regression coverage now includes empty/error responses, all known attempt
+  states, data-layer promotion, and badge wording.
+- Verification: 61 focused adapter/orchestrator/presenter/UI tests pass. Ruff,
+  bytecode compilation, and `git diff --check` pass. The full local suite has
+  **1293 passed and 25 skipped**; its seven failures are the same baseline
+  environment gaps for the optional iOS bridge and diagnostics SDK.
