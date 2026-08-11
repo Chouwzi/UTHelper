@@ -769,7 +769,7 @@ contract.
 
 - [ ] **Step 6: Scan for secrets/authenticated URLs and commit**
 
-Run: `rg -n "NoBoi|080206011901|wstoken=|token=[A-Za-z0-9]{10,}" src tests docs REFAC_KNOWLEDGE.md`
+Run: `rg -n "KNOWN_PASSWORD_MARKER|KNOWN_STUDENT_ID|wstoken=|token=[A-Za-z0-9]{10,}" src tests docs`
 
 Expected: no newly introduced credential or authenticated URL. Existing generic
 parameter names such as `wstoken` in source are reviewed manually and are not secret

@@ -1,6 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+import flet as ft
 import pytest
+
+from src.main import _show_startup_screen
 
 from gui.controllers.startup_visibility import (
     is_autostart_launch,
@@ -52,6 +56,73 @@ def test_alias_matching_is_case_insensitive():
     assert is_autostart_launch(
         argv=["anything"], executable=Path("uthelperAUTOSTART.EXE")
     )
+
+
+def test_startup_screen_publishes_compact_window_with_logo_and_animation():
+    class Page:
+        def __init__(self):
+            self.window = SimpleNamespace(
+                width=None,
+                height=None,
+                min_width=None,
+                max_width=None,
+                resizable=None,
+                icon=None,
+                visible=False,
+            )
+            self.controls = []
+            self.title = ""
+            self.bgcolor = ""
+            self.padding = None
+            self.spacing = None
+            self.theme_mode = None
+            self.update_calls = 0
+
+        def add(self, *controls):
+            self.controls.extend(controls)
+
+        def update(self):
+            self.update_calls += 1
+
+    def walk(control):
+        yield control
+        content = getattr(control, "content", None)
+        if content is not None:
+            yield from walk(content)
+        for child in getattr(control, "controls", None) or []:
+            yield from walk(child)
+
+    page = Page()
+
+    _show_startup_screen(page, ft, publish=True)
+
+    assert (page.window.width, page.window.height) == (420, 720)
+    assert (page.window.min_width, page.window.max_width) == (420, 420)
+    assert page.window.resizable is False
+    assert page.window.icon == "icon.ico"
+    assert page.window.visible is True
+    assert page.title == "UTHelper"
+    assert page.update_calls == 1
+    controls = list(walk(page.controls[0]))
+    assert any(isinstance(control, ft.Image) and control.src == "icon.png" for control in controls)
+    assert any(isinstance(control, ft.ProgressRing) for control in controls)
+    assert any(
+        isinstance(control, ft.Text) and control.value == "Đang khởi động UTHelper..."
+        for control in controls
+    )
+
+
+def test_startup_screen_stays_hidden_for_tray_autostart():
+    page = SimpleNamespace(
+        window=SimpleNamespace(visible=False),
+        controls=[],
+        add=lambda *controls: page.controls.extend(controls),
+        update=lambda: None,
+    )
+
+    _show_startup_screen(page, ft, publish=False)
+
+    assert page.window.visible is False
 
 
 def test_tray_setup_failure_is_explicit(monkeypatch):

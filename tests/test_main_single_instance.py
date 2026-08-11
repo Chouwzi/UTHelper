@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
+import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,13 +60,18 @@ def _install_flet_runner(monkeypatch, *, invoke_target: bool = False, error=None
     def run(**kwargs) -> None:
         calls.append(kwargs)
         if invoke_target:
-            kwargs["main"](object())
+            result = kwargs["main"](object())
+            if inspect.isawaitable(result):
+                asyncio.run(result)
         if error is not None:
             raise error
 
     fake_flet = SimpleNamespace(
         Page=object,
-        AppView=SimpleNamespace(WEB_BROWSER="web-browser"),
+        AppView=SimpleNamespace(
+            WEB_BROWSER="web-browser",
+            FLET_APP_HIDDEN="flet-app-hidden",
+        ),
         run=run,
     )
     monkeypatch.setitem(sys.modules, "flet", fake_flet)
@@ -126,7 +133,8 @@ def test_windows_desktop_bootstraps_before_running_flet(monkeypatch):
 
     assert events == ["bootstrap"]
     assert len(calls) == 1
-    assert set(calls[0]) == {"main", "assets_dir"}
+    assert set(calls[0]) == {"main", "assets_dir", "view"}
+    assert calls[0]["view"] == "flet-app-hidden"
     assert "target" not in calls[0]
 
 
@@ -188,6 +196,7 @@ def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatc
     broker = _BrokerSpy()
     result = SimpleNamespace(exit_code=None, broker=broker, force_visible=True)
     _install_flet_runner(monkeypatch, invoke_target=True)
+    startup_calls: list[tuple[object, bool]] = []
     monkeypatch.delenv("FLET_WEB", raising=False)
     monkeypatch.setattr(application.sys, "platform", "win32")
     monkeypatch.setattr(application.sys, "argv", ["main.py"])
@@ -199,6 +208,13 @@ def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatc
     )
     monkeypatch.setattr(application, "is_autostart_launch", lambda: False, raising=False)
     monkeypatch.setattr(application, "_is_source_checkout", lambda path: True, raising=False)
+    monkeypatch.setattr(
+        application,
+        "_show_startup_screen",
+        lambda page, _ft, *, publish, compact_desktop: startup_calls.append(
+            (page, publish)
+        ),
+    )
     desktop_module = SimpleNamespace(
         main=lambda page, *, activation_broker, force_visible: app_calls.append(
             (page, activation_broker, force_visible)
@@ -210,6 +226,7 @@ def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatc
 
     assert len(app_calls) == 1
     assert app_calls[0][1:] == (broker, True)
+    assert startup_calls == [(app_calls[0][0], True)]
     assert broker.close_calls == [1.0]
 
 

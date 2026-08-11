@@ -1,13 +1,13 @@
 import os
 import sys
 import asyncio
-from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import gui.app_controller as app_controller_module
+from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
 from core.update_models import ReleasePackage
 from gui.app_controller import (
     AppController,
@@ -74,38 +74,38 @@ def test_countdown_tick_batches_page_update_without_per_card_updates():
     assert controller.page.update_count == 1
 
 
-def test_get_today_schedule_items_filters_and_sorts_today(monkeypatch):
-    class _FixedDate(date):
-        @classmethod
-        def today(cls):
-            return cls(2026, 8, 5)
-
-    monkeypatch.setattr(app_controller_module, "date", _FixedDate)
-
+def test_today_schedule_retry_requests_portal_refresh_instead_of_moodle_data():
     controller = AppController.__new__(AppController)
-    controller.all_data = [
-        {"title": "Bài muộn", "deadline": "2026-08-05T15:00:00", "urgency": "warning"},
-        {"title": "Bài sớm", "deadline": "2026-08-05T09:00:00", "urgency": "critical"},
-        {"title": "Bài mai", "deadline": "2026-08-06T09:00:00"},
-        {"title": "Không hạn", "deadline": ""},
-    ]
-
-    items = controller._get_today_schedule_items()
-
-    assert [item["title"] for item in items] == ["Bài sớm", "Bài muộn"]
-
-
-def test_toggle_today_schedule_flips_state_and_refreshes():
-    controller = AppController.__new__(AppController)
-    controller._today_schedule_expanded = False
     calls = []
 
-    controller._refresh_today_schedule_panel = lambda activities=None: calls.append(controller._today_schedule_expanded)
+    def refresh(trigger):
+        return None
 
-    controller._toggle_today_schedule()
+    controller._today_schedule_coordinator = SimpleNamespace(
+        state=TodayScheduleViewState(ScheduleLoadStatus.ERROR),
+        refresh=refresh,
+        ensure_today=lambda: None,
+    )
+    controller._safe_run_task = lambda handler, *args: calls.append((handler, args))
 
-    assert controller._today_schedule_expanded is True
-    assert calls == [True]
+    controller._request_today_schedule()
+
+    assert calls == [(refresh, ("retry",))]
+
+
+def test_today_schedule_state_updates_component_and_page_once():
+    controller = AppController.__new__(AppController)
+    calls = []
+    controller._today_schedule_component = SimpleNamespace(
+        set_state=lambda state: calls.append(("state", state))
+    )
+    controller.page = SimpleNamespace(update=lambda: calls.append(("update",)))
+    state = TodayScheduleViewState(ScheduleLoadStatus.LOADING)
+
+    controller._on_today_schedule_state(state)
+
+    assert controller._today_schedule_state is state
+    assert calls == [("state", state), ("update",)]
 
 
 def test_android_build_number_is_deterministic_and_strict():
