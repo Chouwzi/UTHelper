@@ -4,7 +4,7 @@
     <EnableDefaultItems>false</EnableDefaultItems>
     <InstallerPlatform>x64</InstallerPlatform>
     <OutputName>UTHelper-Setup-$(Version)</OutputName>
-    <DefineConstants>Version=$(Version);MsiPath=$(MsiPath)</DefineConstants>
+    <DefineConstants>Version=$(Version);MsiPath=$(MsiPath);BundleIconPath=$(MSBuildProjectDirectory)\..\..\src\assets\icon.ico;BundleLogoPath=$(MSBuildProjectDirectory)\..\..\src\assets\icon.png</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Bundle.wxs" />

@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import struct
 import tomllib
 
 
@@ -8,6 +9,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _ico_sizes(relative_path: str) -> set[tuple[int, int]]:
+    data = (ROOT / relative_path).read_bytes()
+    reserved, image_type, image_count = struct.unpack_from("<HHH", data)
+    assert (reserved, image_type) == (0, 1)
+    assert len(data) >= 6 + (16 * image_count)
+    sizes: set[tuple[int, int]] = set()
+    for index in range(image_count):
+        width, height = struct.unpack_from("BB", data, 6 + (16 * index))
+        sizes.add((width or 256, height or 256))
+    return sizes
 
 
 def test_release_workflow_pins_expected_artifact_and_signing_certificates():
@@ -281,6 +294,21 @@ def test_wix_authoring_has_stable_upgrade_codes_and_exact_msi_chain():
     assert "/v UTHElearningAlert /f" in package
     assert 'BindName="AppBundle"' in project
     assert "<InstallerPlatform>x64</InstallerPlatform>" in bundle_project
+
+
+def test_wix_bundle_uses_application_branding_for_ui_and_executable():
+    bundle = _read("packaging/windows/Bundle.wxs")
+    bundle_project = _read("packaging/windows/UTHelper.Bundle.wixproj")
+
+    assert 'IconSourceFile="$(BundleIconPath)"' in bundle
+    assert 'LogoFile="$(BundleLogoPath)"' in bundle
+    assert "BundleIconPath=$(MSBuildProjectDirectory)" in bundle_project
+    assert r"src\assets\icon.ico" in bundle_project
+    assert "BundleLogoPath=$(MSBuildProjectDirectory)" in bundle_project
+    assert r"src\assets\icon.png" in bundle_project
+
+    required_shell_sizes = {(16, 16), (32, 32), (48, 48), (256, 256)}
+    assert required_shell_sizes <= _ico_sizes("src/assets/icon.ico")
 
 
 def test_burn_signing_detaches_signs_reattaches_and_signs_outer_bundle():
