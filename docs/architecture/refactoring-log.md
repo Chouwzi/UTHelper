@@ -1350,3 +1350,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   EXE icon, title-bar icon, and content logo.
 - Verification: **1284 tests passed with 25 skipped** under the same source paths
   as CI; `ruff check src tests` and `git diff --check` passed.
+
+## v2.3.0 minor release preparation (2026-08-11)
+
+- The released `v2.2.12` tree was compared with the integrated `develop`
+  branch under Semantic Versioning 2.0.0. This release adds the user-facing
+  Portal daily schedule with startup/00:00/06:00 refresh behavior, explicit
+  schedule loading states, and room/campus/session status presentation.
+- The remaining changes are backward-compatible fixes: branded Windows
+  installer surfaces, a correctly sized branded startup frame, and normalized
+  quiz attempt badges. No public contract was removed or incompatibly changed.
+  The new compatible feature therefore advances the minor version to `2.3.0`
+  rather than using another patch or a major release.
+- `pyproject.toml` remains the sole authored version source. Release metadata
+  resolves `v2.3.0` to monotonic build number `2003000`; runtime and native
+  package versions continue to be generated from that source.
+- Verification: the complete suite passes **1321 tests with 25 skipped**;
+  repository-wide Ruff, bytecode compilation, release tag/build metadata
+  validation, and `git diff --check` pass.
