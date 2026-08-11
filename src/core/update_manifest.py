@@ -455,10 +455,16 @@ def select_candidate(
         raise ManifestError("ambiguous package candidates")
     if not matches:
         return None
+    package = matches[0]
+    in_app_install_allowed = manifest.schema_version in {2, 3} and not (
+        manifest.schema_version == 3
+        and package.platform == "ios"
+        and package.signature_kind == "unsigned-resign-required"
+    )
     return UpdateCandidate(
         manifest=manifest,
-        package=matches[0],
-        automatic_install_allowed=manifest.schema_version == 2,
+        package=package,
+        automatic_install_allowed=in_app_install_allowed,
         required_update=Version(current) < Version(manifest.minimum_supported_version),
     )
 
