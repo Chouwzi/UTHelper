@@ -1,8 +1,10 @@
 # Sideload and self-signed release design
 
+> **Archived:** Design snapshot retained for provenance; not a live status page.
+
 Date: 2026-08-09
 
-Status: Approved by the user's explicit clarification that iOS is distributed for
+Original status: Approved by the user's explicit clarification that iOS is distributed for
 Sideloadly-style re-signing, plus the standing instruction to choose and implement
 the optimal complete option without pausing for further questions.
 

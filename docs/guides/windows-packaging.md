@@ -1,5 +1,8 @@
 # Windows EXE Packaging
 
+Status: current operator guide for Windows build, verification, signing, and
+installer packaging.
+
 This project is a Flet desktop app with Windows tray, toast notification, autostart, keyring, and bundled assets. Build on Windows for Windows artifacts.
 
 ## Canonical Windows Release Path

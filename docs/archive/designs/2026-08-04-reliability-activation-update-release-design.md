@@ -1,8 +1,10 @@
 # Reliability, activation, update, and trusted release design
 
+> **Archived:** Design snapshot retained for provenance; not a live status page.
+
 Date: 2026-08-04
 
-Status: Approved by the user's standing instruction to choose and implement the safest complete option
+Original status: Approved by the user's standing instruction to choose and implement the safest complete option
 
 Branch: `codex/reliability-auto-update`
 

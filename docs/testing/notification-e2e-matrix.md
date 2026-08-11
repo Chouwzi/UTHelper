@@ -1,5 +1,8 @@
 # Ma trận kiểm thử E2E thông báo
 
+Trạng thái: tài liệu kiểm thử hiện hành. Kết quả tự động phải được đối chiếu với
+test trong `tests/`; bằng chứng thiết bị thật được ghi riêng theo từng nền tảng.
+
 Tài liệu này tách rõ bằng chứng tự động, build và thiết bị thật. Không đánh dấu `PASS` cho một nền tảng chỉ vì policy dùng chung đã pass.
 
 ## Hợp đồng chung

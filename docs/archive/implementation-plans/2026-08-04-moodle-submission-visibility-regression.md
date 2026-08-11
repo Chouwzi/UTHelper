@@ -1,5 +1,8 @@
 # Moodle File Submission Visibility Regression — Implementation Plan
 
+> **Archived:** Planning snapshot retained for provenance. It is not the current
+> task tracker; use tests and current operator documentation as the source of truth.
+
 **Goal:** Restore the file-submission area for eligible Moodle assignments using response shapes Moodle actually returns, keep permission/deadline safeguards fail-closed, and show a truthful fallback instead of silently hiding controls when context is incomplete.
 
 **Root cause:** `src/core/submission_snapshot.py` currently requires both a status plugin with `type=file` and a synthetic `configs[file/enabled]` value. Moodle 4.3 only returns enabled and visible plugins and does not guarantee an `enabled` config; the captured response in `docs/moodle_ws_api_documentation.md` has `configs: []`. Tests manufacture the missing row and therefore preserve the regression. The same parser reads `requiresubmissionstatement` from configs although Moodle returns it at assignment top level.

@@ -1,5 +1,8 @@
 # Moodle Web Services API Documentation — UTH Elearning
 
+Trạng thái: tài liệu tham chiếu API hiện hành; mọi payload mẫu phải được khử
+token, cookie và dữ liệu định danh trước khi commit.
+
 > **System**: UTH Elearning (courses.ut.edu.vn)
 > **Moodle Version**: 4.3.5 (Build: 20240610) — Internal version `2023100905`
 > **Theme**: Edly

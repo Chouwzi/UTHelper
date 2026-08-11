@@ -1,5 +1,8 @@
 # 📡 Portal UTH — API Documentation (Reverse-Engineered)
 
+> **Status**: Maintained reference. Captures and credentials must remain outside
+> Git; only redacted endpoint contracts belong in this document.
+
 > **Source**: `https://portal.ut.edu.vn`
 > **Method**: Chrome DevTools network traffic capture (live session)
 > **Date**: 2026-06-22
