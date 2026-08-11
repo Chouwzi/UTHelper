@@ -1290,6 +1290,34 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   seconds**; repository-wide Ruff, bytecode compilation, and `git diff --check`
   pass.
 
+## Native startup frame and Portal daily schedule (2026-08-11)
+
+- Windows now starts Flet with the native host hidden, applies the final
+  420×720 geometry, and publishes a branded splash with an animated progress
+  ring before importing and constructing the full dashboard. The prior visible
+  1280×720 empty Flutter frame is no longer part of the startup lifecycle.
+- "Lịch học hôm nay" no longer filters Moodle quiz/assignment deadlines. A
+  separate Portal boundary authenticates in memory and reads the verified
+  `/lichhoc/ngay` contract from `portal-publicapp.ut.edu.vn`, preserving subject,
+  class code, start/end time, periods, room, campus, cancellation, and note.
+- An account-scoped atomic cache distinguishes an authoritative empty day from
+  missing data. The coordinator fetches when today's cache is absent at app
+  open and refreshes while the app is alive at 00:00 and 06:00. The disclosure
+  shows explicit loading/auth/error/empty states and derives upcoming,
+  in-progress, finished, or cancelled status from the current local time.
+- Live verification returned two current-day sessions with complete subject,
+  time, room, and campus data and round-tripped the redacted schedule cache.
+  Native Windows smoke observed 47 consecutive first-start frames at exactly
+  420×720 and captured the branded splash before the dashboard; a second native
+  smoke rendered both live sessions in the expanded card. Smoke-owned scripts,
+  appdata, logs, and screenshots were deleted before commit.
+- The live account identifier and password prefix previously embedded as grep
+  markers in an archived implementation plan were replaced with synthetic
+  markers; no supplied credential or live room/class identifier remains in the
+  tracked tree.
+- Verification: **1303 tests passed with 25 skipped**; `ruff check src tests`
+  and `git diff --check` passed.
+
 ## Windows Burn installer branding (2026-08-11)
 
 - The WiX Bundle now uses the application ICO as `IconSourceFile`, which gives

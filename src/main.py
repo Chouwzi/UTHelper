@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import asyncio
 from pathlib import Path
 
 from diagnostics.logging_setup import (
@@ -154,13 +155,87 @@ def _is_source_checkout(module_path: Path) -> bool:
         return False
 
 
+def _show_startup_screen(
+    page,
+    ft,
+    *,
+    publish: bool,
+    compact_desktop: bool = True,
+) -> None:
+    """Publish the first frame only after it has final geometry and branding."""
+    if compact_desktop:
+        page.window.width = 420
+        page.window.height = 720
+        page.window.min_width = 420
+        page.window.max_width = 420
+        page.window.min_height = 720
+        page.window.max_height = 720
+        page.window.resizable = False
+        page.window.icon = "icon.ico"
+    page.title = "UTHelper"
+    page.bgcolor = "#0B1120"
+    page.padding = 0
+    page.spacing = 0
+    page.theme_mode = ft.ThemeMode.DARK
+    page.controls.clear()
+    page.add(
+        ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Image(
+                        src="icon.png",
+                        width=92,
+                        height=92,
+                        fit=ft.BoxFit.CONTAIN,
+                    ),
+                    ft.Text(
+                        "UTHelper",
+                        size=24,
+                        weight=ft.FontWeight.BOLD,
+                        color="#F8FAFC",
+                    ),
+                    ft.Text(
+                        "Trợ lý học tập UTH",
+                        size=12,
+                        color="#94A3B8",
+                    ),
+                    ft.Container(height=18),
+                    ft.ProgressRing(
+                        width=28,
+                        height=28,
+                        stroke_width=3,
+                        color="#3B82F6",
+                    ),
+                    ft.Text(
+                        "Đang khởi động UTHelper...",
+                        size=12,
+                        color="#CBD5E1",
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+                expand=True,
+            ),
+            alignment=ft.Alignment(0, 0),
+            expand=True,
+            bgcolor="#0B1120",
+        )
+    )
+    if compact_desktop:
+        page.window.visible = publish
+    page.update()
+
+
 def main() -> int:
     web_mode = _is_web_mode(sys.argv, os.environ)
     result = None
     development = _is_source_checkout(Path(__file__))
-    if sys.platform == "win32" and not web_mode:
+    desktop_windows = sys.platform == "win32" and not web_mode
+    autostart_launch = desktop_windows and is_autostart_launch()
+    if desktop_windows:
         result = bootstrap_windows_instance(
-            autostart_launch=is_autostart_launch(),
+            autostart_launch=autostart_launch,
             release_channel="stable",
             development=development,
         )
@@ -184,13 +259,26 @@ def main() -> int:
 
     active_page = None
 
-    def _app_target(page: ft.Page):
+    async def _app_target(page: ft.Page):
         nonlocal active_page
         active_page = page
         if runtime is not None:
             runtime.attach_page(page)
             runtime.mark_phase(AppPhase.GUI)
         try:
+            publish_startup = not autostart_launch or bool(
+                result and result.force_visible
+            )
+            _show_startup_screen(
+                page,
+                ft,
+                publish=publish_startup,
+                compact_desktop=desktop_windows,
+            )
+            if publish_startup:
+                # Yield to the Flet transport so Flutter paints and animates the
+                # branded first frame before synchronous GUI construction.
+                await asyncio.sleep(0.6)
             logger.info("Starting app imports...")
             
             # Flet compatibility shim (MUST run before any GUI imports)
@@ -249,6 +337,10 @@ def main() -> int:
     if web_mode:
         run_kwargs["view"] = ft.AppView.WEB_BROWSER
         run_kwargs["port"] = web_port
+    elif desktop_windows:
+        # Keep Flutter's default 1280x720 host hidden until the first UTHelper
+        # frame has its final compact geometry, logo, and progress indicator.
+        run_kwargs["view"] = ft.AppView.FLET_APP_HIDDEN
     elif os.environ.get("FLET_SERVER_PORT"):
         # Flet >= 0.82 workaround removed to test if it's causing the issue in 0.85.3
         pass
