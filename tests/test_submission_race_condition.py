@@ -86,6 +86,11 @@ def detail_view_shell():
         _submission_statement=SimpleNamespace(value=False),
         _submission_status_value=SimpleNamespace(value="", color=None),
         _upload_status=SimpleNamespace(value="", color=None, visible=False),
+        _delete_confirm_text=SimpleNamespace(value=""),
+        _delete_confirm_dialog=SimpleNamespace(open=False),
+        _pending_delete_indices=[],
+        _selected_file_indices=set(),
+        _page=SimpleNamespace(overlay=[], update=lambda: None),
         _last_server_status=None,
         _on_status_changed=None,
         _current_url="",
@@ -102,9 +107,113 @@ def detail_view_shell():
         "_on_finalize",
         "_confirm_replace_mutation",
         "_selected_submission_files",
+        "_confirm_single_delete",
+        "_confirm_batch_delete",
+        "_on_remove_submitted_files",
+        "_do_confirmed_delete",
+        "_on_update_file_metadata",
     ):
         setattr(shell, name, MethodType(getattr(DetailView, name), shell))
     return shell
+
+
+def test_delete_last_file_warns_that_file_only_submission_is_removed(detail_view_shell):
+    detail_view_shell._submitted_files = [{"name": "answer.pdf"}]
+    detail_view_shell._submission_snapshot = snapshot(
+        files=(remote("answer.pdf"),), online_text=""
+    )
+
+    detail_view_shell._confirm_single_delete(0)
+
+    assert "xóa toàn bộ bài nộp" in detail_view_shell._delete_confirm_text.value
+
+
+def test_delete_last_file_says_online_text_is_preserved(detail_view_shell):
+    detail_view_shell._submitted_files = [{"name": "answer.pdf"}]
+    detail_view_shell._submission_snapshot = snapshot(
+        files=(remote("answer.pdf"),), online_text="<p>Keep me</p>"
+    )
+
+    detail_view_shell._confirm_single_delete(0)
+
+    assert "chỉ xóa toàn bộ file" in detail_view_shell._delete_confirm_text.value
+    assert "Nội dung văn bản vẫn được giữ lại" in detail_view_shell._delete_confirm_text.value
+
+
+@pytest.mark.anyio
+async def test_ui_delete_one_routes_remove_with_exact_remote_identity(detail_view_shell):
+    detail_view_shell._submitted_files = [
+        {"name": "a.pdf", "filepath": "/"},
+        {"name": "b.pdf", "filepath": "/proof/"},
+    ]
+    detail_view_shell._execute_file_mutation = AsyncMock()
+
+    await detail_view_shell._on_remove_submitted_files([1])
+
+    detail_view_shell._execute_file_mutation.assert_awaited_once_with(
+        MutationOperation.REMOVE,
+        False,
+        remove_identities=(("/proof/", "b.pdf"),),
+    )
+
+
+@pytest.mark.anyio
+async def test_ui_delete_all_routes_clear_and_deduplicates_indices(detail_view_shell):
+    detail_view_shell._submitted_files = [
+        {"name": "a.pdf", "filepath": "/"},
+        {"name": "b.pdf", "filepath": "/proof/"},
+    ]
+    detail_view_shell._execute_file_mutation = AsyncMock()
+
+    await detail_view_shell._on_remove_submitted_files([1, 0, 1, -1, 99])
+
+    detail_view_shell._execute_file_mutation.assert_awaited_once_with(
+        MutationOperation.CLEAR,
+        False,
+        remove_identities=(("/", "a.pdf"), ("/proof/", "b.pdf")),
+    )
+
+
+@pytest.mark.anyio
+async def test_confirmed_delete_closes_dialog_and_routes_pending_indices(detail_view_shell):
+    detail_view_shell._submitted_files = [
+        {"name": "a.pdf", "filepath": "/"},
+        {"name": "b.pdf", "filepath": "/"},
+    ]
+    detail_view_shell._pending_delete_indices = [0]
+    detail_view_shell._execute_file_mutation = AsyncMock()
+
+    await detail_view_shell._do_confirmed_delete()
+
+    assert detail_view_shell._delete_confirm_dialog.open is False
+    assert detail_view_shell._pending_delete_indices == []
+    detail_view_shell._execute_file_mutation.assert_awaited_once_with(
+        MutationOperation.REMOVE,
+        False,
+        remove_identities=(("/", "a.pdf"),),
+    )
+
+
+@pytest.mark.anyio
+async def test_ui_metadata_edit_routes_rename_and_path_move(detail_view_shell):
+    detail_view_shell._submitted_files = [{"name": "old.pdf", "filepath": "/"}]
+    detail_view_shell._editing_file_index = 0
+    detail_view_shell._edit_filename = SimpleNamespace(value="renamed.pdf")
+    detail_view_shell._edit_filepath = SimpleNamespace(value="/proof/")
+    detail_view_shell._edit_status = SimpleNamespace(value="", color=None, visible=False)
+    detail_view_shell._file_edit_dialog = SimpleNamespace(open=True)
+    detail_view_shell._execute_file_mutation = AsyncMock()
+
+    await detail_view_shell._on_update_file_metadata()
+
+    assert detail_view_shell._file_edit_dialog.open is False
+    detail_view_shell._execute_file_mutation.assert_awaited_once_with(
+        MutationOperation.RENAME,
+        False,
+        rename_identity=(("/", "old.pdf")),
+        new_name="renamed.pdf",
+        new_filepath="/proof/",
+    )
 
 
 def test_loaded_snapshot_replaces_server_file_list_and_stores_fingerprint(

@@ -200,7 +200,15 @@ def parse_submission_snapshot(assign_id: int, assignment: Mapping[str, object], 
     if raw_statement_required is None:
         raw_statement_required = _config_value(configs, ("requiresubmissionstatement",))
     statement_required = _as_bool(raw_statement_required)
-    maximum_file_count = max(0, _as_int(_config_value(configs, ("maxfilesubmission", "maxfiles"))))
+    maximum_file_count = max(
+        0,
+        _as_int(
+            _config_value(
+                configs,
+                ("maxfilesubmissions", "maxfilesubmission", "maxfiles"),
+            )
+        ),
+    )
     maximum_file_bytes = max(0, _as_int(_config_value(configs, ("maxsubmissionsizebytes", "maxbytes"))))
     assignment_submissions_enabled = not _as_bool(assignment.get("nosubmissions"))
     submissions_enabled = _as_bool(

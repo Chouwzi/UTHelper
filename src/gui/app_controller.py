@@ -539,7 +539,7 @@ class AppController:
         ]
         from gui.core.theme import _TYPE_COLORS
         _TYPE_CFG = [
-            ("all",        "Loại",         C.TEXT_PRIMARY),
+            ("all",        "Tất cả",         C.TEXT_PRIMARY),
             ("quiz",       "Quiz",         _TYPE_COLORS["quiz"]),
             ("assignment", "Bài tập",      _TYPE_COLORS["assignment"]),
             ("attendance", "Điểm danh",    _TYPE_COLORS["attendance"]),

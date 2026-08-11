@@ -1857,10 +1857,16 @@ class DetailView(ft.Container):
         name = self._submitted_files[index].get('name', 'file')
         self._pending_delete_indices = [index]
         if len(self._submitted_files) == 1:
-            self._delete_confirm_text.value = (
-                "Bạn đang xóa toàn bộ file. Moodle sẽ lưu một bản ghi bài nộp "
-                f"không có file.\n  • {name}"
-            )
+            if self._submission_snapshot and self._submission_snapshot.online_text.strip():
+                self._delete_confirm_text.value = (
+                    "Bạn chỉ xóa toàn bộ file khỏi bài nộp. "
+                    f"Nội dung văn bản vẫn được giữ lại.\n  • {name}"
+                )
+            else:
+                self._delete_confirm_text.value = (
+                    "Bạn đang xóa toàn bộ bài nộp khỏi Moodle. "
+                    f"Thao tác này không thể hoàn tác.\n  • {name}"
+                )
         else:
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
         dlg = self._delete_confirm_dialog
@@ -1879,10 +1885,16 @@ class DetailView(ft.Container):
         deleting_all = len(indices) == len(self._submitted_files)
         if deleting_all:
             file_list = "\n".join(f"  • {n}" for n in names)
-            self._delete_confirm_text.value = (
-                "Bạn đang xóa toàn bộ file. Moodle sẽ lưu một bản ghi bài nộp "
-                f"không có file.\n{file_list}"
-            )
+            if self._submission_snapshot and self._submission_snapshot.online_text.strip():
+                self._delete_confirm_text.value = (
+                    "Bạn chỉ xóa toàn bộ file khỏi bài nộp. "
+                    f"Nội dung văn bản vẫn được giữ lại.\n{file_list}"
+                )
+            else:
+                self._delete_confirm_text.value = (
+                    "Bạn đang xóa toàn bộ bài nộp khỏi Moodle. "
+                    f"Thao tác này không thể hoàn tác.\n{file_list}"
+                )
         elif len(names) == 1:
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{names[0]}'?"
         else:

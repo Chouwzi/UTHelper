@@ -77,9 +77,11 @@ jobs:
 
           # First pass materializes Flet's Flutter project. The notification
           # extension patcher then registers AlarmManager receivers/services.
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 

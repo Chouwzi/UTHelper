@@ -61,6 +61,8 @@ def test_repository_has_actionable_contributor_and_security_controls():
 
     assert "* @Chouwzi" in codeowners
     assert "/.github/workflows/ @Chouwzi" in codeowners
+    assert "/scripts/github_branch_policy.py @Chouwzi" in codeowners
+    assert "/docs/guides/gitflow.md @Chouwzi" in codeowners
     assert "develop" in contributing and "pull request" in contributing.lower()
     assert "https://github.com/Chouwzi/UTHelper/security/advisories/new" in security
     assert "Không đăng" in security
@@ -74,4 +76,46 @@ def test_repository_has_actionable_contributor_and_security_controls():
         'flet_uth_background_sync/android"'
     ) in dependabot
     assert '      - "security"' not in dependabot
-    assert "Rulesets" in _read("docs/WINDOWS_EXE_PACKAGING.md")
+    assert "Rulesets" in _read("docs/guides/windows-packaging.md")
+    assert "develop -> main" in _read("docs/guides/gitflow.md")
+
+
+def test_ci_enforces_gitflow_direction_as_a_named_required_check():
+    workflow = _read(".github/workflows/ci.yml")
+
+    assert "gitflow-policy:" in workflow
+    assert "name: 🌿 Gitflow policy" in workflow
+    assert "python scripts/validate_gitflow_pr.py" in workflow
+    assert '--base "${{ github.base_ref }}"' in workflow
+    assert '--head "${{ github.head_ref }}"' in workflow
+
+
+def test_repository_documentation_is_indexed_and_separates_history():
+    docs = ROOT / "docs"
+    top_level_files = {path.name for path in docs.iterdir() if path.is_file()}
+
+    assert top_level_files == {"PRIVACY.md", "README.md"}
+    assert not (docs / "superpowers").exists()
+    assert not (ROOT / "REFAC_KNOWLEDGE.md").exists()
+
+    maintained = (
+        "docs/api/moodle-web-services.md",
+        "docs/api/portal.md",
+        "docs/guides/windows-packaging.md",
+        "docs/testing/notification-e2e-matrix.md",
+        "docs/architecture/refactoring-plan.md",
+        "docs/architecture/refactoring-log.md",
+    )
+    index = _read("docs/README.md")
+    for relative_path in maintained:
+        path = ROOT / relative_path
+        assert path.is_file(), relative_path
+        assert path.name in index
+
+    assert (docs / "archive" / "designs").is_dir()
+    assert (docs / "archive" / "implementation-plans").is_dir()
+
+
+def test_scripts_directory_contains_no_uncollected_python_test_programs():
+    assert _read("scripts/README.md")
+    assert not tuple((ROOT / "scripts").glob("test_*.py"))

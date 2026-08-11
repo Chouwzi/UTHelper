@@ -8,6 +8,7 @@ from scripts.release_metadata import (
     read_project_version,
     read_release_metadata,
     release_build_number,
+    write_runtime_version,
 )
 
 
@@ -25,6 +26,15 @@ def test_project_version_is_only_authored_version(tmp_path):
 
 def test_this_feature_release_bumps_the_single_authored_version():
     assert read_project_version(ROOT / "pyproject.toml") == "2.2.11"
+
+
+def test_runtime_version_is_generated_from_the_single_authored_version(tmp_path):
+    project = tmp_path / "pyproject.toml"
+    project.write_text('[project]\nversion = "2.2.11"\n', encoding="utf-8")
+    output = tmp_path / "assets" / "release-version"
+
+    assert write_runtime_version(project, output) == output
+    assert output.read_bytes() == b"2.2.11\n"
 
 
 @pytest.mark.parametrize("tag", ["v2.2.4", "2.2.3", "v2.2.3-rc1"])

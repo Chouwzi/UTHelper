@@ -1,11 +1,13 @@
 import json
 import os
 import time
+from http.cookiejar import CookieJar
+from html.parser import HTMLParser
 import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 from config import settings
 from core.moodle_sites import (
     COURSES_MOODLE_SITE,
@@ -16,6 +18,57 @@ import logging
 import sys as _sys
 
 logger = logging.getLogger(__name__)
+
+
+class _MoodleHtmlFormParser(HTMLParser):
+    """Collect ordinary HTML forms without retaining page text or scripts."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms: list[dict[str, object]] = []
+        self.inputs: dict[str, str] = {}
+        self._current: dict[str, object] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]):
+        attributes = {name.lower(): value or "" for name, value in attrs}
+        if tag.lower() == "form":
+            self._current = {
+                "method": attributes.get("method", "get").lower(),
+                "action": attributes.get("action", ""),
+                "inputs": {},
+            }
+            self.forms.append(self._current)
+        elif tag.lower() == "input":
+            name = attributes.get("name", "")
+            if not name:
+                return
+            value = attributes.get("value", "")
+            self.inputs[name] = value
+            if self._current is not None:
+                current_inputs = self._current["inputs"]
+                if isinstance(current_inputs, dict):
+                    current_inputs[name] = value
+
+    def handle_endtag(self, tag: str):
+        if tag.lower() == "form":
+            self._current = None
+
+
+class _SameMoodleOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, origin: str):
+        super().__init__()
+        self.origin = origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        parsed = urllib.parse.urlsplit(redirected.full_url)
+        if f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" != self.origin:
+            raise urllib.error.HTTPError(
+                redirected.full_url, code, "Untrusted Moodle redirect", headers, fp
+            )
+        return redirected
 
 
 def _normalize_draft_filepath(filepath: str) -> str:
@@ -497,12 +550,12 @@ class MoodleClient:
         return await asyncio.to_thread(self.call_ws_api, function, **params)
 
 
-    def get_user_id(self) -> Optional[int]:
+    def get_user_id(self, *, refresh: bool = False) -> Optional[int]:
         """Lấy Moodle user ID từ core_webservice_get_site_info (cached).
         
         Cần cho core_files_upload (instanceid) và các API khác cần userid.
         """
-        if hasattr(self, '_cached_user_id') and self._cached_user_id:
+        if not refresh and hasattr(self, '_cached_user_id') and self._cached_user_id:
             return self._cached_user_id
         try:
             result = self.call_ws_api('core_webservice_get_site_info')
@@ -618,6 +671,126 @@ class MoodleClient:
         except Exception as e:
             logger.error("Download error: %s", e)
         return None
+
+    def remove_assignment_submission(
+        self,
+        cmid: int,
+        *,
+        expected_user_id: int,
+        before_commit: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Remove all submission-plugin data through Moodle's confirmed web action."""
+        if (
+            isinstance(cmid, bool)
+            or not isinstance(cmid, int)
+            or cmid <= 0
+            or isinstance(expected_user_id, bool)
+            or not isinstance(expected_user_id, int)
+            or expected_user_id <= 0
+            or not self._stored_credentials_match_site()
+        ):
+            return False
+
+        origin = self.moodle_site_origin
+        username = settings.UTH_USERNAME
+        password = settings.UTH_PASSWORD
+        if not origin or not username or not password:
+            return False
+
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(CookieJar()),
+            _SameMoodleOriginRedirectHandler(origin),
+        )
+
+        def open_html(path: str, *, data: dict[str, str] | None = None) -> tuple[str, str]:
+            url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+            encoded = urllib.parse.urlencode(data).encode() if data is not None else None
+            request = urllib.request.Request(
+                url,
+                data=encoded,
+                method="POST" if data is not None else "GET",
+                headers={"User-Agent": _DEFAULT_UA, "Accept": "text/html"},
+            )
+            with opener.open(request, timeout=20) as response:
+                final_url = response.geturl()
+                parsed = urllib.parse.urlsplit(final_url)
+                final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+                if final_origin != origin:
+                    raise ValueError("Moodle web response changed origin")
+                body = response.read(2 * 1024 * 1024 + 1)
+            if len(body) > 2 * 1024 * 1024:
+                raise ValueError("Moodle web response was too large")
+            return final_url, body.decode("utf-8", errors="replace")
+
+        try:
+            _, login_page = open_html("/login/index.php")
+            parsed_login = _MoodleHtmlFormParser()
+            parsed_login.feed(login_page)
+            login_token = parsed_login.inputs.get("logintoken", "")
+            if not login_token:
+                return False
+
+            final_url, _ = open_html(
+                "/login/index.php",
+                data={
+                    "anchor": "",
+                    "logintoken": login_token,
+                    "username": username,
+                    "password": password,
+                },
+            )
+            if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                return False
+
+            query = urllib.parse.urlencode(
+                {"id": cmid, "action": "removesubmissionconfirm"}
+            )
+            _, confirmation_page = open_html(f"/mod/assign/view.php?{query}")
+            parsed_confirmation = _MoodleHtmlFormParser()
+            parsed_confirmation.feed(confirmation_page)
+            remove_fields: dict[str, str] | None = None
+            remove_action = ""
+            for form in parsed_confirmation.forms:
+                inputs = form.get("inputs")
+                if (
+                    form.get("method") == "post"
+                    and isinstance(inputs, dict)
+                    and inputs.get("id") == str(cmid)
+                    and inputs.get("action") == "removesubmission"
+                    and str(inputs.get("userid", "")).isdigit()
+                    and str(inputs.get("sesskey", "")).isalnum()
+                ):
+                    remove_fields = {
+                        key: str(inputs[key])
+                        for key in ("id", "action", "userid", "sesskey")
+                    }
+                    remove_action = str(form.get("action", ""))
+                    break
+            if remove_fields is None:
+                return False
+            if int(remove_fields["userid"]) != expected_user_id:
+                return False
+
+            action_url = urllib.parse.urljoin(
+                f"{origin}/mod/assign/view.php", remove_action
+            )
+            parsed_action = urllib.parse.urlsplit(action_url)
+            if (
+                f"{parsed_action.scheme.lower()}://{parsed_action.netloc.lower()}" != origin
+                or parsed_action.path != "/mod/assign/view.php"
+                or parsed_action.query
+                or parsed_action.fragment
+            ):
+                return False
+            if before_commit is not None and not before_commit():
+                return False
+            open_html(action_url, data=remove_fields)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Moodle web submission removal failed (%s)", type(exc).__name__
+            )
+            return False
 
     def delete_draft_file(self, draftitemid: int, filepath: str, filename: str) -> bool:
         """Xóa một file cụ thể từ draft area."""
