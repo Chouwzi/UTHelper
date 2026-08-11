@@ -60,6 +60,7 @@ class SettingsView(ft.Container):
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
         self._hint_containers = []
         self._tiles = []
+        self._tile_bodies = {}
         self._section_containers = []
         self._autostart_coordinator = autostart_coordinator
         self._loading = False
@@ -258,6 +259,10 @@ class SettingsView(ft.Container):
         sec_integration = build_integration_section(self)
         sec_debug = build_debug_section(self)
 
+        # Settings always opens from a clean collapsed state. Detaching each
+        # body keeps hundreds of off-screen controls out of Flutter's tree.
+        self._collapse_setting_groups()
+
         _scroll_content = ft.Column(
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[
@@ -321,21 +326,39 @@ class SettingsView(ft.Container):
 
     def _build_setting_group(self, title: str, subtitle: str, controls: list, default_open: bool = False, icon = None) -> ft.Container:
         leading_icon = ft.Icon(icon, size=20, color=C.ACCENT) if icon else None
+        body = ft.Container(
+            content=ft.Column(
+                controls,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            padding=10,
+        )
+
+        def on_change(event):
+            raw = getattr(event, "data", None)
+            if isinstance(raw, str):
+                expanded = raw.strip().lower() == "true"
+            else:
+                expanded = bool(getattr(event.control, "expanded", False))
+            event.control.controls = [body] if expanded else []
+            event.control.update()
+
         tile = ft.ExpansionTile(
             title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
             subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
             leading=leading_icon,
             affinity=ft.Theme.color_scheme,
-            controls=[
-                ft.Container(content=ft.Column(controls, horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=10)
-            ],
+            controls=[body] if default_open else [],
             collapsed_text_color=C.TEXT_PRIMARY,
             text_color=C.ACCENT,
             shape=ft.RoundedRectangleBorder(radius=10),
             collapsed_shape=ft.RoundedRectangleBorder(radius=10),
             expanded=default_open,
+            maintain_state=False,
+            on_change=on_change,
         )
         self._tiles.append(tile)
+        self._tile_bodies[id(tile)] = body
         container = ft.Container(
             content=tile,
             bgcolor=C.SURFACE,
@@ -347,6 +370,11 @@ class SettingsView(ft.Container):
         )
         self._section_containers.append(container)
         return container
+
+    def _collapse_setting_groups(self) -> None:
+        for tile in getattr(self, "_tiles", []):
+            tile.expanded = False
+            tile.controls = []
 
     def _build_color_field(self, label_text: str, default_color: str):
         tb = ft.TextField(
@@ -1887,19 +1915,7 @@ class SettingsView(ft.Container):
         self._loading = True
         snapshot = SettingsFormSnapshot.from_settings(settings)
         try:
-            autostart = await self._load_autostart_state(generation)
-            if generation != self._load_generation:
-                return
-
-            resolved = snapshot
-            if autostart is not None and autostart.confirmed:
-                resolved = replace(
-                    snapshot,
-                    start_with_windows=autostart.enabled,
-                )
-
-            for tile in getattr(self, '_tiles', []):
-                tile.expanded = False
+            self._collapse_setting_groups()
 
             self._test_login_status.value = ""
             self._test_login_btn.text = "Kiểm tra kết nối"
@@ -1908,8 +1924,8 @@ class SettingsView(ft.Container):
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
 
-            self._original_theme = resolved.theme
-            self._apply_snapshot_to_controls(resolved)
+            self._original_theme = snapshot.theme
+            self._apply_snapshot_to_controls(snapshot)
             self._refresh_section_colors()
 
             self._known_courses = set()
@@ -1929,16 +1945,31 @@ class SettingsView(ft.Container):
             self._update_drp_options()
 
             self._save_status.value = ""
-            self._baseline_snapshot = self._capture_form_snapshot()
+            self._baseline_snapshot = snapshot
+            if self._autostart_coordinator is not None:
+                self._sw_start_with_windows.disabled = True
+                self._autostart_status.value = "Đang kiểm tra trạng thái Windows..."
+                self._autostart_status.color = C.TEXT_SECONDARY
+            self.update()
+
+            autostart = await self._load_autostart_state(generation)
+            if generation != self._load_generation:
+                return
+
             if autostart is not None:
                 display_state = autostart
-                if not autostart.confirmed:
+                if autostart.confirmed:
+                    self._baseline_snapshot = replace(
+                        snapshot,
+                        start_with_windows=autostart.enabled,
+                    )
+                else:
                     display_state = replace(
                         autostart,
-                        enabled=resolved.start_with_windows,
+                        enabled=snapshot.start_with_windows,
                     )
                 self._apply_autostart_ui(display_state)
-            self.update()
+                self.update()
         finally:
             if generation == self._load_generation:
                 self._loading = False
@@ -1948,7 +1979,7 @@ class SettingsView(ft.Container):
         self._loading = False
 
     def has_changes(self):
-        if self._loading or self._baseline_snapshot is None:
+        if self._baseline_snapshot is None:
             return False
         try:
             return self._capture_form_snapshot() != self._baseline_snapshot
@@ -1980,7 +2011,7 @@ class SettingsView(ft.Container):
         import logging
         _log = logging.getLogger("settings.dialog")
         _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
-        if self._loading:
+        if self._loading and not self.has_changes():
             self.cancel_pending_load()
             self._on_close_cb()
             return

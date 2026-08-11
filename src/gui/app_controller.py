@@ -244,7 +244,6 @@ class AppController:
         # Android back button - intercept to navigate within app instead of exiting
         if platform_utils.IS_MOBILE:
             self.page.on_view_pop = self._on_back_button
-        self._safe_run_task(self._pulse_loop_async)
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
         self._safe_run_task(self._today_schedule_coordinator.run)
@@ -808,6 +807,7 @@ class AppController:
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
+        main_stack = ft.Stack(controls=[self.dashboard], expand=True)
         self.view_manager = ViewManager(
             self.page,
             self.dashboard,
@@ -815,10 +815,9 @@ class AppController:
             self.settings_view,
             self.calendar_view,
             self.grade_overview_view,
-            self
+            self,
+            view_host=main_stack,
         )
-
-        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
         if platform_utils.IS_MOBILE:
@@ -828,19 +827,6 @@ class AppController:
 
     def _start_skeleton_shimmer(self):
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
-
-        async def _pulse_skeletons():
-            import asyncio
-            while self._skeleton_visible:
-                for card in self.cards_column.controls:
-                    if hasattr(card, 'opacity'):
-                        card.opacity = 0.7 if card.opacity < 0.6 else 0.4
-                try:
-                    self.page.update()
-                except Exception:
-                    break
-                await asyncio.sleep(0.8)
-        self._safe_run_task(_pulse_skeletons)
 
     def _make_skeleton_card(self):
         """Create a skeleton placeholder card that mimics ActivityCard layout."""
@@ -1218,8 +1204,8 @@ class AppController:
             logger.debug("Grade check background failed (non-critical): %s", e)
 
     async def _prefetch_details_async(self, activities: list):
-        len(activities)
-        workers = max(1, min(settings.PREFETCH_WORKERS, 10))
+        worker_cap = 2 if platform_utils.IS_MOBILE else 10
+        workers = max(1, min(settings.PREFETCH_WORKERS, worker_cap))
         
         with self._data_lock:
             count = len(self.all_data)
@@ -1466,9 +1452,42 @@ class AppController:
             with self._data_lock:
                 self.all_data = data_copy
 
-            # Lưu cache offline
-            self._data_cache.save_server_snapshot(data_copy)
-            saved_snapshot = self._data_cache.load_snapshot()
+            # Publish server truth before slower flash/native/notification work.
+            # This is especially important on older Android storage.
+            submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
+            total_count = len(data_copy)
+            submitted_count = sum(
+                1
+                for item in data_copy
+                if item.get("submission_status", "") in submitted_statuses
+            )
+            progress_text = ""
+            if total_count > 0 and submitted_count > 0:
+                if submitted_count == total_count:
+                    progress_text = " · Đã nộp hết ✓"
+                else:
+                    progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
+            self.status_text.value = (
+                f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · "
+                f"{total_count} hoạt động{progress_text}"
+            )
+            should_show_snackbar = not self._skeleton_visible
+            self._update_footer()
+            if should_show_snackbar:
+                self._show_snackbar(
+                    f"Đã cập nhật {total_count} hoạt động",
+                    ft.Icons.SYNC_ROUNDED,
+                    C.ACCENT,
+                )
+
+            # Persist after the first useful frame and keep slow flash I/O off
+            # the Flet event loop.
+            await asyncio.to_thread(
+                self._data_cache.save_server_snapshot, data_copy
+            )
+            saved_snapshot = await asyncio.to_thread(
+                self._data_cache.load_snapshot
+            )
             self._last_successful_sync_at = (
                 parse_timestamp(saved_snapshot.last_successful_sync_at)
                 or time.time()
@@ -1489,20 +1508,6 @@ class AppController:
                     )
                 except Exception as exc:
                     logger.warning("Android native snapshot import failed: %s", exc)
-            # P3: Tính tiến độ nộp bài - positive reinforcement
-            submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
-            total_count = len(data_copy)
-            submitted_count = sum(1 for x in data_copy if x.get("submission_status", "") in submitted_statuses)
-            progress_text = ""
-            if total_count > 0 and submitted_count > 0:
-                if submitted_count == total_count:
-                    progress_text = " · Đã nộp hết ✓"
-                else:
-                    progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {total_count} hoạt động{progress_text}"
-            if not self._skeleton_visible:
-                self._show_snackbar(f"Đã cập nhật {total_count} hoạt động", ft.Icons.SYNC_ROUNDED, C.ACCENT)
-            
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
                 try:
@@ -1540,8 +1545,6 @@ class AppController:
                 # PERF-OPT: Grade check moved to background task to not block main data display
                 self._safe_run_task(self._check_grades_background)
 
-            self._update_footer()
-            
             self._prefetch_cancel_event.clear()
             with self._data_lock:
                 prefetch_copy = list(self.all_data)
@@ -2290,25 +2293,6 @@ class AppController:
         if changed:
             self.page.update()
 
-    async def _pulse_loop_async(self):
-        pulse_high = True
-        while self._page_alive.is_set():
-            await asyncio.sleep(1.5)
-            if not self._page_alive.is_set(): break
-            # Skip pulse when dashboard is not visible (calendar/detail/settings open)
-            if not self.dashboard.visible:
-                continue
-            pulse_high = not pulse_high
-            try:
-                if not self.active_cards:
-                    continue
-                with self._cards_lock:
-                    cards_snapshot = list(self.active_cards)
-                self._pulse_cards_once(cards_snapshot, pulse_high)
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
     async def _countdown_loop_async(self):
         while self._page_alive.is_set():
             # Adaptive interval: faster when critical items exist
@@ -2317,10 +2301,7 @@ class AppController:
                 for c in (self.active_cards or [])
             )
             interval = 15 if has_critical else 60
-            slept = 0
-            while slept < interval and self._page_alive.is_set():
-                await asyncio.sleep(1)
-                slept += 1
+            await asyncio.sleep(interval)
             if not self._page_alive.is_set(): break
             try:
                 changed = self._refresh_activity_time_state()

@@ -1404,3 +1404,27 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - This is a production hotfix branched from `main`. The same `hotfix/2.3.1`
   branch must merge into both `main` and `develop` before the protected main
   result is tagged.
+
+## Cross-platform interaction performance (2026-08-11)
+
+- Navigation now mounts only the active Flet view instead of keeping Dashboard,
+  Detail, Calendar, Grades, and Settings in the Flutter tree simultaneously.
+- Collapsed Settings groups lazily attach their body controls. The measured
+  Settings tree dropped from 43.3 KiB / 415 controls to 8.6 KiB / 74 controls;
+  the active-host navigation patch is 8.3 KiB on the Windows 11 benchmark host.
+- Python-driven decorative pulse/shimmer repaint loops were removed, countdown
+  scheduling no longer wakes every second, and mobile detail prefetch is capped
+  at two workers to protect old Android CPUs.
+- Fresh Moodle data is rendered before cache/native notification follow-up;
+  cache persistence now runs off the Flet event loop. The fixed startup-frame
+  delay was reduced from 600 ms to 50 ms.
+- Added `scripts/measure_ui_performance.py` and
+  `docs/testing/cross-platform-performance.md` with budgets and the required
+  Windows 10/11 plus weak/strong physical Android validation matrix.
+- Verification: **1327 tests passed with 25 skipped** in the project virtualenv;
+  repository-wide Ruff, the UI protocol budget script, and `git diff --check`
+  passed. A local two-ABI APK build reached Gradle `assembleRelease` but did not
+  complete within the 10-minute bound; all owned Gradle/Python processes and
+  the ignored 0.13 GB worktree build directory were removed. Physical Android
+  frame-time validation remains required because no ADB/device is available on
+  this host.

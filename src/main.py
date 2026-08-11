@@ -278,7 +278,10 @@ def main() -> int:
             if publish_startup:
                 # Yield to the Flet transport so Flutter paints and animates the
                 # branded first frame before synchronous GUI construction.
-                await asyncio.sleep(0.6)
+                # One short yield is enough to publish a branded frame; the
+                # former 600 ms floor made every launch feel slow, especially
+                # with embedded Python on older Android devices.
+                await asyncio.sleep(0.05)
             logger.info("Starting app imports...")
             
             # Flet compatibility shim (MUST run before any GUI imports)
