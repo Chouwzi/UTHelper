@@ -1289,3 +1289,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   background-extension suite passes **1291 tests with 25 skipped in 27.35
   seconds**; repository-wide Ruff, bytecode compilation, and `git diff --check`
   pass.
+
+## Windows Burn installer branding (2026-08-11)
+
+- The WiX Bundle now uses the application ICO as `IconSourceFile`, which gives
+  the generated bootstrapper EXE, Explorer entry, Programs and Features entry,
+  and installer title bar the UTHelper identity instead of the WiX default.
+- WixStdBA now uses the application PNG as `LogoFile`, replacing its generic
+  content logo. The application ICO was rebuilt as a transparent square,
+  multi-resolution resource with 16, 24, 32, 48, 64, 128, and 256 pixel frames.
+- A regression contract checks both WiX bindings and the required Windows shell
+  icon sizes. A real local WiX 7 Bundle build completed without warnings; shell
+  resource extraction and a captured WixStdBA window confirmed the exterior
+  EXE icon, title-bar icon, and content logo.
+- Verification: **1284 tests passed with 25 skipped** under the same source paths
+  as CI; `ruff check src tests` and `git diff --check` passed.
