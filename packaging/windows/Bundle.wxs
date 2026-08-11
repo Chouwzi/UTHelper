@@ -1,11 +1,13 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
   <Bundle Name="UTHelper" Manufacturer="UTHelper" Version="$(Version)"
+          IconSourceFile="$(BundleIconPath)"
           UpgradeCode="EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0">
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
           Theme="hyperlinkLicense"
           LicenseUrl=""
+          LogoFile="$(BundleLogoPath)"
           LaunchTarget="[ProgramFiles64Folder]UTHelper\UTHelper.exe"
           LaunchWorkingFolder="[ProgramFiles64Folder]UTHelper" />
     </BootstrapperApplication>
