@@ -51,6 +51,27 @@ def test_desktop_uses_anchored_popup_with_native_animation_and_checked_item():
     assert [item.checked for item in menu.popup.items] == [False, True, False]
 
 
+def test_trigger_avoids_flet_double_padding_text_clip_regression():
+    menu = AdaptiveFilterMenu(
+        page=_Page(),
+        title="Loại hoạt động",
+        options=_options(),
+        selected_key="all",
+        on_select=lambda _key: None,
+        mobile=False,
+        trigger_width=104,
+    )
+
+    # Flet 0.86.x double-applies Container.padding when ink, an event handler,
+    # and animate are all present. Do not restore trigger animation unless its
+    # padding is moved into a non-animated child and verified in a real renderer.
+    assert menu.trigger.ink is True
+    assert menu.trigger.on_hover is not None
+    assert menu.trigger.animate is None
+    assert menu.arrow.animate_rotation is not None
+    assert menu.popup.popup_animation_style is not None
+
+
 def test_trigger_exposes_filter_and_selection_to_accessibility():
     menu = AdaptiveFilterMenu(
         page=_Page(),

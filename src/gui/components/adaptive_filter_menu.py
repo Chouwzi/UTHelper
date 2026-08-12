@@ -90,7 +90,12 @@ class AdaptiveFilterMenu:
             border_radius=10,
             padding=ft.Padding.symmetric(horizontal=11, vertical=8),
             ink=True,
-            animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
+            # Flet 0.86.x applies padding in both the inner InkWell container
+            # and the outer AnimatedContainer when ink, an event handler and
+            # animate are combined. With a fixed 40 px trigger this leaves only
+            # 8 px for text and clips Vietnamese glyphs. Keep hover/ripple here;
+            # arrow and popup motion remain independently animated.
+            animate=None,
             on_hover=self._on_trigger_hover,
             on_click=(lambda _event: self.open()) if mobile else None,
         )

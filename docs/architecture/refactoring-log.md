@@ -1645,3 +1645,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   override dashboard filter state.
 - The complete application/extension suite passes **1420 tests with 25 skipped**;
   Ruff, bytecode compilation, and `git diff --check` pass.
+
+## Flet filter-trigger renderer regression (2026-08-12)
+
+- A real Flet 0.86.x renderer probe isolated the remaining clipped filter labels
+  from width, ellipsis, `PopupMenuButton`, and `Semantics`. The failure required
+  `Container.padding`, `ink=True`, an event handler, `animate`, and a fixed trigger
+  height together.
+- In that Flet frontend path, the inner InkWell container and outer
+  AnimatedContainer both apply the same padding. A 40-pixel trigger with 8-pixel
+  vertical padding therefore left only 8 pixels for text, rendering mostly
+  Vietnamese diacritics. Removing only trigger-level animation restored the full
+  labels in the renderer probe.
+- Ripple, hover feedback, animated disclosure arrows, and popup/bottom-sheet motion
+  remain enabled. A regression test prevents reintroducing the unsafe property
+  combination until the upstream renderer path changes or padding is moved into a
+  separately verified child.
+- The corrected three-trigger row was captured successfully through a real Flet web
+  renderer at 420 pixels. The complete application/extension suite passes **1421
+  tests with 25 skipped**; Ruff, bytecode compilation, and `git diff --check` pass.
