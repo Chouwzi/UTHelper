@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Callable, Iterable
 
@@ -21,7 +22,9 @@ class FilterMenuOption:
 class AdaptiveFilterMenu:
     """Single-select filter rendered as a desktop popup or mobile sheet."""
 
-    _MOTION_MS = 180
+    _ARROW_MOTION_MS = 260
+    _POPUP_MOTION_MS = 180
+    _EXPANDED_ARROW_ANGLE = math.pi / 2
     _SHEET_MAX_HEIGHT = 560
     _SHEET_MAX_VIEWPORT_RATIO = 0.72
     _SHEET_HEADER_HEIGHT = 44
@@ -73,12 +76,12 @@ class AdaptiveFilterMenu:
             expand=trigger_width is None,
         )
         self.arrow = ft.Icon(
-            ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED,
-            size=16,
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            size=18,
             color=C.TEXT_SECONDARY,
-            rotate=ft.Rotate(0),
+            rotate=ft.Rotate(angle=0, alignment=ft.Alignment.CENTER),
             animate_rotation=ft.Animation(
-                self._MOTION_MS, ft.AnimationCurve.EASE_OUT_CUBIC
+                self._ARROW_MOTION_MS, ft.AnimationCurve.EASE_OUT_CUBIC
             ),
         )
         self.trigger = ft.Container(
@@ -129,7 +132,7 @@ class AdaptiveFilterMenu:
                 ),
                 enable_feedback=True,
                 popup_animation_style=ft.AnimationStyle(
-                    duration=self._MOTION_MS,
+                    duration=self._POPUP_MOTION_MS,
                     reverse_duration=140,
                     curve=ft.AnimationCurve.EASE_OUT_CUBIC,
                     reverse_curve=ft.AnimationCurve.EASE_IN_CUBIC,
@@ -366,7 +369,10 @@ class AdaptiveFilterMenu:
 
     def _set_expanded(self, expanded: bool) -> None:
         self._expanded = expanded
-        self.arrow.rotate = ft.Rotate(0.5 if expanded else 0)
+        self.arrow.rotate = ft.Rotate(
+            angle=self._EXPANDED_ARROW_ANGLE if expanded else 0,
+            alignment=ft.Alignment.CENTER,
+        )
         self.control.expanded = expanded
         self._safe_update(self.arrow)
         self._safe_update(self.control)

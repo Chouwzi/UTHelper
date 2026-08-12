@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -51,6 +52,26 @@ def test_desktop_uses_anchored_popup_with_native_animation_and_checked_item():
     assert menu.popup.popup_animation_style is not None
     assert [item.height for item in menu.popup.items] == [48, 48, 48]
     assert [item.checked for item in menu.popup.items] == [False, True, False]
+
+
+def test_filter_chevron_matches_schedule_disclosure_motion_on_desktop():
+    menu = AdaptiveFilterMenu(
+        page=_Page(),
+        title="Mức độ",
+        options=_options(),
+        selected_key="all",
+        on_select=lambda _key: None,
+        mobile=False,
+    )
+
+    assert menu.arrow.icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
+    assert menu.arrow.rotate.angle == 0
+    menu.popup.on_open(None)
+    assert menu.arrow.rotate.angle == math.pi / 2
+    assert menu.control.expanded is True
+    menu.popup.on_cancel(None)
+    assert menu.arrow.rotate.angle == 0
+    assert menu.control.expanded is False
 
 
 def test_trigger_avoids_flet_double_padding_text_clip_regression():
@@ -241,6 +262,11 @@ def test_mobile_uses_scrollable_safe_bottom_sheet_with_large_rows():
         tile.selected_tile_color == C.SURFACE_HOVER
         for tile in menu.mobile_tiles
     )
+    assert menu.arrow.rotate.angle == math.pi / 2
+    assert menu.control.expanded is True
+    sheet.on_dismiss(None)
+    assert menu.arrow.rotate.angle == 0
+    assert menu.control.expanded is False
 
 
 def test_mobile_sheet_caps_long_option_lists_to_viewport_and_keeps_scroll():

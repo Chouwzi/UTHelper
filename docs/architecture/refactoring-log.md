@@ -1700,5 +1700,9 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   because `adb` is not installed in the current environment.
 - A real 390×844 Flet web smoke confirmed the five-option urgency sheet wraps its
   content instead of filling the viewport. The complete application/extension suite
-  passes **1429 tests with 25 skipped**; Ruff, bytecode compilation, and
+  passes **1430 tests with 25 skipped**; Ruff, bytecode compilation, and
   `git diff --check` pass.
+- Filter triggers now share the schedule disclosure language: a right-facing rounded
+  chevron when closed and a 90-degree downward rotation while open. This replaces
+  the incorrect 0.5-radian tilt. Desktop open/cancel and mobile open/dismiss states
+  are covered by regression tests and a real 390×844 renderer smoke.
