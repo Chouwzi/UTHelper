@@ -1706,3 +1706,20 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   chevron when closed and a 90-degree downward rotation while open. This replaces
   the incorrect 0.5-radian tilt. Desktop open/cancel and mobile open/dismiss states
   are covered by regression tests and a real 390×844 renderer smoke.
+
+## Detail deadline panel live-theme repair (2026-08-13)
+
+- Fixed the deadline summary panel retaining its startup theme after a live theme
+  switch. Its refresh path navigated the layout using a stale numeric child index;
+  an error banner had shifted the detail container, and the resulting exception was
+  swallowed by a broad compatibility guard.
+- Detail header, divider, deadline labels, and summary surface now have stable control
+  references updated directly by `update_theme()`. The submitted-files accent border
+  also uses Flet's opacity helper instead of ambiguous eight-digit color concatenation.
+- Regression coverage switches an already-constructed Detail view from dark to light
+  and verifies that inserting another layout control cannot break theme propagation.
+- A real 390×844 Flet renderer smoke opened a cached quiz detail under the light
+  theme and confirmed the deadline panel, quiz information card, divider, labels,
+  and browser CTA use one coherent palette. The complete application/extension suite
+  passes **1432 tests with 25 skipped**; Ruff, bytecode compilation, and
+  `git diff --check` pass.

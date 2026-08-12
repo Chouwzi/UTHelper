@@ -427,7 +427,7 @@ class DetailView(ft.Container):
                 self._edit_submitted_btn,
             ], spacing=8),
             bgcolor=C.SURFACE,
-            border=ft.Border.all(1, C.SAFE + "40"),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25, C.SAFE)),
             border_radius=8,
             padding=ft.Padding.all(14),
             visible=False,
@@ -614,26 +614,40 @@ class DetailView(ft.Container):
         )
 
     def _init_layout(self, on_close):
+        self._back_icon = ft.Icon(
+            ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY
+        )
+        self._back_text = ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY)
         back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
-                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
+                self._back_icon,
+                self._back_text,
             ], spacing=4, tight=True),
             on_click=lambda _: on_close(),
             style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
         )
 
-        info_box = ft.Container(
+        self._deadline_label = ft.Text(
+            "Thời hạn",
+            size=11,
+            color=C.TEXT_SECONDARY,
+            weight=ft.FontWeight.W_500,
+        )
+        self._countdown_label = ft.Text(
+            "Còn lại",
+            size=11,
+            color=C.TEXT_SECONDARY,
+            weight=ft.FontWeight.W_500,
+        )
+        self._info_box = ft.Container(
             content=ft.Column(controls=[
                 self._opentime_row,
                 ft.Row(controls=[
-                    ft.Text("Thời hạn", size=11, color=C.TEXT_SECONDARY,
-                            weight=ft.FontWeight.W_500),
+                    self._deadline_label,
                     self._deadline_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Row(controls=[
-                    ft.Text("Còn lại", size=11, color=C.TEXT_SECONDARY,
-                            weight=ft.FontWeight.W_500),
+                    self._countdown_label,
                     self._countdown_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self._cutoff_row,
@@ -643,6 +657,7 @@ class DetailView(ft.Container):
             border_radius=8,
             border=ft.Border.all(1, C.BORDER),
         )
+        self._details_divider = ft.Divider(height=16, color=C.BORDER)
 
         self.content = ft.Column(
             controls=[
@@ -661,8 +676,8 @@ class DetailView(ft.Container):
                                     self._badge_ctrl,
                                     self._title_text,
                                     self._course_text,
-                                    ft.Divider(height=16, color=C.BORDER),
-                                    info_box,
+                                    self._details_divider,
+                                    self._info_box,
                                 ], spacing=8),
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
@@ -2102,7 +2117,9 @@ class DetailView(ft.Container):
         # Areas (submitted, submission, pick, submit, upload modes)
         try:
             self._submitted_area.bgcolor = C.SURFACE
-            self._submitted_area.border = ft.Border.all(1, C.SAFE + "40")
+            self._submitted_area.border = ft.Border.all(
+                1, ft.Colors.with_opacity(0.25, C.SAFE)
+            )
             self._submitted_area.content.controls[0].controls[0].color = C.TEXT_SECONDARY
             self._submitted_area.content.controls[0].controls[1].color = C.TEXT_SECONDARY
             
@@ -2146,25 +2163,17 @@ class DetailView(ft.Container):
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-        # Layout elements
-        try:
-            back_row = self.content.controls[0].content.controls[0].content
-            back_row.controls[0].color = C.TEXT_SECONDARY
-            back_row.controls[1].color = C.TEXT_SECONDARY
-            
-            detail_col = self.content.controls[2].content.controls[0].content
-            detail_col.controls[3].color = C.BORDER
-            
-            info_box = detail_col.controls[4]
-            info_box.bgcolor = C.SURFACE
-            info_box.border = ft.Border.all(1, C.BORDER)
-            info_box.content.controls[0].controls[0].color = C.TEXT_SECONDARY
-            info_box.content.controls[1].controls[0].color = C.TEXT_SECONDARY
-            info_box.content.controls[2].controls[0].color = C.TEXT_SECONDARY
-            info_box.content.controls[3].controls[0].color = C.WARNING
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        # Stable references avoid silently breaking theme refresh when layout
+        # controls are inserted or reordered.
+        self._back_icon.color = C.TEXT_SECONDARY
+        self._back_text.color = C.TEXT_SECONDARY
+        self._details_divider.color = C.BORDER
+        self._info_box.bgcolor = C.SURFACE
+        self._info_box.border = ft.Border.all(1, C.BORDER)
+        self._opentime_row.controls[0].color = C.TEXT_SECONDARY
+        self._deadline_label.color = C.TEXT_SECONDARY
+        self._countdown_label.color = C.TEXT_SECONDARY
+        self._cutoff_row.controls[0].color = C.WARNING
 
         # If data is currently shown, refresh dynamic content
         if self._current_data:
