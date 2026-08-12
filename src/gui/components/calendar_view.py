@@ -468,6 +468,13 @@ class CalendarView(ft.Container):
             pager.controls = [period.control for period in self._period_pages]
             pager.selected_index = 1
 
+    def _render_period_pages(self) -> None:
+        for period in self._period_pages:
+            if isinstance(period.anchor, MonthAnchor):
+                self._render_month_period_page(period)
+            else:
+                self._render_week_period_page(period)
+
     def _reset_period_pager(self) -> None:
         self._period_transition_active = False
         self._period_request_active = False
@@ -509,11 +516,11 @@ class CalendarView(ft.Container):
         try:
             if not self._apply_period_delta(delta):
                 return
+            self._seed_period_pages()
             if self._view_mode == "month":
                 self._render_month()
             else:
                 self._render_week()
-            self._seed_period_pages()
             self._pager_recentering = True
             await self._period_pager.jump_to_page(1)
         finally:
@@ -559,11 +566,11 @@ class CalendarView(ft.Container):
         if not pager_is_mounted:
             if not self._apply_period_delta(delta):
                 return
+            self._seed_period_pages()
             if self._view_mode == "month":
                 self._render_month()
             else:
                 self._render_week()
-            self._seed_period_pages()
             return
         self._period_request_active = True
         try:
@@ -769,6 +776,7 @@ class CalendarView(ft.Container):
         self._year, self._month = selected.year, selected.month
         self._selected_day = selected.day
         self._selected_date = selected
+        self._render_period_pages()
         if self._view_mode == "week":
             self._week_start = selected - timedelta(days=selected.weekday())
             self._render_week()
@@ -995,11 +1003,11 @@ class CalendarView(ft.Container):
         """Update calendar with new activity data and refresh grid."""
         self._all_data = activities
         self._build_deadline_map()
+        self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
-        self._reset_period_pager()
 
     def show(self):
         self.visible = True
@@ -1010,11 +1018,11 @@ class CalendarView(ft.Container):
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
+        self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
-        self._reset_period_pager()
 
     def hide(self):
         self.visible = False
@@ -1301,11 +1309,11 @@ class CalendarView(ft.Container):
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
+        self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
-        self._reset_period_pager()
 
     def _toggle_view_mode(self, mode: str):
         """Switch between month and week view."""
@@ -1329,7 +1337,6 @@ class CalendarView(ft.Container):
                 self._year = self._selected_date.year
                 self._month = self._selected_date.month
                 self._selected_day = self._selected_date.day
-            self._render_month()
         else:
             # Update toggle styling
             self._mode_week_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
@@ -1349,8 +1356,11 @@ class CalendarView(ft.Container):
                     self._selected_date = sel
                 except ValueError:
                     pass
-            self._render_week()
         self._reset_period_pager()
+        if self._view_mode == "month":
+            self._render_month()
+        else:
+            self._render_week()
 
     def _on_day_click(self, e):
         cell = e.control

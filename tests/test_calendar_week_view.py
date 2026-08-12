@@ -241,6 +241,62 @@ def test_week_period_page_preserves_deadline_badge_and_urgency_color():
     assert target.data["dots_row"].controls[0].content.value == "3"
 
 
+def test_mode_switch_publishes_week_pager_in_the_same_ui_frame():
+    observations = []
+    holder = {}
+
+    def observe_update():
+        view = holder.get("view")
+        if view is not None:
+            observations.append(
+                (
+                    view._period_pager.height,
+                    view._period_pages[1].anchor,
+                )
+            )
+
+    view = CalendarView(
+        SimpleNamespace(update=observe_update, run_task=lambda *_args: None)
+    )
+    holder["view"] = view
+
+    view._toggle_view_mode("week")
+
+    assert observations
+    assert observations[-1] == (88, view._week_start)
+
+
+def test_month_date_click_repaints_the_mounted_period_cell_immediately():
+    view = CalendarView(_page_stub())
+    selected = date(2026, 8, 20)
+    view._year, view._month = selected.year, selected.month
+    view._selected_day = None
+    view._seed_period_pages()
+
+    view._on_absolute_date_click(selected)
+
+    target = next(
+        cell
+        for row in view._period_pages[1].day_cells
+        for cell in row
+        if cell.data["date"] == selected
+    )
+    assert target.border is not None
+
+
+def test_week_date_click_repaints_the_mounted_period_cell_immediately():
+    view = CalendarView(_page_stub())
+    view._toggle_view_mode("week")
+    selected = view._week_start + timedelta(days=4)
+    view._selected_date = None
+    view._seed_period_pages()
+
+    view._on_absolute_date_click(selected)
+
+    target = view._period_pages[1].week_cells[4]
+    assert target.border is not None
+
+
 class TestCalendarWeekState:
     """Test the week view state management logic (no GUI required)."""
 

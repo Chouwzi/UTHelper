@@ -1781,3 +1781,12 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   verification remains unavailable because `adb` is not installed in this environment.
   The complete application/extension suite passes **1461 tests with 25 skipped**;
   Ruff, bytecode compilation, and `git diff --check` pass.
+- Follow-up interaction testing exposed a stale-frame ordering defect: the legacy
+  detached grid called `page.update()` before the mounted pager was rebuilt. A mode
+  switch therefore published the new header with the old grid, while the next input
+  accidentally flushed the pending pager state; date selection likewise refreshed
+  the detail list but not the mounted cell. Period state and controls are now prepared
+  before the single published frame, and mounted pages are repainted directly on date
+  selection. Mouse and touch taps responded within the 150 ms renderer checkpoint,
+  and month dragging still advanced after the repair. The complete suite now passes
+  **1464 tests with 25 skipped**.
