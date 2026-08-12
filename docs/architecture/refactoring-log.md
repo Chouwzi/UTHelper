@@ -1449,3 +1449,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   1; production signing and canonical build code remain the release workflow's
   responsibility. No install/runtime test was performed because ADB reported
   no connected Android device.
+
+## Visible Windows autostart defaults (2026-08-12)
+
+- New installations now default to `START_WITH_WINDOWS=true` and
+  `START_MINIMIZED=false`, so a normal Windows sign-in launches UTHelper with
+  its compact branded window visible instead of silently placing it in the
+  tray.
+- The Windows autostart backend is applied once on first launch and the result
+  is durably marked. Existing installations with an explicit enabled/disabled
+  preference are migrated as already handled, so an upgrade cannot re-enable a
+  choice the user previously turned off. Transient unavailable/error states
+  remain unmarked and are retried on a later launch.
+- `main.py` now loads the persisted start-minimized preference before deciding
+  whether to publish the startup screen. Explicit users who still prefer tray
+  startup retain that behavior.

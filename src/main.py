@@ -266,8 +266,16 @@ def main() -> int:
             runtime.attach_page(page)
             runtime.mark_phase(AppPhase.GUI)
         try:
-            publish_startup = not autostart_launch or bool(
-                result and result.force_visible
+            # Load the persisted launch preference before deciding whether the
+            # compact startup window should be published. New installations
+            # open normally; only an explicit start-minimized preference keeps
+            # an autostart launch hidden.
+            from config import settings as app_settings
+
+            publish_startup = (
+                not autostart_launch
+                or not app_settings.START_MINIMIZED
+                or bool(result and result.force_visible)
             )
             _show_startup_screen(
                 page,
@@ -289,8 +297,7 @@ def main() -> int:
             patch_flet()
             logger.info("Flet compat patched OK")
             
-            # Import config first (may fail on Android if keyring is missing)
-            from config import settings as app_settings
+            # Config is loaded above so startup visibility uses persisted state.
             configure_logging(
                 _APPDATA_DIR,
                 debug=(

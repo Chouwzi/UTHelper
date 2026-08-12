@@ -89,7 +89,9 @@ class TestSettingsDefaults:
 
     def test_default_start_with_windows(self):
         s = Settings()
-        assert s.START_WITH_WINDOWS is False
+        assert s.START_WITH_WINDOWS is True
+        assert s.START_MINIMIZED is False
+        assert s.AUTOSTART_DEFAULT_APPLIED is False
 
     def test_default_minimize_to_tray(self):
         s = Settings()
@@ -164,7 +166,7 @@ class TestSettingsSerialization:
     def test_legacy_poll_interval_migrates_when_check_missing(self):
         migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 3
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 4
 
     def test_legacy_notification_milestones_migrate_to_minutes(self):
         migrated = migrate_settings_data({
@@ -185,12 +187,25 @@ class TestSettingsSerialization:
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})
 
         assert migrated["AUTO_UPDATE_ENABLED"] is True
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 3
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 4
         assert Settings(**migrated).AUTO_UPDATE_ENABLED is True
         assert (
             Settings.model_fields["AUTO_UPDATE_ENABLED"].description
             == "Tự động kiểm tra cập nhật"
         )
+
+    def test_existing_autostart_choice_is_never_reenabled_by_migration(self):
+        migrated = migrate_settings_data(
+            {
+                "SETTINGS_SCHEMA_VERSION": 3,
+                "START_WITH_WINDOWS": False,
+                "START_MINIMIZED": True,
+            }
+        )
+
+        assert migrated["START_WITH_WINDOWS"] is False
+        assert migrated["START_MINIMIZED"] is True
+        assert migrated["AUTOSTART_DEFAULT_APPLIED"] is True
 
 
 class TestSecretFieldsMapping:

@@ -54,6 +54,7 @@ from gui.controllers.startup_visibility import (
     is_autostart_launch,
     should_hide_startup_window,
 )
+from gui.controllers.autostart_settings import apply_initial_autostart_default
 from gui.controllers.window_activator import WindowActivator
 from gui.components.crash_consent_dialog import CrashConsentDialog
 
@@ -244,6 +245,8 @@ class AppController:
         # Android back button - intercept to navigate within app instead of exiting
         if platform_utils.IS_MOBILE:
             self.page.on_view_pop = self._on_back_button
+        if platform_utils.IS_WINDOWS:
+            self._safe_run_task(self._apply_initial_windows_autostart_default)
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
         self._safe_run_task(self._today_schedule_coordinator.run)
@@ -267,6 +270,22 @@ class AppController:
             self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+
+    async def _apply_initial_windows_autostart_default(self) -> None:
+        """Register the new-install Windows default exactly once."""
+        from platform_utils.autostart import create_autostart_service
+
+        try:
+            result = await apply_initial_autostart_default(
+                create_autostart_service(),
+                settings,
+                save_settings,
+            )
+        except Exception:
+            logger.warning("Initial Windows autostart default failed", exc_info=True)
+            return
+        if result is not None and not result.success:
+            logger.warning("Windows did not accept the autostart default: %s", result.message)
 
     def _persist_crash_consent(self, decision) -> bool:
         """Persist explicit consent without mutating any open Settings draft."""
