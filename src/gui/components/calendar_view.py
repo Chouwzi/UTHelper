@@ -19,11 +19,17 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import calendar
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 import flet as ft
 
+from gui.components.calendar_navigation import (
+    MonthAnchor,
+    month_slot_anchors,
+    week_slot_anchors,
+)
 from gui.core.theme import (
     C,
     on_color,
@@ -42,6 +48,14 @@ _MONTHS_VI = {
     5: "Tháng 5", 6: "Tháng 6", 7: "Tháng 7", 8: "Tháng 8",
     9: "Tháng 9", 10: "Tháng 10", 11: "Tháng 11", 12: "Tháng 12",
 }
+
+
+@dataclass(slots=True)
+class _CalendarPeriodPage:
+    anchor: MonthAnchor | date
+    control: ft.Control
+    day_cells: list[list[ft.Container]] = field(default_factory=list)
+    week_cells: list[ft.Container] = field(default_factory=list)
 
 
 class CalendarView(ft.Container):
@@ -311,6 +325,216 @@ class CalendarView(ft.Container):
             spacing=0,
             expand=True,
         )
+        self._seed_period_pages()
+
+    def _build_month_period_page(
+        self, anchor: MonthAnchor
+    ) -> _CalendarPeriodPage:
+        weekday_row = ft.Row(
+            controls=[
+                ft.Container(
+                    content=ft.Text(
+                        weekday,
+                        size=10,
+                        weight=ft.FontWeight.W_600,
+                        color=(
+                            C.CRITICAL
+                            if weekday == "CN"
+                            else C.TEXT_SECONDARY
+                        ),
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    width=44,
+                    alignment=ft.Alignment(0, 0),
+                )
+                for weekday in _WEEKDAYS
+            ],
+            spacing=2,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            anchor.year, anchor.month
+        )
+        while len(weeks) < 6:
+            weeks.append([0] * 7)
+        day_cells: list[list[ft.Container]] = []
+        rows = []
+        for week in weeks:
+            cells = []
+            for day_number in week:
+                cell = self._make_day_cell()
+                cell_date = (
+                    date(anchor.year, anchor.month, day_number)
+                    if day_number
+                    else None
+                )
+                cell.data["date"] = cell_date
+                cell.data["day"] = day_number
+                cell.data["day_text"].value = str(day_number) if day_number else ""
+                cell.on_click = (
+                    (lambda _, selected=cell_date: self._on_absolute_date_click(selected))
+                    if cell_date
+                    else None
+                )
+                cells.append(cell)
+            day_cells.append(cells)
+            rows.append(
+                ft.Row(
+                    controls=cells,
+                    spacing=2,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                )
+            )
+        control = ft.Column(
+            controls=[weekday_row, *rows],
+            spacing=2,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        period = _CalendarPeriodPage(anchor, control, day_cells=day_cells)
+        self._render_month_period_page(period)
+        return period
+
+    def _build_week_period_page(self, week_start: date) -> _CalendarPeriodPage:
+        cells = [self._make_week_cell(index) for index in range(7)]
+        for index, cell in enumerate(cells):
+            cell_date = week_start + timedelta(days=index)
+            cell.data["date"] = cell_date
+            cell.data["day_text"].value = str(cell_date.day)
+            cell.on_click = (
+                lambda _, selected=cell_date: self._on_absolute_date_click(selected)
+            )
+        control = ft.Container(
+            content=ft.Row(
+                controls=cells,
+                spacing=3,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(top=4, bottom=4),
+        )
+        period = _CalendarPeriodPage(week_start, control, week_cells=cells)
+        self._render_week_period_page(period)
+        return period
+
+    def _seed_period_pages(self) -> None:
+        if self._view_mode == "month":
+            anchors = month_slot_anchors(MonthAnchor(self._year, self._month))
+            self._period_pages = [
+                self._build_month_period_page(anchor) for anchor in anchors
+            ]
+        else:
+            anchors = week_slot_anchors(self._week_start)
+            self._period_pages = [
+                self._build_week_period_page(anchor) for anchor in anchors
+            ]
+
+    def _render_month_period_page(self, period: _CalendarPeriodPage) -> None:
+        anchor = period.anchor
+        if not isinstance(anchor, MonthAnchor):
+            return
+        today = date.today()
+        for column, cell in (
+            (column, cell)
+            for row in period.day_cells
+            for column, cell in enumerate(row)
+        ):
+            cell_date = cell.data["date"]
+            if cell_date is None:
+                cell.data["today_dot"].visible = False
+                continue
+            self._style_period_cell(
+                cell,
+                cell_date,
+                column,
+                today,
+                selected=(
+                    anchor.year == self._year
+                    and anchor.month == self._month
+                    and cell_date.day == self._selected_day
+                ),
+            )
+
+    def _render_week_period_page(self, period: _CalendarPeriodPage) -> None:
+        today = date.today()
+        for cell in period.week_cells:
+            cell_date = cell.data["date"]
+            acts = self._deadline_map.get(cell_date.isoformat(), [])
+            selected = cell_date == self._selected_date
+            cell.bgcolor = C.SURFACE_HOVER if selected else None
+            cell.border = (
+                ft.Border.all(1.5, C.BORDER_STRONG) if selected else None
+            )
+            day_text = cell.data["day_text"]
+            day_text.color = C.ACCENT if cell_date == today else C.TEXT_PRIMARY
+            cell.data["count_text"].value = (
+                f"{len(acts)} bài" if acts else ""
+            )
+
+    def _style_period_cell(
+        self,
+        cell: ft.Container,
+        cell_date: date,
+        column: int,
+        today: date,
+        *,
+        selected: bool,
+    ) -> None:
+        day_text = cell.data["day_text"]
+        dots_row = cell.data["dots_row"]
+        acts = self._deadline_map.get(cell_date.isoformat(), [])
+        is_today = cell_date == today
+        today_dot = cell.data["today_dot"]
+        today_dot.visible = is_today
+        today_dot.bgcolor = C.ACCENT
+        if selected:
+            cell.bgcolor = C.SURFACE_HOVER
+            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+            day_text.color = C.ACCENT if is_today else C.TEXT_PRIMARY
+            day_text.weight = ft.FontWeight.W_700 if is_today else ft.FontWeight.W_600
+        elif is_today:
+            cell.bgcolor = None
+            cell.border = None
+            day_text.color = C.ACCENT
+            day_text.weight = ft.FontWeight.W_700
+        elif acts:
+            urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+            most_urgent = min(
+                acts,
+                key=lambda activity: urgency_priority.get(
+                    activity.get("urgency", "safe"), 3
+                ),
+            )
+            urgency_color = get_urgency_color(most_urgent.get("urgency", "safe"))
+            cell.bgcolor = ft.Colors.with_opacity(0.06, urgency_color)
+            cell.border = ft.Border.all(
+                0.5, ft.Colors.with_opacity(0.19, urgency_color)
+            )
+            day_text.color = C.CRITICAL if column == 6 else C.TEXT_PRIMARY
+            day_text.weight = ft.FontWeight.W_500
+        else:
+            cell.bgcolor = None
+            cell.border = None
+            day_text.color = C.CRITICAL if column == 6 else C.TEXT_PRIMARY
+            day_text.weight = ft.FontWeight.W_400
+        dots_row.controls.clear()
+        for activity in acts[:3]:
+            dots_row.controls.append(
+                ft.Container(
+                    width=6,
+                    height=6,
+                    border_radius=3,
+                    bgcolor=get_urgency_color(activity.get("urgency", "safe")),
+                )
+            )
+
+    def _on_absolute_date_click(self, selected: date) -> None:
+        self._year, self._month = selected.year, selected.month
+        self._selected_day = selected.day
+        self._selected_date = selected
+        if self._view_mode == "week":
+            self._week_start = selected - timedelta(days=selected.weekday())
+            self._render_week()
+        else:
+            self._render_month()
 
     def _make_day_cell(self) -> ft.Container:
         """Create a single day cell with today indicator dot."""
@@ -884,6 +1108,7 @@ class CalendarView(ft.Container):
                 except ValueError:
                     pass
             self._render_week()
+        self._seed_period_pages()
 
     def _on_day_click(self, e):
         cell = e.control

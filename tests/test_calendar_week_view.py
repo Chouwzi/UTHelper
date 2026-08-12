@@ -5,7 +5,40 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 import pytest
+
+from gui.components.calendar_navigation import MonthAnchor, month_slot_anchors
+from gui.components.calendar_view import CalendarView
+
+
+def _page_stub():
+    return SimpleNamespace(update=lambda: None, run_task=lambda *_args: None)
+
+
+def test_month_period_cells_keep_absolute_dates_after_anchor_changes():
+    view = CalendarView(_page_stub())
+    period = view._build_month_period_page(MonthAnchor(2026, 8))
+    dated_cells = [
+        cell for row in period.day_cells for cell in row if cell.data["date"]
+    ]
+
+    view._year, view._month = 2027, 1
+
+    assert dated_cells[0].data["date"] == date(2026, 8, 1)
+    assert dated_cells[-1].data["date"] == date(2026, 8, 31)
+
+
+def test_seeding_month_and_week_modes_always_builds_three_slots():
+    view = CalendarView(_page_stub())
+    assert [page.anchor for page in view._period_pages] == list(
+        month_slot_anchors(MonthAnchor(view._year, view._month))
+    )
+
+    view._toggle_view_mode("week")
+
+    assert len(view._period_pages) == 3
+    assert view._period_pages[1].anchor == view._week_start
 
 
 class TestCalendarWeekState:
