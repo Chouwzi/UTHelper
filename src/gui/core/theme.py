@@ -187,6 +187,8 @@ def refresh_semantic_control_colors(
     roots: Iterable[object],
     previous: dict[str, str],
     current: dict[str, str] | None = None,
+    *,
+    excluded_roots: Iterable[object] = (),
 ) -> None:
     """Remap stored semantic colors across mounted or detached Flet controls.
 
@@ -200,9 +202,14 @@ def refresh_semantic_control_colors(
     if not replacements:
         return
     seen: set[int] = set()
+    excluded_ids = {id(control) for control in excluded_roots}
 
     def visit(control) -> None:
-        if not isinstance(control, ft.BaseControl) or id(control) in seen:
+        if (
+            not isinstance(control, ft.BaseControl)
+            or id(control) in seen
+            or id(control) in excluded_ids
+        ):
             return
         seen.add(id(control))
         for attribute in _CONTROL_COLOR_ATTRIBUTES:

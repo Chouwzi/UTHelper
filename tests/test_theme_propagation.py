@@ -16,6 +16,7 @@ from gui.core.theme import (
     refresh_semantic_control_colors,
     semantic_palette,
 )
+from gui.core.theme_presets import THEME_ORDER, THEME_PRESETS
 
 
 def _page():
@@ -75,6 +76,49 @@ def test_settings_refresh_includes_detached_and_collapsed_controls():
         assert view._sticky_footer.border.top.color == ft.Colors.with_opacity(
             0.19, C.TEXT_SECONDARY
         )
+    finally:
+        apply_theme(original_theme)
+
+
+def test_theme_preview_cards_keep_their_own_preset_palettes():
+    original_theme = settings.THEME
+    page = _page()
+    orchestrator = SimpleNamespace(
+        client=SimpleNamespace(),
+        get_cached_details_snapshot=lambda: {},
+    )
+    try:
+        apply_theme("midnight_blue")
+        view = SettingsView(
+            page,
+            orchestrator,
+            lambda: None,
+            autostart_coordinator=SimpleNamespace(),
+        )
+
+        for selected_theme in ("steel_light", "ocean_teal", "rose_light"):
+            view._on_theme_select(selected_theme)
+            cards = view._theme_cards_row.content.controls
+
+            for key, card in zip(THEME_ORDER, cards, strict=True):
+                preset = THEME_PRESETS[key]
+                content = card.content.controls
+                assert card.bgcolor == preset["surface"]
+                assert content[0].controls[0].color == preset["accent"]
+                assert content[1].gradient.colors == [
+                    preset["bg"],
+                    preset["surface"],
+                    preset["accent"],
+                ]
+                assert [dot.bgcolor for dot in content[2].controls] == [
+                    preset["bg"],
+                    preset["surface"],
+                    preset["accent"],
+                    preset["critical"],
+                    preset["safe"],
+                ]
+                assert content[3].color == preset["text_primary"]
+                assert content[4].color == preset["text_secondary"]
     finally:
         apply_theme(original_theme)
 

@@ -1749,5 +1749,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   former nonexistent `paper_light` name silently selected the dark fallback and
   could not prove a dark-to-light transition. New tests cover nested style remapping,
   opacity preservation, collapsed Settings controls, and hidden Calendar/Grade
-  states. The complete application/extension suite passes **1436 tests with 25
+  states.
+- Theme-selector preview cards are explicitly excluded from semantic remapping. Each
+  preview is a fixed visualization of its own preset rather than part of the active
+  application theme; changing the selected theme must only change selection state,
+  never recolor another preset's surface, gradient, swatches, or labels. Regression
+  coverage switches through dark, light, and teal presets and verifies every card's
+  complete palette. The complete application/extension suite passes **1437 tests with 25
   skipped**; Ruff, bytecode compilation, and `git diff --check` pass.

@@ -693,6 +693,12 @@ class SettingsView(ft.Container):
             for value in vars(self).values()
             if isinstance(value, ft.BaseControl)
         ]
+        theme_preview_cards = []
+        theme_preview_row = getattr(
+            getattr(self, "_theme_cards_row", None), "content", None
+        )
+        if isinstance(theme_preview_row, ft.Row):
+            theme_preview_cards = list(theme_preview_row.controls)
         refresh_semantic_control_colors(
             [
                 self,
@@ -701,6 +707,7 @@ class SettingsView(ft.Container):
             ],
             getattr(self, "_rendered_palette", current_palette),
             current_palette,
+            excluded_roots=theme_preview_cards,
         )
         self._rendered_palette = current_palette
         self.bgcolor = C.BG
