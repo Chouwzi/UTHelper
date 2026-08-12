@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -136,6 +137,117 @@ def test_today_schedule_state_updates_component_and_page_once():
 
     assert controller._today_schedule_state is state
     assert calls == [("state", state), ("update",)]
+
+
+def test_safe_run_task_reports_unhandled_background_exception(caplog):
+    scheduled = []
+    reported = []
+    page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=lambda handler, *args, **kwargs: scheduled.append(
+            (handler, args, kwargs)
+        ),
+    )
+    controller = AppController.__new__(AppController)
+    controller.page = page
+    controller._unhandled_error_reporter = reported.append
+
+    async def fail():
+        raise RuntimeError("private task detail")
+
+    with caplog.at_level(logging.ERROR, logger="gui.app_controller"):
+        controller._safe_run_task(fail)
+        asyncio.run(scheduled[0][0]())
+
+    assert len(reported) == 1
+    assert isinstance(reported[0], RuntimeError)
+    assert "Background UI task failed" in caplog.text
+
+
+def test_mobile_root_view_intercepts_back_and_cancels_native_pop():
+    async def scenario():
+        root = SimpleNamespace(can_pop=True, on_confirm_pop=None)
+        controller = AppController.__new__(AppController)
+        controller.page = SimpleNamespace(views=[root])
+        controller._navigate_back = AsyncMock(return_value=True)
+
+        controller._configure_mobile_back_navigation()
+
+        assert root.can_pop is False
+        assert root.on_confirm_pop == controller._on_root_view_confirm_pop
+        event_view = SimpleNamespace(confirm_pop=AsyncMock())
+        await controller._on_root_view_confirm_pop(
+            SimpleNamespace(control=event_view)
+        )
+        event_view.confirm_pop.assert_awaited_once_with(False)
+
+    from unittest.mock import AsyncMock
+
+    asyncio.run(scenario())
+
+
+def test_mobile_root_view_allows_native_pop_from_dashboard():
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller._navigate_back = AsyncMock(return_value=False)
+        event_view = SimpleNamespace(confirm_pop=AsyncMock())
+
+        await controller._on_root_view_confirm_pop(
+            SimpleNamespace(control=event_view)
+        )
+
+        event_view.confirm_pop.assert_awaited_once_with(True)
+
+    asyncio.run(scenario())
+
+
+def test_shared_back_navigation_handles_settings_dialog_and_grades():
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(
+            visible=True,
+            _handle_back=AsyncMock(),
+        )
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller._close_detail = AsyncMock()
+        controller._close_calendar = AsyncMock()
+        controller._close_grades = AsyncMock()
+
+        assert await controller._navigate_back() is True
+        controller.settings_view._handle_back.assert_awaited_once()
+
+        controller.settings_view.visible = False
+        controller.grade_overview_view.visible = True
+        assert await controller._navigate_back() is True
+        controller._close_grades.assert_awaited_once_with()
+
+    asyncio.run(scenario())
+
+
+def test_window_close_treats_already_closed_session_as_clean_shutdown(monkeypatch):
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller.page = SimpleNamespace(
+            window=SimpleNamespace(
+                destroy=AsyncMock(side_effect=RuntimeError("Session closed"))
+            )
+        )
+        monkeypatch.setattr(app_controller_module.platform_utils, "IS_MOBILE", False)
+        monkeypatch.setattr(app_controller_module.settings, "MINIMIZE_TO_TRAY", False)
+
+        await controller._on_window_event(SimpleNamespace(type="close", data="close"))
+
+        controller.page.window.destroy.assert_awaited_once_with()
+
+    asyncio.run(scenario())
 
 
 def test_android_build_number_is_deterministic_and_strict():

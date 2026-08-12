@@ -449,7 +449,7 @@ def test_applying_disabled_consent_clears_spool_immediately_without_network(tmp_
     assert runtime.spool.pending() == ()
     assert runtime.record_exception(RuntimeError("after revoke"), AppPhase.GUI) is None
     assert runtime.spool.pending() == ()
-    assert delivery.calls == [CrashConsent.ENABLED]
+    assert delivery.calls == [CrashConsent.ENABLED, CrashConsent.ENABLED]
     runtime.close(clean=True)
 
 
@@ -844,7 +844,7 @@ def test_atomic_marker_replace_failure_cleans_temp_and_runtime_continues(
     runtime.close(clean=True)
 
 
-def test_page_handler_captures_only_exception_and_chains_without_delivery(tmp_path):
+def test_page_handler_captures_exception_chains_and_schedules_delivery(tmp_path):
     executor = _Executor(run=False)
     runtime = _runtime(tmp_path, executor=executor)
     runtime.start()
@@ -861,7 +861,8 @@ def test_page_handler_captures_only_exception_and_chains_without_delivery(tmp_pa
     page.on_error(SimpleNamespace(data="string only secret"))
 
     assert len(runtime.spool.pending()) == 1
-    assert len(executor.submissions) == 1
+    assert len(executor.submissions) == 2
+    assert executor.submissions[-1][1] == (CrashConsent.ENABLED,)
     assert page.on_error is wrapper
     assert chained.call_count == 2
     runtime.close(clean=True)

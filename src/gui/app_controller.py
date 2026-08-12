@@ -167,11 +167,17 @@ class _AndroidPackageLauncher:
 
 class AppController:
     def __init__(
-        self, page: ft.Page, *, activation_broker=None, force_visible: bool = False
+        self,
+        page: ft.Page,
+        *,
+        activation_broker=None,
+        force_visible: bool = False,
+        error_reporter=None,
     ):
         self.page = page
         self.activation_broker = activation_broker
         self.force_visible = force_visible
+        self._unhandled_error_reporter = error_reporter
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
         self._page_alive = threading.Event()
@@ -249,9 +255,11 @@ class AppController:
         self.page.on_disconnect = self._on_disconnect
         self.page.on_keyboard_event = self._on_keyboard_event
         
-        # Android back button - intercept to navigate within app instead of exiting
+        # Intercept the native root-view pop on Android/iOS. This app swaps
+        # controls inside one root View, so on_view_pop alone cannot prevent the
+        # platform from finishing the activity.
         if platform_utils.IS_MOBILE:
-            self.page.on_view_pop = self._on_back_button
+            self._configure_mobile_back_navigation()
         if platform_utils.IS_WINDOWS:
             self._safe_run_task(self._apply_initial_windows_autostart_default)
         self._safe_run_task(self._countdown_loop_async)
@@ -321,7 +329,29 @@ class AppController:
             return None
         if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
             return None
-        return self.page.run_task(handler, *args, **kwargs)
+
+        async def guarded_task():
+            try:
+                return await handler(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                reference = None
+                reporter = getattr(self, "_unhandled_error_reporter", None)
+                if callable(reporter):
+                    try:
+                        reference = reporter(exc)
+                    except Exception:
+                        logger.debug(
+                            "Unhandled-error reporter failed", exc_info=True
+                        )
+                logger.exception(
+                    "Background UI task failed; reference=%s",
+                    reference or "none",
+                )
+                return None
+
+        return self.page.run_task(guarded_task)
 
     def _create_update_coordinator(self) -> UpdateCoordinator:
         target = detect_runtime_target()
@@ -535,7 +565,15 @@ class AppController:
                         import logging as _fb_log
                         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             else:
-                await self.page.window.destroy()
+                try:
+                    await self.page.window.destroy()
+                except RuntimeError as exc:
+                    # The host can close its Flet session between the close
+                    # event and the native destroy RPC. That is a completed
+                    # shutdown, not an application failure.
+                    if str(exc) != "Session closed":
+                        raise
+                    logger.debug("Window session closed before destroy completed")
 
     async def _on_keyboard_event(self, e):
         """H-04: Escape key to go back from Detail/Settings/Calendar views."""
@@ -543,25 +581,46 @@ class AppController:
             await self._navigate_back()
 
     async def _on_back_button(self, e):
-        """Android back button handler - navigate within app instead of exiting."""
+        """Fallback for explicit AppBar/View pop events."""
+        await self._navigate_back()
+
+    def _configure_mobile_back_navigation(self) -> bool:
+        """Install root pop confirmation so system Back reaches app navigation."""
+        views = getattr(self.page, "views", None)
+        if not views:
+            logger.warning("Mobile root View is unavailable; Back interception skipped")
+            return False
+        root_view = views[0]
+        root_view.can_pop = False
+        root_view.on_confirm_pop = self._on_root_view_confirm_pop
+        # Retain the standard callback for future stacked Views/AppBars.
+        self.page.on_view_pop = self._on_back_button
+        return True
+
+    async def _on_root_view_confirm_pop(self, event) -> None:
+        """Cancel native pop after internal Back; allow it only on Dashboard."""
         handled = await self._navigate_back()
-        if not handled:
-            # On dashboard with nothing to go back to - minimize app (don't exit)
-            try:
-                self.page.window.close()
-            except (AttributeError, TypeError):
-                pass
+        view = getattr(event, "control", None)
+        if view is None:
+            views = getattr(self.page, "views", ())
+            view = views[0] if views else None
+        confirm_pop = getattr(view, "confirm_pop", None)
+        if callable(confirm_pop):
+            await confirm_pop(not handled)
 
     async def _navigate_back(self) -> bool:
         """Shared back-navigation logic. Returns True if a view was closed."""
         if self.settings_view.visible:
-            await self._close_settings()
+            await self.settings_view._handle_back(None)
             return True
         elif self.detail_view.visible:
             await self._close_detail()
             return True
         elif self.calendar_view.visible:
             await self._close_calendar()
+            return True
+        elif self.grade_overview_view.visible:
+            await self._close_grades()
             return True
         return False
 

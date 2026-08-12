@@ -1540,3 +1540,41 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   session. Repository Ruff, bytecode compilation, UI protocol budgets, and
   `git diff --check` pass. The full shell baseline retains the same seven
   unrelated optional iOS bridge/diagnostics SDK failures.
+
+## Runtime diagnostics and mobile Back navigation (2026-08-12)
+
+- Audited the user-owned `logs/app.log`. All repeated production UI failures
+  resolved to one Settings path: `_update_drp_options()` read `Control.page`
+  from a lazily mounted course list, which Flet rejects until that expansion
+  body is attached. The redundant child update was removed; the mounted parent
+  update remains the single publication point. A separate `Session closed`
+  shutdown race is now treated as a successful native window teardown.
+- Pytest had been importing `src.main` and binding the real AppData rotating
+  handler, mixing synthetic network, cache, upload, and rollback failures into
+  the user's runtime log. Test collection now sets an explicit test mode before
+  that import, while the logging ownership test clears it inside its isolated
+  subprocess. Normal packaged/source startup behavior is unchanged.
+- `Page.run_task()` callbacks now execute through one guarded controller
+  boundary. Unhandled UI task exceptions are forwarded to the diagnostics
+  runtime instead of escaping only through `concurrent.futures`; the real
+  asyncio loop is also attached. A newly durable consented report schedules an
+  immediate single-worker delivery pass, and a privacy-safe warning records
+  unconfigured or unconfirmed delivery without exposing DSN/report contents.
+- The release-environment public DSN was verified without printing it. A
+  synthetic, allow-listed report sent through the application transport was
+  confirmed by Sentry ingestion with HTTP 200. Local source config was updated
+  from the same environment-scoped GitHub variable; this asset remains ignored
+  and is not committed. The declared `sentry-sdk` dependency was also installed
+  into the interpreter that owns the local Flet CLI, eliminating the source-run
+  `sdk_unavailable` state.
+- Android/iOS now set the root Flet `View` to require pop confirmation. System
+  Back first closes Settings (including its unsaved-change dialog), Detail,
+  Calendar, or Grades and cancels the native pop; only Back from Dashboard is
+  confirmed to the OS. `on_view_pop` remains as the stacked-View/AppBar
+  fallback.
+- Focused diagnostics, Settings, navigation, lifecycle, submission, and tray
+  coverage passes **180 tests**. The available-environment suite passes **1381
+  tests with 25 skipped**; repository Ruff, bytecode compilation, and
+  `git diff --check` pass. The full shell baseline retains one environment
+  failure for the optional iOS bridge; both the SDK transport tests and the
+  real Sentry probe now pass.

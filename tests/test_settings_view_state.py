@@ -674,6 +674,32 @@ def test_setting_group_mounts_body_only_while_expanded():
     assert tile.update.call_count == 2
 
 
+def test_muted_course_options_do_not_read_page_from_unmounted_lazy_control():
+    class UnmountedCourseList:
+        def __init__(self):
+            self.controls = []
+
+        @property
+        def page(self):
+            raise RuntimeError("Control must be added to the page first")
+
+    view = SimpleNamespace(
+        _orchestrator=SimpleNamespace(
+            get_cached_details_snapshot=lambda: {
+                "activity": {"course": "Course A"}
+            }
+        ),
+        _muted_courses_field=_control(""),
+        _muted_courses_list=UnmountedCourseList(),
+        _muted_courses_drp=_control(visible=False),
+    )
+
+    SettingsView._update_drp_options(view)
+
+    assert len(view._muted_courses_list.controls) == 1
+    assert view._muted_courses_drp.visible is True
+
+
 def test_closing_settings_cancels_pending_show_and_prevents_late_reveal(monkeypatch):
     async def scenario():
         started = asyncio.Event()

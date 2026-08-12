@@ -71,16 +71,22 @@ except Exception as exc:
     _APPDATA_DIR = Path.home()
 
 # Set up the sole owned file logger after the platform data directory exists.
-try:
-    _LOGGING_RUNTIME = configure_logging(
-        _APPDATA_DIR,
-        debug=startup_debug_enabled(os.environ),
-    )
-    configure_dependency_logging()
-    _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
-except Exception as exc:
+# Pytest imports this module while collecting startup tests; it must never bind
+# the production AppData log and mix synthetic failures with real user events.
+_TEST_MODE = os.environ.get("UTH_TEST_MODE") == "1"
+if _TEST_MODE:
     _LOGGING_RUNTIME = None
-    _boot_log(f"Log setup failed: {exc}")
+else:
+    try:
+        _LOGGING_RUNTIME = configure_logging(
+            _APPDATA_DIR,
+            debug=startup_debug_enabled(os.environ),
+        )
+        configure_dependency_logging()
+        _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
+    except Exception as exc:
+        _LOGGING_RUNTIME = None
+        _boot_log(f"Log setup failed: {exc}")
 
 # Console encoding fix (Windows-only, harmless on other platforms)
 for _stream in (sys.stdout, sys.stderr):
@@ -90,7 +96,7 @@ for _stream in (sys.stdout, sys.stderr):
         import logging as _fb_log
         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-if _LOGGING_RUNTIME is None:
+if _LOGGING_RUNTIME is None and not _TEST_MODE:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -264,6 +270,7 @@ def main() -> int:
         active_page = page
         if runtime is not None:
             runtime.attach_page(page)
+            runtime.attach_asyncio_loop(asyncio.get_running_loop())
             runtime.mark_phase(AppPhase.GUI)
         try:
             # Load the persisted launch preference before deciding whether the
@@ -298,13 +305,14 @@ def main() -> int:
             logger.info("Flet compat patched OK")
             
             # Config is loaded above so startup visibility uses persisted state.
-            configure_logging(
-                _APPDATA_DIR,
-                debug=(
-                    bool(app_settings.DEBUG_MODE)
-                    or startup_debug_enabled(os.environ)
-                ),
-            )
+            if not _TEST_MODE:
+                configure_logging(
+                    _APPDATA_DIR,
+                    debug=(
+                        bool(app_settings.DEBUG_MODE)
+                        or startup_debug_enabled(os.environ)
+                    ),
+                )
             configure_dependency_logging()
             logger.info("Config loaded OK")
             
@@ -317,6 +325,11 @@ def main() -> int:
                 page,
                 activation_broker=result.broker if result else None,
                 force_visible=result.force_visible if result else False,
+                error_reporter=(
+                    (lambda exc: runtime.record_exception(exc, AppPhase.GUI))
+                    if runtime is not None
+                    else None
+                ),
             )
             logger.info("App started successfully")
             

@@ -476,8 +476,10 @@ class SettingsView(ft.Container):
             
             self._muted_courses_list.controls = [make_toggle(c) for c in sorted(list(self._known_courses))]
             self._muted_courses_drp.visible = True
-            if hasattr(self._muted_courses_list, "page") and self._muted_courses_list.page:
-                self._muted_courses_list.update()
+            # This list lives inside a lazily mounted ExpansionTile body. Reading
+            # Control.page before the group is expanded raises in Flet. The
+            # parent SettingsView update below publishes these options whenever
+            # the body is mounted, so a child-level update is unnecessary.
         else:
             self._muted_courses_drp.visible = False
 
@@ -2010,25 +2012,24 @@ class SettingsView(ft.Container):
     async def _handle_back(self, e):
         import logging
         _log = logging.getLogger("settings.dialog")
-        _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
+        _log.debug("Settings Back requested; has_changes=%s", self.has_changes())
         if self._loading and not self.has_changes():
             self.cancel_pending_load()
             self._on_close_cb()
             return
         if self.has_changes():
             def close_dlg(e):
-                _log.warning(">>> CANCEL button clicked!")
+                _log.debug("Settings discard dialog cancelled")
                 self._page.pop_dialog()
                 self._page.update()
 
             def discard_and_close(e):
-                _log.warning(">>> DISCARD button clicked!")
+                _log.debug("Settings changes discarded")
                 self._page.pop_dialog()
                 self._discard_and_close()
-                _log.warning("  discard done")
 
             def save_and_close(e):
-                _log.warning(">>> SAVE button clicked!")
+                _log.debug("Settings save requested from Back dialog")
                 self._page.pop_dialog()
                 self._page.run_task(self._save_and_close_if_valid, e)
 
@@ -2052,7 +2053,7 @@ class SettingsView(ft.Container):
                 bgcolor=C.BG,
             )
             self._page.show_dialog(confirm_dlg)
-            _log.warning("Dialog opened via page.show_dialog()")
+            _log.debug("Settings discard dialog opened")
         else:
             self._on_close_cb()
 

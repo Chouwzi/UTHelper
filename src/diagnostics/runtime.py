@@ -531,10 +531,29 @@ class DiagnosticRuntime:
             self._set_live_consent(selected, delete_pending=True)
             return
         self._set_live_consent(selected, delete_pending=False)
+        self._submit_delivery(selected)
+
+    def _submit_delivery(self, consent: CrashConsent) -> None:
         try:
-            self._executor.submit(self.delivery.flush_once, selected)
+            self._executor.submit(self._flush_delivery, consent)
         except Exception:
             self._write_emergency("diagnostic delivery unavailable\n")
+
+    def _flush_delivery(self, consent: CrashConsent) -> None:
+        """Deliver in the diagnostics worker and expose only safe health state."""
+        try:
+            summary = self.delivery.flush_once(consent)
+        except Exception:
+            self._write_emergency("diagnostic delivery failed\n")
+            return
+        if getattr(summary, "skipped_unconfigured", False):
+            _LOGGER.warning(
+                "Diagnostic delivery is not configured; reports remain local"
+            )
+        elif getattr(summary, "attempted", 0) and getattr(summary, "retained", 0):
+            _LOGGER.warning(
+                "Diagnostic delivery was not confirmed; reports remain local"
+            )
 
     def start(self) -> None:
         """Install hooks and submit one non-blocking delivery attempt."""
@@ -569,10 +588,7 @@ class DiagnosticRuntime:
             if consent is CrashConsent.ENABLED:
                 self._import_flutter_records()
             if consent is CrashConsent.ENABLED:
-                try:
-                    self._executor.submit(self.delivery.flush_once, consent)
-                except Exception:
-                    self._write_emergency("diagnostic delivery unavailable\n")
+                self._submit_delivery(consent)
 
     def record_exception(
         self,
@@ -654,6 +670,8 @@ class DiagnosticRuntime:
             durable = None
         if durable is not None and evidence is not None:
             self._commit_windows_evidence(evidence)
+        if durable is not None and outcome.stored:
+            self._submit_delivery(CrashConsent.ENABLED)
         return durable.event_id.hex if durable is not None else None
 
     def _set_live_consent(
