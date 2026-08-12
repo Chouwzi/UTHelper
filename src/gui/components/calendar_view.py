@@ -28,6 +28,8 @@ import flet as ft
 from gui.components.calendar_navigation import (
     MonthAnchor,
     month_slot_anchors,
+    shift_month,
+    shift_week,
     week_slot_anchors,
 )
 from gui.core.theme import (
@@ -319,9 +321,28 @@ class CalendarView(ft.Container):
             expand=True,
         )
 
+        self._period_transition_active = False
+        self._pager_recentering = False
+        self._period_pager = ft.PageView(
+            controls=[],
+            selected_index=1,
+            horizontal=True,
+            snap=True,
+            implicit_scrolling=True,
+            keep_page=False,
+            pad_ends=False,
+            viewport_fraction=1.0,
+            on_change=self._on_period_page_change,
+        )
+
         # Assemble
         self.content = ft.Column(
-            controls=[self._header, self._mode_toggle, self._grid, self._week_strip, detail_panel],
+            controls=[
+                self._header,
+                self._mode_toggle,
+                self._period_pager,
+                detail_panel,
+            ],
             spacing=0,
             expand=True,
         )
@@ -426,6 +447,54 @@ class CalendarView(ft.Container):
             self._period_pages = [
                 self._build_week_period_page(anchor) for anchor in anchors
             ]
+        pager = getattr(self, "_period_pager", None)
+        if pager is not None:
+            pager.controls = [period.control for period in self._period_pages]
+            pager.selected_index = 1
+
+    def _apply_period_delta(self, delta: int) -> bool:
+        if delta not in (-1, 1):
+            return False
+        if self._view_mode == "month":
+            current = MonthAnchor(self._year, self._month)
+            target = shift_month(current, delta)
+            if target == current:
+                return False
+            self._year, self._month = target.year, target.month
+            self._selected_day = None
+        else:
+            target = shift_week(self._week_start, delta)
+            if target == self._week_start:
+                return False
+            self._week_start = target
+            self._selected_date = None
+            self._selected_day = None
+        return True
+
+    async def _on_period_page_change(self, event) -> None:
+        try:
+            selected_index = int(event.data)
+        except (TypeError, ValueError):
+            return
+        if self._pager_recentering and selected_index == 1:
+            return
+        if self._period_transition_active or selected_index not in (0, 2):
+            return
+        self._period_transition_active = True
+        delta = -1 if selected_index == 0 else 1
+        try:
+            if not self._apply_period_delta(delta):
+                return
+            if self._view_mode == "month":
+                self._render_month()
+            else:
+                self._render_week()
+            self._seed_period_pages()
+            self._pager_recentering = True
+            await self._period_pager.jump_to_page(1)
+        finally:
+            self._pager_recentering = False
+            self._period_transition_active = False
 
     def _render_month_period_page(self, period: _CalendarPeriodPage) -> None:
         anchor = period.anchor
@@ -1355,6 +1424,14 @@ class CalendarView(ft.Container):
         self._day_empty_title.color = C.TEXT_SECONDARY
         self._day_empty_hint.color = C.BORDER
         self._detail_divider.color = C.BORDER
+
+        # Compatibility controls are detached once the pager is mounted but are
+        # still exercised by existing lifecycle paths and tests.
+        for row in self._day_cells:
+            for cell in row:
+                cell.data["today_dot"].bgcolor = C.ACCENT
+        for cell in self._week_cells:
+            cell.data["count_text"].color = C.TEXT_SECONDARY
 
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":

@@ -1,6 +1,7 @@
 """Tests for CalendarView week mode functionality."""
 import sys
 import os
+import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from datetime import date, timedelta
@@ -39,6 +40,39 @@ def test_seeding_month_and_week_modes_always_builds_three_slots():
 
     assert len(view._period_pages) == 3
     assert view._period_pages[1].anchor == view._week_start
+
+
+def test_page_change_advances_month_once_and_recenters():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 12
+    view._selected_day = 20
+    view._seed_period_pages()
+    jumps = []
+
+    async def record_jump(index):
+        jumps.append(index)
+
+    view._period_pager.jump_to_page = record_jump
+
+    asyncio.run(view._on_period_page_change(SimpleNamespace(data="2")))
+
+    assert (view._year, view._month) == (2027, 1)
+    assert view._selected_day is None
+    assert jumps == [1]
+    assert view._period_transition_active is False
+
+
+def test_recenter_and_transition_events_do_not_advance_twice():
+    view = CalendarView(_page_stub())
+    before = (view._year, view._month)
+    view._pager_recentering = True
+    asyncio.run(view._on_period_page_change(SimpleNamespace(data="1")))
+    assert (view._year, view._month) == before
+
+    view._pager_recentering = False
+    view._period_transition_active = True
+    asyncio.run(view._on_period_page_change(SimpleNamespace(data="2")))
+    assert (view._year, view._month) == before
 
 
 class TestCalendarWeekState:
