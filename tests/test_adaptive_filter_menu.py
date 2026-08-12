@@ -165,7 +165,9 @@ def test_long_trigger_label_is_single_line_ellipsis():
     assert menu.label.max_lines == 1
     assert menu.label.overflow == ft.TextOverflow.ELLIPSIS
     assert menu.trigger.width == 112
-    assert menu.trigger.content.tight is False
+    assert menu.label.expand is False
+    assert menu.label.width == 70
+    assert menu.trigger.content.tight is True
 
 
 def test_course_variant_wraps_options_and_exposes_full_tooltip():

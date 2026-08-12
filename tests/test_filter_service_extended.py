@@ -51,6 +51,8 @@ class TestFilterOverdue:
         activities = [_make_activity(deadline=past)]
         results, counts = FilterService.filter_and_count(activities, include_overdue=False)
         assert len(results) == 0
+        assert counts["urgency"]["overdue"] == 1
+        assert counts["urgency"]["all"] == 0
 
     def test_include_overdue_when_requested(self):
         past = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -75,6 +77,14 @@ class TestFilterOverdue:
             _make_activity(title="Active", deadline=future),
         ]
         results, counts = FilterService.filter_and_count(activities, include_overdue=True)
+        assert counts["urgency"]["overdue"] == 1
+
+    def test_cached_overdue_state_is_hidden_but_discoverable_without_deadline(self):
+        activity = _make_activity(deadline="", urgency="overdue")
+
+        results, counts = FilterService.filter_and_count([activity])
+
+        assert results == []
         assert counts["urgency"]["overdue"] == 1
 
 

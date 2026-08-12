@@ -1629,3 +1629,19 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - The complete application/extension suite passes **1419 tests with 25 skipped**;
   Ruff, bytecode compilation, semantic contrast governance, and `git diff --check`
   pass.
+
+## Compact dashboard filter correction (2026-08-12)
+
+- Removed the separate overdue checkbox because “Quá hạn” is already a first-class
+  urgency-menu option. The dashboard now has one unambiguous control for urgency,
+  and the three fixed triggers fit the supported compact 360/420-pixel layouts
+  without a hidden horizontal-scroll affordance.
+- Fixed collapsed trigger labels by assigning the text a deterministic width inside
+  `PopupMenuButton`/`Semantics`; Flet's nested flex constraint could previously
+  reduce even short labels such as “Tất cả” to an ellipsis.
+- Overdue cards remain absent from the default active view, but their real count is
+  always exposed beside “Quá hạn” in the urgency menu. Selecting that option is the
+  single path that reveals overdue cards; legacy `INCLUDE_PAST_DUE` values no longer
+  override dashboard filter state.
+- The complete application/extension suite passes **1420 tests with 25 skipped**;
+  Ruff, bytecode compilation, and `git diff --check` pass.

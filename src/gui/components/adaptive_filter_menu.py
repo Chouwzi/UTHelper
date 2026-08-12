@@ -51,6 +51,12 @@ class AdaptiveFilterMenu:
         self._sheet: ft.BottomSheet | None = None
         self.mobile_tiles: list[ft.ListTile] = []
 
+        label_width = None
+        if trigger_width is not None:
+            # PopupMenuButton/Semantics do not always propagate a useful flex
+            # constraint to an expanded Text. Reserve the arrow and padding
+            # explicitly so short labels do not collapse into a lone ellipsis.
+            label_width = max(24, float(trigger_width) - 42)
         self.label = ft.Text(
             "",
             size=12,
@@ -58,7 +64,8 @@ class AdaptiveFilterMenu:
             weight=ft.FontWeight.W_600,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
-            expand=True,
+            width=label_width,
+            expand=trigger_width is None,
         )
         self.arrow = ft.Icon(
             ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED,
@@ -73,7 +80,7 @@ class AdaptiveFilterMenu:
             content=ft.Row(
                 [self.label, self.arrow],
                 spacing=4,
-                tight=False,
+                tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             width=trigger_width,

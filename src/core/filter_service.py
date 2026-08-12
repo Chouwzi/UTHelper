@@ -56,12 +56,25 @@ class FilterService:
             if is_overdue:
                 u_str = "overdue"
 
-            # Nếu là mục quá hạn mà không yêu cầu hiển thị thì bỏ qua luôn cho nhẹ máy
-            if is_overdue and not include_overdue and active_urgency != "overdue":
+            classified_overdue = is_overdue or u_str == "overdue"
+
+            # Always expose the real overdue count in the urgency menu, even
+            # while overdue cards are hidden from the default "all" view.
+            if classified_overdue:
+                counts["urgency"]["overdue"] += 1
+
+            # Quá hạn là một mục riêng trong menu Mức độ. Mặc định ẩn card,
+            # nhưng người dùng vẫn nhìn thấy số lượng để có thể chọn mục này.
+            if (
+                classified_overdue
+                and not include_overdue
+                and active_urgency != "overdue"
+            ):
                 continue
                 
             counts["urgency"]["all"] += 1
-            counts["urgency"][u_str] = counts["urgency"].get(u_str, 0) + 1
+            if not classified_overdue:
+                counts["urgency"][u_str] = counts["urgency"].get(u_str, 0) + 1
             
             c_name = clean_course_name(a.get("course", ""))
             counts["course"]["all"] += 1

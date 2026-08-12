@@ -685,16 +685,6 @@ class AppController:
             option_max_lines=2,
         )
 
-        self._overdue_cb = ft.Checkbox(
-            value=settings.INCLUDE_PAST_DUE,
-            label="Quá hạn",
-            label_style=ft.TextStyle(size=13, color=C.TEXT_SECONDARY),
-            active_color=C.CRITICAL,
-            check_color=C.ON_CRITICAL,
-            scale=1,
-            on_change=lambda e: self._safe_run_task(self._toggle_overdue, e)
-        )
-
         self.search_field = ft.TextField(
             hint_text="Tìm hoạt động hoặc môn học",
             hint_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
@@ -854,7 +844,15 @@ class AppController:
                 controls=[
                     ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
                     ft.Container(
-                        content=ft.Row(controls=[self.urgency_filter_menu.control, self.type_filter_menu.control, self.course_filter_menu.control, self._overdue_cb], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, scroll=ft.ScrollMode.AUTO),
+                        content=ft.Row(
+                            controls=[
+                                self.urgency_filter_menu.control,
+                                self.type_filter_menu.control,
+                                self.course_filter_menu.control,
+                            ],
+                            spacing=6,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
                         padding=ft.Padding.only(left=16, right=12),
                     ),
                 ], spacing=4,
@@ -1067,7 +1065,7 @@ class AppController:
             self.active_type,
             self.active_course,
             self.active_search,
-            settings.INCLUDE_PAST_DUE
+            self.active_urgency == "overdue",
         )
         if (
             self.active_course != "all"
@@ -1081,7 +1079,7 @@ class AppController:
                 self.active_type,
                 self.active_course,
                 self.active_search,
-                settings.INCLUDE_PAST_DUE,
+                self.active_urgency == "overdue",
             )
 
         n_critical = counts["urgency"].get("critical", 0)
@@ -1111,14 +1109,6 @@ class AppController:
         self.type_filter_menu.set_options(
             self._type_filter_options(type_counts)
         )
-
-        # P5: Dynamic overdue checkbox label with count
-        if n_overdue > 0:
-            self._overdue_cb.label = f"Quá hạn ({n_overdue})"
-            self._overdue_cb.label_style = ft.TextStyle(size=13, color=C.CRITICAL)
-        else:
-            self._overdue_cb.label = "Quá hạn"
-            self._overdue_cb.label_style = ft.TextStyle(size=13, color=C.TEXT_SECONDARY)
 
         # Render cards
         self._clear_skeletons()
@@ -1231,7 +1221,7 @@ class AppController:
         filtered_items, counts = FilterService.filter_and_count(
             base, self.active_urgency, self.active_type,
             self.active_course, self.active_search,
-            settings.INCLUDE_PAST_DUE
+            self.active_urgency == "overdue",
         )
 
         self._clear_skeletons()
@@ -1267,13 +1257,6 @@ class AppController:
     async def _set_urgency(self, key: str):
         self.active_urgency = key
         self.urgency_filter_menu.set_selected(key)
-        # Sync overdue checkbox with urgency popup selection
-        if key == "overdue":
-            self._overdue_cb.value = True
-            settings.INCLUDE_PAST_DUE = True
-        else:
-            self._overdue_cb.value = False
-            settings.INCLUDE_PAST_DUE = False
         self._refresh_ui()
 
     async def _set_type(self, key: str):
@@ -1304,22 +1287,9 @@ class AppController:
             if is_graded and not settings.INCLUDE_GRADED: continue
             if is_submitted and not is_graded and not settings.INCLUDE_SUBMITTED: continue
             
-            # _refresh_ui handles INCLUDE_PAST_DUE now
+            # _refresh_ui exposes overdue activities through the urgency menu.
             result.append(d)
         return result
-
-    async def _toggle_overdue(self, e):
-        settings.INCLUDE_PAST_DUE = self._overdue_cb.value
-        _save_setting("INCLUDE_PAST_DUE", settings.INCLUDE_PAST_DUE)
-        
-        # When checkbox is ON: filter to show ONLY overdue items
-        # When OFF: reset urgency filter to show all (excluding overdue)
-        if self._overdue_cb.value:
-            self.active_urgency = "overdue"
-        else:
-            self.active_urgency = "all"
-        
-        self._update_footer()
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
@@ -1888,14 +1858,6 @@ class AppController:
                 {option.key: option.count or 0 for option in self.course_filter_menu.options}
             )
         )
-
-        try:
-            self._overdue_cb.label_style.color = _C.TEXT_SECONDARY
-            self._overdue_cb.check_color = _C.ON_CRITICAL
-            self._overdue_cb.active_color = _C.CRITICAL
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         # Empty state
         if hasattr(self, '_empty_icon'):
