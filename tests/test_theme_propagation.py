@@ -189,6 +189,11 @@ def test_calendar_and_grade_hidden_controls_receive_live_theme():
         assert calendar._detail_divider.color == C.BORDER
         assert grades._header_divider.color == C.BORDER
         assert grades._loading_text.color == C.TEXT_SECONDARY
+        assert len(calendar._period_pages) == 3
+        for period in calendar._period_pages:
+            for row in period.day_cells:
+                for cell in row:
+                    assert cell.data["today_dot"].bgcolor == C.ACCENT
     finally:
         apply_theme(original_theme)
 

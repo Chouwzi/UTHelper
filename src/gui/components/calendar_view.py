@@ -466,6 +466,12 @@ class CalendarView(ft.Container):
             pager.controls = [period.control for period in self._period_pages]
             pager.selected_index = 1
 
+    def _reset_period_pager(self) -> None:
+        self._period_transition_active = False
+        self._pager_recentering = False
+        self._mouse_drag_distance = 0.0
+        self._seed_period_pages()
+
     def _apply_period_delta(self, delta: int) -> bool:
         if delta not in (-1, 1):
             return False
@@ -890,6 +896,7 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        self._reset_period_pager()
 
     def show(self):
         self.visible = True
@@ -904,6 +911,7 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        self._reset_period_pager()
 
     def hide(self):
         self.visible = False
@@ -1194,6 +1202,7 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        self._reset_period_pager()
 
     def _toggle_view_mode(self, mode: str):
         """Switch between month and week view."""
@@ -1238,7 +1247,7 @@ class CalendarView(ft.Container):
                 except ValueError:
                     pass
             self._render_week()
-        self._seed_period_pages()
+        self._reset_period_pager()
 
     def _on_day_click(self, e):
         cell = e.control

@@ -118,6 +118,46 @@ def test_unmounted_arrow_navigation_uses_same_logical_period_pipeline():
     assert (view._year, view._month) == (2027, 1)
 
 
+def test_today_and_mode_switch_reseed_the_center_slot():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2024, 1
+
+    view._go_today()
+
+    assert view._period_pager.selected_index == 1
+    assert view._period_pages[1].anchor == MonthAnchor(
+        date.today().year, date.today().month
+    )
+
+    view._toggle_view_mode("week")
+
+    assert view._period_pager.selected_index == 1
+    assert view._period_pages[1].anchor == view._week_start
+
+
+def test_data_refresh_rebuilds_all_three_period_pages():
+    view = CalendarView(_page_stub())
+    original_controls = [period.control for period in view._period_pages]
+
+    view.update_data(
+        [
+            {
+                "title": "Bài mới",
+                "deadline": f"{view._year}-{view._month:02d}-15 10:00",
+                "urgency": "warning",
+            }
+        ]
+    )
+
+    assert len(view._period_pages) == 3
+    assert [period.control for period in view._period_pages] != original_controls
+    center_cells = [
+        cell for row in view._period_pages[1].day_cells for cell in row
+    ]
+    target = next(cell for cell in center_cells if cell.data["date"] and cell.data["date"].day == 15)
+    assert target.data["dots_row"].controls
+
+
 class TestCalendarWeekState:
     """Test the week view state management logic (no GUI required)."""
 
