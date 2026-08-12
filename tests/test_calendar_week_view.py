@@ -75,6 +75,49 @@ def test_recenter_and_transition_events_do_not_advance_twice():
     assert (view._year, view._month) == before
 
 
+def test_mouse_drag_accumulates_distance_and_requests_next_page():
+    view = CalendarView(_page_stub())
+    requests = []
+
+    async def record(delta):
+        requests.append(delta)
+
+    view._request_period_navigation = record
+    view._on_mouse_drag_start(None)
+    view._on_mouse_drag_update(SimpleNamespace(primary_delta=-30))
+    view._on_mouse_drag_update(SimpleNamespace(primary_delta=-28))
+    asyncio.run(view._on_mouse_drag_end(SimpleNamespace(primary_velocity=-120)))
+
+    assert requests == [1]
+    assert view._mouse_drag_distance == 0.0
+
+
+def test_short_mouse_drag_cancels_and_gesture_excludes_detail_panel():
+    view = CalendarView(_page_stub())
+    requests = []
+
+    async def record(delta):
+        requests.append(delta)
+
+    view._request_period_navigation = record
+    view._on_mouse_drag_start(None)
+    view._on_mouse_drag_update(SimpleNamespace(primary_delta=12))
+    asyncio.run(view._on_mouse_drag_end(SimpleNamespace(primary_velocity=50)))
+
+    assert requests == []
+    assert view._period_gesture.content is view._period_pager
+    assert view._detail_panel is not view._period_gesture.content
+
+
+def test_unmounted_arrow_navigation_uses_same_logical_period_pipeline():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 12
+
+    asyncio.run(view._request_period_navigation(1))
+
+    assert (view._year, view._month) == (2027, 1)
+
+
 class TestCalendarWeekState:
     """Test the week view state management logic (no GUI required)."""
 

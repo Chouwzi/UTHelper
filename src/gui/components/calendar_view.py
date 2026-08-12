@@ -28,6 +28,7 @@ import flet as ft
 from gui.components.calendar_navigation import (
     MonthAnchor,
     month_slot_anchors,
+    resolve_mouse_navigation,
     shift_month,
     shift_week,
     week_slot_anchors,
@@ -110,14 +111,14 @@ class CalendarView(ft.Container):
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Trước",
-            on_click=lambda _: self._navigate(-1),
+            on_click=self._on_previous_period,
         )
         self._next_btn = ft.IconButton(
             ft.Icons.CHEVRON_RIGHT_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Sau",
-            on_click=lambda _: self._navigate(1),
+            on_click=self._on_next_period,
         )
         self._today_btn = ft.IconButton(
             ft.Icons.TODAY_ROUNDED,
@@ -320,6 +321,7 @@ class CalendarView(ft.Container):
             ),
             expand=True,
         )
+        self._detail_panel = detail_panel
 
         self._period_transition_active = False
         self._pager_recentering = False
@@ -334,13 +336,25 @@ class CalendarView(ft.Container):
             viewport_fraction=1.0,
             on_change=self._on_period_page_change,
         )
+        self._mouse_drag_distance = 0.0
+        self._period_gesture = ft.GestureDetector(
+            content=self._period_pager,
+            allowed_devices=[ft.PointerDeviceType.MOUSE],
+            mouse_cursor=ft.MouseCursor.GRAB,
+            drag_interval=16,
+            exclude_from_semantics=True,
+            on_horizontal_drag_start=self._on_mouse_drag_start,
+            on_horizontal_drag_update=self._on_mouse_drag_update,
+            on_horizontal_drag_end=self._on_mouse_drag_end,
+            on_horizontal_drag_cancel=self._on_mouse_drag_cancel,
+        )
 
         # Assemble
         self.content = ft.Column(
             controls=[
                 self._header,
                 self._mode_toggle,
-                self._period_pager,
+                self._period_gesture,
                 detail_panel,
             ],
             spacing=0,
@@ -495,6 +509,53 @@ class CalendarView(ft.Container):
         finally:
             self._pager_recentering = False
             self._period_transition_active = False
+
+    def _on_mouse_drag_start(self, _event) -> None:
+        self._mouse_drag_distance = 0.0
+        self._period_gesture.mouse_cursor = ft.MouseCursor.GRABBING
+
+    def _on_mouse_drag_update(self, event) -> None:
+        self._mouse_drag_distance += event.primary_delta or 0.0
+
+    def _on_mouse_drag_cancel(self, _event=None) -> None:
+        self._mouse_drag_distance = 0.0
+        self._period_gesture.mouse_cursor = ft.MouseCursor.GRAB
+
+    async def _on_mouse_drag_end(self, event) -> None:
+        distance = self._mouse_drag_distance
+        self._on_mouse_drag_cancel()
+        delta = resolve_mouse_navigation(distance, event.primary_velocity)
+        if delta:
+            await self._request_period_navigation(delta)
+
+    async def _on_previous_period(self, _event) -> None:
+        await self._request_period_navigation(-1)
+
+    async def _on_next_period(self, _event) -> None:
+        await self._request_period_navigation(1)
+
+    async def _request_period_navigation(self, delta: int) -> None:
+        if self._period_transition_active or delta not in (-1, 1):
+            return
+        try:
+            self._period_pager.page
+            pager_is_mounted = True
+        except RuntimeError:
+            pager_is_mounted = False
+        if not pager_is_mounted:
+            if not self._apply_period_delta(delta):
+                return
+            if self._view_mode == "month":
+                self._render_month()
+            else:
+                self._render_week()
+            self._seed_period_pages()
+            return
+        await self._period_pager.go_to_page(
+            0 if delta < 0 else 2,
+            animation_duration=ft.Duration(milliseconds=220),
+            animation_curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+        )
 
     def _render_month_period_page(self, period: _CalendarPeriodPage) -> None:
         anchor = period.anchor
