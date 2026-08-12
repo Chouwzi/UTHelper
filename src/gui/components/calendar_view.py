@@ -324,9 +324,11 @@ class CalendarView(ft.Container):
         self._detail_panel = detail_panel
 
         self._period_transition_active = False
+        self._period_request_active = False
         self._pager_recentering = False
         self._period_pager = ft.PageView(
             controls=[],
+            height=316,
             selected_index=1,
             horizontal=True,
             snap=True,
@@ -468,8 +470,10 @@ class CalendarView(ft.Container):
 
     def _reset_period_pager(self) -> None:
         self._period_transition_active = False
+        self._period_request_active = False
         self._pager_recentering = False
         self._mouse_drag_distance = 0.0
+        self._period_pager.height = 316 if self._view_mode == "month" else 88
         self._seed_period_pages()
 
     def _apply_period_delta(self, delta: int) -> bool:
@@ -541,7 +545,11 @@ class CalendarView(ft.Container):
         await self._request_period_navigation(1)
 
     async def _request_period_navigation(self, delta: int) -> None:
-        if self._period_transition_active or delta not in (-1, 1):
+        if (
+            self._period_transition_active
+            or self._period_request_active
+            or delta not in (-1, 1)
+        ):
             return
         try:
             self._period_pager.page
@@ -557,11 +565,15 @@ class CalendarView(ft.Container):
                 self._render_week()
             self._seed_period_pages()
             return
-        await self._period_pager.go_to_page(
-            0 if delta < 0 else 2,
-            animation_duration=ft.Duration(milliseconds=220),
-            animation_curve=ft.AnimationCurve.EASE_OUT_CUBIC,
-        )
+        self._period_request_active = True
+        try:
+            await self._period_pager.go_to_page(
+                0 if delta < 0 else 2,
+                animation_duration=ft.Duration(milliseconds=220),
+                animation_curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            )
+        finally:
+            self._period_request_active = False
 
     def _render_month_period_page(self, period: _CalendarPeriodPage) -> None:
         anchor = period.anchor
@@ -591,19 +603,71 @@ class CalendarView(ft.Container):
 
     def _render_week_period_page(self, period: _CalendarPeriodPage) -> None:
         today = date.today()
-        for cell in period.week_cells:
+        urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+        for index, cell in enumerate(period.week_cells):
             cell_date = cell.data["date"]
             acts = self._deadline_map.get(cell_date.isoformat(), [])
             selected = cell_date == self._selected_date
-            cell.bgcolor = C.SURFACE_HOVER if selected else None
-            cell.border = (
-                ft.Border.all(1.5, C.BORDER_STRONG) if selected else None
-            )
             day_text = cell.data["day_text"]
-            day_text.color = C.ACCENT if cell_date == today else C.TEXT_PRIMARY
-            cell.data["count_text"].value = (
-                f"{len(acts)} bài" if acts else ""
+            weekday_label = cell.data["wd_label"]
+            count_text = cell.data["count_text"]
+            is_today = cell_date == today
+            most_urgent_color = None
+            if acts:
+                most_urgent = min(
+                    acts,
+                    key=lambda activity: urgency_priority.get(
+                        activity.get("urgency", "safe"), 3
+                    ),
+                )
+                most_urgent_color = get_urgency_color(
+                    most_urgent.get("urgency", "safe")
+                )
+
+            if selected and is_today:
+                cell.bgcolor = ft.Colors.with_opacity(0.13, C.ACCENT)
+                cell.border = ft.Border.all(2, C.ACCENT)
+                day_text.color = weekday_label.color = C.ACCENT
+                day_text.weight = ft.FontWeight.W_700
+            elif selected:
+                cell.bgcolor = C.SURFACE_HOVER
+                cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                day_text.color = weekday_label.color = C.TEXT_PRIMARY
+                day_text.weight = ft.FontWeight.W_700
+            elif is_today:
+                cell.bgcolor = ft.Colors.with_opacity(0.06, C.ACCENT)
+                cell.border = ft.Border.all(
+                    1, ft.Colors.with_opacity(0.31, C.ACCENT)
+                )
+                day_text.color = weekday_label.color = C.ACCENT
+                day_text.weight = ft.FontWeight.W_700
+            elif acts:
+                cell.bgcolor = ft.Colors.with_opacity(
+                    0.05, most_urgent_color or C.ACCENT
+                )
+                cell.border = ft.Border.all(
+                    0.5,
+                    ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+                )
+                day_text.color = C.CRITICAL if index == 6 else C.TEXT_PRIMARY
+                weekday_label.color = (
+                    C.CRITICAL if index == 6 else C.TEXT_SECONDARY
+                )
+                day_text.weight = ft.FontWeight.W_500
+            else:
+                cell.bgcolor = None
+                cell.border = None
+                day_text.color = C.CRITICAL if index == 6 else C.TEXT_PRIMARY
+                weekday_label.color = (
+                    C.CRITICAL if index == 6 else C.TEXT_SECONDARY
+                )
+                day_text.weight = ft.FontWeight.W_400
+
+            self._render_activity_markers(
+                cell.data["dots_row"], acts, most_urgent_color
             )
+            count_text.value = f"{len(acts)} bài" if acts else ""
+            count_text.color = most_urgent_color or C.TEXT_SECONDARY
 
     def _style_period_cell(
         self,
@@ -651,15 +715,54 @@ class CalendarView(ft.Container):
             cell.border = None
             day_text.color = C.CRITICAL if column == 6 else C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_400
+        most_urgent_color = None
+        if acts:
+            urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+            most_urgent = min(
+                acts,
+                key=lambda activity: urgency_priority.get(
+                    activity.get("urgency", "safe"), 3
+                ),
+            )
+            most_urgent_color = get_urgency_color(
+                most_urgent.get("urgency", "safe")
+            )
+        self._render_activity_markers(dots_row, acts, most_urgent_color)
+
+    def _render_activity_markers(
+        self,
+        dots_row: ft.Row,
+        activities: list[dict[str, Any]],
+        most_urgent_color: Optional[str],
+    ) -> None:
         dots_row.controls.clear()
-        for activity in acts[:3]:
+        if len(activities) >= 3:
+            color = most_urgent_color or C.ACCENT
             dots_row.controls.append(
                 ft.Container(
-                    width=6,
-                    height=6,
-                    border_radius=3,
-                    bgcolor=get_urgency_color(activity.get("urgency", "safe")),
+                    content=ft.Text(
+                        str(len(activities)),
+                        size=8,
+                        color=on_color(color),
+                        weight=ft.FontWeight.W_700,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    width=16,
+                    height=16,
+                    border_radius=8,
+                    bgcolor=color,
+                    alignment=ft.Alignment(0, 0),
                 )
+            )
+            return
+        seen = set()
+        for activity in activities:
+            color = get_urgency_color(activity.get("urgency", "safe"))
+            if color in seen:
+                continue
+            seen.add(color)
+            dots_row.controls.append(
+                ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
             )
 
     def _on_absolute_date_click(self, selected: date) -> None:

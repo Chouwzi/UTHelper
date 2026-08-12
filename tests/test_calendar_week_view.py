@@ -5,7 +5,7 @@ import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 from types import SimpleNamespace
 import pytest
 
@@ -118,6 +118,38 @@ def test_unmounted_arrow_navigation_uses_same_logical_period_pipeline():
     assert (view._year, view._month) == (2027, 1)
 
 
+def test_rapid_navigation_requests_do_not_queue_multiple_page_changes():
+    view = CalendarView(_page_stub())
+    calls = []
+
+    async def exercise():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_go_to_page(index, **_kwargs):
+            calls.append(index)
+            entered.set()
+            await release.wait()
+
+        view._period_pager.go_to_page = blocked_go_to_page
+        with patch.object(
+            type(view._period_pager),
+            "page",
+            new_callable=PropertyMock,
+            return_value=object(),
+        ):
+            first = asyncio.create_task(view._request_period_navigation(1))
+            await entered.wait()
+            second = asyncio.create_task(view._request_period_navigation(1))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(first, second)
+
+    asyncio.run(exercise())
+
+    assert calls == [2]
+
+
 def test_today_and_mode_switch_reseed_the_center_slot():
     view = CalendarView(_page_stub())
     view._year, view._month = 2024, 1
@@ -156,6 +188,57 @@ def test_data_refresh_rebuilds_all_three_period_pages():
     ]
     target = next(cell for cell in center_cells if cell.data["date"] and cell.data["date"].day == 15)
     assert target.data["dots_row"].controls
+
+
+def test_period_pager_has_bounded_height_for_each_view_mode():
+    view = CalendarView(_page_stub())
+
+    assert view._period_pager.height == 316
+
+    view._toggle_view_mode("week")
+
+    assert view._period_pager.height == 88
+
+
+def test_month_period_page_uses_count_badge_for_three_or_more_deadlines():
+    view = CalendarView(_page_stub())
+    target_date = date(2026, 8, 3)
+    view._deadline_map[target_date.isoformat()] = [
+        {"urgency": "safe"},
+        {"urgency": "warning"},
+        {"urgency": "critical"},
+    ]
+
+    period = view._build_month_period_page(MonthAnchor(2026, 8))
+    target = next(
+        cell
+        for row in period.day_cells
+        for cell in row
+        if cell.data["date"] == target_date
+    )
+
+    markers = target.data["dots_row"].controls
+    assert len(markers) == 1
+    assert markers[0].content.value == "3"
+
+
+def test_week_period_page_preserves_deadline_badge_and_urgency_color():
+    view = CalendarView(_page_stub())
+    week_start = date(2026, 8, 10)
+    target_date = week_start + timedelta(days=1)
+    view._deadline_map[target_date.isoformat()] = [
+        {"urgency": "safe"},
+        {"urgency": "warning"},
+        {"urgency": "critical"},
+    ]
+
+    period = view._build_week_period_page(week_start)
+    target = period.week_cells[1]
+
+    assert target.data["count_text"].value == "3 bài"
+    assert target.data["count_text"].color is not None
+    assert len(target.data["dots_row"].controls) == 1
+    assert target.data["dots_row"].controls[0].content.value == "3"
 
 
 class TestCalendarWeekState:
