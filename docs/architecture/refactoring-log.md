@@ -1761,3 +1761,23 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   smoke selected Ocean Teal and confirmed that Graphite, Midnight, and Ocean retained
   distinct palettes. The complete application/extension suite passes **1438 tests with 25
   skipped**; Ruff, bytecode compilation, and `git diff --check` pass.
+
+## Calendar period swipe navigation (2026-08-13)
+
+- Replaced the mounted month/week grid with a reusable three-slot `PageView` whose
+  center page is the current period and whose adjacent pages are the previous and
+  next month or week. After a completed transition, the data anchor advances once,
+  the three pages are rebuilt, and the pager recenters without an infinite page list.
+- Native touch scrolling remains owned by `PageView`. Desktop adds a mouse-only,
+  thresholded horizontal drag detector over the month grid or week strip; clicks,
+  short drags, the selected-day detail panel, Today, mode switching, and header arrows
+  retain their existing behavior through one navigation pipeline.
+- Added guards for rapid repeated requests and pager recenter events. Period pages
+  keep absolute dates, refresh all three slots when data or theme changes, and retain
+  the previous urgency dots/count badges and week-cell states.
+- Real 390×844 Flet renderer checks moved August to September with mouse drag and
+  week 33 to week 34 on the week strip. Renderer testing also exposed and fixed an
+  unbounded-height `PageView` error before completion. Native Android emulator
+  verification remains unavailable because `adb` is not installed in this environment.
+  The complete application/extension suite passes **1461 tests with 25 skipped**;
+  Ruff, bytecode compilation, and `git diff --check` pass.
