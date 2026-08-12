@@ -4,6 +4,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from core.activity_status import (
+    normalize_submission_status,
+    prefer_known_submission_status,
+)
 from core.time_utils import parse_datetime
 
 _URGENCY_ORDER = {
@@ -35,12 +39,17 @@ def merge_cached_details(
             continue
 
         enriched = detail_cache[url]
+        submission_status = prefer_known_submission_status(
+            enriched.get("submission_status"),
+            item.get("submission_status"),
+        )
+        enriched_details = enriched.get("details")
         merged[index] = {
             **item,
             "type": enriched.get("type", item.get("type", "other")),
             "course": enriched.get("course", item.get("course", "")),
-            "submission_status": enriched.get("submission_status", "unknown"),
-            "details": enriched.get("details", {}),
+            "submission_status": submission_status,
+            "details": enriched_details or item.get("details", {}),
             "deadline": enriched.get("deadline", item.get("deadline")),
             "is_open": enriched.get("is_open", item.get("is_open")),
             "urgency": enriched.get("urgency", item.get("urgency")),
@@ -73,10 +82,11 @@ def apply_pending_submission_updates(
         if action_time <= fetch_start_time:
             continue
 
-        item["submission_status"] = new_status
+        canonical_status = normalize_submission_status(new_status)
+        item["submission_status"] = canonical_status
         details = dict(item.get("details", {}))
         status_data = dict(details.get("status_data", {}))
-        status_data["Trạng thái nộp bài"] = new_status
+        status_data["Trạng thái nộp bài"] = canonical_status
         details["status_data"] = status_data
         item["details"] = details
 

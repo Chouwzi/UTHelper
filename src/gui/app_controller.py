@@ -31,6 +31,7 @@ from core.today_schedule import (
 )
 from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
+from core.activity_status import normalize_submission_status
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
 from core.update_checker import GitHubReleaseClient, VerifiedDownloader
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
@@ -55,6 +56,7 @@ from gui.controllers.startup_visibility import (
     should_hide_startup_window,
 )
 from gui.controllers.autostart_settings import apply_initial_autostart_default
+from gui.controllers.refresh_coordinator import build_prefetched_dataset
 from gui.controllers.window_activator import WindowActivator
 from gui.components.crash_consent_dialog import CrashConsentDialog
 
@@ -218,6 +220,7 @@ class AppController:
         self._pending_updates = {}
         
         self._prefetch_cancel_event = threading.Event()
+        self._prefetch_epoch = 0
         self._android_background = None
 
         self._init_window()
@@ -231,7 +234,7 @@ class AppController:
         self._crash_consent_dialog.present_if_needed(
             settings.CRASH_REPORTING_CONSENT
         )
-        self._load_cached_snapshot()
+        has_cached_snapshot = self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
             interval_provider=get_sync_interval_minutes,
@@ -249,6 +252,7 @@ class AppController:
             self._safe_run_task(self._apply_initial_windows_autostart_default)
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
+        self._schedule_cached_detail_hydration(has_cached_snapshot)
         self._safe_run_task(self._today_schedule_coordinator.run)
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
@@ -1169,8 +1173,12 @@ class AppController:
             # Check both English and Vietnamese keys (WS API uses Vietnamese)
             grading     = status.get("Grading status", "") or status.get("Trạng thái chấm", "") or status.get("Chấm điểm", "")
             submission  = status.get("Submission status", "") or status.get("Trạng thái nộp bài", "") or d.get("submission_status", "")
-            is_graded   = (grading in ("Graded", "Đã chấm") or (grading.startswith("Graded") and "Not" not in grading))
-            is_submitted = (submission in ("Submitted for grading", "Đã nộp", "Đã nộp, chờ chấm") or ("Submitted" in submission and "Not" not in submission) or ("Đã nộp" in submission and "Chưa" not in submission))
+            submission_state = normalize_submission_status(submission)
+            grading_state = normalize_submission_status(grading)
+            is_graded = (
+                submission_state == "graded" or grading_state == "graded"
+            )
+            is_submitted = submission_state in ("submitted", "graded")
 
             if is_graded and not settings.INCLUDE_GRADED: continue
             if is_submitted and not is_graded and not settings.INCLUDE_SUBMITTED: continue
@@ -1222,7 +1230,11 @@ class AppController:
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
 
-    async def _prefetch_details_async(self, activities: list):
+    async def _prefetch_details_async(
+        self, activities: list, prefetch_epoch: int | None = None
+    ):
+        if prefetch_epoch is None:
+            prefetch_epoch = getattr(self, "_prefetch_epoch", 0)
         worker_cap = 2 if platform_utils.IS_MOBILE else 10
         workers = max(1, min(settings.PREFETCH_WORKERS, worker_cap))
         
@@ -1232,42 +1244,57 @@ class AppController:
         self.loading_bar.visible = True
         self.page.update()
 
-        await asyncio.to_thread(
-            self.orchestrator.prefetch_all_details,
-            activities,
-            workers,
-            lambda: self._prefetch_cancel_event.is_set(),
-            False
-        )
+        try:
+            await asyncio.to_thread(
+                self.orchestrator.prefetch_all_details,
+                activities,
+                workers,
+                lambda: self._prefetch_cancel_event.is_set(),
+                False,
+            )
 
-        if not self._prefetch_cancel_event.is_set() and not self._is_loading:
+            if (
+                self._prefetch_cancel_event.is_set()
+                or self._is_loading
+                or prefetch_epoch != getattr(self, "_prefetch_epoch", 0)
+            ):
+                return
             cache = self.orchestrator.get_cached_details_snapshot()
             with self._data_lock:
                 data_copy = list(self.all_data)
-            for i, item in enumerate(data_copy):
-                url = item.get("url")
-                if url and url in cache:
-                    enriched = cache[url]
-                    data_copy[i] = {
-                        **item,
-                        "type": enriched.get("type", item.get("type", "other")),
-                        "course": enriched.get("course", item.get("course", "")),
-                        "submission_status": enriched.get("submission_status", "unknown"),
-                        "details": enriched.get("details", {}),
-                        "deadline": enriched.get("deadline", item.get("deadline")),
-                        "is_open": enriched.get("is_open", item.get("is_open")),
-                        "urgency": enriched.get("urgency", item.get("urgency")),
-                    }
-            data_copy.sort(key=lambda x: (
-                0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
-                x.get("deadline", "")
-            ))
+            data_copy = build_prefetched_dataset(data_copy, cache)
             with self._data_lock:
                 self.all_data = data_copy
             self._update_footer()
             self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {len(data_copy)} hoạt động ✓"
-            self.loading_bar.visible = False
-            self.page.update()
+            persisted = await asyncio.to_thread(
+                self._data_cache.save_local_activities, data_copy
+            )
+            if not persisted:
+                logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
+        finally:
+            if not self._is_loading:
+                self.loading_bar.visible = False
+                self.page.update()
+
+    def _schedule_cached_detail_hydration(self, has_cached_snapshot: bool) -> bool:
+        """Hydrate incomplete cached cards immediately without blocking startup."""
+        if not has_cached_snapshot or not settings.MOODLE_WS_TOKEN:
+            return False
+        with self._data_lock:
+            cached_items = list(self.all_data)
+        if not any(
+            normalize_submission_status(item.get("submission_status")) == "unknown"
+            and item.get("url")
+            for item in cached_items
+        ):
+            return False
+        self._prefetch_cancel_event.clear()
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
+        self._safe_run_task(
+            self._prefetch_details_async, cached_items, self._prefetch_epoch
+        )
+        return True
 
     def _refresh_activity_time_state(self) -> bool:
         """Recompute volatile urgency from absolute deadlines and current time."""
@@ -1319,6 +1346,7 @@ class AppController:
         self.loading_bar.visible = False
         self._update_footer()
         self.page.update()
+        return True
 
     async def _initialize_android_background(self):
         """Attach native worker settings and prefer its cache after app restart."""
@@ -1356,6 +1384,7 @@ class AppController:
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading: return
         self._is_loading = True
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
         
         # Clear persistent detail cache to force fresh data fetch on manual refresh
@@ -1567,7 +1596,11 @@ class AppController:
             self._prefetch_cancel_event.clear()
             with self._data_lock:
                 prefetch_copy = list(self.all_data)
-            self._safe_run_task(self._prefetch_details_async, prefetch_copy)
+            self._safe_run_task(
+                self._prefetch_details_async,
+                prefetch_copy,
+                self._prefetch_epoch,
+            )
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
         except Exception as exc:
@@ -2215,6 +2248,7 @@ class AppController:
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
+        new_status = normalize_submission_status(new_status)
         updated = False
         import time
         with self._data_lock:
@@ -2359,6 +2393,7 @@ class AppController:
         if tray is not None:
             tray.close(timeout_seconds=1.0)
         self._page_alive.clear()
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:

@@ -1482,3 +1482,36 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Corrected the license description from open source to source-available under
   PolyForm Noncommercial, and made the independent, unofficial relationship to
   UTH explicit. All local README links resolve to tracked repository content.
+
+## Activity status hydration and badge consistency (2026-08-12)
+
+- Root-cause analysis of intermittently missing `Chưa nộp` / `Chưa làm`
+  badges found that the authoritative activity feed was persisted before
+  background detail hydration. Enriched status existed only in RAM, so the
+  next cold start restored mostly `unknown` states. A real account-scoped cache
+  contained 34 activities but only three known statuses, matching the mixed
+  cards reported in the UI.
+- Submission and attempt states now cross the data/UI boundary in one canonical
+  vocabulary. Known Moodle English/Vietnamese aliases are normalized while an
+  unavailable or future server state remains `unknown`; the app never invents
+  a negative completion state from an API failure. The old substring fallback
+  that could misread `Not submitted` as `submitted` was removed.
+- Completed prefetch results are merged through the refresh coordinator and
+  saved as a local cache update without moving the authoritative server-sync
+  cursor. Cold starts immediately hydrate incomplete cached cards in the
+  background. Cancellation and generation guards prevent an older prefetch
+  from overwriting a newer refresh.
+- Activity-card reuse now fingerprints all visible status inputs, including
+  `details.status_data`, instead of only ID/deadline/top-level status. Enriched
+  details therefore repaint the badge without disabling card recycling.
+- A read-only live sweep hydrated all 34 current activities: five resolved to
+  `submitted`, 28 to `not_submitted`, and one future assignment correctly
+  remained `unknown` because Moodle exposed no submission state. Its opening
+  time still produced an explicit `Chưa mở`/`Sắp mở` badge, so all 34 cards had
+  a truthful visible state without inventing completion data. Focused
+  lifecycle, persistence, alias, filtering, and race coverage passes **169
+  tests**. The available-environment suite passes **1325
+  tests with 25 skipped**; repository-wide Ruff, bytecode compilation, and
+  `git diff --check` pass. The full shell baseline retains seven unrelated
+  failures because the optional iOS bridge and diagnostics SDK are not
+  installed.

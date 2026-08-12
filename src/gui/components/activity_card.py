@@ -1,4 +1,5 @@
 import flet as ft
+from core.activity_status import normalize_submission_status
 from gui.core.theme import C
 from datetime import datetime
 from gui.core.utils import get_urgency_color, get_countdown_color, get_type_label, get_type_color, clean_course_name, format_deadline, get_countdown, get_progress_value, urgency_str, get_urgency_badge, get_status_tag, get_submission_badge
@@ -103,12 +104,40 @@ class ActivityCard(ft.Container):
 
 
 
+    @staticmethod
+    def _render_fingerprint(data: dict) -> tuple:
+        details = data.get("details", {})
+        if not isinstance(details, dict):
+            details = {}
+        status_data = details.get("status_data", {})
+        if not isinstance(status_data, dict):
+            status_data = {}
+        status_fingerprint = tuple(
+            sorted((str(key), str(value)) for key, value in status_data.items())
+        )
+        return (
+            data.get("id"),
+            data.get("title"),
+            data.get("course"),
+            data.get("course_name"),
+            data.get("deadline"),
+            data.get("submission_status"),
+            data.get("urgency"),
+            data.get("type"),
+            data.get("is_open"),
+            data.get("late_status"),
+            data.get("cutoff_date"),
+            details.get("open_time"),
+            details.get("course_full_name"),
+            details.get("quiz_attempt_status"),
+            status_fingerprint,
+        )
+
     def update_data(self, data: dict, force: bool = False, on_tap=None):
-        # C7: Lightweight identity check instead of deep dict equality
+        # Avoid rebuilding an unchanged Flet subtree while including every
+        # field that can change the visible card or its submission badge.
         if not force and getattr(self, '_initialized', False):
-            old_id = (self.data.get("id"), self.data.get("deadline"), self.data.get("submission_status"))
-            new_id = (data.get("id"), data.get("deadline"), data.get("submission_status"))
-            if old_id == new_id:
+            if self._render_fingerprint(self.data) == self._render_fingerprint(data):
                 if on_tap:
                     self.on_tap_cb = on_tap
                 self.update_countdown()
@@ -219,7 +248,9 @@ class ActivityCard(ft.Container):
 
         self._bar_widget.bgcolor = bar_color
 
-        _sub_status = data.get("submission_status", "unknown")
+        _sub_status = normalize_submission_status(
+            data.get("submission_status", "unknown")
+        )
         _is_submitted = _sub_status in ("submitted", "graded")
         is_critical_active = (urgency_str(urgency) == "critical") and not overdue and not _is_submitted
 

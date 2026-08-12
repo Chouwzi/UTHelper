@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from gui.controllers.refresh_coordinator import (
@@ -42,6 +44,41 @@ def test_merge_cached_details_overlays_prefetched_fields():
     assert result[0]["submission_status"] == "submitted"
     assert result[0]["deadline"] == "2026-07-01 10:00:00"
     assert items[0]["type"] == "other"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("new", "not_submitted"),
+        ("Chưa nộp", "not_submitted"),
+        ("Not submitted", "not_submitted"),
+        ("submitted", "submitted"),
+        ("Đã nộp", "submitted"),
+        ("graded", "graded"),
+        ("Đã chấm điểm", "graded"),
+        ("draft", "draft"),
+        ("Bản nháp", "draft"),
+        (None, "unknown"),
+        ("", "unknown"),
+        ("server-added-state", "unknown"),
+    ],
+)
+def test_merge_cached_details_normalizes_known_statuses(raw, expected):
+    result = merge_cached_details(
+        [{"url": "activity", "submission_status": "unknown"}],
+        {"activity": {"submission_status": raw}},
+    )
+
+    assert result[0]["submission_status"] == expected
+
+
+def test_merge_cached_details_does_not_erase_known_status_with_unknown_enrichment():
+    result = merge_cached_details(
+        [{"url": "activity", "submission_status": "submitted"}],
+        {"activity": {"submission_status": "unknown", "details": {}}},
+    )
+
+    assert result[0]["submission_status"] == "submitted"
 
 
 def test_apply_pending_submission_updates_keeps_new_local_status_and_prunes_old_items():
@@ -145,7 +182,7 @@ def test_build_refresh_dataset_merges_pending_and_counts_submissions():
     assert result.total_count == 2
     assert result.submitted_count == 1
     assert result.items[0]["_title_lower"] == "a"
-    assert result.items[0]["submission_status"] == "Đã nộp"
+    assert result.items[0]["submission_status"] == "submitted"
 
 
 def test_format_refresh_status_includes_submission_progress():

@@ -6,6 +6,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
+from core.activity_status import normalize_submission_status
 from core.grade_monitor import GradeMonitor
 from core.moodle_service import MoodleService
 from config import settings
@@ -78,15 +79,16 @@ class DataOrchestrator:
 
     def update_cached_submission_status(self, url: str, new_status: str):
         """Cập nhật trạng thái nộp bài trực tiếp trong cache để đồng bộ giao diện."""
+        canonical_status = normalize_submission_status(new_status)
         with self._detail_lock:
             cached = self._detail_cache.get(url)
             if cached:
-                cached["submission_status"] = new_status
+                cached["submission_status"] = canonical_status
                 details = cached.get("details", {})
                 if isinstance(details, dict):
                     status_data = details.get("status_data", {})
                     if isinstance(status_data, dict):
-                        status_data["Trạng thái nộp bài"] = new_status
+                        status_data["Trạng thái nộp bài"] = canonical_status
 
     def invalidate_detail_cache(self, url: str):
         """Xóa cache chi tiết của một URL cụ thể (khi có tác vụ ghi như nộp/xóa bài)."""
@@ -597,11 +599,15 @@ class DataOrchestrator:
         status_data = ws_details.get('status_data', {})
         quiz_attempt_status = ws_details.get('quiz_attempt_status')
         if activity_type == 'quiz' and quiz_attempt_status:
-            result['submission_status'] = quiz_attempt_status
+            result['submission_status'] = normalize_submission_status(quiz_attempt_status)
         elif 'Trạng thái nộp bài' in status_data:
-            result['submission_status'] = status_data['Trạng thái nộp bài']
+            result['submission_status'] = normalize_submission_status(
+                status_data['Trạng thái nộp bài']
+            )
         elif 'Trạng thái' in status_data:
-            result['submission_status'] = status_data['Trạng thái']
+            result['submission_status'] = normalize_submission_status(
+                status_data['Trạng thái']
+            )
         
         return result
 
@@ -674,7 +680,9 @@ class DataOrchestrator:
             "deadline": assign.deadline.isoformat(),
             "urgency": assign.urgency,
             "url": assign.url,
-            "submission_status": assign.submission_status,
+            "submission_status": normalize_submission_status(
+                assign.submission_status
+            ),
             "details": {}
         }
 

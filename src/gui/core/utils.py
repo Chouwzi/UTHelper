@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 from core.time_utils import parse_datetime
+from core.activity_status import normalize_submission_status
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
 from core.display_utils import urgency_str, clean_course_name  # re-exported
@@ -204,7 +205,7 @@ def get_submission_badge(data: dict):
                 return "Sắp mở", C.WARNING
 
     # Trạng thái nộp lấy ở cấp độ ngoài (top-level)
-    ss = data.get("submission_status", "unknown")
+    ss = normalize_submission_status(data.get("submission_status", "unknown"))
     
     # Dự phòng rà quét status_data bằng cách khớp chuỗi chính xác
     details     = data.get("details", {})
@@ -228,6 +229,8 @@ def get_submission_badge(data: dict):
         return ("Đã nộp" if act_type != "quiz" else "Đã làm"), C.SAFE
     if ss == "not_submitted":
         return ("Chưa nộp" if act_type != "quiz" else "Chưa làm"), C.TEXT_SECONDARY
+    if ss == "draft":
+        return "Bản nháp", C.WARNING
     if act_type == "quiz":
         if ss == "in_progress":
             return "Đang làm", C.WARNING
@@ -253,10 +256,13 @@ def get_submission_badge(data: dict):
             return "Đã chấm", C.SAFE
 
     if submission:
-        if any(x in submission.lower() for x in ["submitted", "đã nộp"]):
+        fallback_status = normalize_submission_status(submission)
+        if fallback_status in ("submitted", "graded"):
             return ("Đã nộp" if act_type != "quiz" else "Đã làm"), C.SAFE
-        if any(x in submission.lower() for x in ["not submitted", "chưa nộp", "no submissions"]):
+        if fallback_status == "not_submitted":
             return ("Chưa nộp" if act_type != "quiz" else "Chưa làm"), C.TEXT_SECONDARY
+        if fallback_status == "draft":
+            return "Bản nháp", C.WARNING
     return None
 
 

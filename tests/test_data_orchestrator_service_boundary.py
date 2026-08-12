@@ -55,7 +55,7 @@ def test_fetch_detail_via_ws_uses_moodle_service_boundary():
 
     assert fake_service.detail_calls == [(77, 12, "assign")]
     assert result["details"]["description_html"] == "<p>Chi tiết</p>"
-    assert result["submission_status"] == "Đã nộp"
+    assert result["submission_status"] == "submitted"
 
 
 def test_fetch_quiz_detail_promotes_normalized_attempt_status():
