@@ -1464,3 +1464,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - `main.py` now loads the persisted start-minimized preference before deciding
   whether to publish the startup screen. Explicit users who still prefer tray
   startup retain that behavior.
+
+## Repository README information architecture (2026-08-12)
+
+- Reviewed the current top-level documentation against the README structure of
+  mature repositories including VS Code, Kubernetes, Rust, and Flask. Their
+  root documents use plain headings, establish project scope early, provide a
+  short development path, and delegate operating detail to maintained guides.
+- Preserved the UTHelper logo, title, workflow badges, and metadata badge rows.
+  Replaced only the colloquial emoji tagline in the hero, then removed emoji
+  decoration from headings, tables, CI descriptions, warnings, and the footer.
+- Reorganized the body around product scope, supported platform status, source
+  installation, contributor checks, package entry points, architecture
+  boundaries, security, documentation, and licensing. Removed the empty
+  screenshot placeholder, stale checklist roadmap, duplicated release runbook,
+  and performance/feature claims that lacked stable evidence.
+- Corrected the license description from open source to source-available under
+  PolyForm Noncommercial, and made the independent, unofficial relationship to
+  UTH explicit. All local README links resolve to tracked repository content.
