@@ -24,7 +24,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 import flet as ft
 
-from gui.core.theme import C, on_color
+from gui.core.theme import (
+    C,
+    on_color,
+    refresh_semantic_control_colors,
+    semantic_palette,
+)
 from gui.core.utils import (
     get_countdown,
     get_urgency_color,
@@ -65,6 +70,7 @@ class CalendarView(ft.Container):
         self._selected_date: Optional[date] = today  # full date for week view
 
         self._build_ui()
+        self._rendered_palette = semantic_palette()
 
     # Build UI
     def _build_ui(self):
@@ -76,43 +82,51 @@ class CalendarView(ft.Container):
         self._month_summary = ft.Text(
             "", size=10, color=C.TEXT_SECONDARY,
         )
+        self._back_btn = ft.IconButton(
+            ft.Icons.ARROW_BACK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=18,
+            tooltip="Quay lại",
+            on_click=lambda _: self._on_close() if self._on_close else None,
+        )
+        self._previous_btn = ft.IconButton(
+            ft.Icons.CHEVRON_LEFT_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Trước",
+            on_click=lambda _: self._navigate(-1),
+        )
+        self._next_btn = ft.IconButton(
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Sau",
+            on_click=lambda _: self._navigate(1),
+        )
+        self._today_btn = ft.IconButton(
+            ft.Icons.TODAY_ROUNDED,
+            icon_color=C.ACCENT,
+            icon_size=18,
+            tooltip="Hôm nay",
+            on_click=lambda _: self._go_today(),
+        )
 
         self._header = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Row(
                         controls=[
-                            ft.IconButton(
-                                ft.Icons.ARROW_BACK_ROUNDED,
-                                icon_color=C.TEXT_SECONDARY, icon_size=18,
-                                tooltip="Quay lại",
-                                on_click=lambda _: self._on_close() if self._on_close else None,
-                            ),
+                            self._back_btn,
                             ft.Row(
                                 controls=[
-                                    ft.IconButton(
-                                        ft.Icons.CHEVRON_LEFT_ROUNDED,
-                                        icon_color=C.TEXT_SECONDARY, icon_size=20,
-                                        tooltip="Trước",
-                                        on_click=lambda _: self._navigate(-1),
-                                    ),
+                                    self._previous_btn,
                                     self._month_label,
-                                    ft.IconButton(
-                                        ft.Icons.CHEVRON_RIGHT_ROUNDED,
-                                        icon_color=C.TEXT_SECONDARY, icon_size=20,
-                                        tooltip="Sau",
-                                        on_click=lambda _: self._navigate(1),
-                                    ),
+                                    self._next_btn,
                                 ],
                                 spacing=0,
                                 alignment=ft.MainAxisAlignment.CENTER,
                             ),
-                            ft.IconButton(
-                                ft.Icons.TODAY_ROUNDED,
-                                icon_color=C.ACCENT, icon_size=18,
-                                tooltip="Hôm nay",
-                                on_click=lambda _: self._go_today(),
-                            ),
+                            self._today_btn,
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
@@ -147,21 +161,33 @@ class CalendarView(ft.Container):
         )
 
         # Mode toggle (Month / Week)
+        self._mode_month_icon = ft.Icon(
+            ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY
+        )
+        self._mode_month_text = ft.Text(
+            "Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
+        )
         self._mode_month_btn = ft.Container(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY),
-                ft.Text("Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY),
+                self._mode_month_icon,
+                self._mode_month_text,
             ], spacing=4, tight=True),
-            bgcolor=C.ACCENT + "30",
+            bgcolor=ft.Colors.with_opacity(0.19, C.ACCENT),
             border_radius=12,
             padding=ft.Padding(left=14, right=14, top=5, bottom=5),
             on_click=lambda _: self._toggle_view_mode("month"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
+        self._mode_week_icon = ft.Icon(
+            ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY
+        )
+        self._mode_week_text = ft.Text(
+            "Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+        )
         self._mode_week_btn = ft.Container(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY),
-                ft.Text("Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY),
+                self._mode_week_icon,
+                self._mode_week_text,
             ], spacing=4, tight=True),
             bgcolor="transparent",
             border_radius=12,
@@ -231,12 +257,21 @@ class CalendarView(ft.Container):
         self._day_count = ft.Text("", size=11, color=C.TEXT_SECONDARY)
         self._day_list = ft.ListView(spacing=6, expand=True)
         # CV-06: Better empty state
+        self._day_empty_icon = ft.Icon(
+            ft.Icons.CALENDAR_TODAY_ROUNDED, size=28, color=C.BORDER
+        )
+        self._day_empty_title = ft.Text(
+            "Không có bài tập đến hạn", size=12, color=C.TEXT_SECONDARY
+        )
+        self._day_empty_hint = ft.Text(
+            "Chọn ngày có chấm màu để xem", size=10, color=C.BORDER
+        )
         self._day_empty = ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Icon(ft.Icons.CALENDAR_TODAY_ROUNDED, size=28, color=C.BORDER),
-                    ft.Text("Không có bài tập đến hạn", size=12, color=C.TEXT_SECONDARY),
-                    ft.Text("Chọn ngày có chấm màu để xem", size=10, color=C.BORDER),
+                    self._day_empty_icon,
+                    self._day_empty_title,
+                    self._day_empty_hint,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
@@ -246,10 +281,11 @@ class CalendarView(ft.Container):
             visible=False,
         )
 
+        self._detail_divider = ft.Divider(height=1, color=C.BORDER)
         detail_panel = ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Divider(height=1, color=C.BORDER),
+                    self._detail_divider,
                     ft.Container(
                         content=ft.Row(
                             controls=[self._day_title, self._day_count],
@@ -392,6 +428,7 @@ class CalendarView(ft.Container):
             cell.data["date"] = d
 
             day_text.value = str(d.day)
+            count_text.color = C.TEXT_SECONDARY
 
             is_today = (d == today)
             is_selected = (d == self._selected_date)
@@ -410,7 +447,7 @@ class CalendarView(ft.Container):
             # Styling
             wd_label: ft.Text = cell.data["wd_label"]
             if is_selected and is_today:
-                cell.bgcolor = C.ACCENT + "20"
+                cell.bgcolor = ft.Colors.with_opacity(0.13, C.ACCENT)
                 cell.border = ft.Border.all(2, C.ACCENT)
                 day_text.color = C.ACCENT
                 day_text.weight = ft.FontWeight.W_700
@@ -422,14 +459,21 @@ class CalendarView(ft.Container):
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.TEXT_PRIMARY
             elif is_today:
-                cell.bgcolor = C.ACCENT + "10"
-                cell.border = ft.Border.all(1, C.ACCENT + "50")
+                cell.bgcolor = ft.Colors.with_opacity(0.06, C.ACCENT)
+                cell.border = ft.Border.all(
+                    1, ft.Colors.with_opacity(0.31, C.ACCENT)
+                )
                 day_text.color = C.ACCENT
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.ACCENT
             elif has_deadline:
-                cell.bgcolor = (most_urgent_color or C.ACCENT) + "0D"
-                cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+                cell.bgcolor = ft.Colors.with_opacity(
+                    0.05, most_urgent_color or C.ACCENT
+                )
+                cell.border = ft.Border.all(
+                    0.5,
+                    ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+                )
                 day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
                 day_text.weight = ft.FontWeight.W_500
                 wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
@@ -595,6 +639,7 @@ class CalendarView(ft.Container):
 
                 today_dot: ft.Container = cell.data["today_dot"]
                 today_dot.visible = is_today  # dot is ONLY for today
+                today_dot.bgcolor = C.ACCENT
 
                 if is_selected and is_today:
                     # Both: accent text + white selection border + today dot
@@ -616,8 +661,15 @@ class CalendarView(ft.Container):
                     day_text.weight = ft.FontWeight.W_700
                 elif has_deadline:
                     # Has deadline: subtle urgency bg
-                    cell.bgcolor = (most_urgent_color or C.ACCENT) + "10"
-                    cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+                    cell.bgcolor = ft.Colors.with_opacity(
+                        0.06, most_urgent_color or C.ACCENT
+                    )
+                    cell.border = ft.Border.all(
+                        0.5,
+                        ft.Colors.with_opacity(
+                            0.19, most_urgent_color or C.BORDER
+                        ),
+                    )
                     day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
                     day_text.weight = ft.FontWeight.W_500
                 else:
@@ -686,6 +738,7 @@ class CalendarView(ft.Container):
 
         today_dot: ft.Container = cell.data["today_dot"]
         today_dot.visible = is_today
+        today_dot.bgcolor = C.ACCENT
 
         if is_selected and is_today:
             cell.bgcolor = C.SURFACE_HOVER
@@ -703,8 +756,13 @@ class CalendarView(ft.Container):
             day_text.color = C.ACCENT
             day_text.weight = ft.FontWeight.W_700
         elif has_deadline:
-            cell.bgcolor = (most_urgent_color or C.ACCENT) + "10"
-            cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+            cell.bgcolor = ft.Colors.with_opacity(
+                0.06, most_urgent_color or C.ACCENT
+            )
+            cell.border = ft.Border.all(
+                0.5,
+                ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+            )
             day_text.color = C.CRITICAL if col == 6 else C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_500
         else:
@@ -791,12 +849,12 @@ class CalendarView(ft.Container):
 
         if mode == "month":
             # Update toggle styling
-            self._mode_month_btn.bgcolor = C.ACCENT + "30"
-            self._mode_month_btn.content.controls[0].color = C.TEXT_PRIMARY
-            self._mode_month_btn.content.controls[1].color = C.TEXT_PRIMARY
+            self._mode_month_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
+            self._mode_month_icon.color = C.TEXT_PRIMARY
+            self._mode_month_text.color = C.TEXT_PRIMARY
             self._mode_week_btn.bgcolor = "transparent"
-            self._mode_week_btn.content.controls[0].color = C.TEXT_SECONDARY
-            self._mode_week_btn.content.controls[1].color = C.TEXT_SECONDARY
+            self._mode_week_icon.color = C.TEXT_SECONDARY
+            self._mode_week_text.color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = True
             self._week_strip.visible = False
@@ -808,12 +866,12 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             # Update toggle styling
-            self._mode_week_btn.bgcolor = C.ACCENT + "30"
-            self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY
-            self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY
+            self._mode_week_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
+            self._mode_week_icon.color = C.TEXT_PRIMARY
+            self._mode_week_text.color = C.TEXT_PRIMARY
             self._mode_month_btn.bgcolor = "transparent"
-            self._mode_month_btn.content.controls[0].color = C.TEXT_SECONDARY
-            self._mode_month_btn.content.controls[1].color = C.TEXT_SECONDARY
+            self._mode_month_icon.color = C.TEXT_SECONDARY
+            self._mode_month_text.color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = False
             self._week_strip.visible = True
@@ -929,7 +987,7 @@ class CalendarView(ft.Container):
                 ft.Container(
                     content=ft.Text("✓ Đã nộp", size=9, weight=ft.FontWeight.W_600, color=C.SAFE),
                     padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                    bgcolor=C.SAFE + "15",
+                    bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
                     border_radius=4,
                 )
             )
@@ -938,7 +996,7 @@ class CalendarView(ft.Container):
                 ft.Container(
                     content=ft.Text("★ Đã chấm", size=9, weight=ft.FontWeight.W_600, color=C.SAFE),
                     padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                    bgcolor=C.SAFE + "15",
+                    bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
                     border_radius=4,
                 )
             )
@@ -1015,32 +1073,20 @@ class CalendarView(ft.Container):
     def update_theme(self):
         """Update colors of all calendar controls dynamically on theme switch."""
         from gui.core.theme import C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [self], self._rendered_palette, current_palette
+        )
+        self._rendered_palette = current_palette
         self.bgcolor = C.BG
         self._header.bgcolor = C.BG
-        
-        # Header Controls
-        try:
-            header_col = self._header.content
-            row1 = header_col.controls[0]
-            
-            # Back button
-            row1.controls[0].icon_color = C.TEXT_SECONDARY
-            
-            # Month nav row: chevron_left, month_label, chevron_right
-            month_nav = row1.controls[1]
-            month_nav.controls[0].icon_color = C.TEXT_SECONDARY
-            month_nav.controls[1].color = C.TEXT_PRIMARY
-            month_nav.controls[2].icon_color = C.TEXT_SECONDARY
-            
-            # Today button
-            row1.controls[2].icon_color = C.ACCENT
-            
-            # Month summary
-            month_summary = header_col.controls[1].content
-            month_summary.color = C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        self._back_btn.icon_color = C.TEXT_SECONDARY
+        self._previous_btn.icon_color = C.TEXT_SECONDARY
+        self._month_label.color = C.TEXT_PRIMARY
+        self._next_btn.icon_color = C.TEXT_SECONDARY
+        self._today_btn.icon_color = C.ACCENT
+        self._month_summary.color = C.TEXT_SECONDARY
 
         # Weekdays Row Controls
         try:
@@ -1056,17 +1102,21 @@ class CalendarView(ft.Container):
             self._mode_toggle.bgcolor = C.SURFACE
             self._mode_toggle.border = ft.Border.all(1, C.BORDER)
             
-            self._mode_month_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
-            self._mode_month_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
+            self._mode_month_icon.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
+            self._mode_month_text.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
             if self._view_mode == "month":
-                self._mode_month_btn.bgcolor = C.ACCENT + "30"
+                self._mode_month_btn.bgcolor = ft.Colors.with_opacity(
+                    0.19, C.ACCENT
+                )
                 self._mode_week_btn.bgcolor = "transparent"
             else:
                 self._mode_month_btn.bgcolor = "transparent"
-                self._mode_week_btn.bgcolor = C.ACCENT + "30"
+                self._mode_week_btn.bgcolor = ft.Colors.with_opacity(
+                    0.19, C.ACCENT
+                )
                 
-            self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
-            self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._mode_week_icon.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._mode_week_text.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -1076,13 +1126,10 @@ class CalendarView(ft.Container):
         self._day_count.color = C.TEXT_SECONDARY
         
         # Day Empty State
-        try:
-            self._day_empty.content.controls[0].color = C.BORDER
-            self._day_empty.content.controls[1].color = C.TEXT_SECONDARY
-            self._day_empty.content.controls[2].color = C.BORDER
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        self._day_empty_icon.color = C.BORDER
+        self._day_empty_title.color = C.TEXT_SECONDARY
+        self._day_empty_hint.color = C.BORDER
+        self._detail_divider.color = C.BORDER
 
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":

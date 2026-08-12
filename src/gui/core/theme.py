@@ -5,6 +5,9 @@
 # Mỗi preset là một dict đầy đủ gồm: các màu UI cơ bản + màu mức độ khẩn cấp + màu badge loại hoạt động.
 # Key = tên theme (snake_case), được lưu trong cấu hình settings.THEME.
 
+from dataclasses import fields, is_dataclass, replace
+from typing import Iterable
+
 from gui.core.theme_presets import THEME_PRESETS, THEME_ORDER
 
 __all__ = [
@@ -15,6 +18,8 @@ __all__ = [
     "contrast_ratio",
     "load_theme_from_settings",
     "on_color",
+    "refresh_semantic_control_colors",
+    "semantic_palette",
     "set_page_theme",
 ]
 
@@ -44,6 +49,185 @@ class C:
     ON_UPDATE      = "#0B0F1A"
     SCRIM          = "#99000000"
     SHADOW         = "#66000000"
+
+
+_SEMANTIC_COLOR_NAMES = (
+    "BG",
+    "SURFACE",
+    "SURFACE_HOVER",
+    "SURFACE_ELEVATED",
+    "ACCENT",
+    "CRITICAL",
+    "WARNING",
+    "SAFE",
+    "TEXT_PRIMARY",
+    "TEXT_SECONDARY",
+    "BORDER",
+    "BORDER_STRONG",
+    "ON_ACCENT",
+    "ON_CRITICAL",
+    "ON_WARNING",
+    "ON_SAFE",
+    "UPDATE",
+    "ON_UPDATE",
+    "SCRIM",
+    "SHADOW",
+)
+
+_CONTROL_COLOR_ATTRIBUTES = (
+    "color",
+    "bgcolor",
+    "icon_color",
+    "border_color",
+    "focused_border_color",
+    "selected_color",
+    "selected_tile_color",
+    "hover_color",
+    "splash_color",
+    "active_color",
+    "active_track_color",
+    "check_color",
+    "fill_color",
+    "focus_color",
+    "overlay_color",
+    "track_color",
+    "track_outline_color",
+    "thumb_color",
+    "text_color",
+    "collapsed_text_color",
+    "collapsed_icon_color",
+    "divider_color",
+    "shadow_color",
+    "barrier_color",
+    "label_style",
+    "hint_style",
+    "text_style",
+    "style",
+    "border",
+    "gradient",
+)
+
+_CONTROL_CHILD_ATTRIBUTES = (
+    "content",
+    "controls",
+    "items",
+    "actions",
+    "title",
+    "subtitle",
+    "leading",
+    "trailing",
+    "label",
+)
+
+
+def semantic_palette() -> dict[str, str]:
+    """Capture the currently active semantic color tokens."""
+    return {name: getattr(C, name) for name in _SEMANTIC_COLOR_NAMES}
+
+
+def _semantic_replacements(
+    previous: dict[str, str], current: dict[str, str]
+) -> dict[str, str]:
+    return {
+        previous[name].upper(): current[name]
+        for name in _SEMANTIC_COLOR_NAMES
+        if name in previous and name in current and previous[name] != current[name]
+    }
+
+
+def _remap_color_string(value: str, replacements: dict[str, str]) -> str:
+    direct = replacements.get(value.upper())
+    if direct is not None:
+        return direct
+    # Flet 0.86 serializes Colors.with_opacity() as "#RRGGBB,opacity".
+    base, separator, opacity = value.partition(",")
+    if separator:
+        replacement = replacements.get(base.upper())
+        if replacement is not None:
+            return f"{replacement},{opacity}"
+    # Flet emits translucent colors as #AARRGGBB. Preserve alpha while replacing
+    # the semantic RGB token underneath it.
+    if len(value) == 9 and value.startswith("#"):
+        replacement = replacements.get(f"#{value[3:]}".upper())
+        if replacement is not None and replacement.startswith("#"):
+            return f"{value[:3]}{replacement[1:]}"
+    return value
+
+
+def _remap_style_value(value, replacements: dict[str, str]):
+    import flet as ft
+
+    if isinstance(value, str):
+        return _remap_color_string(value, replacements)
+    if isinstance(value, ft.BaseControl):
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _remap_style_value(item, replacements)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_remap_style_value(item, replacements) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_remap_style_value(item, replacements) for item in value)
+    if is_dataclass(value):
+        changes = {}
+        for field in fields(value):
+            if not field.init:
+                continue
+            old = getattr(value, field.name)
+            new = _remap_style_value(old, replacements)
+            if new != old:
+                changes[field.name] = new
+        return replace(value, **changes) if changes else value
+    return value
+
+
+def refresh_semantic_control_colors(
+    roots: Iterable[object],
+    previous: dict[str, str],
+    current: dict[str, str] | None = None,
+) -> None:
+    """Remap stored semantic colors across mounted or detached Flet controls.
+
+    Flet controls retain concrete color strings from construction time. This
+    bounded traversal updates public color/style properties after a live theme
+    switch and intentionally avoids private Flet serialization internals.
+    """
+    import flet as ft
+
+    replacements = _semantic_replacements(previous, current or semantic_palette())
+    if not replacements:
+        return
+    seen: set[int] = set()
+
+    def visit(control) -> None:
+        if not isinstance(control, ft.BaseControl) or id(control) in seen:
+            return
+        seen.add(id(control))
+        for attribute in _CONTROL_COLOR_ATTRIBUTES:
+            if not hasattr(control, attribute):
+                continue
+            try:
+                old = getattr(control, attribute)
+                new = _remap_style_value(old, replacements)
+                if new != old:
+                    setattr(control, attribute, new)
+            except (AttributeError, TypeError, ValueError):
+                continue
+        for attribute in _CONTROL_CHILD_ATTRIBUTES:
+            try:
+                children = getattr(control, attribute, None)
+            except (AttributeError, RuntimeError):
+                continue
+            if isinstance(children, ft.BaseControl):
+                visit(children)
+            elif isinstance(children, (list, tuple)):
+                for child in children:
+                    visit(child)
+
+    for root in roots:
+        visit(root)
 
 
 def _relative_luminance(color: str) -> float:

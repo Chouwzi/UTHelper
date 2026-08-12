@@ -10,7 +10,14 @@ import flet as ft
 import asyncio
 import logging
 from dataclasses import replace
-from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
+from gui.core.theme import (
+    C,
+    THEME_ORDER,
+    THEME_PRESETS,
+    apply_theme,
+    refresh_semantic_control_colors,
+    semantic_palette,
+)
 from config import settings
 from config import save_settings
 from core.version import APP_VERSION
@@ -39,6 +46,7 @@ class SettingsView(ft.Container):
         self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update)
         self._init_controls()
         self._init_layout()
+        self._rendered_palette = semantic_palette()
 
     def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update):
         self._page    = page
@@ -304,7 +312,11 @@ class SettingsView(ft.Container):
             ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=C.BG,
             padding=ft.Padding.only(left=20, right=20, top=10, bottom=12),
-            border=ft.Border.only(top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "30")),
+            border=ft.Border.only(
+                top=ft.BorderSide(
+                    1.5, ft.Colors.with_opacity(0.19, C.TEXT_SECONDARY)
+                )
+            ),
         )
 
         self.content = ft.Column(
@@ -433,7 +445,11 @@ class SettingsView(ft.Container):
             for k, card in self._profile_cards.items():
                 is_sel = (k == profile_key)
                 card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-                card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+                card.bgcolor = (
+                    ft.Colors.with_opacity(0.08, C.ACCENT)
+                    if is_sel
+                    else C.SURFACE
+                )
             self._update_profile_summary()
             self._update_dnd_summary()
             self.update()
@@ -554,7 +570,11 @@ class SettingsView(ft.Container):
 
     def _make_theme_card(self, key: str, preset: dict, selected: bool):
         """Create a single theme preview card."""
-        border_col = preset["accent"] if selected else (preset["border"] + "80")
+        border_col = (
+            preset["accent"]
+            if selected
+            else ft.Colors.with_opacity(0.50, preset["border"])
+        )
         border_w = 2.5 if selected else 1
 
         # Color strip: 5 small color dots showing the palette
@@ -667,6 +687,24 @@ class SettingsView(ft.Container):
         Covers: section containers, expansion tiles, text fields, switches,
         save button, sticky footer, back button, test login, etc.
         """
+        current_palette = semantic_palette()
+        detached_controls = [
+            value
+            for value in vars(self).values()
+            if isinstance(value, ft.BaseControl)
+        ]
+        refresh_semantic_control_colors(
+            [
+                self,
+                *getattr(self, "_tile_bodies", {}).values(),
+                *detached_controls,
+            ],
+            getattr(self, "_rendered_palette", current_palette),
+            current_palette,
+        )
+        self._rendered_palette = current_palette
+        self.bgcolor = C.BG
+
         # Section containers (bg + border)
         for container in getattr(self, '_section_containers', []):
             container.bgcolor = C.SURFACE
@@ -761,7 +799,9 @@ class SettingsView(ft.Container):
         if hasattr(self, '_sticky_footer'):
             self._sticky_footer.bgcolor = C.BG
             self._sticky_footer.border = ft.Border.only(
-                top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "30")
+                top=ft.BorderSide(
+                    1.5, ft.Colors.with_opacity(0.19, C.TEXT_SECONDARY)
+                )
             )
             try:
                 self._sticky_footer.update()
@@ -824,7 +864,11 @@ class SettingsView(ft.Container):
         for k, card in getattr(self, '_profile_cards', {}).items():
             is_sel = (k == getattr(self, '_current_profile', 'balanced'))
             card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            card.bgcolor = (
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if is_sel
+                else C.SURFACE
+            )
             col = card.content
             if col and hasattr(col, 'controls') and len(col.controls) >= 3:
                 col.controls[0].color = C.ACCENT if is_sel else C.TEXT_SECONDARY  # icon
@@ -877,7 +921,11 @@ class SettingsView(ft.Container):
                 card = row_ctrl.controls[i]
                 
                 # Update border
-                border_col = preset["accent"] if selected else (preset["border"] + "80")
+                border_col = (
+                    preset["accent"]
+                    if selected
+                    else ft.Colors.with_opacity(0.50, preset["border"])
+                )
                 border_w = 2.5 if selected else 1
                 card.border = ft.Border.all(border_w, border_col)
                 
@@ -938,7 +986,11 @@ class SettingsView(ft.Container):
         for k, card in self._profile_cards.items():
             is_sel = (k == "balanced")
             card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            card.bgcolor = (
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if is_sel
+                else C.SURFACE
+            )
         # Reset milestone chips to canonical minute-based defaults.
         _default_milestones = [4320, 1440, 180, 60, 30, 5]
         for h, chip in self._milestone_chips.items():
@@ -1898,7 +1950,11 @@ class SettingsView(ft.Container):
                 if selected
                 else ft.Border.all(1, C.BORDER)
             )
-            card.bgcolor = C.ACCENT + "15" if selected else C.SURFACE
+            card.bgcolor = (
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if selected
+                else C.SURFACE
+            )
 
         self._rebuild_theme_cards()
         self._sync_autostart_dependency()

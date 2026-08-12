@@ -24,7 +24,11 @@ def init_notification_controls(view):
                 ft.Text(pval["desc"], size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER),
             ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             width=110, padding=12, border_radius=12,
-            bgcolor=C.ACCENT + "15" if is_sel else C.SURFACE,
+            bgcolor=(
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if is_sel
+                else C.SURFACE
+            ),
             border=ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER),
             on_click=view._handle_profile_select(pkey),
             ink=True,

@@ -42,7 +42,7 @@ from platform_utils.update_packages import (
     detect_runtime_target,
 )
 
-from gui.core.theme import C
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
@@ -807,17 +807,24 @@ class AppController:
         self._today_schedule_component.set_state(self._today_schedule_state)
 
     def _init_views_and_transitions(self):
-        header_container = ft.Container(
+        self._app_title = ft.Text(
+            "UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY
+        )
+        self._version_text = ft.Text(
+            APP_VERSION, size=9, color=C.TEXT_SECONDARY
+        )
+        self._version_badge = ft.Container(
+            content=self._version_text,
+            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=4,
+        )
+        self._header_container = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
                     ft.Row(controls=[
-                        ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
-                        ft.Container(
-                            content=ft.Text(APP_VERSION, size=9, color=C.TEXT_SECONDARY),
-                            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                            border=ft.Border.all(1, C.BORDER),
-                            border_radius=4,
-                        ),
+                        self._app_title,
+                        self._version_badge,
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Row(controls=[self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -829,7 +836,7 @@ class AppController:
 
         header = ft.Stack(
             controls=[
-                header_container,
+                self._header_container,
                 ft.Container(
                     content=self.loading_bar,
                     bottom=0,
@@ -839,7 +846,7 @@ class AppController:
             ]
         )
 
-        filter_container = ft.Container(
+        self._filter_container = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
@@ -861,7 +868,7 @@ class AppController:
             bgcolor=C.BG,
         )
 
-        content_area = ft.Container(
+        self._content_area = ft.Container(
             content=ft.Column(controls=[
                 ft.Stack(controls=[
                     ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
@@ -871,7 +878,7 @@ class AppController:
             expand=True, clip_behavior=ft.ClipBehavior.NONE,
         )
 
-        footer = ft.Container(
+        self._footer = ft.Container(
             content=ft.Row(controls=[
                 self.footer_critical, self.footer_warning, self.footer_safe, self.footer_overdue,
             ], spacing=12, alignment=ft.MainAxisAlignment.CENTER),
@@ -880,7 +887,13 @@ class AppController:
         )
 
         self.dashboard = ft.Column(
-            controls=[header, self._update_banner, filter_container, content_area, footer],
+            controls=[
+                header,
+                self._update_banner,
+                self._filter_container,
+                self._content_area,
+                self._footer,
+            ],
             spacing=0, expand=True,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
@@ -924,6 +937,7 @@ class AppController:
             self,
             view_host=main_stack,
         )
+        self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
         if platform_utils.UI_IS_MOBILE:
@@ -1807,35 +1821,25 @@ class AppController:
         we must explicitly reassign every color property when the theme changes.
         """
         from gui.core.theme import C as _C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [self.dashboard], self._rendered_palette, current_palette
+        )
+        self._rendered_palette = current_palette
 
         # Page
         self.page.bgcolor = _C.BG
 
-        # Header
-        header_stack = self.dashboard.controls[0]  # ft.Stack
-        if len(header_stack.controls) > 0:
-            header_container = header_stack.controls[0]
-            header_container.bgcolor = _C.BG
-            # Walk header children: title text, version badge, status text
-            try:
-                header_col = header_container.content  # ft.Column
-                title_row = header_col.controls[0]  # ft.Row
-                left_row = title_row.controls[0]  # ft.Row with title + version
-                # "UTHelper" text
-                left_row.controls[0].color = _C.TEXT_PRIMARY
-                # Version badge container
-                ver_badge = left_row.controls[1]
-                ver_badge.content.color = _C.TEXT_SECONDARY
-                ver_badge.border = ft.Border.all(1, _C.BORDER)
-            except (IndexError, AttributeError):
-                pass
+        self._header_container.bgcolor = _C.BG
+        self._app_title.color = _C.TEXT_PRIMARY
+        self._version_text.color = _C.TEXT_SECONDARY
+        self._version_badge.border = ft.Border.all(1, _C.BORDER)
 
         # Status text
         self.status_text.color = _C.TEXT_SECONDARY
 
         # Filter area
-        filter_container = self.dashboard.controls[2]
-        filter_container.bgcolor = _C.BG
+        self._filter_container.bgcolor = _C.BG
         self.search_field.bgcolor = _C.SURFACE
         self.search_field.border_color = _C.BORDER
         self.search_field.focused_border_color = _C.ACCENT
@@ -1879,9 +1883,8 @@ class AppController:
             self._error_retry_btn.color = _C.ON_ACCENT
 
         # Footer
-        footer = self.dashboard.controls[-1]
-        footer.bgcolor = _C.SURFACE
-        footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
+        self._footer.bgcolor = _C.SURFACE
+        self._footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
         # Footer counter colors are set dynamically by _refresh_counts,
         # but update the base colors here too
         self.footer_critical.color = _C.CRITICAL if self.footer_critical.value else _C.BORDER
@@ -1889,13 +1892,7 @@ class AppController:
         self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
         self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
 
-        # Content area bgcolor
-        try:
-            content_area = self.dashboard.controls[3]
-            content_area.bgcolor = _C.BG
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        self._content_area.bgcolor = _C.BG
 
         # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):

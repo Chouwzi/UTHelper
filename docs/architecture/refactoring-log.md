@@ -1723,3 +1723,31 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   and browser CTA use one coherent palette. The complete application/extension suite
   passes **1432 tests with 25 skipped**; Ruff, bytecode compilation, and
   `git diff --check` pass.
+
+## Live-theme propagation hardening (2026-08-13)
+
+- A repository-wide audit found the same lifecycle defect beyond the deadline panel:
+  Flet controls retain the concrete color string present when they are constructed,
+  while `apply_theme()` changes only the shared semantic tokens. Controls created or
+  rebuilt after a switch therefore looked correct, but mounted, collapsed, cached,
+  or detached controls could keep the previous palette. This explains why the issue
+  depended on navigation order and appeared intermittent.
+- Added a bounded semantic-color refresh that traverses public control children and
+  style values without entering Flet's private serialization graph. Dashboard,
+  Settings (including collapsed and detached controls), Detail and its dialogs,
+  Calendar month/week states, and Grade overview now remap their previous semantic
+  palette before applying view-specific state colors.
+- Replaced remaining layout-index theme updates with stable references in the
+  dashboard, Calendar, Grade overview, and Detail view. Theme refresh no longer
+  depends on an optional banner or another child preserving a numeric position, and
+  exceptions can no longer silently leave a partially updated surface in these paths.
+- Replaced every remaining UI `#RRGGBB` plus two-digit-alpha concatenation with
+  `Colors.with_opacity()`. Flet 0.86 interprets eight-digit hex as `#AARRGGBB`, so the
+  previous construction could turn selected and hover states into unrelated colors.
+  A source contract test prevents this pattern from returning.
+- Corrected the live-theme regression test to use the real `steel_light` preset; the
+  former nonexistent `paper_light` name silently selected the dark fallback and
+  could not prove a dark-to-light transition. New tests cover nested style remapping,
+  opacity preservation, collapsed Settings controls, and hidden Calendar/Grade
+  states. The complete application/extension suite passes **1436 tests with 25
+  skipped**; Ruff, bytecode compilation, and `git diff --check` pass.

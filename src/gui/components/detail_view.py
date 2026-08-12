@@ -13,7 +13,7 @@ import flet as ft
 import asyncio
 import logging
 from collections import Counter
-from gui.core.theme import C
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
 from gui.components.detail.submission_presenter import (
@@ -90,6 +90,7 @@ class DetailView(ft.Container):
         self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
         self._init_controls()
         self._init_layout(on_close)
+        self._rendered_palette = semantic_palette()
 
     def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
         self._page          = page
@@ -2023,6 +2024,20 @@ class DetailView(ft.Container):
     def update_theme(self):
         """Update colors of all detail view controls dynamically on theme switch."""
         from gui.core.theme import C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [
+                self,
+                *(
+                    value
+                    for value in vars(self).values()
+                    if isinstance(value, ft.BaseControl)
+                ),
+            ],
+            self._rendered_palette,
+            current_palette,
+        )
+        self._rendered_palette = current_palette
         self.bgcolor = C.BG
         
         # Static Text & Control Colors
@@ -2038,6 +2053,16 @@ class DetailView(ft.Container):
         self._upload_progress.color = C.SAFE
         self._upload_progress.bgcolor = C.BORDER
         self._upload_status.color = C.TEXT_SECONDARY
+        self._submission_statement.active_color = C.ACCENT
+        self._submission_statement.check_color = C.ON_ACCENT
+        self._submission_statement.label_text_style = ft.TextStyle(
+            color=C.TEXT_PRIMARY
+        )
+        self._submission_policy_text.color = (
+            C.WARNING
+            if self._submission_policy and self._submission_policy.edit_reason
+            else C.TEXT_SECONDARY
+        )
 
         # Error Banner
         try:
@@ -2048,6 +2073,16 @@ class DetailView(ft.Container):
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        # Replace confirmation dialog
+        self._replace_confirm_dialog.title.color = C.WARNING
+        self._replace_confirm_dialog.bgcolor = C.SURFACE
+        self._replace_confirm_dialog.content.color = C.TEXT_PRIMARY
+        self._replace_confirm_dialog.actions[0].style = ft.ButtonStyle(
+            color=C.TEXT_SECONDARY
+        )
+        self._replace_confirm_dialog.actions[1].bgcolor = C.WARNING
+        self._replace_confirm_dialog.actions[1].color = C.ON_WARNING
 
         # Text Fields & Dropdowns (Edit metadata dialog)
         _edit_fields = [

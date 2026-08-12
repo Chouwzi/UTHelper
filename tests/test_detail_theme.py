@@ -15,7 +15,7 @@ def test_detail_deadline_panel_refreshes_from_dark_to_light_theme():
         view = DetailView(page, lambda: None)
         assert view._info_box.bgcolor == "#141B2D"
 
-        apply_theme("paper_light")
+        apply_theme("steel_light")
         view.update_theme()
 
         assert view.bgcolor == C.BG
@@ -37,7 +37,7 @@ def test_detail_theme_refresh_does_not_depend_on_content_tree_indexes():
         view = DetailView(page, lambda: None)
         view.content.controls.insert(2, ft.Container())
 
-        apply_theme("paper_light")
+        apply_theme("steel_light")
         view.update_theme()
 
         assert view._info_box.bgcolor == C.SURFACE

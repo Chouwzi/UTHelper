@@ -14,7 +14,7 @@ if _project_root not in sys.path:
 import flet as ft
 import logging
 from typing import List, Dict, Any, Optional, Callable
-from gui.core.theme import C
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,11 @@ class GradeOverviewView(ft.Container):
         self._loading = ft.ProgressRing(
             width=24, height=24, stroke_width=3, color=C.ACCENT,
         )
+        self._loading_text = ft.Text(
+            "Đang tải điểm...", size=13, color=C.TEXT_SECONDARY
+        )
         self._loading_row = ft.Row(
-            controls=[self._loading, ft.Text("Đang tải điểm...", size=13, color=C.TEXT_SECONDARY)],
+            controls=[self._loading, self._loading_text],
             alignment=ft.MainAxisAlignment.CENTER,
             visible=False,
         )
@@ -74,10 +77,11 @@ class GradeOverviewView(ft.Container):
         )
 
         # Main content
+        self._header_divider = ft.Divider(height=1, color=C.BORDER)
         self.content = ft.Column(
             controls=[
                 self._header,
-                ft.Divider(height=1, color=C.BORDER),
+                self._header_divider,
                 self._loading_row,
                 self._empty_state,
                 self._grade_list,
@@ -94,6 +98,7 @@ class GradeOverviewView(ft.Container):
         self.opacity = 0.0
         self.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
         self.animate_opacity = ft.Animation(200)
+        self._rendered_palette = semantic_palette()
 
     def show_loading(self):
         """Show loading state."""
@@ -211,26 +216,22 @@ class GradeOverviewView(ft.Container):
     def update_theme(self):
         """Update colors of all grade overview controls dynamically on theme switch."""
         from gui.core.theme import C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [self], self._rendered_palette, current_palette
+        )
+        self._rendered_palette = current_palette
         self.bgcolor = C.BG
         
         # Header title and close
         self._title.color = C.TEXT_PRIMARY
         self._close_btn.icon_color = C.TEXT_SECONDARY
         
-        # Divider color in content
-        try:
-            self.content.controls[1].color = C.BORDER
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        self._header_divider.color = C.BORDER
             
         # Loading controls
         self._loading.color = C.ACCENT
-        try:
-            self._loading_row.controls[1].color = C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        self._loading_text.color = C.TEXT_SECONDARY
             
         # Empty text
         self._empty_text.color = C.TEXT_SECONDARY

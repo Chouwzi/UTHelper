@@ -14,10 +14,10 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
     error_banner = ft.Container(
         content=ft.Row(controls=[_error_icon, _error_msg], spacing=8,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        bgcolor=C.CRITICAL + "15",
+        bgcolor=ft.Colors.with_opacity(0.08, C.CRITICAL),
         padding=ft.Padding.symmetric(horizontal=12, vertical=8),
         border_radius=8,
-        border=ft.Border.all(1, C.CRITICAL + "40"),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.25, C.CRITICAL)),
         visible=False,
     )
 
