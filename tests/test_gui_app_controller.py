@@ -28,6 +28,35 @@ def test_render_cards_refreshes_current_filters():
     assert calls == ["refresh"]
 
 
+def test_dashboard_filter_models_share_counts_and_short_trigger_labels():
+    urgency = AppController._urgency_filter_options(
+        {"all": 12, "critical": 1, "warning": 2, "safe": 9, "overdue": 0}
+    )
+    activity_type = AppController._type_filter_options(
+        {"all": 12, "quiz": 4, "assignment": 8}
+    )
+    courses = AppController._course_filter_options(
+        {"all": 12, "Course B": 5, "Course A": 7}
+    )
+
+    assert urgency[0].trigger_label == "Mức độ"
+    assert urgency[1].count == 1
+    assert activity_type[0].trigger_label == "Tất cả"
+    assert activity_type[1].count == 4
+    assert courses[0].trigger_label == "Môn học"
+    assert [option.key for option in courses] == ["all", "Course A", "Course B"]
+
+
+def test_every_dashboard_filter_option_has_an_icon_for_fast_scanning():
+    option_groups = [
+        AppController._urgency_filter_options(),
+        AppController._type_filter_options(),
+        AppController._course_filter_options({"all": 0, "Course": 1}),
+    ]
+
+    assert all(option.icon is not None for group in option_groups for option in group)
+
+
 class _FakePage:
     def __init__(self):
         self.update_count = 0

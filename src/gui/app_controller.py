@@ -50,6 +50,10 @@ from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.components.today_schedule_panel import TodaySchedulePanel
+from gui.components.adaptive_filter_menu import (
+    AdaptiveFilterMenu,
+    FilterMenuOption,
+)
 from gui.view_manager import ViewManager
 from gui.controllers.startup_visibility import (
     is_autostart_launch,
@@ -577,42 +581,35 @@ class AppController:
         self.footer_overdue  = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.loading_bar     = ft.ProgressBar(color=C.ACCENT, bgcolor=C.BORDER, visible=False)
 
-        _URGENCY_CFG = [
-            ("all",      "Mức độ",   C.TEXT_PRIMARY),
-            ("critical", "Cấp bách", C.CRITICAL),
-            ("warning",  "Sắp tới",  C.WARNING),
-            ("safe",     "An toàn",  C.SAFE),
-            ("overdue",  "Quá hạn",  C.CRITICAL),
-        ]
-        from gui.core.theme import _TYPE_COLORS
-        _TYPE_CFG = [
-            ("all",        "Tất cả",         C.TEXT_PRIMARY),
-            ("quiz",       "Quiz",         _TYPE_COLORS["quiz"]),
-            ("assignment", "Bài tập",      _TYPE_COLORS["assignment"]),
-            ("attendance", "Điểm danh",    _TYPE_COLORS["attendance"]),
-            ("open",       "Sắp mở",       _TYPE_COLORS["open"]),
-            ("other",      "Sự kiện khác", C.TEXT_SECONDARY),
-        ]
-
-        self.urgency_popup, self._update_urgency_counts = self._make_filter_popup(
-            _URGENCY_CFG, lambda key: self._safe_run_task(self._set_urgency, key)
+        self.urgency_filter_menu = AdaptiveFilterMenu(
+            page=self.page,
+            title="Mức độ",
+            options=self._urgency_filter_options(),
+            selected_key=self.active_urgency,
+            on_select=lambda key: self._safe_run_task(self._set_urgency, key),
+            mobile=platform_utils.IS_MOBILE,
+            trigger_width=88,
+            popup_width=224,
         )
-        self.type_popup, self._update_type_counts = self._make_filter_popup(
-            _TYPE_CFG, lambda key: self._safe_run_task(self._set_type, key)
+        self.type_filter_menu = AdaptiveFilterMenu(
+            page=self.page,
+            title="Loại hoạt động",
+            options=self._type_filter_options(),
+            selected_key=self.active_type,
+            on_select=lambda key: self._safe_run_task(self._set_type, key),
+            mobile=platform_utils.IS_MOBILE,
+            trigger_width=94,
+            popup_width=232,
         )
-
-        self.course_btn_label = ft.Text("Môn học", size=12, color=C.TEXT_PRIMARY, weight=ft.FontWeight.W_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
-        self.course_popup = ft.PopupMenuButton(
-            content=ft.Container(
-                content=ft.Row([
-                    ft.Container(content=self.course_btn_label, width=50, height=20, alignment=ft.Alignment(-1, 0)),
-                    ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)
-                ], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=8, vertical=8),
-            ),
-            items=[],
-            menu_position=ft.PopupMenuPosition.UNDER,
-            shape=ft.RoundedRectangleBorder(radius=10),
+        self.course_filter_menu = AdaptiveFilterMenu(
+            page=self.page,
+            title="Môn học",
+            options=self._course_filter_options({"all": 0}),
+            selected_key=self.active_course,
+            on_select=lambda key: self._safe_run_task(self._set_course, key),
+            mobile=platform_utils.IS_MOBILE,
+            trigger_width=112,
+            popup_width=276,
         )
 
         self._overdue_cb = ft.Checkbox(
@@ -769,7 +766,7 @@ class AppController:
                 controls=[
                     ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
                     ft.Container(
-                        content=ft.Row(controls=[self.urgency_popup, self.type_popup, self.course_popup, self._overdue_cb], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, scroll=ft.ScrollMode.AUTO),
+                        content=ft.Row(controls=[self.urgency_filter_menu.control, self.type_filter_menu.control, self.course_filter_menu.control, self._overdue_cb], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, scroll=ft.ScrollMode.AUTO),
                         padding=ft.Padding.only(left=16, right=12),
                     ),
                 ], spacing=4,
@@ -888,62 +885,86 @@ class AppController:
             self._skeleton_visible = False
             self.cards_column.controls.clear()
 
-    def _make_filter_popup(self, cfg, on_select_cb):
-        btn_label = ft.Text(cfg[0][1], size=12, color=cfg[0][2], weight=ft.FontWeight.W_500)
-        count_refs = {}
-        check_refs = {}
-
-        def _on_item(key: str, label: str, config_color: str):
-            btn_label.value = label
-            from gui.core.theme import C, _TYPE_COLORS
-            if key == "all":
-                resolved_color = C.TEXT_PRIMARY
-            elif key in ("critical", "overdue"):
-                resolved_color = C.CRITICAL
-            elif key == "warning":
-                resolved_color = C.WARNING
-            elif key == "safe":
-                resolved_color = C.SAFE
-            elif key in _TYPE_COLORS:
-                resolved_color = _TYPE_COLORS[key]
-            elif key == "other":
-                resolved_color = C.TEXT_SECONDARY
-            else:
-                resolved_color = C.TEXT_PRIMARY
-            btn_label.color = resolved_color
-            btn_label.update()
-            for k, icon in check_refs.items():
-                icon.visible = (k == key)
-            on_select_cb(key)
-
-        items = []
-        for key, label, color in cfg:
-            cnt_ref   = ft.Text("", size=10, color=color)
-            check_ref = ft.Icon(ft.Icons.CHECK, size=12, color=color, visible=(key == "all"))
-            count_refs[key] = cnt_ref
-            check_refs[key] = check_ref
-            if key == "all":
-                item_content = ft.Row([ft.Text(label, size=12, color=C.TEXT_SECONDARY, expand=True), check_ref], spacing=6, tight=True)
-            else:
-                item_content = ft.Row([ft.Text(label, size=12, color=color, weight=ft.FontWeight.W_600), cnt_ref, ft.Container(expand=True), check_ref], spacing=4, tight=True)
-            items.append(ft.PopupMenuItem(content=item_content, on_click=lambda e, k=key, l=label, c=color: _on_item(k, l, c)))
-
-        popup = ft.PopupMenuButton(
-            content=ft.Container(
-                content=ft.Row([btn_label, ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+    @staticmethod
+    def _urgency_filter_options(counts: dict | None = None):
+        counts = counts or {}
+        return [
+            FilterMenuOption(
+                "all", "Tất cả mức độ", C.TEXT_SECONDARY,
+                count=counts.get("all", 0), icon=ft.Icons.TUNE_ROUNDED,
+                trigger_label="Mức độ",
             ),
-            items=items,
-            menu_position=ft.PopupMenuPosition.UNDER,
-            shape=ft.RoundedRectangleBorder(radius=10),
+            FilterMenuOption(
+                "critical", "Cấp bách", C.CRITICAL,
+                count=counts.get("critical", 0), icon=ft.Icons.PRIORITY_HIGH_ROUNDED,
+            ),
+            FilterMenuOption(
+                "warning", "Sắp tới", C.WARNING,
+                count=counts.get("warning", 0), icon=ft.Icons.SCHEDULE_ROUNDED,
+            ),
+            FilterMenuOption(
+                "safe", "An toàn", C.SAFE,
+                count=counts.get("safe", 0), icon=ft.Icons.SHIELD_OUTLINED,
+            ),
+            FilterMenuOption(
+                "overdue", "Quá hạn", C.CRITICAL,
+                count=counts.get("overdue", 0), icon=ft.Icons.HISTORY_ROUNDED,
+            ),
+        ]
+
+    @staticmethod
+    def _type_filter_options(counts: dict | None = None):
+        from gui.core.theme import _TYPE_COLORS
+
+        counts = counts or {}
+        return [
+            FilterMenuOption(
+                "all", "Tất cả hoạt động", C.TEXT_SECONDARY,
+                count=counts.get("all", 0), icon=ft.Icons.CATEGORY_OUTLINED,
+                trigger_label="Tất cả",
+            ),
+            FilterMenuOption(
+                "quiz", "Quiz", _TYPE_COLORS["quiz"],
+                count=counts.get("quiz", 0), icon=ft.Icons.QUIZ_OUTLINED,
+            ),
+            FilterMenuOption(
+                "assignment", "Bài tập", _TYPE_COLORS["assignment"],
+                count=counts.get("assignment", 0), icon=ft.Icons.ASSIGNMENT_OUTLINED,
+            ),
+            FilterMenuOption(
+                "attendance", "Điểm danh", _TYPE_COLORS["attendance"],
+                count=counts.get("attendance", 0), icon=ft.Icons.FACT_CHECK_OUTLINED,
+            ),
+            FilterMenuOption(
+                "open", "Sắp mở", _TYPE_COLORS["open"],
+                count=counts.get("open", 0), icon=ft.Icons.LOCK_CLOCK_OUTLINED,
+            ),
+            FilterMenuOption(
+                "other", "Sự kiện khác", C.TEXT_SECONDARY,
+                count=counts.get("other", 0), icon=ft.Icons.MORE_HORIZ_ROUNDED,
+            ),
+        ]
+
+    @staticmethod
+    def _course_filter_options(counts: dict):
+        options = [
+            FilterMenuOption(
+                "all", "Tất cả môn học", C.TEXT_SECONDARY,
+                count=counts.get("all", 0), icon=ft.Icons.SCHOOL_OUTLINED,
+                trigger_label="Môn học",
+            )
+        ]
+        options.extend(
+            FilterMenuOption(
+                course,
+                course,
+                C.ACCENT,
+                count=counts.get(course, 0),
+                icon=ft.Icons.BOOK_OUTLINED,
+            )
+            for course in sorted(key for key in counts if key != "all")
         )
-
-        def update_counts(counts: dict):
-            for key, ref in count_refs.items():
-                n = counts.get(key, 0)
-                ref.value = f"· {n}" if n > 0 else ""
-
-        return popup, update_counts
+        return options
 
     def _refresh_ui(self):
         # Snapshot all_data under lock for thread safety
@@ -960,6 +981,20 @@ class AppController:
             self.active_search,
             settings.INCLUDE_PAST_DUE
         )
+        if (
+            self.active_course != "all"
+            and self.active_course not in counts["course"]
+        ):
+            self.active_course = "all"
+            self.course_filter_menu.set_selected("all")
+            filtered_items, counts = FilterService.filter_and_count(
+                base,
+                self.active_urgency,
+                self.active_type,
+                self.active_course,
+                self.active_search,
+                settings.INCLUDE_PAST_DUE,
+            )
 
         n_critical = counts["urgency"].get("critical", 0)
         n_warning = counts["urgency"].get("warning", 0)
@@ -969,26 +1004,9 @@ class AppController:
         course_counts = counts["course"]
         type_counts = counts["type"]
 
-        def _on_course_select(e, c_name):
-            self._safe_run_task(self._set_course, c_name)
-
-        c_items = [ft.PopupMenuItem(
-            content=ft.Row([ft.Text("Tất cả môn học", size=12, color=C.TEXT_SECONDARY, expand=True), ft.Icon(ft.Icons.CHECK, size=12, color=C.TEXT_PRIMARY, visible=(self.active_course == "all"))], spacing=6, tight=True),
-            on_click=lambda e: _on_course_select(e, "all")
-        )]
-        
-        for c in sorted([k for k in course_counts.keys() if k != "all"]):
-            is_active = (self.active_course == c)
-            cnt = course_counts.get(c, 0)
-            c_items.append(ft.PopupMenuItem(
-                content=ft.Row([
-                    ft.Text(c, size=12, color=C.TEXT_PRIMARY, expand=True),
-                    ft.Text(f"· {cnt}", size=11, color=C.TEXT_SECONDARY),
-                    ft.Icon(ft.Icons.CHECK, size=12, color=C.TEXT_PRIMARY, visible=is_active)
-                ], spacing=6, tight=True),
-                on_click=lambda e, name=c: _on_course_select(e, name)
-            ))
-        self.course_popup.items = c_items
+        self.course_filter_menu.set_options(
+            self._course_filter_options(course_counts)
+        )
         # UX-3: Natural language order - "N label" instead of "Label · N"
         self.footer_critical.value = f"{n_critical} khẩn cấp" if n_critical else "0 khẩn cấp"
         self.footer_critical.color = C.CRITICAL if n_critical else C.BORDER
@@ -999,8 +1017,12 @@ class AppController:
         self.footer_overdue.value  = f"{n_overdue} quá hạn" if n_overdue else "0 quá hạn"
         self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
 
-        self._update_urgency_counts(counts["urgency"])
-        self._update_type_counts(type_counts)
+        self.urgency_filter_menu.set_options(
+            self._urgency_filter_options(counts["urgency"])
+        )
+        self.type_filter_menu.set_options(
+            self._type_filter_options(type_counts)
+        )
 
         # P5: Dynamic overdue checkbox label with count
         if n_overdue > 0:
@@ -1146,6 +1168,7 @@ class AppController:
 
     async def _set_urgency(self, key: str):
         self.active_urgency = key
+        self.urgency_filter_menu.set_selected(key)
         # Sync overdue checkbox with urgency popup selection
         if key == "overdue":
             self._overdue_cb.value = True
@@ -1157,12 +1180,12 @@ class AppController:
 
     async def _set_type(self, key: str):
         self.active_type = key
+        self.type_filter_menu.set_selected(key)
         self._refresh_ui()
 
     async def _set_course(self, course_name: str):
         self.active_course = course_name
-        self.course_btn_label.value = "Môn học" if course_name == "all" else course_name
-        self.course_btn_label.update()
+        self.course_filter_menu.set_selected(course_name)
         self._refresh_ui()
 
     def _apply_settings_filter(self, data: list) -> list:
@@ -1726,99 +1749,23 @@ class AppController:
         self.search_field.focused_border_color = _C.ACCENT
         self.search_field.color = _C.TEXT_PRIMARY
 
-        # Filter popups and checkbuttons
-        try:
-            self.urgency_popup.content.bgcolor = _C.SURFACE
-            self.urgency_popup.content.border = ft.Border.all(1, _C.BORDER)
-            self.urgency_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
-
-            urgency_colors = {
-                "all": _C.TEXT_PRIMARY,
-                "critical": _C.CRITICAL,
-                "warning": _C.WARNING,
-                "safe": _C.SAFE,
-                "overdue": _C.CRITICAL
-            }
-            self.urgency_popup.content.content.controls[0].color = urgency_colors.get(self.active_urgency, _C.TEXT_PRIMARY)
-
-            # Urgency Popup Items
-            self.urgency_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
-            self.urgency_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
-
-            # critical
-            self.urgency_popup.items[1].content.controls[0].color = _C.CRITICAL
-            self.urgency_popup.items[1].content.controls[1].color = _C.CRITICAL
-            self.urgency_popup.items[1].content.controls[3].color = _C.CRITICAL
-
-            # warning
-            self.urgency_popup.items[2].content.controls[0].color = _C.WARNING
-            self.urgency_popup.items[2].content.controls[1].color = _C.WARNING
-            self.urgency_popup.items[2].content.controls[3].color = _C.WARNING
-
-            # safe
-            self.urgency_popup.items[3].content.controls[0].color = _C.SAFE
-            self.urgency_popup.items[3].content.controls[1].color = _C.SAFE
-            self.urgency_popup.items[3].content.controls[3].color = _C.SAFE
-
-            # overdue
-            self.urgency_popup.items[4].content.controls[0].color = _C.CRITICAL
-            self.urgency_popup.items[4].content.controls[1].color = _C.CRITICAL
-            self.urgency_popup.items[4].content.controls[3].color = _C.CRITICAL
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-        try:
-            from gui.core.theme import _TYPE_COLORS
-            self.type_popup.content.bgcolor = _C.SURFACE
-            self.type_popup.content.border = ft.Border.all(1, _C.BORDER)
-            self.type_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
-
-            type_colors = {
-                "all": _C.TEXT_PRIMARY,
-                "quiz": _TYPE_COLORS["quiz"],
-                "assignment": _TYPE_COLORS["assignment"],
-                "attendance": _TYPE_COLORS["attendance"],
-                "open": _TYPE_COLORS["open"],
-                "other": _C.TEXT_SECONDARY
-            }
-            self.type_popup.content.content.controls[0].color = type_colors.get(self.active_type, _C.TEXT_PRIMARY)
-
-            # Type Popup Items
-            self.type_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
-            self.type_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
-
-            self.type_popup.items[1].content.controls[0].color = _TYPE_COLORS["quiz"]
-            self.type_popup.items[1].content.controls[1].color = _TYPE_COLORS["quiz"]
-            self.type_popup.items[1].content.controls[3].color = _TYPE_COLORS["quiz"]
-
-            self.type_popup.items[2].content.controls[0].color = _TYPE_COLORS["assignment"]
-            self.type_popup.items[2].content.controls[1].color = _TYPE_COLORS["assignment"]
-            self.type_popup.items[2].content.controls[3].color = _TYPE_COLORS["assignment"]
-
-            self.type_popup.items[3].content.controls[0].color = _TYPE_COLORS["attendance"]
-            self.type_popup.items[3].content.controls[1].color = _TYPE_COLORS["attendance"]
-            self.type_popup.items[3].content.controls[3].color = _TYPE_COLORS["attendance"]
-
-            self.type_popup.items[4].content.controls[0].color = _TYPE_COLORS["open"]
-            self.type_popup.items[4].content.controls[1].color = _TYPE_COLORS["open"]
-            self.type_popup.items[4].content.controls[3].color = _TYPE_COLORS["open"]
-
-            self.type_popup.items[5].content.controls[0].color = _C.TEXT_SECONDARY
-            self.type_popup.items[5].content.controls[1].color = _C.TEXT_SECONDARY
-            self.type_popup.items[5].content.controls[3].color = _C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-        try:
-            self.course_btn_label.color = _C.TEXT_PRIMARY
-            self.course_popup.content.bgcolor = _C.SURFACE
-            self.course_popup.content.border = ft.Border.all(1, _C.BORDER)
-            self.course_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        # Adaptive filters rebuild from their option models instead of relying
+        # on brittle control-tree indexes.
+        self.urgency_filter_menu.refresh_theme(
+            self._urgency_filter_options(
+                {option.key: option.count or 0 for option in self.urgency_filter_menu.options}
+            )
+        )
+        self.type_filter_menu.refresh_theme(
+            self._type_filter_options(
+                {option.key: option.count or 0 for option in self.type_filter_menu.options}
+            )
+        )
+        self.course_filter_menu.refresh_theme(
+            self._course_filter_options(
+                {option.key: option.count or 0 for option in self.course_filter_menu.options}
+            )
+        )
 
         try:
             self._overdue_cb.label_style.color = _C.TEXT_SECONDARY

@@ -1515,3 +1515,28 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `git diff --check` pass. The full shell baseline retains seven unrelated
   failures because the optional iOS bridge and diagnostics SDK are not
   installed.
+
+## Adaptive dashboard filter menus (2026-08-12)
+
+- Replaced three separately assembled dashboard popup menus with one reusable
+  `AdaptiveFilterMenu` and immutable `FilterMenuOption` model. Urgency,
+  activity-type, and course filters now share selection, count, ellipsis,
+  accessibility, motion, and theme-refresh behavior while filtering policy
+  remains in `AppController`/`FilterService`.
+- Windows keeps an anchored `PopupMenuButton` with checked 48-pixel rows,
+  bounded geometry, hover/ink feedback, explicit semantics, a 180 ms native
+  open transition, and an animated disclosure arrow. Android/iOS render the
+  same model in a safe-area, draggable, scrollable `BottomSheet` with 52-pixel
+  list rows and selected-row tinting.
+- Dynamic course options fall back to `all` if a course disappears. Structural
+  option signatures skip unchanged rebuilds; a 21-option benchmark measured
+  about 0.002 ms for an unchanged update, 1.13 ms for a changed desktop update,
+  and 0.021 ms for a changed mobile-model update on the Windows test host.
+- The design and research decision log is maintained in
+  `docs/archive/designs/2026-08-12-adaptive-filter-menu-design.md`. Focused
+  component/controller/filter/race coverage passes **112 tests**; the
+  available-environment suite passes **1336 tests with 25 skipped**. Desktop
+  popup and mobile-sheet control trees both serialize through a real Flet
+  session. Repository Ruff, bytecode compilation, UI protocol budgets, and
+  `git diff --check` pass. The full shell baseline retains the same seven
+  unrelated optional iOS bridge/diagnostics SDK failures.
