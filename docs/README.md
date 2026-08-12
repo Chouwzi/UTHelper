@@ -16,6 +16,8 @@ records. Start here instead of searching by filename.
   GitHub ruleset enforcement.
 - [Theme system](design/theme-system.md) — semantic color contract, dark-theme
   design, accessibility checks, and runtime refresh rules.
+- [UI platform preview](guides/ui-platform-preview.md) — safely render Android,
+  iOS, or desktop presentation on another runtime.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.

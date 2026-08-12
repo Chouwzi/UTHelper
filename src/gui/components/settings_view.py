@@ -14,7 +14,7 @@ from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
 from config import settings
 from config import save_settings
 from core.version import APP_VERSION
-import platform_utils as _pu  # use _pu.IS_MOBILE for live platform detection
+import platform_utils as _pu  # live runtime capability and UI-profile detection
 from gui.components.color_picker import open_color_picker
 
 # Import settings section helpers
@@ -1048,7 +1048,14 @@ class SettingsView(ft.Container):
         """Show device/platform info for debugging."""
         import sys
         import platform as pf
-        from platform_utils import IS_ANDROID, IS_IOS, IS_MOBILE, IS_WINDOWS
+        from platform_utils import (
+            IS_ANDROID,
+            IS_IOS,
+            IS_MOBILE,
+            IS_WINDOWS,
+            UI_PLATFORM,
+            UI_PLATFORM_OVERRIDE,
+        )
         try:
             import flet as ft_info
             flet_ver = getattr(ft_info, '__version__', 'unknown')
@@ -1061,6 +1068,7 @@ class SettingsView(ft.Container):
             f"Platform: {pf.system()} {pf.release()} ({pf.machine()})",
             f"Flet: {flet_ver}",
             f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
+            f"UI profile: {UI_PLATFORM} (override={UI_PLATFORM_OVERRIDE or 'none'})",
             f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
             f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
             f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.CHECK_INTERVAL_MINUTES}m)",

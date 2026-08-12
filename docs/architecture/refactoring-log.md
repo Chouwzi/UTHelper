@@ -1664,3 +1664,23 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - The corrected three-trigger row was captured successfully through a real Flet web
   renderer at 420 pixels. The complete application/extension suite passes **1421
   tests with 25 skipped**; Ruff, bytecode compilation, and `git diff --check` pass.
+
+## Cross-platform UI profile override (2026-08-12)
+
+- Added `UTHELPER_UI_PLATFORM=android|ios|desktop` as a presentation-only developer
+  override. Runtime `IS_*` flags remain authoritative for native capabilities;
+  separate `UI_*` flags select SafeArea, adaptive filter menus, terms sizing, and
+  mobile/desktop Settings composition.
+- `detect_platform()` now uses Flet's page platform only as the default presentation
+  profile while keeping Python-host runtime capabilities immutable. Invalid override
+  values are ignored with a bounded log
+  message that does not echo environment contents. Device diagnostics display both
+  runtime flags and the effective UI profile.
+- The usage and safety boundary are maintained in
+  `docs/guides/ui-platform-preview.md`. Android/iOS UI on Windows keeps Windows tray,
+  update, notification, window, and background capabilities; native behavior still
+  requires a physical device or emulator.
+- A full application smoke at a 390×844 Android viewport rendered the mobile profile
+  through the real entrypoint while retaining the Windows runtime. The complete
+  application/extension suite passes **1427 tests with 25 skipped**; Ruff, bytecode
+  compilation, and `git diff --check` pass.

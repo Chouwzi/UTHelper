@@ -472,7 +472,7 @@ class AppController:
         self.window_activator = WindowActivator(self.page)
         # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
         detect_platform(self.page)
-        # Đọc lại các cờ sau khi phát hiện lúc runtime (chúng có thể đã thay đổi)
+        # Read the immutable runtime capabilities after resolving the UI profile.
         import platform_utils
         _is_mobile = platform_utils.IS_MOBILE
         _is_windows = platform_utils.IS_WINDOWS
@@ -659,7 +659,7 @@ class AppController:
             options=self._urgency_filter_options(),
             selected_key=self.active_urgency,
             on_select=lambda key: self._safe_run_task(self._set_urgency, key),
-            mobile=platform_utils.IS_MOBILE,
+            mobile=platform_utils.UI_IS_MOBILE,
             trigger_width=88,
             popup_width=224,
         )
@@ -669,7 +669,7 @@ class AppController:
             options=self._type_filter_options(),
             selected_key=self.active_type,
             on_select=lambda key: self._safe_run_task(self._set_type, key),
-            mobile=platform_utils.IS_MOBILE,
+            mobile=platform_utils.UI_IS_MOBILE,
             trigger_width=104,
             popup_width=232,
         )
@@ -679,7 +679,7 @@ class AppController:
             options=self._course_filter_options({"all": 0}),
             selected_key=self.active_course,
             on_select=lambda key: self._safe_run_task(self._set_course, key),
-            mobile=platform_utils.IS_MOBILE,
+            mobile=platform_utils.UI_IS_MOBILE,
             trigger_width=124,
             popup_width=340,
             option_max_lines=2,
@@ -926,7 +926,7 @@ class AppController:
         )
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
-        if platform_utils.IS_MOBILE:
+        if platform_utils.UI_IS_MOBILE:
             self.page.add(ft.SafeArea(content=main_stack, expand=True))
         else:
             self.page.add(main_stack)

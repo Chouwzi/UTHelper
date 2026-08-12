@@ -28,7 +28,7 @@ def build_display_section(view) -> ft.Container:
     """Xây dựng nhóm các tùy chọn hiển thị danh sách bài tập."""
     controls = [view._sw_submitted, view._sw_graded]
     # Chỉ bổ sung tùy chọn "Luôn ở trên cùng" nếu đang chạy trên phiên bản Desktop
-    if not _pu.IS_MOBILE:
+    if not _pu.UI_IS_MOBILE:
         controls.append(view._sw_always_on_top)
     
     return view._build_setting_group(

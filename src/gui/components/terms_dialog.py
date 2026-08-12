@@ -69,7 +69,7 @@ def build_terms_dialog(page: ft.Page) -> ft.AlertDialog:
         title=ft.Text("Điều khoản sử dụng & quyền riêng tư"),
         content=ft.Container(
             content=content,
-            width=None if platform_utils.IS_MOBILE else 520,
+            width=None if platform_utils.UI_IS_MOBILE else 520,
             height=460,
         ),
         actions=[

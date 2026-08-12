@@ -78,7 +78,7 @@ def init_system_controls(view):
 
 def build_system_section(view) -> ft.Container:
     """Xây dựng Container nhóm cấu hình hệ thống phù hợp với từng nền tảng Desktop/Mobile."""
-    if not _pu.IS_MOBILE:
+    if not _pu.UI_IS_MOBILE:
         controls = [
             view._sw_start_with_windows,
             view._sw_start_minimized,
