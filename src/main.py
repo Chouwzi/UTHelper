@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import asyncio
+import inspect
 from pathlib import Path
 
 from diagnostics.logging_setup import (
@@ -321,16 +322,18 @@ def main() -> int:
             logger.info("GUI module imported OK")
             
             # Run the app
-            app_main(
-                page,
-                activation_broker=result.broker if result else None,
-                force_visible=result.force_visible if result else False,
-                error_reporter=(
+            app_options = {
+                "activation_broker": result.broker if result else None,
+                "force_visible": result.force_visible if result else False,
+                "error_reporter": (
                     (lambda exc: runtime.record_exception(exc, AppPhase.GUI))
                     if runtime is not None
                     else None
                 ),
-            )
+            }
+            if "diagnostic_recorder" in inspect.signature(app_main).parameters:
+                app_options["diagnostic_recorder"] = runtime
+            app_main(page, **app_options)
             logger.info("App started successfully")
             
         except Exception as exc:

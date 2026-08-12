@@ -97,8 +97,8 @@ class TestSettingsDefaults:
         s = Settings()
         assert s.MINIMIZE_TO_TRAY is True
 
-    def test_crash_consent_defaults_to_not_asked(self):
-        assert Settings().CRASH_REPORTING_CONSENT == "not_asked"
+    def test_crash_diagnostics_default_to_enabled(self):
+        assert Settings().CRASH_REPORTING_CONSENT == "enabled"
 
 
 class TestSettingsSecretExclusion:
@@ -181,7 +181,7 @@ class TestSettingsSerialization:
     def test_legacy_settings_without_crash_consent_migrate_to_not_asked(self):
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 1})
 
-        assert migrated["CRASH_REPORTING_CONSENT"] == "not_asked"
+        assert migrated["CRASH_REPORTING_CONSENT"] == "enabled"
 
     def test_schema_two_settings_enable_trusted_update_checks_by_default(self):
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})

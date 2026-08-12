@@ -5,7 +5,8 @@ records. Start here instead of searching by filename.
 
 ## Maintained documentation
 
-- [Privacy contract](PRIVACY.md) — diagnostic data, consent, and retention.
+- [Terms of use](TERMS.md) — acceptable use, dependencies, and limitations.
+- [Privacy contract](PRIVACY.md) — diagnostic data, opt-out, and retention.
 - [Moodle Web Services](api/moodle-web-services.md) — Moodle endpoints and verified
   assignment workflow semantics.
 - [UTH Portal API](api/portal.md) — redacted reverse-engineered Portal contracts.

@@ -1578,3 +1578,29 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `git diff --check` pass. The full shell baseline retains one environment
   failure for the optional iOS bridge; both the SDK transport tests and the
   real Sentry probe now pass.
+
+## Filter legibility, Sentry contexts, and Settings policies (2026-08-12)
+
+- Fixed the adaptive-filter trigger's collapsed flex layout. Desktop menus stay
+  anchored below their buttons, use a distinct background/outline/elevation,
+  and expose full labels through tooltips. The reusable course variant allows
+  two-line rows and a wider popup; mobile uses the same two-line label policy.
+- Expanded the diagnostics allow-list with bounded OS build, device class, CPU
+  count, RAM class, and display class. The Sentry event now uses standard OS,
+  runtime, app, and device contexts while continuing to reconstruct the event
+  from scratch without user, request, URL, credential, Moodle/Portal, IP, raw
+  log, breadcrumb, replay, or stable-device fields.
+- Empty frame collections now omit `stacktrace`, fixing Sentry's invalid empty
+  `exception.values.0.stacktrace.frames` processing error. Diagnostics defaults
+  to enabled for new and legacy-undecided settings; an explicit disabled choice
+  remains authoritative and clears the owned queue through the existing live
+  consent boundary.
+- Removed the first-run crash-consent popup. Privacy Settings now contains only
+  the enabled/disabled diagnostic choice plus a dedicated “Điều khoản sử dụng &
+  quyền riêng tư” entry that opens a scrollable notice. Login remains unchanged
+  and has no policy checkbox.
+- Added maintained Terms and updated the public privacy contract, README, docs
+  index, design decision log, and governance coverage. The available-environment
+  suite passes **1377 tests with 25 skipped**; focused post-theme UI coverage
+  passes **108 tests**. Repository Ruff, bytecode compilation, and
+  `git diff --check` pass.

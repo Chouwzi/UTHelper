@@ -94,11 +94,12 @@ def test_repository_documentation_is_indexed_and_separates_history():
     docs = ROOT / "docs"
     top_level_files = {path.name for path in docs.iterdir() if path.is_file()}
 
-    assert top_level_files == {"PRIVACY.md", "README.md"}
+    assert top_level_files == {"PRIVACY.md", "README.md", "TERMS.md"}
     assert not (docs / "superpowers").exists()
     assert not (ROOT / "REFAC_KNOWLEDGE.md").exists()
 
     maintained = (
+        "docs/TERMS.md",
         "docs/api/moodle-web-services.md",
         "docs/api/portal.md",
         "docs/guides/windows-packaging.md",

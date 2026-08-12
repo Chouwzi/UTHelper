@@ -2,17 +2,18 @@ import flet as ft
 
 from config import settings
 from gui.core.theme import C
+from gui.components.terms_dialog import show_terms_dialog
 
 
 def init_privacy_controls(view) -> None:
     """Create the cross-platform crash-reporting consent control."""
+    current = getattr(settings, "CRASH_REPORTING_CONSENT", "enabled")
     view._dd_crash_reporting_consent = ft.Dropdown(
-        value=getattr(settings, "CRASH_REPORTING_CONSENT", "not_asked"),
+        value="disabled" if current == "disabled" else "enabled",
         label="Gửi chẩn đoán sự cố",
         options=[
-            ft.dropdown.Option("not_asked", "Chưa quyết định"),
-            ft.dropdown.Option("enabled", "Cho phép"),
-            ft.dropdown.Option("disabled", "Không cho phép"),
+            ft.dropdown.Option("enabled", "Bật (mặc định)"),
+            ft.dropdown.Option("disabled", "Tắt"),
         ],
         border_color=C.BORDER,
         focused_border_color=C.ACCENT,
@@ -23,13 +24,58 @@ def init_privacy_controls(view) -> None:
 
 
 def build_privacy_section(view) -> ft.Container:
-    """Render consent on every platform without translating stored values."""
+    """Render diagnostics choice and the read-only legal notice entry."""
+    terms_title = ft.Text(
+        "Điều khoản sử dụng & quyền riêng tư",
+        size=13,
+        weight=ft.FontWeight.W_600,
+        color=C.TEXT_PRIMARY,
+    )
+    terms_subtitle = ft.Text(
+        "Xem cách ứng dụng sử dụng và bảo vệ dữ liệu",
+        size=11,
+        color=C.TEXT_SECONDARY,
+    )
+    terms_entry = ft.Container(
+        content=ft.Semantics(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.DESCRIPTION_OUTLINED, size=20, color=C.ACCENT),
+                    ft.Column(
+                        [terms_title, terms_subtitle],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.Icon(
+                        ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                        size=20,
+                        color=C.TEXT_SECONDARY,
+                    ),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            button=True,
+            label="Mở Điều khoản sử dụng và quyền riêng tư",
+            on_tap_hint_text="Mở nội dung chính sách",
+        ),
+        padding=ft.Padding.symmetric(horizontal=12, vertical=12),
+        bgcolor=C.BG,
+        border=ft.Border.all(1, C.BORDER),
+        border_radius=10,
+        ink=True,
+        on_click=lambda _event: show_terms_dialog(view._page),
+    )
+    view._themed_texts.append(terms_title)
+    view._hint_containers.append((terms_entry, terms_subtitle))
+    view._terms_policy_entry = terms_entry
     return view._build_setting_group(
         "Quyền riêng tư",
-        "Lựa chọn gửi chẩn đoán sự cố",
+        "Chẩn đoán và chính sách dữ liệu",
         [
             view._dd_crash_reporting_consent,
-            view._build_hint("Bạn có thể thay đổi lựa chọn này bất cứ lúc nào."),
+            view._build_hint("Chẩn đoán ẩn danh được bật mặc định; bạn có thể tắt bất cứ lúc nào."),
+            terms_entry,
         ],
         icon=ft.Icons.PRIVACY_TIP_OUTLINED,
     )

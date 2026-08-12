@@ -177,11 +177,11 @@ không phụ thuộc GUI. Các quyết định kiến trúc có hiệu lực n�
   backend tương ứng khả dụng.
 - HTML từ Moodle được làm sạch trước khi hiển thị.
 - Request mạng có xác minh TLS và timeout hữu hạn.
-- Chẩn đoán sự cố chỉ được gửi sau khi người dùng đồng ý.
+- Chẩn đoán sự cố ẩn danh được bật mặc định và có thể tắt trong Cài đặt.
 - Updater xác minh package, metadata và chữ ký theo chính sách của từng nền
   tảng trước khi mở installer.
 
-Đọc [chính sách quyền riêng tư](docs/PRIVACY.md) để biết dữ liệu chẩn đoán và
+Đọc [điều khoản sử dụng](docs/TERMS.md) và [chính sách quyền riêng tư](docs/PRIVACY.md) để biết dữ liệu chẩn đoán và
 thời hạn lưu. Báo cáo lỗ hổng theo [SECURITY.md](SECURITY.md); không đăng
 credential hoặc chi tiết khai thác chưa vá trong issue công khai.
 

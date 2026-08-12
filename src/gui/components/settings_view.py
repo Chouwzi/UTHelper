@@ -669,6 +669,11 @@ class SettingsView(ft.Container):
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
+        terms_entry = getattr(self, "_terms_policy_entry", None)
+        if terms_entry is not None:
+            terms_entry.bgcolor = C.BG
+            terms_entry.border = ft.Border.all(1, C.BORDER)
+
         # Expansion tiles (title text + icon colors)
         for tile in getattr(self, '_tiles', []):
             tile.collapsed_text_color = C.TEXT_PRIMARY

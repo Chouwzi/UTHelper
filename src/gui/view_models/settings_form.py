@@ -244,7 +244,7 @@ class SettingsFormSnapshot:
                 "start_minimized": getattr(value, "START_MINIMIZED", False),
                 "minimize_to_tray": getattr(value, "MINIMIZE_TO_TRAY", True),
                 "auto_update_enabled": getattr(value, "AUTO_UPDATE_ENABLED", True),
-                "crash_reporting_consent": getattr(value, "CRASH_REPORTING_CONSENT", "not_asked"),
+                "crash_reporting_consent": getattr(value, "CRASH_REPORTING_CONSENT", "enabled"),
                 "background_check_android": getattr(value, "BACKGROUND_CHECK_ANDROID", True),
                 "enable_gmail": getattr(value, "ENABLE_GMAIL", False),
                 "gmail_address": getattr(value, "GMAIL_ADDRESS", ""),

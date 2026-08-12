@@ -34,6 +34,7 @@ class AdaptiveFilterMenu:
         mobile: bool,
         trigger_width: int | float | None = None,
         popup_width: int | float = 240,
+        option_max_lines: int = 1,
     ) -> None:
         self.page = page
         self.title = title
@@ -41,6 +42,8 @@ class AdaptiveFilterMenu:
         self.on_select = on_select
         self.trigger_width = trigger_width
         self.popup_width = popup_width
+        self.option_max_lines = max(1, min(int(option_max_lines), 2))
+        self.option_height = 48 if self.option_max_lines == 1 else 62
         self.options: tuple[FilterMenuOption, ...] = ()
         self.selected_key = selected_key
         self._signature: tuple = ()
@@ -70,7 +73,7 @@ class AdaptiveFilterMenu:
             content=ft.Row(
                 [self.label, self.arrow],
                 spacing=4,
-                tight=True,
+                tight=False,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             width=trigger_width,
@@ -94,9 +97,12 @@ class AdaptiveFilterMenu:
                 content=self.trigger,
                 items=[],
                 menu_position=ft.PopupMenuPosition.UNDER,
-                shape=ft.RoundedRectangleBorder(radius=12),
-                bgcolor=C.SURFACE,
-                elevation=8,
+                shape=ft.RoundedRectangleBorder(
+                    radius=12,
+                    side=ft.BorderSide(1, C.BORDER),
+                ),
+                bgcolor=C.BG,
+                elevation=12,
                 shadow_color="#66000000",
                 menu_padding=ft.Padding.symmetric(horizontal=6, vertical=6),
                 size_constraints=ft.BoxConstraints(
@@ -187,7 +193,7 @@ class AdaptiveFilterMenu:
                             if option.key == self.selected_key
                             else ft.FontWeight.W_500
                         ),
-                        max_lines=1,
+                        max_lines=self.option_max_lines,
                         overflow=ft.TextOverflow.ELLIPSIS,
                         expand=True,
                     ),
@@ -200,10 +206,11 @@ class AdaptiveFilterMenu:
                 ft.PopupMenuItem(
                     content=content,
                     checked=option.key == self.selected_key,
-                    height=48,
+                    height=self.option_height,
                     padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                     mouse_cursor=ft.MouseCursor.CLICK,
                     data=option.key,
+                    tooltip=option.label,
                     on_click=lambda _event, key=option.key: self.select(key),
                 )
             )
@@ -247,7 +254,7 @@ class AdaptiveFilterMenu:
                         weight=(
                             ft.FontWeight.W_600 if selected else ft.FontWeight.W_500
                         ),
-                        max_lines=1,
+                        max_lines=self.option_max_lines,
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                     leading=leading,
@@ -258,7 +265,7 @@ class AdaptiveFilterMenu:
                     hover_color=f"{option.color}0D",
                     splash_color=f"{option.color}18",
                     content_padding=ft.Padding.symmetric(horizontal=18, vertical=2),
-                    min_height=52,
+                    min_height=56 if self.option_max_lines == 1 else 68,
                     shape=ft.RoundedRectangleBorder(radius=10),
                     enable_feedback=True,
                     on_click=lambda _event, key=option.key: self._select_from_sheet(key),
@@ -288,10 +295,10 @@ class AdaptiveFilterMenu:
         return ft.BottomSheet(
             content=ft.Container(
                 content=body,
-                bgcolor=C.SURFACE,
+                bgcolor=C.BG,
                 padding=ft.Padding.only(bottom=16),
             ),
-            bgcolor=C.SURFACE,
+            bgcolor=C.BG,
             dismissible=True,
             draggable=True,
             show_drag_handle=True,
@@ -412,7 +419,11 @@ class AdaptiveFilterMenu:
         self.arrow.color = C.TEXT_SECONDARY
         self.trigger.bgcolor = C.SURFACE
         if self.popup is not None:
-            self.popup.bgcolor = C.SURFACE
+            self.popup.bgcolor = C.BG
+            self.popup.shape = ft.RoundedRectangleBorder(
+                radius=12,
+                side=ft.BorderSide(1, C.BORDER),
+            )
         if options is None:
             options = self.options
         self._signature = ()

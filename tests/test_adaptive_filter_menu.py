@@ -165,6 +165,27 @@ def test_long_trigger_label_is_single_line_ellipsis():
     assert menu.label.max_lines == 1
     assert menu.label.overflow == ft.TextOverflow.ELLIPSIS
     assert menu.trigger.width == 112
+    assert menu.trigger.content.tight is False
+
+
+def test_course_variant_wraps_options_and_exposes_full_tooltip():
+    label = "Hệ quản trị cơ sở dữ liệu - CNS_CS1"
+    menu = AdaptiveFilterMenu(
+        page=_Page(),
+        title="Môn học",
+        options=[FilterMenuOption("course", label, "#E2E8F0", count=20)],
+        selected_key="course",
+        on_select=lambda _key: None,
+        mobile=False,
+        popup_width=340,
+        option_max_lines=2,
+    )
+
+    item = menu.popup.items[0]
+    assert menu.popup.bgcolor != menu.trigger.bgcolor
+    assert item.height == 62
+    assert item.tooltip == label
+    assert item.content.controls[1].max_lines == 2
 
 
 def test_mobile_uses_scrollable_safe_bottom_sheet_with_large_rows():

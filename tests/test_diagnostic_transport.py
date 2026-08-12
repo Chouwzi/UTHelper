@@ -17,7 +17,19 @@ from uuid import UUID
 
 import pytest
 
-from diagnostics.models import AppPhase, CrashConsent, DiagnosticFrame, DiagnosticReport
+from diagnostics.models import (
+    AppPhase,
+    CrashConsent,
+    DiagnosticFrame,
+    DiagnosticGpu,
+    DiagnosticBreadcrumb,
+    DiagnosticAction,
+    DiagnosticOutcome,
+    DiagnosticPackages,
+    DiagnosticReport,
+    DiagnosticScreen,
+    DiagnosticSource,
+)
 from diagnostics.spool import DiagnosticSpool
 from diagnostics.transport import (
     DiagnosticConsentGate,
@@ -188,6 +200,7 @@ def test_strict_before_send_reconstructs_only_allowlisted_event():
         "fingerprint",
         "exception",
         "tags",
+        "contexts",
     }
     serialized = repr(event)
     assert "student@example.com" not in serialized
@@ -197,6 +210,109 @@ def test_strict_before_send_reconstructs_only_allowlisted_event():
     assert event["fingerprint"] == [report.fingerprint]
     assert event["tags"]["native_exception_code"] == "0xc0000409"
     assert event["tags"]["faulting_module"] == "flutter_windows.dll"
+    assert event["contexts"]["device"]["arch"] == "AMD64"
+    assert "user" not in event
+    assert "request" not in event
+
+
+def test_exception_without_frames_omits_invalid_empty_stacktrace():
+    event = _strict_before_send(
+        {},
+        {"report": _report().model_copy(update={"frames": ()})},
+    )
+
+    assert event["exception"]["values"] == [
+        {
+            "type": "ValueError",
+            "mechanism": {
+                "type": "manual.capture",
+                "handled": True,
+                "data": {"execution": "unknown"},
+            },
+        }
+    ]
+
+
+def test_hardware_uses_standard_sentry_device_app_and_gpu_contexts():
+    report = _report().model_copy(
+        update={
+            "processor_count": 16,
+            "cpu_description": "AMD Ryzen 7 7840HS",
+            "processor_frequency_mhz": 3800,
+            "memory_size": 16 * 1024**3,
+            "free_memory": 6 * 1024**3,
+            "usable_memory": 16 * 1024**3,
+            "app_memory": 123_456_789,
+            "screen_width_pixels": 1920,
+            "screen_height_pixels": 1080,
+            "screen_dpi": 96,
+            "gpu": DiagnosticGpu(
+                name="AMD Radeon 780M Graphics",
+                vendor_name="AMD",
+                driver_version="32.0.1",
+                memory_size_mb=4096,
+                api_type="Direct3D",
+            ),
+        }
+    )
+
+    event = _strict_before_send({}, {"report": report})
+
+    device = event["contexts"]["device"]
+    assert device["cpu_description"] == "AMD Ryzen 7 7840HS"
+    assert device["processor_count"] == 16
+    assert device["processor_frequency"] == 3800
+    assert device["memory_size"] == 16 * 1024**3
+    assert device["free_memory"] == 6 * 1024**3
+    assert device["usable_memory"] == 16 * 1024**3
+    assert device["screen_resolution"] == "1920x1080"
+    assert device["screen_dpi"] == 96
+    assert event["contexts"]["app"]["app_memory"] == 123_456_789
+    assert event["contexts"]["gpu"] == {
+        "type": "gpu",
+        "name": "AMD Radeon 780M Graphics",
+        "vendor_name": "AMD",
+        "driver_version": "32.0.1",
+        "memory_size": 4096,
+        "api_type": "Direct3D",
+    }
+    assert "cpu_description" not in event["tags"]
+    assert "name" not in event["tags"]
+
+
+def test_safe_breadcrumbs_and_fixed_packages_are_serialized_without_messages():
+    report = _report().model_copy(
+        update={
+            "breadcrumbs": (
+                DiagnosticBreadcrumb(
+                    occurred_at=NOW,
+                    action=DiagnosticAction.REFRESH,
+                    outcome=DiagnosticOutcome.FAILED,
+                    source=DiagnosticSource.MOODLE,
+                    screen=DiagnosticScreen.HOME,
+                ),
+            ),
+            "packages": DiagnosticPackages(
+                pydantic="2.11.0", sentry_sdk="2.35.0"
+            ),
+        }
+    )
+
+    event = _strict_before_send({}, {"report": report})
+
+    assert event["modules"] == {
+        "pydantic": "2.11.0",
+        "sentry_sdk": "2.35.0",
+    }
+    crumb = event["breadcrumbs"]["values"][0]
+    assert crumb["category"] == "uthelper.refresh"
+    assert crumb["data"] == {
+        "action": "refresh",
+        "outcome": "failed",
+        "source": "moodle",
+        "screen": "home",
+    }
+    assert "message" not in crumb
 
 
 class _FakeClient:
@@ -360,10 +476,17 @@ def test_real_sdk_adapter_confirms_http_and_envelope_is_strict(monkeypatch):
         "fingerprint",
         "exception",
         "tags",
+        "contexts",
     }
     assert "user" not in event
     assert "request" not in event
-    assert "contexts" not in event
+    assert set(event["contexts"]) == {
+        "os",
+        "runtime",
+        "app",
+        "device",
+        "diagnostic_state",
+    }
     assert "breadcrumbs" not in event
     assert "modules" not in event
 

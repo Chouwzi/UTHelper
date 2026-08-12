@@ -62,7 +62,6 @@ from gui.controllers.startup_visibility import (
 from gui.controllers.autostart_settings import apply_initial_autostart_default
 from gui.controllers.refresh_coordinator import build_prefetched_dataset
 from gui.controllers.window_activator import WindowActivator
-from gui.components.crash_consent_dialog import CrashConsentDialog
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +172,13 @@ class AppController:
         activation_broker=None,
         force_visible: bool = False,
         error_reporter=None,
+        diagnostic_recorder=None,
     ):
         self.page = page
         self.activation_broker = activation_broker
         self.force_visible = force_visible
         self._unhandled_error_reporter = error_reporter
+        self._diagnostic_recorder = diagnostic_recorder
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
         self._page_alive = threading.Event()
@@ -238,12 +239,8 @@ class AppController:
         self._manual_update_check_requested = False
         self._update_coordinator = self._create_update_coordinator()
         self._init_ui()
-        self._crash_consent_dialog = CrashConsentDialog(
-            self.page, self._persist_crash_consent
-        )
-        self._crash_consent_dialog.present_if_needed(
-            settings.CRASH_REPORTING_CONSENT
-        )
+        self._diag_screen("home")
+        self._diag_breadcrumb("app_start", "succeeded", "app", screen="home")
         has_cached_snapshot = self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
@@ -269,17 +266,53 @@ class AppController:
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
-        
+
         self._update_coordinator.start()
-        
+
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
         # With credentials, the coordinator waits until cache age + the
         # one-minute startup grace are due. Manual refresh remains immediate.
 
+    def _diag_screen(self, screen: str) -> None:
+        recorder = getattr(self, "_diagnostic_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.set_diagnostic_screen(screen)
+        except Exception:
+            logger.debug("Diagnostic state update failed", exc_info=True)
+
+    def _diag_breadcrumb(
+        self,
+        action: str,
+        outcome: str,
+        source: str,
+        *,
+        screen: str | None = None,
+        duration: str | None = None,
+    ) -> None:
+        recorder = getattr(self, "_diagnostic_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.record_breadcrumb(
+                action,
+                outcome,
+                source,
+                screen=screen,
+                duration=duration,
+            )
+        except Exception:
+            logger.debug("Diagnostic breadcrumb failed", exc_info=True)
+
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
+        self._diag_screen("login")
+        self._diag_breadcrumb("login", "started", "user", screen="login")
         async def _on_login_success():
+            self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
+            self._diag_screen("home")
             # UX-5: Show success snackbar after dialog closes
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
             self._portal_client.clear_token()
@@ -302,27 +335,6 @@ class AppController:
             return
         if result is not None and not result.success:
             logger.warning("Windows did not accept the autostart default: %s", result.message)
-
-    def _persist_crash_consent(self, decision) -> bool:
-        """Persist explicit consent without mutating any open Settings draft."""
-        if decision not in {"enabled", "disabled"}:
-            return False
-        previous = settings.CRASH_REPORTING_CONSENT
-        settings.CRASH_REPORTING_CONSENT = decision
-        try:
-            persisted = bool(save_settings())
-        except Exception:
-            persisted = False
-            logger.warning("Crash-consent persistence raised", exc_info=True)
-        if persisted:
-            return True
-        settings.CRASH_REPORTING_CONSENT = previous
-        self._show_snackbar(
-            "Không thể lưu lựa chọn chẩn đoán sự cố. Vui lòng thử lại.",
-            ft.Icons.ERROR_OUTLINE_ROUNDED,
-            C.CRITICAL,
-        )
-        return False
 
     def _safe_run_task(self, handler, *args, **kwargs):
         if not hasattr(self.page, "session") or self.page.session is None:
@@ -394,6 +406,7 @@ class AppController:
         return self._safe_run_task(_open) is not None
 
     def _check_updates_now(self) -> None:
+        self._diag_breadcrumb("update_check", "started", "github")
         self._manual_update_check_requested = True
         self._update_coordinator.check_now()
 
@@ -657,7 +670,7 @@ class AppController:
             selected_key=self.active_type,
             on_select=lambda key: self._safe_run_task(self._set_type, key),
             mobile=platform_utils.IS_MOBILE,
-            trigger_width=94,
+            trigger_width=104,
             popup_width=232,
         )
         self.course_filter_menu = AdaptiveFilterMenu(
@@ -667,8 +680,9 @@ class AppController:
             selected_key=self.active_course,
             on_select=lambda key: self._safe_run_task(self._set_course, key),
             mobile=platform_utils.IS_MOBILE,
-            trigger_width=112,
-            popup_width=276,
+            trigger_width=124,
+            popup_width=340,
+            option_max_lines=2,
         )
 
         self._overdue_cb = ft.Checkbox(
@@ -1167,6 +1181,16 @@ class AppController:
 
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
         self._today_schedule_state = state
+        if state.status is ScheduleLoadStatus.LOADING:
+            self._diag_breadcrumb("schedule_load", "started", "portal")
+        elif state.status is ScheduleLoadStatus.READY:
+            self._diag_breadcrumb("schedule_load", "succeeded", "portal")
+        elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
+            self._diag_breadcrumb(
+                "schedule_load", "permission_denied", "portal"
+            )
+        elif state.status is ScheduleLoadStatus.ERROR:
+            self._diag_breadcrumb("schedule_load", "failed", "portal")
         component = getattr(self, "_today_schedule_component", None)
         if component is None:
             return
@@ -1465,6 +1489,8 @@ class AppController:
 
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading: return
+        sync_source = "user" if trigger == "manual" else "scheduler"
+        self._diag_breadcrumb("refresh", "started", sync_source)
         self._is_loading = True
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
@@ -1683,9 +1709,20 @@ class AppController:
                 prefetch_copy,
                 self._prefetch_epoch,
             )
+            elapsed = time.time() - fetch_start_time
+            duration = (
+                "lt_250ms" if elapsed < 0.25
+                else "250ms_1s" if elapsed < 1
+                else "1s_5s" if elapsed < 5
+                else "gte_5s"
+            )
+            self._diag_breadcrumb(
+                "refresh", "succeeded", "moodle", duration=duration
+            )
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
         except Exception as exc:
+            self._diag_breadcrumb("refresh", "failed", "moodle")
             logger.exception(f"[Load] Lỗi: {exc}")
             try:
                 self._data_cache.record_failed_attempt(str(exc))
@@ -1727,6 +1764,8 @@ class AppController:
 
     async def _show_calendar(self):
         """Show calendar view with current data."""
+        self._diag_screen("calendar")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="calendar")
         with self._data_lock:
             data_snapshot = list(self.all_data)
         self.view_manager.show_calendar(data_snapshot)
@@ -1734,8 +1773,14 @@ class AppController:
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
         await self.view_manager.close_calendar()
+        self._diag_screen("home")
 
     async def _show_settings(self):
+        if hasattr(self, "_diag_screen"):
+            self._diag_screen("settings")
+            self._diag_breadcrumb(
+                "navigation", "succeeded", "user", screen="settings"
+            )
         await self.view_manager.show_settings()
 
     async def _toggle_grades(self):
@@ -1747,6 +1792,8 @@ class AppController:
 
     async def _show_grades(self):
         """Show grade overview panel and fetch data."""
+        self._diag_screen("grades")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="grades")
         self.view_manager.show_grades_loading()
 
         # Fetch grades in background thread to avoid freezing UI
@@ -1766,6 +1813,7 @@ class AppController:
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
         await self.view_manager.close_grades()
+        self._diag_screen("home")
 
     def _rebuild_colors(self):
         """Repaint ALL existing controls with current C values for live theme switching.
@@ -1944,6 +1992,7 @@ class AppController:
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
         await self.view_manager.close_settings()
+        self._diag_screen("home")
         
         self._update_footer()
         
@@ -2061,10 +2110,12 @@ class AppController:
             self._update_candidate = candidate
         check_button = getattr(self.settings_view, "_check_update_btn", None)
         if event.kind is UpdateEventKind.CHECKING:
+            self._diag_breadcrumb("update_check", "started", "github")
             if check_button is not None:
                 check_button.disabled = True
                 check_button.content = "Đang kiểm tra..."
         elif event.kind is UpdateEventKind.UP_TO_DATE:
+            self._diag_breadcrumb("update_check", "succeeded", "github")
             if check_button is not None:
                 check_button.disabled = False
                 check_button.content = "Kiểm tra ngay"
@@ -2076,6 +2127,7 @@ class AppController:
                 )
             self._manual_update_check_requested = False
         elif event.kind is UpdateEventKind.UPDATE_AVAILABLE and candidate is not None:
+            self._diag_breadcrumb("update_check", "succeeded", "github")
             self._manual_update_check_requested = False
             if check_button is not None:
                 check_button.disabled = False
@@ -2092,6 +2144,8 @@ class AppController:
             self._update_progress.visible = False
             self._update_banner.visible = True
         elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
+            if event.kind is UpdateEventKind.DOWNLOADING:
+                self._diag_breadcrumb("update_download", "started", "github")
             if candidate is not None:
                 self._update_text.value = (
                     f"Đang tải và xác minh v{candidate.manifest.release_version}..."
@@ -2104,11 +2158,13 @@ class AppController:
             UpdateEventKind.READY_TO_INSTALL,
             UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
         }:
+            self._diag_breadcrumb("update_download", "succeeded", "github")
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
             self._show_update_confirmation()
         elif event.kind is UpdateEventKind.FAILED:
+            self._diag_breadcrumb("update_download", "failed", "github")
             should_notify = (
                 self._manual_update_check_requested or self._update_banner.visible
             )
@@ -2132,10 +2188,12 @@ class AppController:
                     C.CRITICAL,
                 )
         elif event.kind is UpdateEventKind.CANCELLED:
+            self._diag_breadcrumb("update_download", "cancelled", "user")
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
+            self._diag_breadcrumb("update_install", "succeeded", "os")
             self._update_banner.visible = False
         self.page.update()
         if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
@@ -2310,6 +2368,8 @@ class AppController:
     async def _show_detail_async(self, data: dict):
         # Ghi nhận nếu màn hình chi tiết được mở từ Lịch để phục vụ quay lại (back-navigation)
         self._detail_from_calendar = self.calendar_view.visible
+        self._diag_screen("detail")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="detail")
         self.view_manager.show_detail_loading(data)
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)

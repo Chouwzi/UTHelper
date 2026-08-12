@@ -239,8 +239,8 @@ class Settings(BaseModel):
         description="Tự động kiểm tra cập nhật",
     )
     CRASH_REPORTING_CONSENT: Literal["not_asked", "enabled", "disabled"] = Field(
-        default="not_asked",
-        description="Quyết định gửi chẩn đoán sự cố của người dùng",
+        default="enabled",
+        description="Gửi chẩn đoán sự cố ẩn danh; người dùng có thể tắt",
     )
 
     # Mấy kênh thông báo khác (đang phát triển)
@@ -313,7 +313,8 @@ def migrate_settings_data(raw: dict) -> dict:
         "AUTOSTART_DEFAULT_APPLIED",
         "START_WITH_WINDOWS" in source,
     )
-    data.setdefault("CRASH_REPORTING_CONSENT", "not_asked")
+    if data.get("CRASH_REPORTING_CONSENT") in {None, "not_asked"}:
+        data["CRASH_REPORTING_CONSENT"] = "enabled"
     data.setdefault("AUTO_UPDATE_ENABLED", True)
     if "CHECK_INTERVAL_MINUTES" not in data:
         legacy_value = data.get("POLL_INTERVAL_MINUTES")
