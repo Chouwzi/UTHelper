@@ -1755,5 +1755,9 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   application theme; changing the selected theme must only change selection state,
   never recolor another preset's surface, gradient, swatches, or labels. Regression
   coverage switches through dark, light, and teal presets and verifies every card's
-  complete palette. The complete application/extension suite passes **1437 tests with 25
+  complete palette. Because the global preview callback runs after Settings' local
+  repaint, the selector also restores every preset surface, gradient, swatch, and
+  label after that callback; local exclusion alone was insufficient. A real Flet web
+  smoke selected Ocean Teal and confirmed that Graphite, Midnight, and Ocean retained
+  distinct palettes. The complete application/extension suite passes **1438 tests with 25
   skipped**; Ruff, bytecode compilation, and `git diff --check` pass.

@@ -123,6 +123,49 @@ def test_theme_preview_cards_keep_their_own_preset_palettes():
         apply_theme(original_theme)
 
 
+def test_theme_preview_palettes_are_restored_after_external_repaint():
+    original_theme = settings.THEME
+    page = _page()
+    orchestrator = SimpleNamespace(
+        client=SimpleNamespace(),
+        get_cached_details_snapshot=lambda: {},
+    )
+    view = None
+    external_previous_palette = None
+
+    def _repaint_everything_including_previews():
+        refresh_semantic_control_colors(
+            [view], external_previous_palette, semantic_palette()
+        )
+
+    try:
+        apply_theme("midnight_blue")
+        external_previous_palette = semantic_palette()
+        view = SettingsView(
+            page,
+            orchestrator,
+            lambda: None,
+            on_theme_preview=_repaint_everything_including_previews,
+            autostart_coordinator=SimpleNamespace(),
+        )
+
+        view._on_theme_select("sakura_pink")
+
+        for key, card in zip(
+            THEME_ORDER, view._theme_cards_row.content.controls, strict=True
+        ):
+            preset = THEME_PRESETS[key]
+            content = card.content.controls
+            assert card.bgcolor == preset["surface"]
+            assert content[1].gradient.colors == [
+                preset["bg"], preset["surface"], preset["accent"]
+            ]
+            assert content[3].color == preset["text_primary"]
+            assert content[4].color == preset["text_secondary"]
+    finally:
+        apply_theme(original_theme)
+
+
 def test_calendar_and_grade_hidden_controls_receive_live_theme():
     original_theme = settings.THEME
     try:

@@ -656,7 +656,6 @@ class SettingsView(ft.Container):
         try:
             self._selected_theme = theme_key
             self._apply_theme_colors(theme_key)
-            self._rebuild_theme_cards()
             # Apply theme globally RIGHT NOW for instant preview
             apply_theme(theme_key)
             log.info(f"[THEME] After apply_theme: TEXT_PRIMARY={C.TEXT_PRIMARY}, TEXT_SECONDARY={C.TEXT_SECONDARY}")
@@ -672,6 +671,10 @@ class SettingsView(ft.Container):
             # Notify app_controller to refresh entire UI (dashboard, header, footer, cards)
             if self._on_theme_preview:
                 self._on_theme_preview()
+            # Preview cards visualize their own immutable presets. Restore them
+            # after every external theme callback so no broader repaint can tint
+            # the swatches with the active application palette.
+            self._rebuild_theme_cards()
             # Show unsaved indicator
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = True
@@ -919,7 +922,7 @@ class SettingsView(ft.Container):
         self._c_tb_other.value = preset["other"]
 
     def _rebuild_theme_cards(self):
-        """Rebuild theme cards row to reflect new selection in place."""
+        """Restore preset previews and update selection state in place."""
         row_ctrl = self._theme_cards_row.content
         if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) == len(THEME_ORDER):
             for i, key in enumerate(THEME_ORDER):
@@ -934,20 +937,39 @@ class SettingsView(ft.Container):
                     else ft.Colors.with_opacity(0.50, preset["border"])
                 )
                 border_w = 2.5 if selected else 1
+                card.bgcolor = preset["surface"]
                 card.border = ft.Border.all(border_w, border_col)
-                
-                # Update check icon
+
                 try:
-                    check_icon = card.content.controls[0].controls[0]
+                    content = card.content.controls
+                    check_icon = content[0].controls[0]
+                    preview_strip = content[1]
+                    dots = content[2].controls
+                    label = content[3]
+                    sublabel = content[4]
+
+                    check_icon.color = preset["accent"]
                     check_icon.visible = selected
-                except Exception:
-                    import logging as _fb_log
-                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                
-                # Update label font weight
-                try:
-                    label = card.content.controls[3]
+                    preview_strip.gradient = ft.LinearGradient(
+                        begin=ft.Alignment(-1, 0),
+                        end=ft.Alignment(1, 0),
+                        colors=[preset["bg"], preset["surface"], preset["accent"]],
+                    )
+                    for dot, color in zip(
+                        dots,
+                        (
+                            preset["bg"],
+                            preset["surface"],
+                            preset["accent"],
+                            preset["critical"],
+                            preset["safe"],
+                        ),
+                        strict=True,
+                    ):
+                        dot.bgcolor = color
+                    label.color = preset["text_primary"]
                     label.weight = ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL
+                    sublabel.color = preset["text_secondary"]
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -971,7 +993,6 @@ class SettingsView(ft.Container):
         # Reset theme to default
         self._selected_theme = "midnight_blue"
         self._apply_theme_colors("midnight_blue")
-        self._rebuild_theme_cards()
         # Apply theme live preview
         apply_theme("midnight_blue")
         from gui.core.theme import set_page_theme
@@ -980,6 +1001,7 @@ class SettingsView(ft.Container):
         self._refresh_section_colors()
         if self._on_theme_preview:
             self._on_theme_preview()
+        self._rebuild_theme_cards()
         
         self._critical_hours_field.value = "24"
         self._warning_hours_field.value = "72"
