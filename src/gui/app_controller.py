@@ -470,7 +470,7 @@ class AppController:
 
     def _init_window(self):
         self.window_activator = WindowActivator(self.page)
-        # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
+        # Resolve the presentation profile without mutating native capabilities.
         detect_platform(self.page)
         # Read the immutable runtime capabilities after resolving the UI profile.
         import platform_utils

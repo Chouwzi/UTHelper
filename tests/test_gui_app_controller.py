@@ -230,6 +230,39 @@ def test_shared_back_navigation_handles_settings_dialog_and_grades():
     asyncio.run(scenario())
 
 
+def test_shared_back_navigation_returns_to_dashboard_from_every_child_view():
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(
+            visible=False,
+            _handle_back=AsyncMock(),
+        )
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller._close_detail = AsyncMock()
+        controller._close_calendar = AsyncMock()
+        controller._close_grades = AsyncMock()
+
+        cases = (
+            (controller.settings_view, controller.settings_view._handle_back),
+            (controller.detail_view, controller._close_detail),
+            (controller.calendar_view, controller._close_calendar),
+            (controller.grade_overview_view, controller._close_grades),
+        )
+        for view, handler in cases:
+            view.visible = True
+            assert await controller._navigate_back() is True
+            handler.assert_awaited_once()
+            view.visible = False
+
+        assert await controller._navigate_back() is False
+
+    asyncio.run(scenario())
+
+
 def test_window_close_treats_already_closed_session_as_clean_shutdown(monkeypatch):
     async def scenario():
         from unittest.mock import AsyncMock

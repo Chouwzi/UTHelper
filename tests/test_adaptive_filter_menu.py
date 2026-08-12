@@ -11,12 +11,14 @@ from gui.components.adaptive_filter_menu import (
     AdaptiveFilterMenu,
     FilterMenuOption,
 )
+from gui.core.theme import C
 
 
 class _Page:
     def __init__(self):
         self.dialogs = []
         self.pops = 0
+        self.height = 800
 
     def show_dialog(self, dialog):
         self.dialogs.append(dialog)
@@ -232,6 +234,37 @@ def test_mobile_uses_scrollable_safe_bottom_sheet_with_large_rows():
     assert sheet.show_drag_handle is True
     assert sheet.animation_style is not None
     assert all(tile.min_height >= 52 for tile in menu.mobile_tiles)
+    assert sheet.content.height == 236
+    assert sheet.content.height < page.height
+    assert all(tile.hover_color == C.SURFACE_HOVER for tile in menu.mobile_tiles)
+    assert all(
+        tile.selected_tile_color == C.SURFACE_HOVER
+        for tile in menu.mobile_tiles
+    )
+
+
+def test_mobile_sheet_caps_long_option_lists_to_viewport_and_keeps_scroll():
+    page = _Page()
+    options = [
+        FilterMenuOption(str(index), f"Môn học {index}", "#3B82F6")
+        for index in range(20)
+    ]
+    menu = AdaptiveFilterMenu(
+        page=page,
+        title="Môn học",
+        options=options,
+        selected_key="0",
+        on_select=lambda _key: None,
+        mobile=True,
+        option_max_lines=2,
+    )
+
+    menu.open()
+    sheet = page.dialogs[-1]
+
+    assert sheet.content.height == 560
+    assert sheet.scrollable is True
+    assert sheet.content.content.scroll == ft.ScrollMode.AUTO
 
 
 def test_mobile_selection_closes_sheet_after_applying():

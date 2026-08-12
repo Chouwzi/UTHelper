@@ -1684,3 +1684,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   through the real entrypoint while retaining the Windows runtime. The complete
   application/extension suite passes **1427 tests with 25 skipped**; Ruff, bytecode
   compilation, and `git diff --check` pass.
+
+## Compact mobile filter sheets and Back verification (2026-08-13)
+
+- Mobile filter sheets now calculate their height from the title and option rows,
+  capped at 72% of the viewport (and 560 logical pixels) for long course lists.
+  This removes the accidental full-screen sheet while preserving bounded scrolling.
+- Replaced malformed `#RRGGBBAA` color concatenation with Flet color helpers and
+  shared semantic theme tokens. Mobile selected/hover states now use the same
+  `SURFACE_HOVER` treatment as the anchored desktop menu.
+- Re-audited the single-root mobile Back policy: Settings, detail, calendar, and
+  grade overview consume Back and return to Dashboard; Back at Dashboard is allowed
+  to leave the root view, matching normal Android behavior. Tests cover every child
+  view and the Dashboard fall-through. Native emulator verification was unavailable
+  because `adb` is not installed in the current environment.
+- A real 390×844 Flet web smoke confirmed the five-option urgency sheet wraps its
+  content instead of filling the viewport. The complete application/extension suite
+  passes **1429 tests with 25 skipped**; Ruff, bytecode compilation, and
+  `git diff --check` pass.

@@ -22,6 +22,11 @@ class AdaptiveFilterMenu:
     """Single-select filter rendered as a desktop popup or mobile sheet."""
 
     _MOTION_MS = 180
+    _SHEET_MAX_HEIGHT = 560
+    _SHEET_MAX_VIEWPORT_RATIO = 0.72
+    _SHEET_HEADER_HEIGHT = 44
+    _SHEET_BOTTOM_PADDING = 16
+    _SHEET_OPTION_SPACING = 4
 
     def __init__(
         self,
@@ -174,7 +179,9 @@ class AdaptiveFilterMenu:
             option.color if option.key != self.options[0].key else C.BORDER,
         )
         self.trigger.bgcolor = (
-            f"{option.color}12" if option.key != self.options[0].key else C.SURFACE
+            ft.Colors.with_opacity(0.07, option.color)
+            if option.key != self.options[0].key
+            else C.SURFACE
         )
         self.control.label = f"{self.title}: {option.label}"
         self.control.value = option.label
@@ -272,10 +279,10 @@ class AdaptiveFilterMenu:
                     leading=leading,
                     trailing=trailing,
                     selected=selected,
-                    selected_color=option.color,
-                    selected_tile_color=f"{option.color}14",
-                    hover_color=f"{option.color}0D",
-                    splash_color=f"{option.color}18",
+                    selected_color=C.TEXT_PRIMARY,
+                    selected_tile_color=C.SURFACE_HOVER,
+                    hover_color=C.SURFACE_HOVER,
+                    splash_color=ft.Colors.with_opacity(0.12, C.ACCENT),
                     content_padding=ft.Padding.symmetric(horizontal=18, vertical=2),
                     min_height=56 if self.option_max_lines == 1 else 68,
                     shape=ft.RoundedRectangleBorder(radius=10),
@@ -284,6 +291,26 @@ class AdaptiveFilterMenu:
                 )
             )
         return tiles
+
+    def _mobile_sheet_height(self) -> float:
+        rows_height = sum(float(tile.min_height or 0) for tile in self.mobile_tiles)
+        rows_height += self._SHEET_OPTION_SPACING * max(
+            0, len(self.mobile_tiles) - 1
+        )
+        content_height = (
+            self._SHEET_HEADER_HEIGHT
+            + rows_height
+            + self._SHEET_BOTTOM_PADDING
+        )
+        viewport_height = getattr(self.page, "height", None)
+        if isinstance(viewport_height, (int, float)) and viewport_height > 0:
+            max_height = min(
+                self._SHEET_MAX_HEIGHT,
+                viewport_height * self._SHEET_MAX_VIEWPORT_RATIO,
+            )
+        else:
+            max_height = self._SHEET_MAX_HEIGHT
+        return min(content_height, max_height)
 
     def _build_sheet(self) -> ft.BottomSheet:
         self.mobile_tiles = self._build_mobile_tiles()
@@ -309,6 +336,7 @@ class AdaptiveFilterMenu:
                 content=body,
                 bgcolor=C.BG,
                 padding=ft.Padding.only(bottom=16),
+                height=self._mobile_sheet_height(),
             ),
             bgcolor=C.BG,
             dismissible=True,
@@ -348,13 +376,13 @@ class AdaptiveFilterMenu:
         option = self._selected_option()
         if hovered:
             self.trigger.bgcolor = (
-                f"{option.color}1A"
+                ft.Colors.with_opacity(0.10, option.color)
                 if option.key != self.options[0].key
                 else C.BORDER
             )
         else:
             self.trigger.bgcolor = (
-                f"{option.color}12"
+                ft.Colors.with_opacity(0.07, option.color)
                 if option.key != self.options[0].key
                 else C.SURFACE
             )
