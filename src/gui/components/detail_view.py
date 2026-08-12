@@ -300,7 +300,7 @@ class DetailView(ft.Container):
                     "Cập nhật",
                     icon=ft.Icons.SAVE_ROUNDED,
                     on_click=self._on_update_file_metadata,
-                    bgcolor=C.ACCENT, color=ft.Colors.WHITE,
+                    bgcolor=C.ACCENT, color=C.ON_ACCENT,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -323,7 +323,7 @@ class DetailView(ft.Container):
                     "Xóa",
                     icon=ft.Icons.DELETE_ROUNDED,
                     on_click=self._do_confirmed_delete,
-                    bgcolor=C.CRITICAL, color=ft.Colors.WHITE,
+                    bgcolor=C.CRITICAL, color=C.ON_CRITICAL,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -348,7 +348,7 @@ class DetailView(ft.Container):
                     icon=ft.Icons.SWAP_HORIZ_ROUNDED,
                     on_click=self._confirm_replace_mutation,
                     bgcolor=C.WARNING,
-                    color=ft.Colors.WHITE,
+                    color=C.ON_WARNING,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -454,8 +454,8 @@ class DetailView(ft.Container):
         self._submit_btn = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.CLOUD_UPLOAD_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Lưu bài nộp", size=13, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                    ft.Icon(ft.Icons.CLOUD_UPLOAD_ROUNDED, size=16, color=C.ON_SAFE),
+                    ft.Text("Lưu bài nộp", size=13, color=C.ON_SAFE, weight=ft.FontWeight.W_600),
                 ],
                 spacing=6, alignment=ft.MainAxisAlignment.CENTER,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -472,8 +472,8 @@ class DetailView(ft.Container):
         self._finalize_btn = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.SEND_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Nộp bài", size=13, color=ft.Colors.WHITE,
+                    ft.Icon(ft.Icons.SEND_ROUNDED, size=16, color=C.ON_SAFE),
+                    ft.Text("Nộp bài", size=13, color=C.ON_SAFE,
                             weight=ft.FontWeight.W_600),
                 ],
                 spacing=6,
@@ -515,8 +515,8 @@ class DetailView(ft.Container):
         )
         self._mode_append_btn = ft.Container(
             content=ft.Row([
-                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=ft.Colors.WHITE),
-                ft.Text("Thêm file", size=11, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=C.ON_ACCENT),
+                ft.Text("Thêm file", size=11, color=C.ON_ACCENT, weight=ft.FontWeight.W_600),
             ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=C.ACCENT,
             border_radius=6,
@@ -575,8 +575,8 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=ft.Colors.WHITE)
-        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=ft.Colors.WHITE,
+        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=C.ON_ACCENT)
+        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
             content=ft.Row(
@@ -906,8 +906,8 @@ class DetailView(ft.Container):
             self._cta_text.value = "Mở trong trình duyệt"
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
-            self._cta_text.color = ft.Colors.WHITE
-            self._cta_icon.color = ft.Colors.WHITE
+            self._cta_text.color = C.ON_ACCENT
+            self._cta_icon.color = C.ON_ACCENT
 
         details = data.get("details", {})
 
@@ -1241,8 +1241,8 @@ class DetailView(ft.Container):
             # Overwrite active
             self._mode_overwrite_btn.bgcolor = C.ACCENT
             self._mode_overwrite_btn.border = None
-            self._mode_overwrite_btn.content.controls[0].color = ft.Colors.WHITE
-            self._mode_overwrite_btn.content.controls[1].color = ft.Colors.WHITE
+            self._mode_overwrite_btn.content.controls[0].color = C.ON_ACCENT
+            self._mode_overwrite_btn.content.controls[1].color = C.ON_ACCENT
             self._mode_overwrite_btn.content.controls[1].weight = ft.FontWeight.W_600
             # Append inactive
             self._mode_append_btn.bgcolor = C.BG
@@ -1256,8 +1256,8 @@ class DetailView(ft.Container):
             # Append active
             self._mode_append_btn.bgcolor = C.ACCENT
             self._mode_append_btn.border = None
-            self._mode_append_btn.content.controls[0].color = ft.Colors.WHITE
-            self._mode_append_btn.content.controls[1].color = ft.Colors.WHITE
+            self._mode_append_btn.content.controls[0].color = C.ON_ACCENT
+            self._mode_append_btn.content.controls[1].color = C.ON_ACCENT
             self._mode_append_btn.content.controls[1].weight = ft.FontWeight.W_600
             # Overwrite inactive
             self._mode_overwrite_btn.bgcolor = C.BG
@@ -2057,6 +2057,7 @@ class DetailView(ft.Container):
             self._file_edit_dialog.actions[0].style.color = C.TEXT_SECONDARY
             # Update Button
             self._file_edit_dialog.actions[1].bgcolor = C.ACCENT
+            self._file_edit_dialog.actions[1].color = C.ON_ACCENT
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -2070,6 +2071,7 @@ class DetailView(ft.Container):
             self._delete_confirm_dialog.actions[0].style.color = C.TEXT_SECONDARY
             # Delete Button
             self._delete_confirm_dialog.actions[1].bgcolor = C.CRITICAL
+            self._delete_confirm_dialog.actions[1].color = C.ON_CRITICAL
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -2110,6 +2112,12 @@ class DetailView(ft.Container):
             self._pick_btn.content.controls[1].color = C.ACCENT
             
             self._submit_btn.bgcolor = C.SAFE
+            for control in self._submit_btn.content.controls:
+                control.color = C.ON_SAFE
+
+            self._finalize_btn.bgcolor = C.SAFE
+            for control in self._finalize_btn.content.controls:
+                control.color = C.ON_SAFE
             
             self._mode_overwrite_btn.bgcolor = C.BG
             self._mode_overwrite_btn.border = ft.Border.all(1, C.BORDER)
@@ -2117,6 +2125,8 @@ class DetailView(ft.Container):
             self._mode_overwrite_btn.content.controls[1].color = C.TEXT_SECONDARY
             
             self._mode_append_btn.bgcolor = C.ACCENT
+            for control in self._mode_append_btn.content.controls:
+                control.color = C.ON_ACCENT
             self._upload_mode_warning_icon.color = C.WARNING
             self._upload_mode_warning_text.color = C.WARNING
             
@@ -2126,6 +2136,8 @@ class DetailView(ft.Container):
             self._submission_area.content.controls[0].controls[1].color = C.TEXT_SECONDARY
             
             self._open_btn.bgcolor = C.ACCENT
+            self._cta_icon.color = C.ON_ACCENT
+            self._cta_text.color = C.ON_ACCENT
             
             self._opentime_row.controls[0].color = C.TEXT_SECONDARY
             self._cutoff_row.controls[0].color = C.WARNING

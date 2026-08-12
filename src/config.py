@@ -207,7 +207,10 @@ class Settings(BaseModel):
     PORTAL_API_BASE: str = "https://portal-publicapp.ut.edu.vn/api/v1"
     
     # Cài đặt chung của ứng dụng
-    THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
+    THEME: str = Field(
+        default="midnight_blue",
+        description="Theme preset, including Material Graphite and light variants",
+    )
     SETTINGS_SCHEMA_VERSION: int = Field(default=4, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
     # Deprecated compatibility fields. Runtime scheduling uses only

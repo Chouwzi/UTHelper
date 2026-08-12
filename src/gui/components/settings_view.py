@@ -95,12 +95,20 @@ class SettingsView(ft.Container):
             )
         )
 
+        self._save_icon = ft.Icon(
+            ft.Icons.SAVE_ROUNDED, size=16, color=C.ON_ACCENT
+        )
+        self._save_text = ft.Text(
+            "Lưu cài đặt",
+            size=14,
+            color=C.ON_ACCENT,
+            weight=ft.FontWeight.BOLD,
+        )
         self._save_btn = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.SAVE_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Lưu cài đặt", size=14, color=ft.Colors.WHITE,
-                            weight=ft.FontWeight.BOLD),
+                    self._save_icon,
+                    self._save_text,
                 ],
                 spacing=8, alignment=ft.MainAxisAlignment.CENTER,
             ),
@@ -129,9 +137,9 @@ class SettingsView(ft.Container):
         _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
         _notif_buttons = ft.Row([
             *([_tray_btn] if not _pu.IS_MOBILE else [_mobile_btn]),
-            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
-            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
-            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
             ft.Button("Gửi tất cả", icon=ft.Icons.CAMPAIGN_ROUNDED, on_click=lambda e: self._do_test_broadcast(), bgcolor=C.SURFACE, color=C.CRITICAL),
         ], wrap=True, spacing=6)
 
@@ -384,7 +392,7 @@ class SettingsView(ft.Container):
         )
         box = ft.Container(
             width=24, height=24, bgcolor=default_color, border_radius=4,
-            border=ft.Border.all(1, "#333333"), ink=True
+            border=ft.Border.all(1, C.BORDER_STRONG), ink=True
         )
         
         def _on_box_click(e):
@@ -741,6 +749,8 @@ class SettingsView(ft.Container):
         # Save button
         if hasattr(self, '_save_btn'):
             self._save_btn.bgcolor = C.ACCENT
+            self._save_icon.color = C.ON_ACCENT
+            self._save_text.color = C.ON_ACCENT
             try:
                 self._save_btn.update()
             except Exception:
@@ -762,7 +772,7 @@ class SettingsView(ft.Container):
         # Test login button
         if hasattr(self, '_test_login_btn'):
             self._test_login_btn.style = ft.ButtonStyle(
-                color=ft.Colors.WHITE,
+                color=C.ON_ACCENT,
                 bgcolor=C.ACCENT,
                 shape=ft.RoundedRectangleBorder(radius=10),
                 padding=12,
@@ -825,6 +835,12 @@ class SettingsView(ft.Container):
         for h, chip in getattr(self, '_milestone_chips', {}).items():
             chip.selected_color = C.ACCENT
             chip.bgcolor = C.SURFACE
+
+        for checkbox in getattr(self, '_notify_type_checks', {}).values():
+            checkbox.fill_color = {ft.ControlState.SELECTED: C.ACCENT}
+            checkbox.check_color = C.ON_ACCENT
+            if checkbox.label_style:
+                checkbox.label_style.color = C.TEXT_PRIMARY
 
         # Summary texts (profile, DND, milestone)
         for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):

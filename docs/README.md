@@ -14,6 +14,8 @@ records. Start here instead of searching by filename.
   the Windows release.
 - [Gitflow policy](guides/gitflow.md) — branch direction, merge contract, and
   GitHub ruleset enforcement.
+- [Theme system](design/theme-system.md) — semantic color contract, dark-theme
+  design, accessibility checks, and runtime refresh rules.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.

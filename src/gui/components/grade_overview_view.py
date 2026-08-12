@@ -188,13 +188,13 @@ class GradeOverviewView(ft.Container):
         try:
             val = float(grade_str.replace(',', '.'))
             if val >= 8.0:
-                return "#22C55E"  # Green
+                return C.SAFE
             elif val >= 6.5:
-                return "#3B82F6"  # Blue
+                return C.ACCENT
             elif val >= 5.0:
-                return "#F59E0B"  # Orange
+                return C.WARNING
             else:
-                return "#EF4444"  # Red
+                return C.CRITICAL
         except (ValueError, AttributeError):
             return C.TEXT_PRIMARY
 

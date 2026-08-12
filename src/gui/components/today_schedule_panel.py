@@ -44,11 +44,17 @@ class TodaySchedulePanel:
         )
         self.subtitle = ft.Text("Đang chuẩn bị lịch học...", size=11, color=C.TEXT_SECONDARY)
         self.item_column = ft.Column(controls=[], spacing=8)
+        self._loading_ring = ft.ProgressRing(
+            width=16, height=16, stroke_width=2, color=C.ACCENT
+        )
+        self._loading_text = ft.Text(
+            "Đang lấy lịch học hôm nay...", size=11, color=C.TEXT_SECONDARY
+        )
         self.loading = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.ProgressRing(width=16, height=16, stroke_width=2, color=C.ACCENT),
-                    ft.Text("Đang lấy lịch học hôm nay...", size=11, color=C.TEXT_SECONDARY),
+                    self._loading_ring,
+                    self._loading_text,
                 ],
                 spacing=8,
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -68,10 +74,11 @@ class TodaySchedulePanel:
             ft.Icons.CLOUD_OFF_ROUNDED,
             "Không thể lấy lịch học. Chạm để thử lại.",
         )
+        self._body_divider = ft.Container(height=1, bgcolor=C.BORDER)
         self.body = ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Container(height=1, bgcolor=C.BORDER),
+                    self._body_divider,
                     self.loading,
                     self.auth_required,
                     self.error,
@@ -83,18 +90,22 @@ class TodaySchedulePanel:
             padding=ft.Padding.only(left=12, right=12, top=0, bottom=12),
             visible=False,
         )
+        self._header_icon = ft.Icon(
+            ft.Icons.CALENDAR_TODAY_ROUNDED, size=18, color=C.ACCENT
+        )
+        self._header_title = ft.Text(
+            "Lịch học hôm nay",
+            size=13,
+            weight=ft.FontWeight.W_600,
+            color=C.TEXT_PRIMARY,
+        )
         self.header = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.CALENDAR_TODAY_ROUNDED, size=18, color=C.ACCENT),
+                    self._header_icon,
                     ft.Column(
                         controls=[
-                            ft.Text(
-                                "Lịch học hôm nay",
-                                size=13,
-                                weight=ft.FontWeight.W_600,
-                                color=C.TEXT_PRIMARY,
-                            ),
+                            self._header_title,
                             self.subtitle,
                         ],
                         spacing=1,
@@ -227,8 +238,16 @@ class TodaySchedulePanel:
         self.control.bgcolor = C.SURFACE
         self.control.border = ft.Border.all(1, C.BORDER)
         self.accent_bar.bgcolor = C.ACCENT if self.expanded else C.BORDER
+        self._header_icon.color = C.ACCENT
+        self._header_title.color = C.TEXT_PRIMARY
+        self._body_divider.bgcolor = C.BORDER
+        self._loading_ring.color = C.ACCENT
+        self._loading_text.color = C.TEXT_SECONDARY
         self.subtitle.color = C.TEXT_SECONDARY
         self.toggle_icon.color = C.TEXT_SECONDARY
+        for state_control in (self.empty, self.auth_required, self.error):
+            state_control.content.controls[0].color = C.BORDER_STRONG
+            state_control.content.controls[1].color = C.TEXT_SECONDARY
         self.set_state(self.state, now=self._rendered_at)
 
     @staticmethod

@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import flet as ft
 
-from gui.core.theme import C
+from gui.core.theme import C, on_color
 from gui.core.utils import (
     get_countdown,
     get_urgency_color,
@@ -416,8 +416,8 @@ class CalendarView(ft.Container):
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.ACCENT
             elif is_selected:
-                cell.bgcolor = "#15889AAF"
-                cell.border = ft.Border.all(1.5, "#99AABBCC")
+                cell.bgcolor = C.SURFACE_HOVER
+                cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
                 day_text.color = C.TEXT_PRIMARY
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.TEXT_PRIMARY
@@ -446,8 +446,13 @@ class CalendarView(ft.Container):
                 if len(acts) >= 3:
                     dots_row.controls.append(
                         ft.Container(
-                            content=ft.Text(str(len(acts)), size=8, color="#FFFFFF",
-                                            weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                            content=ft.Text(
+                                str(len(acts)),
+                                size=8,
+                                color=on_color(most_urgent_color or C.ACCENT),
+                                weight=ft.FontWeight.W_700,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
                             width=16, height=16, border_radius=8,
                             bgcolor=most_urgent_color or C.ACCENT,
                             alignment=ft.Alignment(0, 0),
@@ -593,14 +598,14 @@ class CalendarView(ft.Container):
 
                 if is_selected and is_today:
                     # Both: accent text + white selection border + today dot
-                    cell.bgcolor = "#1A8899AA"  # subtle cool tint
-                    cell.border = ft.Border.all(1.5, "#99AABBCC")
+                    cell.bgcolor = C.SURFACE_HOVER
+                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
                     day_text.color = C.ACCENT
                     day_text.weight = ft.FontWeight.W_700
                 elif is_selected:
                     # Selected only: white/silver border, neutral bg
-                    cell.bgcolor = "#15889AAF"
-                    cell.border = ft.Border.all(1.5, "#99AABBCC")
+                    cell.bgcolor = C.SURFACE_HOVER
+                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
                     day_text.color = C.TEXT_PRIMARY
                     day_text.weight = ft.FontWeight.W_600
                 elif is_today:
@@ -628,8 +633,13 @@ class CalendarView(ft.Container):
                         # Show count badge instead of many dots
                         dots_row.controls.append(
                             ft.Container(
-                                content=ft.Text(str(len(acts)), size=7, color="#FFFFFF",
-                                                weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                                content=ft.Text(
+                                    str(len(acts)),
+                                    size=7,
+                                    color=on_color(most_urgent_color or C.ACCENT),
+                                    weight=ft.FontWeight.W_700,
+                                    text_align=ft.TextAlign.CENTER,
+                                ),
                                 width=14, height=14, border_radius=7,
                                 bgcolor=most_urgent_color or C.ACCENT,
                                 alignment=ft.Alignment(0, 0),
@@ -678,13 +688,13 @@ class CalendarView(ft.Container):
         today_dot.visible = is_today
 
         if is_selected and is_today:
-            cell.bgcolor = "#1A8899AA"
-            cell.border = ft.Border.all(1.5, "#99AABBCC")
+            cell.bgcolor = C.SURFACE_HOVER
+            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
             day_text.color = C.ACCENT
             day_text.weight = ft.FontWeight.W_700
         elif is_selected:
-            cell.bgcolor = "#15889AAF"
-            cell.border = ft.Border.all(1.5, "#99AABBCC")
+            cell.bgcolor = C.SURFACE_HOVER
+            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
             day_text.color = C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_600
         elif is_today:
@@ -708,8 +718,13 @@ class CalendarView(ft.Container):
             if len(acts) >= 3:
                 dots_row.controls.append(
                     ft.Container(
-                        content=ft.Text(str(len(acts)), size=7, color="#FFFFFF",
-                                        weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                        content=ft.Text(
+                            str(len(acts)),
+                            size=7,
+                            color=on_color(most_urgent_color or C.ACCENT),
+                            weight=ft.FontWeight.W_700,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
                         width=14, height=14, border_radius=7,
                         bgcolor=most_urgent_color or C.ACCENT,
                         alignment=ft.Alignment(0, 0),

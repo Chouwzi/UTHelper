@@ -31,7 +31,7 @@ def init_account_controls(view):
         icon=ft.Icons.WIFI_FIND_ROUNDED,
         on_click=view._handle_test_login,
         style=ft.ButtonStyle(
-            color=ft.Colors.WHITE,
+            color=C.ON_ACCENT,
             bgcolor=C.ACCENT,
             shape=ft.RoundedRectangleBorder(radius=10),
             padding=12,

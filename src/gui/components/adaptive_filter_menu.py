@@ -103,7 +103,7 @@ class AdaptiveFilterMenu:
                 ),
                 bgcolor=C.BG,
                 elevation=12,
-                shadow_color="#66000000",
+                shadow_color=C.SHADOW,
                 menu_padding=ft.Padding.symmetric(horizontal=6, vertical=6),
                 size_constraints=ft.BoxConstraints(
                     min_width=popup_width,
@@ -306,7 +306,7 @@ class AdaptiveFilterMenu:
             scrollable=True,
             maintain_bottom_view_insets_padding=True,
             elevation=12,
-            barrier_color="#99000000",
+            barrier_color=C.SCRIM,
             shape=ft.RoundedRectangleBorder(radius=18),
             animation_style=ft.AnimationStyle(
                 duration=220,

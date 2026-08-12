@@ -102,7 +102,7 @@ def init_notification_controls(view):
             label=label,
             value=(key in _current_types),
             fill_color={ft.ControlState.SELECTED: C.ACCENT},
-            check_color=C.BG,
+            check_color=C.ON_ACCENT,
             label_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
         )
     view._notify_types_row = ft.Row(

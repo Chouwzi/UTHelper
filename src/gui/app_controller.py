@@ -690,7 +690,7 @@ class AppController:
             label="Quá hạn",
             label_style=ft.TextStyle(size=13, color=C.TEXT_SECONDARY),
             active_color=C.CRITICAL,
-            check_color=C.BG,
+            check_color=C.ON_CRITICAL,
             scale=1,
             on_change=lambda e: self._safe_run_task(self._toggle_overdue, e)
         )
@@ -737,13 +737,28 @@ class AppController:
         )
 
     def _init_banner_and_states(self):
-        self._update_icon = ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color="#FCD34D")
-        self._update_text = ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", weight=ft.FontWeight.W_500, expand=True)
-        self._update_progress = ft.ProgressBar(value=0, width=0, height=3, color="#FCD34D", bgcolor="#FCD34D20", visible=False)
+        self._update_icon = ft.Icon(
+            ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color=C.UPDATE
+        )
+        self._update_text = ft.Text(
+            "Có phiên bản mới!",
+            size=12,
+            color=C.UPDATE,
+            weight=ft.FontWeight.W_500,
+            expand=True,
+        )
+        self._update_progress = ft.ProgressBar(
+            value=0,
+            width=0,
+            height=3,
+            color=C.UPDATE,
+            bgcolor=C.BORDER,
+            visible=False,
+        )
         self._update_btn = ft.TextButton(
             "Cập nhật",
             icon=ft.Icons.DOWNLOAD_ROUNDED,
-            style=ft.ButtonStyle(color="#FCD34D"),
+            style=ft.ButtonStyle(color=C.UPDATE),
             on_click=self._request_update_download,
         )
         self._update_banner = ft.Container(
@@ -751,8 +766,8 @@ class AppController:
                 ft.Row([self._update_icon, self._update_text, self._update_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self._update_progress,
             ], spacing=2, tight=True),
-            bgcolor="#1C1917",
-            border=ft.Border.all(1, "#FCD34D30"),
+            bgcolor=C.SURFACE_ELEVATED,
+            border=ft.Border.all(1, C.UPDATE),
             border_radius=10,
             padding=ft.Padding(left=12, right=8, top=8, bottom=8),
             margin=ft.Margin(left=14, right=14, top=0, bottom=0),
@@ -780,7 +795,7 @@ class AppController:
             "Thử lại",
             icon=ft.Icons.REFRESH_ROUNDED,
             on_click=lambda _: self._safe_run_task(self._load_data_async),
-            bgcolor=C.ACCENT, color=C.TEXT_PRIMARY,
+            bgcolor=C.ACCENT, color=C.ON_ACCENT,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
         )
         self.error_state = ft.Container(
@@ -1327,8 +1342,8 @@ class AppController:
                 if len(grade_changes) > 3:
                     msg += f" +{len(grade_changes) - 3} kh\u00e1c"
                 self.page.snack_bar = ft.SnackBar(
-                    content=ft.Text(msg, color=ft.Colors.WHITE),
-                    bgcolor="#22C55E",
+                    content=ft.Text(msg, color=C.ON_SAFE),
+                    bgcolor=C.SAFE,
                     duration=5000,
                 )
                 self.page.snack_bar.open = True
@@ -1876,7 +1891,7 @@ class AppController:
 
         try:
             self._overdue_cb.label_style.color = _C.TEXT_SECONDARY
-            self._overdue_cb.check_color = _C.BG
+            self._overdue_cb.check_color = _C.ON_CRITICAL
             self._overdue_cb.active_color = _C.CRITICAL
         except Exception:
             import logging as _fb_log
@@ -1899,7 +1914,7 @@ class AppController:
             self.error_text.color = _C.BORDER
         if hasattr(self, '_error_retry_btn'):
             self._error_retry_btn.bgcolor = _C.ACCENT
-            self._error_retry_btn.color = _C.TEXT_PRIMARY
+            self._error_retry_btn.color = _C.ON_ACCENT
 
         # Footer
         footer = self.dashboard.controls[-1]
@@ -1943,6 +1958,15 @@ class AppController:
         # Loading bar
         self.loading_bar.color = _C.ACCENT
         self.loading_bar.bgcolor = _C.BORDER
+
+        # Update banner is a semantic elevated surface, not a fixed brown card.
+        self._update_banner.bgcolor = _C.SURFACE_ELEVATED
+        self._update_banner.border = ft.Border.all(1, _C.UPDATE)
+        self._update_icon.color = _C.UPDATE
+        self._update_text.color = _C.UPDATE
+        self._update_progress.color = _C.UPDATE
+        self._update_progress.bgcolor = _C.BORDER
+        self._update_btn.style = ft.ButtonStyle(color=_C.UPDATE)
 
         # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
@@ -2133,7 +2157,7 @@ class AppController:
                 check_button.disabled = False
                 check_button.content = "Kiểm tra ngay"
             self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
-            self._update_icon.color = "#FCD34D"
+            self._update_icon.color = C.UPDATE
             self._update_text.value = (
                 f"Phiên bản mới v{candidate.manifest.release_version} đã sẵn sàng!"
             )

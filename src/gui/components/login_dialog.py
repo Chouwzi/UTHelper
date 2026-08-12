@@ -54,8 +54,8 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
     btn_login = ft.Container(
         content=ft.Row(
             controls=[
-                ft.Icon(ft.Icons.LOGIN_ROUNDED, size=18, color=ft.Colors.WHITE),
-                ft.Text("Đăng nhập", size=14, color=ft.Colors.WHITE,
+                ft.Icon(ft.Icons.LOGIN_ROUNDED, size=18, color=C.ON_ACCENT),
+                ft.Text("Đăng nhập", size=14, color=C.ON_ACCENT,
                         weight=ft.FontWeight.W_600),
             ],
             spacing=8, alignment=ft.MainAxisAlignment.CENTER,
@@ -93,8 +93,8 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         _hide_error()
         btn_login.content = ft.Row(
             controls=[
-                ft.ProgressRing(width=16, height=16, stroke_width=2, color=ft.Colors.WHITE),
-                ft.Text("Đang đăng nhập...", size=14, color=ft.Colors.WHITE,
+                ft.ProgressRing(width=16, height=16, stroke_width=2, color=C.ON_ACCENT),
+                ft.Text("Đang đăng nhập...", size=14, color=C.ON_ACCENT,
                         weight=ft.FontWeight.W_500),
             ],
             spacing=8, alignment=ft.MainAxisAlignment.CENTER,
@@ -120,8 +120,8 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             # Success feedback
             btn_login.content = ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, size=18, color=ft.Colors.WHITE),
-                    ft.Text("Đăng nhập thành công!", size=14, color=ft.Colors.WHITE,
+                    ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, size=18, color=C.ON_SAFE),
+                    ft.Text("Đăng nhập thành công!", size=14, color=C.ON_SAFE,
                             weight=ft.FontWeight.W_600),
                 ],
                 spacing=8, alignment=ft.MainAxisAlignment.CENTER,
@@ -144,8 +144,8 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             # --- Reset to input state ---
             btn_login.content = ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.LOGIN_ROUNDED, size=18, color=ft.Colors.WHITE),
-                    ft.Text("Đăng nhập", size=14, color=ft.Colors.WHITE,
+                    ft.Icon(ft.Icons.LOGIN_ROUNDED, size=18, color=C.ON_ACCENT),
+                    ft.Text("Đăng nhập", size=14, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600),
                 ],
                 spacing=8, alignment=ft.MainAxisAlignment.CENTER,

@@ -170,6 +170,8 @@ def _show_startup_screen(
     compact_desktop: bool = True,
 ) -> None:
     """Publish the first frame only after it has final geometry and branding."""
+    from gui.core.theme import C, set_page_theme
+
     if compact_desktop:
         page.window.width = 420
         page.window.height = 720
@@ -180,10 +182,10 @@ def _show_startup_screen(
         page.window.resizable = False
         page.window.icon = "icon.ico"
     page.title = "UTHelper"
-    page.bgcolor = "#0B1120"
+    set_page_theme(page)
+    page.bgcolor = C.BG
     page.padding = 0
     page.spacing = 0
-    page.theme_mode = ft.ThemeMode.DARK
     page.controls.clear()
     page.add(
         ft.Container(
@@ -199,24 +201,24 @@ def _show_startup_screen(
                         "UTHelper",
                         size=24,
                         weight=ft.FontWeight.BOLD,
-                        color="#F8FAFC",
+                        color=C.TEXT_PRIMARY,
                     ),
                     ft.Text(
                         "Trợ lý học tập UTH",
                         size=12,
-                        color="#94A3B8",
+                        color=C.TEXT_SECONDARY,
                     ),
                     ft.Container(height=18),
                     ft.ProgressRing(
                         width=28,
                         height=28,
                         stroke_width=3,
-                        color="#3B82F6",
+                        color=C.ACCENT,
                     ),
                     ft.Text(
                         "Đang khởi động UTHelper...",
                         size=12,
-                        color="#CBD5E1",
+                        color=C.TEXT_SECONDARY,
                     ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -226,7 +228,7 @@ def _show_startup_screen(
             ),
             alignment=ft.Alignment(0, 0),
             expand=True,
-            bgcolor="#0B1120",
+            bgcolor=C.BG,
         )
     )
     if compact_desktop:

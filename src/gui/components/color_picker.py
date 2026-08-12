@@ -45,7 +45,7 @@ class ColorPicker:
             ),
             actions=[
                 ft.TextButton("Hủy", on_click=self._cancel),
-                ft.Button("Áp dụng", on_click=self._apply, bgcolor=C.ACCENT, color=ft.Colors.WHITE),
+                ft.Button("Áp dụng", on_click=self._apply, bgcolor=C.ACCENT, color=C.ON_ACCENT),
             ],
             shape=ft.RoundedRectangleBorder(radius=12)
         )

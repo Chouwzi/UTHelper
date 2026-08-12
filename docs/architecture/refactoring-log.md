@@ -1604,3 +1604,28 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   suite passes **1377 tests with 25 skipped**; focused post-theme UI coverage
   passes **108 tests**. Repository Ruff, bytecode compilation, and
   `git diff --check` pass.
+
+## Semantic theme and contrast audit (2026-08-12)
+
+- Audited GUI color assignments across startup, dashboard, filters, schedule,
+  calendar, detail/submission, grades, login, and Settings. Replaced fixed white
+  foregrounds, fixed grade colors, popup shadow/scrim values, calendar selection
+  colors, update-banner colors, and checkbox checks with semantic roles.
+- Added `Material Graphite`, a neutral layered dark theme derived from Material
+  role-based color guidance. Expanded the runtime contract with elevated surface,
+  strong outline, matching filled-control foregrounds, update, scrim, and shadow
+  roles and mapped them into Flet's `ColorScheme`.
+- Corrected live theme propagation for the mounted update banner, submission
+  actions, diagnostic notification controls, and every static/dynamic element in
+  the Today Schedule panel. The startup splash now honors the selected theme; the
+  boot-failure screen remains intentionally independent.
+- Rebalanced semantic colors in all existing presets. Automated WCAG AA checks now
+  require at least 4.5:1 contrast for small text on page/card surfaces and for all
+  filled semantic control pairs. Custom solid colors receive a computed accessible
+  foreground.
+- Maintained design rules and official research sources are recorded in
+  `docs/design/theme-system.md`. Physical-device keyboard, screen-reader, text-scale,
+  and OLED/LCD validation remains a release-candidate responsibility.
+- The complete application/extension suite passes **1419 tests with 25 skipped**;
+  Ruff, bytecode compilation, semantic contrast governance, and `git diff --check`
+  pass.

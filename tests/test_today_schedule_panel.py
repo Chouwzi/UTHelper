@@ -9,6 +9,7 @@ from core.today_schedule import (
     TodayScheduleViewState,
 )
 from gui.components.today_schedule_panel import TodaySchedulePanel
+from gui.core.theme import C, apply_theme
 
 
 def _state(*, status=ScheduleLoadStatus.READY, sessions=()):
@@ -104,3 +105,25 @@ def test_panel_refreshes_phase_when_time_crosses_class_boundary():
     assert panel.refresh_time_state(datetime(2026, 8, 11, 7, 0)) is True
 
     assert "Đang học" in _texts(panel.item_column.controls[0])
+
+
+def test_panel_refresh_theme_updates_static_and_dynamic_controls():
+    panel = TodaySchedulePanel(on_need_data=lambda: None)
+    panel.set_state(
+        _state(sessions=(_session(),)),
+        now=datetime(2026, 8, 11, 8, 0),
+    )
+    original_theme = "midnight_blue"
+    try:
+        apply_theme("material_graphite")
+        panel.refresh_theme()
+
+        assert panel.control.bgcolor == C.SURFACE
+        assert panel._header_icon.color == C.ACCENT
+        assert panel._header_title.color == C.TEXT_PRIMARY
+        assert panel._body_divider.bgcolor == C.BORDER
+        assert panel._loading_ring.color == C.ACCENT
+        assert panel.empty.content.controls[0].color == C.BORDER_STRONG
+        assert panel.item_column.controls[0].bgcolor == C.BG
+    finally:
+        apply_theme(original_theme)
