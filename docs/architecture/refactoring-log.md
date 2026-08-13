@@ -1825,3 +1825,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   and an open detail keeps its selected class while the dashboard spotlight advances.
   The CI-equivalent application/extension suite passes **1478 tests with 25 skipped**;
   focused Ruff checks and `git diff --check` pass.
+- Follow-up real-render review found that `AlertDialog` defaults to
+  `ClipBehavior.NONE`, so its full-background content painted square pixels over the
+  rounded top corners. The dialog and its inner surface now share an 18 px radius and
+  anti-alias clipping. Class detail now uses one full-width information card with a
+  consistent 17/16/12/11/10 px type scale, separate time, room, and campus rows, and
+  no redundant second status block.
+- Closing detail previously called `page.pop_dialog()` before clearing its internal
+  state. Flet can synchronously route that pop through the shared Back callback, which
+  still saw an open list-origin detail and repainted the list while closing. Cleanup
+  now happens before the native pop; a re-entrant callback regression test verifies
+  that X closes once and cannot reopen the schedule surface. The complete suite now
+  passes **1481 tests with 25 skipped**.

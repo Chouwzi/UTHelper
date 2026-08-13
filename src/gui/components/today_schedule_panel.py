@@ -22,6 +22,14 @@ _PHASE_PRESENTATION = {
     SchedulePhase.CANCELLED: ("Tạm ngưng", lambda: C.CRITICAL),
 }
 
+_DIALOG_TITLE_SIZE = 17
+_DETAIL_SUBJECT_SIZE = 16
+_CARD_SUBJECT_SIZE = 13
+_BODY_SIZE = 12
+_META_SIZE = 11
+_LABEL_SIZE = 10
+_STATUS_SIZE = 10
+
 
 class TodaySchedulePanel:
     """Compact Portal class-schedule disclosure for the dashboard."""
@@ -72,7 +80,7 @@ class TodaySchedulePanel:
             ft.Row(
                 [
                     ft.Icon(ft.Icons.ACCESS_TIME_ROUNDED, size=14, color=C.TEXT_SECONDARY),
-                    ft.Text(time_text, size=11, color=C.TEXT_SECONDARY, expand=True),
+                    ft.Text(time_text, size=_META_SIZE, color=C.TEXT_SECONDARY, expand=True),
                 ],
                 spacing=6,
             ),
@@ -81,7 +89,7 @@ class TodaySchedulePanel:
                     ft.Icon(ft.Icons.MEETING_ROOM_OUTLINED, size=14, color=C.TEXT_SECONDARY),
                     ft.Text(
                         f"Phòng {session.room}" if session.room else "Chưa cập nhật phòng",
-                        size=11,
+                        size=_META_SIZE,
                         color=C.TEXT_SECONDARY,
                         expand=True,
                     ),
@@ -93,7 +101,7 @@ class TodaySchedulePanel:
                     ft.Icon(ft.Icons.LOCATION_ON_OUTLINED, size=14, color=C.TEXT_SECONDARY),
                     ft.Text(
                         session.campus or "Chưa cập nhật cơ sở",
-                        size=11,
+                        size=_META_SIZE,
                         color=C.TEXT_SECONDARY,
                         max_lines=2,
                         overflow=ft.TextOverflow.ELLIPSIS,
@@ -119,7 +127,7 @@ class TodaySchedulePanel:
                             ft.Icon(ft.Icons.EVENT_AVAILABLE_ROUNDED, size=20, color=C.SAFE),
                             ft.Text(
                                 "Đã hoàn thành lịch học hôm nay",
-                                size=13,
+                                size=_CARD_SUBJECT_SIZE,
                                 weight=ft.FontWeight.W_600,
                                 color=C.TEXT_PRIMARY,
                                 expand=True,
@@ -168,7 +176,7 @@ class TodaySchedulePanel:
                                 expand=True,
                             ),
                             ft.Container(
-                                content=ft.Text(status_text, size=9, color=status_color, weight=ft.FontWeight.W_600),
+                                content=ft.Text(status_text, size=_STATUS_SIZE, color=status_color, weight=ft.FontWeight.W_600),
                                 padding=ft.Padding.symmetric(horizontal=7, vertical=4),
                                 border=ft.Border.all(1, status_color),
                                 border_radius=999,
@@ -227,7 +235,7 @@ class TodaySchedulePanel:
                         [
                             ft.Text(
                                 session.subject,
-                                size=12,
+                                size=_CARD_SUBJECT_SIZE,
                                 weight=ft.FontWeight.W_600,
                                 color=C.TEXT_PRIMARY,
                                 max_lines=2,
@@ -236,7 +244,7 @@ class TodaySchedulePanel:
                             ),
                             ft.Text(
                                 status_text,
-                                size=9,
+                                size=_STATUS_SIZE,
                                 weight=ft.FontWeight.W_600,
                                 color=status_color,
                             ),
@@ -278,7 +286,7 @@ class TodaySchedulePanel:
                 leading,
                 ft.Text(
                     title,
-                    size=15,
+                    size=_DIALOG_TITLE_SIZE,
                     weight=ft.FontWeight.W_700,
                     color=C.TEXT_PRIMARY,
                     text_align=ft.TextAlign.CENTER,
@@ -309,7 +317,7 @@ class TodaySchedulePanel:
                 self._surface_header("Lịch học hôm nay", show_back=False),
                 ft.Text(
                     f"{schedule_date:%d/%m/%Y} · {len(sessions)} buổi",
-                    size=10,
+                    size=_META_SIZE,
                     color=C.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -324,28 +332,47 @@ class TodaySchedulePanel:
             expand=True,
         )
 
-    def _detail_field(self, label: str, values: list[str]) -> ft.Container:
-        return ft.Container(
-            content=ft.Column(
-                [
-                    ft.Text(label.upper(), size=9, color=C.TEXT_SECONDARY),
-                    *[
+    @staticmethod
+    def _detail_info_row(
+        icon: str,
+        label: str,
+        values: list[str],
+    ) -> ft.Row:
+        return ft.Row(
+            [
+                ft.Container(
+                    content=ft.Icon(icon, size=18, color=C.ACCENT),
+                    width=36,
+                    height=36,
+                    border_radius=9,
+                    bgcolor=ft.Colors.with_opacity(0.10, C.ACCENT),
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Column(
+                    [
                         ft.Text(
-                            value,
-                            size=12,
-                            color=C.TEXT_PRIMARY,
-                            max_lines=3,
-                            overflow=ft.TextOverflow.ELLIPSIS,
-                        )
-                        for value in values
+                            label.upper(),
+                            size=_LABEL_SIZE,
+                            color=C.TEXT_SECONDARY,
+                            weight=ft.FontWeight.W_500,
+                        ),
+                        *[
+                            ft.Text(
+                                value,
+                                size=_BODY_SIZE,
+                                color=C.TEXT_PRIMARY,
+                                max_lines=4,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            )
+                            for value in values
+                        ],
                     ],
-                ],
-                spacing=3,
-            ),
-            bgcolor=C.SURFACE,
-            border=ft.Border.all(1, C.BORDER),
-            border_radius=10,
-            padding=12,
+                    spacing=2,
+                    expand=True,
+                ),
+            ],
+            spacing=11,
+            vertical_alignment=ft.CrossAxisAlignment.START,
         )
 
     def _build_detail_surface(self) -> ft.Control:
@@ -358,25 +385,50 @@ class TodaySchedulePanel:
         period = ""
         if session.period_start is not None and session.period_end is not None:
             period = f"Tiết {session.period_start}–{session.period_end}"
-        fields = [
-            self._detail_field(
+        info_rows: list[ft.Control] = [
+            self._detail_info_row(
+                ft.Icons.ACCESS_TIME_ROUNDED,
                 "Thời gian",
                 [
                     f"{session.start_at:%H:%M} – {session.end_at:%H:%M}",
                     *([period] if period else []),
                 ],
             ),
-            self._detail_field(
-                "Địa điểm",
+            ft.Divider(height=1, thickness=1, color=C.BORDER),
+            self._detail_info_row(
+                ft.Icons.MEETING_ROOM_OUTLINED,
+                "Phòng học",
                 [
                     f"Phòng {session.room}" if session.room else "Chưa cập nhật phòng",
-                    session.campus or "Chưa cập nhật cơ sở",
                 ],
             ),
-            self._detail_field("Trạng thái", [status_text]),
+            ft.Divider(height=1, thickness=1, color=C.BORDER),
+            self._detail_info_row(
+                ft.Icons.LOCATION_ON_OUTLINED,
+                "Cơ sở",
+                [session.campus or "Chưa cập nhật cơ sở"],
+            ),
         ]
         if session.note:
-            fields.append(self._detail_field("Ghi chú", [session.note]))
+            info_rows.extend(
+                [
+                    ft.Divider(height=1, thickness=1, color=C.BORDER),
+                    self._detail_info_row(
+                        ft.Icons.NOTES_ROUNDED,
+                        "Ghi chú",
+                        [session.note],
+                    ),
+                ]
+            )
+        info_card = ft.Container(
+            content=ft.Column(info_rows, spacing=12),
+            data="schedule-detail-info",
+            width=float("inf"),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=12,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=14),
+        )
         return ft.Column(
             [
                 self._surface_header("Chi tiết lớp học", show_back=True),
@@ -386,7 +438,7 @@ class TodaySchedulePanel:
                             ft.Container(
                                 content=ft.Text(
                                     status_text,
-                                    size=9,
+                                    size=_STATUS_SIZE,
                                     color=status_color,
                                     weight=ft.FontWeight.W_600,
                                 ),
@@ -396,7 +448,7 @@ class TodaySchedulePanel:
                             ),
                             ft.Text(
                                 session.subject,
-                                size=17,
+                                size=_DETAIL_SUBJECT_SIZE,
                                 weight=ft.FontWeight.W_700,
                                 color=C.TEXT_PRIMARY,
                                 text_align=ft.TextAlign.CENTER,
@@ -413,9 +465,14 @@ class TodaySchedulePanel:
                     ),
                     alignment=ft.Alignment.CENTER,
                 ),
-                ft.Column(fields, spacing=8, scroll=ft.ScrollMode.AUTO, expand=True),
+                ft.Column(
+                    [info_card],
+                    spacing=0,
+                    scroll=ft.ScrollMode.AUTO,
+                    expand=True,
+                ),
             ],
-            spacing=8,
+            spacing=14,
             expand=True,
         )
 
@@ -458,6 +515,8 @@ class TodaySchedulePanel:
             padding=ft.Padding.only(left=14, right=14, bottom=14),
             height=self._surface_height() if self.mobile else 520,
             width=None if self.mobile else 430,
+            border_radius=18,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
         if self.mobile:
             self._surface = ft.BottomSheet(
@@ -480,7 +539,8 @@ class TodaySchedulePanel:
                 modal=True,
                 content_padding=0,
                 inset_padding=20,
-                shape=ft.RoundedRectangleBorder(radius=16),
+                shape=ft.RoundedRectangleBorder(radius=18),
+                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                 on_dismiss=self._on_surface_dismissed,
             )
         self.surface_open = True
@@ -513,9 +573,10 @@ class TodaySchedulePanel:
     def close_surface(self) -> bool:
         if not self.surface_open:
             return False
-        if self.page is not None:
-            self.page.pop_dialog()
+        page = self.page
         self._on_surface_dismissed()
+        if page is not None:
+            page.pop_dialog()
         return True
 
     def handle_back(self) -> bool:

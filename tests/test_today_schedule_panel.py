@@ -17,12 +17,15 @@ class _Page:
         self.height = height
         self.dialogs = []
         self.pop_count = 0
+        self.on_pop = None
 
     def show_dialog(self, dialog):
         self.dialogs.append(dialog)
 
     def pop_dialog(self):
         self.pop_count += 1
+        if self.on_pop is not None:
+            self.on_pop()
 
 
 def _state(*, status=ScheduleLoadStatus.READY, sessions=()):
@@ -159,6 +162,19 @@ def test_desktop_schedule_surface_uses_a_dialog():
     assert isinstance(page.dialogs[-1], ft.AlertDialog)
 
 
+def test_desktop_dialog_clips_content_to_rounded_top_corners():
+    page = _Page()
+    panel = TodaySchedulePanel(page=page, mobile=False, on_need_data=lambda: None)
+    panel.set_state(_state(sessions=(_session(),)))
+
+    panel.open_schedule()
+
+    dialog = page.dialogs[-1]
+    assert dialog.clip_behavior is ft.ClipBehavior.ANTI_ALIAS
+    assert panel._surface_content.border_radius == 18
+    assert panel._surface_content.clip_behavior is ft.ClipBehavior.ANTI_ALIAS
+
+
 def test_list_detail_back_returns_to_list_without_stacking_a_dialog():
     page = _Page()
     panel = TodaySchedulePanel(page=page, mobile=True, on_need_data=lambda: None)
@@ -196,6 +212,58 @@ def test_direct_spotlight_detail_back_closes_surface_to_dashboard():
     assert panel.handle_back() is True
     assert panel.surface_open is False
     assert page.pop_count == 1
+
+
+def test_close_marks_surface_closed_before_flet_pop_callback_runs():
+    page = _Page()
+    session = _session()
+    panel = TodaySchedulePanel(page=page, mobile=False, on_need_data=lambda: None)
+    panel.set_state(
+        _state(sessions=(session,)),
+        now=datetime(2026, 8, 11, 8, 0),
+    )
+    panel.open_schedule()
+    panel._list_rows[0].on_click(None)
+    observed = []
+    page.on_pop = lambda: observed.append(
+        (panel.surface_open, panel._surface_mode, panel.handle_back())
+    )
+
+    assert panel.close_surface() is True
+
+    assert observed == [(False, None, False)]
+    assert panel.surface_open is False
+    assert page.pop_count == 1
+
+
+def test_detail_uses_consistent_type_scale_and_one_full_width_information_card():
+    page = _Page()
+    session = _session()
+    panel = TodaySchedulePanel(page=page, mobile=False, on_need_data=lambda: None)
+    panel.set_state(
+        _state(sessions=(session,)),
+        now=datetime(2026, 8, 11, 8, 0),
+    )
+
+    panel.open_detail(session, from_list=False)
+
+    surface = panel._surface_content
+    texts = _controls(surface, ft.Text)
+    text_by_value = {text.value: text for text in texts}
+    assert text_by_value["Chi tiết lớp học"].size == 17
+    assert text_by_value["Hệ quản trị cơ sở dữ liệu"].size == 16
+    assert text_by_value["CNS_CS1"].size == 11
+    assert text_by_value["THỜI GIAN"].size == 10
+    assert text_by_value["PHÒNG HỌC"].size == 10
+    assert text_by_value["CƠ SỞ"].size == 10
+    assert "TRẠNG THÁI" not in text_by_value
+    info_cards = [
+        control
+        for control in _controls(surface, ft.Container)
+        if control.data == "schedule-detail-info"
+    ]
+    assert len(info_cards) == 1
+    assert info_cards[0].width == float("inf")
 
 
 def test_phase_boundary_advances_spotlight_and_refreshes_open_detail():
