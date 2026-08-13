@@ -660,7 +660,7 @@ class AppController:
             selected_key=self.active_urgency,
             on_select=lambda key: self._safe_run_task(self._set_urgency, key),
             mobile=platform_utils.UI_IS_MOBILE,
-            trigger_width=88,
+            trigger_width=None,
             popup_width=224,
         )
         self.type_filter_menu = AdaptiveFilterMenu(
@@ -670,7 +670,7 @@ class AppController:
             selected_key=self.active_type,
             on_select=lambda key: self._safe_run_task(self._set_type, key),
             mobile=platform_utils.UI_IS_MOBILE,
-            trigger_width=104,
+            trigger_width=None,
             popup_width=232,
         )
         self.course_filter_menu = AdaptiveFilterMenu(
@@ -680,7 +680,7 @@ class AppController:
             selected_key=self.active_course,
             on_select=lambda key: self._safe_run_task(self._set_course, key),
             mobile=platform_utils.UI_IS_MOBILE,
-            trigger_width=124,
+            trigger_width=None,
             popup_width=340,
             option_max_lines=2,
         )
@@ -851,15 +851,7 @@ class AppController:
                 controls=[
                     ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
                     ft.Container(
-                        content=ft.Row(
-                            controls=[
-                                self.urgency_filter_menu.control,
-                                self.type_filter_menu.control,
-                                self.course_filter_menu.control,
-                            ],
-                            spacing=6,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
+                        content=self._build_dashboard_filter_row(),
                         padding=ft.Padding.only(left=16, right=12),
                     ),
                 ], spacing=4,
@@ -944,6 +936,20 @@ class AppController:
             self.page.add(ft.SafeArea(content=main_stack, expand=True))
         else:
             self.page.add(main_stack)
+
+    def _build_dashboard_filter_row(self) -> ft.Row:
+        controls = [
+            self.urgency_filter_menu.control,
+            self.type_filter_menu.control,
+            self.course_filter_menu.control,
+        ]
+        for control, flex in zip(controls, (4, 4, 5), strict=True):
+            control.expand = flex
+        return ft.Row(
+            controls=controls,
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
     def _start_skeleton_shimmer(self):
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]

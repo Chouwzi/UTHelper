@@ -66,6 +66,24 @@ def test_filter_chevron_matches_schedule_disclosure_motion_on_desktop():
 
     assert menu.arrow.icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
     assert menu.arrow.rotate.angle == 0
+
+
+def test_flexible_trigger_fills_the_width_allocated_by_filter_row():
+    menu = AdaptiveFilterMenu(
+        page=_Page(),
+        title="Môn học",
+        options=[FilterMenuOption("all", "Tất cả môn học", "#FFFFFF")],
+        selected_key="all",
+        on_select=lambda _key: None,
+        mobile=False,
+        trigger_width=None,
+        popup_width=340,
+    )
+
+    assert menu.trigger.expand is True
+    assert menu.label.expand is True
+    assert menu.trigger.width is None
+    assert menu.popup.size_constraints.max_width == 340
     menu.popup.on_open(None)
     assert menu.arrow.rotate.angle == math.pi / 2
     assert menu.control.expanded is True

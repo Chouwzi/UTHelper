@@ -1799,3 +1799,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   restored to secondary/critical roles. Sequential dark/light renderer checks showed
   correct selected, today, critical, safe, divider, header, and mode-toggle colors;
   the complete suite passes **1465 tests with 25 skipped**.
+- Removed the residual dashboard filter gap left by the retired overdue checkbox.
+  The three adaptive triggers now consume the available row width with a responsive
+  `4:4:5` flex ratio, keeping Mức độ and Tất cả readable while reserving more room
+  for Môn học. Trigger internals expand with their allocated slot, but desktop popup
+  constraints remain independent, so menus still anchor directly below their source
+  button. Real 390 px and 430 px render checks covered mobile layout, full Vietnamese
+  labels, and the anchored desktop popup; the complete suite passes **1467 tests with
+  25 skipped**.

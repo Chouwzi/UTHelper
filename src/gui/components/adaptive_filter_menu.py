@@ -92,6 +92,7 @@ class AdaptiveFilterMenu:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             width=trigger_width,
+            expand=trigger_width is None,
             height=48 if mobile else 40,
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),

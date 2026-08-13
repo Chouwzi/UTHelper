@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import flet as ft
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import gui.app_controller as app_controller_module
@@ -56,6 +58,18 @@ def test_every_dashboard_filter_option_has_an_icon_for_fast_scanning():
     ]
 
     assert all(option.icon is not None for group in option_groups for option in group)
+
+
+def test_dashboard_filter_row_distributes_removed_checkbox_space():
+    controller = AppController.__new__(AppController)
+    controller.urgency_filter_menu = SimpleNamespace(control=ft.Container())
+    controller.type_filter_menu = SimpleNamespace(control=ft.Container())
+    controller.course_filter_menu = SimpleNamespace(control=ft.Container())
+
+    row = controller._build_dashboard_filter_row()
+
+    assert row.spacing == 6
+    assert [control.expand for control in row.controls] == [4, 4, 5]
 
 
 class _FakePage:
