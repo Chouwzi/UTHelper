@@ -57,6 +57,7 @@ _MONTHS_VI = {
 class _CalendarPeriodPage:
     anchor: MonthAnchor | date
     control: ft.Control
+    weekday_labels: list[ft.Text] = field(default_factory=list)
     day_cells: list[list[ft.Container]] = field(default_factory=list)
     week_cells: list[ft.Container] = field(default_factory=list)
 
@@ -367,24 +368,24 @@ class CalendarView(ft.Container):
     def _build_month_period_page(
         self, anchor: MonthAnchor
     ) -> _CalendarPeriodPage:
+        weekday_labels = [
+            ft.Text(
+                weekday,
+                size=10,
+                weight=ft.FontWeight.W_600,
+                color=C.CRITICAL if weekday == "CN" else C.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            )
+            for weekday in _WEEKDAYS
+        ]
         weekday_row = ft.Row(
             controls=[
                 ft.Container(
-                    content=ft.Text(
-                        weekday,
-                        size=10,
-                        weight=ft.FontWeight.W_600,
-                        color=(
-                            C.CRITICAL
-                            if weekday == "CN"
-                            else C.TEXT_SECONDARY
-                        ),
-                        text_align=ft.TextAlign.CENTER,
-                    ),
+                    content=label,
                     width=44,
                     alignment=ft.Alignment(0, 0),
                 )
-                for weekday in _WEEKDAYS
+                for label in weekday_labels
             ],
             spacing=2,
             alignment=ft.MainAxisAlignment.CENTER,
@@ -427,7 +428,12 @@ class CalendarView(ft.Container):
             spacing=2,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        period = _CalendarPeriodPage(anchor, control, day_cells=day_cells)
+        period = _CalendarPeriodPage(
+            anchor,
+            control,
+            weekday_labels=weekday_labels,
+            day_cells=day_cells,
+        )
         self._render_month_period_page(period)
         return period
 
@@ -586,6 +592,8 @@ class CalendarView(ft.Container):
         anchor = period.anchor
         if not isinstance(anchor, MonthAnchor):
             return
+        for label in period.weekday_labels:
+            label.color = C.CRITICAL if label.value == "CN" else C.TEXT_SECONDARY
         today = date.today()
         for column, cell in (
             (column, cell)
@@ -1621,6 +1629,7 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        self._render_period_pages()
 
         # Re-render selected day details list (re-creates mini-cards with correct theme)
         self._update_day_panel()

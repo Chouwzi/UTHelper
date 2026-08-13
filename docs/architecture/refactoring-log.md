@@ -1790,3 +1790,12 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   selection. Mouse and touch taps responded within the 150 ms renderer checkpoint,
   and month dragging still advanced after the repair. The complete suite now passes
   **1464 tests with 25 skipped**.
+- A nine-preset Calendar theme audit found a semantic-role collision during live
+  switching: when a source preset reused one RGB value for two roles (Monokai uses
+  the same yellow for accent and warning), generic color replacement could not infer
+  whether a mounted value represented selection or urgency. The active month/week
+  pages are now repainted from their calendar state after semantic traversal, and
+  each month page retains explicit weekday-label references so T2–T7 and CN are
+  restored to secondary/critical roles. Sequential dark/light renderer checks showed
+  correct selected, today, critical, safe, divider, header, and mode-toggle colors;
+  the complete suite passes **1465 tests with 25 skipped**.

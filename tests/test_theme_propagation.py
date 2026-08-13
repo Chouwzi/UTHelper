@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -194,6 +195,62 @@ def test_calendar_and_grade_hidden_controls_receive_live_theme():
             for row in period.day_cells:
                 for cell in row:
                     assert cell.data["today_dot"].bgcolor == C.ACCENT
+    finally:
+        apply_theme(original_theme)
+
+
+def test_calendar_mounted_period_states_keep_semantic_roles_across_all_themes():
+    original_theme = settings.THEME
+    try:
+        apply_theme(THEME_ORDER[0])
+        calendar = CalendarView(_page(), on_close=lambda: None)
+        today = date.today()
+        calendar._year, calendar._month = today.year, today.month
+        calendar._selected_day = today.day
+        calendar._selected_date = today
+
+        critical_date = next(
+            date(today.year, today.month, day)
+            for day in range(1, 29)
+            if day != today.day
+            and date(today.year, today.month, day).weekday() != 6
+        )
+        calendar._deadline_map = {
+            critical_date.isoformat(): [{"urgency": "critical"}]
+        }
+        calendar._reset_period_pager()
+
+        for theme_name in [*THEME_ORDER, "material_graphite"]:
+            apply_theme(theme_name)
+            calendar.update_theme()
+            center = calendar._period_pages[1]
+            dated_cells = {
+                cell.data["date"]: cell
+                for row in center.day_cells
+                for cell in row
+                if cell.data["date"] is not None
+            }
+            selected = dated_cells[today]
+            critical = dated_cells[critical_date]
+
+            assert selected.bgcolor == C.SURFACE_HOVER, theme_name
+            assert selected.data["day_text"].color == C.ACCENT, theme_name
+            assert selected.border.top.color == C.BORDER_STRONG, theme_name
+            assert critical.bgcolor == ft.Colors.with_opacity(
+                0.06, C.CRITICAL
+            ), theme_name
+            assert critical.border.top.color == ft.Colors.with_opacity(
+                0.19, C.CRITICAL
+            ), theme_name
+            assert calendar._mode_month_btn.bgcolor == ft.Colors.with_opacity(
+                0.19, C.ACCENT
+            ), theme_name
+            assert all(
+                label.color == (
+                    C.CRITICAL if label.value == "CN" else C.TEXT_SECONDARY
+                )
+                for label in center.weekday_labels
+            ), theme_name
     finally:
         apply_theme(original_theme)
 
