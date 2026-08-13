@@ -623,6 +623,9 @@ class AppController:
 
     async def _navigate_back(self) -> bool:
         """Shared back-navigation logic. Returns True if a view was closed."""
+        schedule_component = getattr(self, "_today_schedule_component", None)
+        if schedule_component is not None and schedule_component.handle_back():
+            return True
         if self.settings_view.visible:
             await self.settings_view._handle_back(None)
             return True
@@ -802,6 +805,8 @@ class AppController:
 
         self._today_schedule_component = TodaySchedulePanel(
             on_need_data=self._request_today_schedule,
+            page=self.page,
+            mobile=platform_utils.UI_IS_MOBILE,
         )
         self.today_schedule_panel = self._today_schedule_component.control
         self._today_schedule_component.set_state(self._today_schedule_state)

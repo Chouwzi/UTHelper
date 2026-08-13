@@ -1807,3 +1807,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   button. Real 390 px and 430 px render checks covered mobile layout, full Vietnamese
   labels, and the anchored desktop popup; the complete suite passes **1467 tests with
   25 skipped**.
+
+## Today schedule spotlight and disclosure (2026-08-13)
+
+- Replaced the collapsed inline Portal schedule with a glanceable dashboard spotlight.
+  It selects an in-progress class first, otherwise the earliest upcoming class, skips
+  cancelled/finished sessions, advances at time boundaries without another network
+  request, and reports completion when no relevant class remains.
+- Split time, room, and campus into independent wrapping lines. The card content opens
+  the spotlight class directly, while its 48 px action row opens every class for the
+  day in chronological order, including finished and cancelled context.
+- Added one adaptive disclosure surface: a bounded, safe-area-aware bottom sheet for
+  Android/iOS presentation and a dialog for desktop. List rows drill into class detail
+  within the same surface; explicit and system Back handling returns detail to its
+  parent list or closes a direct-detail surface before any dashboard child view.
+- Open schedule surfaces rebuild from semantic theme roles during live theme changes,
+  and an open detail keeps its selected class while the dashboard spotlight advances.
+  The CI-equivalent application/extension suite passes **1478 tests with 25 skipped**;
+  focused Ruff checks and `git diff --check` pass.

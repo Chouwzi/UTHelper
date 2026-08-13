@@ -104,6 +104,32 @@ class TodayScheduleViewState:
     error_code: str = ""
 
 
+def select_spotlight_session(
+    sessions: tuple[ClassSession, ...],
+    now: datetime,
+) -> ClassSession | None:
+    """Return the class that is most relevant at ``now`` for the dashboard."""
+    candidates = [
+        session
+        for session in sessions
+        if session.phase_at(now)
+        in {SchedulePhase.IN_PROGRESS, SchedulePhase.UPCOMING}
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda session: (
+            0
+            if session.phase_at(now) is SchedulePhase.IN_PROGRESS
+            else 1,
+            session.start_at,
+            session.end_at,
+            session.session_id,
+        ),
+    )
+
+
 def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None

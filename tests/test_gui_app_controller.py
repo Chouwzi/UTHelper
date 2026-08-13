@@ -195,7 +195,7 @@ def test_mobile_root_view_intercepts_back_and_cancels_native_pop():
         )
         event_view.confirm_pop.assert_awaited_once_with(False)
 
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, Mock
 
     asyncio.run(scenario())
 
@@ -240,6 +240,29 @@ def test_shared_back_navigation_handles_settings_dialog_and_grades():
         controller.grade_overview_view.visible = True
         assert await controller._navigate_back() is True
         controller._close_grades.assert_awaited_once_with()
+
+    asyncio.run(scenario())
+
+
+def test_shared_back_navigation_closes_schedule_surface_before_child_views():
+    from unittest.mock import AsyncMock, Mock
+
+    async def scenario():
+        controller = AppController.__new__(AppController)
+        controller._today_schedule_component = SimpleNamespace(
+            handle_back=Mock(return_value=True),
+        )
+        controller.settings_view = SimpleNamespace(
+            visible=True,
+            _handle_back=AsyncMock(),
+        )
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(visible=False)
+
+        assert await controller._navigate_back() is True
+        controller._today_schedule_component.handle_back.assert_called_once_with()
+        controller.settings_view._handle_back.assert_not_awaited()
 
     asyncio.run(scenario())
 
