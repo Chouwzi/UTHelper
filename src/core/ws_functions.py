@@ -927,7 +927,7 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
                 'type': event_type,
                 'urgency': urgency,
                 'source': 'ws_api',
-                'submission_status': 'unknown',
+                'submission_status': 'new',
                 'details': {},
                 'is_open': event_type == 'open',
             }

@@ -1405,6 +1405,7 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   branch must merge into both `main` and `develop` before the protected main
   result is tagged.
 
+<<<<<<< HEAD
 ## Cross-platform interaction performance (2026-08-11)
 
 - Navigation now mounts only the active Flet view instead of keeping Dashboard,
@@ -1837,3 +1838,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   now happens before the native pop; a re-entrant callback regression test verifies
   that X closes once and cannot reopen the schedule surface. The complete suite now
   passes **1481 tests with 25 skipped**.
+
+## THNN Integration (2026-08-20)
+
+- Triển khai tính năng lấy bài tập từ thnn.ut.edu.vn thông qua đăng nhập session và Moodle AJAX.
+- Bổ sung `login_session` và `call_ajax_api` cho `MoodleClient` (`src/core/client.py`).
+- Cập nhật `DataOrchestrator._fetch_via_ws_api` (`src/core/data_orchestrator.py`) để đồng bộ dữ liệu THNN vào các mốc 0h, 6h, 12h, có fallback tải mới nếu app mở muộn, sử dụng catch-up logic để tối ưu hóa hiệu suất và tránh gây đăng xuất.
+- Đổi mới model `Assignment` và helper `ws_events_to_assignments` (`src/models.py`, `src/core/ws_functions.py`) để chứa thuộc tính `site_identity` nhận biết bài tập thuộc portal nào.
+- Refactor `AssignmentDetailView` (`src/gui/components/detail_view.py`) nhằm vô hiệu hóa các nút chức năng thao tác file (Upload/Submit/Delete) cho bài tập từ THNN, thay bằng thông báo "Chưa hỗ trợ nộp bài trực tiếp. Vui lòng mở bằng trình duyệt." kèm CTA chuyển hướng.
+- Tạo mới scraper (`src/core/html_scrapers.py`) để bóc tách thông tin trạng thái bài nộp qua HTML nếu không có quyền AJAX.
+- Verification: Tests related to `DataOrchestrator` pass. Clean code & gitflow compliance ensured.

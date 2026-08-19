@@ -23,6 +23,11 @@ class DataOrchestrator:
     def __init__(self):
         self.client = MoodleClient()
         self.moodle_service = MoodleService(self.client.call_ws_api)
+        self.thnn_client = MoodleClient("https://thnn.ut.edu.vn")
+        self.thnn_service = MoodleService(self.thnn_client.call_ajax_api)
+        self._last_thnn_fetch_ts = 0.0
+        self._thnn_activities_cache = []
+        self._courses_cache = None
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
         self._detail_cache_saved_at: dict[str, float] = {}
@@ -181,6 +186,196 @@ class DataOrchestrator:
             self.moodle_service, userid
         )
     
+
+    def _should_sync_thnn(self, now_ts: float) -> bool:
+        if self._last_thnn_fetch_ts == 0.0:
+            return True
+        from datetime import datetime
+        now = datetime.fromtimestamp(now_ts)
+        last = datetime.fromtimestamp(self._last_thnn_fetch_ts)
+        
+        def get_milestone(dt: datetime) -> int:
+            if dt.hour < 6: return 0
+            elif dt.hour < 12: return 6
+            else: return 12
+            
+        if now.date() > last.date():
+            return True
+        if get_milestone(now) > get_milestone(last):
+            return True
+        return False
+
+
+    def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
+        try:
+            if not self.thnn_client._sesskey:
+                success = self.thnn_client.login_session()
+                if not success:
+                    return []
+                    
+            opener = self.thnn_client._ensure_html_opener()
+            import urllib.parse
+            import datetime
+            import re
+            from bs4 import BeautifulSoup
+            
+            # 1. Tải file ICS export từ THNN
+            data = urllib.parse.urlencode({
+                'sesskey': self.thnn_client._sesskey,
+                '_qf__core_calendar_export_form': '1',
+                'events[exportevents]': 'all',
+                'period[timeperiod]': 'recentupcoming',
+                'export': 'Export'
+            }).encode('utf-8')
+            
+            try:
+                resp = opener.open("https://thnn.ut.edu.vn/calendar/export.php", data=data, timeout=20)
+                ics_data = resp.read().decode('utf-8', errors='ignore')
+            except Exception as e:
+                logger.error(f"Lỗi tải THNN calendar ICS: {e}")
+                return []
+                
+            events_ics = {}
+            current_event = {}
+            for line in ics_data.split('\n'):
+                line = line.strip()
+                if line == 'BEGIN:VEVENT':
+                    current_event = {}
+                elif line.startswith('UID:'):
+                    m = re.match(r'UID:(\d+)@', line)
+                    if m:
+                        current_event['id'] = int(m.group(1))
+                elif line.startswith('SUMMARY:'):
+                    current_event['name'] = line[8:].replace(r'\,', ',')
+                elif line.startswith('DTEND:'):
+                    dt_str = line[6:]
+                    if dt_str.endswith('Z'):
+                        dt = datetime.datetime.strptime(dt_str, '%Y%m%dT%H%M%SZ')
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                        current_event['timestamp'] = int(dt.timestamp())
+                elif line.startswith('CATEGORIES:'):
+                    current_event['course_name'] = line[11:].replace(r'\,', ',')
+                elif line == 'END:VEVENT':
+                    if 'id' in current_event:
+                        events_ics[current_event['id']] = current_event
+                        
+            # 2. Tải HTML các tháng để map URL
+            now = datetime.datetime.now()
+            months_to_fetch = []
+            for d_month in [-1, 0, 1, 2]:
+                m = now.month + d_month
+                y = now.year + (m - 1) // 12
+                m = ((m - 1) % 12) + 1
+                months_to_fetch.append(int(datetime.datetime(y, m, 1).timestamp()))
+                
+            for ts in months_to_fetch:
+                try:
+                    url = f"https://thnn.ut.edu.vn/calendar/view.php?view=month&time={ts}"
+                    r = opener.open(url, timeout=10)
+                    soup = BeautifulSoup(r.read().decode('utf-8', errors='ignore'), 'html.parser')
+                    for a in soup.find_all('a', attrs={'data-action': 'view-event'}):
+                        ev_id = int(a.get('data-event-id', 0))
+                        href = a.get('href', '')
+                        if ev_id in events_ics and href:
+                            events_ics[ev_id]['url'] = href
+                            if 'mod/assign' in href:
+                                events_ics[ev_id]['modulename'] = 'assign'
+                            elif 'mod/quiz' in href:
+                                events_ics[ev_id]['modulename'] = 'quiz'
+                except Exception as e:
+                    logger.warning(f"Lỗi tải THNN calendar month {ts}: {e}")
+                    
+            # 3. Chuyển đổi format sang định dạng chuẩn của UTHelper
+            results = []
+            import html
+            from datetime import datetime
+            from config import settings
+            
+            for ev in events_ics.values():
+                url = ev.get('url', '')
+                modulename = ev.get('modulename')
+                if url and modulename in ('assign', 'quiz'):
+                    name = ev.get('name', '').replace(' tới hạn', '').replace(' closes', '')
+                    cname = ev.get('course_name', 'THNN Course')
+                    course_id = 0
+                    
+                    cm_id = ""
+                    if 'id=' in url:
+                        cm_id = url.split('id=')[-1].split('&')[0]
+                    
+                    evt_id = ev.get('id', '')
+                    if not evt_id and modulename and cm_id:
+                        evt_id = f"{modulename}_{cm_id}"
+                        
+                    timestart = ev.get('timestamp', 0)
+                    deadline = ''
+                    urgency = 'safe'
+                    if timestart:
+                        try:
+                            deadline = datetime.fromtimestamp(timestart).strftime('%Y-%m-%d %H:%M:%S')
+                            hours_left = (timestart - now_ts) / 3600
+                            if hours_left < 0:
+                                urgency = 'overdue'
+                            elif hours_left < getattr(settings, 'URGENCY_CRITICAL_HOURS', 12):
+                                urgency = 'critical'
+                            elif hours_left < getattr(settings, 'URGENCY_WARNING_HOURS', 24):
+                                urgency = 'warning'
+                        except Exception:
+                            pass
+                            
+                    event_type = modulename
+                    if event_type == 'assign':
+                        event_type = 'assignment'
+                    
+                    act_dict = {
+                        'id': str(evt_id),
+                        'title': html.unescape(name.strip()),
+                        'course_name': html.unescape(cname),
+                        'course': html.unescape(cname),
+                        'course_id': course_id,
+                        'deadline': deadline,
+                        'deadline_str': deadline,
+                        'url': url,
+                        'type': event_type,
+                        'urgency': urgency,
+                        'source': 'thnn_sync',
+                        'submission_status': 'new',
+                        'details': {},
+                        'is_open': False,
+                        'site_identity': 'thnn'
+                    }
+                    results.append(act_dict)
+                    
+            self._last_thnn_fetch_ts = float(now_ts)
+            self._thnn_activities_cache = results
+            return results
+        except Exception as e:
+            logger.error(f"Lỗi khi tải THNN activities: {e}")
+            return []
+
+    def _format_assignment_from_ws(self, a: dict, url: str, identity: str) -> dict:
+        import html
+        from datetime import datetime
+        dd = a.get("duedate", 0)
+        dt = datetime.fromtimestamp(dd).isoformat() if dd > 0 else ""
+        return {
+            'id': str(a.get("id", "0")),
+            'title': html.unescape(a.get("name") or "Bài tập THNN"),
+            'course_name': "THNN Course",
+            'course': "THNN Course",
+            'course_id': str(a.get("course", "0")),
+            'deadline': dt,
+            'deadline_str': dt,
+            'url': url,
+            'type': "assignment",
+            'urgency': "safe",
+            'source': 'ws_api',
+            'submission_status': "submitted" if a.get("nosubmissions") == 0 else "new",
+            'details': {},
+            'is_open': False,
+            'site_identity': identity
+        }
+
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).
         
@@ -265,6 +460,14 @@ class DataOrchestrator:
             
             # Chuyển đổi các sự kiện Web Service sang định dạng của UTHelper
             results = self.moodle_service.ws_events_to_assignments(events) if events else []
+            
+            # Đồng bộ THNN
+            if self._should_sync_thnn(now_ts):
+                thnn_results = self._fetch_thnn_activities(now_ts)
+            else:
+                thnn_results = self._thnn_activities_cache
+            if thnn_results:
+                results.extend(thnn_results)
             
             # Tối ưu PERF: Bước 3 - Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
@@ -444,7 +647,7 @@ class DataOrchestrator:
                     'type': 'assignment',
                     'urgency': urgency,
                     'source': 'ws_assign_api',
-                    'submission_status': 'unknown',
+                    'submission_status': 'submitted',
                     'details': {},
                     'is_open': False,
                     'cutoff_date': cutoffdate,

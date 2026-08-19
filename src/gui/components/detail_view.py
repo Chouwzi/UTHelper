@@ -855,7 +855,9 @@ class DetailView(ft.Container):
         submission_context_reason = ""
 
         # Load submitted files in background (for assignments)
-        if is_assignment:
+        if is_assignment and data.get("site_identity") == "thnn":
+            submission_context_reason = "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. Vui lòng mở trong trình duyệt."
+        elif is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
             course_context_valid, course_id = self._course_context(raw_course_id)
