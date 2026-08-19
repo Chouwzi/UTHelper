@@ -62,7 +62,6 @@ from gui.controllers.startup_visibility import (
 from gui.controllers.autostart_settings import apply_initial_autostart_default
 from gui.controllers.refresh_coordinator import build_prefetched_dataset
 from gui.controllers.window_activator import WindowActivator
-from gui.components.crash_consent_dialog import CrashConsentDialog
 
 logger = logging.getLogger(__name__)
 
@@ -242,13 +241,7 @@ class AppController:
         self._init_ui()
         self._diag_screen("home")
         self._diag_breadcrumb("app_start", "succeeded", "app", screen="home")
-        self._crash_consent_dialog = CrashConsentDialog(
-            self.page, self._persist_crash_consent
-        )
-        self._crash_consent_dialog.present_if_needed(
-            settings.CRASH_REPORTING_CONSENT
-        )
-        has_cache = self._load_cached_snapshot()
+        has_cached_snapshot = self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
             interval_provider=get_sync_interval_minutes,
@@ -268,7 +261,7 @@ class AppController:
             self._safe_run_task(self._apply_initial_windows_autostart_default)
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
-        self._schedule_cached_detail_hydration(has_cache)
+        self._schedule_cached_detail_hydration(has_cached_snapshot)
         self._safe_run_task(self._today_schedule_coordinator.run)
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
@@ -278,7 +271,7 @@ class AppController:
 
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
-        elif not has_cache:
+        elif not has_cached_snapshot:
             self._safe_run_task(self._load_data_async)
         # With credentials, the coordinator waits until cache age + the
         # one-minute startup grace are due. Manual refresh remains immediate.
