@@ -230,7 +230,7 @@ class AppController:
         self._crash_consent_dialog.present_if_needed(
             settings.CRASH_REPORTING_CONSENT
         )
-        self._load_cached_snapshot()
+        has_cache = self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
             interval_provider=get_sync_interval_minutes,
@@ -256,6 +256,8 @@ class AppController:
         
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
+        elif not has_cache:
+            self._safe_run_task(self._load_data_async)
         # With credentials, the coordinator waits until cache age + the
         # one-minute startup grace are due. Manual refresh remains immediate.
 
