@@ -208,7 +208,7 @@ class Settings(BaseModel):
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(
-        default="midnight_blue",
+        default="steel_light",
         description="Theme preset, including Material Graphite and light variants",
     )
     SETTINGS_SCHEMA_VERSION: int = Field(default=4, description="Phiên bản schema cài đặt")

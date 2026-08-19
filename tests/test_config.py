@@ -69,7 +69,7 @@ class TestSettingsDefaults:
 
     def test_default_theme(self):
         s = Settings()
-        assert s.THEME == "midnight_blue"
+        assert s.THEME == "steel_light"
 
     def test_default_moodle_base_url(self):
         s = Settings()
