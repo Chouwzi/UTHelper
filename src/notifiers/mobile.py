@@ -177,13 +177,13 @@ class MobileNotifier(BaseNotifier):
 
         return all_succeeded
 
-    def _on_notification_tap(self, event) -> None:
+    async def _on_notification_tap(self, event) -> None:
         """Open the Moodle activity carried by a native notification payload."""
         try:
             value = json.loads(getattr(event, "data", "{}") or "{}")
             url = str(value.get("payload", ""))
             if self._page and url.startswith(("https://", "http://")):
-                self._page.launch_url(url)
+                await self._page.launch_url(url)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             logger.warning("Invalid Android notification payload: %s", exc)
 

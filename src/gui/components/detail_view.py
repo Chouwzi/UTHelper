@@ -1129,7 +1129,7 @@ class DetailView(ft.Container):
                         desc_md,
                         selectable=True,
                         extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                        on_tap_link=lambda e: ft.UrlLauncher().launch_url(e.data),
+                        on_tap_link=self._handle_link_tap,
                     ),
                     bgcolor=C.SURFACE, border_radius=8,
                     padding=ft.Padding.all(12),
@@ -1137,6 +1137,12 @@ class DetailView(ft.Container):
             ]))
 
         # Chỉ thay đổi giao diện, không tự gọi update
+
+    async def _handle_link_tap(self, e):
+        try:
+            await ft.UrlLauncher().launch_url(e.data)
+        except Exception as exc:
+            logger.warning(f"Failed to launch url {e.data}: {exc}")
 
     def show_error_banner(self):
         self._error_banner.visible = True

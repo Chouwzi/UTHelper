@@ -403,7 +403,7 @@ class AppController:
 
     def _open_external_update_url(self, url: str) -> bool:
         async def _open():
-            self.page.launch_url(url)
+            await self.page.launch_url(url)
 
         return self._safe_run_task(_open) is not None
 
