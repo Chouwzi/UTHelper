@@ -339,7 +339,7 @@ class DataOrchestrator:
                         'type': event_type,
                         'urgency': urgency,
                         'source': 'thnn_sync',
-                        'submission_status': 'new',
+                        'submission_status': 'unknown',
                         'details': {},
                         'is_open': False,
                         'site_identity': 'thnn'
