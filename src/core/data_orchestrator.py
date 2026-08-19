@@ -206,82 +206,144 @@ class DataOrchestrator:
 
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
         try:
-            thnn_userid = self.thnn_service.get_current_user_id()
-            if not thnn_userid:
+            if not self.thnn_client._sesskey:
+                success = self.thnn_client.login_session()
+                if not success:
+                    return []
+                    
+            opener = self.thnn_client._ensure_html_opener()
+            import urllib.parse
+            import datetime
+            import re
+            from bs4 import BeautifulSoup
+            
+            # 1. Tải file ICS export từ THNN
+            data = urllib.parse.urlencode({
+                'sesskey': self.thnn_client._sesskey,
+                '_qf__core_calendar_export_form': '1',
+                'events[exportevents]': 'all',
+                'period[timeperiod]': 'recentupcoming',
+                'export': 'Export'
+            }).encode('utf-8')
+            
+            try:
+                resp = opener.open("https://thnn.ut.edu.vn/calendar/export.php", data=data, timeout=20)
+                ics_data = resp.read().decode('utf-8', errors='ignore')
+            except Exception as e:
+                logger.error(f"Lỗi tải THNN calendar ICS: {e}")
                 return []
-            
-            page_size = 50
-            events = []
-            after_event_id = 0
-            for _page in range(10):
-                response = self.thnn_service.get_action_events_by_timesort(
-                    now_ts,
-                    now_ts + (90 * 24 * 3600),
-                    limit=page_size,
-                    after_event_id=after_event_id,
-                )
-                if not isinstance(response, dict):
-                    break
-                page_events = response.get("events", [])
-                if not isinstance(page_events, list):
-                    break
-                events.extend(page_events)
-                more = bool(response.get("moreevents", len(page_events) >= page_size))
-                if not more:
-                    break
-                last_id = response.get("lastid")
-                if not last_id and page_events:
-                    last_id = page_events[-1].get("id")
+                
+            events_ics = {}
+            current_event = {}
+            for line in ics_data.split('\n'):
+                line = line.strip()
+                if line == 'BEGIN:VEVENT':
+                    current_event = {}
+                elif line.startswith('UID:'):
+                    m = re.match(r'UID:(\d+)@', line)
+                    if m:
+                        current_event['id'] = int(m.group(1))
+                elif line.startswith('SUMMARY:'):
+                    current_event['name'] = line[8:].replace(r'\,', ',')
+                elif line.startswith('DTEND:'):
+                    dt_str = line[6:]
+                    if dt_str.endswith('Z'):
+                        dt = datetime.datetime.strptime(dt_str, '%Y%m%dT%H%M%SZ')
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                        current_event['timestamp'] = int(dt.timestamp())
+                elif line.startswith('CATEGORIES:'):
+                    current_event['course_name'] = line[11:].replace(r'\,', ',')
+                elif line == 'END:VEVENT':
+                    if 'id' in current_event:
+                        events_ics[current_event['id']] = current_event
+                        
+            # 2. Tải HTML các tháng để map URL
+            now = datetime.datetime.now()
+            months_to_fetch = []
+            for d_month in [-1, 0, 1, 2]:
+                m = now.month + d_month
+                y = now.year + (m - 1) // 12
+                m = ((m - 1) % 12) + 1
+                months_to_fetch.append(int(datetime.datetime(y, m, 1).timestamp()))
+                
+            for ts in months_to_fetch:
                 try:
-                    last_id = int(last_id)
-                except (TypeError, ValueError):
-                    break
-                if last_id <= after_event_id:
-                    break
-                after_event_id = last_id
-            
-            # TODO: also fetch all assignments if necessary?
-            # THNN might have less strict need for historical assignments if they only use it for homework.
-            # Let's just fetch action events and courses for now. We can also fetch assignments via get_assignments.
-            thnn_courses = self.thnn_service.get_user_courses(thnn_userid)
-            course_ids = [c['id'] for c in (thnn_courses or []) if isinstance(c, dict) and 'id' in c]
-            
-            # Fetch all assignments to merge
+                    url = f"https://thnn.ut.edu.vn/calendar/view.php?view=month&time={ts}"
+                    r = opener.open(url, timeout=10)
+                    soup = BeautifulSoup(r.read().decode('utf-8', errors='ignore'), 'html.parser')
+                    for a in soup.find_all('a', attrs={'data-action': 'view-event'}):
+                        ev_id = int(a.get('data-event-id', 0))
+                        href = a.get('href', '')
+                        if ev_id in events_ics and href:
+                            events_ics[ev_id]['url'] = href
+                            if 'mod/assign' in href:
+                                events_ics[ev_id]['modulename'] = 'assign'
+                            elif 'mod/quiz' in href:
+                                events_ics[ev_id]['modulename'] = 'quiz'
+                except Exception as e:
+                    logger.warning(f"Lỗi tải THNN calendar month {ts}: {e}")
+                    
+            # 3. Chuyển đổi format sang định dạng chuẩn của UTHelper
+            results = []
+            import html
             from datetime import datetime
-            now = datetime.now()
-            fetch_months = max(1, min(int(getattr(settings, "FETCH_MONTHS", 1)), 3))
-            future_month = now.month + fetch_months
-            future_year = now.year + (future_month - 1) // 12
-            future_month = ((future_month - 1) % 12) + 1
-            max_ts = int(datetime(future_year, future_month, 1).timestamp())
+            from config import settings
             
-            all_assigns = []
-            if course_ids:
-                assign_data = self.thnn_service.get_all_assignments(course_ids)
-                if assign_data and isinstance(assign_data, dict):
-                    all_courses = assign_data.get("courses", [])
-                    for c in all_courses:
-                        for a in c.get("assignments", []):
-                            dd = a.get("duedate", 0)
-                            if 0 < dd < max_ts:
-                                all_assigns.append(a)
-                                
-            # Parse events
-            results = self.thnn_service.ws_events_to_assignments(events) if events else []
-            for r in results:
-                r['site_identity'] = 'thnn'
-            
-            # Merge
-            from core.display_utils import extract_activity_id
-            existing_ids = {extract_activity_id(act.get("url", "")) for act in results}
-            for a in all_assigns:
-                url = f"{self.thnn_client.moodle_site_origin}/mod/assign/view.php?id={a.get('cmid')}"
-                act_id = extract_activity_id(url)
-                if act_id and act_id not in existing_ids:
-                    act_dict = self._format_assignment_from_ws(a, url, "thnn")
+            for ev in events_ics.values():
+                url = ev.get('url', '')
+                modulename = ev.get('modulename')
+                if url and modulename in ('assign', 'quiz'):
+                    name = ev.get('name', '').replace(' tới hạn', '').replace(' closes', '')
+                    cname = ev.get('course_name', 'THNN Course')
+                    course_id = 0
+                    
+                    cm_id = ""
+                    if 'id=' in url:
+                        cm_id = url.split('id=')[-1].split('&')[0]
+                    
+                    evt_id = ev.get('id', '')
+                    if not evt_id and modulename and cm_id:
+                        evt_id = f"{modulename}_{cm_id}"
+                        
+                    timestart = ev.get('timestamp', 0)
+                    deadline = ''
+                    urgency = 'safe'
+                    if timestart:
+                        try:
+                            deadline = datetime.fromtimestamp(timestart).strftime('%Y-%m-%d %H:%M:%S')
+                            hours_left = (timestart - now_ts) / 3600
+                            if hours_left < 0:
+                                urgency = 'overdue'
+                            elif hours_left < getattr(settings, 'URGENCY_CRITICAL_HOURS', 12):
+                                urgency = 'critical'
+                            elif hours_left < getattr(settings, 'URGENCY_WARNING_HOURS', 24):
+                                urgency = 'warning'
+                        except Exception:
+                            pass
+                            
+                    event_type = modulename
+                    if event_type == 'assign':
+                        event_type = 'assignment'
+                    
+                    act_dict = {
+                        'id': str(evt_id),
+                        'title': html.unescape(name.strip()),
+                        'course_name': html.unescape(cname),
+                        'course': html.unescape(cname),
+                        'course_id': course_id,
+                        'deadline': deadline,
+                        'deadline_str': deadline,
+                        'url': url,
+                        'type': event_type,
+                        'urgency': urgency,
+                        'source': 'thnn_sync',
+                        'submission_status': 'unknown',
+                        'details': {},
+                        'is_open': False,
+                        'site_identity': 'thnn'
+                    }
                     results.append(act_dict)
-                    existing_ids.add(act_id)
-            
+                    
             self._last_thnn_fetch_ts = float(now_ts)
             self._thnn_activities_cache = results
             return results
@@ -396,6 +458,14 @@ class DataOrchestrator:
             
             # Chuyển đổi các sự kiện Web Service sang định dạng của UTHelper
             results = self.moodle_service.ws_events_to_assignments(events) if events else []
+            
+            # Đồng bộ THNN
+            if self._should_sync_thnn(now_ts):
+                thnn_results = self._fetch_thnn_activities(now_ts)
+            else:
+                thnn_results = self._thnn_activities_cache
+            if thnn_results:
+                results.extend(thnn_results)
             
             # Tối ưu PERF: Bước 3 - Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]

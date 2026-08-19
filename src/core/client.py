@@ -253,7 +253,7 @@ class MoodleClient:
             self._cookie_jar.clear()
             self._sesskey = ""
 
-            _, login_page = self._self._open_html("/login/index.php")
+            _, login_page = self._open_html("/login/index.php")
             parsed_login = _MoodleHtmlFormParser()
             parsed_login.feed(login_page)
             login_token = parsed_login.inputs.get("logintoken", "")
@@ -262,7 +262,7 @@ class MoodleClient:
                 self._last_login_error = "server_error"
                 return False
 
-            final_url, _ = self._self._open_html(
+            final_url, _ = self._open_html(
                 "/login/index.php",
                 data={
                     "anchor": "",
@@ -277,7 +277,7 @@ class MoodleClient:
                 return False
 
             # Lấy trang Dashboard để trích xuất sesskey
-            _, dashboard_page = self._self._open_html("/my/")
+            _, dashboard_page = self._open_html("/my/")
             
             # sesskey thường nằm trong thẻ JS: "sesskey":"123xyz"
             import re
