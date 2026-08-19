@@ -22,6 +22,11 @@ class DataOrchestrator:
     def __init__(self):
         self.client = MoodleClient()
         self.moodle_service = MoodleService(self.client.call_ws_api)
+        self.thnn_client = MoodleClient("https://thnn.ut.edu.vn")
+        self.thnn_service = MoodleService(self.thnn_client.call_ajax_api)
+        self._last_thnn_fetch_ts = 0.0
+        self._thnn_activities_cache = []
+        self._courses_cache = None
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
         self._detail_cache_saved_at: dict[str, float] = {}
@@ -179,6 +184,134 @@ class DataOrchestrator:
             self.moodle_service, userid
         )
     
+
+    def _should_sync_thnn(self, now_ts: float) -> bool:
+        if self._last_thnn_fetch_ts == 0.0:
+            return True
+        from datetime import datetime
+        now = datetime.fromtimestamp(now_ts)
+        last = datetime.fromtimestamp(self._last_thnn_fetch_ts)
+        
+        def get_milestone(dt: datetime) -> int:
+            if dt.hour < 6: return 0
+            elif dt.hour < 12: return 6
+            else: return 12
+            
+        if now.date() > last.date():
+            return True
+        if get_milestone(now) > get_milestone(last):
+            return True
+        return False
+
+
+    def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
+        try:
+            thnn_userid = self.thnn_service.get_current_user_id()
+            if not thnn_userid:
+                return []
+            
+            page_size = 50
+            events = []
+            after_event_id = 0
+            for _page in range(10):
+                response = self.thnn_service.get_action_events_by_timesort(
+                    now_ts,
+                    now_ts + (90 * 24 * 3600),
+                    limit=page_size,
+                    after_event_id=after_event_id,
+                )
+                if not isinstance(response, dict):
+                    break
+                page_events = response.get("events", [])
+                if not isinstance(page_events, list):
+                    break
+                events.extend(page_events)
+                more = bool(response.get("moreevents", len(page_events) >= page_size))
+                if not more:
+                    break
+                last_id = response.get("lastid")
+                if not last_id and page_events:
+                    last_id = page_events[-1].get("id")
+                try:
+                    last_id = int(last_id)
+                except (TypeError, ValueError):
+                    break
+                if last_id <= after_event_id:
+                    break
+                after_event_id = last_id
+            
+            # TODO: also fetch all assignments if necessary?
+            # THNN might have less strict need for historical assignments if they only use it for homework.
+            # Let's just fetch action events and courses for now. We can also fetch assignments via get_assignments.
+            thnn_courses = self.thnn_service.get_user_courses(thnn_userid)
+            course_ids = [c['id'] for c in (thnn_courses or []) if isinstance(c, dict) and 'id' in c]
+            
+            # Fetch all assignments to merge
+            from datetime import datetime
+            now = datetime.now()
+            fetch_months = max(1, min(int(getattr(settings, "FETCH_MONTHS", 1)), 3))
+            future_month = now.month + fetch_months
+            future_year = now.year + (future_month - 1) // 12
+            future_month = ((future_month - 1) % 12) + 1
+            max_ts = int(datetime(future_year, future_month, 1).timestamp())
+            
+            all_assigns = []
+            if course_ids:
+                assign_data = self.thnn_service.get_all_assignments(course_ids)
+                if assign_data and isinstance(assign_data, dict):
+                    all_courses = assign_data.get("courses", [])
+                    for c in all_courses:
+                        for a in c.get("assignments", []):
+                            dd = a.get("duedate", 0)
+                            if 0 < dd < max_ts:
+                                all_assigns.append(a)
+                                
+            # Parse events
+            results = self.thnn_service.ws_events_to_assignments(events) if events else []
+            for r in results:
+                r['site_identity'] = 'thnn'
+            
+            # Merge
+            from core.display_utils import extract_activity_id
+            existing_ids = {extract_activity_id(act.get("url", "")) for act in results}
+            for a in all_assigns:
+                url = f"{self.thnn_client.moodle_site_origin}/mod/assign/view.php?id={a.get('cmid')}"
+                act_id = extract_activity_id(url)
+                if act_id and act_id not in existing_ids:
+                    act_dict = self._format_assignment_from_ws(a, url, "thnn")
+                    results.append(act_dict)
+                    existing_ids.add(act_id)
+            
+            self._last_thnn_fetch_ts = float(now_ts)
+            self._thnn_activities_cache = results
+            return results
+        except Exception as e:
+            logger.error(f"Lỗi khi tải THNN activities: {e}")
+            return []
+
+    def _format_assignment_from_ws(self, a: dict, url: str, identity: str) -> dict:
+        import html
+        from datetime import datetime
+        dd = a.get("duedate", 0)
+        dt = datetime.fromtimestamp(dd).isoformat() if dd > 0 else ""
+        return {
+            'id': str(a.get("id", "0")),
+            'title': html.unescape(a.get("name") or "Bài tập THNN"),
+            'course_name': "THNN Course",
+            'course': "THNN Course",
+            'course_id': str(a.get("course", "0")),
+            'deadline': dt,
+            'deadline_str': dt,
+            'url': url,
+            'type': "assignment",
+            'urgency': "safe",
+            'source': 'ws_api',
+            'submission_status': "submitted" if a.get("nosubmissions") == 0 else "new",
+            'details': {},
+            'is_open': False,
+            'site_identity': identity
+        }
+
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).
         
