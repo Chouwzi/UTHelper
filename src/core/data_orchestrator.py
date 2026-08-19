@@ -337,7 +337,7 @@ class DataOrchestrator:
                         'type': event_type,
                         'urgency': urgency,
                         'source': 'thnn_sync',
-                        'submission_status': 'unknown',
+                        'submission_status': 'new',
                         'details': {},
                         'is_open': False,
                         'site_identity': 'thnn'
@@ -645,7 +645,7 @@ class DataOrchestrator:
                     'type': 'assignment',
                     'urgency': urgency,
                     'source': 'ws_assign_api',
-                    'submission_status': 'unknown',
+                    'submission_status': 'submitted',
                     'details': {},
                     'is_open': False,
                     'cutoff_date': cutoffdate,
