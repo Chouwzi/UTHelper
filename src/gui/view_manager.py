@@ -163,6 +163,12 @@ class ViewManager:
         self.detail_view.offset = ft.Offset(1, 0)
         self.detail_view.opacity = 0.0
         self.page.update()
+        if destination is self.dashboard:
+            restore_scroll = getattr(
+                self.controller, "_restore_dashboard_scroll", None
+            )
+            if callable(restore_scroll):
+                await restore_scroll()
         await asyncio.sleep(0.25) # Đợi thời gian hoàn tất animation
         self.detail_view.visible = False
         self._show_only(destination)

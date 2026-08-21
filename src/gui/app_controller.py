@@ -70,6 +70,10 @@ from gui.controllers.window_activator import WindowActivator
 
 logger = logging.getLogger(__name__)
 
+_SCROLL_TO_TOP_SHOW_OFFSET = 240.0
+_SCROLL_TO_TOP_HIDE_OFFSET = 96.0
+_SCROLL_TO_TOP_DURATION_MS = 420
+
 try:
     from core.version import APP_VERSION as _APP_VERSION
     APP_VERSION = f"v{_APP_VERSION}"
@@ -240,6 +244,8 @@ class AppController:
         self._card_detail_warm_cancel_event = threading.Event()
         self._detail_request_epoch = 0
         self._android_background = None
+        self._dashboard_scroll_offset = 0.0
+        self._scroll_to_top_visible = False
 
         self._init_window()
         self._update_candidate = None
@@ -783,7 +789,51 @@ class AppController:
         )
         self._update_url = ""
 
-        self.cards_column = ft.ListView(spacing=8, expand=True)
+        self.cards_column = ft.ListView(
+            spacing=8,
+            expand=True,
+            # Flet's scroll_to() API does not work for dynamically-built lists.
+            # The dashboard is intentionally bounded to the filtered activity
+            # controls already held by this controller, so eager Flutter layout
+            # is the smallest reliable trade-off for exact restore + smooth top.
+            build_controls_on_demand=False,
+            auto_scroll=False,
+            scroll_interval=50,
+            on_scroll=self._on_dashboard_scroll,
+        )
+        self._scroll_to_top_button = ft.Container(
+            content=ft.Icon(
+                ft.Icons.KEYBOARD_ARROW_UP_ROUNDED,
+                size=23,
+                color=C.TEXT_PRIMARY,
+            ),
+            width=44,
+            height=44,
+            right=12,
+            bottom=12,
+            alignment=ft.Alignment.CENTER,
+            bgcolor=C.SURFACE_ELEVATED,
+            border=ft.Border.all(1, C.BORDER_STRONG),
+            border_radius=999,
+            shadow=ft.BoxShadow(
+                blur_radius=12,
+                color=C.SHADOW,
+                offset=ft.Offset(0, 3),
+            ),
+            tooltip="Lên đầu danh sách",
+            ink=True,
+            on_click=lambda _: self._safe_run_task(
+                self._scroll_dashboard_to_top
+            ),
+            opacity=0.0,
+            offset=ft.Offset(0, 0.3),
+            scale=0.84,
+            animate_opacity=ft.Animation(170, ft.AnimationCurve.EASE_OUT),
+            animate_offset=ft.Animation(210, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_scale=ft.Animation(210, ft.AnimationCurve.EASE_OUT_CUBIC),
+            # An opacity-zero overlay must not consume taps intended for cards.
+            ignore_interactions=True,
+        )
         self._empty_icon = ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER)
         self._empty_title = ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500)
         self._empty_subtitle = ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER)
@@ -874,6 +924,7 @@ class AppController:
             content=ft.Column(controls=[
                 ft.Stack(controls=[
                     ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
+                    self._scroll_to_top_button,
                 ], expand=True),
             ], spacing=8, expand=True),
             padding=ft.Padding.only(left=4, right=4, bottom=8),
@@ -1839,6 +1890,67 @@ class AppController:
         from_calendar = getattr(self, '_detail_from_calendar', False)
         self._detail_from_calendar = False
         await self.view_manager.close_detail(from_calendar)
+
+    def _set_scroll_to_top_visible(self, visible: bool) -> bool:
+        """Update the floating affordance without rebuilding the card list."""
+        if visible == self._scroll_to_top_visible:
+            return False
+        self._scroll_to_top_visible = visible
+        self._scroll_to_top_button.opacity = 1.0 if visible else 0.0
+        self._scroll_to_top_button.offset = (
+            ft.Offset(0, 0) if visible else ft.Offset(0, 0.3)
+        )
+        self._scroll_to_top_button.scale = 1.0 if visible else 0.84
+        self._scroll_to_top_button.ignore_interactions = not visible
+        return True
+
+    def _on_dashboard_scroll(self, event) -> None:
+        """Track the exact dashboard position and toggle the overlay sparingly."""
+        try:
+            pixels = max(0.0, float(event.pixels))
+        except (AttributeError, TypeError, ValueError):
+            return
+
+        self._dashboard_scroll_offset = pixels
+        if self._scroll_to_top_visible:
+            should_show = pixels > _SCROLL_TO_TOP_HIDE_OFFSET
+        else:
+            should_show = pixels > _SCROLL_TO_TOP_SHOW_OFFSET
+
+        # Hysteresis plus update-on-transition avoids a page update for every
+        # scroll event, which matters on low-end desktop and mobile devices.
+        if self._set_scroll_to_top_visible(should_show):
+            self.page.update()
+
+    async def _scroll_dashboard_to_top(self) -> None:
+        """Smoothly return to the first card and hide the overlay at the top."""
+        self._scroll_to_top_button.ignore_interactions = True
+        self.page.update()
+        try:
+            await self.cards_column.scroll_to(
+                offset=0,
+                duration=_SCROLL_TO_TOP_DURATION_MS,
+                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            )
+        except Exception:
+            self._scroll_to_top_button.ignore_interactions = False
+            self.page.update()
+            raise
+
+        self._dashboard_scroll_offset = 0.0
+        self._set_scroll_to_top_visible(False)
+        self.page.update()
+
+    async def _restore_dashboard_scroll(self) -> None:
+        """Restore the saved pixels before the detail exit animation completes."""
+        offset = max(0.0, float(self._dashboard_scroll_offset))
+        if offset:
+            try:
+                await self.cards_column.scroll_to(offset=offset, duration=0)
+            except Exception:
+                # Scroll restoration is a UX enhancement and must never trap
+                # the user in Detail if the native control is being remounted.
+                logger.debug("Dashboard scroll restore failed", exc_info=True)
 
     async def _toggle_calendar(self):
         """Toggle between dashboard list view and calendar view."""
