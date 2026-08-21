@@ -519,6 +519,7 @@ class DataOrchestrator:
         từ đầu tháng hiện tại → FETCH_MONTHS tháng tới (theo setting).
         """
         from datetime import datetime
+        from urllib.parse import urlsplit
         
         now = datetime.now()
         # Đầu tháng hiện tại
@@ -557,11 +558,23 @@ class DataOrchestrator:
         if not all_assigns:
             return calendar_results
         
+        # Chỉ Courses activities được phép khớp với Courses assignments. Numeric
+        # cmid chỉ duy nhất bên trong một Moodle site, không duy nhất giữa các site.
+        courses_url = urlsplit(settings.MOODLE_BASE_URL)
+        courses_origin = (courses_url.scheme.casefold(), courses_url.netloc.casefold())
+
         # Xây dựng bảng tra cứu: cmid → chỉ mục trong calendar_results (để bổ sung thông tin cutoffdate)
         existing_cmids = set()
         cmid_to_index: dict[int, int] = {}
         for idx, item in enumerate(calendar_results):
             url = item.get('url', '')
+            parsed_url = urlsplit(url)
+            item_origin = (
+                parsed_url.scheme.casefold(),
+                parsed_url.netloc.casefold(),
+            )
+            if item_origin != courses_origin:
+                continue
             if 'id=' in url:
                 try:
                     _cmid = int(url.split('id=')[-1].split('&')[0])
@@ -647,9 +660,10 @@ class DataOrchestrator:
                     'type': 'assignment',
                     'urgency': urgency,
                     'source': 'ws_assign_api',
-                    'submission_status': 'submitted',
+                    'submission_status': 'unknown',
                     'details': {},
                     'is_open': False,
+                    'site_identity': 'courses',
                     'cutoff_date': cutoffdate,
                     'late_status': late_status,
                 })

@@ -8,6 +8,7 @@ Tests verify:
 import os
 import sys
 import time
+from datetime import datetime
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 
@@ -221,6 +222,68 @@ class TestAssignmentMerge:
             "cutoff_date": 0,
             "late_status": "closed",
         }
+
+    def test_supplemental_assignment_without_action_event_has_unknown_status(self):
+        orch = self._make_orchestrator()
+        duedate = int(datetime(datetime.now().year, datetime.now().month, 2).timestamp())
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_assignments.return_value = [
+            {
+                "id": 456,
+                "fullname": "Môn học Courses",
+                "assignments": [
+                    {
+                        "id": 7,
+                        "cmid": 123,
+                        "name": "Bài tập không có action event",
+                        "duedate": duedate,
+                        "cutoffdate": 0,
+                    }
+                ],
+            }
+        ]
+
+        result = orch._merge_all_assignments([], course_ids=[456])
+
+        assert len(result) == 1
+        assert result[0]["submission_status"] == "unknown"
+
+    def test_same_cmid_from_thnn_does_not_consume_courses_assignment(self):
+        orch = self._make_orchestrator()
+        duedate = int(datetime(datetime.now().year, datetime.now().month, 2).timestamp())
+        thnn_item = {
+            "id": "thnn-event-9",
+            "title": "Bài tập THNN",
+            "course": "THNN",
+            "course_id": 777,
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=123",
+            "type": "assignment",
+            "site_identity": "thnn",
+        }
+        original_thnn = dict(thnn_item)
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_assignments.return_value = [
+            {
+                "id": 456,
+                "fullname": "Môn học Courses",
+                "assignments": [
+                    {
+                        "id": 7,
+                        "cmid": 123,
+                        "name": "Bài tập Courses",
+                        "duedate": duedate,
+                        "cutoffdate": 0,
+                    }
+                ],
+            }
+        ]
+
+        result = orch._merge_all_assignments([thnn_item], course_ids=[456])
+
+        assert len(result) == 2
+        assert result[0] == original_thnn
+        assert result[1]["title"] == "Bài tập Courses"
+        assert result[1]["course_id"] == 456
 
 
 class TestCalendarPagination:
