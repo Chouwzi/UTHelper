@@ -110,6 +110,79 @@ class TestDetailCache:
 
         assert orch.get_cached_details_snapshot() == {}
 
+    def test_concurrent_cold_detail_requests_for_same_quiz_share_one_fetch(self):
+        """Foreground navigation must join an in-flight background warmup."""
+        orch = self._make_orchestrator()
+        started = threading.Event()
+        release = threading.Event()
+        fetch_count = 0
+        fetch_count_lock = threading.Lock()
+        activity = {
+            "url": "https://courses.test/mod/quiz/view.php?id=42",
+            "course_id": 7,
+            "type": "quiz",
+        }
+
+        def blocking_fetch(data):
+            nonlocal fetch_count
+            with fetch_count_lock:
+                fetch_count += 1
+            started.set()
+            assert release.wait(2)
+            return {**data, "details": {"quiz_info": {"id": 42}}}
+
+        orch._fetch_detail_via_ws = blocking_fetch
+        results = []
+
+        with patch("core.data_orchestrator.settings.MOODLE_WS_TOKEN", "token"):
+            first = threading.Thread(
+                target=lambda: results.append(orch.fetch_full_details(activity))
+            )
+            second = threading.Thread(
+                target=lambda: results.append(orch.fetch_full_details(activity))
+            )
+            first.start()
+            assert started.wait(1)
+            second.start()
+            time.sleep(0.05)
+            release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        assert fetch_count == 1
+        assert len(results) == 2
+        assert all(result["details"]["quiz_info"]["id"] == 42 for result in results)
+
+    def test_quiz_status_hydration_refreshes_an_existing_full_detail_cache(self):
+        orch = self._make_orchestrator()
+        url = "https://courses.test/mod/quiz/view.php?id=42"
+        cached = {
+            "url": url,
+            "type": "quiz",
+            "submission_status": "not_submitted",
+            "details": {
+                "quiz_attempt_status": "not_submitted",
+                "status_data": {"Trạng thái nộp bài": "not_submitted"},
+            },
+        }
+        orch._set_cached_detail(url, cached)
+        orch.moodle_service.get_quiz_attempts = lambda _quiz_id: [
+            {"state": "finished"}
+        ]
+
+        result = orch._fetch_one_activity_status(
+            {"url": url, "type": "quiz", "quiz_id": 42}
+        )
+        refreshed = orch._get_cached_detail(url)
+
+        assert result["submission_status"] == "submitted"
+        assert refreshed["submission_status"] == "submitted"
+        assert refreshed["details"]["quiz_attempt_status"] == "submitted"
+        assert (
+            refreshed["details"]["status_data"]["Trạng thái nộp bài"]
+            == "submitted"
+        )
+
     def test_prefetch_cancellation_returns_without_waiting_for_running_io(self):
         orch = self._make_orchestrator()
         started = threading.Event()

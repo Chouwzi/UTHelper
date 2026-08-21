@@ -712,6 +712,14 @@ class DetailView(ft.Container):
 
     # Hàm công khai
     def show_loading(self, data: dict):
+        # Navigation has already changed targets, so invalidate background
+        # submission work and hide controls belonging to the previous item.
+        self._view_generation += 1
+        self._error_banner.visible = False
+        self._submission_area.visible = False
+        self._submitted_area.visible = False
+        self._open_btn.visible = False
+        self._header_open_btn.visible = False
         self._title_text.value  = data.get("title", "Đang tải...")
         self._course_text.value = clean_course_name(data.get("course", ""))
         self._current_url       = data.get("url", "")

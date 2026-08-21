@@ -35,7 +35,8 @@ class DataOrchestrator:
         self._detail_cache_generation = 0
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
-        self._detail_lock = threading.Lock()
+        self._detail_lock = threading.RLock()
+        self._detail_inflight: dict[str, threading.Event] = {}
         # Trạng thái cơ chế Smart polling
         self._last_fetch_ts: int = 0
         self._userid_cache: Optional[int] = None
@@ -101,6 +102,8 @@ class DataOrchestrator:
                 cached["submission_status"] = canonical_status
                 details = cached.get("details", {})
                 if isinstance(details, dict):
+                    if cached.get("type") == "quiz":
+                        details["quiz_attempt_status"] = canonical_status
                     status_data = details.get("status_data", {})
                     if isinstance(status_data, dict):
                         status_data["Trạng thái nộp bài"] = canonical_status
@@ -947,25 +950,44 @@ class DataOrchestrator:
         if not url:
             return activity_data
 
+        owned_inflight: threading.Event | None = None
+        if not force_refresh:
+            with self._detail_lock:
+                # Re-check cache and in-flight state atomically. This prevents
+                # foreground navigation from duplicating an identical warm-up.
+                cached = self._get_cached_detail(url)
+                if cached is not None:
+                    return cached
+                inflight = self._detail_inflight.get(url)
+                if inflight is None:
+                    owned_inflight = threading.Event()
+                    self._detail_inflight[url] = owned_inflight
+
+            if owned_inflight is None:
+                inflight.wait()
+                cached = self._get_cached_detail(url)
+                return cached if cached is not None else activity_data
+
         if cache_generation is None:
             with self._detail_lock:
                 cache_generation = self._detail_cache_generation
 
-        # Trả về cache nếu đã tải trước đó và không force refresh
-        if not force_refresh:
-            cached = self._get_cached_detail(url)
-            if cached is not None:
-                return cached
-        
-        # WS API (stateless, không kick browser)
-        if settings.MOODLE_WS_TOKEN:
-            ws_result = self._fetch_detail_via_ws(activity_data)
-            if ws_result:
-                self._set_cached_detail(url, ws_result, cache_generation)
-                return ws_result
-        
-        logger.debug("WS API không lấy được chi tiết cho %s.", url)
-        return activity_data
+        try:
+            # WS API (stateless, không kick browser)
+            if settings.MOODLE_WS_TOKEN:
+                ws_result = self._fetch_detail_via_ws(activity_data)
+                if ws_result:
+                    self._set_cached_detail(url, ws_result, cache_generation)
+                    return ws_result
+
+            logger.debug("WS API không lấy được chi tiết cho %s.", url)
+            return activity_data
+        finally:
+            if owned_inflight is not None:
+                with self._detail_lock:
+                    if self._detail_inflight.get(url) is owned_inflight:
+                        self._detail_inflight.pop(url, None)
+                    owned_inflight.set()
     
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Lấy chi tiết bài tập qua WS API - không cần session, không kick browser."""
@@ -1119,6 +1141,9 @@ class DataOrchestrator:
 
         if status == "unknown":
             return None
+        url = activity_data.get("url")
+        if url:
+            self.update_cached_submission_status(url, status)
         result = dict(activity_data)
         result["submission_status"] = status
         details = dict(result.get("details") or {})

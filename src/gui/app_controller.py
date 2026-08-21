@@ -63,6 +63,7 @@ from gui.controllers.startup_visibility import (
 from gui.controllers.autostart_settings import apply_initial_autostart_default
 from gui.controllers.refresh_coordinator import (
     build_prefetched_dataset,
+    quiz_detail_prefetch_candidates,
     status_hydration_candidates,
 )
 from gui.controllers.window_activator import WindowActivator
@@ -236,6 +237,8 @@ class AppController:
         
         self._prefetch_cancel_event = threading.Event()
         self._prefetch_epoch = 0
+        self._quiz_detail_warm_cancel_event = threading.Event()
+        self._detail_request_epoch = 0
         self._android_background = None
 
         self._init_window()
@@ -267,7 +270,11 @@ class AppController:
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
         if not needs_initial_sync:
-            self._schedule_cached_detail_hydration(has_cached_snapshot)
+            hydration_started = self._schedule_cached_detail_hydration(
+                has_cached_snapshot
+            )
+            if not hydration_started:
+                self._schedule_quiz_detail_warmup()
         self._safe_run_task(self._today_schedule_coordinator.run)
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
@@ -1394,6 +1401,46 @@ class AppController:
         )
         if not persisted:
             logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
+        self._schedule_quiz_detail_warmup()
+
+    async def _warm_quiz_details_async(
+        self,
+        activities: list,
+        cancel_event: threading.Event,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Warm quiz detail cache near-to-far with a single low-impact worker."""
+        candidates = quiz_detail_prefetch_candidates(activities, now=now)
+        if not candidates or cancel_event.is_set():
+            return 0
+        return await asyncio.to_thread(
+            self.orchestrator.prefetch_all_details,
+            candidates,
+            1,
+            cancel_event.is_set,
+            False,
+        )
+
+    def _schedule_quiz_detail_warmup(self) -> bool:
+        """Schedule one ordered quiz-cache pass without affecting sync UI."""
+        if not settings.MOODLE_WS_TOKEN:
+            return False
+        with self._data_lock:
+            activities = list(self.all_data)
+        if not quiz_detail_prefetch_candidates(activities):
+            return False
+
+        previous_event = getattr(self, "_quiz_detail_warm_cancel_event", None)
+        if previous_event is not None:
+            previous_event.set()
+        cancel_event = threading.Event()
+        self._quiz_detail_warm_cancel_event = cancel_event
+        return self._safe_run_task(
+            self._warm_quiz_details_async,
+            activities,
+            cancel_event,
+        ) is not None
 
     def _schedule_cached_detail_hydration(self, has_cached_snapshot: bool) -> bool:
         """Hydrate incomplete cached cards immediately without blocking startup."""
@@ -1512,6 +1559,9 @@ class AppController:
         self._is_loading = True
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
+        detail_warm_cancel = getattr(self, "_quiz_detail_warm_cancel_event", None)
+        if detail_warm_cancel is not None:
+            detail_warm_cancel.set()
         
         # A user-forced refresh bypasses caches; timer/startup refreshes reuse
         # valid metadata and avoid restarting the expensive detail pipeline.
@@ -1738,6 +1788,8 @@ class AppController:
                     prefetch_copy,
                     self._prefetch_epoch,
                 )
+            else:
+                self._schedule_quiz_detail_warmup()
             elapsed = time.time() - fetch_start_time
             duration = (
                 "lt_250ms" if elapsed < 0.25
@@ -1781,6 +1833,9 @@ class AppController:
             self.page.update()
 
     async def _close_detail(self):
+        # asyncio.to_thread cannot cancel blocking HTTP. Invalidate its UI
+        # continuation so a late response cannot reopen/overwrite this view.
+        self._detail_request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
         from_calendar = getattr(self, '_detail_from_calendar', False)
         self._detail_from_calendar = False
         await self.view_manager.close_detail(from_calendar)
@@ -2378,6 +2433,12 @@ class AppController:
         self._safe_run_task(self._show_detail_async, data)
 
     async def _show_detail_async(self, data: dict):
+        request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
+        self._detail_request_epoch = request_epoch
+
+        def request_is_current() -> bool:
+            return request_epoch == getattr(self, "_detail_request_epoch", 0)
+
         # Ghi nhận nếu màn hình chi tiết được mở từ Lịch để phục vụ quay lại (back-navigation)
         self._detail_from_calendar = self.calendar_view.visible
         self._diag_screen("detail")
@@ -2385,17 +2446,30 @@ class AppController:
         self.view_manager.show_detail_loading(data)
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
+            if not request_is_current():
+                return
             if full_data and "details" in full_data:
                 desc_html = full_data["details"].get("description_html", "")
                 if desc_html:
                     from gui.core.utils import pre_cache_description_images
-                    full_data["details"]["description_html"] = await asyncio.to_thread(
+                    cached_html = await asyncio.to_thread(
                         pre_cache_description_images,
                         desc_html,
                     )
+                    if not request_is_current():
+                        return
+                    # Cached detail dictionaries are shared with dashboard
+                    # hydration. Prepare the view without mutating that cache.
+                    full_data = dict(full_data)
+                    full_data["details"] = dict(full_data["details"])
+                    full_data["details"]["description_html"] = cached_html
+            if not request_is_current():
+                return
             self.view_manager.show_detail_data(full_data)
         except Exception:
-            self.view_manager.show_detail_error(data)
+            logger.exception("Không thể tải chi tiết activity")
+            if request_is_current():
+                self.view_manager.show_detail_error(data)
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
         # Tự động tạo bóng đổ nhấp nháy (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
@@ -2476,6 +2550,9 @@ class AppController:
         self._page_alive.clear()
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
+        detail_warm_cancel = getattr(self, "_quiz_detail_warm_cancel_event", None)
+        if detail_warm_cancel is not None:
+            detail_warm_cancel.set()
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.close()

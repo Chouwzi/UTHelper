@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from core.activity_status import (
@@ -46,6 +47,37 @@ def status_hydration_candidates(
         ):
             candidates.append(item)
     return candidates
+
+
+def quiz_detail_prefetch_candidates(
+    items: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return unique Courses quizzes ordered by temporal proximity."""
+    reference_time = now or datetime.now()
+    candidates: list[tuple[tuple[float, int], dict[str, Any]]] = []
+    seen_urls: set[str] = set()
+
+    for item in items:
+        url = item.get("url")
+        if not url or url in seen_urls or item.get("type") != "quiz":
+            continue
+        if item.get("site_identity") == "thnn" or item.get("source") == "thnn_sync":
+            continue
+
+        seen_urls.add(url)
+        deadline = parse_datetime(item.get("deadline", ""))
+        if deadline is None:
+            sort_key = (float("inf"), 1)
+        else:
+            distance = abs((deadline - reference_time).total_seconds())
+            # At equal distance, an upcoming quiz is more actionable.
+            sort_key = (distance, 0 if deadline >= reference_time else 1)
+        candidates.append((sort_key, item))
+
+    candidates.sort(key=lambda entry: entry[0])
+    return [item for _, item in candidates]
 
 
 def merge_cached_details(
