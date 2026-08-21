@@ -5,8 +5,12 @@ import time
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlsplit
 from core.client import MoodleClient
-from core.activity_status import normalize_submission_status
+from core.activity_status import (
+    normalize_submission_status,
+    prefer_known_submission_status,
+)
 from core.grade_monitor import GradeMonitor
 from core.moodle_service import MoodleService
 from config import settings
@@ -937,6 +941,62 @@ class DataOrchestrator:
         return FetchOutcome.complete(ws_result)
 
 
+    @staticmethod
+    def _merge_cached_detail_for_activity(
+        activity_data: Dict[str, Any],
+        cached: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Apply shared module detail without replacing the clicked event card."""
+        result = {**cached, **activity_data}
+        current_details = activity_data.get("details")
+        cached_details = cached.get("details")
+        current_details = (
+            current_details if isinstance(current_details, dict) else {}
+        )
+        cached_details = cached_details if isinstance(cached_details, dict) else {}
+        details = {**current_details, **cached_details}
+
+        cached_status_data = cached_details.get("status_data")
+        current_status_data = current_details.get("status_data")
+        cached_status_data = (
+            cached_status_data if isinstance(cached_status_data, dict) else {}
+        )
+        current_status_data = (
+            current_status_data if isinstance(current_status_data, dict) else {}
+        )
+        if cached_status_data or current_status_data:
+            details["status_data"] = {
+                **cached_status_data,
+                **current_status_data,
+            }
+
+        status = prefer_known_submission_status(
+            activity_data.get("submission_status"),
+            cached.get("submission_status"),
+        )
+        result["submission_status"] = status
+        if result.get("type") == "quiz" and status != "unknown":
+            details["quiz_attempt_status"] = status
+        result["details"] = details
+        return result
+
+
+    @staticmethod
+    def _detail_module_name(activity_data: Dict[str, Any]) -> str:
+        """Resolve the actual Moodle module instead of defaulting cards to assign."""
+        path = urlsplit(str(activity_data.get("url", ""))).path.lower()
+        if "/mod/" in path:
+            module = path.split("/mod/", 1)[1].split("/", 1)[0]
+            if module:
+                return module
+        activity_type = str(activity_data.get("type", "other")).lower()
+        return (
+            "assign"
+            if activity_type in {"assignment", "assign"}
+            else activity_type
+        )
+
+
 
 
     def fetch_full_details(
@@ -957,7 +1017,9 @@ class DataOrchestrator:
                 # foreground navigation from duplicating an identical warm-up.
                 cached = self._get_cached_detail(url)
                 if cached is not None:
-                    return cached
+                    return self._merge_cached_detail_for_activity(
+                        activity_data, cached
+                    )
                 inflight = self._detail_inflight.get(url)
                 if inflight is None:
                     owned_inflight = threading.Event()
@@ -966,7 +1028,11 @@ class DataOrchestrator:
             if owned_inflight is None:
                 inflight.wait()
                 cached = self._get_cached_detail(url)
-                return cached if cached is not None else activity_data
+                return (
+                    self._merge_cached_detail_for_activity(activity_data, cached)
+                    if cached is not None
+                    else activity_data
+                )
 
         if cache_generation is None:
             with self._detail_lock:
@@ -1020,19 +1086,7 @@ class DataOrchestrator:
             logger.debug("Không có course_id cho WS detail fetch.")
             return None
         
-        # Xác định modulename từ type
-        type_to_module = {
-            'assignment': 'assign',
-            'assign': 'assign',
-            'quiz': 'quiz',
-        }
-        modulename = type_to_module.get(activity_type, 'assign')
-        
-        # Nếu URL chứa /mod/quiz/ thì là quiz
-        if '/mod/quiz/' in url:
-            modulename = 'quiz'
-        elif '/mod/assign/' in url:
-            modulename = 'assign'
+        modulename = self._detail_module_name(activity_data)
         
         try:
             cid = int(course_id) if not isinstance(course_id, int) else course_id

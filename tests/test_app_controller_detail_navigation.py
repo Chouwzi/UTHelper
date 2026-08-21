@@ -63,7 +63,7 @@ def test_latest_detail_click_wins_when_older_request_finishes_last():
     assert displayed == ["B"]
 
 
-def test_quiz_detail_warmup_is_ordered_and_uses_one_background_worker():
+def test_card_detail_warmup_is_ordered_and_uses_one_background_worker():
     controller = AppController.__new__(AppController)
     calls = []
 
@@ -90,14 +90,19 @@ def test_quiz_detail_warmup_is_ordered_and_uses_one_background_worker():
             "deadline": "2026-08-31 12:00:00",
         },
         {
-            "url": "https://example.test/quiz/near",
-            "type": "quiz",
+            "url": "https://example.test/attendance/nearest",
+            "type": "attendance",
+            "deadline": "2026-08-21 12:15:00",
+        },
+        {
+            "url": "https://example.test/assignment/near",
+            "type": "assignment",
             "deadline": "2026-08-21 13:00:00",
         },
     ]
 
     asyncio.run(
-        controller._warm_quiz_details_async(
+        controller._warm_card_details_async(
             activities,
             cancel_event,
             now=datetime(2026, 8, 21, 12, 0, 0),
@@ -107,7 +112,8 @@ def test_quiz_detail_warmup_is_ordered_and_uses_one_background_worker():
     assert calls == [
         {
             "urls": [
-                "https://example.test/quiz/near",
+                "https://example.test/attendance/nearest",
+                "https://example.test/assignment/near",
                 "https://example.test/quiz/far",
             ],
             "workers": 1,
@@ -117,7 +123,7 @@ def test_quiz_detail_warmup_is_ordered_and_uses_one_background_worker():
     ]
 
 
-def test_scheduling_a_new_quiz_warmup_cancels_the_previous_pass(monkeypatch):
+def test_scheduling_a_new_card_warmup_cancels_the_previous_pass(monkeypatch):
     controller = AppController.__new__(AppController)
     quiz = {
         "url": "https://example.test/quiz/near",
@@ -127,18 +133,18 @@ def test_scheduling_a_new_quiz_warmup_cancels_the_previous_pass(monkeypatch):
     controller.all_data = [quiz]
     controller._data_lock = threading.Lock()
     previous = threading.Event()
-    controller._quiz_detail_warm_cancel_event = previous
+    controller._card_detail_warm_cancel_event = previous
     scheduled = []
     controller._safe_run_task = lambda *args: scheduled.append(args) or object()
     monkeypatch.setattr(app_controller_module.settings, "MOODLE_WS_TOKEN", "token")
 
-    assert controller._schedule_quiz_detail_warmup() is True
+    assert controller._schedule_card_detail_warmup() is True
 
     assert previous.is_set()
-    assert scheduled[0][0] == controller._warm_quiz_details_async
+    assert scheduled[0][0] == controller._warm_card_details_async
     assert scheduled[0][1] == [quiz]
-    assert scheduled[0][2] is controller._quiz_detail_warm_cancel_event
-    assert not controller._quiz_detail_warm_cancel_event.is_set()
+    assert scheduled[0][2] is controller._card_detail_warm_cancel_event
+    assert not controller._card_detail_warm_cancel_event.is_set()
 
 
 def test_older_detail_is_rejected_when_it_finishes_image_caching_last(monkeypatch):

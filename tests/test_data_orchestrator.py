@@ -37,6 +37,40 @@ class TestDetailCache:
         assert result is not None
         assert result["title"] == "Test"
 
+    def test_cache_hit_preserves_the_clicked_card_identity_for_a_shared_url(self):
+        orch = self._make_orchestrator()
+        url = "https://courses.test/mod/quiz/view.php?id=42"
+        orch._set_cached_detail(
+            url,
+            {
+                "id": "quiz-open-event",
+                "url": url,
+                "title": "Quiz opens",
+                "deadline": "2026-08-20 08:00:00",
+                "is_open": True,
+                "submission_status": "submitted",
+                "details": {"description_html": "<p>Shared detail</p>"},
+            },
+        )
+        clicked = {
+            "id": "quiz-close-event",
+            "url": url,
+            "title": "Quiz closes",
+            "deadline": "2026-08-21 20:00:00",
+            "is_open": False,
+            "submission_status": "unknown",
+            "details": {},
+        }
+
+        result = orch.fetch_full_details(clicked)
+
+        assert result["id"] == "quiz-close-event"
+        assert result["title"] == "Quiz closes"
+        assert result["deadline"] == "2026-08-21 20:00:00"
+        assert result["is_open"] is False
+        assert result["submission_status"] == "submitted"
+        assert result["details"]["description_html"] == "<p>Shared detail</p>"
+
     def test_get_missing_returns_none(self):
         orch = self._make_orchestrator()
         result = orch._get_cached_detail("http://nonexistent.com")

@@ -24,6 +24,8 @@ def test_merge_cached_details_overlays_prefetched_fields():
             "type": "other",
             "course": "Old",
             "deadline": "2026-07-02 10:00:00",
+            "is_open": False,
+            "urgency": "safe",
         }
     ]
     cache = {
@@ -43,7 +45,11 @@ def test_merge_cached_details_overlays_prefetched_fields():
     assert result[0]["type"] == "assignment"
     assert result[0]["course"] == "Clean Code"
     assert result[0]["submission_status"] == "submitted"
-    assert result[0]["deadline"] == "2026-07-01 10:00:00"
+    # The current catalog owns event-specific fields. A cached card with the
+    # same module URL may represent its separate "opens" event.
+    assert result[0]["deadline"] == "2026-07-02 10:00:00"
+    assert result[0]["is_open"] is False
+    assert result[0]["urgency"] == "safe"
     assert items[0]["type"] == "other"
 
 
@@ -142,7 +148,7 @@ def test_prepare_activity_hot_fields_adds_filter_cache_fields():
     assert items[0]["_course_lower"] == "lập trình"
 
 
-def test_build_prefetched_dataset_merges_and_sorts():
+def test_build_prefetched_dataset_keeps_catalog_timing_when_merging_cache():
     items = [
         {"url": "safe", "urgency": "safe", "deadline": "2026-07-02"},
         {"url": "critical", "urgency": "safe", "deadline": "2026-07-03"},
@@ -151,7 +157,9 @@ def test_build_prefetched_dataset_merges_and_sorts():
 
     result = build_prefetched_dataset(items, cache)
 
-    assert [item["url"] for item in result] == ["critical", "safe"]
+    assert [item["url"] for item in result] == ["safe", "critical"]
+    assert result[1]["urgency"] == "safe"
+    assert result[1]["deadline"] == "2026-07-03"
 
 
 def test_build_refresh_dataset_merges_pending_and_counts_submissions():
@@ -191,7 +199,7 @@ def test_format_refresh_status_includes_submission_progress():
     assert format_refresh_status("09:30", 2, 2) == "Cập nhật lúc 09:30 · 2 hoạt động · Đã nộp hết ✓"
 
 
-def test_quiz_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():
+def test_card_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():
     from gui.controllers import refresh_coordinator
 
     near_future = {
@@ -218,6 +226,11 @@ def test_quiz_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():
     assignment = {
         "url": "https://courses.test/mod/assign/view.php?id=5",
         "type": "assignment",
+        "deadline": "2026-08-21 12:15:00",
+    }
+    attendance = {
+        "url": "https://courses.test/mod/attendance/view.php?id=7",
+        "type": "attendance",
         "deadline": "2026-08-21 12:30:00",
     }
     thnn_quiz = {
@@ -227,10 +240,25 @@ def test_quiz_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():
         "deadline": "2026-08-21 12:15:00",
     }
 
-    result = refresh_coordinator.quiz_detail_prefetch_candidates(
-        [far_future, assignment, recent_past, thnn_quiz, unknown_deadline,
-         near_future, duplicate_near],
+    result = refresh_coordinator.card_detail_prefetch_candidates(
+        [
+            far_future,
+            attendance,
+            assignment,
+            recent_past,
+            thnn_quiz,
+            unknown_deadline,
+            near_future,
+            duplicate_near,
+        ],
         now=datetime(2026, 8, 21, 12, 0, 0),
     )
 
-    assert result == [near_future, recent_past, far_future, unknown_deadline]
+    assert result == [
+        assignment,
+        attendance,
+        near_future,
+        recent_past,
+        far_future,
+        unknown_deadline,
+    ]

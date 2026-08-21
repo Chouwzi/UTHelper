@@ -49,19 +49,19 @@ def status_hydration_candidates(
     return candidates
 
 
-def quiz_detail_prefetch_candidates(
+def card_detail_prefetch_candidates(
     items: list[dict[str, Any]],
     *,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Return unique Courses quizzes ordered by temporal proximity."""
+    """Return unique Courses cards ordered by temporal proximity."""
     reference_time = now or datetime.now()
     candidates: list[tuple[tuple[float, int], dict[str, Any]]] = []
     seen_urls: set[str] = set()
 
     for item in items:
         url = item.get("url")
-        if not url or url in seen_urls or item.get("type") != "quiz":
+        if not url or url in seen_urls:
             continue
         if item.get("site_identity") == "thnn" or item.get("source") == "thnn_sync":
             continue
@@ -103,9 +103,11 @@ def merge_cached_details(
             "course": enriched.get("course", item.get("course", "")),
             "submission_status": submission_status,
             "details": enriched_details or item.get("details", {}),
-            "deadline": enriched.get("deadline", item.get("deadline")),
-            "is_open": enriched.get("is_open", item.get("is_open")),
-            "urgency": enriched.get("urgency", item.get("urgency")),
+            # The latest catalog owns event identity. Two cards (for example,
+            # opens/closes) can legitimately share one Moodle module URL.
+            "deadline": item.get("deadline", enriched.get("deadline")),
+            "is_open": item.get("is_open", enriched.get("is_open")),
+            "urgency": item.get("urgency", enriched.get("urgency")),
         }
     return merged
 

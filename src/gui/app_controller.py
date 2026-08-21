@@ -63,7 +63,7 @@ from gui.controllers.startup_visibility import (
 from gui.controllers.autostart_settings import apply_initial_autostart_default
 from gui.controllers.refresh_coordinator import (
     build_prefetched_dataset,
-    quiz_detail_prefetch_candidates,
+    card_detail_prefetch_candidates,
     status_hydration_candidates,
 )
 from gui.controllers.window_activator import WindowActivator
@@ -237,7 +237,7 @@ class AppController:
         
         self._prefetch_cancel_event = threading.Event()
         self._prefetch_epoch = 0
-        self._quiz_detail_warm_cancel_event = threading.Event()
+        self._card_detail_warm_cancel_event = threading.Event()
         self._detail_request_epoch = 0
         self._android_background = None
 
@@ -274,7 +274,7 @@ class AppController:
                 has_cached_snapshot
             )
             if not hydration_started:
-                self._schedule_quiz_detail_warmup()
+                self._schedule_card_detail_warmup()
         self._safe_run_task(self._today_schedule_coordinator.run)
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
@@ -1401,17 +1401,17 @@ class AppController:
         )
         if not persisted:
             logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
-        self._schedule_quiz_detail_warmup()
+        self._schedule_card_detail_warmup()
 
-    async def _warm_quiz_details_async(
+    async def _warm_card_details_async(
         self,
         activities: list,
         cancel_event: threading.Event,
         *,
         now: datetime | None = None,
     ) -> int:
-        """Warm quiz detail cache near-to-far with a single low-impact worker."""
-        candidates = quiz_detail_prefetch_candidates(activities, now=now)
+        """Warm card detail cache near-to-far with a single low-impact worker."""
+        candidates = card_detail_prefetch_candidates(activities, now=now)
         if not candidates or cancel_event.is_set():
             return 0
         return await asyncio.to_thread(
@@ -1422,22 +1422,22 @@ class AppController:
             False,
         )
 
-    def _schedule_quiz_detail_warmup(self) -> bool:
-        """Schedule one ordered quiz-cache pass without affecting sync UI."""
+    def _schedule_card_detail_warmup(self) -> bool:
+        """Schedule one ordered card-cache pass without affecting sync UI."""
         if not settings.MOODLE_WS_TOKEN:
             return False
         with self._data_lock:
             activities = list(self.all_data)
-        if not quiz_detail_prefetch_candidates(activities):
+        if not card_detail_prefetch_candidates(activities):
             return False
 
-        previous_event = getattr(self, "_quiz_detail_warm_cancel_event", None)
+        previous_event = getattr(self, "_card_detail_warm_cancel_event", None)
         if previous_event is not None:
             previous_event.set()
         cancel_event = threading.Event()
-        self._quiz_detail_warm_cancel_event = cancel_event
+        self._card_detail_warm_cancel_event = cancel_event
         return self._safe_run_task(
-            self._warm_quiz_details_async,
+            self._warm_card_details_async,
             activities,
             cancel_event,
         ) is not None
@@ -1559,7 +1559,7 @@ class AppController:
         self._is_loading = True
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
-        detail_warm_cancel = getattr(self, "_quiz_detail_warm_cancel_event", None)
+        detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
             detail_warm_cancel.set()
         
@@ -1789,7 +1789,7 @@ class AppController:
                     self._prefetch_epoch,
                 )
             else:
-                self._schedule_quiz_detail_warmup()
+                self._schedule_card_detail_warmup()
             elapsed = time.time() - fetch_start_time
             duration = (
                 "lt_250ms" if elapsed < 0.25
@@ -2550,7 +2550,7 @@ class AppController:
         self._page_alive.clear()
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
-        detail_warm_cancel = getattr(self, "_quiz_detail_warm_cancel_event", None)
+        detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
             detail_warm_cancel.set()
         coordinator = getattr(self, "_sync_coordinator", None)
