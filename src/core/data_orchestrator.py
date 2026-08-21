@@ -434,10 +434,11 @@ class DataOrchestrator:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).
         
         PERF-OPT: Parallel API calls + eliminated redundant fetches.
-        Kết hợp 2 nguồn:
+        Kết hợp 3 nguồn:
         1. calendar action events (bài chưa nộp, có deadline tương lai)
         2. mod_assign_get_assignments (TẤT CẢ bài tập kể cả đã nộp)
-        Merge lại để bài đã nộp không bị mất khỏi danh sách.
+        3. calendar events + catalog quiz có chọn lọc (quiz đã làm)
+        Merge lại để hoạt động đã hoàn thành không bị mất khỏi danh sách.
         """
         try:
             from datetime import datetime
@@ -523,12 +524,48 @@ class DataOrchestrator:
             if thnn_results:
                 results.extend(thnn_results)
             
-            # Tối ưu PERF: Bước 3 - Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
+            # Bước 3 - Gộp assignment và khôi phục quiz đã biến mất khỏi
+            # action-events. Hai nhánh chạy song song; benchmark cho thấy nhánh
+            # quiz có chọn lọc ngắn hơn call assignment hiện hữu.
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
             try:
-                results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
+                now = datetime.now()
+                month_start = datetime(now.year, now.month, 1)
+                fetch_months = max(1, min(int(getattr(settings, "FETCH_MONTHS", 1)), 3))
+                future_month = now.month + fetch_months
+                future_year = now.year + (future_month - 1) // 12
+                future_month = ((future_month - 1) % 12) + 1
+                window_start = int(month_start.timestamp())
+                window_end = int(datetime(future_year, future_month, 1).timestamp())
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    assignments_future = pool.submit(
+                        self._merge_all_assignments,
+                        results,
+                        userid=userid,
+                        course_ids=course_ids,
+                    )
+                    quizzes_future = pool.submit(
+                        self._fetch_calendar_quizzes,
+                        course_ids,
+                        window_start,
+                        window_end,
+                    )
+                    results = assignments_future.result(timeout=25)
+                    quiz_results = quizzes_future.result(timeout=25)
+                if quiz_results is None:
+                    raise RuntimeError("Calendar quiz snapshot is incomplete")
+
+                existing_urls = {
+                    item.get("url")
+                    for item in results
+                    if isinstance(item, dict) and item.get("url")
+                }
+                results.extend(
+                    item for item in quiz_results if item.get("url") not in existing_urls
+                )
             except Exception as e:
-                logger.warning("Merge assignments failed; snapshot is partial: %s", e)
+                logger.warning("Merge activities failed; snapshot is partial: %s", e)
                 return None
             
             if not results:
@@ -542,6 +579,111 @@ class DataOrchestrator:
         except Exception as e:
             logger.warning("WS API fetch thất bại: %s", e)
             return None
+
+    def _fetch_calendar_quizzes(
+        self,
+        course_ids: List[int],
+        time_start: int,
+        time_end: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Return quiz cards from the complete calendar, scoped to relevant courses.
+
+        Moodle action-events omit completed quizzes. The legacy calendar keeps
+        those events, but exposes a quiz instance id rather than its course
+        module id. Query only the courses that actually contain a quiz event in
+        this window, then use the quiz catalog to construct canonical URLs.
+        """
+        from datetime import datetime
+
+        if not course_ids:
+            return []
+
+        events = self.moodle_service.get_calendar_events(
+            time_start,
+            time_end,
+            course_ids,
+        )
+        if events is None:
+            return None
+
+        quiz_course_ids = sorted(
+            {
+                int(event["courseid"])
+                for event in events
+                if isinstance(event, dict)
+                and event.get("modulename") == "quiz"
+                and event.get("courseid")
+            }
+        )
+        if not quiz_course_ids:
+            return []
+
+        quizzes = self.moodle_service.get_quizzes_by_courses(quiz_course_ids)
+        if not isinstance(quizzes, list):
+            return None
+
+        course_names = {
+            int(course["id"]): html.unescape(course.get("fullname", ""))
+            for course in (self._courses_cache or [])
+            if isinstance(course, dict) and course.get("id")
+        }
+        now_ts = int(datetime.now().timestamp())
+        results: List[Dict[str, Any]] = []
+        seen_cmids: set[int] = set()
+
+        for quiz in quizzes:
+            if not isinstance(quiz, dict):
+                continue
+            try:
+                course_id = int(quiz.get("course") or 0)
+                cmid = int(quiz.get("coursemodule") or 0)
+                quiz_id = int(quiz.get("id") or 0)
+                deadline_ts = int(quiz.get("timeclose") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                course_id not in quiz_course_ids
+                or not cmid
+                or cmid in seen_cmids
+                or not deadline_ts
+                or deadline_ts < time_start
+                or deadline_ts > time_end
+            ):
+                continue
+
+            seen_cmids.add(cmid)
+            remaining = deadline_ts - now_ts
+            if remaining < 0:
+                urgency = "overdue"
+            elif remaining < settings.URGENCY_CRITICAL_HOURS * 3600:
+                urgency = "critical"
+            elif remaining < settings.URGENCY_WARNING_HOURS * 3600:
+                urgency = "warning"
+            else:
+                urgency = "safe"
+            deadline = datetime.fromtimestamp(deadline_ts).strftime("%Y-%m-%d %H:%M:%S")
+            course_name = course_names.get(course_id, "")
+            results.append(
+                {
+                    "id": f"quiz_{quiz_id}",
+                    "title": html.unescape(quiz.get("name") or "Không tên"),
+                    "course_name": course_name,
+                    "course": course_name,
+                    "course_id": course_id,
+                    "deadline": deadline,
+                    "deadline_str": deadline,
+                    "url": f"{settings.MOODLE_BASE_URL}/mod/quiz/view.php?id={cmid}",
+                    "type": "quiz",
+                    "urgency": urgency,
+                    "source": "ws_quiz_calendar_api",
+                    "submission_status": "unknown",
+                    "details": {},
+                    "is_open": False,
+                    "site_identity": "courses",
+                }
+            )
+
+        return results
     
     async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng WS API bất đồng bộ (non-blocking).

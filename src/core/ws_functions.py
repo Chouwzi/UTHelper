@@ -114,6 +114,7 @@ def get_calendar_events(
     call_api: Callable,
     time_start: Optional[int] = None,
     time_end: Optional[int] = None,
+    course_ids: Optional[List[int]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """core_calendar_get_calendar_events - legacy calendar events."""
     params: Dict[str, Any] = {}
@@ -121,6 +122,13 @@ def get_calendar_events(
         params['options[timestart]'] = time_start
     if time_end is not None:
         params['options[timeend]'] = time_end
+    if course_ids is not None:
+        # Without an explicit course filter Moodle only returns user/site events,
+        # not the activity events belonging to enrolled courses.
+        params['options[userevents]'] = 0
+        params['options[siteevents]'] = 0
+        for index, course_id in enumerate(course_ids):
+            params[f'events[courseids][{index}]'] = course_id
 
     try:
         result = call_api('core_calendar_get_calendar_events', **params)
@@ -927,7 +935,10 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
                 'type': event_type,
                 'urgency': urgency,
                 'source': 'ws_api',
-                'submission_status': 'new',
+                # An action event proves an assignment still needs action, but
+                # it does not prove the attempt state of a quiz. Quiz attempts
+                # are authoritative and are hydrated separately.
+                'submission_status': 'unknown' if event_type == 'quiz' else 'new',
                 'details': {},
                 'is_open': event_type == 'open',
             }

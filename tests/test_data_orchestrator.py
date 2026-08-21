@@ -536,3 +536,103 @@ class TestCalendarPagination:
         assert calls[0].kwargs["after_event_id"] == 0
         assert calls[1].kwargs["limit"] == 50
         assert calls[1].kwargs["after_event_id"] == 50
+
+
+class TestCalendarQuizRecovery:
+    """Completed quizzes must not disappear with Moodle action events."""
+
+    def _make_orchestrator(self):
+        with patch("core.data_orchestrator.MoodleClient"), \
+             patch("core.data_orchestrator.GradeMonitor"):
+            from core.data_orchestrator import DataOrchestrator
+            return DataOrchestrator()
+
+    def test_scopes_quiz_catalog_to_courses_with_calendar_quizzes(self):
+        orch = self._make_orchestrator()
+        orch._courses_cache = [
+            {"id": 11, "fullname": "Môn không có quiz"},
+            {"id": 22, "fullname": "Môn có BÀI 3"},
+        ]
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_calendar_events.return_value = [
+            {
+                "id": 420400,
+                "name": "BÀI 3 closes",
+                "modulename": "quiz",
+                "instance": 87658,
+                "courseid": 22,
+                "timestart": 1_900_000_000,
+            }
+        ]
+        orch.moodle_service.get_quizzes_by_courses.return_value = [
+            {
+                "id": 87658,
+                "coursemodule": 675077,
+                "course": 22,
+                "name": "BÀI 3",
+                "timeclose": 1_900_000_000,
+            }
+        ]
+
+        result = orch._fetch_calendar_quizzes(
+            [11, 22],
+            time_start=1_800_000_000,
+            time_end=2_000_000_000,
+        )
+
+        orch.moodle_service.get_calendar_events.assert_called_once_with(
+            1_800_000_000,
+            2_000_000_000,
+            [11, 22],
+        )
+        orch.moodle_service.get_quizzes_by_courses.assert_called_once_with([22])
+        assert result == [
+            {
+                "id": "quiz_87658",
+                "title": "BÀI 3",
+                "course_name": "Môn có BÀI 3",
+                "course": "Môn có BÀI 3",
+                "course_id": 22,
+                "deadline": datetime.fromtimestamp(1_900_000_000).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "deadline_str": datetime.fromtimestamp(1_900_000_000).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=675077",
+                "type": "quiz",
+                "urgency": "safe",
+                "source": "ws_quiz_calendar_api",
+                "submission_status": "unknown",
+                "details": {},
+                "is_open": False,
+                "site_identity": "courses",
+            }
+        ]
+
+    def test_fetch_merges_quiz_missing_from_action_events_without_duplicates(self):
+        orch = self._make_orchestrator()
+        orch._get_userid = Mock(return_value=42)
+        orch._should_sync_thnn = Mock(return_value=False)
+        orch._thnn_activities_cache = []
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_action_events_by_timesort.return_value = {
+            "events": [{"id": 1}],
+            "moreevents": False,
+        }
+        orch.moodle_service.get_user_courses.return_value = [{"id": 22}]
+        existing = {
+            "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=100",
+            "type": "quiz",
+        }
+        missing = {
+            "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=675077",
+            "type": "quiz",
+        }
+        orch.moodle_service.ws_events_to_assignments.return_value = [existing]
+        orch._merge_all_assignments = Mock(side_effect=lambda items, **_kwargs: items)
+        orch._fetch_calendar_quizzes = Mock(return_value=[existing.copy(), missing])
+
+        result = orch._fetch_via_ws_api()
+
+        assert result == [existing, missing]

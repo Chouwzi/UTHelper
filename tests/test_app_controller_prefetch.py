@@ -261,6 +261,30 @@ def test_cached_known_statuses_do_not_trigger_redundant_hydration(monkeypatch):
     assert scheduled == []
 
 
+def test_cached_not_submitted_quiz_is_revalidated(monkeypatch):
+    controller = AppController.__new__(AppController)
+    stale_quiz = {
+        "url": "https://example.com/mod/quiz/view.php?id=675077",
+        "type": "quiz",
+        "submission_status": "not_submitted",
+    }
+    stable_assignment = {
+        "url": "https://example.com/mod/assign/view.php?id=1",
+        "type": "assignment",
+        "submission_status": "not_submitted",
+    }
+    controller.all_data = [stale_quiz, stable_assignment]
+    controller._data_lock = threading.Lock()
+    controller._prefetch_cancel_event = threading.Event()
+    controller._prefetch_epoch = 0
+    scheduled = []
+    controller._safe_run_task = lambda *args: scheduled.append(args)
+    monkeypatch.setattr(app_controller_module.settings, "MOODLE_WS_TOKEN", "token")
+
+    assert controller._schedule_cached_detail_hydration(True) is True
+    assert scheduled[0][1] == [stale_quiz]
+
+
 def test_loading_a_nonempty_cached_snapshot_reports_success():
     controller = AppController.__new__(AppController)
     controller._data_cache = SimpleNamespace(

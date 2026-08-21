@@ -1404,16 +1404,25 @@ class AppController:
             return False
         with self._data_lock:
             cached_items = list(self.all_data)
-        if not any(
-            normalize_submission_status(item.get("submission_status")) == "unknown"
-            and item.get("url")
+        items_to_hydrate = [
+            item
             for item in cached_items
-        ):
+            if item.get("url")
+            and (
+                normalize_submission_status(item.get("submission_status")) == "unknown"
+                or (
+                    item.get("type") == "quiz"
+                    and normalize_submission_status(item.get("submission_status"))
+                    == "not_submitted"
+                )
+            )
+        ]
+        if not items_to_hydrate:
             return False
         self._prefetch_cancel_event.clear()
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._safe_run_task(
-            self._prefetch_details_async, cached_items, self._prefetch_epoch
+            self._prefetch_details_async, items_to_hydrate, self._prefetch_epoch
         )
         return True
 

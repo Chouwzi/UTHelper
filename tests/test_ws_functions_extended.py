@@ -27,8 +27,24 @@ class TestGetCalendarEvents:
 
     def test_success(self):
         mock_api = Mock(return_value={"events": [{"id": 10}]})
-        result = ws_functions.get_calendar_events(mock_api, time_start=1000, time_end=2000)
+        result = ws_functions.get_calendar_events(
+            mock_api,
+            time_start=1000,
+            time_end=2000,
+            course_ids=[101, 202],
+        )
         assert len(result) == 1
+        mock_api.assert_called_once_with(
+            "core_calendar_get_calendar_events",
+            **{
+                "options[timestart]": 1000,
+                "options[timeend]": 2000,
+                "options[userevents]": 0,
+                "options[siteevents]": 0,
+                "events[courseids][0]": 101,
+                "events[courseids][1]": 202,
+            },
+        )
 
     def test_no_time_params(self):
         mock_api = Mock(return_value={"events": []})
@@ -301,6 +317,7 @@ class TestWSEventsToAssignments:
         assert result[0]["title"] == "Bài tập 1"
         assert result[0]["source"] == "ws_api"
         assert result[0]["course_name"] == "Lập trình Web"
+        assert result[0]["submission_status"] == "new"
 
     def test_quiz_event_conversion(self):
         events = [{
@@ -313,6 +330,7 @@ class TestWSEventsToAssignments:
         }]
         result = ws_functions.ws_events_to_assignments(events)
         assert result[0]["type"] == "quiz"
+        assert result[0]["submission_status"] == "unknown"
 
     def test_attendance_event_conversion(self):
         events = [{
