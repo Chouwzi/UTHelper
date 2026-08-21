@@ -340,7 +340,14 @@ class CalendarView(ft.Container):
             viewport_fraction=1.0,
             on_change=self._on_period_page_change,
         )
-        self._desktop_period_host = ft.Container(height=316)
+        # Dismissible keeps drag animation entirely in Flutter. Its child is a
+        # three-page strip whose neighbours overflow on either side; this host
+        # is the stationary viewport that clips that overflow.
+        self._desktop_period_host = ft.Container(
+            width=float("inf"),
+            height=316,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
         self._desktop_period_gesture = ft.GestureDetector(
             content=self._desktop_period_host,
             allowed_devices=[ft.PointerDeviceType.MOUSE],
@@ -484,31 +491,53 @@ class CalendarView(ft.Container):
             self._period_dismiss_generation += 1
             height = 316 if self._view_mode == "month" else 88
 
-            def opaque_period(control: ft.Control) -> ft.Container:
+            def strip_period(control: ft.Control, offset_x: int) -> ft.Container:
                 return ft.Container(
                     content=control,
                     bgcolor=C.BG,
-                    height=height,
-                    expand=True,
+                    left=0,
+                    right=0,
+                    top=0,
+                    bottom=0,
+                    offset=ft.Offset(offset_x, 0),
                 )
 
             previous, current, following = self._period_pages
+            period_strip = ft.Stack(
+                controls=[
+                    strip_period(previous.control, -1),
+                    strip_period(current.control, 0),
+                    strip_period(following.control, 1),
+                ],
+                width=float("inf"),
+                height=height,
+                clip_behavior=ft.ClipBehavior.NONE,
+            )
             self._period_dismissible = ft.Dismissible(
                 key=f"calendar-period-{self._period_dismiss_generation}",
-                content=opaque_period(current.control),
-                background=opaque_period(previous.control),
-                secondary_background=opaque_period(following.control),
+                content=period_strip,
                 dismiss_direction=ft.DismissDirection.HORIZONTAL,
                 dismiss_thresholds={
                     ft.DismissDirection.START_TO_END: 0.14,
                     ft.DismissDirection.END_TO_START: 0.14,
                 },
                 movement_duration=ft.Duration(milliseconds=140),
-                resize_duration=ft.Duration(milliseconds=0),
+                # Zero completes synchronously inside Flutter and Flet 0.86.5
+                # drops on_dismiss, leaving the translated strip off-screen.
+                # A 1 ms resize is visually imperceptible and reliably emits
+                # the event that installs the next keyed period strip.
+                resize_duration=ft.Duration(milliseconds=1),
                 on_dismiss=self._on_desktop_period_dismiss,
                 expand=True,
             )
             self._desktop_period_host.content = self._period_dismissible
+
+    def _update_period_surface(self) -> None:
+        try:
+            self.update()
+        except RuntimeError:
+            # Unit tests and construction before mounting have no Flet page.
+            pass
 
     def _render_period_pages(self) -> None:
         for period in self._period_pages:
@@ -590,6 +619,10 @@ class CalendarView(ft.Container):
                 self._render_month()
             else:
                 self._render_week()
+            # on_dismiss runs after Flutter removed the old keyed widget. Push
+            # its replacement immediately so every completed swipe can be
+            # followed by another one.
+            self._update_period_surface()
         finally:
             self._period_transition_active = False
 

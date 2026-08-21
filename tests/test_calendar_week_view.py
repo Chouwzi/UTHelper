@@ -110,6 +110,52 @@ def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control()
     assert view._period_transition_active is False
 
 
+def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
+    view = CalendarView(_page_stub())
+
+    strip = view._period_dismissible.content
+    assert isinstance(strip, ft.Stack)
+    assert strip.clip_behavior == ft.ClipBehavior.NONE
+    assert strip.width == float("inf")
+    assert [page.offset.x for page in strip.controls] == [-1, 0, 1]
+    assert [page.left for page in strip.controls] == [0, 0, 0]
+    assert [page.right for page in strip.controls] == [0, 0, 0]
+    assert view._period_dismissible.background is None
+    assert view._period_dismissible.secondary_background is None
+    assert view._desktop_period_host.clip_behavior == ft.ClipBehavior.HARD_EDGE
+
+
+def test_native_desktop_dismiss_updates_mounted_host_and_can_repeat():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    first = view._period_dismissible
+
+    async def exercise():
+        with patch.object(view, "update") as update:
+            event = SimpleNamespace(direction=ft.DismissDirection.END_TO_START)
+            await view._on_desktop_period_dismiss(event)
+            second = view._period_dismissible
+            await view._on_desktop_period_dismiss(event)
+            return update.call_count, second
+
+    update_count, second = asyncio.run(exercise())
+
+    assert (view._year, view._month) == (2026, 10)
+    assert first is not second
+    assert second is not view._period_dismissible
+    assert update_count == 2
+
+
+def test_native_desktop_strip_uses_fractional_offsets_without_size_events():
+    view = CalendarView(_page_stub())
+
+    strip = view._period_dismissible.content
+    assert view._desktop_period_host.width == float("inf")
+    assert view._desktop_period_host.on_size_change is None
+    assert [page.offset.x for page in strip.controls] == [-1, 0, 1]
+
+
 def test_native_desktop_dismiss_uses_week_navigation_pipeline_too():
     view = CalendarView(_page_stub())
     view._toggle_view_mode("week")
@@ -136,7 +182,10 @@ def test_native_desktop_drag_uses_flutter_snap_without_python_frame_events():
         ft.DismissDirection.END_TO_START: 0.14,
     }
     assert dismissible.movement_duration == ft.Duration(milliseconds=140)
-    assert dismissible.resize_duration == ft.Duration(milliseconds=0)
+    # Flet 0.86.5 drops on_dismiss when Flutter completes a zero-duration
+    # resize synchronously. One millisecond preserves the callback without a
+    # perceptible contraction.
+    assert dismissible.resize_duration == ft.Duration(milliseconds=1)
     assert view._detail_panel is not view._period_surface
 
 
