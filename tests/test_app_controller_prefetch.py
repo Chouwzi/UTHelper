@@ -310,3 +310,34 @@ def test_loading_a_nonempty_cached_snapshot_reports_success():
 
     assert controller._load_cached_snapshot() is True
     assert controller.status_text.value == "Dữ liệu đã lưu · 1 hoạt động"
+
+
+def test_stale_activity_catalog_forces_initial_sync_without_hiding_cached_cards():
+    controller = AppController.__new__(AppController)
+    controller._data_cache = SimpleNamespace(
+        load_snapshot=lambda: SimpleNamespace(
+            activities=[
+                {
+                    "title": "Cached quiz",
+                    "course": "Course",
+                    "deadline": "2026-08-21 22:30:00",
+                    "submission_status": "unknown",
+                }
+            ],
+            last_successful_sync_at="2026-08-21T14:29:39+00:00",
+            requires_server_refresh=True,
+        )
+    )
+    controller._data_lock = threading.Lock()
+    controller.all_data = []
+    controller._refresh_activity_time_state = lambda: False
+    controller.status_text = SimpleNamespace(value="")
+    controller.loading_bar = SimpleNamespace(visible=True)
+    controller._update_footer = lambda: None
+    controller.page = _FakePage()
+
+    has_cached_snapshot = controller._load_cached_snapshot()
+
+    assert has_cached_snapshot is True
+    assert controller.all_data[0]["title"] == "Cached quiz"
+    assert controller._needs_initial_data_sync(has_cached_snapshot) is True

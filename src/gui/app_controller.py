@@ -271,7 +271,7 @@ class AppController:
 
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
-        elif not has_cached_snapshot:
+        elif self._needs_initial_data_sync(has_cached_snapshot):
             self._safe_run_task(self._load_data_async)
         # With credentials, the coordinator waits until cache age + the
         # one-minute startup grace are due. Manual refresh remains immediate.
@@ -1456,6 +1456,9 @@ class AppController:
     def _load_cached_snapshot(self) -> bool:
         """Render local activities immediately without starting a Moodle call."""
         snapshot = self._data_cache.load_snapshot()
+        self._cache_requires_server_refresh = bool(
+            getattr(snapshot, "requires_server_refresh", False)
+        )
         self._last_successful_sync_at = parse_timestamp(
             snapshot.last_successful_sync_at
         )
@@ -1477,6 +1480,12 @@ class AppController:
         self._update_footer()
         self.page.update()
         return True
+
+    def _needs_initial_data_sync(self, has_cached_snapshot: bool) -> bool:
+        """Refresh immediately when cached activities predate the current catalog."""
+        return not has_cached_snapshot or bool(
+            getattr(self, "_cache_requires_server_refresh", False)
+        )
 
     async def _initialize_android_background(self):
         """Attach native worker settings and prefer its cache after app restart."""
