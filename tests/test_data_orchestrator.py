@@ -286,6 +286,150 @@ class TestAssignmentMerge:
         assert result[1]["course_id"] == 456
 
 
+class _CalendarResponse:
+    def __init__(self, body: str, *, url: str, content_type: str, status: int = 200):
+        self._body = body.encode("utf-8")
+        self._url = url
+        self.status = status
+        self.headers = MagicMock()
+        self.headers.get_content_type.return_value = content_type
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def geturl(self):
+        return self._url
+
+    def read(self, _size=-1):
+        return self._body
+
+
+class _CalendarOpener:
+    def __init__(self, export_responses):
+        self.export_responses = list(export_responses)
+        self.export_calls = 0
+
+    def open(self, url, data=None, timeout=None):
+        del timeout
+        if "calendar/export.php" in str(url):
+            self.export_calls += 1
+            return self.export_responses.pop(0)
+        assert data is None
+        return _CalendarResponse(
+            "<html></html>",
+            url=str(url),
+            content_type="text/html",
+        )
+
+
+class TestThnnCalendarValidation:
+    def _make_orchestrator(self):
+        with patch("core.data_orchestrator.MoodleClient"), \
+             patch("core.data_orchestrator.GradeMonitor"):
+            from core.data_orchestrator import DataOrchestrator
+            orch = DataOrchestrator()
+            orch.thnn_client.moodle_site_origin = "https://thnn.ut.edu.vn"
+            return orch
+
+    @pytest.mark.parametrize(
+        ("body", "content_type", "url", "status"),
+        [
+            (
+                "<html><form action='/login/index.php'></form></html>",
+                "text/html",
+                "https://thnn.ut.edu.vn/login/index.php",
+                200,
+            ),
+            (
+                "BEGIN:VCALENDAR\nBEGIN:VEVENT\nEND:VEVENT",
+                "text/calendar",
+                "https://thnn.ut.edu.vn/calendar/export.php",
+                200,
+            ),
+            (
+                "BEGIN:VCALENDAR\nEND:VCALENDAR",
+                "text/calendar",
+                "https://evil.example/calendar/export.php",
+                200,
+            ),
+            (
+                "BEGIN:VCALENDAR\nEND:VCALENDAR",
+                "text/calendar",
+                "https://thnn.ut.edu.vn/calendar/export.php",
+                500,
+            ),
+            (
+                "BEGIN:VCALENDAR\n" + ("X" * (2 * 1024 * 1024)) + "\nEND:VCALENDAR",
+                "text/calendar",
+                "https://thnn.ut.edu.vn/calendar/export.php",
+                200,
+            ),
+        ],
+        ids=["login-html", "missing-end", "cross-origin", "http-500", "oversized"],
+    )
+    def test_invalid_calendar_preserves_last_known_good_and_freshness(
+        self, body, content_type, url, status
+    ):
+        orch = self._make_orchestrator()
+        cached = [{"id": "old", "site_identity": "thnn"}]
+        orch._thnn_activities_cache = cached
+        orch._last_thnn_fetch_ts = 1234.0
+        orch.thnn_client._sesskey = "stale"
+        responses = [
+            _CalendarResponse(
+                body,
+                url=url,
+                content_type=content_type,
+                status=status,
+            ),
+            _CalendarResponse(
+                body,
+                url=url,
+                content_type=content_type,
+                status=status,
+            ),
+        ]
+        opener = _CalendarOpener(responses)
+        orch.thnn_client._ensure_html_opener.return_value = opener
+        orch.thnn_client.login_session.return_value = True
+
+        result = orch._fetch_thnn_activities(5678)
+
+        assert result == cached
+        assert result is not cached
+        assert orch._thnn_activities_cache == cached
+        assert orch._last_thnn_fetch_ts == 1234.0
+        assert opener.export_calls == 2
+        orch.thnn_client.login_session.assert_called_once_with(force=True)
+
+    def test_valid_empty_calendar_updates_freshness_and_clears_old_cache(self):
+        orch = self._make_orchestrator()
+        orch._thnn_activities_cache = [{"id": "old", "site_identity": "thnn"}]
+        orch._last_thnn_fetch_ts = 1234.0
+        orch.thnn_client._sesskey = "valid"
+        opener = _CalendarOpener(
+            [
+                _CalendarResponse(
+                    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n",
+                    url="https://thnn.ut.edu.vn/calendar/export.php",
+                    content_type="text/calendar",
+                )
+            ]
+        )
+        orch.thnn_client._ensure_html_opener.return_value = opener
+
+        result = orch._fetch_thnn_activities(5678)
+
+        assert result == []
+        assert orch._thnn_activities_cache == []
+        assert orch._last_thnn_fetch_ts == 5678.0
+        assert opener.export_calls == 1
+        orch.thnn_client.login_session.assert_not_called()
+
+
 class TestCalendarPagination:
     """Moodle caps action-event pages at 50 records."""
 

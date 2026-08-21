@@ -205,13 +205,48 @@ class DataOrchestrator:
             return True
         return False
 
+    def _download_thnn_calendar(self, opener, data: bytes) -> Optional[str]:
+        """Download one bounded calendar export and reject login/malformed payloads."""
+        import urllib.parse
+
+        origin = self.thnn_client.moodle_site_origin.rstrip("/")
+        export_url = f"{origin}/calendar/export.php"
+        with opener.open(export_url, data=data, timeout=20) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            final_url = response.geturl()
+            raw_body = response.read(2 * 1024 * 1024 + 1)
+            headers = getattr(response, "headers", None)
+            content_type = ""
+            if headers is not None and hasattr(headers, "get_content_type"):
+                content_type = str(headers.get_content_type() or "").casefold()
+
+        parsed_origin = urllib.parse.urlsplit(origin)
+        parsed_final = urllib.parse.urlsplit(final_url)
+        if (
+            not 200 <= status < 300
+            or parsed_final.scheme.casefold() != parsed_origin.scheme.casefold()
+            or parsed_final.netloc.casefold() != parsed_origin.netloc.casefold()
+            or "/login/" in parsed_final.path.casefold()
+            or len(raw_body) > 2 * 1024 * 1024
+            or content_type == "text/html"
+        ):
+            return None
+
+        decoded = raw_body.decode("utf-8", errors="replace").lstrip("\ufeff \t\r\n")
+        if not decoded.startswith("BEGIN:VCALENDAR"):
+            return None
+        if not decoded.rstrip().endswith("END:VCALENDAR"):
+            return None
+        return decoded
+
 
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
+        last_known_good = list(self._thnn_activities_cache)
         try:
             if not self.thnn_client._sesskey:
                 success = self.thnn_client.login_session()
                 if not success:
-                    return []
+                    return last_known_good
                     
             opener = self.thnn_client._ensure_html_opener()
             import urllib.parse
@@ -228,12 +263,21 @@ class DataOrchestrator:
                 'export': 'Export'
             }).encode('utf-8')
             
-            try:
-                resp = opener.open("https://thnn.ut.edu.vn/calendar/export.php", data=data, timeout=20)
-                ics_data = resp.read().decode('utf-8', errors='ignore')
-            except Exception as e:
-                logger.error(f"Lỗi tải THNN calendar ICS: {e}")
-                return []
+            ics_data = self._download_thnn_calendar(opener, data)
+            if ics_data is None:
+                if not self.thnn_client.login_session(force=True):
+                    return last_known_good
+                opener = self.thnn_client._ensure_html_opener()
+                data = urllib.parse.urlencode({
+                    'sesskey': self.thnn_client._sesskey,
+                    '_qf__core_calendar_export_form': '1',
+                    'events[exportevents]': 'all',
+                    'period[timeperiod]': 'recentupcoming',
+                    'export': 'Export'
+                }).encode('utf-8')
+                ics_data = self._download_thnn_calendar(opener, data)
+                if ics_data is None:
+                    return last_known_good
                 
             events_ics = {}
             current_event = {}
@@ -351,7 +395,7 @@ class DataOrchestrator:
             return results
         except Exception as e:
             logger.error(f"Lỗi khi tải THNN activities: {e}")
-            return []
+            return last_known_good
 
     def _format_assignment_from_ws(self, a: dict, url: str, identity: str) -> dict:
         import html
