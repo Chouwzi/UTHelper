@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List, Dict, Any, Optional
 from core.client import MoodleClient
 from core.activity_status import normalize_submission_status
@@ -32,6 +32,7 @@ class DataOrchestrator:
         self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
         self._detail_cache_saved_at: dict[str, float] = {}
         self._detail_cache_lru: OrderedDict[str, None] = OrderedDict()
+        self._detail_cache_generation = 0
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
         self._detail_lock = threading.Lock()
@@ -59,8 +60,15 @@ class DataOrchestrator:
             self._detail_cache_lru.move_to_end(url)
             return cached
 
-    def _set_cached_detail(self, url: str, value: Dict[str, Any]):
+    def _set_cached_detail(
+        self,
+        url: str,
+        value: Dict[str, Any],
+        generation: Optional[int] = None,
+    ) -> bool:
         with self._detail_lock:
+            if generation is not None and generation != self._detail_cache_generation:
+                return False
             self._detail_cache[url] = value
             self._detail_cache_saved_at[url] = time.monotonic()
             self._detail_cache_lru[url] = None
@@ -69,6 +77,7 @@ class DataOrchestrator:
                 old_url, _ = self._detail_cache_lru.popitem(last=False)
                 self._detail_cache.pop(old_url, None)
                 self._detail_cache_saved_at.pop(old_url, None)
+            return True
 
     def get_cached_details_snapshot(self) -> Dict[str, Dict[str, Any]]:
         with self._detail_lock:
@@ -77,6 +86,7 @@ class DataOrchestrator:
     def clear_detail_cache(self):
         """Xóa sạch bộ nhớ đệm chi tiết (dùng khi refresh thủ công)."""
         with self._detail_lock:
+            self._detail_cache_generation += 1
             self._detail_cache.clear()
             self._detail_cache_saved_at.clear()
             self._detail_cache_lru.clear()
@@ -742,11 +752,20 @@ class DataOrchestrator:
 
 
 
-    def fetch_full_details(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> Dict[str, Any]:
+    def fetch_full_details(
+        self,
+        activity_data: Dict[str, Any],
+        force_refresh: bool = False,
+        cache_generation: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Tải toàn bộ chi tiết (mô tả, trạng thái nộp bài) qua WS API."""
         url = activity_data.get("url")
         if not url:
             return activity_data
+
+        if cache_generation is None:
+            with self._detail_lock:
+                cache_generation = self._detail_cache_generation
 
         # Trả về cache nếu đã tải trước đó và không force refresh
         if not force_refresh:
@@ -758,7 +777,7 @@ class DataOrchestrator:
         if settings.MOODLE_WS_TOKEN:
             ws_result = self._fetch_detail_via_ws(activity_data)
             if ws_result:
-                self._set_cached_detail(url, ws_result)
+                self._set_cached_detail(url, ws_result, cache_generation)
                 return ws_result
         
         logger.debug("WS API không lấy được chi tiết cho %s.", url)
@@ -872,7 +891,12 @@ class DataOrchestrator:
         
         return result
 
-    def prefetch_one_detail(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> bool:
+    def prefetch_one_detail(
+        self,
+        activity_data: Dict[str, Any],
+        force_refresh: bool = False,
+        cache_generation: Optional[int] = None,
+    ) -> bool:
         """
         Prefetch chi tiết một hoạt động vào cache. Trả về True nếu đã cache sẵn hoặc fetch thành công.
         Dùng cho background prefetch - không raise exception.
@@ -883,7 +907,7 @@ class DataOrchestrator:
         if not force_refresh and self._get_cached_detail(url) is not None:
             return True
         try:
-            self.fetch_full_details(activity_data, force_refresh)
+            self.fetch_full_details(activity_data, force_refresh, cache_generation)
             return self._get_cached_detail(url) is not None
         except Exception:
             return False
@@ -904,24 +928,50 @@ class DataOrchestrator:
         if not pending:
             return 0
 
+        if cancel_flag and cancel_flag():
+            return 0
+
         workers = max(1, min(workers, 10))
         logger.debug(f"[Orchestrator] Prefetch {len(pending)} items với {workers} workers (force_refresh={force_refresh})")
         done = 0
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(self.prefetch_one_detail, a, force_refresh): a for a in pending}
-            for future in as_completed(futures):
+        with self._detail_lock:
+            cache_generation = self._detail_cache_generation
+
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {
+            pool.submit(
+                self.prefetch_one_detail,
+                activity,
+                force_refresh,
+                cache_generation,
+            )
+            for activity in pending
+        }
+        try:
+            while futures:
                 if cancel_flag and cancel_flag():
-                    pool.shutdown(wait=False, cancel_futures=True)
                     logger.debug("[Orchestrator] Prefetch bị huỷ")
                     break
-                try:
-                    ok = future.result(timeout=30)
-                except TimeoutError:
-                    logger.warning("Prefetch detail timeout after 30s")
-                    ok = False
-                if ok:
-                    done += 1
+                completed, _ = wait(
+                    futures,
+                    timeout=0.05,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    continue
+                futures.difference_update(completed)
+                for future in completed:
+                    try:
+                        ok = future.result()
+                    except Exception:
+                        ok = False
+                    if ok:
+                        done += 1
+        finally:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
         return done
 

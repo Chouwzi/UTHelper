@@ -1391,7 +1391,10 @@ class AppController:
             if not persisted:
                 logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
         finally:
-            if not self._is_loading:
+            if (
+                not self._is_loading
+                and prefetch_epoch == getattr(self, "_prefetch_epoch", 0)
+            ):
                 self.loading_bar.visible = False
                 self.page.update()
 

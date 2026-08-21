@@ -7,6 +7,7 @@ Tests verify:
 """
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 import pytest
@@ -71,6 +72,78 @@ class TestDetailCache:
         # Snapshot should be a copy
         snapshot["http://c.com"] = {"x": 3}
         assert "http://c.com" not in orch._detail_cache
+
+    def test_clear_during_prefetch_prevents_late_cache_repopulation(self):
+        orch = self._make_orchestrator()
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        activity = {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=9",
+            "course_id": 7,
+            "type": "assignment",
+        }
+
+        def blocking_fetch(_activity):
+            started.set()
+            assert release.wait(2)
+            return {**activity, "details": {"version": "old"}}
+
+        orch._fetch_detail_via_ws = blocking_fetch
+
+        def run_prefetch():
+            try:
+                with patch(
+                    "core.data_orchestrator.settings.MOODLE_WS_TOKEN", "token"
+                ):
+                    orch.prefetch_all_details([activity], workers=1, force_refresh=True)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=run_prefetch)
+        worker.start()
+        assert started.wait(1)
+        orch.clear_detail_cache()
+        release.set()
+        assert finished.wait(1)
+        worker.join(timeout=1)
+
+        assert orch.get_cached_details_snapshot() == {}
+
+    def test_prefetch_cancellation_returns_without_waiting_for_running_io(self):
+        orch = self._make_orchestrator()
+        started = threading.Event()
+        release = threading.Event()
+        cancelled = threading.Event()
+        finished = threading.Event()
+
+        def blocking_prefetch(*_args):
+            started.set()
+            assert release.wait(2)
+            return True
+
+        orch.prefetch_one_detail = blocking_prefetch
+
+        def run_prefetch():
+            try:
+                orch.prefetch_all_details(
+                    [{"url": f"https://example.test/{index}"} for index in range(4)],
+                    workers=2,
+                    cancel_flag=cancelled.is_set,
+                    force_refresh=True,
+                )
+            finally:
+                finished.set()
+
+        caller = threading.Thread(target=run_prefetch)
+        caller.start()
+        assert started.wait(1)
+        cancelled.set()
+        returned_promptly = finished.wait(0.25)
+        release.set()
+        caller.join(timeout=2)
+
+        assert returned_promptly
 
 
 class TestGetUpdatesSince:

@@ -218,6 +218,7 @@ def test_stale_background_prefetch_cannot_overwrite_newer_generation(monkeypatch
 
     assert controller.all_data == [current]
     assert persisted == []
+    assert controller.loading_bar.visible is True
 
 
 def test_cached_unknown_statuses_are_hydrated_immediately(monkeypatch):
