@@ -1990,35 +1990,26 @@ class AppController:
             self.page.update()
 
     async def _scroll_dashboard_to_top(self, _event=None) -> None:
-        """Start native scrolling immediately and fade the overlay concurrently."""
+        """Fade locally first, then issue native scrolling in the same tick."""
         if getattr(self, "_scroll_to_top_in_progress", False):
             return
         self._scroll_to_top_in_progress = True
         previous_offset = self._dashboard_scroll_offset
-        scroll_task = None
         try:
-            scroll_task = asyncio.create_task(
-                self.cards_column.scroll_to(
-                    offset=0,
-                    duration=_SCROLL_TO_TOP_DURATION_MS,
-                    curve=ft.AnimationCurve.EASE_OUT_CUBIC,
-                )
-            )
-            # Give scroll_to the first event-loop tick so its native command is
-            # emitted before the local overlay update. The fade then overlaps
-            # the scroll instead of waiting for its 300 ms animation to finish.
-            await asyncio.sleep(0)
+            # Flet method invocations can occupy the client command queue until
+            # their animation completes. Publish the tiny control-only patch
+            # first so the fade cannot sit behind the 300 ms scroll method.
             self._dashboard_scroll_offset = 0.0
             self._set_scroll_to_top_visible(False)
             self._scroll_to_top_button.update()
-            await scroll_task
+            await self.cards_column.scroll_to(
+                offset=0,
+                duration=_SCROLL_TO_TOP_DURATION_MS,
+                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            )
         except asyncio.CancelledError:
-            if scroll_task is not None and not scroll_task.done():
-                scroll_task.cancel()
             raise
         except Exception:
-            if scroll_task is not None and not scroll_task.done():
-                scroll_task.cancel()
             self._dashboard_scroll_offset = previous_offset
             self._set_scroll_to_top_visible(
                 previous_offset > _SCROLL_TO_TOP_HIDE_OFFSET

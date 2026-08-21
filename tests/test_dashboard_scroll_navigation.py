@@ -98,7 +98,7 @@ def test_manual_overscroll_at_start_hides_the_scroll_button():
     assert controller.page.update_count == 1
 
 
-def test_scroll_to_top_starts_before_local_button_hide_and_skips_page_rebuild():
+def test_scroll_to_top_hides_locally_before_native_scroll_and_skips_page_rebuild():
     controller = _scroll_controller(offset=840, button_visible=True)
     calls = []
     events = []
@@ -121,7 +121,7 @@ def test_scroll_to_top_starts_before_local_button_hide_and_skips_page_rebuild():
             "curve": ft.AnimationCurve.EASE_OUT_CUBIC,
         }
     ]
-    assert events == ["scroll-start", "button-hide", "scroll-end"]
+    assert events == ["button-hide", "scroll-start", "scroll-end"]
     assert controller.page.update_count == 0
     assert controller._dashboard_scroll_offset == 0
     assert controller._scroll_to_top_visible is False
