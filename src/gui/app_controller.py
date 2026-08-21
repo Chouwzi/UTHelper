@@ -909,20 +909,7 @@ class AppController:
             border=ft.Border.all(1, C.BORDER),
             border_radius=4,
         )
-        self._header_container = ft.Container(
-            content=ft.Column(controls=[
-                ft.Row(controls=[
-                    ft.Row(controls=[
-                        self._app_title,
-                        self._version_badge,
-                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn], spacing=0),
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                self._sync_status.control,
-            ], spacing=4),
-            padding=ft.Padding.only(left=16, right=8, top=25, bottom=8),
-            bgcolor=C.BG,
-        )
+        self._header_container = self._build_dashboard_header()
 
         header = self._header_container
 
@@ -1025,12 +1012,55 @@ class AppController:
         self.page.add(self._app_shell)
 
     def _build_desktop_window_header(self) -> ft.Container:
+        self._app_title.size = 13
+        self._app_title.weight = ft.FontWeight.W_600
         return build_desktop_window_header(
             on_minimize=self._minimize_window,
             on_close=lambda _: self._safe_run_task(
                 self._exit_from_window_header
             ),
+            title_control=self._app_title,
+            version_control=self._version_badge,
         )
+
+    def _build_dashboard_header(self) -> ft.Container:
+        action_buttons = ft.Row(
+            controls=[
+                self.calendar_btn,
+                self.grades_btn,
+                self.refresh_btn,
+                self.settings_btn,
+            ],
+            spacing=0,
+        )
+        if platform_utils.UI_IS_MOBILE:
+            title_group = ft.Row(
+                controls=[self._app_title, self._version_badge],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            content = ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[title_group, action_buttons],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self._sync_status.control,
+                ],
+                spacing=4,
+            )
+            padding = ft.Padding.only(left=16, right=8, top=25, bottom=8)
+        else:
+            self._sync_status.control.expand = True
+            self.status_text.no_wrap = True
+            self.status_text.overflow = ft.TextOverflow.ELLIPSIS
+            content = ft.Row(
+                controls=[self._sync_status.control, action_buttons],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            padding = ft.Padding.only(left=16, right=8, top=4, bottom=8)
+        return ft.Container(content=content, padding=padding, bgcolor=C.BG)
 
     def _build_dashboard_filter_row(self) -> ft.Row:
         controls = [
