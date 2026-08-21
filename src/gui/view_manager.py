@@ -57,8 +57,7 @@ class ViewManager:
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
         
-        self.calendar_view.update_data(data_snapshot)
-        self.calendar_view.show()
+        self.calendar_view.show(data_snapshot)
         # Áp dụng hiệu ứng slide-in transition bằng offset và opacity
         self.calendar_view.offset = ft.Offset(0, 0)
         self.calendar_view.opacity = 1.0

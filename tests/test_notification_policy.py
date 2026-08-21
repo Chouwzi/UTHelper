@@ -3,7 +3,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -210,11 +210,13 @@ def test_canonical_minute_milestones_support_multiple_final_reminders():
 
 def test_android_notification_tap_opens_activity_payload(tmp_path):
     notifier = _mobile_notifier(tmp_path, _FakeAndroidNotifications())
-    notifier._page = MagicMock()
-    notifier._on_notification_tap(
-        SimpleNamespace(data='{"payload":"https://courses.example/activity/42"}')
+    notifier._page = SimpleNamespace(launch_url=AsyncMock())
+    asyncio.run(
+        notifier._on_notification_tap(
+            SimpleNamespace(data='{"payload":"https://courses.example/activity/42"}')
+        )
     )
-    notifier._page.launch_url.assert_called_once_with(
+    notifier._page.launch_url.assert_awaited_once_with(
         "https://courses.example/activity/42"
     )
 

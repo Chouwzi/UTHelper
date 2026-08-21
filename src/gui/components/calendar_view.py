@@ -1017,7 +1017,10 @@ class CalendarView(ft.Container):
         else:
             self._render_week()
 
-    def show(self):
+    def show(self, activities: Optional[List[Dict[str, Any]]] = None):
+        if activities is not None:
+            self._all_data = activities
+            self._build_deadline_map()
         self.visible = True
         # Always anchor to today when opening - reduces cognitive orientation time
         today = date.today()
