@@ -27,6 +27,27 @@ class RefreshDataset:
     submitted_count: int
 
 
+def status_hydration_candidates(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return only Courses cards whose student status can still change."""
+    candidates = []
+    for item in items:
+        if not item.get("url"):
+            continue
+        if item.get("site_identity") == "thnn" or item.get("source") == "thnn_sync":
+            continue
+        activity_type = item.get("type")
+        if activity_type not in {"assignment", "assign", "quiz"}:
+            continue
+        status = normalize_submission_status(item.get("submission_status"))
+        if status == "unknown" or (
+            activity_type == "quiz" and status == "not_submitted"
+        ):
+            candidates.append(item)
+    return candidates
+
+
 def merge_cached_details(
     items: list[dict[str, Any]],
     detail_cache: dict[str, dict[str, Any]],

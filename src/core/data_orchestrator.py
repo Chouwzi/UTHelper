@@ -528,6 +528,22 @@ class DataOrchestrator:
             # action-events. Hai nhánh chạy song song; benchmark cho thấy nhánh
             # quiz có chọn lọc ngắn hơn call assignment hiện hữu.
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
+            action_quiz_course_ids = {
+                int(item["course_id"])
+                for item in results
+                if isinstance(item, dict)
+                and item.get("type") == "quiz"
+                and item.get("site_identity") != "thnn"
+                and item.get("course_id")
+            }
+            action_quiz_urls = {
+                item["url"]
+                for item in results
+                if isinstance(item, dict)
+                and item.get("type") == "quiz"
+                and item.get("site_identity") != "thnn"
+                and item.get("url")
+            }
             try:
                 now = datetime.now()
                 month_start = datetime(now.year, now.month, 1)
@@ -550,20 +566,27 @@ class DataOrchestrator:
                         course_ids,
                         window_start,
                         window_end,
+                        action_quiz_course_ids,
+                        action_quiz_urls,
                     )
                     results = assignments_future.result(timeout=25)
                     quiz_results = quizzes_future.result(timeout=25)
                 if quiz_results is None:
                     raise RuntimeError("Calendar quiz snapshot is incomplete")
 
-                existing_urls = {
-                    item.get("url")
+                existing_by_url = {
+                    item.get("url"): item
                     for item in results
                     if isinstance(item, dict) and item.get("url")
                 }
-                results.extend(
-                    item for item in quiz_results if item.get("url") not in existing_urls
-                )
+                for quiz_item in quiz_results:
+                    existing = existing_by_url.get(quiz_item.get("url"))
+                    if existing is not None:
+                        if quiz_item.get("quiz_id"):
+                            existing["quiz_id"] = quiz_item["quiz_id"]
+                        continue
+                    if not quiz_item.get("catalog_only"):
+                        results.append(quiz_item)
             except Exception as e:
                 logger.warning("Merge activities failed; snapshot is partial: %s", e)
                 return None
@@ -585,6 +608,8 @@ class DataOrchestrator:
         course_ids: List[int],
         time_start: int,
         time_end: int,
+        action_quiz_course_ids: Optional[set[int]] = None,
+        action_quiz_urls: Optional[set[str]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Return quiz cards from the complete calendar, scoped to relevant courses.
 
@@ -606,14 +631,15 @@ class DataOrchestrator:
         if events is None:
             return None
 
-        quiz_course_ids = sorted(
-            {
+        calendar_quiz_course_ids = {
                 int(event["courseid"])
                 for event in events
                 if isinstance(event, dict)
                 and event.get("modulename") == "quiz"
                 and event.get("courseid")
-            }
+        }
+        quiz_course_ids = sorted(
+            calendar_quiz_course_ids | set(action_quiz_course_ids or ())
         )
         if not quiz_course_ids:
             return []
@@ -630,6 +656,7 @@ class DataOrchestrator:
         now_ts = int(datetime.now().timestamp())
         results: List[Dict[str, Any]] = []
         seen_cmids: set[int] = set()
+        action_quiz_urls = set(action_quiz_urls or ())
 
         for quiz in quizzes:
             if not isinstance(quiz, dict):
@@ -641,17 +668,28 @@ class DataOrchestrator:
                 deadline_ts = int(quiz.get("timeclose") or 0)
             except (TypeError, ValueError):
                 continue
-            if (
-                course_id not in quiz_course_ids
-                or not cmid
-                or cmid in seen_cmids
-                or not deadline_ts
-                or deadline_ts < time_start
-                or deadline_ts > time_end
+            quiz_url = f"{settings.MOODLE_BASE_URL}/mod/quiz/view.php?id={cmid}"
+            is_action_quiz = quiz_url in action_quiz_urls
+            if not cmid or cmid in seen_cmids or (
+                course_id not in calendar_quiz_course_ids and not is_action_quiz
             ):
                 continue
 
             seen_cmids.add(cmid)
+            if (
+                not deadline_ts
+                or deadline_ts < time_start
+                or deadline_ts > time_end
+            ):
+                if is_action_quiz:
+                    results.append(
+                        {
+                            "url": quiz_url,
+                            "quiz_id": quiz_id,
+                            "catalog_only": True,
+                        }
+                    )
+                continue
             remaining = deadline_ts - now_ts
             if remaining < 0:
                 urgency = "overdue"
@@ -670,9 +708,10 @@ class DataOrchestrator:
                     "course_name": course_name,
                     "course": course_name,
                     "course_id": course_id,
+                    "quiz_id": quiz_id,
                     "deadline": deadline,
                     "deadline_str": deadline,
-                    "url": f"{settings.MOODLE_BASE_URL}/mod/quiz/view.php?id={cmid}",
+                    "url": quiz_url,
                     "type": "quiz",
                     "urgency": urgency,
                     "source": "ws_quiz_calendar_api",
@@ -799,6 +838,8 @@ class DataOrchestrator:
                         _existing = calendar_results[_idx]
                         if not _existing.get('course_id') and course_id:
                             _existing['course_id'] = course_id
+                        if assign.get('id'):
+                            _existing['assignment_id'] = assign['id']
                         _cutoff = assign.get('cutoffdate', 0)
                         _due = assign.get('duedate', 0)
                         if _cutoff > 0 and _cutoff != _due:
@@ -850,6 +891,7 @@ class DataOrchestrator:
                     'course_name': course_name,
                     'course': course_name,
                     'course_id': course_id,
+                    'assignment_id': assign.get('id'),
                     'deadline': deadline_str,
                     'deadline_str': deadline_str,
                     'url': assign_url,
@@ -1032,6 +1074,109 @@ class DataOrchestrator:
             )
         
         return result
+
+    def _fetch_one_activity_status(
+        self, activity_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch student state using IDs already present in the catalog."""
+        activity_type = activity_data.get("type")
+        status = "unknown"
+
+        if activity_type in {"assignment", "assign"}:
+            assignment_id = activity_data.get("assignment_id")
+            if not assignment_id:
+                return None
+            response = self.moodle_service.get_submission_status(int(assignment_id))
+            if response is None:
+                return None
+            last_attempt = response.get("lastattempt", {})
+            submission = last_attempt.get("submission", {})
+            status = normalize_submission_status(submission.get("status"))
+            if status == "unknown":
+                status = normalize_submission_status(last_attempt.get("gradingstatus"))
+        elif activity_type == "quiz":
+            quiz_id = activity_data.get("quiz_id")
+            if not quiz_id:
+                return None
+            attempts = self.moodle_service.get_quiz_attempts(int(quiz_id))
+            if attempts is None:
+                return None
+            states = {
+                normalize_submission_status(attempt.get("state"))
+                for attempt in attempts
+                if isinstance(attempt, dict)
+            }
+            if "submitted" in states:
+                status = "submitted"
+            elif "in_progress" in states:
+                status = "in_progress"
+            elif attempts:
+                status = next((value for value in states if value != "unknown"), "attempted")
+            else:
+                status = "not_submitted"
+        else:
+            return None
+
+        if status == "unknown":
+            return None
+        result = dict(activity_data)
+        result["submission_status"] = status
+        details = dict(result.get("details") or {})
+        status_data = dict(details.get("status_data") or {})
+        status_data["Trạng thái nộp bài"] = status
+        details["status_data"] = status_data
+        if activity_type == "quiz":
+            details["quiz_attempt_status"] = status
+        result["details"] = details
+        return result
+
+    def prefetch_activity_statuses(
+        self,
+        activities: List[Dict[str, Any]],
+        workers: int = 4,
+        cancel_flag=None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Hydrate status only, avoiding per-card assignment/quiz catalog calls."""
+        pending = [activity for activity in activities if activity.get("url")]
+        if not pending or (cancel_flag and cancel_flag()):
+            return {}
+
+        workers = max(1, min(workers, 4))
+        results: Dict[str, Dict[str, Any]] = {}
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {
+            pool.submit(self._fetch_one_activity_status, activity): activity
+            for activity in pending
+        }
+        try:
+            while futures:
+                if cancel_flag and cancel_flag():
+                    break
+                completed, _ = wait(
+                    futures,
+                    timeout=0.05,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    continue
+                for future in completed:
+                    activity = futures.pop(future)
+                    try:
+                        enriched = future.result()
+                    except Exception:
+                        logger.debug(
+                            "Status hydration failed for %s",
+                            activity.get("url"),
+                            exc_info=True,
+                        )
+                        continue
+                    if enriched:
+                        results[activity["url"]] = enriched
+        finally:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+        return results
 
     def prefetch_one_detail(
         self,

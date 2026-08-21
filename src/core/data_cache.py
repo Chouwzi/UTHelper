@@ -47,7 +47,8 @@ class DataCache:
     """Versioned offline activity repository backed by atomic JSON writes."""
 
     SCHEMA_VERSION = 2
-    ACTIVITY_CATALOG_VERSION = 2
+    # v3 persists assignment/quiz instance IDs used by the one-call status path.
+    ACTIVITY_CATALOG_VERSION = 3
 
     def __init__(self, cache_dir: Optional[Path] = None, namespace: Optional[str] = None):
         if cache_dir is None:

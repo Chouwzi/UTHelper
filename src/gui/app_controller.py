@@ -50,6 +50,7 @@ from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.components.today_schedule_panel import TodaySchedulePanel
+from gui.components.sync_status_indicator import SyncStatusIndicator
 from gui.components.adaptive_filter_menu import (
     AdaptiveFilterMenu,
     FilterMenuOption,
@@ -60,7 +61,10 @@ from gui.controllers.startup_visibility import (
     should_hide_startup_window,
 )
 from gui.controllers.autostart_settings import apply_initial_autostart_default
-from gui.controllers.refresh_coordinator import build_prefetched_dataset
+from gui.controllers.refresh_coordinator import (
+    build_prefetched_dataset,
+    status_hydration_candidates,
+)
 from gui.controllers.window_activator import WindowActivator
 
 logger = logging.getLogger(__name__)
@@ -259,9 +263,11 @@ class AppController:
             self._configure_mobile_back_navigation()
         if platform_utils.IS_WINDOWS:
             self._safe_run_task(self._apply_initial_windows_autostart_default)
+        needs_initial_sync = self._needs_initial_data_sync(has_cached_snapshot)
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
-        self._schedule_cached_detail_hydration(has_cached_snapshot)
+        if not needs_initial_sync:
+            self._schedule_cached_detail_hydration(has_cached_snapshot)
         self._safe_run_task(self._today_schedule_coordinator.run)
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
@@ -271,8 +277,8 @@ class AppController:
 
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
-        elif self._needs_initial_data_sync(has_cached_snapshot):
-            self._safe_run_task(self._load_data_async)
+        elif needs_initial_sync:
+            self._safe_run_task(self._load_data_async, "startup")
         # With credentials, the coordinator waits until cache age + the
         # one-minute startup grace are due. Manual refresh remains immediate.
 
@@ -651,12 +657,12 @@ class AppController:
         self._start_skeleton_shimmer()
 
     def _init_footer_and_filters(self):
-        self.status_text     = ft.Text("Đang khởi động...", size=11, color=C.TEXT_SECONDARY)
+        self._sync_status = SyncStatusIndicator("Đang khởi động...")
+        self.status_text = self._sync_status.text
         self.footer_critical = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.footer_warning  = ft.Text("", size=11, color=C.WARNING,  weight=ft.FontWeight.W_600)
         self.footer_safe     = ft.Text("", size=11, color=C.SAFE,     weight=ft.FontWeight.W_600)
         self.footer_overdue  = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
-        self.loading_bar     = ft.ProgressBar(color=C.ACCENT, bgcolor=C.BORDER, visible=False)
 
         self.urgency_filter_menu = AdaptiveFilterMenu(
             page=self.page,
@@ -835,23 +841,13 @@ class AppController:
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Row(controls=[self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                self.status_text,
+                self._sync_status.control,
             ], spacing=4),
             padding=ft.Padding.only(left=16, right=8, top=25, bottom=8),
             bgcolor=C.BG,
         )
 
-        header = ft.Stack(
-            controls=[
-                self._header_container,
-                ft.Container(
-                    content=self.loading_bar,
-                    bottom=0,
-                    left=0,
-                    right=0,
-                )
-            ]
-        )
+        header = self._header_container
 
         self._filter_container = ft.Container(
             content=ft.Column(
@@ -1139,7 +1135,7 @@ class AppController:
 
         # Render cards
         self._clear_skeletons()
-        is_empty = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        is_empty = len(filtered_items) == 0 and not self._is_loading
         self.empty_state.visible = is_empty
         self.error_state.visible = False
 
@@ -1252,7 +1248,7 @@ class AppController:
         )
 
         self._clear_skeletons()
-        self.empty_state.visible = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        self.empty_state.visible = len(filtered_items) == 0 and not self._is_loading
         self.error_state.visible = False
 
         if not hasattr(self, '_reusable_cards'):
@@ -1348,21 +1344,30 @@ class AppController:
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
 
+    def _set_sync_status(self, state: str, message: str) -> None:
+        component = getattr(self, "_sync_status", None)
+        if component is not None:
+            component.set_state(state, message)
+        elif hasattr(self, "status_text"):
+            # Keep isolated controller tests and legacy embedders compatible.
+            self.status_text.value = message
+
     async def _prefetch_details_async(
         self, activities: list, prefetch_epoch: int | None = None
     ):
         if prefetch_epoch is None:
             prefetch_epoch = getattr(self, "_prefetch_epoch", 0)
-        worker_cap = 2 if platform_utils.IS_MOBILE else 10
+        worker_cap = 2 if platform_utils.IS_MOBILE else 4
         workers = max(1, min(settings.PREFETCH_WORKERS, worker_cap))
-        
-        with self._data_lock:
-            count = len(self.all_data)
-        self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {count} hoạt động"
-        self.loading_bar.visible = True
-        self.page.update()
 
-        try:
+        if hasattr(self.orchestrator, "prefetch_activity_statuses"):
+            cache = await asyncio.to_thread(
+                self.orchestrator.prefetch_activity_statuses,
+                activities,
+                workers,
+                lambda: self._prefetch_cancel_event.is_set(),
+            )
+        else:
             await asyncio.to_thread(
                 self.orchestrator.prefetch_all_details,
                 activities,
@@ -1370,33 +1375,25 @@ class AppController:
                 lambda: self._prefetch_cancel_event.is_set(),
                 False,
             )
-
-            if (
-                self._prefetch_cancel_event.is_set()
-                or self._is_loading
-                or prefetch_epoch != getattr(self, "_prefetch_epoch", 0)
-            ):
-                return
             cache = self.orchestrator.get_cached_details_snapshot()
-            with self._data_lock:
-                data_copy = list(self.all_data)
-            data_copy = build_prefetched_dataset(data_copy, cache)
-            with self._data_lock:
-                self.all_data = data_copy
-            self._update_footer()
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {len(data_copy)} hoạt động ✓"
-            persisted = await asyncio.to_thread(
-                self._data_cache.save_local_activities, data_copy
-            )
-            if not persisted:
-                logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
-        finally:
-            if (
-                not self._is_loading
-                and prefetch_epoch == getattr(self, "_prefetch_epoch", 0)
-            ):
-                self.loading_bar.visible = False
-                self.page.update()
+
+        if (
+            self._prefetch_cancel_event.is_set()
+            or self._is_loading
+            or prefetch_epoch != getattr(self, "_prefetch_epoch", 0)
+        ):
+            return
+        with self._data_lock:
+            data_copy = list(self.all_data)
+        data_copy = build_prefetched_dataset(data_copy, cache)
+        with self._data_lock:
+            self.all_data = data_copy
+        self._update_footer()
+        persisted = await asyncio.to_thread(
+            self._data_cache.save_local_activities, data_copy
+        )
+        if not persisted:
+            logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
 
     def _schedule_cached_detail_hydration(self, has_cached_snapshot: bool) -> bool:
         """Hydrate incomplete cached cards immediately without blocking startup."""
@@ -1404,19 +1401,7 @@ class AppController:
             return False
         with self._data_lock:
             cached_items = list(self.all_data)
-        items_to_hydrate = [
-            item
-            for item in cached_items
-            if item.get("url")
-            and (
-                normalize_submission_status(item.get("submission_status")) == "unknown"
-                or (
-                    item.get("type") == "quiz"
-                    and normalize_submission_status(item.get("submission_status"))
-                    == "not_submitted"
-                )
-            )
-        ]
+        items_to_hydrate = status_hydration_candidates(cached_items)
         if not items_to_hydrate:
             return False
         self._prefetch_cancel_event.clear()
@@ -1473,10 +1458,9 @@ class AppController:
                 item["_deadline_dt"] = parse_datetime(deadline)
             item["_title_lower"] = str(item.get("title", "")).lower()
             item["_course_lower"] = str(item.get("course", "")).lower()
-        self.status_text.value = (
-            f"Dữ liệu đã lưu · {len(self.all_data)} hoạt động"
+        self._set_sync_status(
+            "success", f"Dữ liệu đã lưu · {len(self.all_data)} hoạt động"
         )
-        self.loading_bar.visible = False
         self._update_footer()
         self.page.update()
         return True
@@ -1504,8 +1488,9 @@ class AppController:
                     with self._data_lock:
                         self.all_data = native_data
                     self._refresh_activity_time_state()
-                    self.status_text.value = (
-                        f"Dữ liệu nền đã lưu · {len(native_data)} hoạt động"
+                    self._set_sync_status(
+                        "success",
+                        f"Dữ liệu nền đã lưu · {len(native_data)} hoạt động",
                     )
                     self._update_footer()
                     self.page.update()
@@ -1513,12 +1498,12 @@ class AppController:
             logger.warning("Cannot initialize Android background sync: %s", exc)
         return True
 
-    async def _load_data_async(self):
-        """Manual refresh entry point; concurrent callers share one fetch."""
+    async def _load_data_async(self, trigger: str = "manual"):
+        """Refresh entry point; concurrent callers share one fetch."""
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is None:
-            return await self._perform_data_sync("manual")
-        return await coordinator.request("manual", force=True)
+            return await self._perform_data_sync(trigger)
+        return await coordinator.request(trigger, force=trigger == "manual")
 
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading: return
@@ -1528,17 +1513,18 @@ class AppController:
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
         
-        # Clear persistent detail cache to force fresh data fetch on manual refresh
-        try:
-            self.orchestrator.moodle_service.clear_all_caches()
-            self.orchestrator.clear_detail_cache()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        # A user-forced refresh bypasses caches; timer/startup refreshes reuse
+        # valid metadata and avoid restarting the expensive detail pipeline.
+        if trigger == "manual":
+            try:
+                self.orchestrator.moodle_service.clear_all_caches()
+                self.orchestrator.clear_detail_cache()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         self.refresh_btn.disabled = True
-        self.status_text.value    = "Đang cập nhật dữ liệu..."
-        self.loading_bar.visible  = True
+        self._set_sync_status("busy", "Đang cập nhật dữ liệu...")
         self.empty_state.visible  = False
         self.error_state.visible  = False
         self.page.update()
@@ -1558,7 +1544,7 @@ class AppController:
                         item["_title_lower"] = str(item.get("title", "")).lower()
                     if "_course_lower" not in item:
                         item["_course_lower"] = str(item.get("course", "")).lower()
-                self.status_text.value = "Dữ liệu cache · Đang cập nhật..."
+                self._set_sync_status("busy", "Dữ liệu cache · Đang cập nhật...")
                 self._update_footer()
                 self.page.update()
 
@@ -1656,31 +1642,40 @@ class AppController:
                     progress_text = " · Đã nộp hết ✓"
                 else:
                     progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
-            self.status_text.value = (
+            success_message = (
                 f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · "
                 f"{total_count} hoạt động{progress_text}"
             )
             should_show_snackbar = not self._skeleton_visible
             self._update_footer()
-            if should_show_snackbar:
-                self._show_snackbar(
-                    f"Đã cập nhật {total_count} hoạt động",
-                    ft.Icons.SYNC_ROUNDED,
-                    C.ACCENT,
-                )
 
             # Persist after the first useful frame and keep slow flash I/O off
             # the Flet event loop.
-            await asyncio.to_thread(
+            snapshot_persisted = await asyncio.to_thread(
                 self._data_cache.save_server_snapshot, data_copy
             )
-            saved_snapshot = await asyncio.to_thread(
-                self._data_cache.load_snapshot
-            )
-            self._last_successful_sync_at = (
-                parse_timestamp(saved_snapshot.last_successful_sync_at)
-                or time.time()
-            )
+            if snapshot_persisted:
+                saved_snapshot = await asyncio.to_thread(
+                    self._data_cache.load_snapshot
+                )
+                self._last_successful_sync_at = (
+                    parse_timestamp(saved_snapshot.last_successful_sync_at)
+                    or time.time()
+                )
+                self._set_sync_status("success", success_message)
+                if should_show_snackbar:
+                    self._show_snackbar(
+                        f"Đã cập nhật {total_count} hoạt động",
+                        ft.Icons.SYNC_ROUNDED,
+                        C.ACCENT,
+                    )
+            else:
+                logger.error("Không thể commit snapshot activity mới")
+                self._set_sync_status(
+                    "error", "Lỗi lưu cập nhật · dữ liệu mới chưa được lưu"
+                )
+            # Commit state is user-visible before optional native/notification work.
+            self.page.update()
             native_schedule_result = None
             if self._android_background and self._android_background.available:
                 try:
@@ -1736,12 +1731,13 @@ class AppController:
 
             self._prefetch_cancel_event.clear()
             with self._data_lock:
-                prefetch_copy = list(self.all_data)
-            self._safe_run_task(
-                self._prefetch_details_async,
-                prefetch_copy,
-                self._prefetch_epoch,
-            )
+                prefetch_copy = status_hydration_candidates(list(self.all_data))
+            if prefetch_copy:
+                self._safe_run_task(
+                    self._prefetch_details_async,
+                    prefetch_copy,
+                    self._prefetch_epoch,
+                )
             elapsed = time.time() - fetch_start_time
             duration = (
                 "lt_250ms" if elapsed < 0.25
@@ -1770,15 +1766,16 @@ class AppController:
             if cached_data:
                 with self._data_lock:
                     self.all_data = cached_data
-                self.status_text.value = "Offline · Dữ liệu cache"
+                self._set_sync_status(
+                    "error", "Lỗi cập nhật · đang dùng dữ liệu đã lưu"
+                )
                 self.error_state.visible = False
                 self._update_footer()
             else:
                 self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
                 self.error_state.visible = True
-                self.status_text.value = "Lỗi kết nối server"
+                self._set_sync_status("error", "Lỗi kết nối server")
         finally:
-            self.loading_bar.visible  = False
             self.refresh_btn.disabled = False
             self._is_loading          = False
             self.page.update()
@@ -1948,9 +1945,7 @@ class AppController:
         for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
 
-        # Loading bar
-        self.loading_bar.color = _C.ACCENT
-        self.loading_bar.bgcolor = _C.BORDER
+        self._sync_status.refresh_theme()
 
         # Update banner is a semantic elevated surface, not a fixed brown card.
         self._update_banner.bgcolor = _C.SURFACE_ELEVATED

@@ -292,6 +292,7 @@ class TestAssignmentMerge:
             "type": "assignment",
             "details": {"fresh": True},
             "course_id": 456,
+            "assignment_id": 7,
             "cutoff_date": 0,
             "late_status": "closed",
         }
@@ -320,6 +321,7 @@ class TestAssignmentMerge:
 
         assert len(result) == 1
         assert result[0]["submission_status"] == "unknown"
+        assert result[0]["assignment_id"] == 7
 
     def test_same_cmid_from_thnn_does_not_consume_courses_assignment(self):
         orch = self._make_orchestrator()
@@ -593,6 +595,7 @@ class TestCalendarQuizRecovery:
                 "course_name": "Môn có BÀI 3",
                 "course": "Môn có BÀI 3",
                 "course_id": 22,
+                "quiz_id": 87658,
                 "deadline": datetime.fromtimestamp(1_900_000_000).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
@@ -631,8 +634,100 @@ class TestCalendarQuizRecovery:
         }
         orch.moodle_service.ws_events_to_assignments.return_value = [existing]
         orch._merge_all_assignments = Mock(side_effect=lambda items, **_kwargs: items)
-        orch._fetch_calendar_quizzes = Mock(return_value=[existing.copy(), missing])
+        recovered_existing = {**existing, "quiz_id": 9001}
+        orch._fetch_calendar_quizzes = Mock(return_value=[recovered_existing, missing])
 
         result = orch._fetch_via_ws_api()
 
         assert result == [existing, missing]
+        assert existing["quiz_id"] == 9001
+
+    def test_catalog_backfills_action_quiz_id_outside_recovery_window(self):
+        orch = self._make_orchestrator()
+        orch._courses_cache = [
+            {"id": 22, "fullname": "Calendar course"},
+            {"id": 33, "fullname": "Action course"},
+        ]
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_calendar_events.return_value = [
+            {"modulename": "quiz", "courseid": 22}
+        ]
+        orch.moodle_service.get_quizzes_by_courses.return_value = [
+            {
+                "id": 991,
+                "coursemodule": 771,
+                "course": 33,
+                "name": "Quiz outside recovery window",
+                "timeclose": 2_100_000_000,
+            }
+        ]
+        action_url = "https://courses.ut.edu.vn/mod/quiz/view.php?id=771"
+
+        result = orch._fetch_calendar_quizzes(
+            [22, 33],
+            time_start=1_800_000_000,
+            time_end=2_000_000_000,
+            action_quiz_course_ids={33},
+            action_quiz_urls={action_url},
+        )
+
+        orch.moodle_service.get_quizzes_by_courses.assert_called_once_with([22, 33])
+        assert result == [
+            {"url": action_url, "quiz_id": 991, "catalog_only": True}
+        ]
+
+
+class TestStatusPrefetch:
+    def _make_orchestrator(self):
+        with patch("core.data_orchestrator.MoodleClient"), \
+             patch("core.data_orchestrator.GradeMonitor"):
+            from core.data_orchestrator import DataOrchestrator
+            return DataOrchestrator()
+
+    def test_direct_ids_avoid_reloading_assignment_and_quiz_catalogs(self):
+        orch = self._make_orchestrator()
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_submission_status.return_value = {
+            "lastattempt": {"submission": {"status": "submitted"}}
+        }
+        orch.moodle_service.get_quiz_attempts.return_value = [
+            {"state": "finished", "timefinish": 1_700_000_000}
+        ]
+        activities = [
+            {
+                "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=101",
+                "type": "assignment",
+                "assignment_id": 7001,
+                "submission_status": "unknown",
+            },
+            {
+                "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=202",
+                "type": "quiz",
+                "quiz_id": 8002,
+                "submission_status": "not_submitted",
+            },
+        ]
+
+        result = orch.prefetch_activity_statuses(activities, workers=2)
+
+        assert result[activities[0]["url"]]["submission_status"] == "submitted"
+        assert result[activities[1]["url"]]["submission_status"] == "submitted"
+        orch.moodle_service.get_submission_status.assert_called_once_with(7001)
+        orch.moodle_service.get_quiz_attempts.assert_called_once_with(8002)
+        orch.moodle_service.get_assignments.assert_not_called()
+        orch.moodle_service.get_quizzes_by_courses.assert_not_called()
+
+    def test_failed_status_lookup_preserves_unknown_instead_of_claiming_not_submitted(self):
+        orch = self._make_orchestrator()
+        orch.moodle_service = Mock()
+        orch.moodle_service.get_quiz_attempts.return_value = None
+        activity = {
+            "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=202",
+            "type": "quiz",
+            "quiz_id": 8002,
+            "submission_status": "unknown",
+        }
+
+        result = orch.prefetch_activity_statuses([activity], workers=1)
+
+        assert result == {}

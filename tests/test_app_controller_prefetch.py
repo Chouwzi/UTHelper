@@ -21,7 +21,7 @@ class _FakePage:
 def test_background_prefetch_uses_cache_by_default(monkeypatch):
     controller = AppController.__new__(AppController)
     controller.page = _FakePage()
-    controller.status_text = SimpleNamespace(value="")
+    controller.status_text = SimpleNamespace(value="Cập nhật lúc 10:00 · 1 hoạt động")
     controller.loading_bar = SimpleNamespace(visible=False)
     controller.all_data = []
     controller._prefetch_cancel = False
@@ -48,6 +48,8 @@ def test_background_prefetch_uses_cache_by_default(monkeypatch):
     asyncio.run(controller._prefetch_details_async([{"url": "https://example.com/1"}]))
 
     assert calls == [(4, False)]
+    assert controller.status_text.value == "Cập nhật lúc 10:00 · 1 hoạt động"
+    assert controller.loading_bar.visible is False
 
 
 def test_background_prefetch_caps_workers_on_mobile(monkeypatch):
@@ -178,7 +180,7 @@ def test_cancelled_background_prefetch_neither_merges_nor_persists(monkeypatch):
 def test_stale_background_prefetch_cannot_overwrite_newer_generation(monkeypatch):
     controller = AppController.__new__(AppController)
     controller.page = _FakePage()
-    controller.status_text = SimpleNamespace(value="")
+    controller.status_text = SimpleNamespace(value="Cập nhật lúc 10:00 · 1 hoạt động")
     controller.loading_bar = SimpleNamespace(visible=False)
     current = {
         "id": "assignment-new",
@@ -218,7 +220,8 @@ def test_stale_background_prefetch_cannot_overwrite_newer_generation(monkeypatch
 
     assert controller.all_data == [current]
     assert persisted == []
-    assert controller.loading_bar.visible is True
+    assert controller.status_text.value == "Cập nhật lúc 10:00 · 1 hoạt động"
+    assert controller.loading_bar.visible is False
 
 
 def test_cached_unknown_statuses_are_hydrated_immediately(monkeypatch):
@@ -226,6 +229,8 @@ def test_cached_unknown_statuses_are_hydrated_immediately(monkeypatch):
     controller.all_data = [
         {
             "url": "https://example.com/quiz/1",
+            "type": "quiz",
+            "site_identity": "courses",
             "submission_status": "unknown",
         }
     ]
