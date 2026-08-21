@@ -269,12 +269,16 @@ def get_submission_badge(data: dict):
 import hashlib
 import os
 import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_DESCRIPTION_IMAGE_CHUNK_BYTES = 64 * 1024
+_DESCRIPTION_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 def get_active_assets_dir() -> Path:
     """Trả về thư mục assets đang hoạt động ở runtime."""
@@ -453,20 +457,56 @@ def pre_cache_description_images(html_content: str) -> str:
 
         downloaded = True
         if not cache_file_path.exists():
+            temporary_path = None
             try:
                 logger.info(f"Downloading Moodle image: {orig_url}")
                 req = urllib.request.Request(auth_url)
                 req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
                 with urllib.request.urlopen(req, timeout=8) as resp:
-                    if resp.status == 200:
-                        with open(cache_file_path, 'wb') as f:
-                            f.write(resp.read())
-                        logger.info(f"Successfully cached image to {cache_file_path}")
-                    else:
-                        downloaded = False
+                    if resp.status != 200:
+                        raise ValueError(f"Image response status was {resp.status}")
+                    headers = getattr(resp, "headers", None)
+                    content_type = ""
+                    if headers is not None and hasattr(headers, "get_content_type"):
+                        content_type = str(headers.get_content_type() or "").casefold()
+                    if content_type and not content_type.startswith("image/"):
+                        raise ValueError(f"Image response content type was {content_type}")
+
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",
+                        prefix=f".{cache_filename}.",
+                        suffix=".tmp",
+                        dir=cache_dir,
+                        delete=False,
+                    ) as temporary_file:
+                        temporary_path = Path(temporary_file.name)
+                        total_bytes = 0
+                        while True:
+                            chunk = resp.read(_DESCRIPTION_IMAGE_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            total_bytes += len(chunk)
+                            if total_bytes > _DESCRIPTION_IMAGE_MAX_BYTES:
+                                raise ValueError("Image response exceeded 8 MiB")
+                            temporary_file.write(chunk)
+                        if total_bytes == 0:
+                            raise ValueError("Image response was empty")
+
+                    os.replace(temporary_path, cache_file_path)
+                    temporary_path = None
+                    logger.info(f"Successfully cached image to {cache_file_path}")
             except Exception as e:
                 logger.warning(f"Failed to cache image {orig_url}: {e}")
                 downloaded = False
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.debug(
+                            "Failed to remove partial image %s",
+                            temporary_path,
+                            exc_info=True,
+                        )
 
         if downloaded and cache_file_path.exists():
             # Mirror sang active assets và lấy đường dẫn tương đối

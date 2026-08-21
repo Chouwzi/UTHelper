@@ -2373,7 +2373,10 @@ class AppController:
                 desc_html = full_data["details"].get("description_html", "")
                 if desc_html:
                     from gui.core.utils import pre_cache_description_images
-                    full_data["details"]["description_html"] = pre_cache_description_images(desc_html)
+                    full_data["details"]["description_html"] = await asyncio.to_thread(
+                        pre_cache_description_images,
+                        desc_html,
+                    )
             self.view_manager.show_detail_data(full_data)
         except Exception:
             self.view_manager.show_detail_error(data)
