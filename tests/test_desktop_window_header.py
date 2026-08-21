@@ -45,6 +45,7 @@ def test_custom_header_contains_title_version_drag_minimize_and_close():
     ]
     assert controller._app_title in controls
     assert controller._version_badge in controls
+    assert controller._app_title.weight == ft.FontWeight.W_700
 
 
 def test_dashboard_desktop_header_replaces_old_title_row_with_sync_status(monkeypatch):

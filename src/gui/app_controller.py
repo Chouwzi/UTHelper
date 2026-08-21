@@ -1013,7 +1013,7 @@ class AppController:
 
     def _build_desktop_window_header(self) -> ft.Container:
         self._app_title.size = 13
-        self._app_title.weight = ft.FontWeight.W_600
+        self._app_title.weight = ft.FontWeight.W_700
         return build_desktop_window_header(
             on_minimize=self._minimize_window,
             on_close=lambda _: self._safe_run_task(

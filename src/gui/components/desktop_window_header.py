@@ -29,7 +29,7 @@ def build_desktop_window_header(
         or ft.Text(
             "UTHelper",
             size=13,
-            weight=ft.FontWeight.W_600,
+            weight=ft.FontWeight.W_700,
             color=C.TEXT_PRIMARY,
         )
     ]
