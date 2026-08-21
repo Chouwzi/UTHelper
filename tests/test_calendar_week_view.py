@@ -15,7 +15,7 @@ from gui.components.calendar_view import CalendarView
 
 
 def _page_stub():
-    return SimpleNamespace(update=lambda: None, run_task=lambda *_args: None)
+    return SimpleNamespace(update=lambda *_controls: None, run_task=lambda *_args: None)
 
 
 def test_month_period_cells_keep_absolute_dates_after_anchor_changes():
@@ -87,7 +87,8 @@ def test_mobile_keeps_page_view_while_desktop_uses_native_dismissible():
     assert mobile_view._period_pager.horizontal is True
     assert desktop_view._period_surface is desktop_view._desktop_period_gesture
     assert desktop_view._desktop_period_host.content is desktop_view._desktop_period_stage
-    assert desktop_view._desktop_period_stage.controls[-1] is desktop_view._period_dismissible
+    assert desktop_view._desktop_period_stage.controls[-1] is desktop_view._desktop_period_slot
+    assert desktop_view._desktop_period_slot.content is desktop_view._period_dismissible
     assert desktop_view._period_dismissible.on_update is None
     assert desktop_view._period_dismissible.dismiss_direction == ft.DismissDirection.HORIZONTAL
     assert desktop_view._desktop_period_gesture.mouse_cursor == ft.MouseCursor.GRAB
@@ -108,8 +109,43 @@ def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control()
     assert (view._year, view._month) == (2027, 1)
     assert view._period_dismissible is not dismissed
     assert view._desktop_period_host.content is view._desktop_period_stage
-    assert view._desktop_period_stage.controls[-1] is view._period_dismissible
+    assert view._desktop_period_stage.controls[-1] is view._desktop_period_slot
+    assert view._desktop_period_slot.content is view._period_dismissible
     assert view._period_transition_active is False
+
+
+def test_native_desktop_dismiss_reuses_two_adjacent_period_pages():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    old_pages = list(view._period_pages)
+
+    asyncio.run(
+        view._on_desktop_period_dismiss(
+            SimpleNamespace(direction=ft.DismissDirection.END_TO_START)
+        )
+    )
+
+    assert view._period_pages[0] is old_pages[1]
+    assert view._period_pages[1] is old_pages[2]
+    assert view._period_pages[2].anchor == MonthAnchor(2026, 10)
+
+
+def test_native_desktop_reverse_dismiss_reuses_two_adjacent_period_pages():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    old_pages = list(view._period_pages)
+
+    asyncio.run(
+        view._on_desktop_period_dismiss(
+            SimpleNamespace(direction=ft.DismissDirection.START_TO_END)
+        )
+    )
+
+    assert view._period_pages[1] is old_pages[0]
+    assert view._period_pages[2] is old_pages[1]
+    assert view._period_pages[0].anchor == MonthAnchor(2026, 6)
 
 
 def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
@@ -128,30 +164,40 @@ def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
     assert view._period_dismissible.secondary_background is not strip.controls[2]
     assert len(view._period_background_pages) == 2
     assert view._desktop_period_stage.controls[0].content is view._grid
-    assert view._desktop_period_stage.controls[1] is view._period_dismissible
+    assert view._desktop_period_stage.controls[1] is view._desktop_period_slot
+    assert view._desktop_period_slot.content is view._period_dismissible
     assert view._desktop_period_host.clip_behavior == ft.ClipBehavior.HARD_EDGE
 
 
-def test_native_desktop_dismiss_updates_mounted_host_and_can_repeat():
-    view = CalendarView(_page_stub())
+def test_native_desktop_dismiss_batches_only_changed_subtrees_and_can_repeat():
+    page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
+    view = CalendarView(page)
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     first = view._period_dismissible
 
     async def exercise():
-        with patch.object(view, "update") as update:
+        with patch.object(view, "update") as broad_update:
             event = SimpleNamespace(direction=ft.DismissDirection.END_TO_START)
             await view._on_desktop_period_dismiss(event)
             second = view._period_dismissible
             await view._on_desktop_period_dismiss(event)
-            return update.call_count, second
+            return broad_update.call_count, second
 
-    update_count, second = asyncio.run(exercise())
+    broad_update_count, second = asyncio.run(exercise())
 
     assert (view._year, view._month) == (2026, 10)
     assert first is not second
     assert second is not view._period_dismissible
-    assert update_count == 2
+    assert broad_update_count == 0
+    updates = [entry.args for entry in page.update.call_args_list]
+    immediate_update = (
+        view._header,
+        view._desktop_period_slot,
+        view._detail_panel,
+    )
+    assert updates[0] == immediate_update
+    assert updates[1] == immediate_update
 
 
 def test_native_desktop_strip_uses_fractional_offsets_without_size_events():
@@ -188,7 +234,7 @@ def test_native_desktop_drag_uses_flutter_snap_without_python_frame_events():
         ft.DismissDirection.START_TO_END: 0.14,
         ft.DismissDirection.END_TO_START: 0.14,
     }
-    assert dismissible.movement_duration == ft.Duration(milliseconds=140)
+    assert dismissible.movement_duration == ft.Duration(milliseconds=30)
     # None bypasses Flutter's SizeTransition entirely. The destination
     # background remains painted until Python installs the next keyed strip.
     assert dismissible.resize_duration is None

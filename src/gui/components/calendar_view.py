@@ -348,6 +348,12 @@ class CalendarView(ft.Container):
             height=316,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
+        self._desktop_period_slot = ft.Container(
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
+        )
         self._desktop_period_gesture = ft.GestureDetector(
             content=self._desktop_period_host,
             allowed_devices=[ft.PointerDeviceType.MOUSE],
@@ -470,17 +476,169 @@ class CalendarView(ft.Container):
         self._render_week_period_page(period)
         return period
 
-    def _seed_period_pages(self) -> None:
+    def _build_month_period_preview(
+        self, anchor: MonthAnchor
+    ) -> _CalendarPeriodPage:
+        """Build a low-cost, non-interactive release-frame background."""
+        weekday_row = ft.Row(
+            controls=[
+                ft.Container(
+                    content=ft.Text(
+                        weekday,
+                        size=10,
+                        weight=ft.FontWeight.W_600,
+                        color=(
+                            C.CRITICAL
+                            if weekday == "CN"
+                            else C.TEXT_SECONDARY
+                        ),
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    width=44,
+                    alignment=ft.Alignment(0, 0),
+                )
+                for weekday in _WEEKDAYS
+            ],
+            spacing=2,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            anchor.year, anchor.month
+        )
+        while len(weeks) < 6:
+            weeks.append([0] * 7)
+        rows = []
+        today = date.today()
+        for week in weeks:
+            cells = []
+            for column, day_number in enumerate(week):
+                cell_date = (
+                    date(anchor.year, anchor.month, day_number)
+                    if day_number
+                    else None
+                )
+                acts = (
+                    self._deadline_map.get(cell_date.isoformat(), [])
+                    if cell_date
+                    else []
+                )
+                urgency_color = None
+                if acts:
+                    priority = {
+                        "overdue": 0,
+                        "critical": 1,
+                        "warning": 2,
+                        "safe": 3,
+                    }
+                    most_urgent = min(
+                        acts,
+                        key=lambda activity: priority.get(
+                            activity.get("urgency", "safe"), 3
+                        ),
+                    )
+                    urgency_color = get_urgency_color(
+                        most_urgent.get("urgency", "safe")
+                    )
+                is_today = cell_date == today
+                cells.append(
+                    ft.Container(
+                        content=ft.Text(
+                            str(day_number) if day_number else "",
+                            size=12,
+                            color=(
+                                C.ACCENT
+                                if is_today
+                                else C.CRITICAL
+                                if column == 6
+                                else C.TEXT_PRIMARY
+                            ),
+                            weight=(
+                                ft.FontWeight.W_700
+                                if is_today
+                                else ft.FontWeight.W_500
+                                if acts
+                                else ft.FontWeight.W_400
+                            ),
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        width=44,
+                        height=48,
+                        border_radius=8,
+                        alignment=ft.Alignment(0, -0.1),
+                        bgcolor=(
+                            ft.Colors.with_opacity(0.06, urgency_color)
+                            if urgency_color
+                            else None
+                        ),
+                        border=(
+                            ft.Border.all(
+                                0.5,
+                                ft.Colors.with_opacity(0.19, urgency_color),
+                            )
+                            if urgency_color
+                            else None
+                        ),
+                    )
+                )
+            rows.append(
+                ft.Row(
+                    controls=cells,
+                    spacing=2,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                )
+            )
+        return _CalendarPeriodPage(
+            anchor,
+            ft.Column(
+                controls=[weekday_row, *rows],
+                spacing=2,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    def _seed_period_pages(self, *, delta: int | None = None) -> None:
         if self._view_mode == "month":
             anchors = month_slot_anchors(MonthAnchor(self._year, self._month))
-            self._period_pages = [
-                self._build_month_period_page(anchor) for anchor in anchors
-            ]
+            build_period = self._build_month_period_page
         else:
             anchors = week_slot_anchors(self._week_start)
+            build_period = self._build_week_period_page
+
+        old_pages = getattr(self, "_period_pages", [])
+        if (
+            delta == 1
+            and len(old_pages) == 3
+            and old_pages[1].anchor == anchors[0]
+            and old_pages[2].anchor == anchors[1]
+        ):
             self._period_pages = [
-                self._build_week_period_page(anchor) for anchor in anchors
+                old_pages[1],
+                old_pages[2],
+                build_period(anchors[2]),
             ]
+        elif (
+            delta == -1
+            and len(old_pages) == 3
+            and old_pages[0].anchor == anchors[1]
+            and old_pages[1].anchor == anchors[2]
+        ):
+            self._period_pages = [
+                build_period(anchors[0]),
+                old_pages[0],
+                old_pages[1],
+            ]
+        else:
+            self._period_pages = [build_period(anchor) for anchor in anchors]
+
+        # Reused pages keep their control identity (and therefore their
+        # already-mounted Flutter subtrees), but selection/deadline styling
+        # must follow the newly active period.
+        if delta in (-1, 1):
+            for period in self._period_pages:
+                if isinstance(period.anchor, MonthAnchor):
+                    self._render_month_period_page(period)
+                else:
+                    self._render_week_period_page(period)
         pager = getattr(self, "_period_pager", None)
         if pager is not None:
             pager.selected_index = 1
@@ -507,8 +665,8 @@ class CalendarView(ft.Container):
             previous, current, following = self._period_pages
             if self._view_mode == "month":
                 self._period_background_pages = [
-                    self._build_month_period_page(previous.anchor),
-                    self._build_month_period_page(following.anchor),
+                    self._build_month_period_preview(previous.anchor),
+                    self._build_month_period_preview(following.anchor),
                 ]
                 current_underlay = self._grid
             else:
@@ -551,32 +709,47 @@ class CalendarView(ft.Container):
                     ft.DismissDirection.START_TO_END: 0.14,
                     ft.DismissDirection.END_TO_START: 0.14,
                 },
-                movement_duration=ft.Duration(milliseconds=140),
+                movement_duration=ft.Duration(milliseconds=30),
                 # Keep the destination background painted after the slide
                 # while on_dismiss crosses the Flet bridge. A Duration (even
                 # 1 ms) enters SizeTransition and briefly collapses to blank.
                 resize_duration=None,
                 on_dismiss=self._on_desktop_period_dismiss,
-                left=0,
-                right=0,
-                top=0,
-                bottom=0,
             )
-            self._desktop_period_stage = ft.Stack(
-                controls=[
-                    background_period(current_underlay),
-                    self._period_dismissible,
-                ],
-                width=float("inf"),
-                height=height,
-                clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            )
-            self._desktop_period_host.content = self._desktop_period_stage
+            self._desktop_period_slot.content = self._period_dismissible
+            if self._desktop_period_stage is None:
+                self._desktop_period_underlay = background_period(
+                    current_underlay
+                )
+                self._desktop_period_stage = ft.Stack(
+                    controls=[
+                        self._desktop_period_underlay,
+                        self._desktop_period_slot,
+                    ],
+                    width=float("inf"),
+                    height=height,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                )
+                self._desktop_period_host.content = (
+                    self._desktop_period_stage
+                )
+            else:
+                self._desktop_period_underlay.content = current_underlay
+                self._desktop_period_underlay.height = height
+                self._desktop_period_stage.height = height
 
     def _update_period_surface(self) -> None:
         try:
-            self.update()
-        except RuntimeError:
+            # A completed desktop swipe changes only these three mounted
+            # subtrees. Updating CalendarView itself makes Flet diff and
+            # serialize the whole detail screen, which keeps the replacement
+            # Dismissible unavailable long enough to reject the next swipe.
+            self._page_ref.update(
+                self._header,
+                self._desktop_period_slot,
+                self._detail_panel,
+            )
+        except (AttributeError, RuntimeError, TypeError):
             # Unit tests and construction before mounting have no Flet page.
             pass
 
@@ -653,16 +826,14 @@ class CalendarView(ft.Container):
         self._period_transition_active = True
         try:
             self._apply_period_delta(delta)
-            # Flutter removes a dismissed control, so always replace it with a
-            # new keyed instance, including at the supported date boundary.
-            self._seed_period_pages()
+            # Flutter removes a dismissed control, so replace it with a new
+            # keyed instance. Reuse the two still-relevant period pages and
+            # build only the newly exposed far edge.
+            self._seed_period_pages(delta=delta)
             if self._view_mode == "month":
-                self._render_month()
+                self._render_month(update_page=False)
             else:
-                self._render_week()
-            # on_dismiss runs after Flutter removed the old keyed widget. Push
-            # its replacement immediately so every completed swipe can be
-            # followed by another one.
+                self._render_week(update_page=False)
             self._update_period_surface()
         finally:
             self._period_transition_active = False
@@ -982,7 +1153,7 @@ class CalendarView(ft.Container):
             self._month = cell_date.month
             self._render_week()
 
-    def _render_week(self):
+    def _render_week(self, *, update_page: bool = True):
         """Render the 7-day week strip for self._week_start."""
         today = date.today()
         week_num = self._week_start.isocalendar()[1]
@@ -1118,11 +1289,12 @@ class CalendarView(ft.Container):
                 count_text.value = ""
 
         self._update_day_panel()
-        try:
-            self._page_ref.update()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if update_page:
+            try:
+                self._page_ref.update()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     # Public API
     def update_data(self, activities: List[Dict[str, Any]]):
@@ -1168,7 +1340,7 @@ class CalendarView(ft.Container):
             key = dt.strftime("%Y-%m-%d")
             self._deadline_map.setdefault(key, []).append(act)
 
-    def _render_month(self):
+    def _render_month(self, *, update_page: bool = True):
         """Render the grid for self._year / self._month."""
         self._month_label.value = f"{_MONTHS_VI[self._month]} {self._year}"
 
@@ -1314,11 +1486,12 @@ class CalendarView(ft.Container):
                             )
 
         self._update_day_panel()
-        try:
-            self._page_ref.update()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if update_page:
+            try:
+                self._page_ref.update()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _restyle_cell(self, cell, day: int, col: int, today):
         """Restyle a single cell - extracted for targeted updates."""
