@@ -18,6 +18,7 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+import asyncio
 import calendar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -342,6 +343,9 @@ class CalendarView(ft.Container):
         )
         self._mouse_drag_distance = 0.0
         self._mouse_drag_active = False
+        self._mouse_drag_start_x: float | None = None
+        self._mouse_drag_pending_offset: float | None = None
+        self._mouse_drag_move_task: asyncio.Task[None] | None = None
         # The desktop window is 420px wide. on_size_change replaces this
         # fallback with the exact rendered viewport before the first drag.
         self._period_viewport_width = 420.0
@@ -349,7 +353,10 @@ class CalendarView(ft.Container):
             content=self._period_pager,
             allowed_devices=[ft.PointerDeviceType.MOUSE],
             mouse_cursor=ft.MouseCursor.GRAB,
-            drag_interval=16,
+            # Flet uses a strict `elapsed > interval` check. Eight milliseconds
+            # reliably preserves every 60 Hz pointer frame; the latest-wins
+            # bridge worker below prevents a command backlog on slower devices.
+            drag_interval=8,
             exclude_from_semantics=True,
             on_horizontal_drag_start=self._on_mouse_drag_start,
             on_horizontal_drag_update=self._on_mouse_drag_update,
@@ -492,6 +499,14 @@ class CalendarView(ft.Container):
         self._pager_recentering = False
         self._mouse_drag_distance = 0.0
         self._mouse_drag_active = False
+        self._mouse_drag_start_x = None
+        self._mouse_drag_pending_offset = None
+        move_task = self._mouse_drag_move_task
+        if move_task is not None and not move_task.done():
+            move_task.cancel()
+        self._mouse_drag_move_task = None
+        self._period_pager.snap = True
+        self._period_gesture.mouse_cursor = ft.MouseCursor.GRAB
         self._period_pager.height = 316 if self._view_mode == "month" else 88
         self._seed_period_pages()
 
@@ -548,8 +563,15 @@ class CalendarView(ft.Container):
         if width > 0:
             self._period_viewport_width = width
 
-    def _set_period_mouse_cursor(self, cursor: ft.MouseCursor) -> None:
-        self._period_gesture.mouse_cursor = cursor
+    def _set_period_mouse_drag_mode(self, active: bool) -> None:
+        # PageView's page-snapping physics treats every programmatic jump as a
+        # completed scroll and pulls it towards a page boundary. Suspend those
+        # physics while the mouse owns the pager; _finish_mouse_drag performs
+        # the one intentional snap after release.
+        self._period_pager.snap = not active
+        self._period_gesture.mouse_cursor = (
+            ft.MouseCursor.GRABBING if active else ft.MouseCursor.GRAB
+        )
         try:
             self._period_gesture.update()
         except RuntimeError:
@@ -561,19 +583,62 @@ class CalendarView(ft.Container):
             return
         self._mouse_drag_distance = 0.0
         self._mouse_drag_active = True
-        self._set_period_mouse_cursor(ft.MouseCursor.GRABBING)
+        position = getattr(_event, "local_position", None)
+        position_x = getattr(position, "x", None)
+        self._mouse_drag_start_x = (
+            float(position_x) if position_x is not None else None
+        )
+        self._mouse_drag_pending_offset = None
+        self._set_period_mouse_drag_mode(True)
 
     async def _on_mouse_drag_update(self, event) -> None:
         if not self._mouse_drag_active:
             return
         viewport_width = max(self._period_viewport_width, 1.0)
-        distance = self._mouse_drag_distance + (event.primary_delta or 0.0)
-        self._mouse_drag_distance = max(-viewport_width, min(viewport_width, distance))
-        # Page 1 starts at one viewport width. Moving the pointer left must
-        # expose page 2, hence raw scroll offset = centre - pointer distance.
-        await self._period_pager.jump_to(
+        position = getattr(event, "local_position", None)
+        position_x = getattr(position, "x", None)
+        if position_x is not None and self._mouse_drag_start_x is not None:
+            # Use the absolute cursor displacement. Flet throttles drag events,
+            # while primary_delta only describes the last raw pointer event;
+            # accumulating it loses most slow-mouse movement.
+            distance = float(position_x) - self._mouse_drag_start_x
+        else:
+            distance = self._mouse_drag_distance + (event.primary_delta or 0.0)
+        self._mouse_drag_distance = max(
+            -viewport_width,
+            min(viewport_width, distance),
+        )
+        self._mouse_drag_pending_offset = (
             viewport_width - self._mouse_drag_distance
         )
+        move_task = self._mouse_drag_move_task
+        if move_task is None or move_task.done():
+            # Do not queue every bridge round-trip. If native rendering is
+            # slower than pointer input, the worker skips stale intermediate
+            # offsets and always applies the newest cursor position next.
+            self._mouse_drag_move_task = asyncio.create_task(
+                self._flush_mouse_drag_offset()
+            )
+
+    async def _flush_mouse_drag_offset(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while self._mouse_drag_active:
+                offset = self._mouse_drag_pending_offset
+                if offset is None:
+                    return
+                self._mouse_drag_pending_offset = None
+                await self._period_pager.jump_to(offset)
+        finally:
+            if self._mouse_drag_move_task is current_task:
+                self._mouse_drag_move_task = None
+
+    async def _drain_mouse_drag_offset(self) -> None:
+        while True:
+            move_task = self._mouse_drag_move_task
+            if move_task is None or move_task is asyncio.current_task():
+                return
+            await move_task
 
     async def _on_mouse_drag_cancel(self, _event=None) -> None:
         if not self._mouse_drag_active:
@@ -593,6 +658,7 @@ class CalendarView(ft.Container):
             delta = 0
         self._period_transition_active = True
         try:
+            await self._drain_mouse_drag_offset()
             await self._period_pager.go_to_page(
                 1 + delta,
                 animation_duration=ft.Duration(milliseconds=140),
@@ -614,7 +680,10 @@ class CalendarView(ft.Container):
             self._period_transition_active = False
             self._mouse_drag_distance = 0.0
             self._mouse_drag_active = False
-            self._set_period_mouse_cursor(ft.MouseCursor.GRAB)
+            self._mouse_drag_start_x = None
+            self._mouse_drag_pending_offset = None
+            self._mouse_drag_move_task = None
+            self._set_period_mouse_drag_mode(False)
 
     async def _on_previous_period(self, _event) -> None:
         await self._request_period_navigation(-1)
