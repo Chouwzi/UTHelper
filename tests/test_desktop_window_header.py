@@ -33,12 +33,15 @@ def test_custom_header_contains_title_version_drag_minimize_and_close():
     header = controller._build_desktop_window_header()
     controls = list(_walk(header))
     drag_areas = [item for item in controls if isinstance(item, ft.WindowDragArea)]
+    cursor_regions = [item for item in controls if isinstance(item, ft.GestureDetector)]
     buttons = [item for item in controls if isinstance(item, ft.IconButton)]
 
     assert header.height == 34
     assert header.bgcolor == C.BG
     assert len(drag_areas) == 1
     assert drag_areas[0].maximizable is False
+    assert len(cursor_regions) == 1
+    assert cursor_regions[0].mouse_cursor == ft.MouseCursor.GRAB
     assert [button.icon for button in buttons] == [
         ft.Icons.HORIZONTAL_RULE_ROUNDED,
         ft.Icons.CLOSE_ROUNDED,

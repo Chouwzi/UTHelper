@@ -36,15 +36,19 @@ def build_desktop_window_header(
     if version_control is not None:
         title_controls.append(version_control)
     drag_area = ft.WindowDragArea(
-        content=ft.Container(
-            content=ft.Row(
-                controls=title_controls,
-                spacing=6,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        content=ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.GRAB,
+            content=ft.Container(
+                content=ft.Row(
+                    controls=title_controls,
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.Padding.only(left=12),
+                expand=True,
+                bgcolor=C.BG,
             ),
-            padding=ft.Padding.only(left=12),
             expand=True,
-            bgcolor=C.BG,
         ),
         expand=True,
         maximizable=False,
