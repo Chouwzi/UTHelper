@@ -1405,7 +1405,6 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   branch must merge into both `main` and `develop` before the protected main
   result is tagged.
 
-<<<<<<< HEAD
 ## Cross-platform interaction performance (2026-08-11)
 
 - Navigation now mounts only the active Flet view instead of keeping Dashboard,
@@ -1848,3 +1847,37 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Refactor `AssignmentDetailView` (`src/gui/components/detail_view.py`) nhằm vô hiệu hóa các nút chức năng thao tác file (Upload/Submit/Delete) cho bài tập từ THNN, thay bằng thông báo "Chưa hỗ trợ nộp bài trực tiếp. Vui lòng mở bằng trình duyệt." kèm CTA chuyển hướng.
 - Tạo mới scraper (`src/core/html_scrapers.py`) để bóc tách thông tin trạng thái bài nộp qua HTML nếu không có quyền AJAX.
 - Verification: Tests related to `DataOrchestrator` pass. Clean code & gitflow compliance ensured.
+
+## Cross-platform reliability and performance hardening (2026-08-21)
+
+- Corrected supplemental Moodle assignment status from `submitted` to `unknown`
+  without adding per-assignment status requests. Courses assignment merge now
+  matches existing activities only on the Courses origin, so equal numeric course
+  module IDs from THNN and Courses remain separate and cannot exchange metadata.
+- THNN calendar export now uses a bounded 2 MiB read and validates HTTP status,
+  final origin/path, content type, and the complete VCALENDAR envelope. Invalid or
+  stale-auth responses get one forced-session retry and preserve the last-known-good
+  activities and successful timestamp.
+- Description images now download in 64 KiB chunks with an 8 MiB cap, image MIME
+  validation, temporary-file cleanup, and atomic publication. The entire cache call
+  runs outside the Flet event loop. A controlled 406.2 ms slow response retained 27
+  heartbeat ticks with a 16.3 ms maximum gap; a logical 32 MiB response peaked at
+  0.26 MiB traced allocation, published no file, and retained the online fallback.
+- Detail prefetch cache writes are generation-owned. Cancellation polls at 50 ms,
+  cancels queued futures, and returns without waiting for running network I/O; a
+  blocked-worker benchmark returned in 0.1–51.0 ms for one to four workers, while
+  late workers could not repopulate a cleared cache. Stale controller epochs no
+  longer hide the active loading indicator.
+- Calendar opening now builds the real period pager once rather than calling
+  `update_data()` and `show()` back-to-back. Under Flet 0.86.5, pager seeds per open
+  fell from 2.0 to 1.0; median Python open time changed from 29.2 to 11.6 ms for 100
+  distributed activities and from 222.1 to 100.8 ms for 500 same-day activities.
+  These are Python/control-tree measurements, not Android frame-time or ANR proof.
+- Corrected the notification tap regression test to await the existing async Flet
+  callback. Removed an orphaned conflict marker and duplicate imports; no diagnostic
+  executor redesign or THNN coordinator was added because benchmark evidence did
+  not justify those broader changes.
+- Verification: **1489 tests passed with 25 skipped** using the extension source on
+  `PYTHONPATH`; Ruff 0.16.4, bytecode compilation, repository governance, the UI
+  protocol performance script, and `git diff --check` pass. Physical Android frame
+  validation remains outside this host-only benchmark.
