@@ -82,7 +82,7 @@ def test_touch_keeps_native_page_view_swipe_while_mouse_uses_drag_wrapper():
     assert view._period_pager.snap is True
     assert view._period_pager.horizontal is True
     assert view._period_gesture.allowed_devices == [ft.PointerDeviceType.MOUSE]
-    assert view._period_gesture.drag_interval == 8
+    assert view._period_gesture.drag_interval == 12
 
 
 def test_mouse_drag_moves_pager_with_pointer_then_commits_next_page():
@@ -138,22 +138,16 @@ def test_mouse_drag_moves_pager_with_pointer_then_commits_next_page():
     assert view._period_pager.snap is True
 
 
-def test_mouse_drag_coalesces_slow_native_calls_to_latest_cursor_position():
+def test_mouse_drag_preserves_each_throttled_absolute_cursor_position():
     view = CalendarView(_page_stub())
     calls = []
 
     async def exercise():
-        first_call_started = asyncio.Event()
-        release_first_call = asyncio.Event()
-
-        async def slow_jump(value):
+        async def record_jump(value):
             calls.append(value)
-            if len(calls) == 1:
-                first_call_started.set()
-                await release_first_call.wait()
 
         view._period_viewport_width = 400.0
-        view._period_pager.jump_to = slow_jump
+        view._period_pager.jump_to = record_jump
         view._on_mouse_drag_start(
             SimpleNamespace(local_position=SimpleNamespace(x=200.0))
         )
@@ -164,7 +158,6 @@ def test_mouse_drag_coalesces_slow_native_calls_to_latest_cursor_position():
                 local_position=SimpleNamespace(x=190.0), primary_delta=-1
             )
         )
-        await first_call_started.wait()
         await view._on_mouse_drag_update(
             SimpleNamespace(
                 local_position=SimpleNamespace(x=160.0), primary_delta=-1
@@ -175,14 +168,10 @@ def test_mouse_drag_coalesces_slow_native_calls_to_latest_cursor_position():
                 local_position=SimpleNamespace(x=130.0), primary_delta=-1
             )
         )
-        release_first_call.set()
-        await view._mouse_drag_move_task
 
     asyncio.run(exercise())
 
-    # The blocked bridge receives the first position and then only the newest;
-    # the stale middle position is deliberately not replayed later.
-    assert calls == [410.0, 470.0]
+    assert calls == [410.0, 440.0, 470.0]
 
 
 def test_mouse_drag_commit_uses_week_navigation_pipeline_too():
