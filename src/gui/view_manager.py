@@ -130,16 +130,21 @@ class ViewManager:
 
     def show_detail_loading(self, data):
         """Chuyển sang màn hình chi tiết bài tập ở trạng thái tải dữ liệu."""
-        self.dashboard.visible = False
-        self.calendar_view.visible = False
+        # Retain the one origin view behind opaque Detail. Removing a ListView
+        # from Flutter destroys its native ScrollPosition and makes pixel-based
+        # remount restoration susceptible to layout timing drift.
+        origin = self.calendar_view if self.calendar_view.visible else self.dashboard
+        self.dashboard.visible = origin is self.dashboard
+        self.calendar_view.visible = origin is self.calendar_view
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
         
         # Thực hiện hiệu ứng trượt màn hình sang trái
         self.detail_view.offset = ft.Offset(0, 0)
         self.detail_view.opacity = 1.0
+        self.detail_view.visible = True
         self.detail_view.show_loading(data)
-        self._show_only(self.detail_view)
+        self._show_only(origin, self.detail_view)
         self.page.update()
 
     def show_detail_data(self, full_data):
@@ -163,12 +168,6 @@ class ViewManager:
         self.detail_view.offset = ft.Offset(1, 0)
         self.detail_view.opacity = 0.0
         self.page.update()
-        if destination is self.dashboard:
-            restore_scroll = getattr(
-                self.controller, "_restore_dashboard_scroll", None
-            )
-            if callable(restore_scroll):
-                await restore_scroll()
         await asyncio.sleep(0.25) # Đợi thời gian hoàn tất animation
         self.detail_view.visible = False
         self._show_only(destination)

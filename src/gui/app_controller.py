@@ -51,6 +51,7 @@ from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
+from gui.components.desktop_window_header import build_desktop_window_header
 from gui.components.adaptive_filter_menu import (
     AdaptiveFilterMenu,
     FilterMenuOption,
@@ -511,6 +512,10 @@ class AppController:
             self.page.window.min_width    = 420
             self.page.window.always_on_top = settings.ALWAYS_ON_TOP
             self.page.window.resizable    = False
+            self.page.window.maximizable  = False
+            self.page.window.minimizable  = True
+            self.page.window.title_bar_hidden = True
+            self.page.window.title_bar_buttons_hidden = True
             self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
             self.page.window.prevent_close = True
             self.page.window.on_event = self._on_window_event
@@ -608,6 +613,20 @@ class AppController:
                     if str(exc) != "Session closed":
                         raise
                     logger.debug("Window session closed before destroy completed")
+
+    def _minimize_window(self, _event=None) -> None:
+        """Minimize from the custom desktop header without hiding to tray."""
+        self.page.window.minimized = True
+        self.page.update()
+
+    async def _exit_from_window_header(self, _event=None) -> None:
+        """The custom close button is an explicit application-exit action."""
+        try:
+            await self.page.window.destroy()
+        except RuntimeError as exc:
+            if str(exc) != "Session closed":
+                raise
+            logger.debug("Window session closed before custom exit completed")
 
     async def _on_keyboard_event(self, e):
         """H-04: Escape key to go back from Detail/Settings/Calendar views."""
@@ -798,7 +817,9 @@ class AppController:
             # is the smallest reliable trade-off for exact restore + smooth top.
             build_controls_on_demand=False,
             auto_scroll=False,
-            scroll_interval=50,
+            # Deliver the final edge/update notification as well. The handler
+            # only updates Flutter when the overlay crosses a visibility edge.
+            scroll_interval=0,
             on_scroll=self._on_dashboard_scroll,
         )
         self._scroll_to_top_button = ft.Container(
@@ -813,7 +834,6 @@ class AppController:
             bottom=12,
             alignment=ft.Alignment.CENTER,
             bgcolor=C.SURFACE_ELEVATED,
-            border=ft.Border.all(1, C.BORDER_STRONG),
             border_radius=999,
             shadow=ft.BoxShadow(
                 blur_radius=12,
@@ -994,9 +1014,23 @@ class AppController:
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
         if platform_utils.UI_IS_MOBILE:
-            self.page.add(ft.SafeArea(content=main_stack, expand=True))
+            self._app_shell = ft.SafeArea(content=main_stack, expand=True)
         else:
-            self.page.add(main_stack)
+            self._window_header = self._build_desktop_window_header()
+            self._app_shell = ft.Column(
+                controls=[self._window_header, main_stack],
+                spacing=0,
+                expand=True,
+            )
+        self.page.add(self._app_shell)
+
+    def _build_desktop_window_header(self) -> ft.Container:
+        return build_desktop_window_header(
+            on_minimize=self._minimize_window,
+            on_close=lambda _: self._safe_run_task(
+                self._exit_from_window_header
+            ),
+        )
 
     def _build_dashboard_filter_row(self) -> ft.Row:
         controls = [
@@ -1907,15 +1941,19 @@ class AppController:
     def _on_dashboard_scroll(self, event) -> None:
         """Track the exact dashboard position and toggle the overlay sparingly."""
         try:
-            pixels = max(0.0, float(event.pixels))
+            pixels = float(event.pixels)
+            minimum = float(getattr(event, "min_scroll_extent", 0.0))
         except (AttributeError, TypeError, ValueError):
             return
 
-        self._dashboard_scroll_offset = pixels
+        offset = max(0.0, pixels - minimum)
+        if offset <= 0.5:
+            offset = 0.0
+        self._dashboard_scroll_offset = offset
         if self._scroll_to_top_visible:
-            should_show = pixels > _SCROLL_TO_TOP_HIDE_OFFSET
+            should_show = offset > _SCROLL_TO_TOP_HIDE_OFFSET
         else:
-            should_show = pixels > _SCROLL_TO_TOP_SHOW_OFFSET
+            should_show = offset > _SCROLL_TO_TOP_SHOW_OFFSET
 
         # Hysteresis plus update-on-transition avoids a page update for every
         # scroll event, which matters on low-end desktop and mobile devices.
@@ -1940,17 +1978,6 @@ class AppController:
         self._dashboard_scroll_offset = 0.0
         self._set_scroll_to_top_visible(False)
         self.page.update()
-
-    async def _restore_dashboard_scroll(self) -> None:
-        """Restore the saved pixels before the detail exit animation completes."""
-        offset = max(0.0, float(self._dashboard_scroll_offset))
-        if offset:
-            try:
-                await self.cards_column.scroll_to(offset=offset, duration=0)
-            except Exception:
-                # Scroll restoration is a UX enhancement and must never trap
-                # the user in Detail if the native control is being remounted.
-                logger.debug("Dashboard scroll restore failed", exc_info=True)
 
     async def _toggle_calendar(self):
         """Toggle between dashboard list view and calendar view."""
@@ -2020,8 +2047,12 @@ class AppController:
         """
         from gui.core.theme import C as _C
         current_palette = semantic_palette()
+        theme_roots = [self.dashboard]
+        window_header = getattr(self, "_window_header", None)
+        if window_header is not None:
+            theme_roots.append(window_header)
         refresh_semantic_control_colors(
-            [self.dashboard], self._rendered_palette, current_palette
+            theme_roots, self._rendered_palette, current_palette
         )
         self._rendered_palette = current_palette
 

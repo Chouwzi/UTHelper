@@ -180,6 +180,10 @@ def _show_startup_screen(
         page.window.min_height = 720
         page.window.max_height = 720
         page.window.resizable = False
+        page.window.maximizable = False
+        page.window.minimizable = True
+        page.window.title_bar_hidden = True
+        page.window.title_bar_buttons_hidden = True
         page.window.icon = "icon.ico"
     page.title = "UTHelper"
     set_page_theme(page)
@@ -187,8 +191,7 @@ def _show_startup_screen(
     page.padding = 0
     page.spacing = 0
     page.controls.clear()
-    page.add(
-        ft.Container(
+    splash = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Image(
@@ -230,7 +233,33 @@ def _show_startup_screen(
             expand=True,
             bgcolor=C.BG,
         )
-    )
+    if compact_desktop:
+        from gui.components.desktop_window_header import (
+            build_desktop_window_header,
+        )
+
+        def minimize_window(_event):
+            page.window.minimized = True
+            page.update()
+
+        async def close_window(_event):
+            await page.window.destroy()
+
+        page.add(
+            ft.Column(
+                controls=[
+                    build_desktop_window_header(
+                        on_minimize=minimize_window,
+                        on_close=close_window,
+                    ),
+                    splash,
+                ],
+                spacing=0,
+                expand=True,
+            )
+        )
+    else:
+        page.add(splash)
     if compact_desktop:
         page.window.visible = publish
     page.update()

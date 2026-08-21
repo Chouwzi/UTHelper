@@ -46,13 +46,14 @@ def test_dashboard_list_is_scrollable_by_api_and_button_is_a_positioned_overlay(
 
     assert controller.cards_column.build_controls_on_demand is False
     assert controller.cards_column.auto_scroll is False
-    assert controller.cards_column.scroll_interval == 50
+    assert controller.cards_column.scroll_interval == 0
     assert controller.cards_column.on_scroll == controller._on_dashboard_scroll
     assert controller._scroll_to_top_button not in controller.cards_column.controls
     assert controller._scroll_to_top_button.right == 12
     assert controller._scroll_to_top_button.bottom == 12
     assert controller._scroll_to_top_button.opacity == 0.0
     assert controller._scroll_to_top_button.ignore_interactions is True
+    assert controller._scroll_to_top_button.border is None
 
 
 def test_scroll_button_uses_hysteresis_and_does_not_repaint_every_scroll_event():
@@ -81,6 +82,19 @@ def test_scroll_button_uses_hysteresis_and_does_not_repaint_every_scroll_event()
     assert controller.page.update_count == 2
 
 
+def test_manual_overscroll_at_start_hides_the_scroll_button():
+    controller = _scroll_controller(offset=640, button_visible=True)
+
+    controller._on_dashboard_scroll(
+        SimpleNamespace(pixels=-12, min_scroll_extent=0)
+    )
+
+    assert controller._dashboard_scroll_offset == 0
+    assert controller._scroll_to_top_visible is False
+    assert controller._scroll_to_top_button.ignore_interactions is True
+    assert controller.page.update_count == 1
+
+
 def test_scroll_to_top_is_animated_then_hides_the_overlay():
     controller = _scroll_controller(offset=840, button_visible=True)
     calls = []
@@ -104,36 +118,24 @@ def test_scroll_to_top_is_animated_then_hides_the_overlay():
     assert controller._scroll_to_top_button.opacity == 0.0
 
 
-def test_dashboard_scroll_restore_is_exact_and_not_animated():
-    controller = _scroll_controller(offset=487.5)
-    calls = []
-
-    async def scroll_to(**kwargs):
-        calls.append(kwargs)
-
-    controller.cards_column = SimpleNamespace(scroll_to=scroll_to)
-
-    asyncio.run(controller._restore_dashboard_scroll())
-
-    assert calls == [{"offset": 487.5, "duration": 0}]
-
-
-def test_close_detail_restores_dashboard_before_transition_wait(monkeypatch):
+def test_detail_keeps_dashboard_mounted_to_preserve_native_scroll(monkeypatch):
     events = []
 
     class Page:
         def update(self):
             events.append("update")
 
-    async def restore_scroll():
-        events.append("restore")
-
     async def fake_sleep(_seconds):
         events.append("sleep")
 
     monkeypatch.setattr("gui.view_manager.asyncio.sleep", fake_sleep)
     dashboard = SimpleNamespace(visible=False, opacity=0.0)
-    detail = SimpleNamespace(visible=True, offset=None, opacity=1.0)
+    detail = SimpleNamespace(
+        visible=False,
+        offset=None,
+        opacity=1.0,
+        show_loading=lambda _data: events.append("detail-loading"),
+    )
     calendar = SimpleNamespace(visible=False)
     host = SimpleNamespace(controls=[])
     manager = ViewManager(
@@ -143,31 +145,37 @@ def test_close_detail_restores_dashboard_before_transition_wait(monkeypatch):
         settings_view=SimpleNamespace(visible=False),
         calendar_view=calendar,
         grade_overview_view=SimpleNamespace(visible=False),
-        controller=SimpleNamespace(_restore_dashboard_scroll=restore_scroll),
+        controller=SimpleNamespace(),
         view_host=host,
     )
 
+    manager.show_detail_loading({"id": "quiz-1"})
+
+    assert host.controls == [dashboard, detail]
+    assert dashboard.visible is True
+    assert detail.visible is True
+
     asyncio.run(manager.close_detail(detail_from_calendar=False))
 
-    assert events == ["update", "restore", "sleep", "update"]
+    assert events == ["detail-loading", "update", "update", "sleep", "update"]
     assert host.controls == [dashboard]
     assert detail.visible is False
 
 
-def test_close_calendar_detail_does_not_touch_dashboard_scroll(monkeypatch):
-    restore_count = 0
-
-    async def restore_scroll():
-        nonlocal restore_count
-        restore_count += 1
-
+def test_calendar_detail_keeps_calendar_mounted_as_its_origin(monkeypatch):
     async def fake_sleep(_seconds):
         return None
 
     monkeypatch.setattr("gui.view_manager.asyncio.sleep", fake_sleep)
     dashboard = SimpleNamespace(visible=False, opacity=0.0)
-    detail = SimpleNamespace(visible=True, offset=None, opacity=1.0)
-    calendar = SimpleNamespace(visible=False)
+    detail = SimpleNamespace(
+        visible=False,
+        offset=None,
+        opacity=1.0,
+        show_loading=lambda _data: None,
+    )
+    calendar = SimpleNamespace(visible=True)
+    host = SimpleNamespace(controls=[])
     manager = ViewManager(
         page=_Page(),
         dashboard=dashboard,
@@ -175,10 +183,13 @@ def test_close_calendar_detail_does_not_touch_dashboard_scroll(monkeypatch):
         settings_view=SimpleNamespace(visible=False),
         calendar_view=calendar,
         grade_overview_view=SimpleNamespace(visible=False),
-        controller=SimpleNamespace(_restore_dashboard_scroll=restore_scroll),
-        view_host=SimpleNamespace(controls=[]),
+        controller=SimpleNamespace(),
+        view_host=host,
     )
 
+    manager.show_detail_loading({"id": "quiz-1"})
+
+    assert host.controls == [calendar, detail]
     asyncio.run(manager.close_detail(detail_from_calendar=True))
 
-    assert restore_count == 0
+    assert host.controls == [calendar]
