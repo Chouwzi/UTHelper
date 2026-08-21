@@ -24,11 +24,11 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 import flet as ft
+import platform_utils
 
 from gui.components.calendar_navigation import (
     MonthAnchor,
     month_slot_anchors,
-    resolve_mouse_navigation,
     shift_month,
     shift_week,
     week_slot_anchors,
@@ -327,6 +327,7 @@ class CalendarView(ft.Container):
         self._period_transition_active = False
         self._period_request_active = False
         self._pager_recentering = False
+        self._native_desktop_period_drag = platform_utils.UI_IS_DESKTOP
         self._period_pager = ft.PageView(
             controls=[],
             height=316,
@@ -338,27 +339,20 @@ class CalendarView(ft.Container):
             pad_ends=False,
             viewport_fraction=1.0,
             on_change=self._on_period_page_change,
-            on_size_change=self._on_period_pager_size_change,
         )
-        self._mouse_drag_distance = 0.0
-        self._mouse_drag_active = False
-        self._mouse_drag_start_x: float | None = None
-        # The desktop window is 420px wide. on_size_change replaces this
-        # fallback with the exact rendered viewport before the first drag.
-        self._period_viewport_width = 420.0
-        self._period_gesture = ft.GestureDetector(
-            content=self._period_pager,
+        self._desktop_period_host = ft.Container(height=316)
+        self._desktop_period_gesture = ft.GestureDetector(
+            content=self._desktop_period_host,
             allowed_devices=[ft.PointerDeviceType.MOUSE],
             mouse_cursor=ft.MouseCursor.GRAB,
-            # Flet uses a strict `elapsed > interval` check. Twelve milliseconds
-            # preserves every 60 Hz pointer frame without flooding the bridge
-            # with high-polling-rate mouse events.
-            drag_interval=12,
             exclude_from_semantics=True,
-            on_horizontal_drag_start=self._on_mouse_drag_start,
-            on_horizontal_drag_update=self._on_mouse_drag_update,
-            on_horizontal_drag_end=self._on_mouse_drag_end,
-            on_horizontal_drag_cancel=self._on_mouse_drag_cancel,
+        )
+        self._period_dismiss_generation = 0
+        self._period_dismissible: ft.Dismissible | None = None
+        self._period_surface = (
+            self._desktop_period_gesture
+            if self._native_desktop_period_drag
+            else self._period_pager
         )
 
         # Assemble
@@ -366,7 +360,7 @@ class CalendarView(ft.Container):
             controls=[
                 self._header,
                 self._mode_toggle,
-                self._period_gesture,
+                self._period_surface,
                 detail_panel,
             ],
             spacing=0,
@@ -480,8 +474,41 @@ class CalendarView(ft.Container):
             ]
         pager = getattr(self, "_period_pager", None)
         if pager is not None:
-            pager.controls = [period.control for period in self._period_pages]
             pager.selected_index = 1
+            pager.controls = (
+                []
+                if self._native_desktop_period_drag
+                else [period.control for period in self._period_pages]
+            )
+        if self._native_desktop_period_drag:
+            self._period_dismiss_generation += 1
+            height = 316 if self._view_mode == "month" else 88
+
+            def opaque_period(control: ft.Control) -> ft.Container:
+                return ft.Container(
+                    content=control,
+                    bgcolor=C.BG,
+                    height=height,
+                    expand=True,
+                )
+
+            previous, current, following = self._period_pages
+            self._period_dismissible = ft.Dismissible(
+                key=f"calendar-period-{self._period_dismiss_generation}",
+                content=opaque_period(current.control),
+                background=opaque_period(previous.control),
+                secondary_background=opaque_period(following.control),
+                dismiss_direction=ft.DismissDirection.HORIZONTAL,
+                dismiss_thresholds={
+                    ft.DismissDirection.START_TO_END: 0.14,
+                    ft.DismissDirection.END_TO_START: 0.14,
+                },
+                movement_duration=ft.Duration(milliseconds=140),
+                resize_duration=ft.Duration(milliseconds=0),
+                on_dismiss=self._on_desktop_period_dismiss,
+                expand=True,
+            )
+            self._desktop_period_host.content = self._period_dismissible
 
     def _render_period_pages(self) -> None:
         for period in self._period_pages:
@@ -494,12 +521,9 @@ class CalendarView(ft.Container):
         self._period_transition_active = False
         self._period_request_active = False
         self._pager_recentering = False
-        self._mouse_drag_distance = 0.0
-        self._mouse_drag_active = False
-        self._mouse_drag_start_x = None
-        self._period_pager.snap = True
-        self._period_gesture.mouse_cursor = ft.MouseCursor.GRAB
-        self._period_pager.height = 316 if self._view_mode == "month" else 88
+        height = 316 if self._view_mode == "month" else 88
+        self._period_pager.height = height
+        self._desktop_period_host.height = height
         self._seed_period_pages()
 
     def _apply_period_delta(self, delta: int) -> bool:
@@ -528,11 +552,7 @@ class CalendarView(ft.Container):
             return
         if self._pager_recentering and selected_index == 1:
             return
-        if (
-            self._mouse_drag_active
-            or self._period_transition_active
-            or selected_index not in (0, 2)
-        ):
+        if self._period_transition_active or selected_index not in (0, 2):
             return
         self._period_transition_active = True
         delta = -1 if selected_index == 0 else 1
@@ -550,104 +570,28 @@ class CalendarView(ft.Container):
             self._pager_recentering = False
             self._period_transition_active = False
 
-    def _on_period_pager_size_change(self, event) -> None:
-        width = float(getattr(event, "width", 0.0) or 0.0)
-        if width > 0:
-            self._period_viewport_width = width
-
-    def _set_period_mouse_drag_mode(self, active: bool) -> None:
-        # PageView's page-snapping physics treats every programmatic jump as a
-        # completed scroll and pulls it towards a page boundary. Suspend those
-        # physics while the mouse owns the pager; _finish_mouse_drag performs
-        # the one intentional snap after release.
-        self._period_pager.snap = not active
-        self._period_gesture.mouse_cursor = (
-            ft.MouseCursor.GRABBING if active else ft.MouseCursor.GRAB
-        )
-        try:
-            self._period_gesture.update()
-        except RuntimeError:
-            # Unit tests and pre-mount construction have no Flet page yet.
-            pass
-
-    def _on_mouse_drag_start(self, _event) -> None:
-        if self._period_transition_active or self._period_request_active:
-            return
-        self._mouse_drag_distance = 0.0
-        self._mouse_drag_active = True
-        position = getattr(_event, "local_position", None)
-        position_x = getattr(position, "x", None)
-        self._mouse_drag_start_x = (
-            float(position_x) if position_x is not None else None
-        )
-        self._set_period_mouse_drag_mode(True)
-
-    async def _on_mouse_drag_update(self, event) -> None:
-        if not self._mouse_drag_active:
-            return
-        viewport_width = max(self._period_viewport_width, 1.0)
-        position = getattr(event, "local_position", None)
-        position_x = getattr(position, "x", None)
-        if position_x is not None and self._mouse_drag_start_x is not None:
-            # Use the absolute cursor displacement. Flet throttles drag events,
-            # while primary_delta only describes the last raw pointer event;
-            # accumulating it loses most slow-mouse movement.
-            distance = float(position_x) - self._mouse_drag_start_x
+    async def _on_desktop_period_dismiss(self, event) -> None:
+        direction = getattr(event, "direction", None)
+        if direction == ft.DismissDirection.START_TO_END:
+            delta = -1
+        elif direction == ft.DismissDirection.END_TO_START:
+            delta = 1
         else:
-            distance = self._mouse_drag_distance + (event.primary_delta or 0.0)
-        self._mouse_drag_distance = max(
-            -viewport_width,
-            min(viewport_width, distance),
-        )
-        # The mounted desktop client handles jump_to well within a frame. Send
-        # every throttled absolute position directly: deferring/coalescing here
-        # makes visible motion advance in uneven steps even when the bridge is
-        # idle and fast.
-        await self._period_pager.jump_to(
-            viewport_width - self._mouse_drag_distance
-        )
-
-    async def _on_mouse_drag_cancel(self, _event=None) -> None:
-        if not self._mouse_drag_active:
             return
-        await self._finish_mouse_drag(0)
-
-    async def _on_mouse_drag_end(self, event) -> None:
-        if not self._mouse_drag_active:
+        if self._period_transition_active:
             return
-        distance = self._mouse_drag_distance
-        delta = resolve_mouse_navigation(distance, event.primary_velocity)
-        await self._finish_mouse_drag(delta)
-
-    async def _finish_mouse_drag(self, delta: int) -> None:
-        """Snap a physical mouse drag to a neighbour or back to the centre."""
-        if delta not in (-1, 0, 1):
-            delta = 0
         self._period_transition_active = True
         try:
-            await self._period_pager.go_to_page(
-                1 + delta,
-                animation_duration=ft.Duration(milliseconds=140),
-                animation_curve=ft.AnimationCurve.EASE_OUT_CUBIC,
-            )
-            if delta:
-                if self._apply_period_delta(delta):
-                    self._seed_period_pages()
-                    if self._view_mode == "month":
-                        self._render_month()
-                    else:
-                        self._render_week()
-                # Recenter even at the supported date boundary, where the
-                # neighbouring slot intentionally represents the same period.
-                self._pager_recentering = True
-                await self._period_pager.jump_to_page(1)
+            self._apply_period_delta(delta)
+            # Flutter removes a dismissed control, so always replace it with a
+            # new keyed instance, including at the supported date boundary.
+            self._seed_period_pages()
+            if self._view_mode == "month":
+                self._render_month()
+            else:
+                self._render_week()
         finally:
-            self._pager_recentering = False
             self._period_transition_active = False
-            self._mouse_drag_distance = 0.0
-            self._mouse_drag_active = False
-            self._mouse_drag_start_x = None
-            self._set_period_mouse_drag_mode(False)
 
     async def _on_previous_period(self, _event) -> None:
         await self._request_period_navigation(-1)
@@ -700,7 +644,9 @@ class CalendarView(ft.Container):
         ):
             cell_date = cell.data["date"]
             if cell_date is None:
-                cell.data["today_dot"].visible = False
+                today_dot = cell.data["today_dot"]
+                today_dot.visible = False
+                today_dot.bgcolor = C.ACCENT
                 continue
             self._style_period_cell(
                 cell,
