@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 _SCROLL_TO_TOP_SHOW_OFFSET = 240.0
 _SCROLL_TO_TOP_HIDE_OFFSET = 96.0
-_SCROLL_TO_TOP_DURATION_MS = 420
+_SCROLL_TO_TOP_DURATION_MS = 300
 
 try:
     from core.version import APP_VERSION as _APP_VERSION
@@ -247,6 +247,7 @@ class AppController:
         self._android_background = None
         self._dashboard_scroll_offset = 0.0
         self._scroll_to_top_visible = False
+        self._scroll_to_top_in_progress = False
 
         self._init_window()
         self._update_candidate = None
@@ -842,15 +843,13 @@ class AppController:
             ),
             tooltip="Lên đầu danh sách",
             ink=True,
-            on_click=lambda _: self._safe_run_task(
-                self._scroll_dashboard_to_top
-            ),
+            on_click=self._scroll_dashboard_to_top,
             opacity=0.0,
             offset=ft.Offset(0, 0.3),
             scale=0.84,
-            animate_opacity=ft.Animation(170, ft.AnimationCurve.EASE_OUT),
-            animate_offset=ft.Animation(210, ft.AnimationCurve.EASE_OUT_CUBIC),
-            animate_scale=ft.Animation(210, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_opacity=ft.Animation(110, ft.AnimationCurve.EASE_OUT),
+            animate_offset=ft.Animation(150, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_scale=ft.Animation(150, ft.AnimationCurve.EASE_OUT_CUBIC),
             # An opacity-zero overlay must not consume taps intended for cards.
             ignore_interactions=True,
         )
@@ -1990,24 +1989,47 @@ class AppController:
         if self._set_scroll_to_top_visible(should_show):
             self.page.update()
 
-    async def _scroll_dashboard_to_top(self) -> None:
-        """Smoothly return to the first card and hide the overlay at the top."""
-        self._scroll_to_top_button.ignore_interactions = True
-        self.page.update()
+    async def _scroll_dashboard_to_top(self, _event=None) -> None:
+        """Start native scrolling immediately and fade the overlay concurrently."""
+        if getattr(self, "_scroll_to_top_in_progress", False):
+            return
+        self._scroll_to_top_in_progress = True
+        previous_offset = self._dashboard_scroll_offset
+        scroll_task = None
         try:
-            await self.cards_column.scroll_to(
-                offset=0,
-                duration=_SCROLL_TO_TOP_DURATION_MS,
-                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            scroll_task = asyncio.create_task(
+                self.cards_column.scroll_to(
+                    offset=0,
+                    duration=_SCROLL_TO_TOP_DURATION_MS,
+                    curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+                )
             )
-        except Exception:
-            self._scroll_to_top_button.ignore_interactions = False
-            self.page.update()
+            # Give scroll_to the first event-loop tick so its native command is
+            # emitted before the local overlay update. The fade then overlaps
+            # the scroll instead of waiting for its 300 ms animation to finish.
+            await asyncio.sleep(0)
+            self._dashboard_scroll_offset = 0.0
+            self._set_scroll_to_top_visible(False)
+            self._scroll_to_top_button.update()
+            await scroll_task
+        except asyncio.CancelledError:
+            if scroll_task is not None and not scroll_task.done():
+                scroll_task.cancel()
             raise
-
-        self._dashboard_scroll_offset = 0.0
-        self._set_scroll_to_top_visible(False)
-        self.page.update()
+        except Exception:
+            if scroll_task is not None and not scroll_task.done():
+                scroll_task.cancel()
+            self._dashboard_scroll_offset = previous_offset
+            self._set_scroll_to_top_visible(
+                previous_offset > _SCROLL_TO_TOP_HIDE_OFFSET
+            )
+            try:
+                self._scroll_to_top_button.update()
+            except RuntimeError:
+                logger.debug("Scroll button unmounted during recovery")
+            logger.debug("Scroll-to-top command failed", exc_info=True)
+        finally:
+            self._scroll_to_top_in_progress = False
 
     async def _toggle_calendar(self):
         """Toggle between dashboard list view and calendar view."""

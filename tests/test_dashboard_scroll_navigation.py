@@ -26,11 +26,13 @@ def _scroll_controller(*, offset=0.0, button_visible=False):
     controller.page = _Page()
     controller._dashboard_scroll_offset = offset
     controller._scroll_to_top_visible = button_visible
+    controller._scroll_to_top_in_progress = False
     controller._scroll_to_top_button = SimpleNamespace(
         opacity=1.0 if button_visible else 0.0,
         offset=ft.Offset(0, 0 if button_visible else 0.3),
         scale=1.0 if button_visible else 0.84,
         ignore_interactions=not button_visible,
+        update=lambda: None,
     )
     return controller
 
@@ -54,6 +56,7 @@ def test_dashboard_list_is_scrollable_by_api_and_button_is_a_positioned_overlay(
     assert controller._scroll_to_top_button.opacity == 0.0
     assert controller._scroll_to_top_button.ignore_interactions is True
     assert controller._scroll_to_top_button.border is None
+    assert controller._scroll_to_top_button.on_click == controller._scroll_dashboard_to_top
 
 
 def test_scroll_button_uses_hysteresis_and_does_not_repaint_every_scroll_event():
@@ -95,27 +98,57 @@ def test_manual_overscroll_at_start_hides_the_scroll_button():
     assert controller.page.update_count == 1
 
 
-def test_scroll_to_top_is_animated_then_hides_the_overlay():
+def test_scroll_to_top_starts_before_local_button_hide_and_skips_page_rebuild():
     controller = _scroll_controller(offset=840, button_visible=True)
     calls = []
+    events = []
 
     async def scroll_to(**kwargs):
+        events.append("scroll-start")
         calls.append(kwargs)
+        await asyncio.sleep(0)
+        events.append("scroll-end")
 
     controller.cards_column = SimpleNamespace(scroll_to=scroll_to)
+    controller._scroll_to_top_button.update = lambda: events.append("button-hide")
 
     asyncio.run(controller._scroll_dashboard_to_top())
 
     assert calls == [
         {
             "offset": 0,
-            "duration": 420,
+            "duration": 300,
             "curve": ft.AnimationCurve.EASE_OUT_CUBIC,
         }
     ]
+    assert events == ["scroll-start", "button-hide", "scroll-end"]
+    assert controller.page.update_count == 0
     assert controller._dashboard_scroll_offset == 0
     assert controller._scroll_to_top_visible is False
     assert controller._scroll_to_top_button.opacity == 0.0
+    assert controller._scroll_to_top_in_progress is False
+
+
+def test_scroll_to_top_ignores_double_click_while_animation_is_running():
+    controller = _scroll_controller(offset=840, button_visible=True)
+    calls = 0
+
+    async def scroll_to(**_kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+
+    controller.cards_column = SimpleNamespace(scroll_to=scroll_to)
+
+    async def click_twice():
+        await asyncio.gather(
+            controller._scroll_dashboard_to_top(),
+            controller._scroll_dashboard_to_top(),
+        )
+
+    asyncio.run(click_twice())
+
+    assert calls == 1
 
 
 def test_detail_keeps_dashboard_mounted_to_preserve_native_scroll(monkeypatch):
