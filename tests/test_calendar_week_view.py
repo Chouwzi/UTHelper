@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from unittest.mock import MagicMock, PropertyMock, patch
 from types import SimpleNamespace
 import pytest
+import flet as ft
 
 from gui.components.calendar_navigation import MonthAnchor, month_slot_anchors
 from gui.components.calendar_view import CalendarView
@@ -75,38 +76,107 @@ def test_recenter_and_transition_events_do_not_advance_twice():
     assert (view._year, view._month) == before
 
 
-def test_mouse_drag_accumulates_distance_and_requests_next_page():
+def test_touch_keeps_native_page_view_swipe_while_mouse_uses_drag_wrapper():
     view = CalendarView(_page_stub())
-    requests = []
 
-    async def record(delta):
-        requests.append(delta)
+    assert view._period_pager.snap is True
+    assert view._period_pager.horizontal is True
+    assert view._period_gesture.allowed_devices == [ft.PointerDeviceType.MOUSE]
 
-    view._request_period_navigation = record
-    view._on_mouse_drag_start(None)
-    view._on_mouse_drag_update(SimpleNamespace(primary_delta=-30))
-    view._on_mouse_drag_update(SimpleNamespace(primary_delta=-28))
-    asyncio.run(view._on_mouse_drag_end(SimpleNamespace(primary_velocity=-120)))
 
-    assert requests == [1]
+def test_mouse_drag_moves_pager_with_pointer_then_commits_next_page():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 12
+    view._seed_period_pages()
+    offsets = []
+    page_targets = []
+    recenter_targets = []
+
+    async def record_offset(value):
+        offsets.append(value)
+
+    async def record_page(index, **_kwargs):
+        page_targets.append(index)
+
+    async def record_recenter(index):
+        recenter_targets.append(index)
+
+    async def exercise():
+        view._on_period_pager_size_change(SimpleNamespace(width=400.0))
+        view._period_pager.jump_to = record_offset
+        view._period_pager.go_to_page = record_page
+        view._period_pager.jump_to_page = record_recenter
+        view._on_mouse_drag_start(None)
+        await view._on_mouse_drag_update(SimpleNamespace(primary_delta=-30))
+        await view._on_mouse_drag_update(SimpleNamespace(primary_delta=-28))
+        await view._on_mouse_drag_end(SimpleNamespace(primary_velocity=-120))
+
+    asyncio.run(exercise())
+
+    assert offsets == [430.0, 458.0]
+    assert page_targets == [2]
+    assert recenter_targets == [1]
+    assert (view._year, view._month) == (2027, 1)
     assert view._mouse_drag_distance == 0.0
+    assert view._mouse_drag_active is False
 
 
-def test_short_mouse_drag_cancels_and_gesture_excludes_detail_panel():
+def test_mouse_drag_commit_uses_week_navigation_pipeline_too():
     view = CalendarView(_page_stub())
-    requests = []
+    view._toggle_view_mode("week")
+    original_week = view._week_start
 
-    async def record(delta):
-        requests.append(delta)
+    async def no_op(*_args, **_kwargs):
+        return None
 
-    view._request_period_navigation = record
-    view._on_mouse_drag_start(None)
-    view._on_mouse_drag_update(SimpleNamespace(primary_delta=12))
-    asyncio.run(view._on_mouse_drag_end(SimpleNamespace(primary_velocity=50)))
+    async def exercise():
+        view._period_pager.jump_to = no_op
+        view._period_pager.go_to_page = no_op
+        view._period_pager.jump_to_page = no_op
+        view._on_mouse_drag_start(None)
+        await view._on_mouse_drag_update(SimpleNamespace(primary_delta=60))
+        await view._on_mouse_drag_end(SimpleNamespace(primary_velocity=120))
 
-    assert requests == []
+    asyncio.run(exercise())
+
+    assert view._week_start == original_week - timedelta(days=7)
+
+
+def test_short_mouse_drag_snaps_back_and_gesture_excludes_detail_panel():
+    view = CalendarView(_page_stub())
+    offsets = []
+    page_targets = []
+
+    async def record_offset(value):
+        offsets.append(value)
+
+    async def record_page(index, **_kwargs):
+        page_targets.append(index)
+
+    async def exercise():
+        view._period_viewport_width = 400.0
+        view._period_pager.jump_to = record_offset
+        view._period_pager.go_to_page = record_page
+        view._on_mouse_drag_start(None)
+        await view._on_mouse_drag_update(SimpleNamespace(primary_delta=12))
+        await view._on_mouse_drag_end(SimpleNamespace(primary_velocity=50))
+
+    asyncio.run(exercise())
+
+    assert offsets == [388.0]
+    assert page_targets == [1]
     assert view._period_gesture.content is view._period_pager
     assert view._detail_panel is not view._period_gesture.content
+
+
+def test_native_page_change_is_ignored_while_mouse_drag_owns_pager():
+    view = CalendarView(_page_stub())
+    before = (view._year, view._month)
+    view._mouse_drag_active = True
+
+    asyncio.run(view._on_period_page_change(SimpleNamespace(data="2")))
+
+    assert (view._year, view._month) == before
 
 
 def test_unmounted_arrow_navigation_uses_same_logical_period_pipeline():

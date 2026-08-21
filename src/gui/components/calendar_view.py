@@ -338,8 +338,13 @@ class CalendarView(ft.Container):
             pad_ends=False,
             viewport_fraction=1.0,
             on_change=self._on_period_page_change,
+            on_size_change=self._on_period_pager_size_change,
         )
         self._mouse_drag_distance = 0.0
+        self._mouse_drag_active = False
+        # The desktop window is 420px wide. on_size_change replaces this
+        # fallback with the exact rendered viewport before the first drag.
+        self._period_viewport_width = 420.0
         self._period_gesture = ft.GestureDetector(
             content=self._period_pager,
             allowed_devices=[ft.PointerDeviceType.MOUSE],
@@ -486,6 +491,7 @@ class CalendarView(ft.Container):
         self._period_request_active = False
         self._pager_recentering = False
         self._mouse_drag_distance = 0.0
+        self._mouse_drag_active = False
         self._period_pager.height = 316 if self._view_mode == "month" else 88
         self._seed_period_pages()
 
@@ -515,7 +521,11 @@ class CalendarView(ft.Container):
             return
         if self._pager_recentering and selected_index == 1:
             return
-        if self._period_transition_active or selected_index not in (0, 2):
+        if (
+            self._mouse_drag_active
+            or self._period_transition_active
+            or selected_index not in (0, 2)
+        ):
             return
         self._period_transition_active = True
         delta = -1 if selected_index == 0 else 1
@@ -533,23 +543,78 @@ class CalendarView(ft.Container):
             self._pager_recentering = False
             self._period_transition_active = False
 
+    def _on_period_pager_size_change(self, event) -> None:
+        width = float(getattr(event, "width", 0.0) or 0.0)
+        if width > 0:
+            self._period_viewport_width = width
+
+    def _set_period_mouse_cursor(self, cursor: ft.MouseCursor) -> None:
+        self._period_gesture.mouse_cursor = cursor
+        try:
+            self._period_gesture.update()
+        except RuntimeError:
+            # Unit tests and pre-mount construction have no Flet page yet.
+            pass
+
     def _on_mouse_drag_start(self, _event) -> None:
+        if self._period_transition_active or self._period_request_active:
+            return
         self._mouse_drag_distance = 0.0
-        self._period_gesture.mouse_cursor = ft.MouseCursor.GRABBING
+        self._mouse_drag_active = True
+        self._set_period_mouse_cursor(ft.MouseCursor.GRABBING)
 
-    def _on_mouse_drag_update(self, event) -> None:
-        self._mouse_drag_distance += event.primary_delta or 0.0
+    async def _on_mouse_drag_update(self, event) -> None:
+        if not self._mouse_drag_active:
+            return
+        viewport_width = max(self._period_viewport_width, 1.0)
+        distance = self._mouse_drag_distance + (event.primary_delta or 0.0)
+        self._mouse_drag_distance = max(-viewport_width, min(viewport_width, distance))
+        # Page 1 starts at one viewport width. Moving the pointer left must
+        # expose page 2, hence raw scroll offset = centre - pointer distance.
+        await self._period_pager.jump_to(
+            viewport_width - self._mouse_drag_distance
+        )
 
-    def _on_mouse_drag_cancel(self, _event=None) -> None:
-        self._mouse_drag_distance = 0.0
-        self._period_gesture.mouse_cursor = ft.MouseCursor.GRAB
+    async def _on_mouse_drag_cancel(self, _event=None) -> None:
+        if not self._mouse_drag_active:
+            return
+        await self._finish_mouse_drag(0)
 
     async def _on_mouse_drag_end(self, event) -> None:
+        if not self._mouse_drag_active:
+            return
         distance = self._mouse_drag_distance
-        self._on_mouse_drag_cancel()
         delta = resolve_mouse_navigation(distance, event.primary_velocity)
-        if delta:
-            await self._request_period_navigation(delta)
+        await self._finish_mouse_drag(delta)
+
+    async def _finish_mouse_drag(self, delta: int) -> None:
+        """Snap a physical mouse drag to a neighbour or back to the centre."""
+        if delta not in (-1, 0, 1):
+            delta = 0
+        self._period_transition_active = True
+        try:
+            await self._period_pager.go_to_page(
+                1 + delta,
+                animation_duration=ft.Duration(milliseconds=140),
+                animation_curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            )
+            if delta:
+                if self._apply_period_delta(delta):
+                    self._seed_period_pages()
+                    if self._view_mode == "month":
+                        self._render_month()
+                    else:
+                        self._render_week()
+                # Recenter even at the supported date boundary, where the
+                # neighbouring slot intentionally represents the same period.
+                self._pager_recentering = True
+                await self._period_pager.jump_to_page(1)
+        finally:
+            self._pager_recentering = False
+            self._period_transition_active = False
+            self._mouse_drag_distance = 0.0
+            self._mouse_drag_active = False
+            self._set_period_mouse_cursor(ft.MouseCursor.GRAB)
 
     async def _on_previous_period(self, _event) -> None:
         await self._request_period_navigation(-1)
