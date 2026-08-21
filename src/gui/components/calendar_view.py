@@ -356,6 +356,8 @@ class CalendarView(ft.Container):
         )
         self._period_dismiss_generation = 0
         self._period_dismissible: ft.Dismissible | None = None
+        self._desktop_period_stage: ft.Stack | None = None
+        self._period_background_pages: list[_CalendarPeriodPage] = []
         self._period_surface = (
             self._desktop_period_gesture
             if self._native_desktop_period_drag
@@ -503,6 +505,30 @@ class CalendarView(ft.Container):
                 )
 
             previous, current, following = self._period_pages
+            if self._view_mode == "month":
+                self._period_background_pages = [
+                    self._build_month_period_page(previous.anchor),
+                    self._build_month_period_page(following.anchor),
+                ]
+                current_underlay = self._grid
+            else:
+                self._period_background_pages = [
+                    self._build_week_period_page(previous.anchor),
+                    self._build_week_period_page(following.anchor),
+                ]
+                current_underlay = self._week_strip
+            previous_background, following_background = (
+                self._period_background_pages
+            )
+
+            def background_period(control: ft.Control) -> ft.Container:
+                return ft.Container(
+                    content=control,
+                    bgcolor=C.BG,
+                    width=float("inf"),
+                    height=height,
+                )
+
             period_strip = ft.Stack(
                 controls=[
                     strip_period(previous.control, -1),
@@ -516,21 +542,36 @@ class CalendarView(ft.Container):
             self._period_dismissible = ft.Dismissible(
                 key=f"calendar-period-{self._period_dismiss_generation}",
                 content=period_strip,
+                background=background_period(previous_background.control),
+                secondary_background=background_period(
+                    following_background.control
+                ),
                 dismiss_direction=ft.DismissDirection.HORIZONTAL,
                 dismiss_thresholds={
                     ft.DismissDirection.START_TO_END: 0.14,
                     ft.DismissDirection.END_TO_START: 0.14,
                 },
                 movement_duration=ft.Duration(milliseconds=140),
-                # Zero completes synchronously inside Flutter and Flet 0.86.5
-                # drops on_dismiss, leaving the translated strip off-screen.
-                # A 1 ms resize is visually imperceptible and reliably emits
-                # the event that installs the next keyed period strip.
-                resize_duration=ft.Duration(milliseconds=1),
+                # Keep the destination background painted after the slide
+                # while on_dismiss crosses the Flet bridge. A Duration (even
+                # 1 ms) enters SizeTransition and briefly collapses to blank.
+                resize_duration=None,
                 on_dismiss=self._on_desktop_period_dismiss,
-                expand=True,
+                left=0,
+                right=0,
+                top=0,
+                bottom=0,
             )
-            self._desktop_period_host.content = self._period_dismissible
+            self._desktop_period_stage = ft.Stack(
+                controls=[
+                    background_period(current_underlay),
+                    self._period_dismissible,
+                ],
+                width=float("inf"),
+                height=height,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            )
+            self._desktop_period_host.content = self._desktop_period_stage
 
     def _update_period_surface(self) -> None:
         try:
@@ -540,7 +581,7 @@ class CalendarView(ft.Container):
             pass
 
     def _render_period_pages(self) -> None:
-        for period in self._period_pages:
+        for period in self._period_pages + self._period_background_pages:
             if isinstance(period.anchor, MonthAnchor):
                 self._render_month_period_page(period)
             else:

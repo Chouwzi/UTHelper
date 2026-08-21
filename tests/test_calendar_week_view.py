@@ -86,7 +86,8 @@ def test_mobile_keeps_page_view_while_desktop_uses_native_dismissible():
     assert mobile_view._period_pager.snap is True
     assert mobile_view._period_pager.horizontal is True
     assert desktop_view._period_surface is desktop_view._desktop_period_gesture
-    assert desktop_view._desktop_period_host.content is desktop_view._period_dismissible
+    assert desktop_view._desktop_period_host.content is desktop_view._desktop_period_stage
+    assert desktop_view._desktop_period_stage.controls[-1] is desktop_view._period_dismissible
     assert desktop_view._period_dismissible.on_update is None
     assert desktop_view._period_dismissible.dismiss_direction == ft.DismissDirection.HORIZONTAL
     assert desktop_view._desktop_period_gesture.mouse_cursor == ft.MouseCursor.GRAB
@@ -106,7 +107,8 @@ def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control()
 
     assert (view._year, view._month) == (2027, 1)
     assert view._period_dismissible is not dismissed
-    assert view._desktop_period_host.content is view._period_dismissible
+    assert view._desktop_period_host.content is view._desktop_period_stage
+    assert view._desktop_period_stage.controls[-1] is view._period_dismissible
     assert view._period_transition_active is False
 
 
@@ -120,8 +122,13 @@ def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
     assert [page.offset.x for page in strip.controls] == [-1, 0, 1]
     assert [page.left for page in strip.controls] == [0, 0, 0]
     assert [page.right for page in strip.controls] == [0, 0, 0]
-    assert view._period_dismissible.background is None
-    assert view._period_dismissible.secondary_background is None
+    assert view._period_dismissible.background is not None
+    assert view._period_dismissible.secondary_background is not None
+    assert view._period_dismissible.background is not strip.controls[0]
+    assert view._period_dismissible.secondary_background is not strip.controls[2]
+    assert len(view._period_background_pages) == 2
+    assert view._desktop_period_stage.controls[0].content is view._grid
+    assert view._desktop_period_stage.controls[1] is view._period_dismissible
     assert view._desktop_period_host.clip_behavior == ft.ClipBehavior.HARD_EDGE
 
 
@@ -182,10 +189,9 @@ def test_native_desktop_drag_uses_flutter_snap_without_python_frame_events():
         ft.DismissDirection.END_TO_START: 0.14,
     }
     assert dismissible.movement_duration == ft.Duration(milliseconds=140)
-    # Flet 0.86.5 drops on_dismiss when Flutter completes a zero-duration
-    # resize synchronously. One millisecond preserves the callback without a
-    # perceptible contraction.
-    assert dismissible.resize_duration == ft.Duration(milliseconds=1)
+    # None bypasses Flutter's SizeTransition entirely. The destination
+    # background remains painted until Python installs the next keyed strip.
+    assert dismissible.resize_duration is None
     assert view._detail_panel is not view._period_surface
 
 
