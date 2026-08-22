@@ -87,8 +87,11 @@ def test_mobile_keeps_page_view_while_desktop_uses_native_dismissible():
     assert mobile_view._period_pager.horizontal is True
     assert desktop_view._period_surface is desktop_view._desktop_period_gesture
     assert desktop_view._desktop_period_host.content is desktop_view._desktop_period_stage
+    assert isinstance(desktop_view._desktop_period_slot, ft.Stack)
     assert desktop_view._desktop_period_stage.controls[-1] is desktop_view._desktop_period_slot
-    assert desktop_view._desktop_period_slot.content is desktop_view._period_dismissible
+    assert desktop_view._desktop_period_slot.controls == [
+        desktop_view._period_dismissible
+    ]
     assert desktop_view._period_dismissible.on_update is None
     assert desktop_view._period_dismissible.dismiss_direction == ft.DismissDirection.HORIZONTAL
     assert desktop_view._desktop_period_gesture.mouse_cursor == ft.MouseCursor.GRAB
@@ -110,7 +113,7 @@ def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control()
     assert view._period_dismissible is not dismissed
     assert view._desktop_period_host.content is view._desktop_period_stage
     assert view._desktop_period_stage.controls[-1] is view._desktop_period_slot
-    assert view._desktop_period_slot.content is view._period_dismissible
+    assert view._desktop_period_slot.controls == [view._period_dismissible]
     assert view._period_transition_active is False
 
 
@@ -163,9 +166,14 @@ def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
     assert view._period_dismissible.background is not strip.controls[0]
     assert view._period_dismissible.secondary_background is not strip.controls[2]
     assert len(view._period_background_pages) == 2
+    assert all(not page.day_cells for page in view._period_background_pages)
     assert view._desktop_period_stage.controls[0].content is view._grid
     assert view._desktop_period_stage.controls[1] is view._desktop_period_slot
-    assert view._desktop_period_slot.content is view._period_dismissible
+    assert view._desktop_period_slot.controls == [view._period_dismissible]
+    assert view._period_dismissible.left == 0
+    assert view._period_dismissible.right == 0
+    assert view._period_dismissible.top == 0
+    assert view._period_dismissible.bottom == 0
     assert view._desktop_period_host.clip_behavior == ft.ClipBehavior.HARD_EDGE
 
 

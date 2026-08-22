@@ -348,11 +348,17 @@ class CalendarView(ft.Container):
             height=316,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
-        self._desktop_period_slot = ft.Container(
+        # The slot itself is positioned in the outer stage. It must be a
+        # Stack so every replacement Dismissible can use absolute constraints;
+        # a Container child has no bounded size here and leaves only the
+        # lightweight release-frame underlay visible after navigation.
+        self._desktop_period_slot = ft.Stack(
+            controls=[],
             left=0,
             right=0,
             top=0,
             bottom=0,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
         self._desktop_period_gesture = ft.GestureDetector(
             content=self._desktop_period_host,
@@ -715,8 +721,12 @@ class CalendarView(ft.Container):
                 # 1 ms) enters SizeTransition and briefly collapses to blank.
                 resize_duration=None,
                 on_dismiss=self._on_desktop_period_dismiss,
+                left=0,
+                right=0,
+                top=0,
+                bottom=0,
             )
-            self._desktop_period_slot.content = self._period_dismissible
+            self._desktop_period_slot.controls = [self._period_dismissible]
             if self._desktop_period_stage is None:
                 self._desktop_period_underlay = background_period(
                     current_underlay
