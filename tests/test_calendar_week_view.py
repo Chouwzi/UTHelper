@@ -117,6 +117,35 @@ def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control()
     assert view._period_transition_active is False
 
 
+def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
+    page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
+    view = CalendarView(page)
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    old_underlay = view._desktop_period_underlay.content
+    event = SimpleNamespace(direction=ft.DismissDirection.END_TO_START)
+
+    confirmed = asyncio.run(view._on_desktop_period_confirm(event))
+
+    assert confirmed is True
+    assert (view._year, view._month) == (2026, 9)
+    assert view._month_label.value == "Tháng 9 2026"
+    assert view._desktop_period_underlay.content is not old_underlay
+    assert view._pending_desktop_delta == 1
+    assert view._period_transition_active is True
+    assert page.update.call_args.args == (
+        view._header,
+        view._desktop_period_underlay,
+        view._detail_panel,
+    )
+
+    asyncio.run(view._on_desktop_period_dismiss(event))
+
+    assert (view._year, view._month) == (2026, 9)
+    assert view._pending_desktop_delta is None
+    assert view._period_transition_active is False
+
+
 def test_native_desktop_dismiss_reuses_two_adjacent_period_pages():
     view = CalendarView(_page_stub())
     view._year, view._month = 2026, 8
@@ -149,6 +178,34 @@ def test_native_desktop_reverse_dismiss_reuses_two_adjacent_period_pages():
     assert view._period_pages[1] is old_pages[0]
     assert view._period_pages[2] is old_pages[1]
     assert view._period_pages[0].anchor == MonthAnchor(2026, 6)
+
+
+def test_release_frame_preview_keeps_activity_dot_and_count_badge():
+    view = CalendarView(_page_stub())
+    view._deadline_map = {
+        "2026-09-03": [{"urgency": "safe"}],
+        "2026-09-19": [{"urgency": "safe"}] * 3,
+    }
+
+    preview = view._build_month_period_preview(MonthAnchor(2026, 9))
+    dated_cells = {}
+    for row in preview.control.controls[1:]:
+        for cell in row.controls:
+            content = cell.content
+            day_text = (
+                content.controls[0]
+                if isinstance(content, ft.Column)
+                else content
+            )
+            if day_text.value:
+                dated_cells[int(day_text.value)] = cell
+
+    single_marker_row = dated_cells[3].content.controls[-1]
+    count_marker_row = dated_cells[19].content.controls[-1]
+
+    assert len(single_marker_row.controls) == 1
+    assert single_marker_row.controls[0].width == 6
+    assert count_marker_row.controls[0].content.value == "3"
 
 
 def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
@@ -236,7 +293,7 @@ def test_native_desktop_drag_uses_flutter_snap_without_python_frame_events():
 
     dismissible = view._period_dismissible
     assert dismissible.on_update is None
-    assert dismissible.on_confirm_dismiss is None
+    assert dismissible.on_confirm_dismiss == view._on_desktop_period_confirm
     assert dismissible.on_dismiss == view._on_desktop_period_dismiss
     assert dismissible.dismiss_thresholds == {
         ft.DismissDirection.START_TO_END: 0.14,

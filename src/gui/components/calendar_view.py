@@ -327,6 +327,7 @@ class CalendarView(ft.Container):
         self._period_transition_active = False
         self._period_request_active = False
         self._pager_recentering = False
+        self._pending_desktop_delta: int | None = None
         self._native_desktop_period_drag = platform_utils.UI_IS_DESKTOP
         self._period_pager = ft.PageView(
             controls=[],
@@ -546,27 +547,55 @@ class CalendarView(ft.Container):
                         most_urgent.get("urgency", "safe")
                     )
                 is_today = cell_date == today
+                day_text = ft.Text(
+                    str(day_number) if day_number else "",
+                    size=12,
+                    color=(
+                        C.ACCENT
+                        if is_today
+                        else C.CRITICAL
+                        if column == 6
+                        else C.TEXT_PRIMARY
+                    ),
+                    weight=(
+                        ft.FontWeight.W_700
+                        if is_today
+                        else ft.FontWeight.W_500
+                        if acts
+                        else ft.FontWeight.W_400
+                    ),
+                    text_align=ft.TextAlign.CENTER,
+                )
+                marker_controls: list[ft.Control] = []
+                if is_today:
+                    marker_controls.append(
+                        ft.Container(
+                            width=5,
+                            height=5,
+                            border_radius=3,
+                            bgcolor=C.ACCENT,
+                        )
+                    )
+                if acts:
+                    dots_row = ft.Row(
+                        controls=[],
+                        spacing=2,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    )
+                    self._render_activity_markers(
+                        dots_row, acts, urgency_color
+                    )
+                    marker_controls.append(dots_row)
+                cell_content: ft.Control = day_text
+                if marker_controls:
+                    cell_content = ft.Column(
+                        controls=[day_text, *marker_controls],
+                        spacing=0,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
                 cells.append(
                     ft.Container(
-                        content=ft.Text(
-                            str(day_number) if day_number else "",
-                            size=12,
-                            color=(
-                                C.ACCENT
-                                if is_today
-                                else C.CRITICAL
-                                if column == 6
-                                else C.TEXT_PRIMARY
-                            ),
-                            weight=(
-                                ft.FontWeight.W_700
-                                if is_today
-                                else ft.FontWeight.W_500
-                                if acts
-                                else ft.FontWeight.W_400
-                            ),
-                            text_align=ft.TextAlign.CENTER,
-                        ),
+                        content=cell_content,
                         width=44,
                         height=48,
                         border_radius=8,
@@ -720,6 +749,7 @@ class CalendarView(ft.Container):
                 # while on_dismiss crosses the Flet bridge. A Duration (even
                 # 1 ms) enters SizeTransition and briefly collapses to blank.
                 resize_duration=None,
+                on_confirm_dismiss=self._on_desktop_period_confirm,
                 on_dismiss=self._on_desktop_period_dismiss,
                 left=0,
                 right=0,
@@ -744,7 +774,12 @@ class CalendarView(ft.Container):
                     self._desktop_period_stage
                 )
             else:
-                self._desktop_period_underlay.content = current_underlay
+                # A confirmed swipe has already installed a lightweight copy
+                # of the destination below Dismissible. Keep it mounted until
+                # the new full strip paints; replacing it here would expose
+                # the old month's compatibility grid for one bridge frame.
+                if self._pending_desktop_delta is None:
+                    self._desktop_period_underlay.content = current_underlay
                 self._desktop_period_underlay.height = height
                 self._desktop_period_stage.height = height
 
@@ -831,11 +866,18 @@ class CalendarView(ft.Container):
             delta = 1
         else:
             return
-        if self._period_transition_active:
+        pending_delta = self._pending_desktop_delta
+        if self._period_transition_active and pending_delta is None:
             return
-        self._period_transition_active = True
+        if pending_delta is not None and pending_delta != delta:
+            self._pending_desktop_delta = None
+            self._period_transition_active = False
+            return
+        if pending_delta is None:
+            self._period_transition_active = True
         try:
-            self._apply_period_delta(delta)
+            if pending_delta is None:
+                self._apply_period_delta(delta)
             # Flutter removes a dismissed control, so replace it with a new
             # keyed instance. Reuse the two still-relevant period pages and
             # build only the newly exposed far edge.
@@ -846,7 +888,43 @@ class CalendarView(ft.Container):
                 self._render_week(update_page=False)
             self._update_period_surface()
         finally:
+            self._pending_desktop_delta = None
             self._period_transition_active = False
+
+    async def _on_desktop_period_confirm(self, event) -> bool:
+        """Install the destination underlay before Flutter removes the strip."""
+        direction = getattr(event, "direction", None)
+        if direction == ft.DismissDirection.START_TO_END:
+            delta = -1
+        elif direction == ft.DismissDirection.END_TO_START:
+            delta = 1
+        else:
+            return False
+        if self._period_transition_active or self._pending_desktop_delta is not None:
+            return False
+        if not self._apply_period_delta(delta):
+            return False
+
+        self._period_transition_active = True
+        self._pending_desktop_delta = delta
+        if self._view_mode == "month":
+            self._render_month(update_page=False)
+            target_underlay = self._build_month_period_preview(
+                MonthAnchor(self._year, self._month)
+            )
+        else:
+            self._render_week(update_page=False)
+            target_underlay = self._build_week_period_page(self._week_start)
+        self._desktop_period_underlay.content = target_underlay.control
+        try:
+            self._page_ref.update(
+                self._header,
+                self._desktop_period_underlay,
+                self._detail_panel,
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        return True
 
     async def _on_previous_period(self, _event) -> None:
         await self._request_period_navigation(-1)
