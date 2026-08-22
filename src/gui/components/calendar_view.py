@@ -486,150 +486,13 @@ class CalendarView(ft.Container):
     def _build_month_period_preview(
         self, anchor: MonthAnchor
     ) -> _CalendarPeriodPage:
-        """Build a low-cost, non-interactive release-frame background."""
-        weekday_row = ft.Row(
-            controls=[
-                ft.Container(
-                    content=ft.Text(
-                        weekday,
-                        size=10,
-                        weight=ft.FontWeight.W_600,
-                        color=(
-                            C.CRITICAL
-                            if weekday == "CN"
-                            else C.TEXT_SECONDARY
-                        ),
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                    width=44,
-                    alignment=ft.Alignment(0, 0),
-                )
-                for weekday in _WEEKDAYS
-            ],
-            spacing=2,
-            alignment=ft.MainAxisAlignment.CENTER,
-        )
-        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
-            anchor.year, anchor.month
-        )
-        while len(weeks) < 6:
-            weeks.append([0] * 7)
-        rows = []
-        today = date.today()
-        for week in weeks:
-            cells = []
-            for column, day_number in enumerate(week):
-                cell_date = (
-                    date(anchor.year, anchor.month, day_number)
-                    if day_number
-                    else None
-                )
-                acts = (
-                    self._deadline_map.get(cell_date.isoformat(), [])
-                    if cell_date
-                    else []
-                )
-                urgency_color = None
-                if acts:
-                    priority = {
-                        "overdue": 0,
-                        "critical": 1,
-                        "warning": 2,
-                        "safe": 3,
-                    }
-                    most_urgent = min(
-                        acts,
-                        key=lambda activity: priority.get(
-                            activity.get("urgency", "safe"), 3
-                        ),
-                    )
-                    urgency_color = get_urgency_color(
-                        most_urgent.get("urgency", "safe")
-                    )
-                is_today = cell_date == today
-                day_text = ft.Text(
-                    str(day_number) if day_number else "",
-                    size=12,
-                    color=(
-                        C.ACCENT
-                        if is_today
-                        else C.CRITICAL
-                        if column == 6
-                        else C.TEXT_PRIMARY
-                    ),
-                    weight=(
-                        ft.FontWeight.W_700
-                        if is_today
-                        else ft.FontWeight.W_500
-                        if acts
-                        else ft.FontWeight.W_400
-                    ),
-                    text_align=ft.TextAlign.CENTER,
-                )
-                marker_controls: list[ft.Control] = []
-                if is_today:
-                    marker_controls.append(
-                        ft.Container(
-                            width=5,
-                            height=5,
-                            border_radius=3,
-                            bgcolor=C.ACCENT,
-                        )
-                    )
-                if acts:
-                    dots_row = ft.Row(
-                        controls=[],
-                        spacing=2,
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    )
-                    self._render_activity_markers(
-                        dots_row, acts, urgency_color
-                    )
-                    marker_controls.append(dots_row)
-                cell_content: ft.Control = day_text
-                if marker_controls:
-                    cell_content = ft.Column(
-                        controls=[day_text, *marker_controls],
-                        spacing=0,
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    )
-                cells.append(
-                    ft.Container(
-                        content=cell_content,
-                        width=44,
-                        height=48,
-                        border_radius=8,
-                        alignment=ft.Alignment(0, -0.1),
-                        bgcolor=(
-                            ft.Colors.with_opacity(0.06, urgency_color)
-                            if urgency_color
-                            else None
-                        ),
-                        border=(
-                            ft.Border.all(
-                                0.5,
-                                ft.Colors.with_opacity(0.19, urgency_color),
-                            )
-                            if urgency_color
-                            else None
-                        ),
-                    )
-                )
-            rows.append(
-                ft.Row(
-                    controls=cells,
-                    spacing=2,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                )
-            )
-        return _CalendarPeriodPage(
-            anchor,
-            ft.Column(
-                controls=[weekday_row, *rows],
-                spacing=2,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-        )
+        """Build a non-interactive background with exact live-grid geometry."""
+        period = self._build_month_period_page(anchor)
+        for row in period.day_cells:
+            for cell in row:
+                cell.on_click = None
+                cell.animate = None
+        return period
 
     def _seed_period_pages(self, *, delta: int | None = None) -> None:
         if self._view_mode == "month":
@@ -745,10 +608,13 @@ class CalendarView(ft.Container):
                     ft.DismissDirection.END_TO_START: 0.14,
                 },
                 movement_duration=ft.Duration(milliseconds=30),
-                # Keep the destination background painted after the slide
-                # while on_dismiss crosses the Flet bridge. A Duration (even
-                # 1 ms) enters SizeTransition and briefly collapses to blank.
-                resize_duration=None,
+                # Flet treats a missing/None value as its 300 ms default,
+                # which runs a visible vertical SizeTransition after this
+                # horizontal swipe. Flutter skips onDismissed for a zero
+                # duration here, so use the smallest positive duration: it
+                # completes the lifecycle below one display frame while the
+                # exact-geometry underlay remains painted.
+                resize_duration=ft.Duration(milliseconds=1),
                 on_confirm_dismiss=self._on_desktop_period_confirm,
                 on_dismiss=self._on_desktop_period_dismiss,
                 left=0,
@@ -891,19 +757,28 @@ class CalendarView(ft.Container):
             self._pending_desktop_delta = None
             self._period_transition_active = False
 
-    async def _on_desktop_period_confirm(self, event) -> bool:
-        """Install the destination underlay before Flutter removes the strip."""
+    async def _resolve_desktop_period_dismiss(self, event, dismiss: bool) -> None:
+        """Resolve Flet's pending Dismissible decision on its source control."""
+        dismissible = getattr(event, "control", None) or self._period_dismissible
+        if dismissible is not None:
+            await dismissible.confirm_dismiss(dismiss)
+
+    async def _on_desktop_period_confirm(self, event) -> None:
+        """Install the destination underlay, then release Flet's drag lock."""
         direction = getattr(event, "direction", None)
         if direction == ft.DismissDirection.START_TO_END:
             delta = -1
         elif direction == ft.DismissDirection.END_TO_START:
             delta = 1
         else:
-            return False
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
         if self._period_transition_active or self._pending_desktop_delta is not None:
-            return False
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
         if not self._apply_period_delta(delta):
-            return False
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
 
         self._period_transition_active = True
         self._pending_desktop_delta = delta
@@ -924,7 +799,10 @@ class CalendarView(ft.Container):
             )
         except (AttributeError, RuntimeError, TypeError):
             pass
-        return True
+        # Flet 0.86+ does not use the event handler's return value here. The
+        # pending drag remains locked until confirm_dismiss() is invoked on
+        # the exact Dismissible that raised the event.
+        await self._resolve_desktop_period_dismiss(event, True)
 
     async def _on_previous_period(self, _event) -> None:
         await self._request_period_navigation(-1)

@@ -5,7 +5,7 @@ import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from types import SimpleNamespace
 import pytest
 import flet as ft
@@ -123,11 +123,14 @@ def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     old_underlay = view._desktop_period_underlay.content
-    event = SimpleNamespace(direction=ft.DismissDirection.END_TO_START)
+    source = SimpleNamespace(confirm_dismiss=AsyncMock())
+    event = SimpleNamespace(
+        direction=ft.DismissDirection.END_TO_START,
+        control=source,
+    )
 
-    confirmed = asyncio.run(view._on_desktop_period_confirm(event))
+    asyncio.run(view._on_desktop_period_confirm(event))
 
-    assert confirmed is True
     assert (view._year, view._month) == (2026, 9)
     assert view._month_label.value == "Tháng 9 2026"
     assert view._desktop_period_underlay.content is not old_underlay
@@ -138,12 +141,50 @@ def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
         view._desktop_period_underlay,
         view._detail_panel,
     )
+    source.confirm_dismiss.assert_awaited_once_with(True)
 
     asyncio.run(view._on_desktop_period_dismiss(event))
 
     assert (view._year, view._month) == (2026, 9)
     assert view._pending_desktop_delta is None
     assert view._period_transition_active is False
+
+
+def test_confirm_dismiss_resolves_each_replacement_before_next_drag():
+    page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
+    view = CalendarView(page)
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+
+    async def swipe_next_twice():
+        for expected_month in (9, 10):
+            source = SimpleNamespace(confirm_dismiss=AsyncMock())
+            event = SimpleNamespace(
+                direction=ft.DismissDirection.END_TO_START,
+                control=source,
+            )
+            await view._on_desktop_period_confirm(event)
+            source.confirm_dismiss.assert_awaited_once_with(True)
+            await view._on_desktop_period_dismiss(event)
+            assert view._month == expected_month
+            assert view._pending_desktop_delta is None
+            assert view._period_transition_active is False
+
+    asyncio.run(swipe_next_twice())
+
+
+def test_rejected_confirm_explicitly_releases_flet_drag_lock():
+    view = CalendarView(_page_stub())
+    view._period_transition_active = True
+    source = SimpleNamespace(confirm_dismiss=AsyncMock())
+    event = SimpleNamespace(
+        direction=ft.DismissDirection.END_TO_START,
+        control=source,
+    )
+
+    asyncio.run(view._on_desktop_period_confirm(event))
+
+    source.confirm_dismiss.assert_awaited_once_with(False)
 
 
 def test_native_desktop_dismiss_reuses_two_adjacent_period_pages():
@@ -223,7 +264,13 @@ def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
     assert view._period_dismissible.background is not strip.controls[0]
     assert view._period_dismissible.secondary_background is not strip.controls[2]
     assert len(view._period_background_pages) == 2
-    assert all(not page.day_cells for page in view._period_background_pages)
+    assert all(page.day_cells for page in view._period_background_pages)
+    assert all(
+        cell.on_click is None and cell.animate is None
+        for page in view._period_background_pages
+        for row in page.day_cells
+        for cell in row
+    )
     assert view._desktop_period_stage.controls[0].content is view._grid
     assert view._desktop_period_stage.controls[1] is view._desktop_period_slot
     assert view._desktop_period_slot.controls == [view._period_dismissible]
@@ -299,10 +346,8 @@ def test_native_desktop_drag_uses_flutter_snap_without_python_frame_events():
         ft.DismissDirection.START_TO_END: 0.14,
         ft.DismissDirection.END_TO_START: 0.14,
     }
+    assert dismissible.resize_duration == ft.Duration(milliseconds=1)
     assert dismissible.movement_duration == ft.Duration(milliseconds=30)
-    # None bypasses Flutter's SizeTransition entirely. The destination
-    # background remains painted until Python installs the next keyed strip.
-    assert dismissible.resize_duration is None
     assert view._detail_panel is not view._period_surface
 
 
