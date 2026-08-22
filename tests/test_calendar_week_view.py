@@ -123,13 +123,15 @@ def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     old_underlay = view._desktop_period_underlay.content
-    source = SimpleNamespace(confirm_dismiss=AsyncMock())
+    source = view._period_dismissible
     event = SimpleNamespace(
         direction=ft.DismissDirection.END_TO_START,
         control=source,
     )
 
-    asyncio.run(view._on_desktop_period_confirm(event))
+    confirm_dismiss = AsyncMock()
+    with patch.object(ft.Dismissible, "confirm_dismiss", confirm_dismiss):
+        asyncio.run(view._on_desktop_period_confirm(event))
 
     assert (view._year, view._month) == (2026, 9)
     assert view._month_label.value == "Tháng 9 2026"
@@ -141,12 +143,13 @@ def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
         view._desktop_period_underlay,
         view._detail_panel,
     )
-    source.confirm_dismiss.assert_awaited_once_with(True)
+    confirm_dismiss.assert_awaited_once_with(True)
 
     asyncio.run(view._on_desktop_period_dismiss(event))
 
     assert (view._year, view._month) == (2026, 9)
     assert view._pending_desktop_delta is None
+    assert view._pending_desktop_control is None
     assert view._period_transition_active is False
 
 
@@ -158,16 +161,21 @@ def test_confirm_dismiss_resolves_each_replacement_before_next_drag():
 
     async def swipe_next_twice():
         for expected_month in (9, 10):
-            source = SimpleNamespace(confirm_dismiss=AsyncMock())
+            source = view._period_dismissible
             event = SimpleNamespace(
                 direction=ft.DismissDirection.END_TO_START,
                 control=source,
             )
-            await view._on_desktop_period_confirm(event)
-            source.confirm_dismiss.assert_awaited_once_with(True)
+            confirm_dismiss = AsyncMock()
+            with patch.object(
+                ft.Dismissible, "confirm_dismiss", confirm_dismiss
+            ):
+                await view._on_desktop_period_confirm(event)
+            confirm_dismiss.assert_awaited_once_with(True)
             await view._on_desktop_period_dismiss(event)
             assert view._month == expected_month
             assert view._pending_desktop_delta is None
+            assert view._pending_desktop_control is None
             assert view._period_transition_active is False
 
     asyncio.run(swipe_next_twice())
@@ -185,6 +193,92 @@ def test_rejected_confirm_explicitly_releases_flet_drag_lock():
     asyncio.run(view._on_desktop_period_confirm(event))
 
     source.confirm_dismiss.assert_awaited_once_with(False)
+
+
+def test_missing_dismiss_event_is_rearmed_by_bounded_recovery():
+    page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
+    view = CalendarView(page)
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    source = view._period_dismissible
+    event = SimpleNamespace(
+        direction=ft.DismissDirection.END_TO_START,
+        control=source,
+    )
+
+    with patch.object(ft.Dismissible, "confirm_dismiss", AsyncMock()):
+        asyncio.run(view._on_desktop_period_confirm(event))
+    with patch(
+        "gui.components.calendar_view.asyncio.sleep", new=AsyncMock()
+    ):
+        asyncio.run(view._recover_desktop_period_dismiss(source, 1))
+
+    assert (view._year, view._month) == (2026, 9)
+    assert view._period_dismissible is not source
+    assert view._pending_desktop_delta is None
+    assert view._pending_desktop_control is None
+    assert view._period_transition_active is False
+
+
+def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    stale_source = view._period_dismissible
+    view._pending_desktop_delta = 1
+    view._pending_desktop_control = stale_source
+    view._period_transition_active = True
+
+    view._toggle_view_mode("week")
+    view._toggle_view_mode("month")
+    current_source = view._period_dismissible
+
+    assert current_source is not stale_source
+    assert view._pending_desktop_delta is None
+    assert view._pending_desktop_control is None
+    asyncio.run(
+        view._on_desktop_period_dismiss(
+            SimpleNamespace(
+                direction=ft.DismissDirection.END_TO_START,
+                control=stale_source,
+            )
+        )
+    )
+    assert (view._year, view._month) == (2026, 8)
+    assert view._period_dismissible is current_source
+
+    event = SimpleNamespace(
+        direction=ft.DismissDirection.END_TO_START,
+        control=current_source,
+    )
+    confirm_dismiss = AsyncMock()
+    with patch.object(ft.Dismissible, "confirm_dismiss", confirm_dismiss):
+        asyncio.run(view._on_desktop_period_confirm(event))
+    confirm_dismiss.assert_awaited_once_with(True)
+    asyncio.run(view._on_desktop_period_dismiss(event))
+    assert (view._year, view._month) == (2026, 9)
+
+
+def test_current_swipe_heals_orphaned_pending_control():
+    view = CalendarView(_page_stub())
+    view._year, view._month = 2026, 8
+    view._seed_period_pages()
+    current_source = view._period_dismissible
+    view._pending_desktop_delta = -1
+    view._pending_desktop_control = SimpleNamespace()
+    view._period_transition_active = True
+    event = SimpleNamespace(
+        direction=ft.DismissDirection.END_TO_START,
+        control=current_source,
+    )
+    confirm_dismiss = AsyncMock()
+
+    with patch.object(ft.Dismissible, "confirm_dismiss", confirm_dismiss):
+        asyncio.run(view._on_desktop_period_confirm(event))
+
+    confirm_dismiss.assert_awaited_once_with(True)
+    assert (view._year, view._month) == (2026, 9)
+    assert view._pending_desktop_control is current_source
 
 
 def test_native_desktop_dismiss_reuses_two_adjacent_period_pages():

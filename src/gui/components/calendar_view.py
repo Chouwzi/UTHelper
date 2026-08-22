@@ -18,6 +18,7 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+import asyncio
 import calendar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -328,6 +329,7 @@ class CalendarView(ft.Container):
         self._period_request_active = False
         self._pager_recentering = False
         self._pending_desktop_delta: int | None = None
+        self._pending_desktop_control: ft.Dismissible | None = None
         self._native_desktop_period_drag = platform_utils.UI_IS_DESKTOP
         self._period_pager = ft.PageView(
             controls=[],
@@ -675,6 +677,11 @@ class CalendarView(ft.Container):
         self._period_transition_active = False
         self._period_request_active = False
         self._pager_recentering = False
+        # A mode switch can replace a Dismissible before its delayed dismiss
+        # event reaches Python. Do not let that old transaction reject the
+        # first swipe in the newly mounted mode.
+        self._pending_desktop_delta = None
+        self._pending_desktop_control = None
         height = 316 if self._view_mode == "month" else 88
         self._period_pager.height = height
         self._desktop_period_host.height = height
@@ -725,6 +732,11 @@ class CalendarView(ft.Container):
             self._period_transition_active = False
 
     async def _on_desktop_period_dismiss(self, event) -> None:
+        source = getattr(event, "control", None) or self._period_dismissible
+        if source is not self._period_dismissible:
+            # Late event from a Dismissible replaced by another swipe or mode
+            # switch. Its logical delta was already handled (or cancelled).
+            return
         direction = getattr(event, "direction", None)
         if direction == ft.DismissDirection.START_TO_END:
             delta = -1
@@ -732,30 +744,65 @@ class CalendarView(ft.Container):
             delta = 1
         else:
             return
-        pending_delta = self._pending_desktop_delta
-        if self._period_transition_active and pending_delta is None:
-            return
-        if pending_delta is not None and pending_delta != delta:
-            self._pending_desktop_delta = None
-            self._period_transition_active = False
-            return
-        if pending_delta is None:
+        self._finish_desktop_period_dismiss(source, delta)
+
+    def _finish_desktop_period_dismiss(
+        self, source: ft.Dismissible, delta: int
+    ) -> bool:
+        """Idempotently replace one dismissed strip and release its state."""
+        if source is not self._period_dismissible or delta not in (-1, 1):
+            return False
+
+        pending_matches = (
+            self._pending_desktop_control is source
+            and self._pending_desktop_delta == delta
+        )
+        if self._pending_desktop_control is source and not pending_matches:
+            # The source is definitely being removed, so it still needs a
+            # replacement. Keep the already-rendered logical period rather
+            # than applying a contradictory second delta.
+            reuse_delta = None
+        elif pending_matches:
+            reuse_delta = delta
+        else:
+            # Compatibility path for direct on_dismiss delivery without a
+            # preceding confirmation event.
             self._period_transition_active = True
+            if not self._apply_period_delta(delta):
+                reuse_delta = None
+            else:
+                reuse_delta = delta
         try:
-            if pending_delta is None:
-                self._apply_period_delta(delta)
             # Flutter removes a dismissed control, so replace it with a new
             # keyed instance. Reuse the two still-relevant period pages and
             # build only the newly exposed far edge.
-            self._seed_period_pages(delta=delta)
+            self._seed_period_pages(delta=reuse_delta)
             if self._view_mode == "month":
                 self._render_month(update_page=False)
             else:
                 self._render_week(update_page=False)
             self._update_period_surface()
         finally:
-            self._pending_desktop_delta = None
+            if self._pending_desktop_control is source:
+                self._pending_desktop_delta = None
+                self._pending_desktop_control = None
             self._period_transition_active = False
+        return True
+
+    async def _recover_desktop_period_dismiss(
+        self, source: ft.Dismissible, delta: int
+    ) -> None:
+        """Re-arm a strip if Flutter omits/delays its dismiss event."""
+        # movement_duration (30 ms) + resize_duration (1 ms) should normally
+        # emit on_dismiss first. Two extra display frames cover bridge jitter
+        # without introducing the old half-second dead interval.
+        await asyncio.sleep(0.065)
+        if (
+            source is self._period_dismissible
+            and self._pending_desktop_control is source
+            and self._pending_desktop_delta == delta
+        ):
+            self._finish_desktop_period_dismiss(source, delta)
 
     async def _resolve_desktop_period_dismiss(self, event, dismiss: bool) -> None:
         """Resolve Flet's pending Dismissible decision on its source control."""
@@ -765,6 +812,20 @@ class CalendarView(ft.Container):
 
     async def _on_desktop_period_confirm(self, event) -> None:
         """Install the destination underlay, then release Flet's drag lock."""
+        source = getattr(event, "control", None) or self._period_dismissible
+        if source is not self._period_dismissible:
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
+        if (
+            self._pending_desktop_control is not None
+            and self._pending_desktop_control is not source
+        ):
+            # Heal an orphaned transaction defensively. A pending decision is
+            # meaningful only for the control that created it; it must never
+            # veto a swipe on the current replacement.
+            self._pending_desktop_delta = None
+            self._pending_desktop_control = None
+            self._period_transition_active = False
         direction = getattr(event, "direction", None)
         if direction == ft.DismissDirection.START_TO_END:
             delta = -1
@@ -782,6 +843,7 @@ class CalendarView(ft.Container):
 
         self._period_transition_active = True
         self._pending_desktop_delta = delta
+        self._pending_desktop_control = source
         if self._view_mode == "month":
             self._render_month(update_page=False)
             target_underlay = self._build_month_period_preview(
@@ -803,6 +865,12 @@ class CalendarView(ft.Container):
         # pending drag remains locked until confirm_dismiss() is invoked on
         # the exact Dismissible that raised the event.
         await self._resolve_desktop_period_dismiss(event, True)
+        try:
+            self._page_ref.run_task(
+                self._recover_desktop_period_dismiss, source, delta
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            pass
 
     async def _on_previous_period(self, _event) -> None:
         await self._request_period_navigation(-1)
