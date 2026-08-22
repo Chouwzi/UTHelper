@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 _SCROLL_TO_TOP_SHOW_OFFSET = 240.0
 _SCROLL_TO_TOP_HIDE_OFFSET = 96.0
 _SCROLL_TO_TOP_DURATION_MS = 300
+_DASHBOARD_SCROLL_EVENT_INTERVAL_MS = 32
 
 try:
     from core.version import APP_VERSION as _APP_VERSION
@@ -818,9 +819,11 @@ class AppController:
             # is the smallest reliable trade-off for exact restore + smooth top.
             build_controls_on_demand=False,
             auto_scroll=False,
-            # Deliver the final edge/update notification as well. The handler
-            # only updates Flutter when the overlay crosses a visibility edge.
-            scroll_interval=0,
+            # Zero disables throttling and can flood the Python event queue
+            # during a fling, delaying a subsequent button click by hundreds
+            # of milliseconds. Two display frames stay visually responsive
+            # while bounding bridge work on low-end desktop/mobile devices.
+            scroll_interval=_DASHBOARD_SCROLL_EVENT_INTERVAL_MS,
             on_scroll=self._on_dashboard_scroll,
         )
         self._scroll_to_top_button = ft.Container(
@@ -1979,6 +1982,11 @@ class AppController:
         if offset <= 0.5:
             offset = 0.0
         self._dashboard_scroll_offset = offset
+        if getattr(self, "_scroll_to_top_in_progress", False):
+            # Native animateTo() also emits scroll notifications. The click
+            # path already hid the button; do not re-show/repaint it while the
+            # animation is moving through offsets above the show threshold.
+            return
         if self._scroll_to_top_visible:
             should_show = offset > _SCROLL_TO_TOP_HIDE_OFFSET
         else:
@@ -1987,7 +1995,10 @@ class AppController:
         # Hysteresis plus update-on-transition avoids a page update for every
         # scroll event, which matters on low-end desktop and mobile devices.
         if self._set_scroll_to_top_visible(should_show):
-            self.page.update()
+            try:
+                self._scroll_to_top_button.update()
+            except RuntimeError:
+                logger.debug("Scroll button unmounted during visibility update")
 
     async def _scroll_dashboard_to_top(self, _event=None) -> None:
         """Fade locally first, then issue native scrolling in the same tick."""

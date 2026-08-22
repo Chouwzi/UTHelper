@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import flet as ft
 
@@ -32,7 +33,7 @@ def _scroll_controller(*, offset=0.0, button_visible=False):
         offset=ft.Offset(0, 0 if button_visible else 0.3),
         scale=1.0 if button_visible else 0.84,
         ignore_interactions=not button_visible,
-        update=lambda: None,
+        update=MagicMock(),
     )
     return controller
 
@@ -48,7 +49,7 @@ def test_dashboard_list_is_scrollable_by_api_and_button_is_a_positioned_overlay(
 
     assert controller.cards_column.build_controls_on_demand is False
     assert controller.cards_column.auto_scroll is False
-    assert controller.cards_column.scroll_interval == 0
+    assert controller.cards_column.scroll_interval == 32
     assert controller.cards_column.on_scroll == controller._on_dashboard_scroll
     assert controller._scroll_to_top_button not in controller.cards_column.controls
     assert controller._scroll_to_top_button.right == 12
@@ -75,14 +76,16 @@ def test_scroll_button_uses_hysteresis_and_does_not_repaint_every_scroll_event()
     assert controller._scroll_to_top_button.offset == ft.Offset(0, 0)
     assert controller._scroll_to_top_button.scale == 1.0
     assert controller._scroll_to_top_button.ignore_interactions is False
-    assert controller.page.update_count == 1
+    assert controller.page.update_count == 0
+    assert controller._scroll_to_top_button.update.call_count == 1
 
     controller._on_dashboard_scroll(SimpleNamespace(pixels=0))
 
     assert controller._scroll_to_top_visible is False
     assert controller._scroll_to_top_button.opacity == 0.0
     assert controller._scroll_to_top_button.ignore_interactions is True
-    assert controller.page.update_count == 2
+    assert controller.page.update_count == 0
+    assert controller._scroll_to_top_button.update.call_count == 2
 
 
 def test_manual_overscroll_at_start_hides_the_scroll_button():
@@ -95,7 +98,21 @@ def test_manual_overscroll_at_start_hides_the_scroll_button():
     assert controller._dashboard_scroll_offset == 0
     assert controller._scroll_to_top_visible is False
     assert controller._scroll_to_top_button.ignore_interactions is True
-    assert controller.page.update_count == 1
+    assert controller.page.update_count == 0
+    controller._scroll_to_top_button.update.assert_called_once_with()
+
+
+def test_programmatic_scroll_events_do_not_reopen_or_repaint_button():
+    controller = _scroll_controller(offset=840, button_visible=False)
+    controller._scroll_to_top_in_progress = True
+
+    controller._on_dashboard_scroll(SimpleNamespace(pixels=620))
+
+    assert controller._dashboard_scroll_offset == 620
+    assert controller._scroll_to_top_visible is False
+    assert controller._scroll_to_top_button.opacity == 0.0
+    controller._scroll_to_top_button.update.assert_not_called()
+    assert controller.page.update_count == 0
 
 
 def test_scroll_to_top_hides_locally_before_native_scroll_and_skips_page_rebuild():
