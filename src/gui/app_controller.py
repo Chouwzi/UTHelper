@@ -729,6 +729,14 @@ class AppController:
             popup_width=340,
             option_max_lines=2,
         )
+        if not platform_utils.UI_IS_MOBILE:
+            for menu in (
+                self.urgency_filter_menu,
+                self.type_filter_menu,
+                self.course_filter_menu,
+            ):
+                menu.on_desktop_toggle = self._toggle_desktop_filter_menu
+                menu.on_desktop_dismiss = self._dismiss_desktop_filter_menu
 
         self.search_field = ft.TextField(
             hint_text="Tìm hoạt động hoặc môn học",
@@ -750,26 +758,38 @@ class AppController:
             ft.Icons.CALENDAR_MONTH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Lịch",
-            on_click=lambda e: self._safe_run_task(self._toggle_calendar),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._toggle_calendar
+            ),
         )
         self.refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Làm mới",
-            on_click=lambda e: self._safe_run_task(self._load_data_async),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._load_data_async
+            ),
         )
         self.settings_btn = ft.IconButton(
             ft.Icons.SETTINGS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Cài đặt",
-            on_click=lambda e: self._safe_run_task(self._show_settings),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._show_settings
+            ),
         )
         self.grades_btn = ft.IconButton(
             ft.Icons.INSIGHTS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Bảng điểm",
-            on_click=lambda e: self._safe_run_task(self._toggle_grades),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._toggle_grades
+            ),
         )
+
+    def _run_dashboard_header_action(self, handler) -> None:
+        self._dismiss_desktop_filter_menu()
+        self._safe_run_task(handler)
 
     def _init_banner_and_states(self):
         self._update_icon = ft.Icon(
@@ -915,6 +935,7 @@ class AppController:
 
         header = self._header_container
 
+
         self._filter_container = ft.Container(
             content=ft.Column(
                 controls=[
@@ -988,7 +1009,67 @@ class AppController:
             _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
             _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
 
-        main_stack = ft.Stack(controls=[self.dashboard], expand=True)
+        main_stack_controls = [self.dashboard]
+        overlays = []
+        if not platform_utils.UI_IS_MOBILE:
+            self._active_desktop_filter_menu = None
+            self._desktop_filter_top_dismiss_layer = ft.Container(
+                visible=False,
+                left=0,
+                right=180,
+                top=0,
+                height=0,
+                bgcolor=ft.Colors.with_opacity(0.001, C.BG),
+                on_click=lambda _event: self._dismiss_desktop_filter_menu(),
+            )
+            self._desktop_filter_upper_body_dismiss_layer = ft.Container(
+                visible=False,
+                left=0,
+                right=0,
+                top=58,
+                height=0,
+                bgcolor=ft.Colors.with_opacity(0.001, C.BG),
+                on_click=lambda _event: self._dismiss_desktop_filter_menu(),
+            )
+            self._desktop_filter_dismiss_layer = ft.Container(
+                visible=False,
+                left=0,
+                right=0,
+                top=0,
+                bottom=0,
+                bgcolor=ft.Colors.with_opacity(0.001, C.BG),
+                on_click=lambda _event: self._dismiss_desktop_filter_menu(),
+            )
+            self._desktop_filter_popup_host = ft.Container(
+                visible=True,
+                opacity=0,
+                scale=0.96,
+                offset=ft.Offset(0, -0.025),
+                animate_opacity=ft.Animation(
+                    180, ft.AnimationCurve.EASE_OUT_CUBIC
+                ),
+                animate_scale=ft.Animation(
+                    180, ft.AnimationCurve.EASE_OUT_CUBIC
+                ),
+                animate_offset=ft.Animation(
+                    180, ft.AnimationCurve.EASE_OUT_CUBIC
+                ),
+                ignore_interactions=True,
+                left=0,
+                top=0,
+            )
+            overlays = [
+                self._desktop_filter_top_dismiss_layer,
+                self._desktop_filter_upper_body_dismiss_layer,
+                self._desktop_filter_dismiss_layer,
+                self._desktop_filter_popup_host,
+            ]
+            main_stack_controls.extend(overlays)
+        main_stack = ft.Stack(
+            controls=main_stack_controls,
+            expand=True,
+            clip_behavior=ft.ClipBehavior.NONE,
+        )
         self.view_manager = ViewManager(
             self.page,
             self.dashboard,
@@ -998,6 +1079,7 @@ class AppController:
             self.grade_overview_view,
             self,
             view_host=main_stack,
+            overlays=overlays,
         )
         self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
@@ -1077,6 +1159,126 @@ class AppController:
             spacing=6,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+
+    def _toggle_desktop_filter_menu(self, menu, event) -> None:
+        """Atomically replace the active popup; pointer hover never calls this."""
+        active = getattr(self, "_active_desktop_filter_menu", None)
+        if active is menu:
+            self._dismiss_desktop_filter_menu(menu)
+            return
+
+        opening_from_closed = active is None
+        if active is not None:
+            active._set_expanded(False)
+
+        global_position = getattr(event, "global_position", None)
+        local_position = getattr(event, "local_position", None)
+        if global_position is not None and local_position is not None:
+            anchor_left = float(global_position.x - local_position.x)
+            anchor_bottom = float(
+                global_position.y - local_position.y + menu.trigger.height
+            )
+        else:
+            # Event coordinates are always present for real TapEvent payloads.
+            # This fallback keeps keyboard/test invocation deterministic.
+            anchor_left = 8.0
+            anchor_bottom = 160.0
+
+        header_height = float(
+            getattr(getattr(self, "_window_header", None), "height", 34) or 34
+        )
+        viewport_width = float(getattr(self.page, "width", 420) or 420)
+        popup_width = float(menu.popup_width)
+        popup_left = min(
+            max(8.0, anchor_left),
+            max(8.0, viewport_width - popup_width - 8.0),
+        )
+        popup_top = max(0.0, anchor_bottom - header_height)
+
+        self._active_desktop_filter_menu = menu
+        menu._set_expanded(True)
+        self._desktop_filter_popup_host.content = menu.popup_panel
+        self._desktop_filter_popup_host.left = popup_left
+        self._desktop_filter_popup_host.top = popup_top
+        self._desktop_filter_popup_host.ignore_interactions = False
+        if not opening_from_closed:
+            self._desktop_filter_popup_host.opacity = 1
+            self._desktop_filter_popup_host.scale = 1
+            self._desktop_filter_popup_host.offset = ft.Offset(0, 0)
+        # Keep the three triggers uncovered so another explicit press reaches
+        # them. Two dismiss regions protect everything above and below the row.
+        filter_top = max(0.0, popup_top - float(menu.trigger.height or 40))
+        header_region_height = min(filter_top, 58.0)
+        self._desktop_filter_top_dismiss_layer.height = header_region_height
+        self._desktop_filter_top_dismiss_layer.visible = header_region_height > 0
+        upper_body_height = max(0.0, filter_top - 58.0)
+        self._desktop_filter_upper_body_dismiss_layer.height = upper_body_height
+        self._desktop_filter_upper_body_dismiss_layer.visible = (
+            upper_body_height > 0
+        )
+        self._desktop_filter_dismiss_layer.top = popup_top
+        self._desktop_filter_dismiss_layer.visible = True
+        self.page.update()
+        if opening_from_closed:
+            self._safe_run_task(self._animate_desktop_filter_open, menu)
+
+    async def _animate_desktop_filter_open(self, menu) -> None:
+        # The old PopupMenuButton painted a closed frame before its 180 ms
+        # transition. Preserve that two-frame contract for the custom overlay.
+        await asyncio.sleep(0.016)
+        if getattr(self, "_active_desktop_filter_menu", None) is not menu:
+            return
+        host = self._desktop_filter_popup_host
+        host.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+        host.animate_scale = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+        host.animate_offset = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+        host.opacity = 1
+        host.scale = 1
+        host.offset = ft.Offset(0, 0)
+        self.page.update()
+
+    def _dismiss_desktop_filter_menu(self, menu=None) -> None:
+        active = getattr(self, "_active_desktop_filter_menu", None)
+        if menu is not None and active is not menu:
+            return
+        if active is not None:
+            active._set_expanded(False)
+        self._active_desktop_filter_menu = None
+        popup_host = getattr(self, "_desktop_filter_popup_host", None)
+        top_dismiss_layer = getattr(
+            self, "_desktop_filter_top_dismiss_layer", None
+        )
+        upper_body_dismiss_layer = getattr(
+            self, "_desktop_filter_upper_body_dismiss_layer", None
+        )
+        dismiss_layer = getattr(self, "_desktop_filter_dismiss_layer", None)
+        if popup_host is not None:
+            popup_host.animate_opacity = ft.Animation(
+                140, ft.AnimationCurve.EASE_IN_CUBIC
+            )
+            popup_host.animate_scale = ft.Animation(
+                140, ft.AnimationCurve.EASE_IN_CUBIC
+            )
+            popup_host.animate_offset = ft.Animation(
+                140, ft.AnimationCurve.EASE_IN_CUBIC
+            )
+            popup_host.opacity = 0
+            popup_host.scale = 0.96
+            popup_host.offset = ft.Offset(0, -0.025)
+            popup_host.ignore_interactions = True
+        if top_dismiss_layer is not None:
+            top_dismiss_layer.visible = False
+        if upper_body_dismiss_layer is not None:
+            upper_body_dismiss_layer.visible = False
+        if dismiss_layer is not None:
+            dismiss_layer.visible = False
+        if (
+            popup_host is not None
+            or top_dismiss_layer is not None
+            or upper_body_dismiss_layer is not None
+            or dismiss_layer is not None
+        ):
+            self.page.update()
 
     def _start_skeleton_shimmer(self):
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
@@ -2621,12 +2823,10 @@ class AppController:
             except Exception:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-            
-            # 3. Làm mới UI của dashboard (cập nhật card status badge, đếm số bài đã nộp...)
             self._update_footer()
 
     def _show_detail(self, data: dict):
+        self._dismiss_desktop_filter_menu()
         self._safe_run_task(self._show_detail_async, data)
 
     async def _show_detail_async(self, data: dict):

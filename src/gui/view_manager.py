@@ -2,6 +2,7 @@ import asyncio
 import flet as ft
 from gui.core.theme import C
 
+
 class ViewManager:
     """Bộ quản lý chuyển đổi view và hiệu ứng transition trong ứng dụng."""
 
@@ -15,6 +16,7 @@ class ViewManager:
         grade_overview_view,
         controller,
         view_host=None,
+        overlays=None,
     ):
         self.page = page
         self.dashboard = dashboard
@@ -24,7 +26,16 @@ class ViewManager:
         self.grade_overview_view = grade_overview_view
         self.controller = controller
         self.view_host = view_host
+        self.overlays = tuple(overlays or ())
         self._settings_navigation_generation = 0
+
+    def _dismiss_menu_if_open(self) -> None:
+        dismiss = getattr(self.controller, "_dismiss_desktop_filter_menu", None)
+        if callable(dismiss):
+            try:
+                dismiss()
+            except Exception:
+                pass
 
     def _show_only(self, *views):
         """Keep only active views mounted in Flutter's control tree."""
@@ -33,6 +44,9 @@ class ViewManager:
             for view in views:
                 if not any(existing is view for existing in unique_views):
                     unique_views.append(view)
+            for overlay in self.overlays:
+                if not any(existing is overlay for existing in unique_views):
+                    unique_views.append(overlay)
             self.view_host.controls = unique_views
 
     def show_dashboard(self):
@@ -52,6 +66,7 @@ class ViewManager:
 
     def show_calendar(self, data_snapshot):
         """Cập nhật dữ liệu và hiển thị màn hình Lịch (Calendar)."""
+        self._dismiss_menu_if_open()
         self.dashboard.visible = False
         self.detail_view.visible = False
         self.settings_view.visible = False
@@ -82,6 +97,7 @@ class ViewManager:
 
     async def show_settings(self):
         """Tải các thiết lập hiện tại và chuyển sang màn hình Cấu hình (Settings)."""
+        self._dismiss_menu_if_open()
         self._settings_navigation_generation += 1
         generation = self._settings_navigation_generation
 
@@ -102,6 +118,7 @@ class ViewManager:
 
     def show_grades_loading(self):
         """Hiển thị màn hình xem điểm ở trạng thái đang tải dữ liệu (loading state)."""
+        self._dismiss_menu_if_open()
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.detail_view.visible = False
@@ -130,6 +147,7 @@ class ViewManager:
 
     def show_detail_loading(self, data):
         """Chuyển sang màn hình chi tiết bài tập ở trạng thái tải dữ liệu."""
+        self._dismiss_menu_if_open()
         # Retain the one origin view behind opaque Detail. Removing a ListView
         # from Flutter destroys its native ScrollPosition and makes pixel-based
         # remount restoration susceptible to layout timing drift.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from types import SimpleNamespace
 
 import flet as ft
 
@@ -36,7 +37,7 @@ def _options():
     ]
 
 
-def test_desktop_uses_anchored_popup_with_native_animation_and_checked_item():
+def test_desktop_uses_app_coordinated_popup_with_checked_item():
     menu = AdaptiveFilterMenu(
         page=_Page(),
         title="Mức độ",
@@ -47,11 +48,12 @@ def test_desktop_uses_anchored_popup_with_native_animation_and_checked_item():
     )
 
     assert isinstance(menu.control, ft.Semantics)
-    assert isinstance(menu.popup, ft.PopupMenuButton)
-    assert menu.popup.menu_position == ft.PopupMenuPosition.UNDER
-    assert menu.popup.popup_animation_style is not None
-    assert [item.height for item in menu.popup.items] == [48, 48, 48]
-    assert [item.checked for item in menu.popup.items] == [False, True, False]
+    assert isinstance(menu.popup_panel, ft.Container)
+    assert all(isinstance(item, ft.Container) for item in menu.desktop_items)
+    assert [item.height for item in menu.desktop_items] == [48, 48, 48]
+    assert [
+        item.content.controls[0].content.visible for item in menu.desktop_items
+    ] == [False, True, False]
 
 
 def test_filter_chevron_matches_schedule_disclosure_motion_on_desktop():
@@ -66,6 +68,51 @@ def test_filter_chevron_matches_schedule_disclosure_motion_on_desktop():
 
     assert menu.arrow.icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
     assert menu.arrow.rotate.angle == 0
+
+
+def test_desktop_hover_never_opens_or_closes_filter_popup():
+    menu = AdaptiveFilterMenu(
+        page=_Page(),
+        title="Mức độ",
+        options=_options(),
+        selected_key="all",
+        on_select=lambda _key: None,
+        mobile=False,
+    )
+    toggles = []
+    menu.on_desktop_toggle = lambda target, event: toggles.append((target, event))
+
+    menu.trigger.on_hover(SimpleNamespace(data="true"))
+    menu.trigger.on_hover(SimpleNamespace(data="false"))
+
+    assert toggles == []
+    assert menu._expanded is False
+    assert menu.arrow.rotate.angle == 0
+
+
+def test_desktop_click_is_the_only_popup_toggle_event():
+    menu = AdaptiveFilterMenu(
+        page=_Page(),
+        title="Mức độ",
+        options=_options(),
+        selected_key="all",
+        on_select=lambda _key: None,
+        mobile=False,
+    )
+    event = SimpleNamespace(
+        global_position=ft.Offset(80, 160),
+        local_position=ft.Offset(20, 20),
+    )
+    toggles = []
+    menu.on_desktop_toggle = lambda target, received: toggles.append(
+        (target, received)
+    )
+
+    menu.trigger.on_tap_down(event)
+    assert toggles == []
+    menu.trigger.on_click(SimpleNamespace())
+
+    assert toggles == [(menu, event)]
 
 
 def test_flexible_trigger_fills_the_width_allocated_by_filter_row():
@@ -83,13 +130,13 @@ def test_flexible_trigger_fills_the_width_allocated_by_filter_row():
     assert menu.trigger.expand is True
     assert menu.label.expand is True
     assert menu.trigger.width is None
-    assert menu.popup.size_constraints.max_width == 340
-    menu.popup.on_open(None)
+    assert menu.popup_panel.width == 340
+    menu._set_expanded(True)
     assert menu.arrow.rotate.angle == math.pi / 2
-    assert menu.control.expanded is True
-    menu.popup.on_cancel(None)
+    assert menu.semantics.expanded is True
+    menu._set_expanded(False)
     assert menu.arrow.rotate.angle == 0
-    assert menu.control.expanded is False
+    assert menu.semantics.expanded is False
 
 
 def test_trigger_avoids_flet_double_padding_text_clip_regression():
@@ -110,7 +157,7 @@ def test_trigger_avoids_flet_double_padding_text_clip_regression():
     assert menu.trigger.on_hover is not None
     assert menu.trigger.animate is None
     assert menu.arrow.animate_rotation is not None
-    assert menu.popup.popup_animation_style is not None
+    assert menu.popup_panel.shadow is not None
 
 
 def test_trigger_exposes_filter_and_selection_to_accessibility():
@@ -123,9 +170,9 @@ def test_trigger_exposes_filter_and_selection_to_accessibility():
         mobile=False,
     )
 
-    assert menu.control.button is True
-    assert menu.control.label == "Loại hoạt động: An toàn"
-    assert menu.control.on_tap_hint_text == "Mở bộ lọc Loại hoạt động"
+    assert menu.semantics.button is True
+    assert menu.semantics.label == "Loại hoạt động: An toàn"
+    assert menu.semantics.on_tap_hint_text == "Mở bộ lọc Loại hoạt động"
 
 
 def test_selection_updates_label_checked_state_and_calls_once():
@@ -142,7 +189,9 @@ def test_selection_updates_label_checked_state_and_calls_once():
     assert menu.select("warning") is True
     assert menu.selected_key == "warning"
     assert menu.label.value == "Sắp tới"
-    assert [item.checked for item in menu.popup.items] == [False, True, False]
+    assert [
+        item.content.controls[0].content.visible for item in menu.desktop_items
+    ] == [False, True, False]
     assert selected == ["warning"]
     assert menu.select("warning") is False
     assert selected == ["warning"]
@@ -157,10 +206,10 @@ def test_option_update_reuses_controls_when_signature_is_unchanged():
         on_select=lambda _key: None,
         mobile=False,
     )
-    item_ids = [id(item) for item in menu.popup.items]
+    item_ids = [id(item) for item in menu.desktop_items]
 
     assert menu.set_options(_options()) is False
-    assert [id(item) for item in menu.popup.items] == item_ids
+    assert [id(item) for item in menu.desktop_items] == item_ids
 
 
 def test_option_update_changes_counts_without_replacing_selection():
@@ -180,8 +229,8 @@ def test_option_update_changes_counts_without_replacing_selection():
 
     assert menu.set_options(updated) is True
     assert menu.selected_key == "warning"
-    assert menu.popup.items[1].data == "warning"
-    assert "5" in menu.popup.items[1].content.controls[-1].value
+    assert menu.desktop_items[1].data == "warning"
+    assert "5" in menu.desktop_items[1].content.controls[-1].value
 
 
 def test_missing_dynamic_selection_falls_back_to_first_option_without_callback():
@@ -245,11 +294,11 @@ def test_course_variant_wraps_options_and_exposes_full_tooltip():
         option_max_lines=2,
     )
 
-    item = menu.popup.items[0]
-    assert menu.popup.bgcolor != menu.trigger.bgcolor
+    item = menu.desktop_items[0]
+    assert menu.popup_panel.bgcolor != menu.trigger.bgcolor
     assert item.height == 62
     assert item.tooltip == label
-    assert item.content.controls[1].max_lines == 2
+    assert item.content.controls[2].max_lines == 2
 
 
 def test_mobile_uses_scrollable_safe_bottom_sheet_with_large_rows():
@@ -263,7 +312,7 @@ def test_mobile_uses_scrollable_safe_bottom_sheet_with_large_rows():
         mobile=True,
     )
 
-    assert menu.popup is None
+    assert menu.popup_panel is None
     menu.open()
     sheet = page.dialogs[-1]
     assert isinstance(sheet, ft.BottomSheet)
@@ -281,10 +330,10 @@ def test_mobile_uses_scrollable_safe_bottom_sheet_with_large_rows():
         for tile in menu.mobile_tiles
     )
     assert menu.arrow.rotate.angle == math.pi / 2
-    assert menu.control.expanded is True
+    assert menu.semantics.expanded is True
     sheet.on_dismiss(None)
     assert menu.arrow.rotate.angle == 0
-    assert menu.control.expanded is False
+    assert menu.semantics.expanded is False
 
 
 def test_mobile_sheet_caps_long_option_lists_to_viewport_and_keeps_scroll():

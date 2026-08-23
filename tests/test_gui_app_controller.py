@@ -72,6 +72,119 @@ def test_dashboard_filter_row_distributes_removed_checkbox_space():
     assert [control.expand for control in row.controls] == [4, 4, 5]
 
 
+def test_desktop_filter_press_atomically_replaces_active_popup():
+    controller = AppController.__new__(AppController)
+    updates = []
+    controller.page = SimpleNamespace(width=420, update=lambda: updates.append(True))
+    controller._window_header = ft.Container(height=34)
+    controller._desktop_filter_popup_host = ft.Container(
+        visible=True,
+        opacity=0,
+        scale=0.96,
+        offset=ft.Offset(0, -0.025),
+        ignore_interactions=True,
+    )
+    controller._desktop_filter_top_dismiss_layer = ft.Container(visible=False)
+    controller._desktop_filter_upper_body_dismiss_layer = ft.Container(
+        visible=False
+    )
+    controller._desktop_filter_dismiss_layer = ft.Container(visible=False)
+    controller._active_desktop_filter_menu = None
+    first_states = []
+    second_states = []
+    first = SimpleNamespace(
+        trigger=ft.Container(height=40),
+        popup_width=224,
+        popup_panel=ft.Container(data="first"),
+        _set_expanded=first_states.append,
+    )
+    second = SimpleNamespace(
+        trigger=ft.Container(height=40),
+        popup_width=232,
+        popup_panel=ft.Container(data="second"),
+        _set_expanded=second_states.append,
+    )
+    first_event = SimpleNamespace(
+        global_position=ft.Offset(70, 165),
+        local_position=ft.Offset(20, 20),
+    )
+    second_event = SimpleNamespace(
+        global_position=ft.Offset(195, 165),
+        local_position=ft.Offset(50, 20),
+    )
+
+    controller._toggle_desktop_filter_menu(first, first_event)
+    assert controller._desktop_filter_popup_host.opacity == 0
+    asyncio.run(controller._animate_desktop_filter_open(first))
+    assert controller._desktop_filter_popup_host.opacity == 1
+    controller._toggle_desktop_filter_menu(second, second_event)
+
+    assert first_states == [True, False]
+    assert second_states == [True]
+    assert controller._active_desktop_filter_menu is second
+    assert controller._desktop_filter_popup_host.content is second.popup_panel
+    assert controller._desktop_filter_popup_host.visible is True
+    assert controller._desktop_filter_popup_host.opacity == 1
+    assert controller._desktop_filter_popup_host.ignore_interactions is False
+    assert controller._desktop_filter_top_dismiss_layer.visible is True
+    assert controller._desktop_filter_upper_body_dismiss_layer.visible is True
+    assert controller._desktop_filter_dismiss_layer.visible is True
+    assert len(updates) == 3
+
+
+def test_pressing_active_desktop_filter_closes_it_without_reopening():
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(width=420, update=lambda: None)
+    controller._window_header = ft.Container(height=34)
+    controller._desktop_filter_popup_host = ft.Container(
+        visible=True,
+        opacity=0,
+        scale=0.96,
+        offset=ft.Offset(0, -0.025),
+        ignore_interactions=True,
+    )
+    controller._desktop_filter_top_dismiss_layer = ft.Container(visible=False)
+    controller._desktop_filter_upper_body_dismiss_layer = ft.Container(
+        visible=False
+    )
+    controller._desktop_filter_dismiss_layer = ft.Container(visible=False)
+    states = []
+    menu = SimpleNamespace(
+        trigger=ft.Container(height=40),
+        popup_width=224,
+        popup_panel=ft.Container(),
+        _set_expanded=states.append,
+    )
+    event = SimpleNamespace(
+        global_position=ft.Offset(70, 165),
+        local_position=ft.Offset(20, 20),
+    )
+    controller._active_desktop_filter_menu = None
+
+    controller._toggle_desktop_filter_menu(menu, event)
+    controller._toggle_desktop_filter_menu(menu, event)
+
+    assert states == [True, False]
+    assert controller._active_desktop_filter_menu is None
+    assert controller._desktop_filter_popup_host.opacity == 0
+    assert controller._desktop_filter_popup_host.ignore_interactions is True
+    assert controller._desktop_filter_top_dismiss_layer.visible is False
+    assert controller._desktop_filter_upper_body_dismiss_layer.visible is False
+    assert controller._desktop_filter_dismiss_layer.visible is False
+
+
+def test_dashboard_header_action_closes_filter_and_runs_on_same_click():
+    controller = AppController.__new__(AppController)
+    calls = []
+    handler = object()
+    controller._dismiss_desktop_filter_menu = lambda: calls.append("dismiss")
+    controller._safe_run_task = lambda received: calls.append(received)
+
+    controller._run_dashboard_header_action(handler)
+
+    assert calls == ["dismiss", handler]
+
+
 class _FakePage:
     def __init__(self):
         self.update_count = 0

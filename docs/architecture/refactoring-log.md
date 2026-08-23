@@ -55,6 +55,7 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-07-01 | workspace hiện tại | Phase 1 hoàn tất | Bổ sung DTO cho `SubmissionWorkflow`, inject workflow factory từ `AppController`, bỏ fallback tự tạo implementation trong `DetailView` | Đạt 311 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 2/3 tiếp tục | Tách `RefreshCoordinator` khỏi `AppController`; chuyển một phần đọc Moodle trong `DataOrchestrator` qua `MoodleService`; thêm tests coordinator và boundary service | Đạt 317 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 2/3 hoàn tất | Hoàn thiện refresh coordinator cho dataset/status/post-refresh scheduling; chuyển `DataOrchestrator`, `GradeMonitor`, `SubmissionWorkflow` qua `MoodleService`; khóa architecture boundary raw WS | Đạt 322 passed, 22 skipped; `ruff check src tests` pass |
+| 2026-08-24 | `develop` | Bugfix Desktop Filter UI | Fix ViewManager làm mất các overlay layers (filter popup & dismiss) trên main stack sau khi chuyển view/mở detail card; dismiss popup đang mở khi điều hướng | Đạt 1547 passed, 25 skipped |
 
 ---
 

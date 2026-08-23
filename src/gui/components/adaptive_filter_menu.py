@@ -20,10 +20,9 @@ class FilterMenuOption:
 
 
 class AdaptiveFilterMenu:
-    """Single-select filter rendered as a desktop popup or mobile sheet."""
+    """Single-select filter rendered as a coordinated popup or mobile sheet."""
 
     _ARROW_MOTION_MS = 260
-    _POPUP_MOTION_MS = 180
     _EXPANDED_ARROW_ANGLE = math.pi / 2
     _SHEET_MAX_HEIGHT = 560
     _SHEET_MAX_VIEWPORT_RATIO = 0.72
@@ -58,6 +57,13 @@ class AdaptiveFilterMenu:
         self._expanded = False
         self._sheet: ft.BottomSheet | None = None
         self.mobile_tiles: list[ft.ListTile] = []
+        self.desktop_items: list[ft.Container] = []
+        self._desktop_item_parts: dict[str, tuple[ft.Icon, ft.Text]] = {}
+        self._last_desktop_tap_event = None
+        self.on_desktop_toggle: (
+            Callable[["AdaptiveFilterMenu", object], None] | None
+        ) = None
+        self.on_desktop_dismiss: Callable[["AdaptiveFilterMenu"], None] | None = None
 
         label_width = None
         if trigger_width is not None:
@@ -106,53 +112,44 @@ class AdaptiveFilterMenu:
             # arrow and popup motion remain independently animated.
             animate=None,
             on_hover=self._on_trigger_hover,
-            on_click=(lambda _event: self.open()) if mobile else None,
+            on_click=(lambda _event: self.open()) if mobile else self._on_desktop_click,
+            on_tap_down=None if mobile else self._on_desktop_tap_down,
         )
 
-        self.popup: ft.PopupMenuButton | None
-        if mobile:
-            self.popup = None
-            interactive_control = self.trigger
-        else:
-            self.popup = ft.PopupMenuButton(
-                content=self.trigger,
-                items=[],
-                menu_position=ft.PopupMenuPosition.UNDER,
-                shape=ft.RoundedRectangleBorder(
-                    radius=12,
-                    side=ft.BorderSide(1, C.BORDER),
-                ),
-                bgcolor=C.BG,
-                elevation=12,
-                shadow_color=C.SHADOW,
-                menu_padding=ft.Padding.symmetric(horizontal=6, vertical=6),
-                size_constraints=ft.BoxConstraints(
-                    min_width=popup_width,
-                    max_width=popup_width,
-                    max_height=420,
-                ),
-                enable_feedback=True,
-                popup_animation_style=ft.AnimationStyle(
-                    duration=self._POPUP_MOTION_MS,
-                    reverse_duration=140,
-                    curve=ft.AnimationCurve.EASE_OUT_CUBIC,
-                    reverse_curve=ft.AnimationCurve.EASE_IN_CUBIC,
-                ),
-                on_open=lambda _event: self._set_expanded(True),
-                on_cancel=lambda _event: self._set_expanded(False),
-                on_select=lambda _event: self._set_expanded(False),
-            )
-            interactive_control = self.popup
-
-        self.control = ft.Semantics(
-            content=interactive_control,
+        self.semantics = ft.Semantics(
+            content=self.trigger,
             button=True,
             focusable=True,
             expanded=False,
             label=title,
             on_tap_hint_text=f"Mở bộ lọc {title}",
         )
+        self.control = self.semantics
+        self.popup_panel: ft.Container | None = None
+        if not mobile:
+            self.popup_panel = self._build_desktop_panel()
         self.set_options(options, notify=False)
+
+    def _build_desktop_panel(self) -> ft.Container:
+        return ft.Container(
+            content=ft.Column(
+                controls=[],
+                spacing=0,
+                tight=True,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            width=self.popup_width,
+            bgcolor=C.BG,
+            padding=ft.Padding.symmetric(horizontal=6, vertical=6),
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=12,
+            shadow=ft.BoxShadow(
+                blur_radius=20,
+                spread_radius=0,
+                color=C.SHADOW,
+                offset=ft.Offset(0, 8),
+            ),
+        )
 
     @staticmethod
     def _options_signature(options: tuple[FilterMenuOption, ...]) -> tuple:
@@ -187,12 +184,20 @@ class AdaptiveFilterMenu:
             if option.key != self.options[0].key
             else C.SURFACE
         )
-        self.control.label = f"{self.title}: {option.label}"
-        self.control.value = option.label
+        self.semantics.label = f"{self.title}: {option.label}"
+        self.semantics.value = option.label
 
-    def _build_popup_items(self) -> list[ft.PopupMenuItem]:
+    def _build_desktop_items(self) -> list[ft.Container]:
         items = []
+        self._desktop_item_parts = {}
         for option in self.options:
+            selected = option.key == self.selected_key
+            check = ft.Icon(
+                ft.Icons.CHECK_ROUNDED,
+                size=18,
+                color=option.color,
+                visible=selected,
+            )
             marker = (
                 ft.Icon(option.icon, size=17, color=option.color)
                 if option.icon is not None
@@ -204,39 +209,42 @@ class AdaptiveFilterMenu:
                 )
             )
             count_text = "" if option.count is None else str(max(0, option.count))
+            label = ft.Text(
+                option.label,
+                size=12,
+                color=C.TEXT_PRIMARY,
+                weight=(ft.FontWeight.W_600 if selected else ft.FontWeight.W_500),
+                max_lines=self.option_max_lines,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                expand=True,
+            )
             content = ft.Row(
                 [
-                    marker,
-                    ft.Text(
-                        option.label,
-                        size=12,
-                        color=C.TEXT_PRIMARY,
-                        weight=(
-                            ft.FontWeight.W_600
-                            if option.key == self.selected_key
-                            else ft.FontWeight.W_500
-                        ),
-                        max_lines=self.option_max_lines,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                        expand=True,
+                    ft.Container(
+                        content=check,
+                        width=20,
+                        alignment=ft.Alignment.CENTER,
                     ),
+                    marker,
+                    label,
                     ft.Text(count_text, size=11, color=C.TEXT_SECONDARY),
                 ],
                 spacing=10,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
-            items.append(
-                ft.PopupMenuItem(
-                    content=content,
-                    checked=option.key == self.selected_key,
-                    height=self.option_height,
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=4),
-                    mouse_cursor=ft.MouseCursor.CLICK,
-                    data=option.key,
-                    tooltip=option.label,
-                    on_click=lambda _event, key=option.key: self.select(key),
-                )
+            item = ft.Container(
+                content=content,
+                height=self.option_height,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+                border_radius=8,
+                ink=True,
+                data=option.key,
+                tooltip=option.label,
+                on_hover=self._on_desktop_item_hover,
+                on_click=lambda _event, key=option.key: self.select(key),
             )
+            items.append(item)
+            self._desktop_item_parts[option.key] = (check, label)
         return items
 
     def _build_mobile_tiles(self) -> list[ft.ListTile]:
@@ -374,9 +382,9 @@ class AdaptiveFilterMenu:
             angle=self._EXPANDED_ARROW_ANGLE if expanded else 0,
             alignment=ft.Alignment.CENTER,
         )
-        self.control.expanded = expanded
+        self.semantics.expanded = expanded
         self._safe_update(self.arrow)
-        self._safe_update(self.control)
+        self._safe_update(self.semantics)
 
     def _on_trigger_hover(self, event) -> None:
         hovered = str(getattr(event, "data", "false")).lower() == "true"
@@ -395,6 +403,24 @@ class AdaptiveFilterMenu:
             )
         self._safe_update(self.trigger)
 
+    def _on_desktop_tap_down(self, event) -> None:
+        self._last_desktop_tap_event = event
+
+    def _on_desktop_click(self, event) -> None:
+        """Toggle only on click; hover merely updates the trigger color."""
+        if self.on_desktop_toggle is not None:
+            anchor_event = self._last_desktop_tap_event or event
+            self._last_desktop_tap_event = None
+            self.on_desktop_toggle(self, anchor_event)
+
+    def _on_desktop_item_hover(self, event) -> None:
+        hovered = str(getattr(event, "data", "false")).lower() == "true"
+        item = getattr(event, "control", None)
+        if item is None:
+            return
+        item.bgcolor = C.SURFACE_HOVER if hovered else ft.Colors.TRANSPARENT
+        self._safe_update(item)
+
     def set_options(
         self, options: Iterable[FilterMenuOption], *, notify: bool = False
     ) -> bool:
@@ -412,8 +438,13 @@ class AdaptiveFilterMenu:
             if notify:
                 self.on_select(self.selected_key)
         self._sync_trigger()
-        if self.popup is not None:
-            self.popup.items = self._build_popup_items()
+        if self.popup_panel is not None:
+            self.desktop_items = self._build_desktop_items()
+            self.popup_panel.content.controls = self.desktop_items
+            self.popup_panel.height = min(
+                420,
+                12 + len(self.desktop_items) * self.option_height,
+            )
         if self._sheet is not None:
             self._sheet = self._build_sheet()
         return True
@@ -423,26 +454,36 @@ class AdaptiveFilterMenu:
 
     def set_selected(self, key: str, *, notify: bool = False) -> bool:
         if key == self.selected_key:
-            self._set_expanded(False)
+            self._dismiss_desktop_or_collapse()
             return False
         if key not in {option.key for option in self.options}:
             return False
         self.selected_key = key
         self._sync_trigger()
-        if self.popup is not None:
-            for item in self.popup.items:
-                item.checked = item.data == key
-                label = item.content.controls[1]
+        if self.popup_panel is not None:
+            for item_key, (check, label) in self._desktop_item_parts.items():
+                selected = item_key == key
+                check.visible = selected
                 label.weight = (
-                    ft.FontWeight.W_600 if item.data == key else ft.FontWeight.W_500
+                    ft.FontWeight.W_600 if selected else ft.FontWeight.W_500
                 )
-            self._safe_update(self.popup)
+            self._safe_update(self.popup_panel)
         if self._sheet is not None:
             self._sheet = self._build_sheet()
-        self._set_expanded(False)
+        self._dismiss_desktop_or_collapse()
         if notify:
             self.on_select(key)
         return True
+
+    def _dismiss_desktop_or_collapse(self) -> None:
+        if (
+            not self.mobile
+            and self._expanded
+            and self.on_desktop_dismiss is not None
+        ):
+            self.on_desktop_dismiss(self)
+            return
+        self._set_expanded(False)
 
     def _select_from_sheet(self, key: str) -> None:
         if key in {option.key for option in self.options}:
@@ -465,11 +506,14 @@ class AdaptiveFilterMenu:
     def refresh_theme(self, options: Iterable[FilterMenuOption] | None = None) -> None:
         self.arrow.color = C.TEXT_SECONDARY
         self.trigger.bgcolor = C.SURFACE
-        if self.popup is not None:
-            self.popup.bgcolor = C.BG
-            self.popup.shape = ft.RoundedRectangleBorder(
-                radius=12,
-                side=ft.BorderSide(1, C.BORDER),
+        if self.popup_panel is not None:
+            self.popup_panel.bgcolor = C.BG
+            self.popup_panel.border = ft.Border.all(1, C.BORDER)
+            self.popup_panel.shadow = ft.BoxShadow(
+                blur_radius=20,
+                spread_radius=0,
+                color=C.SHADOW,
+                offset=ft.Offset(0, 8),
             )
         if options is None:
             options = self.options
