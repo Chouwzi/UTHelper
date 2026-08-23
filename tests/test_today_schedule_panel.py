@@ -369,3 +369,52 @@ def test_refresh_theme_updates_an_open_schedule_detail_surface():
         )
     finally:
         apply_theme(original_theme)
+
+
+def test_close_surface_after_snackbar_shown_closes_exact_dialog():
+    class _RealDialogStackPage:
+        def __init__(self):
+            self.dialogs = []
+            self.closed_dialogs = []
+
+        def show_dialog(self, dialog):
+            dialog.open = True
+            self.dialogs.append(dialog)
+
+        def pop_dialog(self):
+            for dlg in reversed(self.dialogs):
+                if getattr(dlg, "open", False):
+                    dlg.open = False
+                    self.closed_dialogs.append(dlg)
+                    return dlg
+            return None
+
+    page = _RealDialogStackPage()
+    session = _session()
+    panel = TodaySchedulePanel(page=page, mobile=False, on_need_data=lambda: None)
+    panel.set_state(_state(sessions=(session,)))
+
+    # Step 1: Open schedule list
+    panel.open_schedule()
+    dialog = panel._surface
+    assert dialog.open is True
+
+    # Step 2: Open session detail from list
+    panel.open_detail(session, from_list=True)
+    assert panel.surface_open is True
+
+    # Step 3: Background refresh finishes and shows a SnackBar via show_dialog
+    snackbar = ft.SnackBar(content=ft.Text("Refresh done"))
+    page.show_dialog(snackbar)
+
+    # Step 4: User clicks Back to return to list
+    assert panel.handle_back() is True
+    assert panel.surface_open is True
+    assert panel._surface_mode == "list"
+
+    # Step 5: User clicks Close button in list
+    assert panel.close_surface() is True
+
+    # The actual schedule dialog must be closed!
+    assert dialog.open is False
+

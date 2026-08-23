@@ -1002,6 +1002,8 @@ class AppController:
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
+            page=self.page,
         )
 
         for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
@@ -2270,25 +2272,54 @@ class AppController:
         else:
             await self._show_grades()
 
-    async def _show_grades(self):
-        """Show grade overview panel and fetch data."""
+    async def _show_grades(self, force_refresh: bool = False):
+        """Show grade overview panel and load academic transcript/radar data."""
         self._diag_screen("grades")
         self._diag_breadcrumb("navigation", "succeeded", "user", screen="grades")
         self.view_manager.show_grades_loading()
 
-        # Fetch grades in background thread to avoid freezing UI
+        # Load academic radar data from daily cache / Portal in background thread
         try:
-            userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
-            if userid:
-                courses_grades, grade_items = await asyncio.to_thread(
-                    self.orchestrator.moodle_service.fetch_all_grades, userid
-                )
-                self.view_manager.show_grades_data(courses_grades or [], grade_items)
+            from core.academic_radar import AcademicGradeService
+            service = getattr(self, "_academic_grade_service", None)
+            if service is None:
+                service = AcademicGradeService()
+                self._academic_grade_service = service
+
+            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
+            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+
+            semesters = await asyncio.to_thread(
+                service.load_academic_data,
+                username=username,
+                password=password,
+                force_refresh=force_refresh,
+            )
+            if semesters:
+                profiles = service.get_radar_profiles(semesters)
+                self.view_manager.show_academic_radar_data(semesters, profiles)
             else:
-                self.view_manager.show_grades_data([], {})
+                # Fallback to Moodle grades if Portal returned no semesters
+                userid = await asyncio.to_thread(
+                    getattr(self.orchestrator, "_get_userid", lambda: None)
+                )
+                if userid:
+                    courses_grades, grade_items = await asyncio.to_thread(
+                        self.orchestrator.moodle_service.fetch_all_grades, userid
+                    )
+                    moodle_semesters = service.create_semester_from_moodle_grades(
+                        courses_grades or [], grade_items or {}
+                    )
+                    if moodle_semesters:
+                        profiles = service.get_radar_profiles(moodle_semesters)
+                        self.view_manager.show_academic_radar_data(moodle_semesters, profiles)
+                    else:
+                        self.view_manager.show_grades_data(courses_grades or [], grade_items or {})
+                else:
+                    self.view_manager.show_academic_radar_data([], [])
         except Exception as e:
-            logger.error("Grade fetch failed: %s", e)
-            self.view_manager.show_grades_data([], {})
+            logger.error("Academic grades fetch failed: %s", e)
+            self.view_manager.show_academic_radar_data([], [])
 
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
@@ -2478,15 +2509,19 @@ class AppController:
             bgcolor=C.SURFACE,
             duration=2500,
         )
-        try:
-            self.page.show_dialog(sb)
-        except (AttributeError, TypeError):
-            # Fallback for older Flet
-            overlay = getattr(self.page, "overlay", None)
-            if overlay is not None:
-                overlay.append(sb)
-                sb.open = True
+        overlay = getattr(self.page, "overlay", None)
+        if overlay is not None:
+            overlay.append(sb)
+            sb.open = True
+            try:
                 self.page.update()
+            except Exception:
+                pass
+        else:
+            try:
+                self.page.show_dialog(sb)
+            except (AttributeError, TypeError):
+                pass
 
     def _test_notification_base(self, mock_type="critical"):
         import random

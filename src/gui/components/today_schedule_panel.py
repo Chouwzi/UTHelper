@@ -571,12 +571,19 @@ class TodaySchedulePanel:
         return self._show_surface()
 
     def close_surface(self) -> bool:
-        if not self.surface_open:
+        if not self.surface_open and self._surface is None:
             return False
+        surface = self._surface
         page = self.page
         self._on_surface_dismissed()
-        if page is not None:
-            page.pop_dialog()
+        if surface is not None and getattr(surface, "open", False):
+            surface.open = False
+            self._safe_update(surface)
+        elif page is not None:
+            try:
+                page.pop_dialog()
+            except Exception:
+                pass
         return True
 
     def handle_back(self) -> bool:

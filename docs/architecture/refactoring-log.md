@@ -56,6 +56,8 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-07-01 | workspace hiện tại | Phase 2/3 tiếp tục | Tách `RefreshCoordinator` khỏi `AppController`; chuyển một phần đọc Moodle trong `DataOrchestrator` qua `MoodleService`; thêm tests coordinator và boundary service | Đạt 317 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 2/3 hoàn tất | Hoàn thiện refresh coordinator cho dataset/status/post-refresh scheduling; chuyển `DataOrchestrator`, `GradeMonitor`, `SubmissionWorkflow` qua `MoodleService`; khóa architecture boundary raw WS | Đạt 322 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-08-24 | `develop` | Bugfix Desktop Filter UI | Fix ViewManager làm mất các overlay layers (filter popup & dismiss) trên main stack sau khi chuyển view/mở detail card; dismiss popup đang mở khi điều hướng | Đạt 1547 passed, 25 skipped |
+| 2026-08-24 | `develop` | Bugfix Schedule Dialog Close | Fix `TodaySchedulePanel.close_surface` đóng trực tiếp instance dialog thay vì phụ thuộc `pop_dialog()` khi có SnackBar; chuyển SnackBar sang `page.overlay` để tránh chiếm slot modal dialog stack | Đạt 1549 passed, 25 skipped |
+| 2026-08-24 | `develop` | Feature Academic Radar | Triển khai hệ thống phân tích kết quả học tập Academic Radar 6 chỉ số (Tổng Lực, Nền Tảng, Bứt Phá, Giữ Nhịp, Về Đích, Trụ Vững), bộ chuẩn hóa dữ liệu Portal/Moodle, chính sách cache 1 lần/ngày, component Radar Canvas, Metric Detail Modal và thay thế toàn diện tab Bảng điểm | Đạt 1564 passed, 25 skipped |
 
 ---
 

@@ -555,3 +555,22 @@ def test_update_failure_explains_retry_in_banner_instead_of_stale_ready_copy():
     )
     assert controller._update_btn.content == "Thử lại"
     assert controller._update_btn.disabled is False
+
+
+def test_show_snackbar_uses_page_overlay_when_available():
+    controller = AppController.__new__(AppController)
+    overlay_controls = []
+    dialogs = []
+    page = SimpleNamespace(
+        overlay=overlay_controls,
+        show_dialog=dialogs.append,
+        update=lambda: None,
+    )
+    controller.page = page
+
+    controller._show_snackbar("Đã cập nhật dữ liệu")
+
+    assert len(overlay_controls) == 1
+    assert isinstance(overlay_controls[0], ft.SnackBar)
+    assert overlay_controls[0].open is True
+    assert dialogs == []

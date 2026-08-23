@@ -132,6 +132,11 @@ class ViewManager:
         self.grade_overview_view.update_grades(courses_grades, grade_items)
         self.page.update()
 
+    def show_academic_radar_data(self, semesters, profiles):
+        """Cập nhật dữ liệu hồ sơ học tập Academic Radar và danh sách học phần."""
+        self.grade_overview_view.update_academic_data(semesters, profiles)
+        self.page.update()
+
     async def close_grades(self):
         """Đóng màn hình điểm số và quay lại màn hình chính."""
         self.dashboard.opacity = 1.0
