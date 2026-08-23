@@ -20,11 +20,12 @@ def init_privacy_controls(view) -> None:
         color=C.TEXT_PRIMARY,
         bgcolor=C.BG,
         border_radius=10,
+        on_select=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
 
 
-def build_privacy_section(view) -> ft.Container:
-    """Render diagnostics choice and the read-only legal notice entry."""
+def build_privacy_section(view) -> ft.Control:
+    """Xây dựng nội dung chi tiết quyền riêng tư và chính sách dữ liệu."""
     terms_title = ft.Text(
         "Điều khoản sử dụng & quyền riêng tư",
         size=13,
@@ -69,12 +70,16 @@ def build_privacy_section(view) -> ft.Container:
     view._themed_texts.append(terms_title)
     view._hint_containers.append((terms_entry, terms_subtitle))
     view._terms_policy_entry = terms_entry
+
     return view._build_setting_group(
         "Quyền riêng tư",
         "Chẩn đoán và chính sách dữ liệu",
         [
+            view._make_themed_label("Chẩn đoán sự cố"),
             view._dd_crash_reporting_consent,
             view._build_hint("Chẩn đoán ẩn danh được bật mặc định; bạn có thể tắt bất cứ lúc nào."),
+            ft.Divider(height=16, color=C.BORDER),
+            view._make_themed_label("Chính sách & Pháp lý"),
             terms_entry,
         ],
         icon=ft.Icons.PRIVACY_TIP_OUTLINED,
