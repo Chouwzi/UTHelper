@@ -209,3 +209,86 @@ def test_app_controller_filter_overlay_available_after_navigating_tabs_and_detai
     assert popup_host.ignore_interactions is True
     assert dismiss_layer.visible is False
     assert popup_host in main_stack.controls
+
+
+def test_view_manager_with_tab_and_detail_switchers():
+    page = _FakePage()
+    dashboard = SimpleNamespace(visible=True, opacity=1.0)
+    detail = SimpleNamespace(
+        visible=False,
+        offset=None,
+        opacity=1.0,
+        show_loading=lambda _data: None,
+        update_detail=lambda _data: None,
+    )
+    calendar = SimpleNamespace(
+        visible=False,
+        show=lambda _data: None,
+        hide=lambda: None,
+        offset=None,
+        opacity=1.0,
+    )
+    settings = SimpleNamespace(
+        visible=False,
+        offset=None,
+        opacity=1.0,
+        load_current_settings=lambda: asyncio.sleep(0),
+        cancel_pending_load=lambda: None,
+    )
+    grades = SimpleNamespace(
+        visible=False,
+        show_loading=lambda: None,
+        hide=lambda: None,
+    )
+    controller = SimpleNamespace(
+        calendar_btn=SimpleNamespace(icon_color=None),
+        grades_btn=SimpleNamespace(icon_color=None),
+        _dismiss_desktop_filter_menu=lambda: None,
+    )
+    empty_detail = ft.Container(expand=True, ignore_interactions=True)
+    tab_switcher = ft.AnimatedSwitcher(content=dashboard)
+    detail_switcher = ft.AnimatedSwitcher(content=empty_detail)
+    main_stack = ft.Stack(controls=[tab_switcher, detail_switcher])
+
+    manager = ViewManager(
+        page=page,
+        dashboard=dashboard,
+        detail_view=detail,
+        settings_view=settings,
+        calendar_view=calendar,
+        grade_overview_view=grades,
+        controller=controller,
+        view_host=main_stack,
+        tab_switcher=tab_switcher,
+        detail_switcher=detail_switcher,
+        empty_detail=empty_detail,
+    )
+
+    # 1. Open and Close Calendar via tab_switcher
+    manager.show_calendar([])
+    assert tab_switcher.content is calendar
+    assert detail_switcher.content is empty_detail
+    asyncio.run(manager.close_calendar())
+    assert tab_switcher.content is dashboard
+    assert detail_switcher.content is empty_detail
+
+    # 2. Open and Close Settings via tab_switcher
+    asyncio.run(manager.show_settings())
+    assert tab_switcher.content is settings
+    asyncio.run(manager.close_settings())
+    assert tab_switcher.content is dashboard
+
+    # 3. Open Detail Card over Dashboard via detail_switcher without touching tab_switcher
+    manager.show_detail_loading({"id": "item-1"})
+    assert tab_switcher.content is dashboard  # Dashboard is still mounted in tab_switcher!
+    assert detail_switcher.content is detail  # Detail view is presented on top layer
+    asyncio.run(manager.close_detail(detail_from_calendar=False))
+    assert tab_switcher.content is dashboard  # Dashboard remains intact
+    assert detail_switcher.content is empty_detail
+
+    # 4. Open and Close Grades via tab_switcher
+    manager.show_grades_loading()
+    assert tab_switcher.content is grades
+    asyncio.run(manager.close_grades())
+    assert tab_switcher.content is dashboard
+

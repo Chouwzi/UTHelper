@@ -1012,7 +1012,27 @@ class AppController:
             _view.opacity = 0.0
             _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
 
-        main_stack_controls = [self.dashboard]
+        self.tab_switcher = ft.AnimatedSwitcher(
+            content=self.dashboard,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            duration=160,
+            reverse_duration=160,
+            switch_in_curve=ft.AnimationCurve.EASE_OUT,
+            switch_out_curve=ft.AnimationCurve.EASE_IN,
+            expand=True,
+        )
+        self._empty_detail = ft.Container(expand=True, ignore_interactions=True)
+        self.detail_switcher = ft.AnimatedSwitcher(
+            content=self._empty_detail,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            duration=160,
+            reverse_duration=160,
+            switch_in_curve=ft.AnimationCurve.EASE_OUT,
+            switch_out_curve=ft.AnimationCurve.EASE_IN,
+            expand=True,
+        )
+
+        main_stack_controls = [self.tab_switcher, self.detail_switcher]
         overlays = []
         if not platform_utils.UI_IS_MOBILE:
             self._active_desktop_filter_menu = None
@@ -1083,6 +1103,9 @@ class AppController:
             self,
             view_host=main_stack,
             overlays=overlays,
+            tab_switcher=self.tab_switcher,
+            detail_switcher=self.detail_switcher,
+            empty_detail=self._empty_detail,
         )
         self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
