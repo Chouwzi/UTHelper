@@ -1008,21 +1008,11 @@ class AppController:
         )
 
         for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
-            _view.offset = ft.Offset(1, 0)
-            _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
-            _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
+            _view.offset = ft.Offset(0, 0)
+            _view.opacity = 0.0
+            _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
 
-        self.view_switcher = ft.AnimatedSwitcher(
-            content=self.dashboard,
-            transition=ft.AnimatedSwitcherTransition.FADE,
-            duration=160,
-            reverse_duration=160,
-            switch_in_curve=ft.AnimationCurve.EASE_OUT,
-            switch_out_curve=ft.AnimationCurve.EASE_IN,
-            expand=True,
-        )
-
-        main_stack_controls = [self.view_switcher]
+        main_stack_controls = [self.dashboard]
         overlays = []
         if not platform_utils.UI_IS_MOBILE:
             self._active_desktop_filter_menu = None
@@ -1093,7 +1083,6 @@ class AppController:
             self,
             view_host=main_stack,
             overlays=overlays,
-            view_switcher=self.view_switcher,
         )
         self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
@@ -2191,11 +2180,12 @@ class AppController:
         try:
             pixels = float(event.pixels)
             minimum = float(getattr(event, "min_scroll_extent", 0.0))
+            out_of_range = bool(getattr(event, "out_of_range", False))
         except (AttributeError, TypeError, ValueError):
             return
 
         offset = max(0.0, pixels - minimum)
-        if offset <= 0.5:
+        if offset <= 5.0 or (out_of_range and pixels <= minimum):
             offset = 0.0
         self._dashboard_scroll_offset = offset
         if getattr(self, "_scroll_to_top_in_progress", False):
