@@ -44,12 +44,21 @@ class GradeOverviewView(ft.Container):
         self._profiles: list[RadarProfile] = []
         self._selected_semester_idx = 0
 
-        # 1. Header
+        # 1. Header (Back button on left, Centered Title in middle, Refresh on right)
+        self._back_btn = ft.IconButton(
+            icon=ft.Icons.ARROW_BACK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Quay lại",
+            on_click=self._handle_close,
+        )
         self._title = ft.Text(
             "Bảng điểm",
-            size=18,
+            size=16,
             weight=ft.FontWeight.W_700,
             color=C.TEXT_PRIMARY,
+            text_align=ft.TextAlign.CENTER,
+            expand=True,
         )
         self._refresh_btn = ft.IconButton(
             icon=ft.Icons.REFRESH_ROUNDED,
@@ -58,19 +67,14 @@ class GradeOverviewView(ft.Container):
             tooltip="Làm mới bảng điểm từ Portal",
             on_click=self._handle_refresh,
         )
-        self._close_btn = ft.IconButton(
-            icon=ft.Icons.CLOSE_ROUNDED,
-            icon_color=C.TEXT_SECONDARY,
-            icon_size=20,
-            tooltip="Đóng",
-            on_click=self._handle_close,
-        )
         self._header = ft.Row(
             controls=[
+                self._back_btn,
                 self._title,
-                ft.Row(controls=[self._refresh_btn, self._close_btn], spacing=4),
+                self._refresh_btn,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         # 2. Loading indicator
@@ -266,7 +270,7 @@ class GradeOverviewView(ft.Container):
         self._rendered_palette = current_palette
         self.bgcolor = C.BG
         self._title.color = C.TEXT_PRIMARY
-        self._close_btn.icon_color = C.TEXT_SECONDARY
+        self._back_btn.icon_color = C.TEXT_SECONDARY
         self._refresh_btn.icon_color = C.TEXT_SECONDARY
         self._header_divider.color = C.BORDER
         self._loading.color = C.ACCENT

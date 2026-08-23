@@ -156,47 +156,67 @@ class AcademicRadarCard(ft.Container):
             alignment=ft.Alignment(0, 0),
         )
 
-        # 3. Strongest & Weakest summary
-        summary_rows = []
+        # 3. Strongest & Weakest summary with clean hierarchy
+        def _format_metric_spans(metric_list: list[RadarMetric]) -> list[ft.TextSpan]:
+            spans: list[ft.TextSpan] = []
+            for idx, m in enumerate(metric_list):
+                if idx > 0:
+                    spans.append(ft.TextSpan("  ·  ", ft.TextStyle(color=C.TEXT_SECONDARY, size=11)))
+                spans.append(ft.TextSpan(f"{m.label} ", ft.TextStyle(weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY, size=12)))
+                spans.append(ft.TextSpan(f"{m.display_score}", ft.TextStyle(weight=ft.FontWeight.W_500, color=C.TEXT_SECONDARY, size=12)))
+            return spans
+
+        summary_cols = []
         if profile.strongest_metrics:
-            names = " · ".join(f"{m.label} ({m.display_score})" for m in profile.strongest_metrics)
-            summary_rows.append(
-                ft.Row(
+            summary_cols.append(
+                ft.Column(
                     controls=[
-                        ft.Text("Nổi bật:", size=12, weight=ft.FontWeight.W_600, color=C.SAFE),
-                        ft.Text(names, size=12, weight=ft.FontWeight.W_500, color=C.TEXT_PRIMARY),
+                        ft.Text("Nổi bật", size=11, weight=ft.FontWeight.W_700, color=C.SAFE),
+                        ft.Text(spans=_format_metric_spans(profile.strongest_metrics)),
                     ],
-                    spacing=6,
+                    spacing=2,
+                    expand=True,
                 )
             )
 
         if profile.weakest_metrics:
-            names = " · ".join(f"{m.label} ({m.display_score})" for m in profile.weakest_metrics)
-            summary_rows.append(
-                ft.Row(
+            summary_cols.append(
+                ft.Column(
                     controls=[
-                        ft.Text("Cần củng cố:", size=12, weight=ft.FontWeight.W_600, color=C.WARNING),
-                        ft.Text(names, size=12, weight=ft.FontWeight.W_500, color=C.TEXT_PRIMARY),
+                        ft.Text("Cần củng cố", size=11, weight=ft.FontWeight.W_700, color=C.WARNING),
+                        ft.Text(spans=_format_metric_spans(profile.weakest_metrics)),
                     ],
-                    spacing=6,
+                    spacing=2,
+                    expand=True,
                 )
             )
 
         summary_box = ft.Container(
-            content=ft.Column(controls=summary_rows, spacing=4),
+            content=ft.Row(
+                controls=summary_cols,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+                spacing=12,
+            ),
             bgcolor=C.BG,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             border_radius=8,
             border=ft.Border.all(1, C.BORDER),
-        )
+        ) if summary_cols else ft.Container()
 
         # Insight text
-        insight_pill = ft.Text(
-            profile.insight_text,
-            size=12,
-            italic=True,
-            color=C.TEXT_SECONDARY,
-            text_align=ft.TextAlign.CENTER,
+        insight_pill = ft.Container(
+            content=ft.Text(
+                profile.insight_text,
+                size=12,
+                italic=True,
+                color=C.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            ),
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=8),
         )
 
         # 4. KPI row (GPA 10, GPA 4, Credits, Training points)
@@ -212,7 +232,8 @@ class AcademicRadarCard(ft.Container):
 
         kpi_row = ft.Row(
             controls=kpi_items,
-            alignment=ft.MainAxisAlignment.SPACE_EVENLY,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            spacing=8,
         )
 
         self.content = ft.Column(
@@ -233,14 +254,18 @@ class AcademicRadarCard(ft.Container):
         return ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Text(label, size=11, color=C.TEXT_SECONDARY),
-                    ft.Text(value, size=16, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
+                    ft.Text(label, size=10, weight=ft.FontWeight.W_500, color=C.TEXT_SECONDARY),
+                    ft.Text(value, size=15, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
                 ],
                 spacing=2,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
             ),
             bgcolor=C.BG,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=8),
             border_radius=8,
             border=ft.Border.all(1, C.BORDER),
+            expand=True,
+            height=54,
+            alignment=ft.Alignment(0, 0),
         )

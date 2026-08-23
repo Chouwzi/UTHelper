@@ -63,3 +63,38 @@ def score_to_status(score: float | None) -> str:
     if clamped < 85.0:
         return "Vững Vàng"
     return "Nổi Bật"
+
+
+def hex_with_alpha(hex_color: str, alpha: float) -> str:
+    """Converts a hex color to #AARRGGBB with the given alpha (0.0 to 1.0)."""
+    if not hex_color:
+        return "#00000000"
+    clean = hex_color.lstrip("#")
+    if len(clean) == 8:
+        clean = clean[2:]
+    elif len(clean) != 6:
+        return hex_color
+    try:
+        r = int(clean[0:2], 16)
+        g = int(clean[2:4], 16)
+        b = int(clean[4:6], 16)
+        a = int(round(max(0.0, min(1.0, alpha)) * 255))
+        return f"#{a:02X}{r:02X}{g:02X}{b:02X}"
+    except (ValueError, TypeError):
+        return hex_color
+
+
+# Luminous, airy radial gradient stops for the student's data polygon:
+# Soft translucent aura (12% - 27% opacity) avoiding dense "heat map" effect
+POLYGON_RADIAL_GRADIENT_COLORS: list[str] = [
+    "#20F43F5E",  # Center 0: Soft Rose/Coral ~12% opacity (ethereal, non-heat-map)
+    "#25FB923C",  # 35: Soft Amber/Orange ~15% opacity
+    "#28FBBF24",  # 60: Subtle Warm Gold ~16% opacity
+    "#344ADE80",  # 80: Fresh Mint/Lime ~20% opacity
+    "#4510B981",  # 100: Radiant Emerald Green ~27% opacity
+]
+
+POLYGON_RADIAL_GRADIENT_STOPS: list[float] = [0.0, 0.35, 0.60, 0.80, 1.0]
+
+# Subtle neutral background grid fill
+RADAR_BG_HEXAGON_TINT: str = "#08808080"  # 3% subtle neutral tint for radar grid

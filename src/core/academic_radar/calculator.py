@@ -30,21 +30,21 @@ METRIC_LABELS = {
 }
 
 METRIC_DESCRIPTIONS = {
-    "total_power": "Kết quả học tập tổng thể trong học kỳ.",
-    "foundation": "Mức điểm bạn xây dựng trong quá trình học.",
-    "breakthrough": "Mức điểm của nhóm 1/3 tín chỉ học phần có kết quả tốt nhất.",
-    "rhythm": "Mức độ duy trì phong độ từ điểm quá trình sang điểm thi cuối kỳ.",
-    "finish": "Kết quả ở phần đánh giá và thi kết thúc học phần.",
-    "resilience": "Mặt bằng điểm số của nhóm 1/3 tín chỉ học phần thấp nhất.",
+    "total_power": "Đánh giá tổng quát toàn bộ kết quả học tập trong học kỳ theo trọng số tín chỉ.",
+    "foundation": "Mức độ đồng đều và kết quả bạn xây dựng trong suốt quá trình học tập.",
+    "breakthrough": "Mức điểm của nhóm 1/3 tín chỉ có kết quả xuất sắc nhất trong học kỳ.",
+    "rhythm": "Mức độ duy trì phong độ từ điểm quá trình sang điểm thi kết thúc học phần.",
+    "finish": "Mặt bằng kết quả ở các bài thi và đánh giá giai đoạn kết thúc học phần.",
+    "resilience": "Mức điểm của nhóm 1/3 tín chỉ có kết quả thấp nhất trong học kỳ.",
 }
 
 METRIC_CALCULATION_TEXTS = {
-    "total_power": "Tổng Lực được lấy trực tiếp từ điểm trung bình học lực học kỳ (GPA hệ 10 quy đổi thang 100).",
-    "foundation": "Nền Tảng được tính bằng trung bình có trọng số theo tín chỉ của điểm quá trình (thường kỳ).",
-    "breakthrough": "Bứt Phá được tính từ 1/3 số tín chỉ có điểm tổng kết cao nhất, có trọng số theo số tín chỉ từng học phần.",
-    "rhythm": "Giữ Nhịp đo mức hụt điểm trung bình từ quá trình sang thi cuối kỳ (100 - AvgDrop × 15). Điểm thi cao hơn quá trình không bị trừ điểm.",
-    "finish": "Về Đích được tính bằng trung bình có trọng số theo tín chỉ của điểm thi kết thúc học phần.",
-    "resilience": "Trụ Vững được tính từ 1/3 số tín chỉ có điểm tổng kết thấp nhất, có trọng số theo số tín chỉ từng học phần.",
+    "total_power": "Lấy trực tiếp từ điểm trung bình học lực học kỳ (GPA hệ 10 quy đổi sang thang điểm 100).",
+    "foundation": "Tính bằng trung bình có trọng số theo tín chỉ của tất cả điểm quá trình (thường kỳ).",
+    "breakthrough": "Tính từ 1/3 số tín chỉ có điểm tổng kết cao nhất trong kỳ, tính trung bình theo trọng số tín chỉ.",
+    "rhythm": "Tính dựa trên mức giảm từ điểm quá trình sang điểm thi. Điểm thi cao hơn quá trình không bị tính là giảm phong độ.",
+    "finish": "Tính bằng trung bình có trọng số theo tín chỉ của tất cả điểm thi kết thúc học phần.",
+    "resilience": "Tính từ 1/3 số tín chỉ có điểm tổng kết thấp nhất trong kỳ, tính trung bình theo trọng số tín chỉ.",
 }
 
 
@@ -306,24 +306,24 @@ def _build_deterministic_insight(metrics: dict[str, RadarMetric]) -> str:
 
     # Rule 1: Accelerating at the finish
     if f_score is not None and e_score is not None and (e_score - f_score) >= 5.0:
-        return "Bạn tăng tốc tốt ở phần đánh giá cuối kỳ so với mặt bằng quá trình."
+        return "Điểm thi cuối kỳ tăng trưởng tích cực so với điểm quá trình trên nhiều học phần."
 
     # Rule 2: Dropping at the finish
     if f_score is not None and e_score is not None and (f_score - e_score) >= 5.0:
-        return "Kết quả cuối kỳ thấp hơn mặt bằng quá trình, cần chú ý ôn tập kỳ thi."
+        return "Điểm cuối kỳ đang thấp hơn mặt bằng quá trình ở một vài học phần."
 
     # Rule 3: High dispersion between top and bottom
     if b_score is not None and r_score is not None and (b_score - r_score) >= 15.0:
-        return "Kết quả đang phân hóa khá rõ giữa nhóm học phần thế mạnh và nhóm học phần cần chú ý."
+        return "Kết quả học tập có sự phân hóa giữa nhóm học phần thế mạnh và nhóm cần củng cố."
 
     # Rule 4: Very solid baseline across all courses
     if r_score is not None and r_score >= 85.0:
-        return "Mặt bằng điểm số của tất cả các học phần rất vững chắc và đồng đều."
+        return "Mặt bằng điểm số của tất cả các học phần duy trì rất vững chắc và đồng đều."
 
     if b_score is not None and b_score >= 85.0:
-        return "Bạn có những học phần thế mạnh bứt phá xuất sắc trong học kỳ."
+        return "Bạn có những học phần thế mạnh bứt phá nổi bật trong học kỳ."
 
-    return "Hồ sơ học tập thể hiện đầy đủ phong độ qua từng giai đoạn học phần."
+    return "Hồ sơ học tập phản ánh phong độ ổn định qua các giai đoạn học phần."
 
 
 def _round_half_up(val: float | None) -> int | None:

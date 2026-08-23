@@ -258,9 +258,9 @@ class ActivityCard(ft.Container):
             self.border = ft.Border.all(1, C.CRITICAL)
             # Create a nice starting glow shadow dynamically based on current C.CRITICAL
             crit_hex = C.CRITICAL.lstrip("#")
-            self.shadow = [ft.BoxShadow(spread_radius=0.5, blur_radius=10, color=f"#{crit_hex}", offset=ft.Offset(0, 0))]
+            self.shadow = [ft.BoxShadow(spread_radius=0.8, blur_radius=12, color=f"#30{crit_hex}", offset=ft.Offset(0, 0))]
             self._is_critical_active = True
-            self.animate = ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT)
+            self.animate = ft.Animation(1000, ft.AnimationCurve.EASE_IN_OUT)
         else:
             _card_border_color = C.SAFE if _is_submitted else C.BORDER
             self.border = ft.Border.all(1, _card_border_color)

@@ -277,6 +277,7 @@ class AppController:
             self._safe_run_task(self._apply_initial_windows_autostart_default)
         needs_initial_sync = self._needs_initial_data_sync(has_cached_snapshot)
         self._safe_run_task(self._countdown_loop_async)
+        self._safe_run_task(self._pulse_critical_cards_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
         if not needs_initial_sync:
             hydration_started = self._schedule_cached_detail_hydration(
@@ -2904,11 +2905,11 @@ class AppController:
                 self.view_manager.show_detail_error(data)
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
-        # Tự động tạo bóng đổ nhấp nháy (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
+        # Tự động tạo bóng đổ nhấp nháy mờ nhẹ (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
         crit_hex = C.CRITICAL.lstrip("#")
-        alpha = "40" if pulse_high else "15"
-        blur = 16 if pulse_high else 8
-        spread = 1.5 if pulse_high else 0.5
+        alpha = "45" if pulse_high else "12"
+        blur = 16 if pulse_high else 6
+        spread = 1.2 if pulse_high else 0.2
         shadow = [ft.BoxShadow(
             spread_radius=spread,
             blur_radius=blur,
@@ -2921,7 +2922,27 @@ class AppController:
                 card.shadow = shadow
                 changed = True
         if changed:
-            self.page.update()
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    async def _pulse_critical_cards_loop_async(self):
+        """Smoothly pulses red glow shadow for critical deadline cards."""
+        pulse_state = False
+        while self._page_alive.is_set():
+            await asyncio.sleep(1.2)
+            if not self._page_alive.is_set():
+                break
+            if not getattr(self, "dashboard", None) or not self.dashboard.visible:
+                continue
+            with self._cards_lock:
+                cards_snapshot = list(self.active_cards or [])
+            has_critical = any(getattr(c, "_is_critical_active", False) for c in cards_snapshot)
+            if not has_critical:
+                continue
+            pulse_state = not pulse_state
+            self._pulse_cards_once(cards_snapshot, pulse_state)
 
     def _countdown_cards_once(self, cards_snapshot: list):
         if not cards_snapshot:
