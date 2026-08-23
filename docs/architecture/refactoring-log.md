@@ -61,6 +61,7 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Redesign Radar Gradient | Tái thiết kế trực quan Academic Radar: gradient đa sắc mềm mại (12%-27% opacity, tông san hô/hổ phách/ngọc lục bảo tinh tế chống hiệu ứng heat map), viền polygon hào quang kép hài hòa theo tông điểm chủ đạo | Đạt 1564 passed, 25 skipped |
 | 2026-08-24 | `develop` | Polish UI/UX Tab Bảng Điểm | Chuẩn hóa toàn diện visual language, spacing (4/8/12/16/20/24), hierarchy và wording: hiệu ứng hover tròn bo cong mượt mà cho nhãn node, kéo nhãn radar lại gần các node (112%-114%) chống clipping ở Giữ Nhịp, summary thẻ Nổi bật / Cần củng cố rõ ràng, câu insight khách quan phi phán xét, KPI đồng đều baseline, course list căn cột QT/Thi/TK thẳng hàng, modal chi tiết dạng stat-detail sheet loại bỏ double-negative "Hụt -3.3" -> "Giảm 3.3", và indicator độ đầy đủ dữ liệu trực quan | Đạt 1564 passed, 25 skipped |
 | 2026-08-24 | `develop` | Fix Critical Card Glow Pulse | Kích hoạt vòng lặp async `_pulse_critical_cards_loop_async` cho các thẻ hạn nộp khẩn cấp (< 24h), tạo hiệu ứng hào quang đỏ nhấp nháy/thở mờ nhẹ (1000ms easing pulse) | Đạt 1564 passed, 25 skipped |
+| 2026-08-24 | `develop` | Sort Overdue Recent First | Khi lọc mức độ "Quá hạn", sắp xếp các thẻ hoạt động theo thứ tự hạn nộp từ ngày gần hiện tại nhất đến xa dần (thay vì xa tới gần) | Đạt 1565 passed, 25 skipped |
 
 ---
 

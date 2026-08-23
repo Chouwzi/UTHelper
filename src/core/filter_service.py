@@ -116,4 +116,19 @@ class FilterService:
             if match_urgency and match_type and match_course and match_search:
                 filtered_results.append(a)
 
+        # Khi người dùng lọc mức độ "Quá hạn", sắp xếp từ ngày gần hiện tại nhất đến xa dần
+        if active_urgency == "overdue":
+            def _overdue_sort_key(item: Dict[str, Any]) -> datetime:
+                dt = item.get("_deadline_dt")
+                if isinstance(dt, datetime):
+                    return dt
+                dl_str = item.get("deadline", "")
+                if dl_str:
+                    parsed = parse_datetime(dl_str)
+                    if isinstance(parsed, datetime):
+                        return parsed
+                return datetime.min
+
+            filtered_results.sort(key=_overdue_sort_key, reverse=True)
+
         return filtered_results, counts

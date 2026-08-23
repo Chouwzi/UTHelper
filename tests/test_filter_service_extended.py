@@ -87,6 +87,28 @@ class TestFilterOverdue:
         assert results == []
         assert counts["urgency"]["overdue"] == 1
 
+    def test_overdue_sorted_from_recent_to_distant_past(self):
+        now = datetime.now()
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        last_week = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        last_month = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+        activities = [
+            _make_activity(title="Last Month", deadline=last_month),
+            _make_activity(title="Yesterday", deadline=yesterday),
+            _make_activity(title="Last Week", deadline=last_week),
+        ]
+
+        results, counts = FilterService.filter_and_count(
+            activities, active_urgency="overdue", include_overdue=False
+        )
+
+        assert len(results) == 3
+        # Should be ordered from recent to distant: Yesterday -> Last Week -> Last Month
+        assert results[0]["title"] == "Yesterday"
+        assert results[1]["title"] == "Last Week"
+        assert results[2]["title"] == "Last Month"
+
 
 class TestFilterType:
     """Type-based filtering."""
