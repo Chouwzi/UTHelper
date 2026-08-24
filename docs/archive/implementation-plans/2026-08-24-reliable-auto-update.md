@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14, pytest, urllib, Flet service bridge, Dart MethodChannel, Kotlin/Android PackageManager and FileProvider.
 
-**Spec:** `docs/superpowers/specs/2026-08-24-reliable-auto-update-design.md`
+**Spec:** `docs/archive/designs/2026-08-24-reliable-auto-update-design.md`
 
 ## Global Constraints
 
