@@ -210,12 +210,7 @@ def build_refresh_dataset(
     )
 
 
-def format_refresh_status(clock_label: str, total_count: int, submitted_count: int) -> str:
+def format_refresh_status(clock_label: str, total_count: int, submitted_count: int = 0) -> str:
     """Format the dashboard refresh status line."""
-    progress_text = ""
-    if total_count > 0 and submitted_count > 0:
-        if submitted_count == total_count:
-            progress_text = " · Đã nộp hết ✓"
-        else:
-            progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
-    return f"Cập nhật lúc {clock_label} · {total_count} hoạt động{progress_text}"
+    return f"Cập nhật lúc {clock_label} · {total_count} hoạt động"
+

@@ -194,9 +194,10 @@ def test_build_refresh_dataset_merges_pending_and_counts_submissions():
     assert result.items[0]["submission_status"] == "submitted"
 
 
-def test_format_refresh_status_includes_submission_progress():
-    assert format_refresh_status("09:30", 3, 2) == "Cập nhật lúc 09:30 · 3 hoạt động · 2/3 đã nộp ✓"
-    assert format_refresh_status("09:30", 2, 2) == "Cập nhật lúc 09:30 · 2 hoạt động · Đã nộp hết ✓"
+def test_format_refresh_status():
+    assert format_refresh_status("09:30", 3) == "Cập nhật lúc 09:30 · 3 hoạt động"
+    assert format_refresh_status("09:30", 2, 2) == "Cập nhật lúc 09:30 · 2 hoạt động"
+
 
 
 def test_card_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():

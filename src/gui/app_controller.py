@@ -2033,22 +2033,10 @@ class AppController:
 
             # Publish server truth before slower flash/native/notification work.
             # This is especially important on older Android storage.
-            submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
             total_count = len(data_copy)
-            submitted_count = sum(
-                1
-                for item in data_copy
-                if item.get("submission_status", "") in submitted_statuses
-            )
-            progress_text = ""
-            if total_count > 0 and submitted_count > 0:
-                if submitted_count == total_count:
-                    progress_text = " · Đã nộp hết ✓"
-                else:
-                    progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
             success_message = (
                 f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · "
-                f"{total_count} hoạt động{progress_text}"
+                f"{total_count} hoạt động"
             )
             should_show_snackbar = not self._skeleton_visible
             self._update_footer()
