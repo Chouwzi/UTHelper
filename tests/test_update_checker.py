@@ -120,9 +120,11 @@ def test_manifest_version_mismatch_never_falls_back_to_release_digest():
 
 
 class _Response:
-    def __init__(self, data):
+    def __init__(self, data, *, status=200, headers=None):
         self._stream = io.BytesIO(data)
+        self.status = status
         self.headers = {"Content-Length": str(len(data))}
+        self.headers.update(headers or {})
 
     def __enter__(self):
         return self
@@ -140,6 +142,7 @@ class _ChunkedResponse(_Response):
         self._after_first = after_first
         self._read_count = 0
         self.headers = {}
+        self.status = 200
 
     def read(self, _size=-1):
         try:
@@ -150,6 +153,18 @@ class _ChunkedResponse(_Response):
         if self._read_count == 1 and self._after_first:
             self._after_first()
         return chunk
+
+
+class _InterruptedResponse(_Response):
+    def __init__(self, first_chunk):
+        super().__init__(first_chunk)
+        self._returned_chunk = False
+
+    def read(self, _size=-1):
+        if not self._returned_chunk:
+            self._returned_chunk = True
+            return self._stream.read()
+        raise ConnectionResetError("simulated connection reset")
 
 
 def _release_package(data: bytes) -> ReleasePackage:
@@ -279,6 +294,83 @@ def test_downloader_cancels_and_removes_partial_file(tmp_path, monkeypatch):
 
     assert list(tmp_path.glob("*.part")) == []
     assert list(tmp_path.glob("*.apk")) == []
+
+
+def test_progress_throttler_bounds_events_and_keeps_endpoints():
+    total = 46_882_816
+    chunk = 64 * 1024
+    now = [0.0]
+    events = []
+    throttled = update_checker.ProgressThrottler(
+        lambda done, expected: events.append((done, expected)),
+        total=total,
+        clock=lambda: now[0],
+    )
+
+    for done in range(0, total + chunk, chunk):
+        done = min(done, total)
+        now[0] = done / (3.04 * 1024 * 1024)
+        throttled(done)
+
+    assert events[0] == (0, total)
+    assert events[-1] == (total, total)
+    assert len(events) <= 150
+    assert len(events) < 0.3 * 717
+
+
+def test_downloader_resumes_after_transient_disconnect(tmp_path, monkeypatch):
+    data = b"firstsecond"
+    package = _release_package(data)
+    requests = []
+    responses = iter(
+        [
+            _InterruptedResponse(b"first"),
+            _Response(
+                b"second",
+                status=206,
+                headers={"Content-Range": "bytes 5-10/11"},
+            ),
+        ]
+    )
+
+    def open_request(request, timeout):
+        requests.append((request.get_header("Range"), timeout))
+        return next(responses)
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(update_checker.time, "sleep", lambda _delay: None)
+
+    path = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+    )
+
+    assert path.read_bytes() == data
+    assert requests == [(None, 20), ("bytes=5-", 20)]
+    assert not any(tmp_path.glob("*.part"))
+    assert not any(tmp_path.glob("*.json"))
+
+
+def test_downloader_restarts_safely_when_server_ignores_range(tmp_path, monkeypatch):
+    data = b"firstsecond"
+    package = _release_package(data)
+    requests = []
+    responses = iter([_InterruptedResponse(b"first"), _Response(data, status=200)])
+
+    def open_request(request, timeout):
+        requests.append(request.get_header("Range"))
+        return next(responses)
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(update_checker.time, "sleep", lambda _delay: None)
+
+    path = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+    )
+
+    assert path.read_bytes() == data
+    assert requests == [None, "bytes=5-"]
 
 
 def test_downloader_rejects_size_and_checksum_before_atomic_rename(
