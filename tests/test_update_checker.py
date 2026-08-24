@@ -114,10 +114,9 @@ def test_manifest_version_mismatch_never_falls_back_to_release_digest():
             "_request_json",
             side_effect=[_release(), manifest],
         ),
+        pytest.raises(update_checker.UpdateDiscoveryError, match="metadata is invalid"),
     ):
-        info = update_checker.get_update_info("2.1.0")
-    assert not info.has_update
-    assert info.asset is None
+        update_checker.get_update_info("2.1.0")
 
 
 class _Response:
@@ -187,6 +186,76 @@ def test_release_client_passes_finite_timeout_to_every_request(monkeypatch):
         is None
     )
     assert seen and all(value == 20 for value in seen)
+
+
+def test_release_client_reports_timeout_after_three_bounded_attempts(monkeypatch):
+    attempts = []
+    delays = []
+
+    def timeout(*_args, **_kwargs):
+        attempts.append("timeout")
+        raise TimeoutError("simulated network timeout")
+
+    monkeypatch.setattr(update_checker, "_request_json", timeout)
+    monkeypatch.setattr(update_checker.time, "sleep", delays.append)
+
+    with pytest.raises(update_checker.UpdateDiscoveryError, match="temporarily unavailable"):
+        update_checker.GitHubReleaseClient().fetch_candidate(
+            "2.1.0",
+            RuntimeTarget("windows", "x64", "msi"),
+        )
+
+    assert attempts == ["timeout", "timeout", "timeout"]
+    assert delays == [0.25, 0.5]
+
+
+def test_release_client_retries_transient_failure_then_returns_candidate(monkeypatch):
+    manifest = {
+        "schema_version": 2,
+        "release_version": "2.2.0",
+        "minimum_supported_version": "2.0.0",
+        "published_at": "2026-08-04T00:00:00Z",
+        "release_notes_url": (
+            "https://github.com/Chouwzi/UTHelper/releases/tag/v2.2.0"
+        ),
+        "packages": [
+            {
+                "platform": "android",
+                "architecture": "universal",
+                "package_type": "apk",
+                "install_channel": "sideload",
+                "url": (
+                    "https://github.com/Chouwzi/UTHelper/releases/download/"
+                    "v2.2.0/UTHelper-2.2.0.apk"
+                ),
+                "sha256": "b" * 64,
+                "size": 123,
+                "signer_identity": "CN=UTHelper Android",
+                "certificate_fingerprint": "c" * 64,
+                "install_strategy": {"kind": "android_package_installer"},
+            }
+        ],
+    }
+    responses = iter([TimeoutError("temporary"), _release(), manifest])
+    delays = []
+
+    def request(*_args, **_kwargs):
+        value = next(responses)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(update_checker, "_request_json", request)
+    monkeypatch.setattr(update_checker.time, "sleep", delays.append)
+
+    candidate = update_checker.GitHubReleaseClient().fetch_candidate(
+        "2.1.0",
+        RuntimeTarget("android", "universal", "sideload"),
+    )
+
+    assert candidate is not None
+    assert candidate.manifest.release_version == "2.2.0"
+    assert delays == [0.25]
 
 
 def test_downloader_cancels_and_removes_partial_file(tmp_path, monkeypatch):

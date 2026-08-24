@@ -49,6 +49,10 @@ class DownloadCancelled(UpdateError):
     """The caller cooperatively cancelled an update download."""
 
 
+class UpdateDiscoveryError(UpdateError):
+    """The latest release could not be checked authoritatively."""
+
+
 class PackageIntegrityError(UpdateError):
     """Downloaded bytes do not match the selected release package."""
 
@@ -153,10 +157,7 @@ class GitHubReleaseClient:
         target: RuntimeTarget,
     ) -> UpdateCandidate | None:
         try:
-            release = _request_json(
-                self.releases_url,
-                timeout=self.socket_timeout_seconds,
-            )
+            release = self._request_json_with_retry(self.releases_url)
             if release.get("draft") is True or release.get("prerelease") is True:
                 return None
             tag = release.get("tag_name")
@@ -182,10 +183,7 @@ class GitHubReleaseClient:
             manifest_url = _approved_github_url(
                 manifest_assets[0].get("browser_download_url")
             )
-            document = _request_json(
-                manifest_url,
-                timeout=self.socket_timeout_seconds,
-            )
+            document = self._request_json_with_retry(manifest_url)
             manifest = parse_manifest(
                 document,
                 expected_release_version=release_version,
@@ -195,18 +193,36 @@ class GitHubReleaseClient:
                 current_version=current_version,
                 target=target,
             )
-        except urllib.error.HTTPError as exc:
-            if exc.code != 404:
-                logger.warning("Update check HTTP error: %s", exc.code)
+        except UpdateDiscoveryError:
+            raise
         except (
             ManifestError,
-            OSError,
             UnicodeError,
             ValueError,
             json.JSONDecodeError,
-        ):
+        ) as exc:
             logger.warning("Update check rejected an invalid release")
-        return None
+            raise UpdateDiscoveryError("update release metadata is invalid") from exc
+
+    def _request_json_with_retry(self, url: str) -> dict:
+        for attempt in range(3):
+            try:
+                return _request_json(url, timeout=self.socket_timeout_seconds)
+            except urllib.error.HTTPError as exc:
+                transient = exc.code in {408, 429} or 500 <= exc.code <= 599
+                if not transient:
+                    raise UpdateDiscoveryError(
+                        f"update service returned HTTP {exc.code}"
+                    ) from exc
+                error: BaseException = exc
+            except (OSError, urllib.error.URLError) as exc:
+                error = exc
+            if attempt == 2:
+                raise UpdateDiscoveryError(
+                    "update service is temporarily unavailable"
+                ) from error
+            time.sleep(0.25 * (2**attempt))
+        raise AssertionError("unreachable update discovery retry state")
 
 
 class VerifiedDownloader:
@@ -410,6 +426,7 @@ __all__ = [
     "DownloadCancelled",
     "GitHubReleaseClient",
     "PackageIntegrityError",
+    "UpdateDiscoveryError",
     "UpdateAsset",
     "UpdateInfo",
     "VerifiedDownloader",
