@@ -120,8 +120,7 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
 
     result = asyncio.run(
         bridge.install_update(
-            "https://github.com/Chouwzi/UTHelper/releases/download/"
-            "v2.2.0/UTHelper-2.2.0.apk",
+            "C:/app-cache/uthelper_update/UTHelper-2.2.0.apk",
             "ab" * 32,
             123,
             "com.uthelper.uthelper",
@@ -136,8 +135,7 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
         (
             "install",
             (
-                "https://github.com/Chouwzi/UTHelper/releases/download/"
-                "v2.2.0/UTHelper-2.2.0.apk",
+                "C:/app-cache/uthelper_update/UTHelper-2.2.0.apk",
                 "ab" * 32,
                 123,
                 "com.uthelper.uthelper",

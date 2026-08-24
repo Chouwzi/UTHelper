@@ -437,7 +437,7 @@ def test_android_build_number_is_deterministic_and_strict():
     assert _android_release_build_number("2.2.3") == 2_002_003
 
 
-def test_android_launcher_forwards_native_identity_version_and_signer():
+def test_android_launcher_forwards_verified_local_path_identity_version_and_signer():
     calls = []
 
     class Bridge:
@@ -471,7 +471,7 @@ def test_android_launcher_forwards_native_identity_version_and_signer():
     assert launcher.launch(Path("UTHelper.apk"), package).acknowledged
     assert calls == [
         (
-            package.url,
+            str(Path("UTHelper.apk")),
             package.sha256,
             package.size,
             "com.uthelper.uthelper",
@@ -575,6 +575,28 @@ def test_manual_discovery_failure_is_not_presented_as_download_failure():
 
     assert messages == ["Không thể kiểm tra cập nhật. Hãy kiểm tra mạng và thử lại."]
     assert controller._update_text.value == ""
+    assert controller._update_banner.visible is False
+
+
+def test_android_install_banner_waits_for_native_installer_confirmation(monkeypatch):
+    controller = _update_event_controller()
+    controller._update_banner.visible = True
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", False)
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+        )
+    )
+
+    assert controller._update_banner.visible is True
+    assert controller._update_text.value == "Đang mở trình cài đặt Android..."
+    assert controller._update_btn.content == "Đang mở..."
+    assert controller._update_btn.disabled is True
+
+    controller._on_android_update_result({"status": "installer_opened"})
+
     assert controller._update_banner.visible is False
 
 

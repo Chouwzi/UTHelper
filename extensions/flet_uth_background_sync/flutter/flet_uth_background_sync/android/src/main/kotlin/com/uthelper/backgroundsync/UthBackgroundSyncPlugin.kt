@@ -170,8 +170,8 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
             "install_update" -> execute(result) {
-                val update = updateInstaller.downloadVerifyAndOpen(
-                    url = call.argument<String>("url").orEmpty(),
+                val update = updateInstaller.verifyLocalAndOpen(
+                    localPath = call.argument<String>("local_path").orEmpty(),
                     expectedSha256 = call.argument<String>("sha256").orEmpty(),
                     expectedSize = call.argument<Number>("expected_size")?.toLong() ?: 0L,
                     expectedPackageId = call.argument<String>("expected_package_id").orEmpty(),

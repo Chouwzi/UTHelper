@@ -7,13 +7,10 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
-import android.os.SystemClock
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.core.content.pm.PackageInfoCompat
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,6 +20,11 @@ data class InstallUpdateResult(
     val status: String,
     val bytes: Long = 0,
     val sha256: String = "",
+)
+
+data class VerifiedLocalPackage(
+    val bytes: Long,
+    val sha256: String,
 )
 
 data class ArchiveMetadata(
@@ -64,6 +66,62 @@ fun validateArchiveMetadata(
     }
 }
 
+fun copyAndVerifyLocalPackage(
+    source: File,
+    destination: File,
+    expectedSha256: String,
+    expectedSize: Long,
+    cancelled: AtomicBoolean = AtomicBoolean(false),
+): VerifiedLocalPackage {
+    require(source.isFile) { "Local update package is unavailable" }
+    require(expectedSha256.matches(Regex("[0-9a-fA-F]{64}"))) {
+        "A release SHA-256 checksum is required"
+    }
+    require(expectedSize > 0L) { "A positive release size is required" }
+    require(source.length() == expectedSize) { "Update size mismatch" }
+    require(source.canonicalFile != destination.canonicalFile) {
+        "Local update source overlaps native staging"
+    }
+    check(destination.parentFile?.mkdirs() != false || destination.parentFile?.isDirectory == true) {
+        "Cannot prepare update cache"
+    }
+    destination.delete()
+    try {
+        val digest = MessageDigest.getInstance("SHA-256")
+        var copied = 0L
+        val started = System.nanoTime()
+        source.inputStream().use { input ->
+            destination.outputStream().use { output ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    checkNotCancelled(cancelled)
+                    require((System.nanoTime() - started) / 1_000_000 <= LOCAL_COPY_TIMEOUT_MILLIS) {
+                        "Local update copy exceeded total deadline"
+                    }
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    copied += count
+                    require(copied <= expectedSize) { "Update exceeds manifest size" }
+                    output.write(buffer, 0, count)
+                    digest.update(buffer, 0, count)
+                }
+                output.flush()
+                output.fd.sync()
+            }
+        }
+        checkNotCancelled(cancelled)
+        val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        require(copied == expectedSize) { "Update size mismatch" }
+        require(actualSha256.equals(expectedSha256, ignoreCase = true)) {
+            "Update SHA-256 mismatch"
+        }
+        return VerifiedLocalPackage(copied, actualSha256)
+    } catch (exception: Exception) {
+        destination.delete()
+        throw exception
+    }
+}
+
 class ApkUpdateInstaller(private val context: Context) {
     private val currentCancellation = AtomicReference<AtomicBoolean?>(null)
 
@@ -71,19 +129,14 @@ class ApkUpdateInstaller(private val context: Context) {
         currentCancellation.get()?.set(true)
     }
 
-    fun downloadVerifyAndOpen(
-        url: String,
+    fun verifyLocalAndOpen(
+        localPath: String,
         expectedSha256: String,
         expectedSize: Long,
         expectedPackageId: String,
         expectedVersionCode: Long,
         expectedCertificateSha256: String,
     ): InstallUpdateResult {
-        val initialUri = URI(url)
-        require(initialUri.scheme == "https") { "Update URL must use HTTPS" }
-        require(initialUri.host in APPROVED_DOWNLOAD_HOSTS && initialUri.userInfo == null) {
-            "Update URL must use an approved GitHub host"
-        }
         require(expectedSha256.matches(Regex("[0-9a-fA-F]{64}"))) {
             "A release SHA-256 checksum is required"
         }
@@ -94,7 +147,7 @@ class ApkUpdateInstaller(private val context: Context) {
 
         val cancelled = AtomicBoolean(false)
         check(currentCancellation.compareAndSet(null, cancelled)) {
-            "An update download is already active"
+            "An update installation handoff is already active"
         }
         val directory = File(context.cacheDir, "verified_updates").apply {
             check(mkdirs() || isDirectory) { "Cannot prepare update cache" }
@@ -106,56 +159,13 @@ class ApkUpdateInstaller(private val context: Context) {
 
         try {
             checkNotCancelled(cancelled)
-            val digest = MessageDigest.getInstance("SHA-256")
-            var downloaded = 0L
-            val started = SystemClock.elapsedRealtime()
-            val connection = initialUri.toURL().openConnection() as HttpURLConnection
-            try {
-                connection.instanceFollowRedirects = true
-                connection.connectTimeout = SOCKET_TIMEOUT_MILLIS
-                connection.readTimeout = SOCKET_TIMEOUT_MILLIS
-                connection.setRequestProperty("User-Agent", "UTHelper-Android-Updater/2.2")
-                checkNotCancelled(cancelled)
-                val response = connection.responseCode
-                require(response in 200..299) {
-                    "Update download failed with HTTP $response"
-                }
-                require(connection.url.protocol == "https") { "Unsafe update redirect" }
-                require(connection.url.host in APPROVED_DOWNLOAD_HOSTS) {
-                    "Unsafe update redirect host"
-                }
-                connection.inputStream.use { input ->
-                    partial.outputStream().use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        while (true) {
-                            checkNotCancelled(cancelled)
-                            require(
-                                SystemClock.elapsedRealtime() - started <= TOTAL_TIMEOUT_MILLIS
-                            ) { "Update download exceeded total deadline" }
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            checkNotCancelled(cancelled)
-                            downloaded += count
-                            require(downloaded <= expectedSize) {
-                                "Update exceeds manifest size"
-                            }
-                            output.write(buffer, 0, count)
-                            digest.update(buffer, 0, count)
-                        }
-                        output.flush()
-                        output.fd.sync()
-                    }
-                }
-            } finally {
-                connection.disconnect()
-            }
-
-            checkNotCancelled(cancelled)
-            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
-            require(downloaded == expectedSize) { "Update size mismatch" }
-            require(actualSha256.equals(expectedSha256, ignoreCase = true)) {
-                "Update SHA-256 mismatch"
-            }
+            val verified = copyAndVerifyLocalPackage(
+                source = File(localPath).canonicalFile,
+                destination = partial,
+                expectedSha256 = expectedSha256,
+                expectedSize = expectedSize,
+                cancelled = cancelled,
+            )
 
             val archive = readArchiveMetadata(partial)
             val installed = readInstalledMetadata()
@@ -183,7 +193,11 @@ class ApkUpdateInstaller(private val context: Context) {
                         Uri.parse("package:${context.packageName}"),
                     ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
-                return InstallUpdateResult("permission_required", downloaded, actualSha256)
+                return InstallUpdateResult(
+                    "permission_required",
+                    verified.bytes,
+                    verified.sha256,
+                )
             }
 
             val uri = FileProvider.getUriForFile(
@@ -198,7 +212,11 @@ class ApkUpdateInstaller(private val context: Context) {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
             )
-            return InstallUpdateResult("installer_opened", downloaded, actualSha256)
+            return InstallUpdateResult(
+                "installer_opened",
+                verified.bytes,
+                verified.sha256,
+            )
         } finally {
             partial.delete()
             currentCancellation.compareAndSet(cancelled, null)
@@ -276,18 +294,12 @@ class ApkUpdateInstaller(private val context: Context) {
         }.toSet()
     }
 
-    private fun checkNotCancelled(cancelled: AtomicBoolean) {
-        if (cancelled.get()) {
-            throw CancellationException("Update download cancelled")
-        }
-    }
+}
 
-    companion object {
-        private const val SOCKET_TIMEOUT_MILLIS = 20_000
-        private const val TOTAL_TIMEOUT_MILLIS = 180_000L
-        private val APPROVED_DOWNLOAD_HOSTS = setOf(
-            "github.com",
-            "objects.githubusercontent.com",
-        )
+private const val LOCAL_COPY_TIMEOUT_MILLIS = 180_000L
+
+private fun checkNotCancelled(cancelled: AtomicBoolean) {
+    if (cancelled.get()) {
+        throw CancellationException("Update installation handoff cancelled")
     }
 }

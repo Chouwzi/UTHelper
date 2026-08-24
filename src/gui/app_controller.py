@@ -130,7 +130,7 @@ class _AndroidPackageLauncher:
         self._release_version_provider = release_version_provider
         self._result_sink = result_sink
 
-    def launch(self, _path: Path, package: ReleasePackage) -> LaunchResult:
+    def launch(self, path: Path, package: ReleasePackage) -> LaunchResult:
         if (
             package.platform != "android"
             or package.package_type != "apk"
@@ -142,16 +142,21 @@ class _AndroidPackageLauncher:
             version_code = _android_release_build_number(
                 self._release_version_provider()
             )
-            task = self._task_runner(self._install, package, version_code)
+            task = self._task_runner(self._install, Path(path), package, version_code)
         except (RuntimeError, TypeError, ValueError):
             logger.warning("Android installer scheduling failed", exc_info=True)
             return LaunchResult(False, "Android installer scheduling failed")
         return LaunchResult(task is not None, "Android installer scheduled")
 
-    async def _install(self, package: ReleasePackage, version_code: int) -> None:
+    async def _install(
+        self,
+        path: Path,
+        package: ReleasePackage,
+        version_code: int,
+    ) -> None:
         try:
             result = await self._bridge.install_update(
-                package.url,
+                str(path),
                 package.sha256,
                 package.size,
                 self.PACKAGE_ID,
@@ -437,7 +442,11 @@ class AppController:
 
     def _on_android_update_result(self, result: dict) -> None:
         status = result.get("status")
-        if status == "permission_required":
+        if status == "installer_opened":
+            self._diag_breadcrumb("update_install", "succeeded", "android")
+            self._update_banner.visible = False
+            self.page.update()
+        elif status == "permission_required":
             self._update_banner.visible = True
             self._update_btn.disabled = False
             self._update_btn.content = "Mở trình cài đặt"
@@ -447,7 +456,7 @@ class AppController:
                 C.WARNING,
             )
             self.page.update()
-        elif status != "installer_opened":
+        else:
             self._update_banner.visible = True
             self._update_btn.disabled = False
             self._update_btn.content = "Thử lại"
@@ -2730,8 +2739,15 @@ class AppController:
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
-            self._diag_breadcrumb("update_install", "succeeded", "os")
-            self._update_banner.visible = False
+            if platform_utils.IS_ANDROID:
+                self._diag_breadcrumb("update_install", "started", "android")
+                self._update_text.value = "Đang mở trình cài đặt Android..."
+                self._update_btn.content = "Đang mở..."
+                self._update_btn.disabled = True
+                self._update_banner.visible = True
+            else:
+                self._diag_breadcrumb("update_install", "succeeded", "os")
+                self._update_banner.visible = False
         self.page.update()
         if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
             await self.page.window.destroy()

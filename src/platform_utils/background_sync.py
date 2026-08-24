@@ -102,7 +102,7 @@ class AndroidBackgroundBridge:
 
     async def install_update(
         self,
-        url: str,
+        local_path: str,
         sha256: str,
         expected_size: int,
         expected_package_id: str,
@@ -112,7 +112,7 @@ class AndroidBackgroundBridge:
         if not self.service:
             return {"status": "unavailable"}
         return await self.service.install_update(
-            url,
+            local_path,
             sha256,
             expected_size,
             expected_package_id,
