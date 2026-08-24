@@ -2988,7 +2988,8 @@ class AppController:
             return
         changed = False
         for card in cards_snapshot:
-            if card.update_countdown():
+            update_countdown = getattr(card, "update_countdown", None)
+            if callable(update_countdown) and update_countdown():
                 changed = True
         if changed:
             self.page.update()
@@ -3023,8 +3024,7 @@ class AppController:
                 elif self.detail_view.visible and self.detail_view.refresh_countdown():
                     self.page.update()
             except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+                logger.warning("Countdown refresh failed", exc_info=True)
 
     def _on_disconnect(self, e):
         view_manager = getattr(self, "view_manager", None)

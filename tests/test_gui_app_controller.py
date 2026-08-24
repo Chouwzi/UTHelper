@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,8 @@ from gui.app_controller import (
     _AndroidPackageLauncher,
     _android_release_build_number,
 )
+from gui.components.activity_card import ActivityCard
+from gui.components.today_schedule_panel import TodaySchedulePanel
 
 
 def test_render_cards_refreshes_current_filters():
@@ -229,6 +232,32 @@ def test_countdown_tick_batches_page_update_without_per_card_updates():
 
     assert [c.countdown_count for c in cards] == [1, 1]
     assert [c.update_count for c in cards] == [0, 0]
+    assert controller.page.update_count == 1
+
+
+def test_countdown_tick_skips_schedule_panel_and_updates_real_activity_card():
+    controller = AppController.__new__(AppController)
+    controller.page = _FakePage()
+    panel = TodaySchedulePanel(on_need_data=lambda: None)
+    card = ActivityCard(
+        {
+            "title": "Offline countdown",
+            "course": "Audit",
+            "type": "quiz",
+            "deadline": (datetime.now() + timedelta(minutes=5)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "submission_status": "unknown",
+        },
+        on_tap=lambda _event: None,
+    )
+    card.data["deadline"] = (datetime.now() - timedelta(minutes=1)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    controller._countdown_cards_once([panel, card])
+
+    assert card._countdown_ctrl.value.startswith("Quá hạn")
     assert controller.page.update_count == 1
 
 

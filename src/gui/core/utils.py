@@ -49,20 +49,38 @@ def get_countdown(deadline_str: str, act_type: str = "") -> tuple:
 
     if diff.total_seconds() < 0:
         if is_open_event:
-            if months: return f"Đã mở {months} tháng {remaining_days} ngày", False
-            if days: return f"Đã mở {days} ngày {hours} giờ", False
-            if hours: return f"Đã mở {hours} giờ {mins} phút", False
+            if months:
+                return (
+                    f"Đã mở {months} tháng {remaining_days} ngày {hours} giờ {mins} phút",
+                    False,
+                )
+            if days:
+                return f"Đã mở {days} ngày {hours} giờ {mins} phút", False
+            if hours:
+                return f"Đã mở {hours} giờ {mins} phút", False
             return f"Đã mở {mins} phút", False
 
-        if months: return f"Quá hạn {months} tháng {remaining_days} ngày", True
-        if days: return f"Quá hạn {days} ngày {hours} giờ", True
-        if hours: return f"Quá hạn {hours} giờ {mins} phút", True
+        if months:
+            return (
+                f"Quá hạn {months} tháng {remaining_days} ngày {hours} giờ {mins} phút",
+                True,
+            )
+        if days:
+            return f"Quá hạn {days} ngày {hours} giờ {mins} phút", True
+        if hours:
+            return f"Quá hạn {hours} giờ {mins} phút", True
         return f"Quá hạn {mins} phút", True
     else:
         prefix = "Mở sau" if is_open_event else "Còn"
-        if months: return f"{prefix} {months} tháng {remaining_days} ngày", False
-        if days: return f"{prefix} {days} ngày {hours} giờ", False
-        if hours: return f"{prefix} {hours} giờ {mins} phút", False
+        if months:
+            return (
+                f"{prefix} {months} tháng {remaining_days} ngày {hours} giờ {mins} phút",
+                False,
+            )
+        if days:
+            return f"{prefix} {days} ngày {hours} giờ {mins} phút", False
+        if hours:
+            return f"{prefix} {hours} giờ {mins} phút", False
         return f"{prefix} {mins} phút", False
 
 def get_progress_value(deadline_str: str) -> float:
