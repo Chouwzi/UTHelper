@@ -557,6 +557,27 @@ def test_update_failure_explains_retry_in_banner_instead_of_stale_ready_copy():
     assert controller._update_btn.disabled is False
 
 
+def test_manual_discovery_failure_is_not_presented_as_download_failure():
+    controller = _update_event_controller()
+    controller._manual_update_check_requested = True
+    controller._update_candidate = None
+    messages = []
+    controller._show_snackbar = lambda message, *_args: messages.append(message)
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.FAILED,
+                message="update service is temporarily unavailable",
+            )
+        )
+    )
+
+    assert messages == ["Không thể kiểm tra cập nhật. Hãy kiểm tra mạng và thử lại."]
+    assert controller._update_text.value == ""
+    assert controller._update_banner.visible is False
+
+
 def test_show_snackbar_uses_page_overlay_when_available():
     controller = AppController.__new__(AppController)
     overlay_controls = []

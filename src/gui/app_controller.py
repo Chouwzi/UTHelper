@@ -2690,29 +2690,40 @@ class AppController:
             self._update_progress.visible = False
             self._show_update_confirmation()
         elif event.kind is UpdateEventKind.FAILED:
-            self._diag_breadcrumb("update_download", "failed", "github")
-            should_notify = (
-                self._manual_update_check_requested or self._update_banner.visible
-            )
-            self._manual_update_check_requested = False
-            if check_button is not None:
-                check_button.disabled = False
-                check_button.content = "Kiểm tra ngay"
-            self._update_btn.disabled = False
-            self._update_btn.content = "Thử lại"
-            self._update_progress.visible = False
-            failed_candidate = candidate or getattr(self, "_update_candidate", None)
-            if failed_candidate is not None:
+            if candidate is None:
+                self._diag_breadcrumb("update_check", "failed", "github")
+                should_notify = self._manual_update_check_requested
+                self._manual_update_check_requested = False
+                if check_button is not None:
+                    check_button.disabled = False
+                    check_button.content = "Kiểm tra ngay"
+                if should_notify:
+                    self._show_snackbar(
+                        "Không thể kiểm tra cập nhật. "
+                        "Hãy kiểm tra mạng và thử lại.",
+                        ft.Icons.ERROR_OUTLINE_ROUNDED,
+                        C.CRITICAL,
+                    )
+            else:
+                self._diag_breadcrumb("update_download", "failed", "github")
+                should_notify = self._update_banner.visible
+                self._manual_update_check_requested = False
+                if check_button is not None:
+                    check_button.disabled = False
+                    check_button.content = "Kiểm tra ngay"
+                self._update_btn.disabled = False
+                self._update_btn.content = "Thử lại"
+                self._update_progress.visible = False
                 self._update_text.value = (
                     "Không thể tải hoặc xác minh "
-                    f"v{failed_candidate.manifest.release_version}. Hãy thử lại."
+                    f"v{candidate.manifest.release_version}. Hãy thử lại."
                 )
-            if should_notify:
-                self._show_snackbar(
-                    "Không thể tải hoặc xác minh bản cập nhật",
-                    ft.Icons.ERROR_OUTLINE_ROUNDED,
-                    C.CRITICAL,
-                )
+                if should_notify:
+                    self._show_snackbar(
+                        "Không thể tải hoặc xác minh bản cập nhật",
+                        ft.Icons.ERROR_OUTLINE_ROUNDED,
+                        C.CRITICAL,
+                    )
         elif event.kind is UpdateEventKind.CANCELLED:
             self._diag_breadcrumb("update_download", "cancelled", "user")
             self._update_btn.disabled = False

@@ -138,8 +138,6 @@ class UpdateCoordinator:
         with self._lock:
             self._ensure_open_locked()
             self._automatic_enabled = bool(enabled)
-            if not enabled:
-                self._cancel_download.set()
             if self._started:
                 if (
                     not self._preference_queued
@@ -150,18 +148,32 @@ class UpdateCoordinator:
                     self._queue_check_locked(automatic=True)
 
     def request_download(self, candidate: UpdateCandidate | None = None) -> None:
+        ready_event: UpdateEventKind | None = None
+        ready_candidate: UpdateCandidate | None = None
         with self._lock:
             self._ensure_open_locked()
             self._start_worker_locked(queue_initial_automatic=False)
             if candidate is not None:
-                self._candidate = candidate
-                self._ready_path = None
-                self._ready_external_url = None
-                self._install_handed_off = False
-            if self._candidate is None or self._download_queued:
-                return
-            if self._enqueue_locked(self._DOWNLOAD):
-                self._download_queued = True
+                if candidate != self._candidate:
+                    self._candidate = candidate
+                    self._ready_path = None
+                    self._ready_external_url = None
+                    self._install_handed_off = False
+                elif self._ready_path is not None and self._ready_path.is_file():
+                    ready_event = UpdateEventKind.READY_TO_INSTALL
+                    ready_candidate = candidate
+                elif self._ready_external_url is not None:
+                    ready_event = UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED
+                    ready_candidate = candidate
+                else:
+                    self._ready_path = None
+            if ready_event is None:
+                if self._candidate is None or self._download_queued:
+                    return
+                if self._enqueue_locked(self._DOWNLOAD):
+                    self._download_queued = True
+        if ready_event is not None:
+            self._emit(ready_event, candidate=ready_candidate, progress=1.0)
 
     def confirm_install(self) -> None:
         with self._lock:
@@ -421,6 +433,17 @@ class UpdateCoordinator:
                 acknowledged = bool(self._external_opener(external_url))
                 reason = ""
             elif path is not None:
+                verification = self._verifier.verify(path, candidate)
+                if not verification.verified:
+                    self._remove_downloaded_path(path)
+                    with self._lock:
+                        self._ready_path = None
+                    self._emit(
+                        UpdateEventKind.FAILED,
+                        candidate=candidate,
+                        message=verification.reason,
+                    )
+                    return
                 result = self._launcher.launch(path, candidate.package)
                 acknowledged = result.acknowledged
                 reason = result.reason
