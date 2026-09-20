@@ -32,7 +32,7 @@ windows = [
     "lxml>=6.1.0",
 ]
 android-build = [
-    "flet-android-notifications==0.10.0",
+    "flet-android-notifications==0.11.2",
 ]
 
 [project.scripts]
@@ -72,7 +72,7 @@ dependencies = [
 bundle_id = "com.uthelper.uthelper"
 adaptive_icon_background = "#0F172A"
 dependencies = [
-    "flet-android-notifications==0.10.0",
+    "flet-android-notifications==0.11.2",
     "flet-uth-background-sync==0.1.0",
 ]
 
