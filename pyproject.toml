@@ -14,7 +14,7 @@ dependencies = [
     "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
     "pydantic>=2.6.4",
-    "flet==0.86.5",
+    "flet==1.0.4",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
     "sentry-sdk>=2,<3",
@@ -22,7 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 windows = [
-    "flet[cli,desktop]==0.86.5",
+    "flet[cli,desktop]==1.0.4",
     "pystray>=0.19.5",
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
