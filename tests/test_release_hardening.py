@@ -135,6 +135,7 @@ def test_legacy_installer_cannot_author_a_competing_application_version():
 def test_android_build_workflows_install_the_notification_patcher():
     for workflow_path in (
         ".github/workflows/build-android.yml",
+        ".github/workflows/package-benchmark.yml",
         ".github/workflows/release.yml",
     ):
         workflow = _read(workflow_path)
@@ -447,6 +448,7 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
         ".github/workflows/release.yml",
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
+        ".github/workflows/package-benchmark.yml",
         "scripts/build_android.ps1",
     }
     generator = "scripts/generate_public_runtime_config.py"
@@ -497,7 +499,7 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
             assert version_output in version_matching[0]
             previous_build = build_index
 
-    assert total_builds == 9
+    assert total_builds == 13
 
     for workflow_path in (
         ".github/workflows/release.yml",

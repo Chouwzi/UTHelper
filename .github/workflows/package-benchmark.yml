@@ -2,22 +2,23 @@ name: Package benchmark
 
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/package-performance]
-    paths:
-      - '.github/workflows/package-benchmark.yml'
-      - 'scripts/measure_package.py'
-      - 'scripts/measure_windows_install.ps1'
+    inputs:
+      platform:
+        description: Platform group to measure
+        type: choice
+        options: [all, android, ios, windows]
+        default: all
 
 permissions:
   contents: read
 
 concurrency:
-  group: package-benchmark-${{ github.ref }}
+  group: package-benchmark-${{ github.ref }}-${{ inputs.platform || 'all' }}
   cancel-in-progress: true
 
 jobs:
   android:
+    if: inputs.platform == 'all' || inputs.platform == 'android'
     runs-on: ubuntu-latest
     timeout-minutes: 55
     strategy:
@@ -59,10 +60,13 @@ jobs:
           BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
           python scripts/release_metadata.py --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
-          read -r -a OPTIONS <<< "$FLAGS"
-          flet build apk --build-version "$VERSION" --build-number "$BUILD" "${OPTIONS[@]}" --yes --verbose || test -d build/flutter
+          set --
+          if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
+          flet build apk --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
-          flet build apk --build-version "$VERSION" --build-number "$BUILD" "${OPTIONS[@]}" --yes --verbose
+          python scripts/release_metadata.py --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          flet build apk --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
           mkdir -p measurements
           mapfile -t PACKAGES < <(find build/apk -maxdepth 1 -type f -name '*.apk')
           test "${#PACKAGES[@]}" -eq 1
@@ -92,6 +96,7 @@ jobs:
           retention-days: 7
 
   ios:
+    if: inputs.platform == 'all' || inputs.platform == 'ios'
     runs-on: macos-latest
     timeout-minutes: 65
     strategy:
@@ -124,8 +129,9 @@ jobs:
           BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
           python scripts/release_metadata.py --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
-          read -r -a OPTIONS <<< "$FLAGS"
-          flet build ipa --build-version "$VERSION" --build-number "$BUILD" "${OPTIONS[@]}" --yes --verbose
+          set --
+          if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
+          flet build ipa --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
           mkdir -p measurements
           find build/ipa -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' > archives.txt
           test "$(wc -l < archives.txt | tr -d ' ')" -eq 1
@@ -147,6 +153,7 @@ jobs:
           retention-days: 7
 
   windows:
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     timeout-minutes: 65
     env:

@@ -55,11 +55,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Installed bundle failed verification" }
         # The existing harness isolates APPDATA and tests visible/hidden launches,
         # tray activation and single-instance recovery. It is not a frame benchmark.
-        & (Join-Path $PSScriptRoot "test_windows_single_instance_e2e.ps1") `
+        $activation = & (Join-Path $PSScriptRoot "test_windows_single_instance_e2e.ps1") `
             -ExePath (Join-Path $installDir "UTHelper.exe") `
             -StartupAliasPath (Join-Path $installDir "UTHelperAutostart.exe") `
             -WorkingDirectory $installDir -WindowTimeoutSeconds 15
-        if ($LASTEXITCODE -ne 0) { throw "Installed application smoke test failed" }
+        $activation | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0 -or ($activation | Out-String) -match 'single_instance_fail_open') {
+            throw "Installed application smoke test failed"
+        }
         $uninstallSeconds = Invoke-TimedMsi @("/x", $productCode, "/qn", "/norestart", "/l*v", (Join-Path $root "uninstall-$round.log"))
         $active = $false
         if (Test-Path -LiteralPath $installDir) { throw "Uninstall did not remove the installed bundle" }
