@@ -22,6 +22,9 @@ REQUIRED_INPUTS = {
     "WINDOWS_TIMESTAMP_URL": "https://timestamp.example.com",
     "WIX_EULA_ACCEPTED": "wix7",
     "SENTRY_DSN": "https://public@example.ingest.sentry.io/1",
+    "SENTRY_AUTH_TOKEN": "synthetic-sentry-token",
+    "SENTRY_ORG": "synthetic-org",
+    "SENTRY_PROJECT": "uthelper",
 }
 
 
@@ -49,7 +52,7 @@ def test_complete_release_input_inventory_passes_preflight():
     result = _run()
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "Release credential preflight passed (12 inputs).\n"
+    assert result.stdout == "Release credential preflight passed (15 inputs).\n"
     assert result.stderr == ""
 
 

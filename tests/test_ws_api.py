@@ -249,6 +249,7 @@ class TestOrchestratorWSFallback:
         orch.moodle_service.ws_events_to_assignments.return_value = [
             {"title": "Test", "type": "assignment", "source": "ws_api"}
         ]
+        orch._should_sync_thnn = MagicMock(return_value=False)
         
         result = orch.get_latest_activities()
         assert len(result) == 1

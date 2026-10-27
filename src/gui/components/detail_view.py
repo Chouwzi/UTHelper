@@ -13,8 +13,13 @@ import flet as ft
 import asyncio
 import logging
 from collections import Counter
-from gui.core.theme import C
-from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
+from gui.core.utils import (
+    clean_course_name,
+    format_deadline,
+    get_card_countdown,
+    get_urgency_badge,
+)
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
 from gui.components.detail.submission_presenter import (
     SubmissionUiPolicy,
@@ -90,6 +95,7 @@ class DetailView(ft.Container):
         self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
         self._init_controls()
         self._init_layout(on_close)
+        self._rendered_palette = semantic_palette()
 
     def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
         self._page          = page
@@ -300,7 +306,7 @@ class DetailView(ft.Container):
                     "Cập nhật",
                     icon=ft.Icons.SAVE_ROUNDED,
                     on_click=self._on_update_file_metadata,
-                    bgcolor=C.ACCENT, color=ft.Colors.WHITE,
+                    bgcolor=C.ACCENT, color=C.ON_ACCENT,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -323,7 +329,7 @@ class DetailView(ft.Container):
                     "Xóa",
                     icon=ft.Icons.DELETE_ROUNDED,
                     on_click=self._do_confirmed_delete,
-                    bgcolor=C.CRITICAL, color=ft.Colors.WHITE,
+                    bgcolor=C.CRITICAL, color=C.ON_CRITICAL,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -348,7 +354,7 @@ class DetailView(ft.Container):
                     icon=ft.Icons.SWAP_HORIZ_ROUNDED,
                     on_click=self._confirm_replace_mutation,
                     bgcolor=C.WARNING,
-                    color=ft.Colors.WHITE,
+                    color=C.ON_WARNING,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -427,7 +433,7 @@ class DetailView(ft.Container):
                 self._edit_submitted_btn,
             ], spacing=8),
             bgcolor=C.SURFACE,
-            border=ft.Border.all(1, C.SAFE + "40"),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25, C.SAFE)),
             border_radius=8,
             padding=ft.Padding.all(14),
             visible=False,
@@ -454,8 +460,8 @@ class DetailView(ft.Container):
         self._submit_btn = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.CLOUD_UPLOAD_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Lưu bài nộp", size=13, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                    ft.Icon(ft.Icons.CLOUD_UPLOAD_ROUNDED, size=16, color=C.ON_SAFE),
+                    ft.Text("Lưu bài nộp", size=13, color=C.ON_SAFE, weight=ft.FontWeight.W_600),
                 ],
                 spacing=6, alignment=ft.MainAxisAlignment.CENTER,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -472,8 +478,8 @@ class DetailView(ft.Container):
         self._finalize_btn = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.SEND_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Nộp bài", size=13, color=ft.Colors.WHITE,
+                    ft.Icon(ft.Icons.SEND_ROUNDED, size=16, color=C.ON_SAFE),
+                    ft.Text("Nộp bài", size=13, color=C.ON_SAFE,
                             weight=ft.FontWeight.W_600),
                 ],
                 spacing=6,
@@ -515,8 +521,8 @@ class DetailView(ft.Container):
         )
         self._mode_append_btn = ft.Container(
             content=ft.Row([
-                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=ft.Colors.WHITE),
-                ft.Text("Thêm file", size=11, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED, size=14, color=C.ON_ACCENT),
+                ft.Text("Thêm file", size=11, color=C.ON_ACCENT, weight=ft.FontWeight.W_600),
             ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=C.ACCENT,
             border_radius=6,
@@ -575,8 +581,8 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=ft.Colors.WHITE)
-        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=ft.Colors.WHITE,
+        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=C.ON_ACCENT)
+        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
             content=ft.Row(
@@ -614,26 +620,40 @@ class DetailView(ft.Container):
         )
 
     def _init_layout(self, on_close):
+        self._back_icon = ft.Icon(
+            ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY
+        )
+        self._back_text = ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY)
         back_btn = ft.TextButton(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY),
-                ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY),
+                self._back_icon,
+                self._back_text,
             ], spacing=4, tight=True),
             on_click=lambda _: on_close(),
             style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
         )
 
-        info_box = ft.Container(
+        self._deadline_label = ft.Text(
+            "Thời hạn",
+            size=11,
+            color=C.TEXT_SECONDARY,
+            weight=ft.FontWeight.W_500,
+        )
+        self._countdown_label = ft.Text(
+            "Còn lại",
+            size=11,
+            color=C.TEXT_SECONDARY,
+            weight=ft.FontWeight.W_500,
+        )
+        self._info_box = ft.Container(
             content=ft.Column(controls=[
                 self._opentime_row,
                 ft.Row(controls=[
-                    ft.Text("Thời hạn", size=11, color=C.TEXT_SECONDARY,
-                            weight=ft.FontWeight.W_500),
+                    self._deadline_label,
                     self._deadline_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Row(controls=[
-                    ft.Text("Còn lại", size=11, color=C.TEXT_SECONDARY,
-                            weight=ft.FontWeight.W_500),
+                    self._countdown_label,
                     self._countdown_txt,
                 ], spacing=8, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self._cutoff_row,
@@ -643,6 +663,7 @@ class DetailView(ft.Container):
             border_radius=8,
             border=ft.Border.all(1, C.BORDER),
         )
+        self._details_divider = ft.Divider(height=16, color=C.BORDER)
 
         self.content = ft.Column(
             controls=[
@@ -661,8 +682,8 @@ class DetailView(ft.Container):
                                     self._badge_ctrl,
                                     self._title_text,
                                     self._course_text,
-                                    ft.Divider(height=16, color=C.BORDER),
-                                    info_box,
+                                    self._details_divider,
+                                    self._info_box,
                                 ], spacing=8),
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
@@ -696,6 +717,14 @@ class DetailView(ft.Container):
 
     # Hàm công khai
     def show_loading(self, data: dict):
+        # Navigation has already changed targets, so invalidate background
+        # submission work and hide controls belonging to the previous item.
+        self._view_generation += 1
+        self._error_banner.visible = False
+        self._submission_area.visible = False
+        self._submitted_area.visible = False
+        self._open_btn.visible = False
+        self._header_open_btn.visible = False
         self._title_text.value  = data.get("title", "Đang tải...")
         self._course_text.value = clean_course_name(data.get("course", ""))
         self._current_url       = data.get("url", "")
@@ -713,11 +742,9 @@ class DetailView(ft.Container):
         self._badge_ctrl.visible      = True
 
         deadline_str = data.get("deadline", "")
-        act_type = data.get("type", "")
-        cd_text, overdue = get_countdown(deadline_str, act_type)
+        cd_text, overdue, cd_color, _ = get_card_countdown(data)
         self._countdown_txt.value = cd_text
-        # UX-7: Time-based countdown color consistent with cards
-        self._countdown_txt.color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
+        self._countdown_txt.color = cd_color
         
         details = data.get("details", {})
         open_time_str = details.get("open_time", "")
@@ -760,8 +787,7 @@ class DetailView(ft.Container):
         deadline_str = data.get("deadline", "")
         if not deadline_str:
             return False
-        countdown, overdue = get_countdown(deadline_str, data.get("type", ""))
-        color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
+        countdown, overdue, color, _ = get_card_countdown(data)
         changed = (
             self._countdown_txt.value != countdown
             or self._countdown_txt.color != color
@@ -839,7 +865,9 @@ class DetailView(ft.Container):
         submission_context_reason = ""
 
         # Load submitted files in background (for assignments)
-        if is_assignment:
+        if is_assignment and data.get("site_identity") == "thnn":
+            submission_context_reason = "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. Vui lòng mở trong trình duyệt."
+        elif is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
             course_context_valid, course_id = self._course_context(raw_course_id)
@@ -906,8 +934,8 @@ class DetailView(ft.Container):
             self._cta_text.value = "Mở trong trình duyệt"
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
-            self._cta_text.color = ft.Colors.WHITE
-            self._cta_icon.color = ft.Colors.WHITE
+            self._cta_text.color = C.ON_ACCENT
+            self._cta_icon.color = C.ON_ACCENT
 
         details = data.get("details", {})
 
@@ -1111,7 +1139,7 @@ class DetailView(ft.Container):
                         desc_md,
                         selectable=True,
                         extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                        on_tap_link=lambda e: ft.UrlLauncher().launch_url(e.data),
+                        on_tap_link=self._handle_link_tap,
                     ),
                     bgcolor=C.SURFACE, border_radius=8,
                     padding=ft.Padding.all(12),
@@ -1119,6 +1147,12 @@ class DetailView(ft.Container):
             ]))
 
         # Chỉ thay đổi giao diện, không tự gọi update
+
+    async def _handle_link_tap(self, e):
+        try:
+            await ft.UrlLauncher().launch_url(e.data)
+        except Exception as exc:
+            logger.warning(f"Failed to launch url {e.data}: {exc}")
 
     def show_error_banner(self):
         self._error_banner.visible = True
@@ -1241,8 +1275,8 @@ class DetailView(ft.Container):
             # Overwrite active
             self._mode_overwrite_btn.bgcolor = C.ACCENT
             self._mode_overwrite_btn.border = None
-            self._mode_overwrite_btn.content.controls[0].color = ft.Colors.WHITE
-            self._mode_overwrite_btn.content.controls[1].color = ft.Colors.WHITE
+            self._mode_overwrite_btn.content.controls[0].color = C.ON_ACCENT
+            self._mode_overwrite_btn.content.controls[1].color = C.ON_ACCENT
             self._mode_overwrite_btn.content.controls[1].weight = ft.FontWeight.W_600
             # Append inactive
             self._mode_append_btn.bgcolor = C.BG
@@ -1256,8 +1290,8 @@ class DetailView(ft.Container):
             # Append active
             self._mode_append_btn.bgcolor = C.ACCENT
             self._mode_append_btn.border = None
-            self._mode_append_btn.content.controls[0].color = ft.Colors.WHITE
-            self._mode_append_btn.content.controls[1].color = ft.Colors.WHITE
+            self._mode_append_btn.content.controls[0].color = C.ON_ACCENT
+            self._mode_append_btn.content.controls[1].color = C.ON_ACCENT
             self._mode_append_btn.content.controls[1].weight = ft.FontWeight.W_600
             # Overwrite inactive
             self._mode_overwrite_btn.bgcolor = C.BG
@@ -2008,6 +2042,20 @@ class DetailView(ft.Container):
     def update_theme(self):
         """Update colors of all detail view controls dynamically on theme switch."""
         from gui.core.theme import C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [
+                self,
+                *(
+                    value
+                    for value in vars(self).values()
+                    if isinstance(value, ft.BaseControl)
+                ),
+            ],
+            self._rendered_palette,
+            current_palette,
+        )
+        self._rendered_palette = current_palette
         self.bgcolor = C.BG
         
         # Static Text & Control Colors
@@ -2023,6 +2071,16 @@ class DetailView(ft.Container):
         self._upload_progress.color = C.SAFE
         self._upload_progress.bgcolor = C.BORDER
         self._upload_status.color = C.TEXT_SECONDARY
+        self._submission_statement.active_color = C.ACCENT
+        self._submission_statement.check_color = C.ON_ACCENT
+        self._submission_statement.label_text_style = ft.TextStyle(
+            color=C.TEXT_PRIMARY
+        )
+        self._submission_policy_text.color = (
+            C.WARNING
+            if self._submission_policy and self._submission_policy.edit_reason
+            else C.TEXT_SECONDARY
+        )
 
         # Error Banner
         try:
@@ -2033,6 +2091,16 @@ class DetailView(ft.Container):
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        # Replace confirmation dialog
+        self._replace_confirm_dialog.title.color = C.WARNING
+        self._replace_confirm_dialog.bgcolor = C.SURFACE
+        self._replace_confirm_dialog.content.color = C.TEXT_PRIMARY
+        self._replace_confirm_dialog.actions[0].style = ft.ButtonStyle(
+            color=C.TEXT_SECONDARY
+        )
+        self._replace_confirm_dialog.actions[1].bgcolor = C.WARNING
+        self._replace_confirm_dialog.actions[1].color = C.ON_WARNING
 
         # Text Fields & Dropdowns (Edit metadata dialog)
         _edit_fields = [
@@ -2057,6 +2125,7 @@ class DetailView(ft.Container):
             self._file_edit_dialog.actions[0].style.color = C.TEXT_SECONDARY
             # Update Button
             self._file_edit_dialog.actions[1].bgcolor = C.ACCENT
+            self._file_edit_dialog.actions[1].color = C.ON_ACCENT
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -2070,6 +2139,7 @@ class DetailView(ft.Container):
             self._delete_confirm_dialog.actions[0].style.color = C.TEXT_SECONDARY
             # Delete Button
             self._delete_confirm_dialog.actions[1].bgcolor = C.CRITICAL
+            self._delete_confirm_dialog.actions[1].color = C.ON_CRITICAL
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -2100,7 +2170,9 @@ class DetailView(ft.Container):
         # Areas (submitted, submission, pick, submit, upload modes)
         try:
             self._submitted_area.bgcolor = C.SURFACE
-            self._submitted_area.border = ft.Border.all(1, C.SAFE + "40")
+            self._submitted_area.border = ft.Border.all(
+                1, ft.Colors.with_opacity(0.25, C.SAFE)
+            )
             self._submitted_area.content.controls[0].controls[0].color = C.TEXT_SECONDARY
             self._submitted_area.content.controls[0].controls[1].color = C.TEXT_SECONDARY
             
@@ -2110,6 +2182,12 @@ class DetailView(ft.Container):
             self._pick_btn.content.controls[1].color = C.ACCENT
             
             self._submit_btn.bgcolor = C.SAFE
+            for control in self._submit_btn.content.controls:
+                control.color = C.ON_SAFE
+
+            self._finalize_btn.bgcolor = C.SAFE
+            for control in self._finalize_btn.content.controls:
+                control.color = C.ON_SAFE
             
             self._mode_overwrite_btn.bgcolor = C.BG
             self._mode_overwrite_btn.border = ft.Border.all(1, C.BORDER)
@@ -2117,6 +2195,8 @@ class DetailView(ft.Container):
             self._mode_overwrite_btn.content.controls[1].color = C.TEXT_SECONDARY
             
             self._mode_append_btn.bgcolor = C.ACCENT
+            for control in self._mode_append_btn.content.controls:
+                control.color = C.ON_ACCENT
             self._upload_mode_warning_icon.color = C.WARNING
             self._upload_mode_warning_text.color = C.WARNING
             
@@ -2126,6 +2206,8 @@ class DetailView(ft.Container):
             self._submission_area.content.controls[0].controls[1].color = C.TEXT_SECONDARY
             
             self._open_btn.bgcolor = C.ACCENT
+            self._cta_icon.color = C.ON_ACCENT
+            self._cta_text.color = C.ON_ACCENT
             
             self._opentime_row.controls[0].color = C.TEXT_SECONDARY
             self._cutoff_row.controls[0].color = C.WARNING
@@ -2134,25 +2216,17 @@ class DetailView(ft.Container):
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-        # Layout elements
-        try:
-            back_row = self.content.controls[0].content.controls[0].content
-            back_row.controls[0].color = C.TEXT_SECONDARY
-            back_row.controls[1].color = C.TEXT_SECONDARY
-            
-            detail_col = self.content.controls[2].content.controls[0].content
-            detail_col.controls[3].color = C.BORDER
-            
-            info_box = detail_col.controls[4]
-            info_box.bgcolor = C.SURFACE
-            info_box.border = ft.Border.all(1, C.BORDER)
-            info_box.content.controls[0].controls[0].color = C.TEXT_SECONDARY
-            info_box.content.controls[1].controls[0].color = C.TEXT_SECONDARY
-            info_box.content.controls[2].controls[0].color = C.TEXT_SECONDARY
-            info_box.content.controls[3].controls[0].color = C.WARNING
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        # Stable references avoid silently breaking theme refresh when layout
+        # controls are inserted or reordered.
+        self._back_icon.color = C.TEXT_SECONDARY
+        self._back_text.color = C.TEXT_SECONDARY
+        self._details_divider.color = C.BORDER
+        self._info_box.bgcolor = C.SURFACE
+        self._info_box.border = ft.Border.all(1, C.BORDER)
+        self._opentime_row.controls[0].color = C.TEXT_SECONDARY
+        self._deadline_label.color = C.TEXT_SECONDARY
+        self._countdown_label.color = C.TEXT_SECONDARY
+        self._cutoff_row.controls[0].color = C.WARNING
 
         # If data is currently shown, refresh dynamic content
         if self._current_data:

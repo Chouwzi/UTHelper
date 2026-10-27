@@ -18,13 +18,28 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+import asyncio
 import calendar
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 import flet as ft
+import platform_utils
 
-from gui.core.theme import C
+from gui.components.calendar_navigation import (
+    MonthAnchor,
+    month_slot_anchors,
+    shift_month,
+    shift_week,
+    week_slot_anchors,
+)
+from gui.core.theme import (
+    C,
+    on_color,
+    refresh_semantic_control_colors,
+    semantic_palette,
+)
 from gui.core.utils import (
     get_countdown,
     get_urgency_color,
@@ -37,6 +52,15 @@ _MONTHS_VI = {
     5: "Tháng 5", 6: "Tháng 6", 7: "Tháng 7", 8: "Tháng 8",
     9: "Tháng 9", 10: "Tháng 10", 11: "Tháng 11", 12: "Tháng 12",
 }
+
+
+@dataclass(slots=True)
+class _CalendarPeriodPage:
+    anchor: MonthAnchor | date
+    control: ft.Control
+    weekday_labels: list[ft.Text] = field(default_factory=list)
+    day_cells: list[list[ft.Container]] = field(default_factory=list)
+    week_cells: list[ft.Container] = field(default_factory=list)
 
 
 class CalendarView(ft.Container):
@@ -65,6 +89,7 @@ class CalendarView(ft.Container):
         self._selected_date: Optional[date] = today  # full date for week view
 
         self._build_ui()
+        self._rendered_palette = semantic_palette()
 
     # Build UI
     def _build_ui(self):
@@ -76,43 +101,51 @@ class CalendarView(ft.Container):
         self._month_summary = ft.Text(
             "", size=10, color=C.TEXT_SECONDARY,
         )
+        self._back_btn = ft.IconButton(
+            ft.Icons.ARROW_BACK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=18,
+            tooltip="Quay lại",
+            on_click=lambda _: self._on_close() if self._on_close else None,
+        )
+        self._previous_btn = ft.IconButton(
+            ft.Icons.CHEVRON_LEFT_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Trước",
+            on_click=self._on_previous_period,
+        )
+        self._next_btn = ft.IconButton(
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Sau",
+            on_click=self._on_next_period,
+        )
+        self._today_btn = ft.IconButton(
+            ft.Icons.TODAY_ROUNDED,
+            icon_color=C.ACCENT,
+            icon_size=18,
+            tooltip="Hôm nay",
+            on_click=lambda _: self._go_today(),
+        )
 
         self._header = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Row(
                         controls=[
-                            ft.IconButton(
-                                ft.Icons.ARROW_BACK_ROUNDED,
-                                icon_color=C.TEXT_SECONDARY, icon_size=18,
-                                tooltip="Quay lại",
-                                on_click=lambda _: self._on_close() if self._on_close else None,
-                            ),
+                            self._back_btn,
                             ft.Row(
                                 controls=[
-                                    ft.IconButton(
-                                        ft.Icons.CHEVRON_LEFT_ROUNDED,
-                                        icon_color=C.TEXT_SECONDARY, icon_size=20,
-                                        tooltip="Trước",
-                                        on_click=lambda _: self._navigate(-1),
-                                    ),
+                                    self._previous_btn,
                                     self._month_label,
-                                    ft.IconButton(
-                                        ft.Icons.CHEVRON_RIGHT_ROUNDED,
-                                        icon_color=C.TEXT_SECONDARY, icon_size=20,
-                                        tooltip="Sau",
-                                        on_click=lambda _: self._navigate(1),
-                                    ),
+                                    self._next_btn,
                                 ],
                                 spacing=0,
                                 alignment=ft.MainAxisAlignment.CENTER,
                             ),
-                            ft.IconButton(
-                                ft.Icons.TODAY_ROUNDED,
-                                icon_color=C.ACCENT, icon_size=18,
-                                tooltip="Hôm nay",
-                                on_click=lambda _: self._go_today(),
-                            ),
+                            self._today_btn,
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
@@ -147,21 +180,33 @@ class CalendarView(ft.Container):
         )
 
         # Mode toggle (Month / Week)
+        self._mode_month_icon = ft.Icon(
+            ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY
+        )
+        self._mode_month_text = ft.Text(
+            "Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
+        )
         self._mode_month_btn = ft.Container(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY),
-                ft.Text("Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY),
+                self._mode_month_icon,
+                self._mode_month_text,
             ], spacing=4, tight=True),
-            bgcolor=C.ACCENT + "30",
+            bgcolor=ft.Colors.with_opacity(0.19, C.ACCENT),
             border_radius=12,
             padding=ft.Padding(left=14, right=14, top=5, bottom=5),
             on_click=lambda _: self._toggle_view_mode("month"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
+        self._mode_week_icon = ft.Icon(
+            ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY
+        )
+        self._mode_week_text = ft.Text(
+            "Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+        )
         self._mode_week_btn = ft.Container(
             content=ft.Row(controls=[
-                ft.Icon(ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY),
-                ft.Text("Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY),
+                self._mode_week_icon,
+                self._mode_week_text,
             ], spacing=4, tight=True),
             bgcolor="transparent",
             border_radius=12,
@@ -231,12 +276,21 @@ class CalendarView(ft.Container):
         self._day_count = ft.Text("", size=11, color=C.TEXT_SECONDARY)
         self._day_list = ft.ListView(spacing=6, expand=True)
         # CV-06: Better empty state
+        self._day_empty_icon = ft.Icon(
+            ft.Icons.CALENDAR_TODAY_ROUNDED, size=28, color=C.BORDER
+        )
+        self._day_empty_title = ft.Text(
+            "Không có bài tập đến hạn", size=12, color=C.TEXT_SECONDARY
+        )
+        self._day_empty_hint = ft.Text(
+            "Chọn ngày có chấm màu để xem", size=10, color=C.BORDER
+        )
         self._day_empty = ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Icon(ft.Icons.CALENDAR_TODAY_ROUNDED, size=28, color=C.BORDER),
-                    ft.Text("Không có bài tập đến hạn", size=12, color=C.TEXT_SECONDARY),
-                    ft.Text("Chọn ngày có chấm màu để xem", size=10, color=C.BORDER),
+                    self._day_empty_icon,
+                    self._day_empty_title,
+                    self._day_empty_hint,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
@@ -246,10 +300,11 @@ class CalendarView(ft.Container):
             visible=False,
         )
 
+        self._detail_divider = ft.Divider(height=1, color=C.BORDER)
         detail_panel = ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Divider(height=1, color=C.BORDER),
+                    self._detail_divider,
                     ft.Container(
                         content=ft.Row(
                             controls=[self._day_title, self._day_count],
@@ -268,13 +323,796 @@ class CalendarView(ft.Container):
             ),
             expand=True,
         )
+        self._detail_panel = detail_panel
+
+        self._period_transition_active = False
+        self._period_request_active = False
+        self._pager_recentering = False
+        self._pending_desktop_delta: int | None = None
+        self._pending_desktop_control: ft.Dismissible | None = None
+        self._native_desktop_period_drag = platform_utils.UI_IS_DESKTOP
+        self._period_pager = ft.PageView(
+            controls=[],
+            height=316,
+            selected_index=1,
+            horizontal=True,
+            snap=True,
+            implicit_scrolling=True,
+            keep_page=False,
+            pad_ends=False,
+            viewport_fraction=1.0,
+            on_change=self._on_period_page_change,
+        )
+        # Dismissible keeps drag animation entirely in Flutter. Its child is a
+        # three-page strip whose neighbours overflow on either side; this host
+        # is the stationary viewport that clips that overflow.
+        self._desktop_period_host = ft.Container(
+            width=float("inf"),
+            height=316,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+        # The slot itself is positioned in the outer stage. It must be a
+        # Stack so every replacement Dismissible can use absolute constraints;
+        # a Container child has no bounded size here and leaves only the
+        # lightweight release-frame underlay visible after navigation.
+        self._desktop_period_slot = ft.Stack(
+            controls=[],
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+        self._desktop_period_gesture = ft.GestureDetector(
+            content=self._desktop_period_host,
+            allowed_devices=[ft.PointerDeviceType.MOUSE],
+            mouse_cursor=ft.MouseCursor.GRAB,
+            exclude_from_semantics=True,
+        )
+        self._period_dismiss_generation = 0
+        self._period_dismissible: ft.Dismissible | None = None
+        self._desktop_period_stage: ft.Stack | None = None
+        self._period_background_pages: list[_CalendarPeriodPage] = []
+        self._period_surface = (
+            self._desktop_period_gesture
+            if self._native_desktop_period_drag
+            else self._period_pager
+        )
 
         # Assemble
         self.content = ft.Column(
-            controls=[self._header, self._mode_toggle, self._grid, self._week_strip, detail_panel],
+            controls=[
+                self._header,
+                self._mode_toggle,
+                self._period_surface,
+                detail_panel,
+            ],
             spacing=0,
             expand=True,
         )
+        self._seed_period_pages()
+
+    def _build_month_period_page(
+        self, anchor: MonthAnchor
+    ) -> _CalendarPeriodPage:
+        weekday_labels = [
+            ft.Text(
+                weekday,
+                size=10,
+                weight=ft.FontWeight.W_600,
+                color=C.CRITICAL if weekday == "CN" else C.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            )
+            for weekday in _WEEKDAYS
+        ]
+        weekday_row = ft.Row(
+            controls=[
+                ft.Container(
+                    content=label,
+                    width=44,
+                    alignment=ft.Alignment(0, 0),
+                )
+                for label in weekday_labels
+            ],
+            spacing=2,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            anchor.year, anchor.month
+        )
+        while len(weeks) < 6:
+            weeks.append([0] * 7)
+        day_cells: list[list[ft.Container]] = []
+        rows = []
+        for week in weeks:
+            cells = []
+            for day_number in week:
+                cell = self._make_day_cell()
+                cell_date = (
+                    date(anchor.year, anchor.month, day_number)
+                    if day_number
+                    else None
+                )
+                cell.data["date"] = cell_date
+                cell.data["day"] = day_number
+                cell.data["day_text"].value = str(day_number) if day_number else ""
+                cell.on_click = (
+                    (lambda _, selected=cell_date: self._on_absolute_date_click(selected))
+                    if cell_date
+                    else None
+                )
+                cells.append(cell)
+            day_cells.append(cells)
+            rows.append(
+                ft.Row(
+                    controls=cells,
+                    spacing=2,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                )
+            )
+        control = ft.Column(
+            controls=[weekday_row, *rows],
+            spacing=2,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        period = _CalendarPeriodPage(
+            anchor,
+            control,
+            weekday_labels=weekday_labels,
+            day_cells=day_cells,
+        )
+        self._render_month_period_page(period)
+        return period
+
+    def _build_week_period_page(self, week_start: date) -> _CalendarPeriodPage:
+        cells = [self._make_week_cell(index) for index in range(7)]
+        for index, cell in enumerate(cells):
+            cell_date = week_start + timedelta(days=index)
+            cell.data["date"] = cell_date
+            cell.data["day_text"].value = str(cell_date.day)
+            cell.on_click = (
+                lambda _, selected=cell_date: self._on_absolute_date_click(selected)
+            )
+        control = ft.Container(
+            content=ft.Row(
+                controls=cells,
+                spacing=3,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(top=4, bottom=4),
+        )
+        period = _CalendarPeriodPage(week_start, control, week_cells=cells)
+        self._render_week_period_page(period)
+        return period
+
+    def _build_month_period_preview(
+        self, anchor: MonthAnchor
+    ) -> _CalendarPeriodPage:
+        """Build a non-interactive background with exact live-grid geometry."""
+        period = self._build_month_period_page(anchor)
+        for row in period.day_cells:
+            for cell in row:
+                cell.on_click = None
+                cell.animate = None
+        return period
+
+    def _seed_period_pages(self, *, delta: int | None = None) -> None:
+        if self._view_mode == "month":
+            anchors = month_slot_anchors(MonthAnchor(self._year, self._month))
+            build_period = self._build_month_period_page
+        else:
+            anchors = week_slot_anchors(self._week_start)
+            build_period = self._build_week_period_page
+
+        old_pages = getattr(self, "_period_pages", [])
+        if (
+            delta == 1
+            and len(old_pages) == 3
+            and old_pages[1].anchor == anchors[0]
+            and old_pages[2].anchor == anchors[1]
+        ):
+            self._period_pages = [
+                old_pages[1],
+                old_pages[2],
+                build_period(anchors[2]),
+            ]
+        elif (
+            delta == -1
+            and len(old_pages) == 3
+            and old_pages[0].anchor == anchors[1]
+            and old_pages[1].anchor == anchors[2]
+        ):
+            self._period_pages = [
+                build_period(anchors[0]),
+                old_pages[0],
+                old_pages[1],
+            ]
+        else:
+            self._period_pages = [build_period(anchor) for anchor in anchors]
+
+        # Reused pages keep their control identity (and therefore their
+        # already-mounted Flutter subtrees), but selection/deadline styling
+        # must follow the newly active period.
+        if delta in (-1, 1):
+            for period in self._period_pages:
+                if isinstance(period.anchor, MonthAnchor):
+                    self._render_month_period_page(period)
+                else:
+                    self._render_week_period_page(period)
+        pager = getattr(self, "_period_pager", None)
+        if pager is not None:
+            pager.selected_index = 1
+            pager.controls = (
+                []
+                if self._native_desktop_period_drag
+                else [period.control for period in self._period_pages]
+            )
+        if self._native_desktop_period_drag:
+            self._period_dismiss_generation += 1
+            height = 316 if self._view_mode == "month" else 88
+
+            def strip_period(control: ft.Control, offset_x: int) -> ft.Container:
+                return ft.Container(
+                    content=control,
+                    bgcolor=C.BG,
+                    left=0,
+                    right=0,
+                    top=0,
+                    bottom=0,
+                    offset=ft.Offset(offset_x, 0),
+                )
+
+            previous, current, following = self._period_pages
+            if self._view_mode == "month":
+                self._period_background_pages = [
+                    self._build_month_period_preview(previous.anchor),
+                    self._build_month_period_preview(following.anchor),
+                ]
+                current_underlay = self._grid
+            else:
+                self._period_background_pages = [
+                    self._build_week_period_page(previous.anchor),
+                    self._build_week_period_page(following.anchor),
+                ]
+                current_underlay = self._week_strip
+            previous_background, following_background = (
+                self._period_background_pages
+            )
+
+            def background_period(control: ft.Control) -> ft.Container:
+                return ft.Container(
+                    content=control,
+                    bgcolor=C.BG,
+                    width=float("inf"),
+                    height=height,
+                )
+
+            period_strip = ft.Stack(
+                controls=[
+                    strip_period(previous.control, -1),
+                    strip_period(current.control, 0),
+                    strip_period(following.control, 1),
+                ],
+                width=float("inf"),
+                height=height,
+                clip_behavior=ft.ClipBehavior.NONE,
+            )
+            self._period_dismissible = ft.Dismissible(
+                key=f"calendar-period-{self._period_dismiss_generation}",
+                content=period_strip,
+                background=background_period(previous_background.control),
+                secondary_background=background_period(
+                    following_background.control
+                ),
+                dismiss_direction=ft.DismissDirection.HORIZONTAL,
+                dismiss_thresholds={
+                    ft.DismissDirection.START_TO_END: 0.14,
+                    ft.DismissDirection.END_TO_START: 0.14,
+                },
+                movement_duration=ft.Duration(milliseconds=30),
+                # Flet treats a missing/None value as its 300 ms default,
+                # which runs a visible vertical SizeTransition after this
+                # horizontal swipe. Flutter skips onDismissed for a zero
+                # duration here, so use the smallest positive duration: it
+                # completes the lifecycle below one display frame while the
+                # exact-geometry underlay remains painted.
+                resize_duration=ft.Duration(milliseconds=1),
+                on_confirm_dismiss=self._on_desktop_period_confirm,
+                on_dismiss=self._on_desktop_period_dismiss,
+                left=0,
+                right=0,
+                top=0,
+                bottom=0,
+            )
+            self._desktop_period_slot.controls = [self._period_dismissible]
+            if self._desktop_period_stage is None:
+                self._desktop_period_underlay = background_period(
+                    current_underlay
+                )
+                self._desktop_period_stage = ft.Stack(
+                    controls=[
+                        self._desktop_period_underlay,
+                        self._desktop_period_slot,
+                    ],
+                    width=float("inf"),
+                    height=height,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                )
+                self._desktop_period_host.content = (
+                    self._desktop_period_stage
+                )
+            else:
+                # A confirmed swipe has already installed a lightweight copy
+                # of the destination below Dismissible. Keep it mounted until
+                # the new full strip paints; replacing it here would expose
+                # the old month's compatibility grid for one bridge frame.
+                if self._pending_desktop_delta is None:
+                    self._desktop_period_underlay.content = current_underlay
+                self._desktop_period_underlay.height = height
+                self._desktop_period_stage.height = height
+
+    def _update_period_surface(self) -> None:
+        try:
+            # A completed desktop swipe changes only these three mounted
+            # subtrees. Updating CalendarView itself makes Flet diff and
+            # serialize the whole detail screen, which keeps the replacement
+            # Dismissible unavailable long enough to reject the next swipe.
+            self._page_ref.update(
+                self._header,
+                self._desktop_period_slot,
+                self._detail_panel,
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            # Unit tests and construction before mounting have no Flet page.
+            pass
+
+    def _render_period_pages(self) -> None:
+        for period in self._period_pages + self._period_background_pages:
+            if isinstance(period.anchor, MonthAnchor):
+                self._render_month_period_page(period)
+            else:
+                self._render_week_period_page(period)
+
+    def _reset_period_pager(self) -> None:
+        self._period_transition_active = False
+        self._period_request_active = False
+        self._pager_recentering = False
+        # A mode switch can replace a Dismissible before its delayed dismiss
+        # event reaches Python. Do not let that old transaction reject the
+        # first swipe in the newly mounted mode.
+        self._pending_desktop_delta = None
+        self._pending_desktop_control = None
+        height = 316 if self._view_mode == "month" else 88
+        self._period_pager.height = height
+        self._desktop_period_host.height = height
+        self._seed_period_pages()
+
+    def _apply_period_delta(self, delta: int) -> bool:
+        if delta not in (-1, 1):
+            return False
+        if self._view_mode == "month":
+            current = MonthAnchor(self._year, self._month)
+            target = shift_month(current, delta)
+            if target == current:
+                return False
+            self._year, self._month = target.year, target.month
+            self._selected_day = None
+        else:
+            target = shift_week(self._week_start, delta)
+            if target == self._week_start:
+                return False
+            self._week_start = target
+            self._selected_date = None
+            self._selected_day = None
+        return True
+
+    async def _on_period_page_change(self, event) -> None:
+        try:
+            selected_index = int(event.data)
+        except (TypeError, ValueError):
+            return
+        if self._pager_recentering and selected_index == 1:
+            return
+        if self._period_transition_active or selected_index not in (0, 2):
+            return
+        self._period_transition_active = True
+        delta = -1 if selected_index == 0 else 1
+        try:
+            if not self._apply_period_delta(delta):
+                return
+            self._seed_period_pages()
+            if self._view_mode == "month":
+                self._render_month()
+            else:
+                self._render_week()
+            self._pager_recentering = True
+            await self._period_pager.jump_to_page(1)
+        finally:
+            self._pager_recentering = False
+            self._period_transition_active = False
+
+    async def _on_desktop_period_dismiss(self, event) -> None:
+        source = getattr(event, "control", None) or self._period_dismissible
+        if source is not self._period_dismissible:
+            # Late event from a Dismissible replaced by another swipe or mode
+            # switch. Its logical delta was already handled (or cancelled).
+            return
+        direction = getattr(event, "direction", None)
+        if direction == ft.DismissDirection.START_TO_END:
+            delta = -1
+        elif direction == ft.DismissDirection.END_TO_START:
+            delta = 1
+        else:
+            return
+        self._finish_desktop_period_dismiss(source, delta)
+
+    def _finish_desktop_period_dismiss(
+        self, source: ft.Dismissible, delta: int
+    ) -> bool:
+        """Idempotently replace one dismissed strip and release its state."""
+        if source is not self._period_dismissible or delta not in (-1, 1):
+            return False
+
+        pending_matches = (
+            self._pending_desktop_control is source
+            and self._pending_desktop_delta == delta
+        )
+        if self._pending_desktop_control is source and not pending_matches:
+            # The source is definitely being removed, so it still needs a
+            # replacement. Keep the already-rendered logical period rather
+            # than applying a contradictory second delta.
+            reuse_delta = None
+        elif pending_matches:
+            reuse_delta = delta
+        else:
+            # Compatibility path for direct on_dismiss delivery without a
+            # preceding confirmation event.
+            self._period_transition_active = True
+            if not self._apply_period_delta(delta):
+                reuse_delta = None
+            else:
+                reuse_delta = delta
+        try:
+            # Flutter removes a dismissed control, so replace it with a new
+            # keyed instance. Reuse the two still-relevant period pages and
+            # build only the newly exposed far edge.
+            self._seed_period_pages(delta=reuse_delta)
+            if self._view_mode == "month":
+                self._render_month(update_page=False)
+            else:
+                self._render_week(update_page=False)
+            self._update_period_surface()
+        finally:
+            if self._pending_desktop_control is source:
+                self._pending_desktop_delta = None
+                self._pending_desktop_control = None
+            self._period_transition_active = False
+        return True
+
+    async def _recover_desktop_period_dismiss(
+        self, source: ft.Dismissible, delta: int
+    ) -> None:
+        """Re-arm a strip if Flutter omits/delays its dismiss event."""
+        # movement_duration (30 ms) + resize_duration (1 ms) should normally
+        # emit on_dismiss first. Two extra display frames cover bridge jitter
+        # without introducing the old half-second dead interval.
+        await asyncio.sleep(0.065)
+        if (
+            source is self._period_dismissible
+            and self._pending_desktop_control is source
+            and self._pending_desktop_delta == delta
+        ):
+            self._finish_desktop_period_dismiss(source, delta)
+
+    async def _resolve_desktop_period_dismiss(self, event, dismiss: bool) -> None:
+        """Resolve Flet's pending Dismissible decision on its source control."""
+        dismissible = getattr(event, "control", None) or self._period_dismissible
+        if dismissible is not None:
+            await dismissible.confirm_dismiss(dismiss)
+
+    async def _on_desktop_period_confirm(self, event) -> None:
+        """Install the destination underlay, then release Flet's drag lock."""
+        source = getattr(event, "control", None) or self._period_dismissible
+        if source is not self._period_dismissible:
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
+        if (
+            self._pending_desktop_control is not None
+            and self._pending_desktop_control is not source
+        ):
+            # Heal an orphaned transaction defensively. A pending decision is
+            # meaningful only for the control that created it; it must never
+            # veto a swipe on the current replacement.
+            self._pending_desktop_delta = None
+            self._pending_desktop_control = None
+            self._period_transition_active = False
+        direction = getattr(event, "direction", None)
+        if direction == ft.DismissDirection.START_TO_END:
+            delta = -1
+        elif direction == ft.DismissDirection.END_TO_START:
+            delta = 1
+        else:
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
+        if self._period_transition_active or self._pending_desktop_delta is not None:
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
+        if not self._apply_period_delta(delta):
+            await self._resolve_desktop_period_dismiss(event, False)
+            return
+
+        self._period_transition_active = True
+        self._pending_desktop_delta = delta
+        self._pending_desktop_control = source
+        if self._view_mode == "month":
+            self._render_month(update_page=False)
+            target_underlay = self._build_month_period_preview(
+                MonthAnchor(self._year, self._month)
+            )
+        else:
+            self._render_week(update_page=False)
+            target_underlay = self._build_week_period_page(self._week_start)
+        self._desktop_period_underlay.content = target_underlay.control
+        try:
+            self._page_ref.update(
+                self._header,
+                self._desktop_period_underlay,
+                self._detail_panel,
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        # Flet 0.86+ does not use the event handler's return value here. The
+        # pending drag remains locked until confirm_dismiss() is invoked on
+        # the exact Dismissible that raised the event.
+        await self._resolve_desktop_period_dismiss(event, True)
+        try:
+            self._page_ref.run_task(
+                self._recover_desktop_period_dismiss, source, delta
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    async def _on_previous_period(self, _event) -> None:
+        await self._request_period_navigation(-1)
+
+    async def _on_next_period(self, _event) -> None:
+        await self._request_period_navigation(1)
+
+    async def _request_period_navigation(self, delta: int) -> None:
+        if (
+            self._period_transition_active
+            or self._period_request_active
+            or delta not in (-1, 1)
+        ):
+            return
+        try:
+            self._period_pager.page
+            pager_is_mounted = True
+        except RuntimeError:
+            pager_is_mounted = False
+        if not pager_is_mounted:
+            if not self._apply_period_delta(delta):
+                return
+            self._seed_period_pages()
+            if self._view_mode == "month":
+                self._render_month()
+            else:
+                self._render_week()
+            return
+        self._period_request_active = True
+        try:
+            await self._period_pager.go_to_page(
+                0 if delta < 0 else 2,
+                animation_duration=ft.Duration(milliseconds=220),
+                animation_curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            )
+        finally:
+            self._period_request_active = False
+
+    def _render_month_period_page(self, period: _CalendarPeriodPage) -> None:
+        anchor = period.anchor
+        if not isinstance(anchor, MonthAnchor):
+            return
+        for label in period.weekday_labels:
+            label.color = C.CRITICAL if label.value == "CN" else C.TEXT_SECONDARY
+        today = date.today()
+        for column, cell in (
+            (column, cell)
+            for row in period.day_cells
+            for column, cell in enumerate(row)
+        ):
+            cell_date = cell.data["date"]
+            if cell_date is None:
+                today_dot = cell.data["today_dot"]
+                today_dot.visible = False
+                today_dot.bgcolor = C.ACCENT
+                continue
+            self._style_period_cell(
+                cell,
+                cell_date,
+                column,
+                today,
+                selected=(
+                    anchor.year == self._year
+                    and anchor.month == self._month
+                    and cell_date.day == self._selected_day
+                ),
+            )
+
+    def _render_week_period_page(self, period: _CalendarPeriodPage) -> None:
+        today = date.today()
+        urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+        for index, cell in enumerate(period.week_cells):
+            cell_date = cell.data["date"]
+            acts = self._deadline_map.get(cell_date.isoformat(), [])
+            selected = cell_date == self._selected_date
+            day_text = cell.data["day_text"]
+            weekday_label = cell.data["wd_label"]
+            count_text = cell.data["count_text"]
+            is_today = cell_date == today
+            most_urgent_color = None
+            if acts:
+                most_urgent = min(
+                    acts,
+                    key=lambda activity: urgency_priority.get(
+                        activity.get("urgency", "safe"), 3
+                    ),
+                )
+                most_urgent_color = get_urgency_color(
+                    most_urgent.get("urgency", "safe")
+                )
+
+            if selected and is_today:
+                cell.bgcolor = ft.Colors.with_opacity(0.13, C.ACCENT)
+                cell.border = ft.Border.all(2, C.ACCENT)
+                day_text.color = weekday_label.color = C.ACCENT
+                day_text.weight = ft.FontWeight.W_700
+            elif selected:
+                cell.bgcolor = C.SURFACE_HOVER
+                cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                day_text.color = weekday_label.color = C.TEXT_PRIMARY
+                day_text.weight = ft.FontWeight.W_700
+            elif is_today:
+                cell.bgcolor = ft.Colors.with_opacity(0.06, C.ACCENT)
+                cell.border = ft.Border.all(
+                    1, ft.Colors.with_opacity(0.31, C.ACCENT)
+                )
+                day_text.color = weekday_label.color = C.ACCENT
+                day_text.weight = ft.FontWeight.W_700
+            elif acts:
+                cell.bgcolor = ft.Colors.with_opacity(
+                    0.05, most_urgent_color or C.ACCENT
+                )
+                cell.border = ft.Border.all(
+                    0.5,
+                    ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+                )
+                day_text.color = C.CRITICAL if index == 6 else C.TEXT_PRIMARY
+                weekday_label.color = (
+                    C.CRITICAL if index == 6 else C.TEXT_SECONDARY
+                )
+                day_text.weight = ft.FontWeight.W_500
+            else:
+                cell.bgcolor = None
+                cell.border = None
+                day_text.color = C.CRITICAL if index == 6 else C.TEXT_PRIMARY
+                weekday_label.color = (
+                    C.CRITICAL if index == 6 else C.TEXT_SECONDARY
+                )
+                day_text.weight = ft.FontWeight.W_400
+
+            self._render_activity_markers(
+                cell.data["dots_row"], acts, most_urgent_color
+            )
+            count_text.value = f"{len(acts)} bài" if acts else ""
+            count_text.color = most_urgent_color or C.TEXT_SECONDARY
+
+    def _style_period_cell(
+        self,
+        cell: ft.Container,
+        cell_date: date,
+        column: int,
+        today: date,
+        *,
+        selected: bool,
+    ) -> None:
+        day_text = cell.data["day_text"]
+        dots_row = cell.data["dots_row"]
+        acts = self._deadline_map.get(cell_date.isoformat(), [])
+        is_today = cell_date == today
+        today_dot = cell.data["today_dot"]
+        today_dot.visible = is_today
+        today_dot.bgcolor = C.ACCENT
+        if selected:
+            cell.bgcolor = C.SURFACE_HOVER
+            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+            day_text.color = C.ACCENT if is_today else C.TEXT_PRIMARY
+            day_text.weight = ft.FontWeight.W_700 if is_today else ft.FontWeight.W_600
+        elif is_today:
+            cell.bgcolor = None
+            cell.border = None
+            day_text.color = C.ACCENT
+            day_text.weight = ft.FontWeight.W_700
+        elif acts:
+            urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+            most_urgent = min(
+                acts,
+                key=lambda activity: urgency_priority.get(
+                    activity.get("urgency", "safe"), 3
+                ),
+            )
+            urgency_color = get_urgency_color(most_urgent.get("urgency", "safe"))
+            cell.bgcolor = ft.Colors.with_opacity(0.06, urgency_color)
+            cell.border = ft.Border.all(
+                0.5, ft.Colors.with_opacity(0.19, urgency_color)
+            )
+            day_text.color = C.CRITICAL if column == 6 else C.TEXT_PRIMARY
+            day_text.weight = ft.FontWeight.W_500
+        else:
+            cell.bgcolor = None
+            cell.border = None
+            day_text.color = C.CRITICAL if column == 6 else C.TEXT_PRIMARY
+            day_text.weight = ft.FontWeight.W_400
+        most_urgent_color = None
+        if acts:
+            urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+            most_urgent = min(
+                acts,
+                key=lambda activity: urgency_priority.get(
+                    activity.get("urgency", "safe"), 3
+                ),
+            )
+            most_urgent_color = get_urgency_color(
+                most_urgent.get("urgency", "safe")
+            )
+        self._render_activity_markers(dots_row, acts, most_urgent_color)
+
+    def _render_activity_markers(
+        self,
+        dots_row: ft.Row,
+        activities: list[dict[str, Any]],
+        most_urgent_color: Optional[str],
+    ) -> None:
+        dots_row.controls.clear()
+        if len(activities) >= 3:
+            color = most_urgent_color or C.ACCENT
+            dots_row.controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        str(len(activities)),
+                        size=8,
+                        color=on_color(color),
+                        weight=ft.FontWeight.W_700,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    width=16,
+                    height=16,
+                    border_radius=8,
+                    bgcolor=color,
+                    alignment=ft.Alignment(0, 0),
+                )
+            )
+            return
+        seen = set()
+        for activity in activities:
+            color = get_urgency_color(activity.get("urgency", "safe"))
+            if color in seen:
+                continue
+            seen.add(color)
+            dots_row.controls.append(
+                ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+            )
+
+    def _on_absolute_date_click(self, selected: date) -> None:
+        self._year, self._month = selected.year, selected.month
+        self._selected_day = selected.day
+        self._selected_date = selected
+        self._render_period_pages()
+        if self._view_mode == "week":
+            self._week_start = selected - timedelta(days=selected.weekday())
+            self._render_week()
+        else:
+            self._render_month()
 
     def _make_day_cell(self) -> ft.Container:
         """Create a single day cell with today indicator dot."""
@@ -349,7 +1187,7 @@ class CalendarView(ft.Container):
             self._month = cell_date.month
             self._render_week()
 
-    def _render_week(self):
+    def _render_week(self, *, update_page: bool = True):
         """Render the 7-day week strip for self._week_start."""
         today = date.today()
         week_num = self._week_start.isocalendar()[1]
@@ -392,6 +1230,7 @@ class CalendarView(ft.Container):
             cell.data["date"] = d
 
             day_text.value = str(d.day)
+            count_text.color = C.TEXT_SECONDARY
 
             is_today = (d == today)
             is_selected = (d == self._selected_date)
@@ -410,26 +1249,33 @@ class CalendarView(ft.Container):
             # Styling
             wd_label: ft.Text = cell.data["wd_label"]
             if is_selected and is_today:
-                cell.bgcolor = C.ACCENT + "20"
+                cell.bgcolor = ft.Colors.with_opacity(0.13, C.ACCENT)
                 cell.border = ft.Border.all(2, C.ACCENT)
                 day_text.color = C.ACCENT
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.ACCENT
             elif is_selected:
-                cell.bgcolor = "#15889AAF"
-                cell.border = ft.Border.all(1.5, "#99AABBCC")
+                cell.bgcolor = C.SURFACE_HOVER
+                cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
                 day_text.color = C.TEXT_PRIMARY
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.TEXT_PRIMARY
             elif is_today:
-                cell.bgcolor = C.ACCENT + "10"
-                cell.border = ft.Border.all(1, C.ACCENT + "50")
+                cell.bgcolor = ft.Colors.with_opacity(0.06, C.ACCENT)
+                cell.border = ft.Border.all(
+                    1, ft.Colors.with_opacity(0.31, C.ACCENT)
+                )
                 day_text.color = C.ACCENT
                 day_text.weight = ft.FontWeight.W_700
                 wd_label.color = C.ACCENT
             elif has_deadline:
-                cell.bgcolor = (most_urgent_color or C.ACCENT) + "0D"
-                cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+                cell.bgcolor = ft.Colors.with_opacity(
+                    0.05, most_urgent_color or C.ACCENT
+                )
+                cell.border = ft.Border.all(
+                    0.5,
+                    ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+                )
                 day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
                 day_text.weight = ft.FontWeight.W_500
                 wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
@@ -446,8 +1292,13 @@ class CalendarView(ft.Container):
                 if len(acts) >= 3:
                     dots_row.controls.append(
                         ft.Container(
-                            content=ft.Text(str(len(acts)), size=8, color="#FFFFFF",
-                                            weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                            content=ft.Text(
+                                str(len(acts)),
+                                size=8,
+                                color=on_color(most_urgent_color or C.ACCENT),
+                                weight=ft.FontWeight.W_700,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
                             width=16, height=16, border_radius=8,
                             bgcolor=most_urgent_color or C.ACCENT,
                             alignment=ft.Alignment(0, 0),
@@ -472,23 +1323,28 @@ class CalendarView(ft.Container):
                 count_text.value = ""
 
         self._update_day_panel()
-        try:
-            self._page_ref.update()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if update_page:
+            try:
+                self._page_ref.update()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     # Public API
     def update_data(self, activities: List[Dict[str, Any]]):
         """Update calendar with new activity data and refresh grid."""
         self._all_data = activities
         self._build_deadline_map()
+        self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
 
-    def show(self):
+    def show(self, activities: Optional[List[Dict[str, Any]]] = None):
+        if activities is not None:
+            self._all_data = activities
+            self._build_deadline_map()
         self.visible = True
         # Always anchor to today when opening - reduces cognitive orientation time
         today = date.today()
@@ -497,6 +1353,7 @@ class CalendarView(ft.Container):
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
+        self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
@@ -517,7 +1374,7 @@ class CalendarView(ft.Container):
             key = dt.strftime("%Y-%m-%d")
             self._deadline_map.setdefault(key, []).append(act)
 
-    def _render_month(self):
+    def _render_month(self, *, update_page: bool = True):
         """Render the grid for self._year / self._month."""
         self._month_label.value = f"{_MONTHS_VI[self._month]} {self._year}"
 
@@ -590,17 +1447,18 @@ class CalendarView(ft.Container):
 
                 today_dot: ft.Container = cell.data["today_dot"]
                 today_dot.visible = is_today  # dot is ONLY for today
+                today_dot.bgcolor = C.ACCENT
 
                 if is_selected and is_today:
                     # Both: accent text + white selection border + today dot
-                    cell.bgcolor = "#1A8899AA"  # subtle cool tint
-                    cell.border = ft.Border.all(1.5, "#99AABBCC")
+                    cell.bgcolor = C.SURFACE_HOVER
+                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
                     day_text.color = C.ACCENT
                     day_text.weight = ft.FontWeight.W_700
                 elif is_selected:
                     # Selected only: white/silver border, neutral bg
-                    cell.bgcolor = "#15889AAF"
-                    cell.border = ft.Border.all(1.5, "#99AABBCC")
+                    cell.bgcolor = C.SURFACE_HOVER
+                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
                     day_text.color = C.TEXT_PRIMARY
                     day_text.weight = ft.FontWeight.W_600
                 elif is_today:
@@ -611,8 +1469,15 @@ class CalendarView(ft.Container):
                     day_text.weight = ft.FontWeight.W_700
                 elif has_deadline:
                     # Has deadline: subtle urgency bg
-                    cell.bgcolor = (most_urgent_color or C.ACCENT) + "10"
-                    cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+                    cell.bgcolor = ft.Colors.with_opacity(
+                        0.06, most_urgent_color or C.ACCENT
+                    )
+                    cell.border = ft.Border.all(
+                        0.5,
+                        ft.Colors.with_opacity(
+                            0.19, most_urgent_color or C.BORDER
+                        ),
+                    )
                     day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
                     day_text.weight = ft.FontWeight.W_500
                 else:
@@ -628,8 +1493,13 @@ class CalendarView(ft.Container):
                         # Show count badge instead of many dots
                         dots_row.controls.append(
                             ft.Container(
-                                content=ft.Text(str(len(acts)), size=7, color="#FFFFFF",
-                                                weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                                content=ft.Text(
+                                    str(len(acts)),
+                                    size=7,
+                                    color=on_color(most_urgent_color or C.ACCENT),
+                                    weight=ft.FontWeight.W_700,
+                                    text_align=ft.TextAlign.CENTER,
+                                ),
                                 width=14, height=14, border_radius=7,
                                 bgcolor=most_urgent_color or C.ACCENT,
                                 alignment=ft.Alignment(0, 0),
@@ -650,11 +1520,12 @@ class CalendarView(ft.Container):
                             )
 
         self._update_day_panel()
-        try:
-            self._page_ref.update()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        if update_page:
+            try:
+                self._page_ref.update()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
     def _restyle_cell(self, cell, day: int, col: int, today):
         """Restyle a single cell - extracted for targeted updates."""
@@ -676,15 +1547,16 @@ class CalendarView(ft.Container):
 
         today_dot: ft.Container = cell.data["today_dot"]
         today_dot.visible = is_today
+        today_dot.bgcolor = C.ACCENT
 
         if is_selected and is_today:
-            cell.bgcolor = "#1A8899AA"
-            cell.border = ft.Border.all(1.5, "#99AABBCC")
+            cell.bgcolor = C.SURFACE_HOVER
+            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
             day_text.color = C.ACCENT
             day_text.weight = ft.FontWeight.W_700
         elif is_selected:
-            cell.bgcolor = "#15889AAF"
-            cell.border = ft.Border.all(1.5, "#99AABBCC")
+            cell.bgcolor = C.SURFACE_HOVER
+            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
             day_text.color = C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_600
         elif is_today:
@@ -693,8 +1565,13 @@ class CalendarView(ft.Container):
             day_text.color = C.ACCENT
             day_text.weight = ft.FontWeight.W_700
         elif has_deadline:
-            cell.bgcolor = (most_urgent_color or C.ACCENT) + "10"
-            cell.border = ft.Border.all(0.5, (most_urgent_color or C.BORDER) + "30")
+            cell.bgcolor = ft.Colors.with_opacity(
+                0.06, most_urgent_color or C.ACCENT
+            )
+            cell.border = ft.Border.all(
+                0.5,
+                ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+            )
             day_text.color = C.CRITICAL if col == 6 else C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_500
         else:
@@ -708,8 +1585,13 @@ class CalendarView(ft.Container):
             if len(acts) >= 3:
                 dots_row.controls.append(
                     ft.Container(
-                        content=ft.Text(str(len(acts)), size=7, color="#FFFFFF",
-                                        weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                        content=ft.Text(
+                            str(len(acts)),
+                            size=7,
+                            color=on_color(most_urgent_color or C.ACCENT),
+                            weight=ft.FontWeight.W_700,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
                         width=14, height=14, border_radius=7,
                         bgcolor=most_urgent_color or C.ACCENT,
                         alignment=ft.Alignment(0, 0),
@@ -763,6 +1645,7 @@ class CalendarView(ft.Container):
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
+        self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
@@ -776,12 +1659,12 @@ class CalendarView(ft.Container):
 
         if mode == "month":
             # Update toggle styling
-            self._mode_month_btn.bgcolor = C.ACCENT + "30"
-            self._mode_month_btn.content.controls[0].color = C.TEXT_PRIMARY
-            self._mode_month_btn.content.controls[1].color = C.TEXT_PRIMARY
+            self._mode_month_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
+            self._mode_month_icon.color = C.TEXT_PRIMARY
+            self._mode_month_text.color = C.TEXT_PRIMARY
             self._mode_week_btn.bgcolor = "transparent"
-            self._mode_week_btn.content.controls[0].color = C.TEXT_SECONDARY
-            self._mode_week_btn.content.controls[1].color = C.TEXT_SECONDARY
+            self._mode_week_icon.color = C.TEXT_SECONDARY
+            self._mode_week_text.color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = True
             self._week_strip.visible = False
@@ -790,15 +1673,14 @@ class CalendarView(ft.Container):
                 self._year = self._selected_date.year
                 self._month = self._selected_date.month
                 self._selected_day = self._selected_date.day
-            self._render_month()
         else:
             # Update toggle styling
-            self._mode_week_btn.bgcolor = C.ACCENT + "30"
-            self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY
-            self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY
+            self._mode_week_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
+            self._mode_week_icon.color = C.TEXT_PRIMARY
+            self._mode_week_text.color = C.TEXT_PRIMARY
             self._mode_month_btn.bgcolor = "transparent"
-            self._mode_month_btn.content.controls[0].color = C.TEXT_SECONDARY
-            self._mode_month_btn.content.controls[1].color = C.TEXT_SECONDARY
+            self._mode_month_icon.color = C.TEXT_SECONDARY
+            self._mode_month_text.color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = False
             self._week_strip.visible = True
@@ -810,6 +1692,10 @@ class CalendarView(ft.Container):
                     self._selected_date = sel
                 except ValueError:
                     pass
+        self._reset_period_pager()
+        if self._view_mode == "month":
+            self._render_month()
+        else:
             self._render_week()
 
     def _on_day_click(self, e):
@@ -914,7 +1800,7 @@ class CalendarView(ft.Container):
                 ft.Container(
                     content=ft.Text("✓ Đã nộp", size=9, weight=ft.FontWeight.W_600, color=C.SAFE),
                     padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                    bgcolor=C.SAFE + "15",
+                    bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
                     border_radius=4,
                 )
             )
@@ -923,7 +1809,7 @@ class CalendarView(ft.Container):
                 ft.Container(
                     content=ft.Text("★ Đã chấm", size=9, weight=ft.FontWeight.W_600, color=C.SAFE),
                     padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                    bgcolor=C.SAFE + "15",
+                    bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
                     border_radius=4,
                 )
             )
@@ -1000,32 +1886,20 @@ class CalendarView(ft.Container):
     def update_theme(self):
         """Update colors of all calendar controls dynamically on theme switch."""
         from gui.core.theme import C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [self], self._rendered_palette, current_palette
+        )
+        self._rendered_palette = current_palette
         self.bgcolor = C.BG
         self._header.bgcolor = C.BG
-        
-        # Header Controls
-        try:
-            header_col = self._header.content
-            row1 = header_col.controls[0]
-            
-            # Back button
-            row1.controls[0].icon_color = C.TEXT_SECONDARY
-            
-            # Month nav row: chevron_left, month_label, chevron_right
-            month_nav = row1.controls[1]
-            month_nav.controls[0].icon_color = C.TEXT_SECONDARY
-            month_nav.controls[1].color = C.TEXT_PRIMARY
-            month_nav.controls[2].icon_color = C.TEXT_SECONDARY
-            
-            # Today button
-            row1.controls[2].icon_color = C.ACCENT
-            
-            # Month summary
-            month_summary = header_col.controls[1].content
-            month_summary.color = C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        self._back_btn.icon_color = C.TEXT_SECONDARY
+        self._previous_btn.icon_color = C.TEXT_SECONDARY
+        self._month_label.color = C.TEXT_PRIMARY
+        self._next_btn.icon_color = C.TEXT_SECONDARY
+        self._today_btn.icon_color = C.ACCENT
+        self._month_summary.color = C.TEXT_SECONDARY
 
         # Weekdays Row Controls
         try:
@@ -1041,17 +1915,21 @@ class CalendarView(ft.Container):
             self._mode_toggle.bgcolor = C.SURFACE
             self._mode_toggle.border = ft.Border.all(1, C.BORDER)
             
-            self._mode_month_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
-            self._mode_month_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
+            self._mode_month_icon.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
+            self._mode_month_text.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
             if self._view_mode == "month":
-                self._mode_month_btn.bgcolor = C.ACCENT + "30"
+                self._mode_month_btn.bgcolor = ft.Colors.with_opacity(
+                    0.19, C.ACCENT
+                )
                 self._mode_week_btn.bgcolor = "transparent"
             else:
                 self._mode_month_btn.bgcolor = "transparent"
-                self._mode_week_btn.bgcolor = C.ACCENT + "30"
+                self._mode_week_btn.bgcolor = ft.Colors.with_opacity(
+                    0.19, C.ACCENT
+                )
                 
-            self._mode_week_btn.content.controls[0].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
-            self._mode_week_btn.content.controls[1].color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._mode_week_icon.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._mode_week_text.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -1061,19 +1939,25 @@ class CalendarView(ft.Container):
         self._day_count.color = C.TEXT_SECONDARY
         
         # Day Empty State
-        try:
-            self._day_empty.content.controls[0].color = C.BORDER
-            self._day_empty.content.controls[1].color = C.TEXT_SECONDARY
-            self._day_empty.content.controls[2].color = C.BORDER
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        self._day_empty_icon.color = C.BORDER
+        self._day_empty_title.color = C.TEXT_SECONDARY
+        self._day_empty_hint.color = C.BORDER
+        self._detail_divider.color = C.BORDER
+
+        # Compatibility controls are detached once the pager is mounted but are
+        # still exercised by existing lifecycle paths and tests.
+        for row in self._day_cells:
+            for cell in row:
+                cell.data["today_dot"].bgcolor = C.ACCENT
+        for cell in self._week_cells:
+            cell.data["count_text"].color = C.TEXT_SECONDARY
 
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
+        self._render_period_pages()
 
         # Re-render selected day details list (re-creates mini-cards with correct theme)
         self._update_day_panel()

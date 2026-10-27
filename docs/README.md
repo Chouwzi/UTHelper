@@ -3,9 +3,13 @@
 This directory separates maintained documentation from historical implementation
 records. Start here instead of searching by filename.
 
+Version ứng dụng hiện tại: `2.4.0`. `pyproject.toml` là nguồn version canonical;
+UI và metadata đóng gói được sinh từ nguồn này.
+
 ## Maintained documentation
 
-- [Privacy contract](PRIVACY.md) — diagnostic data, consent, and retention.
+- [Terms of use](TERMS.md) — acceptable use, dependencies, and limitations.
+- [Privacy contract](PRIVACY.md) — diagnostic data, opt-out, and retention.
 - [Moodle Web Services](api/moodle-web-services.md) — Moodle endpoints and verified
   assignment workflow semantics.
 - [UTH Portal API](api/portal.md) — redacted reverse-engineered Portal contracts.
@@ -13,6 +17,10 @@ records. Start here instead of searching by filename.
   the Windows release.
 - [Gitflow policy](guides/gitflow.md) — branch direction, merge contract, and
   GitHub ruleset enforcement.
+- [Theme system](design/theme-system.md) — semantic color contract, dark-theme
+  design, accessibility checks, and runtime refresh rules.
+- [UI platform preview](guides/ui-platform-preview.md) — safely render Android,
+  iOS, or desktop presentation on another runtime.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.

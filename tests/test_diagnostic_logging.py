@@ -376,6 +376,7 @@ def test_main_import_owns_one_rotating_log_without_legacy_debug_file(
     env["FLET_APP_STORAGE_DATA"] = str(tmp_path / "UTHelper")
     env["FLET_APP_STORAGE_TEMP"] = str(tmp_path / "UTHelper" / "flet" / "temp")
     env.pop("UTH_DEBUG_LOGGING", None)
+    env.pop("UTH_TEST_MODE", None)
     completed = subprocess.run(
         [
             sys.executable,

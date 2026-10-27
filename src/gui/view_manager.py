@@ -2,10 +2,25 @@ import asyncio
 import flet as ft
 from gui.core.theme import C
 
+
 class ViewManager:
     """Bộ quản lý chuyển đổi view và hiệu ứng transition trong ứng dụng."""
 
-    def __init__(self, page, dashboard, detail_view, settings_view, calendar_view, grade_overview_view, controller):
+    def __init__(
+        self,
+        page,
+        dashboard,
+        detail_view,
+        settings_view,
+        calendar_view,
+        grade_overview_view,
+        controller,
+        view_host=None,
+        overlays=None,
+        tab_switcher=None,
+        detail_switcher=None,
+        empty_detail=None,
+    ):
         self.page = page
         self.dashboard = dashboard
         self.detail_view = detail_view
@@ -13,16 +28,51 @@ class ViewManager:
         self.calendar_view = calendar_view
         self.grade_overview_view = grade_overview_view
         self.controller = controller
+        self.view_host = view_host
+        self.overlays = tuple(overlays or ())
+        self.tab_switcher = tab_switcher
+        self.detail_switcher = detail_switcher
+        self._empty_detail = empty_detail or ft.Container(expand=True, ignore_interactions=True)
         self._settings_navigation_generation = 0
+
+    def _dismiss_menu_if_open(self) -> None:
+        dismiss = getattr(self.controller, "_dismiss_desktop_filter_menu", None)
+        if callable(dismiss):
+            try:
+                dismiss()
+            except Exception:
+                pass
+
+    def _show_only(self, *views):
+        """Keep only active views mounted in Flutter's control tree."""
+        if self.view_host is not None:
+            unique_views = []
+            if self.tab_switcher is not None and self.detail_switcher is not None:
+                unique_views.append(self.tab_switcher)
+                unique_views.append(self.detail_switcher)
+            else:
+                for view in views:
+                    if not any(existing is view for existing in unique_views):
+                        unique_views.append(view)
+            for overlay in self.overlays:
+                if not any(existing is overlay for existing in unique_views):
+                    unique_views.append(overlay)
+            self.view_host.controls = unique_views
 
     def show_dashboard(self):
         """Hiển thị màn hình chính (Dashboard) và ẩn các view phụ."""
+        self._dismiss_menu_if_open()
         self.calendar_view.visible = False
         self.detail_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
         self.dashboard.visible = True
         self.dashboard.opacity = 1.0
+        self.dashboard.offset = ft.Offset(0, 0)
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.dashboard
+        else:
+            self._show_only(self.dashboard)
         
         # Đặt lại màu sắc của các nút trên thanh điều hướng về trạng thái không active
         self.controller.calendar_btn.icon_color = C.TEXT_SECONDARY
@@ -31,40 +81,48 @@ class ViewManager:
 
     def show_calendar(self, data_snapshot):
         """Cập nhật dữ liệu và hiển thị màn hình Lịch (Calendar)."""
+        self._dismiss_menu_if_open()
         self.dashboard.visible = False
         self.detail_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
         
-        self.calendar_view.update_data(data_snapshot)
-        self.calendar_view.show()
-        # Áp dụng hiệu ứng slide-in transition bằng offset và opacity
-        self.calendar_view.offset = ft.Offset(0, 0)
+        self.calendar_view.show(data_snapshot)
+        self.calendar_view.visible = True
         self.calendar_view.opacity = 1.0
+        self.calendar_view.offset = ft.Offset(0, 0)
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.calendar_view
+        else:
+            self._show_only(self.calendar_view)
         self.controller.calendar_btn.icon_color = C.ACCENT
         self.page.update()
 
     async def close_calendar(self):
         """Ẩn màn hình Lịch bằng hiệu ứng và hiển thị lại màn hình Dashboard."""
-        # Thực hiện hiệu ứng slide-out sang bên phải
-        self.calendar_view.offset = ft.Offset(1, 0)
-        self.calendar_view.opacity = 0.0
-        self.page.update()
-        await asyncio.sleep(0.25) # Đợi hiệu ứng kết thúc trước khi ẩn hoàn toàn
         self.calendar_view.hide()
-        self.dashboard.opacity = 1.0
-        self.dashboard.visible = True
+        if self.tab_switcher is not None:
+            self.calendar_view.visible = False
+            self.dashboard.visible = True
+            self.dashboard.opacity = 1.0
+            self.tab_switcher.content = self.dashboard
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+            self._show_only(self.dashboard, self.calendar_view)
+            self.calendar_view.opacity = 0.0
+            self.page.update()
+            await asyncio.sleep(0.18)
+            self.calendar_view.visible = False
+            self._show_only(self.dashboard)
         self.controller.calendar_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     async def show_settings(self):
         """Tải các thiết lập hiện tại và chuyển sang màn hình Cấu hình (Settings)."""
+        self._dismiss_menu_if_open()
         self._settings_navigation_generation += 1
         generation = self._settings_navigation_generation
-
-        await self.settings_view.load_current_settings()
-        if generation != self._settings_navigation_generation:
-            return
 
         self.dashboard.visible = False
         self.calendar_view.visible = False
@@ -73,14 +131,32 @@ class ViewManager:
         self.settings_view.visible = True
         self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.settings_view
+        else:
+            self._show_only(self.settings_view)
+        # Publish immediate visual feedback before any native settings lookup.
         self.page.update()
+
+        await self.settings_view.load_current_settings()
+        if generation != self._settings_navigation_generation:
+            return
 
     def show_grades_loading(self):
         """Hiển thị màn hình xem điểm ở trạng thái đang tải dữ liệu (loading state)."""
+        self._dismiss_menu_if_open()
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.detail_view.visible = False
+        self.settings_view.visible = False
+        self.grade_overview_view.visible = True
+        self.grade_overview_view.opacity = 1.0
+        self.grade_overview_view.offset = ft.Offset(0, 0)
         self.grade_overview_view.show_loading()
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.grade_overview_view
+        else:
+            self._show_only(self.grade_overview_view)
         self.controller.grades_btn.icon_color = C.ACCENT
         self.page.update()
 
@@ -89,28 +165,49 @@ class ViewManager:
         self.grade_overview_view.update_grades(courses_grades, grade_items)
         self.page.update()
 
+    def show_academic_radar_data(self, semesters, profiles):
+        """Cập nhật dữ liệu hồ sơ học tập Academic Radar và danh sách học phần."""
+        self.grade_overview_view.update_academic_data(semesters, profiles)
+        self.page.update()
+
     async def close_grades(self):
         """Đóng màn hình điểm số và quay lại màn hình chính."""
         self.grade_overview_view.hide()
-        self.page.update()
-        await asyncio.sleep(0.25) # Chờ cho hiệu ứng ẩn hoàn tất
-        self.grade_overview_view.visible = False
-        self.dashboard.opacity = 1.0
-        self.dashboard.visible = True
+        if self.tab_switcher is not None:
+            self.grade_overview_view.visible = False
+            self.dashboard.visible = True
+            self.dashboard.opacity = 1.0
+            self.tab_switcher.content = self.dashboard
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+            self._show_only(self.dashboard, self.grade_overview_view)
+            self.grade_overview_view.opacity = 0.0
+            self.page.update()
+            await asyncio.sleep(0.18)
+            self.grade_overview_view.visible = False
+            self._show_only(self.dashboard)
         self.controller.grades_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     def show_detail_loading(self, data):
         """Chuyển sang màn hình chi tiết bài tập ở trạng thái tải dữ liệu."""
-        self.dashboard.visible = False
-        self.calendar_view.visible = False
+        self._dismiss_menu_if_open()
+        # Retain origin view mounted behind opaque Detail to preserve native ScrollPosition.
+        origin = self.calendar_view if getattr(self.calendar_view, "visible", False) else self.dashboard
+        self.dashboard.visible = origin is self.dashboard
+        self.calendar_view.visible = origin is self.calendar_view
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
-        
-        # Thực hiện hiệu ứng trượt màn hình sang trái
+
         self.detail_view.offset = ft.Offset(0, 0)
         self.detail_view.opacity = 1.0
+        self.detail_view.visible = True
         self.detail_view.show_loading(data)
+        if self.detail_switcher is not None:
+            self.detail_switcher.content = self.detail_view
+        else:
+            self._show_only(origin, self.detail_view)
         self.page.update()
 
     def show_detail_data(self, full_data):
@@ -126,31 +223,46 @@ class ViewManager:
 
     async def close_detail(self, detail_from_calendar: bool):
         """Đóng màn hình chi tiết và quay lại nơi xuất phát (Lịch hoặc Dashboard)."""
-        self.detail_view.offset = ft.Offset(1, 0)
-        self.detail_view.opacity = 0.0
-        self.page.update()
-        await asyncio.sleep(0.25) # Đợi thời gian hoàn tất animation
-        self.detail_view.visible = False
-        if detail_from_calendar:
-            self.calendar_view.visible = True
+        destination = self.calendar_view if detail_from_calendar else self.dashboard
+        if self.detail_switcher is not None:
+            self.detail_view.visible = False
+            destination.visible = True
+            destination.opacity = 1.0
+            self.detail_switcher.content = self._empty_detail
         else:
-            self.dashboard.opacity = 1.0
-            self.dashboard.visible = True
+            destination.visible = True
+            if destination is self.dashboard:
+                destination.opacity = 1.0
+            self._show_only(destination, self.detail_view)
+            self.detail_view.opacity = 0.0
+            self.page.update()
+            await asyncio.sleep(0.18)
+            self.detail_view.visible = False
+            self._show_only(destination)
         self.page.update()
 
     async def close_settings(self):
         """Đóng màn hình cấu hình với hiệu ứng và hiển thị lại màn hình Dashboard chính."""
         self.cancel_pending_settings_navigation()
-        self.settings_view.offset = ft.Offset(1, 0)
-        self.settings_view.opacity = 0.0
-        self.page.update()
-        await asyncio.sleep(0.25)
-        self.settings_view.visible = False
-        self.dashboard.opacity = 1.0
-        self.dashboard.visible = True
+        if self.tab_switcher is not None:
+            self.settings_view.visible = False
+            self.dashboard.visible = True
+            self.dashboard.opacity = 1.0
+            self.tab_switcher.content = self.dashboard
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+            self._show_only(self.dashboard, self.settings_view)
+            self.settings_view.opacity = 0.0
+            self.page.update()
+            await asyncio.sleep(0.18)
+            self.settings_view.visible = False
+            self._show_only(self.dashboard)
         self.page.update()
 
     def cancel_pending_settings_navigation(self) -> None:
         """Invalidate an in-flight Settings reveal without awaiting its I/O."""
         self._settings_navigation_generation += 1
         self.settings_view.cancel_pending_load()
+
+

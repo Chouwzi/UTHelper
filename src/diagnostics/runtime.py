@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -21,7 +22,20 @@ import sys
 import threading
 from typing import Any, Protocol, TextIO
 
-from diagnostics.models import AppPhase, CrashConsent, DiagnosticContext
+from diagnostics.models import (
+    AppPhase,
+    CrashConsent,
+    DiagnosticAction,
+    DiagnosticBreadcrumb,
+    DiagnosticContext,
+    DiagnosticDuration,
+    DiagnosticExecution,
+    DiagnosticMechanism,
+    DiagnosticOutcome,
+    DiagnosticPackages,
+    DiagnosticScreen,
+    DiagnosticSource,
+)
 from diagnostics.redaction import build_report, sanitize_log_text
 from diagnostics.release_config import load_runtime_public_dsn
 from diagnostics.spool import (
@@ -455,6 +469,10 @@ class DiagnosticRuntime:
         self._page_hooks: list[_PageHook] = []
         self._async_hooks: list[_AsyncHook] = []
         self._phase = AppPhase.BOOT
+        self._screen = DiagnosticScreen.BOOT
+        self._operation: DiagnosticAction | None = DiagnosticAction.APP_START
+        self._data_source: DiagnosticSource | None = DiagnosticSource.APP
+        self._breadcrumbs: deque[DiagnosticBreadcrumb] = deque(maxlen=20)
         self._unclean_previous_exit = False
         self._pending_windows_evidence: WindowsCrashEvidence | None = None
         self._run_started_at: datetime | None = None
@@ -531,10 +549,29 @@ class DiagnosticRuntime:
             self._set_live_consent(selected, delete_pending=True)
             return
         self._set_live_consent(selected, delete_pending=False)
+        self._submit_delivery(selected)
+
+    def _submit_delivery(self, consent: CrashConsent) -> None:
         try:
-            self._executor.submit(self.delivery.flush_once, selected)
+            self._executor.submit(self._flush_delivery, consent)
         except Exception:
             self._write_emergency("diagnostic delivery unavailable\n")
+
+    def _flush_delivery(self, consent: CrashConsent) -> None:
+        """Deliver in the diagnostics worker and expose only safe health state."""
+        try:
+            summary = self.delivery.flush_once(consent)
+        except Exception:
+            self._write_emergency("diagnostic delivery failed\n")
+            return
+        if getattr(summary, "skipped_unconfigured", False):
+            _LOGGER.warning(
+                "Diagnostic delivery is not configured; reports remain local"
+            )
+        elif getattr(summary, "attempted", 0) and getattr(summary, "retained", 0):
+            _LOGGER.warning(
+                "Diagnostic delivery was not confirmed; reports remain local"
+            )
 
     def start(self) -> None:
         """Install hooks and submit one non-blocking delivery attempt."""
@@ -569,18 +606,31 @@ class DiagnosticRuntime:
             if consent is CrashConsent.ENABLED:
                 self._import_flutter_records()
             if consent is CrashConsent.ENABLED:
-                try:
-                    self._executor.submit(self.delivery.flush_once, consent)
-                except Exception:
-                    self._write_emergency("diagnostic delivery unavailable\n")
+                self._submit_delivery(consent)
 
     def record_exception(
         self,
         exc: BaseException,
         phase: AppPhase = AppPhase.GUI,
+        *,
+        mechanism: DiagnosticMechanism = DiagnosticMechanism.MANUAL,
+        handled: bool = True,
+        execution: DiagnosticExecution | None = None,
     ) -> str | None:
         """Persist one scrubbed report and return its ephemeral event reference."""
-        return self._record_exception(exc, phase, occurred_at=None)
+        selected_execution = execution or (
+            DiagnosticExecution.MAIN_THREAD
+            if threading.current_thread() is threading.main_thread()
+            else DiagnosticExecution.BACKGROUND_THREAD
+        )
+        return self._record_exception(
+            exc,
+            phase,
+            occurred_at=None,
+            mechanism=mechanism,
+            handled=handled,
+            execution=selected_execution,
+        )
 
     def _record_exception(
         self,
@@ -588,6 +638,9 @@ class DiagnosticRuntime:
         phase: AppPhase,
         *,
         occurred_at: datetime | None,
+        mechanism: DiagnosticMechanism = DiagnosticMechanism.MANUAL,
+        handled: bool = True,
+        execution: DiagnosticExecution = DiagnosticExecution.UNKNOWN,
     ) -> str | None:
         if not isinstance(exc, BaseException):
             return None
@@ -601,6 +654,9 @@ class DiagnosticRuntime:
                         exc,
                         phase,
                         occurred_at=occurred_at,
+                        mechanism=mechanism,
+                        handled=handled,
+                        execution=execution,
                     )
                 )
                 return reference if allowed else None
@@ -616,9 +672,21 @@ class DiagnosticRuntime:
         phase: AppPhase,
         *,
         occurred_at: datetime | None,
+        mechanism: DiagnosticMechanism,
+        handled: bool,
+        execution: DiagnosticExecution,
     ) -> str | None:
         context = self.context(phase)
         evidence = self._peek_windows_evidence(context)
+        with self._lifecycle_lock:
+            screen = self._screen
+            operation = self._operation
+            data_source = self._data_source
+            breadcrumbs = tuple(self._breadcrumbs)
+        if evidence is not None:
+            mechanism = DiagnosticMechanism.WINDOWS
+            execution = DiagnosticExecution.NATIVE
+            handled = False
         report = build_report(
             exc,
             context,
@@ -629,6 +697,13 @@ class DiagnosticRuntime:
             faulting_module=(
                 evidence.faulting_module_basename if evidence is not None else None
             ),
+            mechanism=mechanism,
+            handled=handled,
+            execution=execution,
+            screen=screen,
+            operation=operation,
+            data_source=data_source,
+            breadcrumbs=breadcrumbs,
         )
         outcome = self.spool.enqueue(report)
         pending = self.spool.pending()
@@ -654,6 +729,8 @@ class DiagnosticRuntime:
             durable = None
         if durable is not None and evidence is not None:
             self._commit_windows_evidence(evidence)
+        if durable is not None and outcome.stored:
+            self._submit_delivery(CrashConsent.ENABLED)
         return durable.event_id.hex if durable is not None else None
 
     def _set_live_consent(
@@ -717,6 +794,9 @@ class DiagnosticRuntime:
                 flutter_exception,
                 evidence.phase,
                 occurred_at=evidence.occurred_at,
+                mechanism=DiagnosticMechanism.FLUTTER,
+                handled=False,
+                execution=DiagnosticExecution.FLUTTER,
             )
             if reference is None:
                 durable = False
@@ -735,6 +815,56 @@ class DiagnosticRuntime:
             self._phase = phase
             self._write_run_state(phase)
 
+    def set_diagnostic_screen(self, screen: DiagnosticScreen | str) -> None:
+        """Update coarse UI state without accepting arbitrary screen names."""
+        try:
+            selected = DiagnosticScreen(screen)
+        except (TypeError, ValueError):
+            return
+        with self._lifecycle_lock:
+            if self._started and not self._closed:
+                self._screen = selected
+
+    def record_breadcrumb(
+        self,
+        action: DiagnosticAction | str,
+        outcome: DiagnosticOutcome | str,
+        source: DiagnosticSource | str,
+        *,
+        screen: DiagnosticScreen | str | None = None,
+        duration: DiagnosticDuration | str | None = None,
+    ) -> None:
+        """Record one safe semantic event from strict enumerations only."""
+        try:
+            selected_action = DiagnosticAction(action)
+            selected_outcome = DiagnosticOutcome(outcome)
+            selected_source = DiagnosticSource(source)
+            selected_screen = (
+                DiagnosticScreen(screen) if screen is not None else None
+            )
+            selected_duration = (
+                DiagnosticDuration(duration) if duration is not None else None
+            )
+        except (TypeError, ValueError):
+            return
+        with self._lifecycle_lock:
+            if not self._started or self._closed:
+                return
+            if selected_screen is not None:
+                self._screen = selected_screen
+            self._operation = selected_action
+            self._data_source = selected_source
+            self._breadcrumbs.append(
+                DiagnosticBreadcrumb(
+                    occurred_at=_normalized_utc(self._clock()),
+                    action=selected_action,
+                    outcome=selected_outcome,
+                    source=selected_source,
+                    screen=self._screen,
+                    duration=selected_duration,
+                )
+            )
+
     def attach_page(self, page: Any) -> None:
         """Wrap a Flet page error callback without consuming string payloads."""
         with self._lifecycle_lock:
@@ -750,7 +880,13 @@ class DiagnosticRuntime:
                     candidate = getattr(event, "error", None)
                     exc = candidate if isinstance(candidate, BaseException) else None
                 if exc is not None:
-                    self.record_exception(exc, AppPhase.GUI)
+                    self.record_exception(
+                        exc,
+                        AppPhase.GUI,
+                        mechanism=DiagnosticMechanism.FLET,
+                        handled=False,
+                        execution=DiagnosticExecution.MAIN_THREAD,
+                    )
                 if callable(previous):
                     self._chain(previous, event)
 
@@ -775,7 +911,13 @@ class DiagnosticRuntime:
             ) -> None:
                 exc = context.get("exception")
                 if isinstance(exc, BaseException):
-                    self.record_exception(exc, AppPhase.GUI)
+                    self.record_exception(
+                        exc,
+                        AppPhase.GUI,
+                        mechanism=DiagnosticMechanism.ASYNCIO,
+                        handled=False,
+                        execution=DiagnosticExecution.ASYNC_TASK,
+                    )
                 if callable(previous):
                     self._chain(previous, active_loop, context)
                 else:
@@ -859,19 +1001,36 @@ class DiagnosticRuntime:
 
         def sys_hook(exc_type: type[BaseException], exc: BaseException, traceback) -> None:
             if isinstance(exc, BaseException):
-                self.record_exception(exc, self._phase)
+                self.record_exception(
+                    exc,
+                    self._phase,
+                    mechanism=DiagnosticMechanism.SYS_HOOK,
+                    handled=False,
+                    execution=DiagnosticExecution.MAIN_THREAD,
+                )
             self._chain(previous.sys_hook, exc_type, exc, traceback)
 
         def thread_hook(args: Any) -> None:
             exc = getattr(args, "exc_value", None)
             if isinstance(exc, BaseException):
-                self.record_exception(exc, self._phase)
+                self.record_exception(
+                    exc,
+                    self._phase,
+                    mechanism=DiagnosticMechanism.THREAD_HOOK,
+                    handled=False,
+                    execution=DiagnosticExecution.BACKGROUND_THREAD,
+                )
             self._chain(previous.thread_hook, args)
 
         def unraisable_hook(args: Any) -> None:
             exc = getattr(args, "exc_value", None)
             if isinstance(exc, BaseException):
-                self.record_exception(exc, self._phase)
+                self.record_exception(
+                    exc,
+                    self._phase,
+                    mechanism=DiagnosticMechanism.UNRAISABLE_HOOK,
+                    handled=False,
+                )
             self._chain(previous.unraisable_hook, args)
 
         self._owned_hooks = _HookSet(sys_hook, thread_hook, unraisable_hook)
@@ -1159,11 +1318,27 @@ def create_default_runtime(
 
     from config import settings, subscribe_settings_saved
     from core.version import APP_VERSION
+    from diagnostics import device_profile
 
     try:
         flet_version = version("flet")
     except PackageNotFoundError:
         flet_version = "unknown"
+
+    def package_version(distribution: str) -> str | None:
+        try:
+            return version(distribution)[:64]
+        except PackageNotFoundError:
+            return None
+
+    packages = DiagnosticPackages(
+        pydantic=package_version("pydantic"),
+        requests=package_version("requests"),
+        certifi=package_version("certifi"),
+        packaging=package_version("packaging"),
+        sentry_sdk=package_version("sentry-sdk"),
+        flet=package_version("flet"),
+    )
 
     def consent_provider() -> CrashConsent:
         try:
@@ -1172,19 +1347,47 @@ def create_default_runtime(
             return CrashConsent.NOT_ASKED
 
     def context_provider(phase: AppPhase, unclean: bool) -> DiagnosticContext:
+        family = device_profile.os_family()
+        hardware = device_profile.collect_device_profile()
         return DiagnosticContext(
             source_root=Path(__file__).resolve().parents[1],
             app_version=APP_VERSION,
             release_channel="stable",
             install_type="source" if development else "packaged",
-            os_family=platform.system() or "unknown",
+            os_family=family,
             os_version=platform.release() or "unknown",
+            os_build=device_profile.os_build(),
             architecture=platform.machine() or "unknown",
+            device_class=device_profile.device_class(family),
+            processor_count=hardware.processor_count,
+            cpu_description=hardware.cpu_description,
+            processor_frequency_mhz=hardware.processor_frequency_mhz,
+            memory_size=hardware.memory.total,
+            free_memory=hardware.memory.available,
+            usable_memory=hardware.memory.usable,
+            app_memory=hardware.process_memory_bytes,
+            memory_class=device_profile.memory_class(hardware.memory.total),
+            screen_width_pixels=hardware.display.width,
+            screen_height_pixels=hardware.display.height,
+            screen_dpi=hardware.display.dpi,
+            display_class=device_profile.display_class(hardware.display.width),
+            gpu=(
+                {
+                    "name": hardware.gpu.name,
+                    "vendor_name": hardware.gpu.vendor_name,
+                    "driver_version": hardware.gpu.driver_version,
+                    "memory_size_mb": hardware.gpu.memory_size_mb,
+                    "api_type": hardware.gpu.api_type,
+                }
+                if hardware.gpu is not None
+                else None
+            ),
             python_version=platform.python_version(),
             flet_version=flet_version,
             phase=phase,
             window_state="unknown",
             unclean_previous_exit=unclean,
+            packages=packages,
         )
 
     spool = DiagnosticSpool(Path(data_dir) / "telemetry" / "pending")

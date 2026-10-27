@@ -91,7 +91,7 @@ def build_submitted_files_ui(view, *, show_file_actions: bool = True):
                 ),
             ], spacing=4),
             bgcolor=C.BG,
-            border=ft.Border.all(1, C.SAFE + "30"),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.19, C.SAFE)),
             border_radius=6,
             padding=ft.Padding.symmetric(horizontal=10, vertical=8),
         )

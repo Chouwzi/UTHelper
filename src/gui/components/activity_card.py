@@ -1,7 +1,20 @@
 import flet as ft
+from core.activity_status import normalize_submission_status
 from gui.core.theme import C
 from datetime import datetime
-from gui.core.utils import get_urgency_color, get_countdown_color, get_type_label, get_type_color, clean_course_name, format_deadline, get_countdown, get_progress_value, urgency_str, get_urgency_badge, get_status_tag, get_submission_badge
+from core.time_utils import parse_datetime
+from gui.core.utils import (
+    get_urgency_color,
+    get_type_label,
+    get_type_color,
+    clean_course_name,
+    format_deadline,
+    urgency_str,
+    get_urgency_badge,
+    get_status_tag,
+    get_submission_badge,
+    get_card_countdown,
+)
 
 class ActivityCard(ft.Container):
     def __init__(self, data: dict, on_tap, animate: bool = False):
@@ -103,12 +116,40 @@ class ActivityCard(ft.Container):
 
 
 
+    @staticmethod
+    def _render_fingerprint(data: dict) -> tuple:
+        details = data.get("details", {})
+        if not isinstance(details, dict):
+            details = {}
+        status_data = details.get("status_data", {})
+        if not isinstance(status_data, dict):
+            status_data = {}
+        status_fingerprint = tuple(
+            sorted((str(key), str(value)) for key, value in status_data.items())
+        )
+        return (
+            data.get("id"),
+            data.get("title"),
+            data.get("course"),
+            data.get("course_name"),
+            data.get("deadline"),
+            data.get("submission_status"),
+            data.get("urgency"),
+            data.get("type"),
+            data.get("is_open"),
+            data.get("late_status"),
+            data.get("cutoff_date"),
+            details.get("open_time"),
+            details.get("course_full_name"),
+            details.get("quiz_attempt_status"),
+            status_fingerprint,
+        )
+
     def update_data(self, data: dict, force: bool = False, on_tap=None):
-        # C7: Lightweight identity check instead of deep dict equality
+        # Avoid rebuilding an unchanged Flet subtree while including every
+        # field that can change the visible card or its submission badge.
         if not force and getattr(self, '_initialized', False):
-            old_id = (self.data.get("id"), self.data.get("deadline"), self.data.get("submission_status"))
-            new_id = (data.get("id"), data.get("deadline"), data.get("submission_status"))
-            if old_id == new_id:
+            if self._render_fingerprint(self.data) == self._render_fingerprint(data):
                 if on_tap:
                     self.on_tap_cb = on_tap
                 self.update_countdown()
@@ -128,19 +169,14 @@ class ActivityCard(ft.Container):
 
         deadline_str = data.get("deadline", "")
         formatted_dl = format_deadline(deadline_str)
-        cd_text, overdue = get_countdown(deadline_str, act_type)
-        progress_val = get_progress_value(deadline_str)
+        cd_text, overdue, cd_color, progress_val = get_card_countdown(data)
+        bar_color = cd_color
         submission = get_submission_badge(data)
 
         _details = data.get("details", {})
         _full_name = _details.get("course_full_name", "")
-        # WS API provides course_name directly (cleaner than HTML scraping)
         _ws_course = data.get("course_name", "")
         course_clean = clean_course_name(_ws_course or _full_name or data.get("course", ""))
-
-        # UX-7: Time-based countdown color (red < 24h, orange < 3d, green > 3d)
-        cd_color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
-        bar_color = get_countdown_color(deadline_str) if not overdue else C.CRITICAL
 
         self._type_text.value = type_label
         self._type_text.color = type_color
@@ -182,32 +218,29 @@ class ActivityCard(ft.Container):
             )
         
         # Late submission warning badge
+        # Late submission warning badge / cutoff date info
+        is_late_active = (status_label == "NỘP MUỘN")
         late_status = data.get('late_status', '')
         cutoff_ts = data.get('cutoff_date', 0)
-        if late_status == 'late_allowed' and cutoff_ts:
-            now_ts = int(datetime.now().timestamp())
-            remaining_s = cutoff_ts - now_ts
-            if remaining_s > 0:
-                hours_left = remaining_s // 3600
-                mins_left = (remaining_s % 3600) // 60
-                if hours_left > 24:
-                    days_left = hours_left // 24
-                    cutoff_text = f"Trễ hạn - còn {days_left} ngày nộp muộn"
-                elif hours_left > 0:
-                    cutoff_text = f"Trễ hạn - còn {hours_left}h{mins_left:02d} nộp muộn"
+        if is_late_active and cutoff_ts:
+            try:
+                if isinstance(cutoff_ts, (int, float)) and cutoff_ts > 0:
+                    cutoff_dt = datetime.fromtimestamp(cutoff_ts)
                 else:
-                    cutoff_text = f"Trễ hạn - còn {mins_left} phút nộp muộn"
-            else:
-                cutoff_text = "Trễ hạn - còn nộp muộn"
-            self._optional_rows.controls.append(
-                ft.Container(
-                    content=ft.Text(cutoff_text, size=10, color=C.WARNING, weight=ft.FontWeight.W_500),
-                    padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                    border=ft.Border.all(1, C.WARNING),
-                    border_radius=4,
-                )
-            )
-        elif late_status == 'closed' and cutoff_ts and cutoff_ts > 0:
+                    cutoff_dt = parse_datetime(str(cutoff_ts))
+                if cutoff_dt:
+                    cutoff_text = f"Hạn chót: {cutoff_dt.strftime('%d/%m %H:%M')}"
+                    self._optional_rows.controls.append(
+                        ft.Container(
+                            content=ft.Text(cutoff_text, size=10, color=C.WARNING, weight=ft.FontWeight.W_500),
+                            padding=ft.Padding.symmetric(horizontal=7, vertical=2),
+                            border=ft.Border.all(1, C.WARNING),
+                            border_radius=4,
+                        )
+                    )
+            except Exception:
+                pass
+        elif (late_status == 'closed' or overdue) and cutoff_ts and cutoff_ts > 0:
             self._optional_rows.controls.append(
                 ft.Container(
                     content=ft.Text("Hết hạn nộp", size=10, color=C.CRITICAL, weight=ft.FontWeight.W_500),
@@ -219,7 +252,9 @@ class ActivityCard(ft.Container):
 
         self._bar_widget.bgcolor = bar_color
 
-        _sub_status = data.get("submission_status", "unknown")
+        _sub_status = normalize_submission_status(
+            data.get("submission_status", "unknown")
+        )
         _is_submitted = _sub_status in ("submitted", "graded")
         is_critical_active = (urgency_str(urgency) == "critical") and not overdue and not _is_submitted
 
@@ -227,9 +262,9 @@ class ActivityCard(ft.Container):
             self.border = ft.Border.all(1, C.CRITICAL)
             # Create a nice starting glow shadow dynamically based on current C.CRITICAL
             crit_hex = C.CRITICAL.lstrip("#")
-            self.shadow = [ft.BoxShadow(spread_radius=0.5, blur_radius=10, color=f"#{crit_hex}", offset=ft.Offset(0, 0))]
+            self.shadow = [ft.BoxShadow(spread_radius=0.8, blur_radius=12, color=f"#30{crit_hex}", offset=ft.Offset(0, 0))]
             self._is_critical_active = True
-            self.animate = ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT)
+            self.animate = ft.Animation(1000, ft.AnimationCurve.EASE_IN_OUT)
         else:
             _card_border_color = C.SAFE if _is_submitted else C.BORDER
             self.border = ft.Border.all(1, _card_border_color)
@@ -243,12 +278,12 @@ class ActivityCard(ft.Container):
         deadline_str = self.data.get("deadline", "")
         if not deadline_str:
             return False
-        act_type = self.data.get("type", "")
-        cd_text, overdue = get_countdown(deadline_str, act_type)
-        progress_val     = get_progress_value(deadline_str)
-        # UX-7: Time-based color for countdown
-        cd_color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
-        changed = (self._countdown_ctrl.value != cd_text)
+        cd_text, overdue, cd_color, progress_val = get_card_countdown(self.data)
+        changed = (
+            self._countdown_ctrl.value != cd_text
+            or self._countdown_ctrl.color != cd_color
+            or self._progress_ctrl.value != progress_val
+        )
         self._countdown_ctrl.value = cd_text
         self._countdown_ctrl.color = cd_color
         self._progress_ctrl.value  = progress_val

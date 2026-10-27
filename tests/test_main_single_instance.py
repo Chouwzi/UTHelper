@@ -12,6 +12,11 @@ import pytest
 import src.main as application
 
 
+def test_main_import_does_not_bind_user_log_during_pytest_collection():
+    assert application._TEST_MODE is True
+    assert application._LOGGING_RUNTIME is None
+
+
 class _BrokerSpy:
     def __init__(self) -> None:
         self.close_calls: list[float] = []
@@ -29,6 +34,9 @@ class _RuntimeSpy:
 
     def attach_page(self, page) -> None:
         self.calls.append(("attach_page", page))
+
+    def attach_asyncio_loop(self, loop) -> None:
+        self.calls.append(("attach_asyncio_loop", loop))
 
     def mark_phase(self, phase) -> None:
         self.calls.append(("mark_phase", phase))
@@ -216,8 +224,8 @@ def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatc
         ),
     )
     desktop_module = SimpleNamespace(
-        main=lambda page, *, activation_broker, force_visible: app_calls.append(
-            (page, activation_broker, force_visible)
+        main=lambda page, *, activation_broker, force_visible, error_reporter: app_calls.append(
+            (page, activation_broker, force_visible, error_reporter)
         )
     )
     monkeypatch.setitem(sys.modules, "gui.compact_desktop", desktop_module)
@@ -225,7 +233,8 @@ def test_primary_passes_bootstrap_dependencies_to_desktop_composition(monkeypatc
     assert application.main() == 0
 
     assert len(app_calls) == 1
-    assert app_calls[0][1:] == (broker, True)
+    assert app_calls[0][1:3] == (broker, True)
+    assert callable(app_calls[0][3])
     assert startup_calls == [(app_calls[0][0], True)]
     assert broker.close_calls == [1.0]
 

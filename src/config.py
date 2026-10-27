@@ -207,8 +207,11 @@ class Settings(BaseModel):
     PORTAL_API_BASE: str = "https://portal-publicapp.ut.edu.vn/api/v1"
     
     # Cài đặt chung của ứng dụng
-    THEME: str = Field(default="midnight_blue", description="Theme preset: midnight_blue, ocean_teal, sakura_pink, nord_frost, monokai_pro, solarized_dark")
-    SETTINGS_SCHEMA_VERSION: int = Field(default=3, description="Phiên bản schema cài đặt")
+    THEME: str = Field(
+        default="steel_light",
+        description="Theme preset, including Material Graphite and light variants",
+    )
+    SETTINGS_SCHEMA_VERSION: int = Field(default=4, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
     # Deprecated compatibility fields. Runtime scheduling uses only
     # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
@@ -223,8 +226,12 @@ class Settings(BaseModel):
     INCLUDE_PAST_DUE: bool = Field(default=False, description="Hiển thị cả các bài đã quá hạn")
 
     # Chuyện khởi động và hệ thống
-    START_WITH_WINDOWS: bool = Field(default=False, description="Tự động chạy khi mở máy")
-    START_MINIMIZED: bool = Field(default=True, description="Chạy ngầm khi khởi động")
+    START_WITH_WINDOWS: bool = Field(default=True, description="Tự động chạy khi mở máy")
+    START_MINIMIZED: bool = Field(default=False, description="Chạy ngầm khi khởi động")
+    AUTOSTART_DEFAULT_APPLIED: bool = Field(
+        default=False,
+        description="Đã áp dụng mặc định autostart cho cài đặt mới",
+    )
     MINIMIZE_TO_TRAY: bool = Field(default=True, description="Thu nhỏ xuống khay hệ thống (System Tray)")
 
     # Android background notifications (AlarmManager)
@@ -235,8 +242,8 @@ class Settings(BaseModel):
         description="Tự động kiểm tra cập nhật",
     )
     CRASH_REPORTING_CONSENT: Literal["not_asked", "enabled", "disabled"] = Field(
-        default="not_asked",
-        description="Quyết định gửi chẩn đoán sự cố của người dùng",
+        default="enabled",
+        description="Gửi chẩn đoán sự cố ẩn danh; người dùng có thể tắt",
     )
 
     # Mấy kênh thông báo khác (đang phát triển)
@@ -300,8 +307,17 @@ def migrate_settings_data(raw: dict) -> dict:
     predate it fall back to the poll interval and finally the Android interval.
     Legacy keys are intentionally preserved during this compatibility window.
     """
-    data = dict(raw or {})
-    data.setdefault("CRASH_REPORTING_CONSENT", "not_asked")
+    source = dict(raw or {})
+    data = dict(source)
+    # Existing installations already contain an explicit preference. Mark the
+    # one-time default as handled so an upgrade never re-enables autostart after
+    # a user deliberately disabled it.
+    data.setdefault(
+        "AUTOSTART_DEFAULT_APPLIED",
+        "START_WITH_WINDOWS" in source,
+    )
+    if data.get("CRASH_REPORTING_CONSENT") in {None, "not_asked"}:
+        data["CRASH_REPORTING_CONSENT"] = "enabled"
     data.setdefault("AUTO_UPDATE_ENABLED", True)
     if "CHECK_INTERVAL_MINUTES" not in data:
         legacy_value = data.get("POLL_INTERVAL_MINUTES")
@@ -330,7 +346,7 @@ def migrate_settings_data(raw: dict) -> dict:
             except (TypeError, ValueError):
                 pass
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
-    data["SETTINGS_SCHEMA_VERSION"] = 3
+    data["SETTINGS_SCHEMA_VERSION"] = 4
     return data
 
 

@@ -73,7 +73,7 @@ class AndroidBackgroundSync(Service):
 
     async def install_update(
         self,
-        url: str,
+        local_path: str,
         sha256: str,
         expected_size: int,
         expected_package_id: str,
@@ -83,7 +83,7 @@ class AndroidBackgroundSync(Service):
         return await self._invoke_method(
             "install_update",
             {
-                "url": url,
+                "local_path": local_path,
                 "sha256": sha256,
                 "expected_size": expected_size,
                 "expected_package_id": expected_package_id,

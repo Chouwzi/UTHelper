@@ -10,11 +10,18 @@ import flet as ft
 import asyncio
 import logging
 from dataclasses import replace
-from gui.core.theme import C, THEME_PRESETS, THEME_ORDER, apply_theme
+from gui.core.theme import (
+    C,
+    THEME_ORDER,
+    THEME_PRESETS,
+    apply_theme,
+    refresh_semantic_control_colors,
+    semantic_palette,
+)
 from config import settings
 from config import save_settings
 from core.version import APP_VERSION
-import platform_utils as _pu  # use _pu.IS_MOBILE for live platform detection
+import platform_utils as _pu  # live runtime capability and UI-profile detection
 from gui.components.color_picker import open_color_picker
 
 # Import settings section helpers
@@ -24,8 +31,8 @@ from gui.components.settings.system_section import init_system_controls, build_s
 from gui.components.settings.privacy_section import init_privacy_controls, build_privacy_section
 from gui.components.settings.urgency_section import init_urgency_controls, build_urgency_section
 from gui.components.settings.theme_section import init_theme_controls, build_theme_section
-from gui.components.settings.notification_section import init_notification_controls, build_notification_section, build_advanced_section
-from gui.components.settings.integration_section import init_integration_controls, build_integration_section
+from gui.components.settings.notification_section import init_notification_controls, build_notification_section
+from gui.components.settings.integration_section import init_integration_controls
 from gui.components.settings.debug_section import init_debug_controls, build_debug_section
 from gui.controllers.autostart_settings import (
     AutostartSettingsCoordinator,
@@ -39,6 +46,7 @@ class SettingsView(ft.Container):
         self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update)
         self._init_controls()
         self._init_layout()
+        self._rendered_palette = semantic_palette()
 
     def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update):
         self._page    = page
@@ -60,11 +68,18 @@ class SettingsView(ft.Container):
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
         self._hint_containers = []
         self._tiles = []
+        self._tile_bodies = {}
         self._section_containers = []
         self._autostart_coordinator = autostart_coordinator
         self._loading = False
         self._load_generation = 0
         self._baseline_snapshot = None
+        self._current_screen = "hub"
+        self._active_category_id = None
+        self._category_cards = {}
+        self._category_icons = {}
+        self._category_titles = {}
+        self._category_subtitles = {}
         if self._autostart_coordinator is None and not _pu.IS_MOBILE:
             from platform_utils.autostart import create_autostart_service
 
@@ -73,13 +88,18 @@ class SettingsView(ft.Container):
             )
 
     def _init_controls(self):
-        self._save_status = ft.Text("", size=12, color=C.SAFE)
+        self._save_status = ft.Text("", size=12, color=C.SAFE, text_align=ft.TextAlign.CENTER)
         self._unsaved_dot = ft.Container(
             width=8, height=8, border_radius=4,
             bgcolor=C.CRITICAL, visible=False,
         )
-        self._back_icon = ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16, color=C.TEXT_SECONDARY)
-        self._back_text = ft.Text("Quay lại", size=14, color=C.TEXT_SECONDARY)
+        self._hub_title = ft.Text("Cài đặt", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER, expand=True)
+        self._hub_version = ft.Text(f"UTHelper v{APP_VERSION}", size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
+        self._title_text = self._hub_title
+        self._version_text = self._hub_version
+
+        self._back_icon = ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=18, color=C.TEXT_SECONDARY)
+        self._back_text = ft.Text("Quay lại", size=13, color=C.TEXT_SECONDARY)
         self._back_btn = ft.TextButton(
             content=ft.Row(controls=[
                 self._back_icon,
@@ -94,22 +114,41 @@ class SettingsView(ft.Container):
             )
         )
 
+        self._detail_back_btn = ft.IconButton(
+            icon=ft.Icons.ARROW_BACK_ROUNDED,
+            icon_size=20,
+            icon_color=C.TEXT_SECONDARY,
+            on_click=lambda _: self._navigate_to_hub(),
+            tooltip="Quay lại",
+        )
+        self._detail_title = ft.Text("", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER)
+        self._detail_subtitle = ft.Text("", size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
+
+        self._save_icon = ft.Icon(
+            ft.Icons.SAVE_ROUNDED, size=16, color=C.ON_ACCENT
+        )
+        self._save_text = ft.Text(
+            "Lưu thay đổi",
+            size=13,
+            color=C.ON_ACCENT,
+            weight=ft.FontWeight.BOLD,
+        )
         self._save_btn = ft.Container(
             content=ft.Row(
                 controls=[
-                    ft.Icon(ft.Icons.SAVE_ROUNDED, size=16, color=ft.Colors.WHITE),
-                    ft.Text("Lưu cài đặt", size=14, color=ft.Colors.WHITE,
-                            weight=ft.FontWeight.BOLD),
+                    self._save_icon,
+                    self._save_text,
                 ],
-                spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+                spacing=6, alignment=ft.MainAxisAlignment.CENTER,
             ),
             bgcolor=C.ACCENT,
-            padding=ft.Padding.symmetric(vertical=14),
+            padding=ft.Padding.symmetric(vertical=12),
             border_radius=10,
             on_click=self._save,
             ink=True,
             alignment=ft.Alignment(0, 0),
         )
+        self._saving = False
 
         # Call extracted control initializers
         init_account_controls(self)
@@ -128,9 +167,9 @@ class SettingsView(ft.Container):
         _mobile_btn = ft.Button("Mobile", icon=ft.Icons.PHONE_ANDROID_ROUNDED, on_click=lambda e: self._do_test_mobile(), bgcolor=C.SURFACE, color=C.ACCENT)
         _notif_buttons = ft.Row([
             *([_tray_btn] if not _pu.IS_MOBILE else [_mobile_btn]),
-            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color="#0088cc"),
-            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color="#5865F2"),
-            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color="#EA4335"),
+            ft.Button("Telegram", icon=ft.Icons.TELEGRAM_ROUNDED, on_click=lambda e: self._do_test_tele(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Discord", icon=ft.Icons.DISCORD_ROUNDED, on_click=lambda e: self._do_test_discord(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
+            ft.Button("Gmail", icon=ft.Icons.EMAIL_ROUNDED, on_click=lambda e: self._do_test_mail(), bgcolor=C.SURFACE, color=C.TEXT_PRIMARY),
             ft.Button("Gửi tất cả", icon=ft.Icons.CAMPAIGN_ROUNDED, on_click=lambda e: self._do_test_broadcast(), bgcolor=C.SURFACE, color=C.CRITICAL),
         ], wrap=True, spacing=6)
 
@@ -242,76 +281,218 @@ class SettingsView(ft.Container):
         )
 
     def _init_layout(self):
-        self._title_text = ft.Text("Cài đặt", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY)
-        self._version_text = ft.Text(f"UTHelper v{APP_VERSION}", size=11, color=C.TEXT_SECONDARY)
-        self._header_divider = ft.Divider(height=16, color=C.BORDER)
-        
-        # Build sections using imported builders
-        sec_account = build_account_section(self)
-        sec_display = build_display_section(self)
-        sec_system = build_system_section(self)
-        sec_privacy = build_privacy_section(self)
-        sec_urgency = build_urgency_section(self)
-        sec_theme = build_theme_section(self)
-        sec_notify = build_notification_section(self)
-        sec_advanced = build_advanced_section(self)
-        sec_integration = build_integration_section(self)
-        sec_debug = build_debug_section(self)
+        self._category_defs = [
+            ("account", ft.Icons.PERSON_ROUNDED, "Tài khoản", "Đăng nhập UTH", "Thông tin tài khoản và kết nối e-learning"),
+            ("display", ft.Icons.VISIBILITY_ROUNDED, "Hiển thị", "Bộ lọc · Cửa sổ", "Tùy chỉnh hiển thị bài tập trên màn hình"),
+            ("notification", ft.Icons.NOTIFICATIONS_ROUNDED, "Thông báo", "Nhắc nhở · Kênh gửi", "Cấu hình chế độ, mốc nhắc và kênh gửi"),
+            ("urgency", ft.Icons.ACCESS_TIME_ROUNDED, "Cảnh báo", "Mốc thời gian · Mức độ", "Ngưỡng thời gian phân loại khẩn cấp"),
+            ("theme", ft.Icons.PALETTE_ROUNDED, "Giao diện", "Chủ đề · Màu sắc", "Giao diện màu sắc và chủ đề ứng dụng"),
+            ("system", ft.Icons.SETTINGS_ROUNDED, "Hệ thống", "Khởi động · Cập nhật", "Khởi động cùng Windows và cập nhật"),
+            ("privacy", ft.Icons.SHIELD_ROUNDED, "Riêng tư", "Dữ liệu · Quyền riêng tư", "Chẩn đoán sự cố và chính sách dữ liệu"),
+            ("debug", ft.Icons.BUILD_ROUNDED, "Nâng cao", "Hiệu năng · Gỡ lỗi", "Hiệu năng tải và công cụ gỡ lỗi"),
+        ]
 
-        _scroll_content = ft.Column(
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        cards = []
+        for cat_id, icon, title, subtitle, _ in self._category_defs:
+            icon_ctrl = ft.Icon(icon, size=22, color=C.ACCENT)
+            icon_bg = ft.Container(
+                content=icon_ctrl,
+                width=42,
+                height=42,
+                bgcolor=ft.Colors.with_opacity(0.10, C.ACCENT),
+                border_radius=12,
+                alignment=ft.Alignment(0, 0),
+            )
+            t_ctrl = ft.Text(title, size=13.5, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER)
+
+            self._category_icons[cat_id] = (icon_ctrl, icon_bg)
+            self._category_titles[cat_id] = t_ctrl
+
+            card = ft.Container(
+                content=ft.Column(
+                    controls=[
+                        icon_bg,
+                        t_ctrl,
+                    ],
+                    spacing=10,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=C.SURFACE,
+                border=ft.Border.all(1, C.BORDER),
+                border_radius=14,
+                padding=ft.Padding.symmetric(vertical=14, horizontal=10),
+                height=96,
+                expand=True,
+                ink=True,
+                on_click=lambda _, cid=cat_id: self._navigate_to_detail(cid),
+            )
+            self._category_cards[cat_id] = card
+            cards.append(card)
+
+        grid_rows = []
+        for i in range(0, len(cards), 2):
+            grid_rows.append(ft.Row(controls=cards[i:i+2], spacing=10))
+
+        hub_header = ft.Row(
             controls=[
-                ft.Row(controls=[
-                    ft.Column(controls=[
-                        self._title_text,
-                        self._version_text,
-                    ], spacing=2),
-                ]),
-                self._header_divider,
-                sec_account,
-                sec_display,
-                sec_system,
-                sec_privacy,
-                sec_urgency,
-                sec_theme,
-                sec_notify,
-                sec_advanced,
-                sec_integration,
-                sec_debug,
-                ft.Container(height=16),
+                ft.IconButton(
+                    icon=ft.Icons.ARROW_BACK_ROUNDED,
+                    icon_size=20,
+                    icon_color=C.TEXT_SECONDARY,
+                    on_click=self._handle_back,
+                    tooltip="Quay lại",
+                ),
+                self._hub_title,
+                ft.Container(
+                    content=self._unsaved_dot,
+                    width=40,
+                    alignment=ft.Alignment(0, 0),
+                ),
             ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        self._hub_grid_col = ft.Column(
+            controls=grid_rows,
             spacing=10,
             scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        )
+
+        version_footer = ft.Container(
+            content=self._hub_version,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.only(top=8, bottom=4),
+        )
+
+        self._hub_container = ft.Column(
+            controls=[
+                ft.Container(content=hub_header, padding=ft.Padding.only(top=6, bottom=2, left=2, right=2)),
+                ft.Divider(height=12, color=C.BORDER),
+                ft.Container(content=self._hub_grid_col, expand=True, padding=ft.Padding.symmetric(horizontal=4)),
+                version_footer,
+            ],
+            spacing=4,
+            expand=True,
+        )
+
+        detail_header = ft.Row(
+            controls=[
+                self._detail_back_btn,
+                ft.Column(
+                    controls=[
+                        self._detail_title,
+                        self._detail_subtitle,
+                    ],
+                    spacing=1,
+                    expand=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Container(width=40),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        self._detail_content_holder = ft.Column(
+            controls=[],
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
         )
 
         self._sticky_footer = ft.Container(
-            content=ft.Column(controls=[
-                self._save_btn,
-                self._save_status,
-            ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            content=ft.Column(
+                controls=[
+                    self._save_btn,
+                    self._save_status,
+                ],
+                spacing=4,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             bgcolor=C.BG,
-            padding=ft.Padding.only(left=20, right=20, top=10, bottom=12),
-            border=ft.Border.only(top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "30")),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border=ft.Border.only(
+                top=ft.BorderSide(
+                    1.0, ft.Colors.with_opacity(0.19, C.TEXT_SECONDARY)
+                )
+            ),
         )
 
-        self.content = ft.Column(
+        self._detail_container = ft.Column(
             controls=[
-                ft.Container(
-                    content=ft.Row(controls=[self._back_btn], alignment=ft.MainAxisAlignment.START),
-                    padding=ft.Padding.only(left=8, top=25, bottom=4),
-                ),
-                # Scrollable content
-                ft.Container(
-                    content=_scroll_content,
-                    padding=ft.Padding.symmetric(horizontal=20),
-                    expand=True,
-                ),
-                # Fixed save button at bottom
+                ft.Container(content=detail_header, padding=ft.Padding.only(top=6, bottom=2, left=2, right=2)),
+                ft.Divider(height=12, color=C.BORDER),
+                ft.Container(content=self._detail_content_holder, expand=True, padding=ft.Padding.symmetric(horizontal=8)),
                 self._sticky_footer,
             ],
-            spacing=0,
+            spacing=6,
             expand=True,
         )
+
+        self._view_switcher = ft.AnimatedSwitcher(
+            content=self._hub_container,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            duration=150,
+            reverse_duration=150,
+            expand=True,
+        )
+
+        self.content = ft.Container(
+            content=self._view_switcher,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            expand=True,
+        )
+
+    def _navigate_to_detail(self, cat_id: str):
+        self._active_category_id = cat_id
+        self._current_screen = cat_id
+
+        # Update title and subtitle
+        for cid, _, title, _, desc in self._category_defs:
+            if cid == cat_id:
+                self._detail_title.value = title
+                self._detail_subtitle.value = desc
+                break
+
+        # Build section controls
+        if cat_id == "account":
+            detail_ctrl = build_account_section(self)
+            self._sticky_footer.visible = False
+        else:
+            self._sticky_footer.visible = True
+            if cat_id == "display":
+                detail_ctrl = build_display_section(self)
+            elif cat_id == "notification":
+                detail_ctrl = build_notification_section(self)
+            elif cat_id == "urgency":
+                detail_ctrl = build_urgency_section(self)
+            elif cat_id == "theme":
+                detail_ctrl = build_theme_section(self)
+            elif cat_id == "system":
+                detail_ctrl = build_system_section(self)
+            elif cat_id == "privacy":
+                detail_ctrl = build_privacy_section(self)
+            elif cat_id == "debug":
+                detail_ctrl = build_debug_section(self)
+            else:
+                detail_ctrl = ft.Container()
+
+        self._detail_content_holder.controls = [detail_ctrl]
+        self._view_switcher.content = self._detail_container
+        self._save_status.value = ""
+        self._update_save_button_state()
+        self.update()
+
+    def _navigate_to_hub(self):
+        self._active_category_id = None
+        self._current_screen = "hub"
+        self._view_switcher.content = self._hub_container
+        self._save_status.value = ""
+        if hasattr(self, '_unsaved_dot'):
+            self._unsaved_dot.visible = self.has_changes()
+        self.update()
 
     def _build_hint(self, text: str) -> ft.Container:
         txt = ft.Text(text, size=11, color=C.TEXT_SECONDARY)
@@ -321,21 +502,39 @@ class SettingsView(ft.Container):
 
     def _build_setting_group(self, title: str, subtitle: str, controls: list, default_open: bool = False, icon = None) -> ft.Container:
         leading_icon = ft.Icon(icon, size=20, color=C.ACCENT) if icon else None
+        body = ft.Container(
+            content=ft.Column(
+                controls,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            padding=10,
+        )
+
+        def on_change(event):
+            raw = getattr(event, "data", None)
+            if isinstance(raw, str):
+                expanded = raw.strip().lower() == "true"
+            else:
+                expanded = bool(getattr(event.control, "expanded", False))
+            event.control.controls = [body] if expanded else []
+            event.control.update()
+
         tile = ft.ExpansionTile(
             title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
             subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
             leading=leading_icon,
             affinity=ft.Theme.color_scheme,
-            controls=[
-                ft.Container(content=ft.Column(controls, horizontal_alignment=ft.CrossAxisAlignment.STRETCH), padding=10)
-            ],
+            controls=[body] if default_open else [],
             collapsed_text_color=C.TEXT_PRIMARY,
             text_color=C.ACCENT,
             shape=ft.RoundedRectangleBorder(radius=10),
             collapsed_shape=ft.RoundedRectangleBorder(radius=10),
             expanded=default_open,
+            maintain_state=False,
+            on_change=on_change,
         )
         self._tiles.append(tile)
+        self._tile_bodies[id(tile)] = body
         container = ft.Container(
             content=tile,
             bgcolor=C.SURFACE,
@@ -348,6 +547,11 @@ class SettingsView(ft.Container):
         self._section_containers.append(container)
         return container
 
+    def _collapse_setting_groups(self) -> None:
+        for tile in getattr(self, "_tiles", []):
+            tile.expanded = False
+            tile.controls = []
+
     def _build_color_field(self, label_text: str, default_color: str):
         tb = ft.TextField(
             value=default_color, width=90, text_size=12, height=36,
@@ -356,7 +560,7 @@ class SettingsView(ft.Container):
         )
         box = ft.Container(
             width=24, height=24, bgcolor=default_color, border_radius=4,
-            border=ft.Border.all(1, "#333333"), ink=True
+            border=ft.Border.all(1, C.BORDER_STRONG), ink=True
         )
         
         def _on_box_click(e):
@@ -371,6 +575,8 @@ class SettingsView(ft.Container):
         def _on_change(e):
             box.bgcolor = tb.value
             box.update()
+            if hasattr(self, "_on_form_field_change"):
+                self._on_form_field_change()
         tb.on_change = _on_change
         label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
         self._themed_texts.append(label_txt)
@@ -381,7 +587,7 @@ class SettingsView(ft.Container):
             _PROFILES = {
                 "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [1440, 60], "dnd": True, "dnd_start": 22, "dnd_end": 8},
                 "balanced": {"icon": ft.Icons.NOTIFICATIONS_OUTLINED, "label": "Cân bằng", "desc": "Mặc định", "milestones": [4320, 1440, 180, 60, 30, 5], "dnd": True, "dnd_start": 22, "dnd_end": 7},
-                "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Tuần thi", "desc": "Không bỏ lỡ gì", "milestones": [4320, 1440, 360, 180, 60, 30, 5], "dnd": False, "dnd_start": 22, "dnd_end": 7},
+                "exam_week": {"icon": ft.Icons.LOCAL_FIRE_DEPARTMENT_OUTLINED, "label": "Theo sát", "desc": "Không bỏ lỡ gì", "milestones": [4320, 1440, 360, 180, 60, 30, 5], "dnd": False, "dnd_start": 22, "dnd_end": 7},
             }
             self._current_profile = profile_key
             prof = _PROFILES[profile_key]
@@ -392,14 +598,24 @@ class SettingsView(ft.Container):
             # Update milestone chips
             for h, chip in self._milestone_chips.items():
                 chip.selected = h in prof["milestones"]
+                chip.check_color = C.ON_ACCENT
+                lbl = getattr(chip, "label", None)
+                if lbl and hasattr(lbl, "color"):
+                    lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
             self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
             # Update card styles
             for k, card in self._profile_cards.items():
                 is_sel = (k == profile_key)
                 card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-                card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+                card.bgcolor = (
+                    ft.Colors.with_opacity(0.08, C.ACCENT)
+                    if is_sel
+                    else C.SURFACE
+                )
             self._update_profile_summary()
             self._update_dnd_summary()
+            if hasattr(self, "_on_form_field_change"):
+                self._on_form_field_change()
             self.update()
         return handler
 
@@ -410,10 +626,16 @@ class SettingsView(ft.Container):
             chip = self._milestone_chips[minutes]
             if getattr(e, "control", None) is not chip:
                 chip.selected = bool(getattr(getattr(e, "control", None), "selected", chip.selected))
+            chip.check_color = C.ON_ACCENT
+            lbl = getattr(chip, "label", None)
+            if lbl and hasattr(lbl, "color"):
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
             # Sync to hidden field
             active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
             self._milestones_field.value = ", ".join(str(h) for h in active)
             self._milestone_summary.value = f"Bạn sẽ nhận {len(active)} lần nhắc cho mỗi deadline" if active else "Không có mốc nhắc nhở nào"
+            if hasattr(self, "_on_form_field_change"):
+                self._on_form_field_change()
             self.update()
         return handler
 
@@ -432,9 +654,11 @@ class SettingsView(ft.Container):
                     c_name = clean_course_name(c)
                     if c_name: self._known_courses.add(c_name)
 
+        current = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
+        if hasattr(self, "_muted_count_text"):
+            self._muted_count_text.value = f"{len(current)} môn"
+
         if getattr(self, '_known_courses', None):
-            current = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
-            
             def make_toggle(course):
                 def _on_check(e):
                     curr = [x.strip() for x in self._muted_courses_field.value.split(",") if x.strip()]
@@ -443,13 +667,20 @@ class SettingsView(ft.Container):
                     elif not e.control.value and course in curr:
                         curr.remove(course)
                     self._muted_courses_field.value = ", ".join(curr)
+                    if hasattr(self, "_muted_count_text"):
+                        self._muted_count_text.value = f"{len(curr)} môn"
+                    if hasattr(self, "_on_form_field_change"):
+                        self._on_form_field_change()
                     self._muted_courses_field.update()
+                    if hasattr(self, "_muted_count_text"):
+                        try:
+                            self._muted_count_text.update()
+                        except Exception:
+                            pass
                 return ft.Checkbox(label=course, value=(course in current), on_change=_on_check, fill_color=C.ACCENT)
             
             self._muted_courses_list.controls = [make_toggle(c) for c in sorted(list(self._known_courses))]
             self._muted_courses_drp.visible = True
-            if hasattr(self._muted_courses_list, "page") and self._muted_courses_list.page:
-                self._muted_courses_list.update()
         else:
             self._muted_courses_drp.visible = False
 
@@ -477,7 +708,9 @@ class SettingsView(ft.Container):
     def _update_dnd_summary(self):
         """Update DND summary text based on current toggle and time values."""
         try:
-            enabled = self._sw_dnd_enable.value
+            enabled = bool(getattr(self._sw_dnd_enable, "value", False))
+            if hasattr(self, "_dnd_time_row"):
+                self._dnd_time_row.visible = enabled
             start = int(self._dnd_start_field.value or "22")
             end = int(self._dnd_end_field.value or "7")
             if not enabled:
@@ -516,7 +749,11 @@ class SettingsView(ft.Container):
 
     def _make_theme_card(self, key: str, preset: dict, selected: bool):
         """Create a single theme preview card."""
-        border_col = preset["accent"] if selected else (preset["border"] + "80")
+        border_col = (
+            preset["accent"]
+            if selected
+            else ft.Colors.with_opacity(0.50, preset["border"])
+        )
         border_w = 2.5 if selected else 1
 
         # Color strip: 5 small color dots showing the palette
@@ -598,7 +835,6 @@ class SettingsView(ft.Container):
         try:
             self._selected_theme = theme_key
             self._apply_theme_colors(theme_key)
-            self._rebuild_theme_cards()
             # Apply theme globally RIGHT NOW for instant preview
             apply_theme(theme_key)
             log.info(f"[THEME] After apply_theme: TEXT_PRIMARY={C.TEXT_PRIMARY}, TEXT_SECONDARY={C.TEXT_SECONDARY}")
@@ -614,6 +850,10 @@ class SettingsView(ft.Container):
             # Notify app_controller to refresh entire UI (dashboard, header, footer, cards)
             if self._on_theme_preview:
                 self._on_theme_preview()
+            # Preview cards visualize their own immutable presets. Restore them
+            # after every external theme callback so no broader repaint can tint
+            # the swatches with the active application palette.
+            self._rebuild_theme_cards()
             # Show unsaved indicator
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = True
@@ -629,6 +869,31 @@ class SettingsView(ft.Container):
         Covers: section containers, expansion tiles, text fields, switches,
         save button, sticky footer, back button, test login, etc.
         """
+        current_palette = semantic_palette()
+        detached_controls = [
+            value
+            for value in vars(self).values()
+            if isinstance(value, ft.BaseControl)
+        ]
+        theme_preview_cards = []
+        theme_preview_row = getattr(
+            getattr(self, "_theme_cards_row", None), "content", None
+        )
+        if isinstance(theme_preview_row, ft.Row):
+            theme_preview_cards = list(theme_preview_row.controls)
+        refresh_semantic_control_colors(
+            [
+                self,
+                *getattr(self, "_tile_bodies", {}).values(),
+                *detached_controls,
+            ],
+            getattr(self, "_rendered_palette", current_palette),
+            current_palette,
+            excluded_roots=theme_preview_cards,
+        )
+        self._rendered_palette = current_palette
+        self.bgcolor = C.BG
+
         # Section containers (bg + border)
         for container in getattr(self, '_section_containers', []):
             container.bgcolor = C.SURFACE
@@ -638,6 +903,11 @@ class SettingsView(ft.Container):
             except Exception:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+        terms_entry = getattr(self, "_terms_policy_entry", None)
+        if terms_entry is not None:
+            terms_entry.bgcolor = C.BG
+            terms_entry.border = ft.Border.all(1, C.BORDER)
 
         # Expansion tiles (title text + icon colors)
         for tile in getattr(self, '_tiles', []):
@@ -702,10 +972,9 @@ class SettingsView(ft.Container):
                 if sname != '_sw_debug':
                     sw.active_color = C.ACCENT
                 sw.label_text_style = ft.TextStyle(color=C.TEXT_PRIMARY, size=13)
-
-        # Save button
+        # Save button state
+        self._update_save_button_state()
         if hasattr(self, '_save_btn'):
-            self._save_btn.bgcolor = C.ACCENT
             try:
                 self._save_btn.update()
             except Exception:
@@ -716,7 +985,9 @@ class SettingsView(ft.Container):
         if hasattr(self, '_sticky_footer'):
             self._sticky_footer.bgcolor = C.BG
             self._sticky_footer.border = ft.Border.only(
-                top=ft.BorderSide(1.5, C.TEXT_SECONDARY + "30")
+                top=ft.BorderSide(
+                    1.5, ft.Colors.with_opacity(0.19, C.TEXT_SECONDARY)
+                )
             )
             try:
                 self._sticky_footer.update()
@@ -727,7 +998,7 @@ class SettingsView(ft.Container):
         # Test login button
         if hasattr(self, '_test_login_btn'):
             self._test_login_btn.style = ft.ButtonStyle(
-                color=ft.Colors.WHITE,
+                color=C.ON_ACCENT,
                 bgcolor=C.ACCENT,
                 shape=ft.RoundedRectangleBorder(radius=10),
                 padding=12,
@@ -751,8 +1022,8 @@ class SettingsView(ft.Container):
         if hasattr(self, '_back_btn'):
             self._back_btn.style = ft.ButtonStyle(
                 color=C.TEXT_SECONDARY,
-                overlay_color=ft.Colors.with_opacity(0.1, C.TEXT_SECONDARY),
-                padding=ft.Padding.symmetric(horizontal=8, vertical=10),
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=4),
             )
 
         # Header texts
@@ -779,7 +1050,11 @@ class SettingsView(ft.Container):
         for k, card in getattr(self, '_profile_cards', {}).items():
             is_sel = (k == getattr(self, '_current_profile', 'balanced'))
             card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            card.bgcolor = (
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if is_sel
+                else C.SURFACE
+            )
             col = card.content
             if col and hasattr(col, 'controls') and len(col.controls) >= 3:
                 col.controls[0].color = C.ACCENT if is_sel else C.TEXT_SECONDARY  # icon
@@ -789,7 +1064,17 @@ class SettingsView(ft.Container):
         # Milestone chips
         for h, chip in getattr(self, '_milestone_chips', {}).items():
             chip.selected_color = C.ACCENT
+            chip.check_color = C.ON_ACCENT
             chip.bgcolor = C.SURFACE
+            lbl = getattr(chip, "label", None)
+            if lbl and hasattr(lbl, "color"):
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+
+        for checkbox in getattr(self, '_notify_type_checks', {}).values():
+            checkbox.fill_color = {ft.ControlState.SELECTED: C.ACCENT}
+            checkbox.check_color = C.ON_ACCENT
+            if checkbox.label_style:
+                checkbox.label_style.color = C.TEXT_PRIMARY
 
         # Summary texts (profile, DND, milestone)
         for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):
@@ -804,6 +1089,74 @@ class SettingsView(ft.Container):
             if tile.subtitle and hasattr(tile.subtitle, 'color'):
                 tile.subtitle.color = C.TEXT_SECONDARY
 
+        # Hub category cards
+        for cat_id, card in getattr(self, '_category_cards', {}).items():
+            card.bgcolor = C.SURFACE
+            card.border = ft.Border.all(1, C.BORDER)
+            if cat_id in getattr(self, '_category_icons', {}):
+                icon_ctrl, icon_bg = self._category_icons[cat_id]
+                icon_ctrl.color = C.ACCENT
+                icon_bg.bgcolor = ft.Colors.with_opacity(0.1, C.ACCENT)
+            if cat_id in getattr(self, '_category_titles', {}):
+                self._category_titles[cat_id].color = C.TEXT_PRIMARY
+            if cat_id in getattr(self, '_category_subtitles', {}):
+                self._category_subtitles[cat_id].color = C.TEXT_SECONDARY
+
+        # Detail view headers
+        if hasattr(self, '_detail_title'):
+            self._detail_title.color = C.TEXT_PRIMARY
+        if hasattr(self, '_detail_subtitle'):
+            self._detail_subtitle.color = C.TEXT_SECONDARY
+        if hasattr(self, '_detail_back_btn'):
+            self._detail_back_btn.icon_color = C.TEXT_SECONDARY
+        if hasattr(self, '_hub_title'):
+            self._hub_title.color = C.TEXT_PRIMARY
+        if hasattr(self, '_hub_version'):
+            self._hub_version.color = C.TEXT_SECONDARY
+
+    def _update_save_button_state(self):
+        """Update save button appearance and disabled state based on dirty state machine."""
+        if not hasattr(self, "_save_btn") or not hasattr(self, "_save_text") or not hasattr(self, "_save_icon"):
+            return
+
+        if getattr(self, "_saving", False):
+            self._save_btn.disabled = True
+            self._save_text.value = "Đang lưu..."
+            self._save_icon.name = ft.Icons.HOURGLASS_TOP_ROUNDED
+            self._save_btn.bgcolor = ft.Colors.with_opacity(0.4, C.ACCENT)
+            self._save_text.color = C.ON_ACCENT
+            self._save_icon.color = C.ON_ACCENT
+            self._save_btn.opacity = 0.8
+        elif self.has_changes():
+            self._save_btn.disabled = False
+            self._save_text.value = "Lưu thay đổi"
+            self._save_icon.name = ft.Icons.SAVE_ROUNDED
+            self._save_btn.bgcolor = C.ACCENT
+            self._save_text.color = C.ON_ACCENT
+            self._save_icon.color = C.ON_ACCENT
+            self._save_btn.opacity = 1.0
+        else:
+            self._save_btn.disabled = True
+            self._save_text.value = "Đã lưu"
+            self._save_icon.name = ft.Icons.CHECK_ROUNDED
+            self._save_btn.bgcolor = C.SURFACE
+            self._save_text.color = C.TEXT_SECONDARY
+            self._save_icon.color = C.TEXT_SECONDARY
+            self._save_btn.opacity = 0.85
+
+    def _on_form_field_change(self, e=None):
+        """Callback whenever any setting input changes value."""
+        changed = self.has_changes()
+        if hasattr(self, "_unsaved_dot"):
+            self._unsaved_dot.visible = changed
+        self._update_save_button_state()
+        try:
+            self._save_btn.update()
+            if hasattr(self, "_unsaved_dot"):
+                self._unsaved_dot.update()
+        except Exception:
+            pass
+
     def _apply_theme_colors(self, theme_key: str):
         """Fill color text fields from preset values."""
         preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["midnight_blue"])
@@ -817,7 +1170,7 @@ class SettingsView(ft.Container):
         self._c_tb_other.value = preset["other"]
 
     def _rebuild_theme_cards(self):
-        """Rebuild theme cards row to reflect new selection in place."""
+        """Restore preset previews and update selection state in place."""
         row_ctrl = self._theme_cards_row.content
         if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) == len(THEME_ORDER):
             for i, key in enumerate(THEME_ORDER):
@@ -826,22 +1179,45 @@ class SettingsView(ft.Container):
                 card = row_ctrl.controls[i]
                 
                 # Update border
-                border_col = preset["accent"] if selected else (preset["border"] + "80")
+                border_col = (
+                    preset["accent"]
+                    if selected
+                    else ft.Colors.with_opacity(0.50, preset["border"])
+                )
                 border_w = 2.5 if selected else 1
+                card.bgcolor = preset["surface"]
                 card.border = ft.Border.all(border_w, border_col)
-                
-                # Update check icon
+
                 try:
-                    check_icon = card.content.controls[0].controls[0]
+                    content = card.content.controls
+                    check_icon = content[0].controls[0]
+                    preview_strip = content[1]
+                    dots = content[2].controls
+                    label = content[3]
+                    sublabel = content[4]
+
+                    check_icon.color = preset["accent"]
                     check_icon.visible = selected
-                except Exception:
-                    import logging as _fb_log
-                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-                
-                # Update label font weight
-                try:
-                    label = card.content.controls[3]
+                    preview_strip.gradient = ft.LinearGradient(
+                        begin=ft.Alignment(-1, 0),
+                        end=ft.Alignment(1, 0),
+                        colors=[preset["bg"], preset["surface"], preset["accent"]],
+                    )
+                    for dot, color in zip(
+                        dots,
+                        (
+                            preset["bg"],
+                            preset["surface"],
+                            preset["accent"],
+                            preset["critical"],
+                            preset["safe"],
+                        ),
+                        strict=True,
+                    ):
+                        dot.bgcolor = color
+                    label.color = preset["text_primary"]
                     label.weight = ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL
+                    sublabel.color = preset["text_secondary"]
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -865,7 +1241,6 @@ class SettingsView(ft.Container):
         # Reset theme to default
         self._selected_theme = "midnight_blue"
         self._apply_theme_colors("midnight_blue")
-        self._rebuild_theme_cards()
         # Apply theme live preview
         apply_theme("midnight_blue")
         from gui.core.theme import set_page_theme
@@ -874,6 +1249,7 @@ class SettingsView(ft.Container):
         self._refresh_section_colors()
         if self._on_theme_preview:
             self._on_theme_preview()
+        self._rebuild_theme_cards()
         
         self._critical_hours_field.value = "24"
         self._warning_hours_field.value = "72"
@@ -887,11 +1263,19 @@ class SettingsView(ft.Container):
         for k, card in self._profile_cards.items():
             is_sel = (k == "balanced")
             card.border = ft.Border.all(2, C.ACCENT) if is_sel else ft.Border.all(1, C.BORDER)
-            card.bgcolor = C.ACCENT + "15" if is_sel else C.SURFACE
+            card.bgcolor = (
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if is_sel
+                else C.SURFACE
+            )
         # Reset milestone chips to canonical minute-based defaults.
         _default_milestones = [4320, 1440, 180, 60, 30, 5]
         for h, chip in self._milestone_chips.items():
             chip.selected = h in _default_milestones
+            chip.check_color = C.ON_ACCENT
+            lbl = getattr(chip, "label", None)
+            if lbl and hasattr(lbl, "color"):
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         self._milestones_field.value = "4320, 1440, 180, 60, 30, 5"
         self._milestone_summary.value = "Bạn sẽ nhận 6 lần nhắc cho mỗi deadline"
         # Reset DND
@@ -909,6 +1293,10 @@ class SettingsView(ft.Container):
         if not user or not pwd:
             self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                self._test_login_status_icon.color = C.CRITICAL
+                self._test_login_status_icon.visible = True
             self.update()
             return
 
@@ -919,19 +1307,33 @@ class SettingsView(ft.Container):
         self._test_login_btn.icon = ft.Icons.HOURGLASS_TOP_ROUNDED
         self._test_loading_bar.visible = True
         self._test_login_status.value = ""
+        if hasattr(self, "_test_login_status_icon"):
+            self._test_login_status_icon.visible = False
         self.update()
 
         try:
             success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
             if success:
-                self._test_login_status.value = "Kết nối thành công!"
+                self._test_login_status.value = "Đã kết nối với hệ thống UTH"
                 self._test_login_status.color = C.SAFE
+                if hasattr(self, "_test_login_status_icon"):
+                    self._test_login_status_icon.name = ft.Icons.CHECK_CIRCLE_ROUNDED
+                    self._test_login_status_icon.color = C.SAFE
+                    self._test_login_status_icon.visible = True
             else:
                 self._test_login_status.value = "Đăng nhập thất bại. Kiểm tra lại thông tin!"
                 self._test_login_status.color = C.CRITICAL
+                if hasattr(self, "_test_login_status_icon"):
+                    self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                    self._test_login_status_icon.color = C.CRITICAL
+                    self._test_login_status_icon.visible = True
         except Exception as ex:
-            self._test_login_status.value = f"Lỗi: {str(ex)}"
+            self._test_login_status.value = f"Lỗi kết nối: {str(ex)}"
             self._test_login_status.color = C.CRITICAL
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                self._test_login_status_icon.color = C.CRITICAL
+                self._test_login_status_icon.visible = True
         finally:
             self._test_login_btn.disabled = False
             self._username_field.disabled = False
@@ -997,7 +1399,14 @@ class SettingsView(ft.Container):
         """Show device/platform info for debugging."""
         import sys
         import platform as pf
-        from platform_utils import IS_ANDROID, IS_IOS, IS_MOBILE, IS_WINDOWS
+        from platform_utils import (
+            IS_ANDROID,
+            IS_IOS,
+            IS_MOBILE,
+            IS_WINDOWS,
+            UI_PLATFORM,
+            UI_PLATFORM_OVERRIDE,
+        )
         try:
             import flet as ft_info
             flet_ver = getattr(ft_info, '__version__', 'unknown')
@@ -1010,7 +1419,8 @@ class SettingsView(ft.Container):
             f"Platform: {pf.system()} {pf.release()} ({pf.machine()})",
             f"Flet: {flet_ver}",
             f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
-            f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
+            f"UI profile: {UI_PLATFORM} (override={UI_PLATFORM_OVERRIDE or 'none'})",
+            f"App: v{APP_VERSION}",
             f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
             f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.CHECK_INTERVAL_MINUTES}m)",
             f"DND: {'ON' if cfg.NOTIFY_DND_ENABLE else 'OFF'} ({cfg.NOTIFY_DND_START}h-{cfg.NOTIFY_DND_END}h)",
@@ -1418,7 +1828,6 @@ class SettingsView(ft.Container):
         def _worker():
             try:
                 from core.update_checker import check_for_update
-                from gui.app_controller import APP_VERSION
                 has_update, version, url, asset = check_for_update(APP_VERSION)
                 if has_update:
                     result = f"Phiên bản mới: v{version}\nURL: {url}\nAsset: {asset or 'N/A'}"
@@ -1659,14 +2068,19 @@ class SettingsView(ft.Container):
 
     def _sync_autostart_dependency(self):
         """Keep the visibility preference scoped to an enabled autostart state."""
-        self._sw_start_minimized.disabled = not bool(
-            self._sw_start_with_windows.value
-        )
+        enabled = bool(self._sw_start_with_windows.value)
+        self._sw_start_minimized.disabled = not enabled
+        if hasattr(self, "_sw_start_minimized_container"):
+            self._sw_start_minimized_container.visible = enabled
 
     def _on_autostart_toggle(self, _event):
         self._sync_autostart_dependency()
         self._autostart_status.value = ""
+        if hasattr(self, "_on_form_field_change"):
+            self._on_form_field_change()
         try:
+            if hasattr(self, "_sw_start_minimized_container"):
+                self._sw_start_minimized_container.update()
             self._sw_start_minimized.update()
             self._autostart_status.update()
         except Exception:
@@ -1822,6 +2236,10 @@ class SettingsView(ft.Container):
         )
         for minutes, chip in self._milestone_chips.items():
             chip.selected = minutes in snapshot.notify_milestones_minutes
+            chip.check_color = C.ON_ACCENT
+            lbl = getattr(chip, "label", None)
+            if lbl and hasattr(lbl, "color"):
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         active_count = sum(
             minutes in snapshot.notify_milestones_minutes
             for minutes in self._milestone_chips
@@ -1839,7 +2257,11 @@ class SettingsView(ft.Container):
                 if selected
                 else ft.Border.all(1, C.BORDER)
             )
-            card.bgcolor = C.ACCENT + "15" if selected else C.SURFACE
+            card.bgcolor = (
+                ft.Colors.with_opacity(0.08, C.ACCENT)
+                if selected
+                else C.SURFACE
+            )
 
         self._rebuild_theme_cards()
         self._sync_autostart_dependency()
@@ -1849,6 +2271,12 @@ class SettingsView(ft.Container):
         self._toggle_debug_ui()
         self._update_profile_summary()
         self._update_dnd_summary()
+        if hasattr(self, "_muted_count_text"):
+            self._muted_count_text.value = f"{len(snapshot.notify_muted_courses)} môn"
+        from gui.components.settings.urgency_section import validate_urgency_thresholds
+        validate_urgency_thresholds(self)
+        if hasattr(self, "_update_save_button_state") and callable(getattr(self, "_update_save_button_state")):
+            self._update_save_button_state()
 
     def _persist_snapshot_to_settings(self, snapshot: SettingsFormSnapshot) -> bool:
         """Persist a complete snapshot and restore in-memory state on failure."""
@@ -1887,29 +2315,23 @@ class SettingsView(ft.Container):
         self._loading = True
         snapshot = SettingsFormSnapshot.from_settings(settings)
         try:
-            autostart = await self._load_autostart_state(generation)
-            if generation != self._load_generation:
-                return
-
-            resolved = snapshot
-            if autostart is not None and autostart.confirmed:
-                resolved = replace(
-                    snapshot,
-                    start_with_windows=autostart.enabled,
-                )
-
-            for tile in getattr(self, '_tiles', []):
-                tile.expanded = False
+            self._collapse_setting_groups()
+            if hasattr(self, "_view_switcher") and hasattr(self, "_hub_container"):
+                self._view_switcher.content = self._hub_container
+                self._current_screen = "hub"
+                self._active_category_id = None
 
             self._test_login_status.value = ""
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.visible = False
             self._test_login_btn.text = "Kiểm tra kết nối"
             self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
             self._test_loading_bar.visible = False
             if hasattr(self, '_unsaved_dot'):
                 self._unsaved_dot.visible = False
 
-            self._original_theme = resolved.theme
-            self._apply_snapshot_to_controls(resolved)
+            self._original_theme = snapshot.theme
+            self._apply_snapshot_to_controls(snapshot)
             self._refresh_section_colors()
 
             self._known_courses = set()
@@ -1929,16 +2351,33 @@ class SettingsView(ft.Container):
             self._update_drp_options()
 
             self._save_status.value = ""
-            self._baseline_snapshot = self._capture_form_snapshot()
+            self._baseline_snapshot = snapshot
+            if hasattr(self, "_update_save_button_state") and callable(getattr(self, "_update_save_button_state")):
+                self._update_save_button_state()
+            if self._autostart_coordinator is not None:
+                self._sw_start_with_windows.disabled = True
+                self._autostart_status.value = "Đang kiểm tra trạng thái Windows..."
+                self._autostart_status.color = C.TEXT_SECONDARY
+            self.update()
+
+            autostart = await self._load_autostart_state(generation)
+            if generation != self._load_generation:
+                return
+
             if autostart is not None:
                 display_state = autostart
-                if not autostart.confirmed:
+                if autostart.confirmed:
+                    self._baseline_snapshot = replace(
+                        snapshot,
+                        start_with_windows=autostart.enabled,
+                    )
+                else:
                     display_state = replace(
                         autostart,
-                        enabled=resolved.start_with_windows,
+                        enabled=snapshot.start_with_windows,
                     )
                 self._apply_autostart_ui(display_state)
-            self.update()
+                self.update()
         finally:
             if generation == self._load_generation:
                 self._loading = False
@@ -1948,7 +2387,7 @@ class SettingsView(ft.Container):
         self._loading = False
 
     def has_changes(self):
-        if self._loading or self._baseline_snapshot is None:
+        if self._baseline_snapshot is None:
             return False
         try:
             return self._capture_form_snapshot() != self._baseline_snapshot
@@ -1979,25 +2418,24 @@ class SettingsView(ft.Container):
     async def _handle_back(self, e):
         import logging
         _log = logging.getLogger("settings.dialog")
-        _log.warning("=== _handle_back called, has_changes=%s ===", self.has_changes())
-        if self._loading:
+        _log.debug("Settings Back requested; has_changes=%s", self.has_changes())
+        if self._loading and not self.has_changes():
             self.cancel_pending_load()
             self._on_close_cb()
             return
         if self.has_changes():
             def close_dlg(e):
-                _log.warning(">>> CANCEL button clicked!")
+                _log.debug("Settings discard dialog cancelled")
                 self._page.pop_dialog()
                 self._page.update()
 
             def discard_and_close(e):
-                _log.warning(">>> DISCARD button clicked!")
+                _log.debug("Settings changes discarded")
                 self._page.pop_dialog()
                 self._discard_and_close()
-                _log.warning("  discard done")
 
             def save_and_close(e):
-                _log.warning(">>> SAVE button clicked!")
+                _log.debug("Settings save requested from Back dialog")
                 self._page.pop_dialog()
                 self._page.run_task(self._save_and_close_if_valid, e)
 
@@ -2021,7 +2459,7 @@ class SettingsView(ft.Container):
                 bgcolor=C.BG,
             )
             self._page.show_dialog(confirm_dlg)
-            _log.warning("Dialog opened via page.show_dialog()")
+            _log.debug("Settings discard dialog opened")
         else:
             self._on_close_cb()
 
@@ -2033,6 +2471,24 @@ class SettingsView(ft.Container):
         return True
 
     async def _save(self, e) -> bool:
+        if getattr(self, "_saving", False):
+            return False
+
+        from gui.components.settings.urgency_section import validate_urgency_thresholds
+        if not validate_urgency_thresholds(self):
+            self._save_status.value = "Lỗi: Ngưỡng 'Sắp tới' phải lớn hơn ngưỡng 'Cấp bách'."
+            self._save_status.color = C.CRITICAL
+            self.update()
+            return False
+
+        self._saving = True
+        if hasattr(self, "_update_save_button_state") and callable(getattr(self, "_update_save_button_state")):
+            self._update_save_button_state()
+        try:
+            self.update()
+        except Exception:
+            pass
+
         try:
             requested = self._capture_form_snapshot()
             baseline = self._baseline_snapshot
@@ -2279,6 +2735,14 @@ class SettingsView(ft.Container):
             self._save_status.color = C.CRITICAL
             self.update()
             return False
+        finally:
+            self._saving = False
+            if hasattr(self, "_update_save_button_state") and callable(getattr(self, "_update_save_button_state")):
+                self._update_save_button_state()
+            try:
+                self.update()
+            except Exception:
+                pass
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""

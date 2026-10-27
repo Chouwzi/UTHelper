@@ -1,10 +1,14 @@
-"""Grade Overview View - shows all course grades in a dedicated panel.
+"""Grade Overview View - Academic Radar & Course Transcript Analysis.
 
-Accessible via the 📊 icon in the header. Displays a summary of grades
-for all enrolled courses with detail expansion per course.
+Displays a 6-axis Academic Radar character-stat profile, semester KPIs,
+interactive metric detail modals, and comprehensive course grades.
 """
+from __future__ import annotations
+
+import logging
 import os
 import sys
+from typing import Any, Callable, Optional
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -12,50 +16,85 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import flet as ft
-import logging
-from typing import List, Dict, Any, Optional, Callable
-from gui.core.theme import C
+from core.academic_radar.calculator import calculate_radar_profile
+from core.academic_radar.models import RadarProfile, SemesterGradeData
+from core.academic_radar.normalizer import SemesterNormalizer
+from gui.components.academic_radar.grade_list_view import AcademicGradeListView
+from gui.components.academic_radar.radar_card import AcademicRadarCard
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 
 logger = logging.getLogger(__name__)
 
 
 class GradeOverviewView(ft.Container):
-    """Slide-in panel showing grade overview for all courses."""
+    """Modern Academic Radar and Course Grades slide-in panel."""
 
-    def __init__(self, on_close: Optional[Callable] = None, **kwargs):
+    def __init__(
+        self,
+        on_close: Optional[Callable] = None,
+        on_refresh: Optional[Callable] = None,
+        page: Optional[ft.Page] = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self._on_close = on_close
+        self._on_refresh = on_refresh
+        self._page_ref = page
+        self._semesters: list[SemesterGradeData] = []
+        self._profiles: list[RadarProfile] = []
+        self._selected_semester_idx = 0
 
-        # Header
-        self._title = ft.Text(
-            "📊 Bảng điểm", size=18,
-            weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY,
-        )
-        self._close_btn = ft.IconButton(
-            icon=ft.Icons.CLOSE_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=20,
-            tooltip="Đóng",
+        # 1. Header (Back button on left, Centered Title in middle, Refresh on right)
+        self._back_btn = ft.IconButton(
+            icon=ft.Icons.ARROW_BACK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Quay lại",
             on_click=self._handle_close,
         )
+        self._title = ft.Text(
+            "Bảng điểm",
+            size=16,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            text_align=ft.TextAlign.CENTER,
+            expand=True,
+        )
+        self._refresh_btn = ft.IconButton(
+            icon=ft.Icons.REFRESH_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Làm mới bảng điểm từ Portal",
+            on_click=self._handle_refresh,
+        )
         self._header = ft.Row(
-            controls=[self._title, self._close_btn],
+            controls=[
+                self._back_btn,
+                self._title,
+                self._refresh_btn,
+            ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        # Loading indicator
+        # 2. Loading indicator
         self._loading = ft.ProgressRing(
             width=24, height=24, stroke_width=3, color=C.ACCENT,
         )
+        self._loading_text = ft.Text(
+            "Đang tải hồ sơ học tập...", size=13, color=C.TEXT_SECONDARY
+        )
         self._loading_row = ft.Row(
-            controls=[self._loading, ft.Text("Đang tải điểm...", size=13, color=C.TEXT_SECONDARY)],
+            controls=[self._loading, self._loading_text],
             alignment=ft.MainAxisAlignment.CENTER,
             visible=False,
         )
 
-        # Empty state
+        # 3. Empty state
         self._empty_text = ft.Text(
-            "Chưa có dữ liệu điểm. Hãy thử làm mới.",
-            size=13, color=C.TEXT_SECONDARY,
+            "Chưa có dữ liệu bảng điểm.\nRadar học tập sẽ xuất hiện khi có kết quả học phần.",
+            size=13,
+            color=C.TEXT_SECONDARY,
             text_align=ft.TextAlign.CENTER,
         )
         self._empty_state = ft.Container(
@@ -65,22 +104,34 @@ class GradeOverviewView(ft.Container):
             visible=False,
         )
 
-        # Grade list
-        self._grade_list = ft.Column(
-            controls=[],
-            spacing=8,
+        # 4. Academic Radar Card & Grade List
+        self._radar_card = AcademicRadarCard(
+            profiles=[],
+            on_semester_change=self._on_semester_changed,
+            page=self._get_page(),
+            visible=False,
+        )
+        self._grade_list_view = AcademicGradeListView(courses=[], visible=False)
+
+        # Main scrollable body
+        self._scrollable_content = ft.Column(
+            controls=[
+                self._radar_card,
+                self._grade_list_view,
+            ],
+            spacing=16,
             scroll=ft.ScrollMode.AUTO,
             expand=True,
         )
 
-        # Main content
+        self._header_divider = ft.Divider(height=1, color=C.BORDER)
         self.content = ft.Column(
             controls=[
                 self._header,
-                ft.Divider(height=1, color=C.BORDER),
+                self._header_divider,
                 self._loading_row,
                 self._empty_state,
-                self._grade_list,
+                self._scrollable_content,
             ],
             spacing=8,
             expand=True,
@@ -94,195 +145,159 @@ class GradeOverviewView(ft.Container):
         self.opacity = 0.0
         self.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
         self.animate_opacity = ft.Animation(200)
+        self._rendered_palette = semantic_palette()
 
-    def show_loading(self):
-        """Show loading state."""
+    def _get_page(self) -> Optional[ft.Page]:
+        if self._page_ref is not None:
+            return self._page_ref
+        try:
+            return self.page
+        except Exception:
+            return None
+
+    def show_loading(self) -> None:
+        """Shows loading state."""
         self._loading_row.visible = True
         self._empty_state.visible = False
-        self._grade_list.controls.clear()
+        self._radar_card.visible = False
+        self._grade_list_view.visible = False
         self.visible = True
         self.offset = ft.Offset(0, 0)
         self.opacity = 1.0
+        try:
+            self.update()
+        except Exception:
+            pass
 
-    def update_grades(self, courses_grades: List[Dict[str, Any]], grade_items: Dict[str, List[Dict]]):
-        """Update the view with grade data.
-
-        Args:
-            courses_grades: List of {courseid, coursename, grade, rank} from WS.
-            grade_items: Dict of course_id -> list of grade items.
-        """
+    def update_academic_data(
+        self,
+        semesters: list[SemesterGradeData],
+        profiles: list[RadarProfile],
+    ) -> None:
+        """Populates the view with full academic transcript and computed radar profiles."""
         self._loading_row.visible = False
-        self._grade_list.controls.clear()
+        self._semesters = semesters
+        self._profiles = profiles
+        self._selected_semester_idx = 0
 
-        if not courses_grades:
+        if not profiles or not semesters:
             self._empty_state.visible = True
+            self._radar_card.visible = False
+            self._grade_list_view.visible = False
+            try:
+                self.update()
+            except Exception:
+                pass
             return
 
         self._empty_state.visible = False
+        self._radar_card.visible = True
+        self._grade_list_view.visible = True
 
-        for cg in courses_grades:
-            course_id = str(cg.get('courseid', ''))
-            course_name = cg.get('coursename', f'Course {course_id}')
-            overall_grade = cg.get('grade', '-')
-            rank = cg.get('rank', '')
+        self._radar_card._page_ref = self._get_page()
+        self._radar_card.set_profiles(profiles, selected_index=0)
 
-            # Course header card
-            grade_color = self._grade_color(overall_grade)
-            grade_display = ft.Text(
-                overall_grade if overall_grade and overall_grade != '-' else '-',
-                size=20, weight=ft.FontWeight.W_700,
-                color=grade_color,
-            )
-
-            course_card_content = [
-                ft.Row(
-                    controls=[
-                        ft.Column(
-                            controls=[
-                                ft.Text(course_name, size=14, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                                ft.Text(f"Xếp hạng: {rank}" if rank else "", size=11, color=C.TEXT_SECONDARY),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        grade_display,
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-            ]
-
-            # Grade items for this course
-            items = grade_items.get(course_id, [])
-            if items:
-                items_column = ft.Column(spacing=2)
-                for item in items:
-                    item_name = item.get('itemname', '')
-                    item_grade = item.get('gradeformatted', '-')
-                    if not item_name:
-                        continue
-                    item_row = ft.Row(
-                        controls=[
-                            ft.Text(f"  • {item_name}", size=12, color=C.TEXT_SECONDARY,
-                                    expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                            ft.Text(item_grade, size=12, color=C.TEXT_PRIMARY,
-                                    weight=ft.FontWeight.W_500),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    )
-                    items_column.controls.append(item_row)
-                course_card_content.append(ft.Divider(height=1, color=C.BORDER))
-                course_card_content.append(items_column)
-
-            course_card = ft.Container(
-                content=ft.Column(controls=course_card_content, spacing=6),
-                bgcolor=C.SURFACE,
-                border=ft.Border.all(1, C.BORDER),
-                border_radius=12,
-                padding=12,
-            )
-            self._grade_list.controls.append(course_card)
-
-    def _grade_color(self, grade_str: str) -> str:
-        """Color-code the grade value."""
-        try:
-            val = float(grade_str.replace(',', '.'))
-            if val >= 8.0:
-                return "#22C55E"  # Green
-            elif val >= 6.5:
-                return "#3B82F6"  # Blue
-            elif val >= 5.0:
-                return "#F59E0B"  # Orange
-            else:
-                return "#EF4444"  # Red
-        except (ValueError, AttributeError):
-            return C.TEXT_PRIMARY
-
-    def _handle_close(self, e):
-        """Handle close button click."""
-        if self._on_close:
-            self._on_close()
-
-    def hide(self):
-        """Hide the view with animation."""
-        self.offset = ft.Offset(1, 0)
-        self.opacity = 0.0
-
-    def update_theme(self):
-        """Update colors of all grade overview controls dynamically on theme switch."""
-        from gui.core.theme import C
-        self.bgcolor = C.BG
-        
-        # Header title and close
-        self._title.color = C.TEXT_PRIMARY
-        self._close_btn.icon_color = C.TEXT_SECONDARY
-        
-        # Divider color in content
-        try:
-            self.content.controls[1].color = C.BORDER
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            
-        # Loading controls
-        self._loading.color = C.ACCENT
-        try:
-            self._loading_row.controls[1].color = C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            
-        # Empty text
-        self._empty_text.color = C.TEXT_SECONDARY
-
-        # Update any rendered cards inside _grade_list
-        try:
-            for card in self._grade_list.controls:
-                card.bgcolor = C.SURFACE
-                card.border = ft.Border.all(1, C.BORDER)
-                
-                col = card.content
-                if not col:
-                    continue
-                # Header row
-                header_row = col.controls[0]
-                left_col = header_row.controls[0]
-                left_col.controls[0].color = C.TEXT_PRIMARY
-                left_col.controls[1].color = C.TEXT_SECONDARY
-                
-                grade_display = header_row.controls[1]
-                if hasattr(grade_display, 'value'):
-                    grade_display.color = self._grade_color(grade_display.value)
-                
-                if len(col.controls) > 2:
-                    divider = col.controls[1]
-                    divider.color = C.BORDER
-                    
-                    items_col = col.controls[2]
-                    for item_row in items_col.controls:
-                        item_row.controls[0].color = C.TEXT_SECONDARY
-                        item_row.controls[1].color = C.TEXT_PRIMARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        current_courses = semesters[0].courses if semesters else []
+        self._grade_list_view.update_courses(current_courses)
 
         try:
             self.update()
         except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            pass
+
+    def update_grades(
+        self,
+        courses_grades: list[dict[str, Any]],
+        grade_items: dict[str, list[dict]],
+    ) -> None:
+        """Backward-compatibility bridge for raw Moodle grade responses."""
+        if not courses_grades:
+            self.update_academic_data([], [])
+            return
+
+        # Normalize Moodle courses into standard SemesterGradeData
+        normalizer = SemesterNormalizer()
+        raw_courses = []
+        for cg in courses_grades:
+            cid = str(cg.get("courseid", ""))
+            cname = cg.get("coursename", f"Course {cid}")
+            g_str = cg.get("grade", "")
+            try:
+                final_g = float(str(g_str).replace(",", "."))
+            except (ValueError, TypeError):
+                final_g = None
+
+            raw_courses.append({
+                "id": cid,
+                "tenMonHoc": cname,
+                "soTinChi": 3,
+                "diemTongKet": final_g,
+                "diemTBThuongKy": final_g,
+                "diemThi": final_g,
+            })
+
+        sem_data = normalizer.normalize_semester({
+            "id": 1,
+            "tenDot": "Bảng điểm hiện tại",
+            "courses": raw_courses,
+        })
+        profile = calculate_radar_profile(sem_data)
+        self.update_academic_data([sem_data], [profile])
+
+    def _on_semester_changed(self, index: int) -> None:
+        self._selected_semester_idx = index
+        if 0 <= index < len(self._semesters):
+            self._grade_list_view.update_courses(self._semesters[index].courses)
+
+    def _handle_refresh(self, e: ft.ControlEvent) -> None:
+        if self._on_refresh:
+            self._on_refresh()
+
+    def _handle_close(self, e: ft.ControlEvent) -> None:
+        if self._on_close:
+            self._on_close()
+
+    def hide(self) -> None:
+        """Hides the view with animation."""
+        self.offset = ft.Offset(1, 0)
+        self.opacity = 0.0
+
+    def update_theme(self) -> None:
+        """Updates colors dynamically on theme switch."""
+        from gui.core.theme import C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors([self], self._rendered_palette, current_palette)
+        self._rendered_palette = current_palette
+        self.bgcolor = C.BG
+        self._title.color = C.TEXT_PRIMARY
+        self._back_btn.icon_color = C.TEXT_SECONDARY
+        self._refresh_btn.icon_color = C.TEXT_SECONDARY
+        self._header_divider.color = C.BORDER
+        self._loading.color = C.ACCENT
+        self._loading_text.color = C.TEXT_SECONDARY
+        self._empty_text.color = C.TEXT_SECONDARY
+
+        if self._radar_card.visible:
+            self._radar_card._build_ui()
+        if self._grade_list_view.visible:
+            self._grade_list_view._build_list()
+
+        try:
+            self.update()
+        except Exception:
+            pass
+
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""
-    # Apply compatibility shims if running directly
     try:
         from gui.flet_compat import patch_flet
         patch_flet()
     except Exception:
-        import logging as _fb_log
-        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        pass
     from gui.app_controller import AppController
     AppController(page)
+
 
 if __name__ == "__main__":
     ft.run(main=main, assets_dir=os.path.join(_project_root, "assets"))

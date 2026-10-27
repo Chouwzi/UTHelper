@@ -13,6 +13,7 @@ from core.today_schedule import (
     TodayScheduleSnapshot,
     next_schedule_refresh_at,
     parse_portal_day,
+    select_spotlight_session,
 )
 
 
@@ -119,6 +120,49 @@ def test_class_session_phase_boundaries_and_cancellation_priority():
     assert session.phase_at(datetime(2026, 8, 11, 9, 29, 59)) is SchedulePhase.IN_PROGRESS
     assert session.phase_at(datetime(2026, 8, 11, 9, 30)) is SchedulePhase.FINISHED
     assert _session(cancelled=True).phase_at(datetime(2026, 8, 11, 8, 0)) is SchedulePhase.CANCELLED
+
+
+def test_spotlight_prefers_in_progress_over_earlier_upcoming_input():
+    now = datetime(2026, 8, 11, 8, 0)
+    upcoming = _session(
+        start=datetime(2026, 8, 11, 10, 0),
+        end=datetime(2026, 8, 11, 11, 0),
+    )
+    current = _session(
+        start=datetime(2026, 8, 11, 7, 0),
+        end=datetime(2026, 8, 11, 9, 0),
+    )
+
+    assert select_spotlight_session((upcoming, current), now) is current
+
+
+def test_spotlight_selects_earliest_upcoming_session():
+    now = datetime(2026, 8, 11, 6, 0)
+    later = _session(
+        start=datetime(2026, 8, 11, 13, 0),
+        end=datetime(2026, 8, 11, 15, 0),
+    )
+    earlier = _session(
+        start=datetime(2026, 8, 11, 7, 0),
+        end=datetime(2026, 8, 11, 9, 0),
+    )
+
+    assert select_spotlight_session((later, earlier), now) is earlier
+
+
+def test_spotlight_skips_cancelled_and_finished_sessions():
+    now = datetime(2026, 8, 11, 10, 0)
+    finished = _session(
+        start=datetime(2026, 8, 11, 7, 0),
+        end=datetime(2026, 8, 11, 9, 0),
+    )
+    cancelled = _session(
+        start=datetime(2026, 8, 11, 11, 0),
+        end=datetime(2026, 8, 11, 12, 0),
+        cancelled=True,
+    )
+
+    assert select_spotlight_session((cancelled, finished), now) is None
 
 
 def test_today_schedule_cache_treats_an_empty_day_as_authoritative(tmp_path):

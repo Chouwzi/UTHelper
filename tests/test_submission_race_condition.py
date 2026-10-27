@@ -1165,10 +1165,10 @@ async def test_app_controller_submission_race_condition():
         
         # 2. Người dùng nộp bài tập (trạng thái chuyển thành "Đã nộp")
         controller._on_activity_status_changed(url, "Đã nộp")
-        assert controller.all_data[0]["submission_status"] == "Đã nộp"
+        assert controller.all_data[0]["submission_status"] == "submitted"
         
         # 3. Chờ tiến trình fetch nền hoàn thành hoàn toàn
         await refresh_task
         
         # 4. Kiểm tra xem Smart Merge có hoạt động chính xác để giữ trạng thái "Đã nộp" hay không
-        assert controller.all_data[0]["submission_status"] == "Đã nộp"
+        assert controller.all_data[0]["submission_status"] == "submitted"

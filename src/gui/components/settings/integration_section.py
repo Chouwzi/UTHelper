@@ -8,14 +8,15 @@ def init_integration_controls(view):
     view._sw_email = ft.Switch(
         value=settings.ENABLE_GMAIL, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-        label="Kích hoạt thông báo qua Gmail",
-        on_change=lambda e: view._toggle_integration_ui()
+        label="",
+        on_change=lambda e: (view._toggle_integration_ui(), getattr(view, "_on_form_field_change", lambda: None)())
     )
     view._gmail_addr_field = ft.TextField(
         value=getattr(settings, 'GMAIL_ADDRESS', ''),
         label="Địa chỉ Email",
         visible=settings.ENABLE_GMAIL,
         border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+        on_change=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
     view._gmail_pw_field = ft.TextField(
         value=getattr(settings, 'GMAIL_APP_PASSWORD', ''),
@@ -23,28 +24,30 @@ def init_integration_controls(view):
         password=True, can_reveal_password=True,
         visible=settings.ENABLE_GMAIL,
         border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+        on_change=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
 
     # Tích hợp Discord
     view._sw_discord = ft.Switch(
         value=settings.ENABLE_DISCORD, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-        label="Kích hoạt thông báo qua Discord",
-        on_change=lambda e: view._toggle_integration_ui()
+        label="",
+        on_change=lambda e: (view._toggle_integration_ui(), getattr(view, "_on_form_field_change", lambda: None)())
     )
     view._discord_wh_field = ft.TextField(
         value=getattr(settings, 'DISCORD_WEBHOOK_URL', ''),
         label="Discord Webhook URL",
         visible=settings.ENABLE_DISCORD,
         border_color=C.BORDER, focused_border_color=C.ACCENT, color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
+        on_change=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
 
     # Tích hợp Telegram
     view._sw_telegram = ft.Switch(
         value=settings.ENABLE_TELEGRAM, active_color=C.ACCENT,
         label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
-        label="Kích hoạt thông báo qua Telegram",
-        on_change=lambda e: view._toggle_telegram_ui()
+        label="",
+        on_change=lambda e: (view._toggle_telegram_ui(), getattr(view, "_on_form_field_change", lambda: None)())
     )
     view._tel_token_field = ft.TextField(
         value=settings.TELEGRAM_BOT_TOKEN,
@@ -52,7 +55,8 @@ def init_integration_controls(view):
         text_size=13,
         border_color=C.BORDER, focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
-        visible=settings.ENABLE_TELEGRAM
+        visible=settings.ENABLE_TELEGRAM,
+        on_change=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
     view._tel_chat_field = ft.TextField(
         value=settings.TELEGRAM_CHAT_ID,
@@ -60,7 +64,8 @@ def init_integration_controls(view):
         text_size=13,
         border_color=C.BORDER, focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY, bgcolor=C.BG, border_radius=10,
-        visible=settings.ENABLE_TELEGRAM
+        visible=settings.ENABLE_TELEGRAM,
+        on_change=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
 
 def build_integration_section(view) -> ft.Container:

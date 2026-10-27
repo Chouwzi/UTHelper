@@ -51,7 +51,7 @@ def test_system_controls_scope_hidden_option_to_windows_autostart():
     assert view._sw_start_with_windows.label == "Khởi động cùng Windows"
     assert (
         view._sw_start_minimized.label
-        == "Khi khởi động cùng Windows: Ẩn xuống khay hệ thống"
+        == "Ẩn xuống khay khi khởi động"
     )
     assert view._sw_start_minimized.disabled is (not view._sw_start_with_windows.value)
     assert view._sw_start_with_windows.on_change is not None

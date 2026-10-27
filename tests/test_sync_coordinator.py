@@ -69,3 +69,32 @@ async def test_not_due_request_is_skipped():
     result = await coordinator.request("timer")
 
     assert result.skipped_not_due is True
+
+
+@pytest.mark.anyio
+async def test_forced_startup_request_bypasses_startup_grace():
+    calls = 0
+
+    async def sync_once(trigger):
+        nonlocal calls
+        calls += 1
+        return trigger
+
+    coordinator = ActivitySyncCoordinator(
+        sync_once,
+        interval_provider=lambda: 60,
+        last_success_provider=lambda: 1_000,
+        startup_grace_seconds=60,
+        clock=lambda: 1_010,
+    )
+
+    # Normal request within startup grace is skipped
+    result_normal = await coordinator.request("timer", force=False)
+    assert result_normal.skipped_not_due is True
+    assert calls == 0
+
+    # Startup request with force=True executes immediately
+    result_startup = await coordinator.request("startup", force=True)
+    assert result_startup.started is True
+    assert result_startup.skipped_not_due is False
+    assert calls == 1

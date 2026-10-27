@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
 from datetime import datetime
+from core.activity_time_policy import is_late_submission_active
 from core.time_utils import parse_datetime
 from core.display_utils import clean_course_name, urgency_str, _TYPE_FILTER_MAP
 
@@ -47,8 +48,11 @@ class FilterService:
                 dl = parse_datetime(dl_str)
 
             # Tính độ khẩn cấp, xem có bị quá hạn không
-            is_overdue = isinstance(dl, datetime) and dl < now
-            if isinstance(a.get("urgency"), str):
+            is_late_active = is_late_submission_active(a, now)
+            is_overdue = (isinstance(dl, datetime) and dl < now) and not is_late_active
+            if is_late_active:
+                u_str = "critical"
+            elif isinstance(a.get("urgency"), str):
                 u_str = a.get("urgency")
             else:
                 u_str = urgency_str(a.get("urgency")) if not is_overdue else "overdue"
@@ -56,12 +60,25 @@ class FilterService:
             if is_overdue:
                 u_str = "overdue"
 
-            # Nếu là mục quá hạn mà không yêu cầu hiển thị thì bỏ qua luôn cho nhẹ máy
-            if is_overdue and not include_overdue and active_urgency != "overdue":
+            classified_overdue = is_overdue or u_str == "overdue"
+
+            # Always expose the real overdue count in the urgency menu, even
+            # while overdue cards are hidden from the default "all" view.
+            if classified_overdue:
+                counts["urgency"]["overdue"] += 1
+
+            # Quá hạn là một mục riêng trong menu Mức độ. Mặc định ẩn card,
+            # nhưng người dùng vẫn nhìn thấy số lượng để có thể chọn mục này.
+            if (
+                classified_overdue
+                and not include_overdue
+                and active_urgency != "overdue"
+            ):
                 continue
                 
             counts["urgency"]["all"] += 1
-            counts["urgency"][u_str] = counts["urgency"].get(u_str, 0) + 1
+            if not classified_overdue:
+                counts["urgency"][u_str] = counts["urgency"].get(u_str, 0) + 1
             
             c_name = clean_course_name(a.get("course", ""))
             counts["course"]["all"] += 1
@@ -102,5 +119,20 @@ class FilterService:
 
             if match_urgency and match_type and match_course and match_search:
                 filtered_results.append(a)
+
+        # Khi người dùng lọc mức độ "Quá hạn", sắp xếp từ ngày gần hiện tại nhất đến xa dần
+        if active_urgency == "overdue":
+            def _overdue_sort_key(item: Dict[str, Any]) -> datetime:
+                dt = item.get("_deadline_dt")
+                if isinstance(dt, datetime):
+                    return dt
+                dl_str = item.get("deadline", "")
+                if dl_str:
+                    parsed = parse_datetime(dl_str)
+                    if isinstance(parsed, datetime):
+                        return parsed
+                return datetime.min
+
+            filtered_results.sort(key=_overdue_sort_key, reverse=True)
 
         return filtered_results, counts

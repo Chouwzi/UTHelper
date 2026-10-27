@@ -61,9 +61,10 @@ def test_foreground_import_is_revision_and_submission_safe():
     assert 'activity.submissionState.lowercase() == "unknown"' not in policy
 
 
-def test_android_updater_requires_https_checksum_and_package_installer():
+def test_android_updater_requires_local_checksum_and_package_installer():
     updater = next(ANDROID.rglob("ApkUpdateInstaller.kt")).read_text(encoding="utf-8")
-    assert 'initialUri.scheme == "https"' in updater
+    assert "copyAndVerifyLocalPackage" in updater
+    assert "HttpURLConnection" not in updater
     assert "Update SHA-256 mismatch" in updater
     assert "canRequestPackageInstalls" in updater
     assert "application/vnd.android.package-archive" in updater
@@ -103,8 +104,7 @@ def test_python_service_forwards_configuration(monkeypatch):
 
     updated = asyncio.run(
         service.install_update(
-            "https://github.com/Chouwzi/UTHelper/releases/download/"
-            "v2.2.0/UTHelper-2.2.0.apk",
+            "/data/user/0/com.uthelper.uthelper/cache/UTHelper-2.2.0.apk",
             "ab" * 32,
             123,
             "com.uthelper.uthelper",
@@ -116,9 +116,8 @@ def test_python_service_forwards_configuration(monkeypatch):
     assert captured == {
         "name": "install_update",
         "arguments": {
-            "url": (
-                "https://github.com/Chouwzi/UTHelper/releases/download/"
-                "v2.2.0/UTHelper-2.2.0.apk"
+            "local_path": (
+                "/data/user/0/com.uthelper.uthelper/cache/UTHelper-2.2.0.apk"
             ),
             "sha256": "ab" * 32,
             "expected_size": 123,

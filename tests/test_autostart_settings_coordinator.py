@@ -5,6 +5,7 @@ import pytest
 from gui.controllers.autostart_settings import (
     AutostartSettingsCoordinator,
     AutostartUiState,
+    apply_initial_autostart_default,
 )
 from platform_utils.autostart import AutostartState, AutostartStatus
 
@@ -90,3 +91,68 @@ def test_backend_safe_message_is_preserved_for_error():
     result = asyncio.run(AutostartSettingsCoordinator(service).load())
 
     assert result.message == "Không thể đọc trạng thái Windows."
+
+
+def test_new_install_enables_and_persists_autostart_once():
+    service = FakeService([status(AutostartState.ENABLED)])
+    settings = type(
+        "Settings",
+        (),
+        {"START_WITH_WINDOWS": True, "AUTOSTART_DEFAULT_APPLIED": False},
+    )()
+    persisted = []
+
+    result = asyncio.run(
+        apply_initial_autostart_default(
+            service,
+            settings,
+            lambda: persisted.append(True) or True,
+        )
+    )
+
+    assert result == AutostartUiState(True, True, True, "")
+    assert service.requests == [True]
+    assert settings.START_WITH_WINDOWS is True
+    assert settings.AUTOSTART_DEFAULT_APPLIED is True
+    assert persisted == [True]
+
+    assert (
+        asyncio.run(
+            apply_initial_autostart_default(service, settings, lambda: False)
+        )
+        is None
+    )
+    assert service.requests == [True]
+
+
+def test_existing_disabled_choice_skips_initial_autostart_default():
+    service = FakeService([])
+    settings = type(
+        "Settings",
+        (),
+        {"START_WITH_WINDOWS": False, "AUTOSTART_DEFAULT_APPLIED": True},
+    )()
+
+    result = asyncio.run(
+        apply_initial_autostart_default(service, settings, lambda: False)
+    )
+
+    assert result is None
+    assert service.requests == []
+    assert settings.START_WITH_WINDOWS is False
+
+
+def test_transient_autostart_failure_remains_retryable():
+    service = FakeService([status(AutostartState.ERROR)])
+    settings = type(
+        "Settings",
+        (),
+        {"START_WITH_WINDOWS": True, "AUTOSTART_DEFAULT_APPLIED": False},
+    )()
+
+    result = asyncio.run(
+        apply_initial_autostart_default(service, settings, lambda: False)
+    )
+
+    assert result is not None and result.confirmed is False
+    assert settings.AUTOSTART_DEFAULT_APPLIED is False

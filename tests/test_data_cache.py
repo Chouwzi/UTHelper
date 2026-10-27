@@ -85,6 +85,57 @@ def test_saved_json_structure(tmp_path):
     assert "count" in raw
     assert raw["count"] == 1
     assert "activities" in raw
+    assert raw["activity_catalog_version"] == DataCache.ACTIVITY_CATALOG_VERSION
+
+
+def test_pre_catalog_version_snapshot_is_rendered_but_requires_server_refresh(tmp_path):
+    cache_path = tmp_path / "activities_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "generation": 8,
+                "updated_at": "2026-08-21T14:29:39+00:00",
+                "last_successful_sync_at": "2026-08-21T14:29:39+00:00",
+                "activities": [{"id": "stale-without-completed-quiz"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = DataCache(cache_dir=tmp_path).load_snapshot()
+
+    assert snapshot.activities == [{"id": "stale-without-completed-quiz"}]
+    assert snapshot.requires_server_refresh is True
+
+
+def test_local_update_does_not_mark_old_catalog_as_refreshed(tmp_path):
+    cache_path = tmp_path / "activities_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "last_successful_sync_at": "2026-08-21T14:29:39+00:00",
+                "activities": [{"id": "stale", "submission_status": "unknown"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache = DataCache(cache_dir=tmp_path)
+
+    cache.save_local_activities([{"id": "stale", "submission_status": "submitted"}])
+
+    assert cache.load_snapshot().requires_server_refresh is True
+
+
+def test_authoritative_server_snapshot_marks_current_catalog(tmp_path):
+    cache = DataCache(cache_dir=tmp_path)
+
+    cache.save_server_snapshot([{"id": "quiz_87658"}])
+
+    snapshot = cache.load_snapshot()
+    assert snapshot.requires_server_refresh is False
+    assert snapshot.activity_catalog_version == DataCache.ACTIVITY_CATALOG_VERSION
 
 
 def test_local_update_does_not_move_last_server_sync(tmp_path):

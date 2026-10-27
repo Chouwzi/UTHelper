@@ -31,6 +31,7 @@ from core.today_schedule import (
 )
 from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
+from core.activity_status import normalize_submission_status
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
 from core.update_checker import GitHubReleaseClient, VerifiedDownloader
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
@@ -41,7 +42,7 @@ from platform_utils.update_packages import (
     detect_runtime_target,
 )
 
-from gui.core.theme import C
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
@@ -49,15 +50,31 @@ from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.components.today_schedule_panel import TodaySchedulePanel
+from gui.components.sync_status_indicator import SyncStatusIndicator
+from gui.components.desktop_window_header import build_desktop_window_header
+from gui.components.adaptive_filter_menu import (
+    AdaptiveFilterMenu,
+    FilterMenuOption,
+)
 from gui.view_manager import ViewManager
 from gui.controllers.startup_visibility import (
     is_autostart_launch,
     should_hide_startup_window,
 )
+from gui.controllers.autostart_settings import apply_initial_autostart_default
+from gui.controllers.refresh_coordinator import (
+    build_prefetched_dataset,
+    card_detail_prefetch_candidates,
+    status_hydration_candidates,
+)
 from gui.controllers.window_activator import WindowActivator
-from gui.components.crash_consent_dialog import CrashConsentDialog
 
 logger = logging.getLogger(__name__)
+
+_SCROLL_TO_TOP_SHOW_OFFSET = 240.0
+_SCROLL_TO_TOP_HIDE_OFFSET = 96.0
+_SCROLL_TO_TOP_DURATION_MS = 300
+_DASHBOARD_SCROLL_EVENT_INTERVAL_MS = 32
 
 try:
     from core.version import APP_VERSION as _APP_VERSION
@@ -113,7 +130,7 @@ class _AndroidPackageLauncher:
         self._release_version_provider = release_version_provider
         self._result_sink = result_sink
 
-    def launch(self, _path: Path, package: ReleasePackage) -> LaunchResult:
+    def launch(self, path: Path, package: ReleasePackage) -> LaunchResult:
         if (
             package.platform != "android"
             or package.package_type != "apk"
@@ -125,16 +142,21 @@ class _AndroidPackageLauncher:
             version_code = _android_release_build_number(
                 self._release_version_provider()
             )
-            task = self._task_runner(self._install, package, version_code)
+            task = self._task_runner(self._install, Path(path), package, version_code)
         except (RuntimeError, TypeError, ValueError):
             logger.warning("Android installer scheduling failed", exc_info=True)
             return LaunchResult(False, "Android installer scheduling failed")
         return LaunchResult(task is not None, "Android installer scheduled")
 
-    async def _install(self, package: ReleasePackage, version_code: int) -> None:
+    async def _install(
+        self,
+        path: Path,
+        package: ReleasePackage,
+        version_code: int,
+    ) -> None:
         try:
             result = await self._bridge.install_update(
-                package.url,
+                str(path),
                 package.sha256,
                 package.size,
                 self.PACKAGE_ID,
@@ -160,11 +182,19 @@ class _AndroidPackageLauncher:
 
 class AppController:
     def __init__(
-        self, page: ft.Page, *, activation_broker=None, force_visible: bool = False
+        self,
+        page: ft.Page,
+        *,
+        activation_broker=None,
+        force_visible: bool = False,
+        error_reporter=None,
+        diagnostic_recorder=None,
     ):
         self.page = page
         self.activation_broker = activation_broker
         self.force_visible = force_visible
+        self._unhandled_error_reporter = error_reporter
+        self._diagnostic_recorder = diagnostic_recorder
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
         self._page_alive = threading.Event()
@@ -217,20 +247,22 @@ class AppController:
         self._pending_updates = {}
         
         self._prefetch_cancel_event = threading.Event()
+        self._prefetch_epoch = 0
+        self._card_detail_warm_cancel_event = threading.Event()
+        self._detail_request_epoch = 0
         self._android_background = None
+        self._dashboard_scroll_offset = 0.0
+        self._scroll_to_top_visible = False
+        self._scroll_to_top_in_progress = False
 
         self._init_window()
         self._update_candidate = None
         self._manual_update_check_requested = False
         self._update_coordinator = self._create_update_coordinator()
         self._init_ui()
-        self._crash_consent_dialog = CrashConsentDialog(
-            self.page, self._persist_crash_consent
-        )
-        self._crash_consent_dialog.present_if_needed(
-            settings.CRASH_REPORTING_CONSENT
-        )
-        self._load_cached_snapshot()
+        self._diag_screen("home")
+        self._diag_breadcrumb("app_start", "succeeded", "app", screen="home")
+        has_cached_snapshot = self._load_cached_snapshot()
         self._sync_coordinator = ActivitySyncCoordinator(
             self._perform_data_sync,
             interval_provider=get_sync_interval_minutes,
@@ -241,27 +273,74 @@ class AppController:
         self.page.on_disconnect = self._on_disconnect
         self.page.on_keyboard_event = self._on_keyboard_event
         
-        # Android back button - intercept to navigate within app instead of exiting
+        # Intercept the native root-view pop on Android/iOS. This app swaps
+        # controls inside one root View, so on_view_pop alone cannot prevent the
+        # platform from finishing the activity.
         if platform_utils.IS_MOBILE:
-            self.page.on_view_pop = self._on_back_button
-        self._safe_run_task(self._pulse_loop_async)
+            self._configure_mobile_back_navigation()
+        if platform_utils.IS_WINDOWS:
+            self._safe_run_task(self._apply_initial_windows_autostart_default)
+        needs_initial_sync = self._needs_initial_data_sync(has_cached_snapshot)
         self._safe_run_task(self._countdown_loop_async)
+        self._safe_run_task(self._pulse_critical_cards_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
+        if not needs_initial_sync:
+            hydration_started = self._schedule_cached_detail_hydration(
+                has_cached_snapshot
+            )
+            if not hydration_started:
+                self._schedule_card_detail_warmup()
         self._safe_run_task(self._today_schedule_coordinator.run)
         if self._android_background and self._android_background.available:
             self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
-        
+
         self._update_coordinator.start()
-        
+
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
-        # With credentials, the coordinator waits until cache age + the
-        # one-minute startup grace are due. Manual refresh remains immediate.
+        else:
+            self._safe_run_task(self._load_data_async, "startup")
+
+    def _diag_screen(self, screen: str) -> None:
+        recorder = getattr(self, "_diagnostic_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.set_diagnostic_screen(screen)
+        except Exception:
+            logger.debug("Diagnostic state update failed", exc_info=True)
+
+    def _diag_breadcrumb(
+        self,
+        action: str,
+        outcome: str,
+        source: str,
+        *,
+        screen: str | None = None,
+        duration: str | None = None,
+    ) -> None:
+        recorder = getattr(self, "_diagnostic_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.record_breadcrumb(
+                action,
+                outcome,
+                source,
+                screen=screen,
+                duration=duration,
+            )
+        except Exception:
+            logger.debug("Diagnostic breadcrumb failed", exc_info=True)
 
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
+        self._diag_screen("login")
+        self._diag_breadcrumb("login", "started", "user", screen="login")
         async def _on_login_success():
+            self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
+            self._diag_screen("home")
             # UX-5: Show success snackbar after dialog closes
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
             self._portal_client.clear_token()
@@ -269,33 +348,50 @@ class AppController:
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
-    def _persist_crash_consent(self, decision) -> bool:
-        """Persist explicit consent without mutating any open Settings draft."""
-        if decision not in {"enabled", "disabled"}:
-            return False
-        previous = settings.CRASH_REPORTING_CONSENT
-        settings.CRASH_REPORTING_CONSENT = decision
+    async def _apply_initial_windows_autostart_default(self) -> None:
+        """Register the new-install Windows default exactly once."""
+        from platform_utils.autostart import create_autostart_service
+
         try:
-            persisted = bool(save_settings())
+            result = await apply_initial_autostart_default(
+                create_autostart_service(),
+                settings,
+                save_settings,
+            )
         except Exception:
-            persisted = False
-            logger.warning("Crash-consent persistence raised", exc_info=True)
-        if persisted:
-            return True
-        settings.CRASH_REPORTING_CONSENT = previous
-        self._show_snackbar(
-            "Không thể lưu lựa chọn chẩn đoán sự cố. Vui lòng thử lại.",
-            ft.Icons.ERROR_OUTLINE_ROUNDED,
-            C.CRITICAL,
-        )
-        return False
+            logger.warning("Initial Windows autostart default failed", exc_info=True)
+            return
+        if result is not None and not result.success:
+            logger.warning("Windows did not accept the autostart default: %s", result.message)
 
     def _safe_run_task(self, handler, *args, **kwargs):
         if not hasattr(self.page, "session") or self.page.session is None:
             return None
         if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
             return None
-        return self.page.run_task(handler, *args, **kwargs)
+
+        async def guarded_task():
+            try:
+                return await handler(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                reference = None
+                reporter = getattr(self, "_unhandled_error_reporter", None)
+                if callable(reporter):
+                    try:
+                        reference = reporter(exc)
+                    except Exception:
+                        logger.debug(
+                            "Unhandled-error reporter failed", exc_info=True
+                        )
+                logger.exception(
+                    "Background UI task failed; reference=%s",
+                    reference or "none",
+                )
+                return None
+
+        return self.page.run_task(guarded_task)
 
     def _create_update_coordinator(self) -> UpdateCoordinator:
         target = detect_runtime_target()
@@ -333,17 +429,22 @@ class AppController:
 
     def _open_external_update_url(self, url: str) -> bool:
         async def _open():
-            self.page.launch_url(url)
+            await self.page.launch_url(url)
 
         return self._safe_run_task(_open) is not None
 
     def _check_updates_now(self) -> None:
+        self._diag_breadcrumb("update_check", "started", "github")
         self._manual_update_check_requested = True
         self._update_coordinator.check_now()
 
     def _on_android_update_result(self, result: dict) -> None:
         status = result.get("status")
-        if status == "permission_required":
+        if status == "installer_opened":
+            self._diag_breadcrumb("update_install", "succeeded", "android")
+            self._update_banner.visible = False
+            self.page.update()
+        elif status == "permission_required":
             self._update_banner.visible = True
             self._update_btn.disabled = False
             self._update_btn.content = "Mở trình cài đặt"
@@ -353,7 +454,7 @@ class AppController:
                 C.WARNING,
             )
             self.page.update()
-        elif status != "installer_opened":
+        else:
             self._update_banner.visible = True
             self._update_btn.disabled = False
             self._update_btn.content = "Thử lại"
@@ -401,9 +502,9 @@ class AppController:
 
     def _init_window(self):
         self.window_activator = WindowActivator(self.page)
-        # Phát hiện nền tảng lúc runtime để xác định chính xác các cờ mobile/desktop
+        # Resolve the presentation profile without mutating native capabilities.
         detect_platform(self.page)
-        # Đọc lại các cờ sau khi phát hiện lúc runtime (chúng có thể đã thay đổi)
+        # Read the immutable runtime capabilities after resolving the UI profile.
         import platform_utils
         _is_mobile = platform_utils.IS_MOBILE
         _is_windows = platform_utils.IS_WINDOWS
@@ -421,6 +522,10 @@ class AppController:
             self.page.window.min_width    = 420
             self.page.window.always_on_top = settings.ALWAYS_ON_TOP
             self.page.window.resizable    = False
+            self.page.window.maximizable  = False
+            self.page.window.minimizable  = True
+            self.page.window.title_bar_hidden = True
+            self.page.window.title_bar_buttons_hidden = True
             self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
             self.page.window.prevent_close = True
             self.page.window.on_event = self._on_window_event
@@ -509,7 +614,29 @@ class AppController:
                         import logging as _fb_log
                         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             else:
-                await self.page.window.destroy()
+                try:
+                    await self.page.window.destroy()
+                except RuntimeError as exc:
+                    # The host can close its Flet session between the close
+                    # event and the native destroy RPC. That is a completed
+                    # shutdown, not an application failure.
+                    if str(exc) != "Session closed":
+                        raise
+                    logger.debug("Window session closed before destroy completed")
+
+    def _minimize_window(self, _event=None) -> None:
+        """Minimize from the custom desktop header without hiding to tray."""
+        self.page.window.minimized = True
+        self.page.update()
+
+    async def _exit_from_window_header(self, _event=None) -> None:
+        """The custom close button is an explicit application-exit action."""
+        try:
+            await self.page.window.destroy()
+        except RuntimeError as exc:
+            if str(exc) != "Session closed":
+                raise
+            logger.debug("Window session closed before custom exit completed")
 
     async def _on_keyboard_event(self, e):
         """H-04: Escape key to go back from Detail/Settings/Calendar views."""
@@ -517,25 +644,49 @@ class AppController:
             await self._navigate_back()
 
     async def _on_back_button(self, e):
-        """Android back button handler - navigate within app instead of exiting."""
+        """Fallback for explicit AppBar/View pop events."""
+        await self._navigate_back()
+
+    def _configure_mobile_back_navigation(self) -> bool:
+        """Install root pop confirmation so system Back reaches app navigation."""
+        views = getattr(self.page, "views", None)
+        if not views:
+            logger.warning("Mobile root View is unavailable; Back interception skipped")
+            return False
+        root_view = views[0]
+        root_view.can_pop = False
+        root_view.on_confirm_pop = self._on_root_view_confirm_pop
+        # Retain the standard callback for future stacked Views/AppBars.
+        self.page.on_view_pop = self._on_back_button
+        return True
+
+    async def _on_root_view_confirm_pop(self, event) -> None:
+        """Cancel native pop after internal Back; allow it only on Dashboard."""
         handled = await self._navigate_back()
-        if not handled:
-            # On dashboard with nothing to go back to - minimize app (don't exit)
-            try:
-                self.page.window.close()
-            except (AttributeError, TypeError):
-                pass
+        view = getattr(event, "control", None)
+        if view is None:
+            views = getattr(self.page, "views", ())
+            view = views[0] if views else None
+        confirm_pop = getattr(view, "confirm_pop", None)
+        if callable(confirm_pop):
+            await confirm_pop(not handled)
 
     async def _navigate_back(self) -> bool:
         """Shared back-navigation logic. Returns True if a view was closed."""
+        schedule_component = getattr(self, "_today_schedule_component", None)
+        if schedule_component is not None and schedule_component.handle_back():
+            return True
         if self.settings_view.visible:
-            await self._close_settings()
+            await self.settings_view._handle_back(None)
             return True
         elif self.detail_view.visible:
             await self._close_detail()
             return True
         elif self.calendar_view.visible:
             await self._close_calendar()
+            return True
+        elif self.grade_overview_view.visible:
+            await self._close_grades()
             return True
         return False
 
@@ -548,60 +699,52 @@ class AppController:
         self._start_skeleton_shimmer()
 
     def _init_footer_and_filters(self):
-        self.status_text     = ft.Text("Đang khởi động...", size=11, color=C.TEXT_SECONDARY)
+        self._sync_status = SyncStatusIndicator("Đang khởi động...")
+        self.status_text = self._sync_status.text
         self.footer_critical = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
         self.footer_warning  = ft.Text("", size=11, color=C.WARNING,  weight=ft.FontWeight.W_600)
         self.footer_safe     = ft.Text("", size=11, color=C.SAFE,     weight=ft.FontWeight.W_600)
         self.footer_overdue  = ft.Text("", size=11, color=C.CRITICAL, weight=ft.FontWeight.W_600)
-        self.loading_bar     = ft.ProgressBar(color=C.ACCENT, bgcolor=C.BORDER, visible=False)
 
-        _URGENCY_CFG = [
-            ("all",      "Mức độ",   C.TEXT_PRIMARY),
-            ("critical", "Cấp bách", C.CRITICAL),
-            ("warning",  "Sắp tới",  C.WARNING),
-            ("safe",     "An toàn",  C.SAFE),
-            ("overdue",  "Quá hạn",  C.CRITICAL),
-        ]
-        from gui.core.theme import _TYPE_COLORS
-        _TYPE_CFG = [
-            ("all",        "Tất cả",         C.TEXT_PRIMARY),
-            ("quiz",       "Quiz",         _TYPE_COLORS["quiz"]),
-            ("assignment", "Bài tập",      _TYPE_COLORS["assignment"]),
-            ("attendance", "Điểm danh",    _TYPE_COLORS["attendance"]),
-            ("open",       "Sắp mở",       _TYPE_COLORS["open"]),
-            ("other",      "Sự kiện khác", C.TEXT_SECONDARY),
-        ]
-
-        self.urgency_popup, self._update_urgency_counts = self._make_filter_popup(
-            _URGENCY_CFG, lambda key: self._safe_run_task(self._set_urgency, key)
+        self.urgency_filter_menu = AdaptiveFilterMenu(
+            page=self.page,
+            title="Mức độ",
+            options=self._urgency_filter_options(),
+            selected_key=self.active_urgency,
+            on_select=lambda key: self._safe_run_task(self._set_urgency, key),
+            mobile=platform_utils.UI_IS_MOBILE,
+            trigger_width=None,
+            popup_width=224,
         )
-        self.type_popup, self._update_type_counts = self._make_filter_popup(
-            _TYPE_CFG, lambda key: self._safe_run_task(self._set_type, key)
+        self.type_filter_menu = AdaptiveFilterMenu(
+            page=self.page,
+            title="Loại hoạt động",
+            options=self._type_filter_options(),
+            selected_key=self.active_type,
+            on_select=lambda key: self._safe_run_task(self._set_type, key),
+            mobile=platform_utils.UI_IS_MOBILE,
+            trigger_width=None,
+            popup_width=232,
         )
-
-        self.course_btn_label = ft.Text("Môn học", size=12, color=C.TEXT_PRIMARY, weight=ft.FontWeight.W_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
-        self.course_popup = ft.PopupMenuButton(
-            content=ft.Container(
-                content=ft.Row([
-                    ft.Container(content=self.course_btn_label, width=50, height=20, alignment=ft.Alignment(-1, 0)),
-                    ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)
-                ], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=8, vertical=8),
-            ),
-            items=[],
-            menu_position=ft.PopupMenuPosition.UNDER,
-            shape=ft.RoundedRectangleBorder(radius=10),
+        self.course_filter_menu = AdaptiveFilterMenu(
+            page=self.page,
+            title="Môn học",
+            options=self._course_filter_options({"all": 0}),
+            selected_key=self.active_course,
+            on_select=lambda key: self._safe_run_task(self._set_course, key),
+            mobile=platform_utils.UI_IS_MOBILE,
+            trigger_width=None,
+            popup_width=340,
+            option_max_lines=2,
         )
-
-        self._overdue_cb = ft.Checkbox(
-            value=settings.INCLUDE_PAST_DUE,
-            label="Quá hạn",
-            label_style=ft.TextStyle(size=13, color=C.TEXT_SECONDARY),
-            active_color=C.CRITICAL,
-            check_color=C.BG,
-            scale=1,
-            on_change=lambda e: self._safe_run_task(self._toggle_overdue, e)
-        )
+        if not platform_utils.UI_IS_MOBILE:
+            for menu in (
+                self.urgency_filter_menu,
+                self.type_filter_menu,
+                self.course_filter_menu,
+            ):
+                menu.on_desktop_toggle = self._toggle_desktop_filter_menu
+                menu.on_desktop_dismiss = self._dismiss_desktop_filter_menu
 
         self.search_field = ft.TextField(
             hint_text="Tìm hoạt động hoặc môn học",
@@ -623,35 +766,62 @@ class AppController:
             ft.Icons.CALENDAR_MONTH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Lịch",
-            on_click=lambda e: self._safe_run_task(self._toggle_calendar),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._toggle_calendar
+            ),
         )
         self.refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Làm mới",
-            on_click=lambda e: self._safe_run_task(self._load_data_async),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._load_data_async
+            ),
         )
         self.settings_btn = ft.IconButton(
             ft.Icons.SETTINGS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Cài đặt",
-            on_click=lambda e: self._safe_run_task(self._show_settings),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._show_settings
+            ),
         )
         self.grades_btn = ft.IconButton(
             ft.Icons.INSIGHTS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Bảng điểm",
-            on_click=lambda e: self._safe_run_task(self._toggle_grades),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._toggle_grades
+            ),
         )
 
+    def _run_dashboard_header_action(self, handler) -> None:
+        self._dismiss_desktop_filter_menu()
+        self._safe_run_task(handler)
+
     def _init_banner_and_states(self):
-        self._update_icon = ft.Icon(ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color="#FCD34D")
-        self._update_text = ft.Text("Có phiên bản mới!", size=12, color="#FCD34D", weight=ft.FontWeight.W_500, expand=True)
-        self._update_progress = ft.ProgressBar(value=0, width=0, height=3, color="#FCD34D", bgcolor="#FCD34D20", visible=False)
+        self._update_icon = ft.Icon(
+            ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color=C.UPDATE
+        )
+        self._update_text = ft.Text(
+            "Có phiên bản mới!",
+            size=12,
+            color=C.UPDATE,
+            weight=ft.FontWeight.W_500,
+            expand=True,
+        )
+        self._update_progress = ft.ProgressBar(
+            value=0,
+            width=0,
+            height=3,
+            color=C.UPDATE,
+            bgcolor=C.BORDER,
+            visible=False,
+        )
         self._update_btn = ft.TextButton(
             "Cập nhật",
             icon=ft.Icons.DOWNLOAD_ROUNDED,
-            style=ft.ButtonStyle(color="#FCD34D"),
+            style=ft.ButtonStyle(color=C.UPDATE),
             on_click=self._request_update_download,
         )
         self._update_banner = ft.Container(
@@ -659,8 +829,8 @@ class AppController:
                 ft.Row([self._update_icon, self._update_text, self._update_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self._update_progress,
             ], spacing=2, tight=True),
-            bgcolor="#1C1917",
-            border=ft.Border.all(1, "#FCD34D30"),
+            bgcolor=C.SURFACE_ELEVATED,
+            border=ft.Border.all(1, C.UPDATE),
             border_radius=10,
             padding=ft.Padding(left=12, right=8, top=8, bottom=8),
             margin=ft.Margin(left=14, right=14, top=0, bottom=0),
@@ -668,7 +838,52 @@ class AppController:
         )
         self._update_url = ""
 
-        self.cards_column = ft.ListView(spacing=8, expand=True)
+        self.cards_column = ft.ListView(
+            spacing=8,
+            expand=True,
+            # Flet's scroll_to() API does not work for dynamically-built lists.
+            # The dashboard is intentionally bounded to the filtered activity
+            # controls already held by this controller, so eager Flutter layout
+            # is the smallest reliable trade-off for exact restore + smooth top.
+            build_controls_on_demand=False,
+            auto_scroll=False,
+            # Zero disables throttling and can flood the Python event queue
+            # during a fling, delaying a subsequent button click by hundreds
+            # of milliseconds. Two display frames stay visually responsive
+            # while bounding bridge work on low-end desktop/mobile devices.
+            scroll_interval=_DASHBOARD_SCROLL_EVENT_INTERVAL_MS,
+            on_scroll=self._on_dashboard_scroll,
+        )
+        self._scroll_to_top_button = ft.Container(
+            content=ft.Icon(
+                ft.Icons.KEYBOARD_ARROW_UP_ROUNDED,
+                size=23,
+                color=C.TEXT_PRIMARY,
+            ),
+            width=44,
+            height=44,
+            right=12,
+            bottom=12,
+            alignment=ft.Alignment.CENTER,
+            bgcolor=C.SURFACE_ELEVATED,
+            border_radius=999,
+            shadow=ft.BoxShadow(
+                blur_radius=12,
+                color=C.SHADOW,
+                offset=ft.Offset(0, 3),
+            ),
+            tooltip="Lên đầu danh sách",
+            ink=True,
+            on_click=self._scroll_dashboard_to_top,
+            opacity=0.0,
+            offset=ft.Offset(0, 0.3),
+            scale=0.84,
+            animate_opacity=ft.Animation(110, ft.AnimationCurve.EASE_OUT),
+            animate_offset=ft.Animation(150, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_scale=ft.Animation(150, ft.AnimationCurve.EASE_OUT_CUBIC),
+            # An opacity-zero overlay must not consume taps intended for cards.
+            ignore_interactions=True,
+        )
         self._empty_icon = ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER)
         self._empty_title = ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500)
         self._empty_subtitle = ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER)
@@ -688,7 +903,7 @@ class AppController:
             "Thử lại",
             icon=ft.Icons.REFRESH_ROUNDED,
             on_click=lambda _: self._safe_run_task(self._load_data_async),
-            bgcolor=C.ACCENT, color=C.TEXT_PRIMARY,
+            bgcolor=C.ACCENT, color=C.ON_ACCENT,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
         )
         self.error_state = ft.Container(
@@ -705,49 +920,36 @@ class AppController:
 
         self._today_schedule_component = TodaySchedulePanel(
             on_need_data=self._request_today_schedule,
+            page=self.page,
+            mobile=platform_utils.UI_IS_MOBILE,
         )
         self.today_schedule_panel = self._today_schedule_component.control
         self._today_schedule_component.set_state(self._today_schedule_state)
 
     def _init_views_and_transitions(self):
-        header_container = ft.Container(
-            content=ft.Column(controls=[
-                ft.Row(controls=[
-                    ft.Row(controls=[
-                        ft.Text("UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
-                        ft.Container(
-                            content=ft.Text(APP_VERSION, size=9, color=C.TEXT_SECONDARY),
-                            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                            border=ft.Border.all(1, C.BORDER),
-                            border_radius=4,
-                        ),
-                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row(controls=[self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn], spacing=0),
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                self.status_text,
-            ], spacing=4),
-            padding=ft.Padding.only(left=16, right=8, top=25, bottom=8),
-            bgcolor=C.BG,
+        self._app_title = ft.Text(
+            "UTHelper", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY
         )
-
-        header = ft.Stack(
-            controls=[
-                header_container,
-                ft.Container(
-                    content=self.loading_bar,
-                    bottom=0,
-                    left=0,
-                    right=0,
-                )
-            ]
+        self._version_text = ft.Text(
+            APP_VERSION, size=9, color=C.TEXT_SECONDARY
         )
+        self._version_badge = ft.Container(
+            content=self._version_text,
+            padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=4,
+        )
+        self._header_container = self._build_dashboard_header()
 
-        filter_container = ft.Container(
+        header = self._header_container
+
+
+        self._filter_container = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
                     ft.Container(
-                        content=ft.Row(controls=[self.urgency_popup, self.type_popup, self.course_popup, self._overdue_cb], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, scroll=ft.ScrollMode.AUTO),
+                        content=self._build_dashboard_filter_row(),
                         padding=ft.Padding.only(left=16, right=12),
                     ),
                 ], spacing=4,
@@ -756,17 +958,18 @@ class AppController:
             bgcolor=C.BG,
         )
 
-        content_area = ft.Container(
+        self._content_area = ft.Container(
             content=ft.Column(controls=[
                 ft.Stack(controls=[
                     ft.Column(controls=[self.cards_column, self.empty_state, self.error_state], spacing=0, expand=True),
+                    self._scroll_to_top_button,
                 ], expand=True),
             ], spacing=8, expand=True),
             padding=ft.Padding.only(left=4, right=4, bottom=8),
             expand=True, clip_behavior=ft.ClipBehavior.NONE,
         )
 
-        footer = ft.Container(
+        self._footer = ft.Container(
             content=ft.Row(controls=[
                 self.footer_critical, self.footer_warning, self.footer_safe, self.footer_overdue,
             ], spacing=12, alignment=ft.MainAxisAlignment.CENTER),
@@ -775,7 +978,13 @@ class AppController:
         )
 
         self.dashboard = ft.Column(
-            controls=[header, self._update_banner, filter_container, content_area, footer],
+            controls=[
+                header,
+                self._update_banner,
+                self._filter_container,
+                self._content_area,
+                self._footer,
+            ],
             spacing=0, expand=True,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
@@ -801,13 +1010,96 @@ class AppController:
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
+            page=self.page,
         )
 
         for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
-            _view.offset = ft.Offset(1, 0)
-            _view.animate_offset = ft.Animation(250, ft.AnimationCurve.EASE_OUT)
-            _view.animate_opacity = ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT)
+            _view.offset = ft.Offset(0, 0)
+            _view.opacity = 0.0
+            _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
 
+        self.tab_switcher = ft.AnimatedSwitcher(
+            content=self.dashboard,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            duration=160,
+            reverse_duration=160,
+            switch_in_curve=ft.AnimationCurve.EASE_OUT,
+            switch_out_curve=ft.AnimationCurve.EASE_IN,
+            expand=True,
+        )
+        self._empty_detail = ft.Container(expand=True, ignore_interactions=True)
+        self.detail_switcher = ft.AnimatedSwitcher(
+            content=self._empty_detail,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            duration=160,
+            reverse_duration=160,
+            switch_in_curve=ft.AnimationCurve.EASE_OUT,
+            switch_out_curve=ft.AnimationCurve.EASE_IN,
+            expand=True,
+        )
+
+        main_stack_controls = [self.tab_switcher, self.detail_switcher]
+        overlays = []
+        if not platform_utils.UI_IS_MOBILE:
+            self._active_desktop_filter_menu = None
+            self._desktop_filter_top_dismiss_layer = ft.Container(
+                visible=False,
+                left=0,
+                right=180,
+                top=0,
+                height=0,
+                bgcolor=ft.Colors.with_opacity(0.001, C.BG),
+                on_click=lambda _event: self._dismiss_desktop_filter_menu(),
+            )
+            self._desktop_filter_upper_body_dismiss_layer = ft.Container(
+                visible=False,
+                left=0,
+                right=0,
+                top=58,
+                height=0,
+                bgcolor=ft.Colors.with_opacity(0.001, C.BG),
+                on_click=lambda _event: self._dismiss_desktop_filter_menu(),
+            )
+            self._desktop_filter_dismiss_layer = ft.Container(
+                visible=False,
+                left=0,
+                right=0,
+                top=0,
+                bottom=0,
+                bgcolor=ft.Colors.with_opacity(0.001, C.BG),
+                on_click=lambda _event: self._dismiss_desktop_filter_menu(),
+            )
+            self._desktop_filter_popup_host = ft.Container(
+                visible=True,
+                opacity=0,
+                scale=0.96,
+                offset=ft.Offset(0, -0.025),
+                animate_opacity=ft.Animation(
+                    180, ft.AnimationCurve.EASE_OUT_CUBIC
+                ),
+                animate_scale=ft.Animation(
+                    180, ft.AnimationCurve.EASE_OUT_CUBIC
+                ),
+                animate_offset=ft.Animation(
+                    180, ft.AnimationCurve.EASE_OUT_CUBIC
+                ),
+                ignore_interactions=True,
+                left=0,
+                top=0,
+            )
+            overlays = [
+                self._desktop_filter_top_dismiss_layer,
+                self._desktop_filter_upper_body_dismiss_layer,
+                self._desktop_filter_dismiss_layer,
+                self._desktop_filter_popup_host,
+            ]
+            main_stack_controls.extend(overlays)
+        main_stack = ft.Stack(
+            controls=main_stack_controls,
+            expand=True,
+            clip_behavior=ft.ClipBehavior.NONE,
+        )
         self.view_manager = ViewManager(
             self.page,
             self.dashboard,
@@ -815,32 +1107,214 @@ class AppController:
             self.settings_view,
             self.calendar_view,
             self.grade_overview_view,
-            self
+            self,
+            view_host=main_stack,
+            overlays=overlays,
+            tab_switcher=self.tab_switcher,
+            detail_switcher=self.detail_switcher,
+            empty_detail=self._empty_detail,
         )
-
-        main_stack = ft.Stack(controls=[self.dashboard, self.calendar_view, self.grade_overview_view, self.detail_view, self.settings_view], expand=True)
+        self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
-        if platform_utils.IS_MOBILE:
-            self.page.add(ft.SafeArea(content=main_stack, expand=True))
+        if platform_utils.UI_IS_MOBILE:
+            self._app_shell = ft.SafeArea(content=main_stack, expand=True)
         else:
-            self.page.add(main_stack)
+            self._window_header = self._build_desktop_window_header()
+            self._app_shell = ft.Column(
+                controls=[self._window_header, main_stack],
+                spacing=0,
+                expand=True,
+            )
+        self.page.add(self._app_shell)
+
+    def _build_desktop_window_header(self) -> ft.Container:
+        self._app_title.size = 13
+        self._app_title.weight = ft.FontWeight.W_700
+        return build_desktop_window_header(
+            on_minimize=self._minimize_window,
+            on_close=lambda _: self._safe_run_task(
+                self._exit_from_window_header
+            ),
+            title_control=self._app_title,
+            version_control=self._version_badge,
+        )
+
+    def _build_dashboard_header(self) -> ft.Container:
+        action_buttons = ft.Row(
+            controls=[
+                self.calendar_btn,
+                self.grades_btn,
+                self.refresh_btn,
+                self.settings_btn,
+            ],
+            spacing=0,
+        )
+        if platform_utils.UI_IS_MOBILE:
+            title_group = ft.Row(
+                controls=[self._app_title, self._version_badge],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            content = ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[title_group, action_buttons],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self._sync_status.control,
+                ],
+                spacing=4,
+            )
+            padding = ft.Padding.only(left=16, right=8, top=25, bottom=8)
+        else:
+            self._sync_status.control.expand = True
+            self.status_text.no_wrap = True
+            self.status_text.overflow = ft.TextOverflow.ELLIPSIS
+            content = ft.Row(
+                controls=[self._sync_status.control, action_buttons],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            padding = ft.Padding.only(left=16, right=8, top=4, bottom=8)
+        return ft.Container(content=content, padding=padding, bgcolor=C.BG)
+
+    def _build_dashboard_filter_row(self) -> ft.Row:
+        controls = [
+            self.urgency_filter_menu.control,
+            self.type_filter_menu.control,
+            self.course_filter_menu.control,
+        ]
+        for control, flex in zip(controls, (4, 4, 5), strict=True):
+            control.expand = flex
+        return ft.Row(
+            controls=controls,
+            spacing=6,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _toggle_desktop_filter_menu(self, menu, event) -> None:
+        """Atomically replace the active popup; pointer hover never calls this."""
+        active = getattr(self, "_active_desktop_filter_menu", None)
+        if active is menu:
+            self._dismiss_desktop_filter_menu(menu)
+            return
+
+        opening_from_closed = active is None
+        if active is not None:
+            active._set_expanded(False)
+
+        global_position = getattr(event, "global_position", None)
+        local_position = getattr(event, "local_position", None)
+        if global_position is not None and local_position is not None:
+            anchor_left = float(global_position.x - local_position.x)
+            anchor_bottom = float(
+                global_position.y - local_position.y + menu.trigger.height
+            )
+        else:
+            # Event coordinates are always present for real TapEvent payloads.
+            # This fallback keeps keyboard/test invocation deterministic.
+            anchor_left = 8.0
+            anchor_bottom = 160.0
+
+        header_height = float(
+            getattr(getattr(self, "_window_header", None), "height", 34) or 34
+        )
+        viewport_width = float(getattr(self.page, "width", 420) or 420)
+        popup_width = float(menu.popup_width)
+        popup_left = min(
+            max(8.0, anchor_left),
+            max(8.0, viewport_width - popup_width - 8.0),
+        )
+        popup_top = max(0.0, anchor_bottom - header_height)
+
+        self._active_desktop_filter_menu = menu
+        menu._set_expanded(True)
+        self._desktop_filter_popup_host.content = menu.popup_panel
+        self._desktop_filter_popup_host.left = popup_left
+        self._desktop_filter_popup_host.top = popup_top
+        self._desktop_filter_popup_host.ignore_interactions = False
+        if not opening_from_closed:
+            self._desktop_filter_popup_host.opacity = 1
+            self._desktop_filter_popup_host.scale = 1
+            self._desktop_filter_popup_host.offset = ft.Offset(0, 0)
+        # Keep the three triggers uncovered so another explicit press reaches
+        # them. Two dismiss regions protect everything above and below the row.
+        filter_top = max(0.0, popup_top - float(menu.trigger.height or 40))
+        header_region_height = min(filter_top, 58.0)
+        self._desktop_filter_top_dismiss_layer.height = header_region_height
+        self._desktop_filter_top_dismiss_layer.visible = header_region_height > 0
+        upper_body_height = max(0.0, filter_top - 58.0)
+        self._desktop_filter_upper_body_dismiss_layer.height = upper_body_height
+        self._desktop_filter_upper_body_dismiss_layer.visible = (
+            upper_body_height > 0
+        )
+        self._desktop_filter_dismiss_layer.top = popup_top
+        self._desktop_filter_dismiss_layer.visible = True
+        self.page.update()
+        if opening_from_closed:
+            self._safe_run_task(self._animate_desktop_filter_open, menu)
+
+    async def _animate_desktop_filter_open(self, menu) -> None:
+        # The old PopupMenuButton painted a closed frame before its 180 ms
+        # transition. Preserve that two-frame contract for the custom overlay.
+        await asyncio.sleep(0.016)
+        if getattr(self, "_active_desktop_filter_menu", None) is not menu:
+            return
+        host = self._desktop_filter_popup_host
+        host.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+        host.animate_scale = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+        host.animate_offset = ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC)
+        host.opacity = 1
+        host.scale = 1
+        host.offset = ft.Offset(0, 0)
+        self.page.update()
+
+    def _dismiss_desktop_filter_menu(self, menu=None) -> None:
+        active = getattr(self, "_active_desktop_filter_menu", None)
+        if menu is not None and active is not menu:
+            return
+        if active is not None:
+            active._set_expanded(False)
+        self._active_desktop_filter_menu = None
+        popup_host = getattr(self, "_desktop_filter_popup_host", None)
+        top_dismiss_layer = getattr(
+            self, "_desktop_filter_top_dismiss_layer", None
+        )
+        upper_body_dismiss_layer = getattr(
+            self, "_desktop_filter_upper_body_dismiss_layer", None
+        )
+        dismiss_layer = getattr(self, "_desktop_filter_dismiss_layer", None)
+        if popup_host is not None:
+            popup_host.animate_opacity = ft.Animation(
+                140, ft.AnimationCurve.EASE_IN_CUBIC
+            )
+            popup_host.animate_scale = ft.Animation(
+                140, ft.AnimationCurve.EASE_IN_CUBIC
+            )
+            popup_host.animate_offset = ft.Animation(
+                140, ft.AnimationCurve.EASE_IN_CUBIC
+            )
+            popup_host.opacity = 0
+            popup_host.scale = 0.96
+            popup_host.offset = ft.Offset(0, -0.025)
+            popup_host.ignore_interactions = True
+        if top_dismiss_layer is not None:
+            top_dismiss_layer.visible = False
+        if upper_body_dismiss_layer is not None:
+            upper_body_dismiss_layer.visible = False
+        if dismiss_layer is not None:
+            dismiss_layer.visible = False
+        if (
+            popup_host is not None
+            or top_dismiss_layer is not None
+            or upper_body_dismiss_layer is not None
+            or dismiss_layer is not None
+        ):
+            self.page.update()
 
     def _start_skeleton_shimmer(self):
         self.cards_column.controls = [self._make_skeleton_card() for _ in range(4)]
-
-        async def _pulse_skeletons():
-            import asyncio
-            while self._skeleton_visible:
-                for card in self.cards_column.controls:
-                    if hasattr(card, 'opacity'):
-                        card.opacity = 0.7 if card.opacity < 0.6 else 0.4
-                try:
-                    self.page.update()
-                except Exception:
-                    break
-                await asyncio.sleep(0.8)
-        self._safe_run_task(_pulse_skeletons)
 
     def _make_skeleton_card(self):
         """Create a skeleton placeholder card that mimics ActivityCard layout."""
@@ -879,62 +1353,86 @@ class AppController:
             self._skeleton_visible = False
             self.cards_column.controls.clear()
 
-    def _make_filter_popup(self, cfg, on_select_cb):
-        btn_label = ft.Text(cfg[0][1], size=12, color=cfg[0][2], weight=ft.FontWeight.W_500)
-        count_refs = {}
-        check_refs = {}
-
-        def _on_item(key: str, label: str, config_color: str):
-            btn_label.value = label
-            from gui.core.theme import C, _TYPE_COLORS
-            if key == "all":
-                resolved_color = C.TEXT_PRIMARY
-            elif key in ("critical", "overdue"):
-                resolved_color = C.CRITICAL
-            elif key == "warning":
-                resolved_color = C.WARNING
-            elif key == "safe":
-                resolved_color = C.SAFE
-            elif key in _TYPE_COLORS:
-                resolved_color = _TYPE_COLORS[key]
-            elif key == "other":
-                resolved_color = C.TEXT_SECONDARY
-            else:
-                resolved_color = C.TEXT_PRIMARY
-            btn_label.color = resolved_color
-            btn_label.update()
-            for k, icon in check_refs.items():
-                icon.visible = (k == key)
-            on_select_cb(key)
-
-        items = []
-        for key, label, color in cfg:
-            cnt_ref   = ft.Text("", size=10, color=color)
-            check_ref = ft.Icon(ft.Icons.CHECK, size=12, color=color, visible=(key == "all"))
-            count_refs[key] = cnt_ref
-            check_refs[key] = check_ref
-            if key == "all":
-                item_content = ft.Row([ft.Text(label, size=12, color=C.TEXT_SECONDARY, expand=True), check_ref], spacing=6, tight=True)
-            else:
-                item_content = ft.Row([ft.Text(label, size=12, color=color, weight=ft.FontWeight.W_600), cnt_ref, ft.Container(expand=True), check_ref], spacing=4, tight=True)
-            items.append(ft.PopupMenuItem(content=item_content, on_click=lambda e, k=key, l=label, c=color: _on_item(k, l, c)))
-
-        popup = ft.PopupMenuButton(
-            content=ft.Container(
-                content=ft.Row([btn_label, ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=16, color=C.TEXT_SECONDARY)], spacing=2, tight=True),
-                bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+    @staticmethod
+    def _urgency_filter_options(counts: dict | None = None):
+        counts = counts or {}
+        return [
+            FilterMenuOption(
+                "all", "Tất cả mức độ", C.TEXT_SECONDARY,
+                count=counts.get("all", 0), icon=ft.Icons.TUNE_ROUNDED,
+                trigger_label="Mức độ",
             ),
-            items=items,
-            menu_position=ft.PopupMenuPosition.UNDER,
-            shape=ft.RoundedRectangleBorder(radius=10),
+            FilterMenuOption(
+                "critical", "Cấp bách", C.CRITICAL,
+                count=counts.get("critical", 0), icon=ft.Icons.PRIORITY_HIGH_ROUNDED,
+            ),
+            FilterMenuOption(
+                "warning", "Sắp tới", C.WARNING,
+                count=counts.get("warning", 0), icon=ft.Icons.SCHEDULE_ROUNDED,
+            ),
+            FilterMenuOption(
+                "safe", "An toàn", C.SAFE,
+                count=counts.get("safe", 0), icon=ft.Icons.SHIELD_OUTLINED,
+            ),
+            FilterMenuOption(
+                "overdue", "Quá hạn", C.CRITICAL,
+                count=counts.get("overdue", 0), icon=ft.Icons.HISTORY_ROUNDED,
+            ),
+        ]
+
+    @staticmethod
+    def _type_filter_options(counts: dict | None = None):
+        from gui.core.theme import _TYPE_COLORS
+
+        counts = counts or {}
+        return [
+            FilterMenuOption(
+                "all", "Tất cả hoạt động", C.TEXT_SECONDARY,
+                count=counts.get("all", 0), icon=ft.Icons.CATEGORY_OUTLINED,
+                trigger_label="Tất cả",
+            ),
+            FilterMenuOption(
+                "quiz", "Quiz", _TYPE_COLORS["quiz"],
+                count=counts.get("quiz", 0), icon=ft.Icons.QUIZ_OUTLINED,
+            ),
+            FilterMenuOption(
+                "assignment", "Bài tập", _TYPE_COLORS["assignment"],
+                count=counts.get("assignment", 0), icon=ft.Icons.ASSIGNMENT_OUTLINED,
+            ),
+            FilterMenuOption(
+                "attendance", "Điểm danh", _TYPE_COLORS["attendance"],
+                count=counts.get("attendance", 0), icon=ft.Icons.FACT_CHECK_OUTLINED,
+            ),
+            FilterMenuOption(
+                "open", "Sắp mở", _TYPE_COLORS["open"],
+                count=counts.get("open", 0), icon=ft.Icons.LOCK_CLOCK_OUTLINED,
+            ),
+            FilterMenuOption(
+                "other", "Sự kiện khác", C.TEXT_SECONDARY,
+                count=counts.get("other", 0), icon=ft.Icons.MORE_HORIZ_ROUNDED,
+            ),
+        ]
+
+    @staticmethod
+    def _course_filter_options(counts: dict):
+        options = [
+            FilterMenuOption(
+                "all", "Tất cả môn học", C.TEXT_SECONDARY,
+                count=counts.get("all", 0), icon=ft.Icons.SCHOOL_OUTLINED,
+                trigger_label="Môn học",
+            )
+        ]
+        options.extend(
+            FilterMenuOption(
+                course,
+                course,
+                C.ACCENT,
+                count=counts.get(course, 0),
+                icon=ft.Icons.BOOK_OUTLINED,
+            )
+            for course in sorted(key for key in counts if key != "all")
         )
-
-        def update_counts(counts: dict):
-            for key, ref in count_refs.items():
-                n = counts.get(key, 0)
-                ref.value = f"· {n}" if n > 0 else ""
-
-        return popup, update_counts
+        return options
 
     def _refresh_ui(self):
         # Snapshot all_data under lock for thread safety
@@ -949,8 +1447,22 @@ class AppController:
             self.active_type,
             self.active_course,
             self.active_search,
-            settings.INCLUDE_PAST_DUE
+            self.active_urgency == "overdue",
         )
+        if (
+            self.active_course != "all"
+            and self.active_course not in counts["course"]
+        ):
+            self.active_course = "all"
+            self.course_filter_menu.set_selected("all")
+            filtered_items, counts = FilterService.filter_and_count(
+                base,
+                self.active_urgency,
+                self.active_type,
+                self.active_course,
+                self.active_search,
+                self.active_urgency == "overdue",
+            )
 
         n_critical = counts["urgency"].get("critical", 0)
         n_warning = counts["urgency"].get("warning", 0)
@@ -960,26 +1472,9 @@ class AppController:
         course_counts = counts["course"]
         type_counts = counts["type"]
 
-        def _on_course_select(e, c_name):
-            self._safe_run_task(self._set_course, c_name)
-
-        c_items = [ft.PopupMenuItem(
-            content=ft.Row([ft.Text("Tất cả môn học", size=12, color=C.TEXT_SECONDARY, expand=True), ft.Icon(ft.Icons.CHECK, size=12, color=C.TEXT_PRIMARY, visible=(self.active_course == "all"))], spacing=6, tight=True),
-            on_click=lambda e: _on_course_select(e, "all")
-        )]
-        
-        for c in sorted([k for k in course_counts.keys() if k != "all"]):
-            is_active = (self.active_course == c)
-            cnt = course_counts.get(c, 0)
-            c_items.append(ft.PopupMenuItem(
-                content=ft.Row([
-                    ft.Text(c, size=12, color=C.TEXT_PRIMARY, expand=True),
-                    ft.Text(f"· {cnt}", size=11, color=C.TEXT_SECONDARY),
-                    ft.Icon(ft.Icons.CHECK, size=12, color=C.TEXT_PRIMARY, visible=is_active)
-                ], spacing=6, tight=True),
-                on_click=lambda e, name=c: _on_course_select(e, name)
-            ))
-        self.course_popup.items = c_items
+        self.course_filter_menu.set_options(
+            self._course_filter_options(course_counts)
+        )
         # UX-3: Natural language order - "N label" instead of "Label · N"
         self.footer_critical.value = f"{n_critical} khẩn cấp" if n_critical else "0 khẩn cấp"
         self.footer_critical.color = C.CRITICAL if n_critical else C.BORDER
@@ -990,20 +1485,16 @@ class AppController:
         self.footer_overdue.value  = f"{n_overdue} quá hạn" if n_overdue else "0 quá hạn"
         self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
 
-        self._update_urgency_counts(counts["urgency"])
-        self._update_type_counts(type_counts)
-
-        # P5: Dynamic overdue checkbox label with count
-        if n_overdue > 0:
-            self._overdue_cb.label = f"Quá hạn ({n_overdue})"
-            self._overdue_cb.label_style = ft.TextStyle(size=13, color=C.CRITICAL)
-        else:
-            self._overdue_cb.label = "Quá hạn"
-            self._overdue_cb.label_style = ft.TextStyle(size=13, color=C.TEXT_SECONDARY)
+        self.urgency_filter_menu.set_options(
+            self._urgency_filter_options(counts["urgency"])
+        )
+        self.type_filter_menu.set_options(
+            self._type_filter_options(type_counts)
+        )
 
         # Render cards
         self._clear_skeletons()
-        is_empty = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        is_empty = len(filtered_items) == 0 and not self._is_loading
         self.empty_state.visible = is_empty
         self.error_state.visible = False
 
@@ -1077,6 +1568,16 @@ class AppController:
 
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
         self._today_schedule_state = state
+        if state.status is ScheduleLoadStatus.LOADING:
+            self._diag_breadcrumb("schedule_load", "started", "portal")
+        elif state.status is ScheduleLoadStatus.READY:
+            self._diag_breadcrumb("schedule_load", "succeeded", "portal")
+        elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
+            self._diag_breadcrumb(
+                "schedule_load", "permission_denied", "portal"
+            )
+        elif state.status is ScheduleLoadStatus.ERROR:
+            self._diag_breadcrumb("schedule_load", "failed", "portal")
         component = getattr(self, "_today_schedule_component", None)
         if component is None:
             return
@@ -1102,11 +1603,11 @@ class AppController:
         filtered_items, counts = FilterService.filter_and_count(
             base, self.active_urgency, self.active_type,
             self.active_course, self.active_search,
-            settings.INCLUDE_PAST_DUE
+            self.active_urgency == "overdue",
         )
 
         self._clear_skeletons()
-        self.empty_state.visible = (len(filtered_items) == 0 and not self.loading_bar.visible)
+        self.empty_state.visible = len(filtered_items) == 0 and not self._is_loading
         self.error_state.visible = False
 
         if not hasattr(self, '_reusable_cards'):
@@ -1137,23 +1638,17 @@ class AppController:
 
     async def _set_urgency(self, key: str):
         self.active_urgency = key
-        # Sync overdue checkbox with urgency popup selection
-        if key == "overdue":
-            self._overdue_cb.value = True
-            settings.INCLUDE_PAST_DUE = True
-        else:
-            self._overdue_cb.value = False
-            settings.INCLUDE_PAST_DUE = False
+        self.urgency_filter_menu.set_selected(key)
         self._refresh_ui()
 
     async def _set_type(self, key: str):
         self.active_type = key
+        self.type_filter_menu.set_selected(key)
         self._refresh_ui()
 
     async def _set_course(self, course_name: str):
         self.active_course = course_name
-        self.course_btn_label.value = "Môn học" if course_name == "all" else course_name
-        self.course_btn_label.update()
+        self.course_filter_menu.set_selected(course_name)
         self._refresh_ui()
 
     def _apply_settings_filter(self, data: list) -> list:
@@ -1164,28 +1659,19 @@ class AppController:
             # Check both English and Vietnamese keys (WS API uses Vietnamese)
             grading     = status.get("Grading status", "") or status.get("Trạng thái chấm", "") or status.get("Chấm điểm", "")
             submission  = status.get("Submission status", "") or status.get("Trạng thái nộp bài", "") or d.get("submission_status", "")
-            is_graded   = (grading in ("Graded", "Đã chấm") or (grading.startswith("Graded") and "Not" not in grading))
-            is_submitted = (submission in ("Submitted for grading", "Đã nộp", "Đã nộp, chờ chấm") or ("Submitted" in submission and "Not" not in submission) or ("Đã nộp" in submission and "Chưa" not in submission))
+            submission_state = normalize_submission_status(submission)
+            grading_state = normalize_submission_status(grading)
+            is_graded = (
+                submission_state == "graded" or grading_state == "graded"
+            )
+            is_submitted = submission_state in ("submitted", "graded")
 
             if is_graded and not settings.INCLUDE_GRADED: continue
             if is_submitted and not is_graded and not settings.INCLUDE_SUBMITTED: continue
             
-            # _refresh_ui handles INCLUDE_PAST_DUE now
+            # _refresh_ui exposes overdue activities through the urgency menu.
             result.append(d)
         return result
-
-    async def _toggle_overdue(self, e):
-        settings.INCLUDE_PAST_DUE = self._overdue_cb.value
-        _save_setting("INCLUDE_PAST_DUE", settings.INCLUDE_PAST_DUE)
-        
-        # When checkbox is ON: filter to show ONLY overdue items
-        # When OFF: reset urgency filter to show all (excluding overdue)
-        if self._overdue_cb.value:
-            self.active_urgency = "overdue"
-        else:
-            self.active_urgency = "all"
-        
-        self._update_footer()
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
@@ -1208,8 +1694,8 @@ class AppController:
                 if len(grade_changes) > 3:
                     msg += f" +{len(grade_changes) - 3} kh\u00e1c"
                 self.page.snack_bar = ft.SnackBar(
-                    content=ft.Text(msg, color=ft.Colors.WHITE),
-                    bgcolor="#22C55E",
+                    content=ft.Text(msg, color=C.ON_SAFE),
+                    bgcolor=C.SAFE,
                     duration=5000,
                 )
                 self.page.snack_bar.open = True
@@ -1217,52 +1703,112 @@ class AppController:
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
 
-    async def _prefetch_details_async(self, activities: list):
-        len(activities)
-        workers = max(1, min(settings.PREFETCH_WORKERS, 10))
-        
-        with self._data_lock:
-            count = len(self.all_data)
-        self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {count} hoạt động"
-        self.loading_bar.visible = True
-        self.page.update()
+    def _set_sync_status(self, state: str, message: str) -> None:
+        component = getattr(self, "_sync_status", None)
+        if component is not None:
+            component.set_state(state, message)
+        elif hasattr(self, "status_text"):
+            # Keep isolated controller tests and legacy embedders compatible.
+            self.status_text.value = message
 
-        await asyncio.to_thread(
+    async def _prefetch_details_async(
+        self, activities: list, prefetch_epoch: int | None = None
+    ):
+        if prefetch_epoch is None:
+            prefetch_epoch = getattr(self, "_prefetch_epoch", 0)
+        worker_cap = 2 if platform_utils.IS_MOBILE else 4
+        workers = max(1, min(settings.PREFETCH_WORKERS, worker_cap))
+
+        if hasattr(self.orchestrator, "prefetch_activity_statuses"):
+            cache = await asyncio.to_thread(
+                self.orchestrator.prefetch_activity_statuses,
+                activities,
+                workers,
+                lambda: self._prefetch_cancel_event.is_set(),
+            )
+        else:
+            await asyncio.to_thread(
+                self.orchestrator.prefetch_all_details,
+                activities,
+                workers,
+                lambda: self._prefetch_cancel_event.is_set(),
+                False,
+            )
+            cache = self.orchestrator.get_cached_details_snapshot()
+
+        if (
+            self._prefetch_cancel_event.is_set()
+            or self._is_loading
+            or prefetch_epoch != getattr(self, "_prefetch_epoch", 0)
+        ):
+            return
+        with self._data_lock:
+            data_copy = list(self.all_data)
+        data_copy = build_prefetched_dataset(data_copy, cache)
+        with self._data_lock:
+            self.all_data = data_copy
+        self._update_footer()
+        persisted = await asyncio.to_thread(
+            self._data_cache.save_local_activities, data_copy
+        )
+        if not persisted:
+            logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
+        self._schedule_card_detail_warmup()
+
+    async def _warm_card_details_async(
+        self,
+        activities: list,
+        cancel_event: threading.Event,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Warm card detail cache near-to-far with a single low-impact worker."""
+        candidates = card_detail_prefetch_candidates(activities, now=now)
+        if not candidates or cancel_event.is_set():
+            return 0
+        return await asyncio.to_thread(
             self.orchestrator.prefetch_all_details,
-            activities,
-            workers,
-            lambda: self._prefetch_cancel_event.is_set(),
-            False
+            candidates,
+            1,
+            cancel_event.is_set,
+            False,
         )
 
-        if not self._prefetch_cancel_event.is_set() and not self._is_loading:
-            cache = self.orchestrator.get_cached_details_snapshot()
-            with self._data_lock:
-                data_copy = list(self.all_data)
-            for i, item in enumerate(data_copy):
-                url = item.get("url")
-                if url and url in cache:
-                    enriched = cache[url]
-                    data_copy[i] = {
-                        **item,
-                        "type": enriched.get("type", item.get("type", "other")),
-                        "course": enriched.get("course", item.get("course", "")),
-                        "submission_status": enriched.get("submission_status", "unknown"),
-                        "details": enriched.get("details", {}),
-                        "deadline": enriched.get("deadline", item.get("deadline")),
-                        "is_open": enriched.get("is_open", item.get("is_open")),
-                        "urgency": enriched.get("urgency", item.get("urgency")),
-                    }
-            data_copy.sort(key=lambda x: (
-                0 if x.get("urgency") == "critical" else 1 if x.get("urgency") == "warning" else 2,
-                x.get("deadline", "")
-            ))
-            with self._data_lock:
-                self.all_data = data_copy
-            self._update_footer()
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {len(data_copy)} hoạt động ✓"
-            self.loading_bar.visible = False
-            self.page.update()
+    def _schedule_card_detail_warmup(self) -> bool:
+        """Schedule one ordered card-cache pass without affecting sync UI."""
+        if not settings.MOODLE_WS_TOKEN:
+            return False
+        with self._data_lock:
+            activities = list(self.all_data)
+        if not card_detail_prefetch_candidates(activities):
+            return False
+
+        previous_event = getattr(self, "_card_detail_warm_cancel_event", None)
+        if previous_event is not None:
+            previous_event.set()
+        cancel_event = threading.Event()
+        self._card_detail_warm_cancel_event = cancel_event
+        return self._safe_run_task(
+            self._warm_card_details_async,
+            activities,
+            cancel_event,
+        ) is not None
+
+    def _schedule_cached_detail_hydration(self, has_cached_snapshot: bool) -> bool:
+        """Hydrate incomplete cached cards immediately without blocking startup."""
+        if not has_cached_snapshot or not settings.MOODLE_WS_TOKEN:
+            return False
+        with self._data_lock:
+            cached_items = list(self.all_data)
+        items_to_hydrate = status_hydration_candidates(cached_items)
+        if not items_to_hydrate:
+            return False
+        self._prefetch_cancel_event.clear()
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
+        self._safe_run_task(
+            self._prefetch_details_async, items_to_hydrate, self._prefetch_epoch
+        )
+        return True
 
     def _refresh_activity_time_state(self) -> bool:
         """Recompute volatile urgency from absolute deadlines and current time."""
@@ -1294,6 +1840,9 @@ class AppController:
     def _load_cached_snapshot(self) -> bool:
         """Render local activities immediately without starting a Moodle call."""
         snapshot = self._data_cache.load_snapshot()
+        self._cache_requires_server_refresh = bool(
+            getattr(snapshot, "requires_server_refresh", False)
+        )
         self._last_successful_sync_at = parse_timestamp(
             snapshot.last_successful_sync_at
         )
@@ -1308,12 +1857,18 @@ class AppController:
                 item["_deadline_dt"] = parse_datetime(deadline)
             item["_title_lower"] = str(item.get("title", "")).lower()
             item["_course_lower"] = str(item.get("course", "")).lower()
-        self.status_text.value = (
-            f"Dữ liệu đã lưu · {len(self.all_data)} hoạt động"
+        self._set_sync_status(
+            "success", f"Dữ liệu đã lưu · {len(self.all_data)} hoạt động"
         )
-        self.loading_bar.visible = False
         self._update_footer()
         self.page.update()
+        return True
+
+    def _needs_initial_data_sync(self, has_cached_snapshot: bool) -> bool:
+        """Refresh immediately when cached activities predate the current catalog."""
+        return not has_cached_snapshot or bool(
+            getattr(self, "_cache_requires_server_refresh", False)
+        )
 
     async def _initialize_android_background(self):
         """Attach native worker settings and prefer its cache after app restart."""
@@ -1332,8 +1887,9 @@ class AppController:
                     with self._data_lock:
                         self.all_data = native_data
                     self._refresh_activity_time_state()
-                    self.status_text.value = (
-                        f"Dữ liệu nền đã lưu · {len(native_data)} hoạt động"
+                    self._set_sync_status(
+                        "success",
+                        f"Dữ liệu nền đã lưu · {len(native_data)} hoạt động",
                     )
                     self._update_footer()
                     self.page.update()
@@ -1341,29 +1897,43 @@ class AppController:
             logger.warning("Cannot initialize Android background sync: %s", exc)
         return True
 
-    async def _load_data_async(self):
-        """Manual refresh entry point; concurrent callers share one fetch."""
+    async def _load_data_async(self, trigger: str = "manual"):
+        """Refresh entry point; concurrent callers share one fetch."""
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is None:
-            return await self._perform_data_sync("manual")
-        return await coordinator.request("manual", force=True)
+            return await self._perform_data_sync(trigger)
+        return await coordinator.request(
+            trigger, force=trigger in ("manual", "startup")
+        )
 
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading: return
+        sync_source = "user" if trigger == "manual" else "scheduler"
+        self._diag_breadcrumb("refresh", "started", sync_source)
         self._is_loading = True
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
+        detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
+        if detail_warm_cancel is not None:
+            detail_warm_cancel.set()
         
-        # Clear persistent detail cache to force fresh data fetch on manual refresh
-        try:
-            self.orchestrator.moodle_service.clear_all_caches()
-            self.orchestrator.clear_detail_cache()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        # A user-forced refresh bypasses caches; timer/startup refreshes reuse
+        # valid metadata and avoid restarting the expensive detail pipeline.
+        if trigger == "manual":
+            try:
+                self.orchestrator.moodle_service.clear_all_caches()
+                self.orchestrator.clear_detail_cache()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         self.refresh_btn.disabled = True
-        self.status_text.value    = "Đang cập nhật dữ liệu..."
-        self.loading_bar.visible  = True
+        status_text = (
+            "Dữ liệu cache · Đang cập nhật..."
+            if self.all_data
+            else "Đang cập nhật dữ liệu..."
+        )
+        self._set_sync_status("busy", status_text)
         self.empty_state.visible  = False
         self.error_state.visible  = False
         self.page.update()
@@ -1383,7 +1953,7 @@ class AppController:
                         item["_title_lower"] = str(item.get("title", "")).lower()
                     if "_course_lower" not in item:
                         item["_course_lower"] = str(item.get("course", "")).lower()
-                self.status_text.value = "Dữ liệu cache · Đang cập nhật..."
+                self._set_sync_status("busy", "Dữ liệu cache · Đang cập nhật...")
                 self._update_footer()
                 self.page.update()
 
@@ -1466,13 +2036,43 @@ class AppController:
             with self._data_lock:
                 self.all_data = data_copy
 
-            # Lưu cache offline
-            self._data_cache.save_server_snapshot(data_copy)
-            saved_snapshot = self._data_cache.load_snapshot()
-            self._last_successful_sync_at = (
-                parse_timestamp(saved_snapshot.last_successful_sync_at)
-                or time.time()
+            # Publish server truth before slower flash/native/notification work.
+            # This is especially important on older Android storage.
+            total_count = len(data_copy)
+            success_message = (
+                f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · "
+                f"{total_count} hoạt động"
             )
+            should_show_snackbar = not self._skeleton_visible
+            self._update_footer()
+
+            # Persist after the first useful frame and keep slow flash I/O off
+            # the Flet event loop.
+            snapshot_persisted = await asyncio.to_thread(
+                self._data_cache.save_server_snapshot, data_copy
+            )
+            if snapshot_persisted:
+                saved_snapshot = await asyncio.to_thread(
+                    self._data_cache.load_snapshot
+                )
+                self._last_successful_sync_at = (
+                    parse_timestamp(saved_snapshot.last_successful_sync_at)
+                    or time.time()
+                )
+                self._set_sync_status("success", success_message)
+                if should_show_snackbar:
+                    self._show_snackbar(
+                        f"Đã cập nhật {total_count} hoạt động",
+                        ft.Icons.SYNC_ROUNDED,
+                        C.ACCENT,
+                    )
+            else:
+                logger.error("Không thể commit snapshot activity mới")
+                self._set_sync_status(
+                    "error", "Lỗi lưu cập nhật · dữ liệu mới chưa được lưu"
+                )
+            # Commit state is user-visible before optional native/notification work.
+            self.page.update()
             native_schedule_result = None
             if self._android_background and self._android_background.available:
                 try:
@@ -1489,20 +2089,6 @@ class AppController:
                     )
                 except Exception as exc:
                     logger.warning("Android native snapshot import failed: %s", exc)
-            # P3: Tính tiến độ nộp bài - positive reinforcement
-            submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
-            total_count = len(data_copy)
-            submitted_count = sum(1 for x in data_copy if x.get("submission_status", "") in submitted_statuses)
-            progress_text = ""
-            if total_count > 0 and submitted_count > 0:
-                if submitted_count == total_count:
-                    progress_text = " · Đã nộp hết ✓"
-                else:
-                    progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
-            self.status_text.value = f"Cập nhật lúc {datetime.now().strftime('%H:%M')} · {total_count} hoạt động{progress_text}"
-            if not self._skeleton_visible:
-                self._show_snackbar(f"Đã cập nhật {total_count} hoạt động", ft.Icons.SYNC_ROUNDED, C.ACCENT)
-            
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
                 try:
@@ -1540,15 +2126,31 @@ class AppController:
                 # PERF-OPT: Grade check moved to background task to not block main data display
                 self._safe_run_task(self._check_grades_background)
 
-            self._update_footer()
-            
             self._prefetch_cancel_event.clear()
             with self._data_lock:
-                prefetch_copy = list(self.all_data)
-            self._safe_run_task(self._prefetch_details_async, prefetch_copy)
+                prefetch_copy = status_hydration_candidates(list(self.all_data))
+            if prefetch_copy:
+                self._safe_run_task(
+                    self._prefetch_details_async,
+                    prefetch_copy,
+                    self._prefetch_epoch,
+                )
+            else:
+                self._schedule_card_detail_warmup()
+            elapsed = time.time() - fetch_start_time
+            duration = (
+                "lt_250ms" if elapsed < 0.25
+                else "250ms_1s" if elapsed < 1
+                else "1s_5s" if elapsed < 5
+                else "gte_5s"
+            )
+            self._diag_breadcrumb(
+                "refresh", "succeeded", "moodle", duration=duration
+            )
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
         except Exception as exc:
+            self._diag_breadcrumb("refresh", "failed", "moodle")
             logger.exception(f"[Load] Lỗi: {exc}")
             try:
                 self._data_cache.record_failed_attempt(str(exc))
@@ -1563,23 +2165,104 @@ class AppController:
             if cached_data:
                 with self._data_lock:
                     self.all_data = cached_data
-                self.status_text.value = "Offline · Dữ liệu cache"
+                self._set_sync_status(
+                    "error", "Lỗi cập nhật · đang dùng dữ liệu đã lưu"
+                )
                 self.error_state.visible = False
                 self._update_footer()
             else:
                 self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
                 self.error_state.visible = True
-                self.status_text.value = "Lỗi kết nối server"
+                self._set_sync_status("error", "Lỗi kết nối server")
         finally:
-            self.loading_bar.visible  = False
             self.refresh_btn.disabled = False
             self._is_loading          = False
             self.page.update()
 
     async def _close_detail(self):
+        # asyncio.to_thread cannot cancel blocking HTTP. Invalidate its UI
+        # continuation so a late response cannot reopen/overwrite this view.
+        self._detail_request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
         from_calendar = getattr(self, '_detail_from_calendar', False)
         self._detail_from_calendar = False
         await self.view_manager.close_detail(from_calendar)
+
+    def _set_scroll_to_top_visible(self, visible: bool) -> bool:
+        """Update the floating affordance without rebuilding the card list."""
+        if visible == self._scroll_to_top_visible:
+            return False
+        self._scroll_to_top_visible = visible
+        self._scroll_to_top_button.opacity = 1.0 if visible else 0.0
+        self._scroll_to_top_button.offset = (
+            ft.Offset(0, 0) if visible else ft.Offset(0, 0.3)
+        )
+        self._scroll_to_top_button.scale = 1.0 if visible else 0.84
+        self._scroll_to_top_button.ignore_interactions = not visible
+        return True
+
+    def _on_dashboard_scroll(self, event) -> None:
+        """Track the exact dashboard position and toggle the overlay sparingly."""
+        try:
+            pixels = float(event.pixels)
+            minimum = float(getattr(event, "min_scroll_extent", 0.0))
+            out_of_range = bool(getattr(event, "out_of_range", False))
+        except (AttributeError, TypeError, ValueError):
+            return
+
+        offset = max(0.0, pixels - minimum)
+        if offset <= 5.0 or (out_of_range and pixels <= minimum):
+            offset = 0.0
+        self._dashboard_scroll_offset = offset
+        if getattr(self, "_scroll_to_top_in_progress", False):
+            # Native animateTo() also emits scroll notifications. The click
+            # path already hid the button; do not re-show/repaint it while the
+            # animation is moving through offsets above the show threshold.
+            return
+        if self._scroll_to_top_visible:
+            should_show = offset > _SCROLL_TO_TOP_HIDE_OFFSET
+        else:
+            should_show = offset > _SCROLL_TO_TOP_SHOW_OFFSET
+
+        # Hysteresis plus update-on-transition avoids a page update for every
+        # scroll event, which matters on low-end desktop and mobile devices.
+        if self._set_scroll_to_top_visible(should_show):
+            try:
+                self._scroll_to_top_button.update()
+            except RuntimeError:
+                logger.debug("Scroll button unmounted during visibility update")
+
+    async def _scroll_dashboard_to_top(self, _event=None) -> None:
+        """Fade locally first, then issue native scrolling in the same tick."""
+        if getattr(self, "_scroll_to_top_in_progress", False):
+            return
+        self._scroll_to_top_in_progress = True
+        previous_offset = self._dashboard_scroll_offset
+        try:
+            # Flet method invocations can occupy the client command queue until
+            # their animation completes. Publish the tiny control-only patch
+            # first so the fade cannot sit behind the 300 ms scroll method.
+            self._dashboard_scroll_offset = 0.0
+            self._set_scroll_to_top_visible(False)
+            self._scroll_to_top_button.update()
+            await self.cards_column.scroll_to(
+                offset=0,
+                duration=_SCROLL_TO_TOP_DURATION_MS,
+                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._dashboard_scroll_offset = previous_offset
+            self._set_scroll_to_top_visible(
+                previous_offset > _SCROLL_TO_TOP_HIDE_OFFSET
+            )
+            try:
+                self._scroll_to_top_button.update()
+            except RuntimeError:
+                logger.debug("Scroll button unmounted during recovery")
+            logger.debug("Scroll-to-top command failed", exc_info=True)
+        finally:
+            self._scroll_to_top_in_progress = False
 
     async def _toggle_calendar(self):
         """Toggle between dashboard list view and calendar view."""
@@ -1590,6 +2273,8 @@ class AppController:
 
     async def _show_calendar(self):
         """Show calendar view with current data."""
+        self._diag_screen("calendar")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="calendar")
         with self._data_lock:
             data_snapshot = list(self.all_data)
         self.view_manager.show_calendar(data_snapshot)
@@ -1597,8 +2282,14 @@ class AppController:
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
         await self.view_manager.close_calendar()
+        self._diag_screen("home")
 
     async def _show_settings(self):
+        if hasattr(self, "_diag_screen"):
+            self._diag_screen("settings")
+            self._diag_breadcrumb(
+                "navigation", "succeeded", "user", screen="settings"
+            )
         await self.view_manager.show_settings()
 
     async def _toggle_grades(self):
@@ -1608,27 +2299,59 @@ class AppController:
         else:
             await self._show_grades()
 
-    async def _show_grades(self):
-        """Show grade overview panel and fetch data."""
+    async def _show_grades(self, force_refresh: bool = False):
+        """Show grade overview panel and load academic transcript/radar data."""
+        self._diag_screen("grades")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="grades")
         self.view_manager.show_grades_loading()
 
-        # Fetch grades in background thread to avoid freezing UI
+        # Load academic radar data from daily cache / Portal in background thread
         try:
-            userid = self.orchestrator._get_userid() if hasattr(self.orchestrator, '_get_userid') else None
-            if userid:
-                courses_grades, grade_items = await asyncio.to_thread(
-                    self.orchestrator.moodle_service.fetch_all_grades, userid
-                )
-                self.view_manager.show_grades_data(courses_grades or [], grade_items)
+            from core.academic_radar import AcademicGradeService
+            service = getattr(self, "_academic_grade_service", None)
+            if service is None:
+                service = AcademicGradeService()
+                self._academic_grade_service = service
+
+            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
+            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+
+            semesters = await asyncio.to_thread(
+                service.load_academic_data,
+                username=username,
+                password=password,
+                force_refresh=force_refresh,
+            )
+            if semesters:
+                profiles = service.get_radar_profiles(semesters)
+                self.view_manager.show_academic_radar_data(semesters, profiles)
             else:
-                self.view_manager.show_grades_data([], {})
+                # Fallback to Moodle grades if Portal returned no semesters
+                userid = await asyncio.to_thread(
+                    getattr(self.orchestrator, "_get_userid", lambda: None)
+                )
+                if userid:
+                    courses_grades, grade_items = await asyncio.to_thread(
+                        self.orchestrator.moodle_service.fetch_all_grades, userid
+                    )
+                    moodle_semesters = service.create_semester_from_moodle_grades(
+                        courses_grades or [], grade_items or {}
+                    )
+                    if moodle_semesters:
+                        profiles = service.get_radar_profiles(moodle_semesters)
+                        self.view_manager.show_academic_radar_data(moodle_semesters, profiles)
+                    else:
+                        self.view_manager.show_grades_data(courses_grades or [], grade_items or {})
+                else:
+                    self.view_manager.show_academic_radar_data([], [])
         except Exception as e:
-            logger.error("Grade fetch failed: %s", e)
-            self.view_manager.show_grades_data([], {})
+            logger.error("Academic grades fetch failed: %s", e)
+            self.view_manager.show_academic_radar_data([], [])
 
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
         await self.view_manager.close_grades()
+        self._diag_screen("home")
 
     def _rebuild_colors(self):
         """Repaint ALL existing controls with current C values for live theme switching.
@@ -1637,141 +2360,51 @@ class AppController:
         we must explicitly reassign every color property when the theme changes.
         """
         from gui.core.theme import C as _C
+        current_palette = semantic_palette()
+        theme_roots = [self.dashboard]
+        window_header = getattr(self, "_window_header", None)
+        if window_header is not None:
+            theme_roots.append(window_header)
+        refresh_semantic_control_colors(
+            theme_roots, self._rendered_palette, current_palette
+        )
+        self._rendered_palette = current_palette
 
         # Page
         self.page.bgcolor = _C.BG
 
-        # Header
-        header_stack = self.dashboard.controls[0]  # ft.Stack
-        if len(header_stack.controls) > 0:
-            header_container = header_stack.controls[0]
-            header_container.bgcolor = _C.BG
-            # Walk header children: title text, version badge, status text
-            try:
-                header_col = header_container.content  # ft.Column
-                title_row = header_col.controls[0]  # ft.Row
-                left_row = title_row.controls[0]  # ft.Row with title + version
-                # "UTHelper" text
-                left_row.controls[0].color = _C.TEXT_PRIMARY
-                # Version badge container
-                ver_badge = left_row.controls[1]
-                ver_badge.content.color = _C.TEXT_SECONDARY
-                ver_badge.border = ft.Border.all(1, _C.BORDER)
-            except (IndexError, AttributeError):
-                pass
+        self._header_container.bgcolor = _C.BG
+        self._app_title.color = _C.TEXT_PRIMARY
+        self._version_text.color = _C.TEXT_SECONDARY
+        self._version_badge.border = ft.Border.all(1, _C.BORDER)
 
         # Status text
         self.status_text.color = _C.TEXT_SECONDARY
 
         # Filter area
-        filter_container = self.dashboard.controls[2]
-        filter_container.bgcolor = _C.BG
+        self._filter_container.bgcolor = _C.BG
         self.search_field.bgcolor = _C.SURFACE
         self.search_field.border_color = _C.BORDER
         self.search_field.focused_border_color = _C.ACCENT
         self.search_field.color = _C.TEXT_PRIMARY
 
-        # Filter popups and checkbuttons
-        try:
-            self.urgency_popup.content.bgcolor = _C.SURFACE
-            self.urgency_popup.content.border = ft.Border.all(1, _C.BORDER)
-            self.urgency_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
-
-            urgency_colors = {
-                "all": _C.TEXT_PRIMARY,
-                "critical": _C.CRITICAL,
-                "warning": _C.WARNING,
-                "safe": _C.SAFE,
-                "overdue": _C.CRITICAL
-            }
-            self.urgency_popup.content.content.controls[0].color = urgency_colors.get(self.active_urgency, _C.TEXT_PRIMARY)
-
-            # Urgency Popup Items
-            self.urgency_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
-            self.urgency_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
-
-            # critical
-            self.urgency_popup.items[1].content.controls[0].color = _C.CRITICAL
-            self.urgency_popup.items[1].content.controls[1].color = _C.CRITICAL
-            self.urgency_popup.items[1].content.controls[3].color = _C.CRITICAL
-
-            # warning
-            self.urgency_popup.items[2].content.controls[0].color = _C.WARNING
-            self.urgency_popup.items[2].content.controls[1].color = _C.WARNING
-            self.urgency_popup.items[2].content.controls[3].color = _C.WARNING
-
-            # safe
-            self.urgency_popup.items[3].content.controls[0].color = _C.SAFE
-            self.urgency_popup.items[3].content.controls[1].color = _C.SAFE
-            self.urgency_popup.items[3].content.controls[3].color = _C.SAFE
-
-            # overdue
-            self.urgency_popup.items[4].content.controls[0].color = _C.CRITICAL
-            self.urgency_popup.items[4].content.controls[1].color = _C.CRITICAL
-            self.urgency_popup.items[4].content.controls[3].color = _C.CRITICAL
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-        try:
-            from gui.core.theme import _TYPE_COLORS
-            self.type_popup.content.bgcolor = _C.SURFACE
-            self.type_popup.content.border = ft.Border.all(1, _C.BORDER)
-            self.type_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
-
-            type_colors = {
-                "all": _C.TEXT_PRIMARY,
-                "quiz": _TYPE_COLORS["quiz"],
-                "assignment": _TYPE_COLORS["assignment"],
-                "attendance": _TYPE_COLORS["attendance"],
-                "open": _TYPE_COLORS["open"],
-                "other": _C.TEXT_SECONDARY
-            }
-            self.type_popup.content.content.controls[0].color = type_colors.get(self.active_type, _C.TEXT_PRIMARY)
-
-            # Type Popup Items
-            self.type_popup.items[0].content.controls[0].color = _C.TEXT_SECONDARY
-            self.type_popup.items[0].content.controls[1].color = _C.TEXT_SECONDARY
-
-            self.type_popup.items[1].content.controls[0].color = _TYPE_COLORS["quiz"]
-            self.type_popup.items[1].content.controls[1].color = _TYPE_COLORS["quiz"]
-            self.type_popup.items[1].content.controls[3].color = _TYPE_COLORS["quiz"]
-
-            self.type_popup.items[2].content.controls[0].color = _TYPE_COLORS["assignment"]
-            self.type_popup.items[2].content.controls[1].color = _TYPE_COLORS["assignment"]
-            self.type_popup.items[2].content.controls[3].color = _TYPE_COLORS["assignment"]
-
-            self.type_popup.items[3].content.controls[0].color = _TYPE_COLORS["attendance"]
-            self.type_popup.items[3].content.controls[1].color = _TYPE_COLORS["attendance"]
-            self.type_popup.items[3].content.controls[3].color = _TYPE_COLORS["attendance"]
-
-            self.type_popup.items[4].content.controls[0].color = _TYPE_COLORS["open"]
-            self.type_popup.items[4].content.controls[1].color = _TYPE_COLORS["open"]
-            self.type_popup.items[4].content.controls[3].color = _TYPE_COLORS["open"]
-
-            self.type_popup.items[5].content.controls[0].color = _C.TEXT_SECONDARY
-            self.type_popup.items[5].content.controls[1].color = _C.TEXT_SECONDARY
-            self.type_popup.items[5].content.controls[3].color = _C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-        try:
-            self.course_btn_label.color = _C.TEXT_PRIMARY
-            self.course_popup.content.bgcolor = _C.SURFACE
-            self.course_popup.content.border = ft.Border.all(1, _C.BORDER)
-            self.course_popup.content.content.controls[1].color = _C.TEXT_SECONDARY
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-        try:
-            self._overdue_cb.label_style.color = _C.TEXT_SECONDARY
-            self._overdue_cb.check_color = _C.BG
-            self._overdue_cb.active_color = _C.CRITICAL
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        # Adaptive filters rebuild from their option models instead of relying
+        # on brittle control-tree indexes.
+        self.urgency_filter_menu.refresh_theme(
+            self._urgency_filter_options(
+                {option.key: option.count or 0 for option in self.urgency_filter_menu.options}
+            )
+        )
+        self.type_filter_menu.refresh_theme(
+            self._type_filter_options(
+                {option.key: option.count or 0 for option in self.type_filter_menu.options}
+            )
+        )
+        self.course_filter_menu.refresh_theme(
+            self._course_filter_options(
+                {option.key: option.count or 0 for option in self.course_filter_menu.options}
+            )
+        )
 
         # Empty state
         if hasattr(self, '_empty_icon'):
@@ -1790,12 +2423,11 @@ class AppController:
             self.error_text.color = _C.BORDER
         if hasattr(self, '_error_retry_btn'):
             self._error_retry_btn.bgcolor = _C.ACCENT
-            self._error_retry_btn.color = _C.TEXT_PRIMARY
+            self._error_retry_btn.color = _C.ON_ACCENT
 
         # Footer
-        footer = self.dashboard.controls[-1]
-        footer.bgcolor = _C.SURFACE
-        footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
+        self._footer.bgcolor = _C.SURFACE
+        self._footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
         # Footer counter colors are set dynamically by _refresh_counts,
         # but update the base colors here too
         self.footer_critical.color = _C.CRITICAL if self.footer_critical.value else _C.BORDER
@@ -1803,13 +2435,7 @@ class AppController:
         self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
         self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
 
-        # Content area bgcolor
-        try:
-            content_area = self.dashboard.controls[3]
-            content_area.bgcolor = _C.BG
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        self._content_area.bgcolor = _C.BG
 
         # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):
@@ -1831,9 +2457,16 @@ class AppController:
         for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
 
-        # Loading bar
-        self.loading_bar.color = _C.ACCENT
-        self.loading_bar.bgcolor = _C.BORDER
+        self._sync_status.refresh_theme()
+
+        # Update banner is a semantic elevated surface, not a fixed brown card.
+        self._update_banner.bgcolor = _C.SURFACE_ELEVATED
+        self._update_banner.border = ft.Border.all(1, _C.UPDATE)
+        self._update_icon.color = _C.UPDATE
+        self._update_text.color = _C.UPDATE
+        self._update_progress.color = _C.UPDATE
+        self._update_progress.bgcolor = _C.BORDER
+        self._update_btn.style = ft.ButtonStyle(color=_C.UPDATE)
 
         # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
@@ -1883,6 +2516,7 @@ class AppController:
         
         # Toggle visibility - no full rebuild needed (fixes white flash)
         await self.view_manager.close_settings()
+        self._diag_screen("home")
         
         self._update_footer()
         
@@ -1902,15 +2536,19 @@ class AppController:
             bgcolor=C.SURFACE,
             duration=2500,
         )
-        try:
-            self.page.show_dialog(sb)
-        except (AttributeError, TypeError):
-            # Fallback for older Flet
-            overlay = getattr(self.page, "overlay", None)
-            if overlay is not None:
-                overlay.append(sb)
-                sb.open = True
+        overlay = getattr(self.page, "overlay", None)
+        if overlay is not None:
+            overlay.append(sb)
+            sb.open = True
+            try:
                 self.page.update()
+            except Exception:
+                pass
+        else:
+            try:
+                self.page.show_dialog(sb)
+            except (AttributeError, TypeError):
+                pass
 
     def _test_notification_base(self, mock_type="critical"):
         import random
@@ -2000,10 +2638,12 @@ class AppController:
             self._update_candidate = candidate
         check_button = getattr(self.settings_view, "_check_update_btn", None)
         if event.kind is UpdateEventKind.CHECKING:
+            self._diag_breadcrumb("update_check", "started", "github")
             if check_button is not None:
                 check_button.disabled = True
                 check_button.content = "Đang kiểm tra..."
         elif event.kind is UpdateEventKind.UP_TO_DATE:
+            self._diag_breadcrumb("update_check", "succeeded", "github")
             if check_button is not None:
                 check_button.disabled = False
                 check_button.content = "Kiểm tra ngay"
@@ -2015,12 +2655,13 @@ class AppController:
                 )
             self._manual_update_check_requested = False
         elif event.kind is UpdateEventKind.UPDATE_AVAILABLE and candidate is not None:
+            self._diag_breadcrumb("update_check", "succeeded", "github")
             self._manual_update_check_requested = False
             if check_button is not None:
                 check_button.disabled = False
                 check_button.content = "Kiểm tra ngay"
             self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
-            self._update_icon.color = "#FCD34D"
+            self._update_icon.color = C.UPDATE
             self._update_text.value = (
                 f"Phiên bản mới v{candidate.manifest.release_version} đã sẵn sàng!"
             )
@@ -2031,6 +2672,8 @@ class AppController:
             self._update_progress.visible = False
             self._update_banner.visible = True
         elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
+            if event.kind is UpdateEventKind.DOWNLOADING:
+                self._diag_breadcrumb("update_download", "started", "github")
             if candidate is not None:
                 self._update_text.value = (
                     f"Đang tải và xác minh v{candidate.manifest.release_version}..."
@@ -2043,39 +2686,61 @@ class AppController:
             UpdateEventKind.READY_TO_INSTALL,
             UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
         }:
+            self._diag_breadcrumb("update_download", "succeeded", "github")
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
             self._show_update_confirmation()
         elif event.kind is UpdateEventKind.FAILED:
-            should_notify = (
-                self._manual_update_check_requested or self._update_banner.visible
-            )
-            self._manual_update_check_requested = False
-            if check_button is not None:
-                check_button.disabled = False
-                check_button.content = "Kiểm tra ngay"
-            self._update_btn.disabled = False
-            self._update_btn.content = "Thử lại"
-            self._update_progress.visible = False
-            failed_candidate = candidate or getattr(self, "_update_candidate", None)
-            if failed_candidate is not None:
+            if candidate is None:
+                self._diag_breadcrumb("update_check", "failed", "github")
+                should_notify = self._manual_update_check_requested
+                self._manual_update_check_requested = False
+                if check_button is not None:
+                    check_button.disabled = False
+                    check_button.content = "Kiểm tra ngay"
+                if should_notify:
+                    self._show_snackbar(
+                        "Không thể kiểm tra cập nhật. "
+                        "Hãy kiểm tra mạng và thử lại.",
+                        ft.Icons.ERROR_OUTLINE_ROUNDED,
+                        C.CRITICAL,
+                    )
+            else:
+                self._diag_breadcrumb("update_download", "failed", "github")
+                should_notify = self._update_banner.visible
+                self._manual_update_check_requested = False
+                if check_button is not None:
+                    check_button.disabled = False
+                    check_button.content = "Kiểm tra ngay"
+                self._update_btn.disabled = False
+                self._update_btn.content = "Thử lại"
+                self._update_progress.visible = False
                 self._update_text.value = (
                     "Không thể tải hoặc xác minh "
-                    f"v{failed_candidate.manifest.release_version}. Hãy thử lại."
+                    f"v{candidate.manifest.release_version}. Hãy thử lại."
                 )
-            if should_notify:
-                self._show_snackbar(
-                    "Không thể tải hoặc xác minh bản cập nhật",
-                    ft.Icons.ERROR_OUTLINE_ROUNDED,
-                    C.CRITICAL,
-                )
+                if should_notify:
+                    self._show_snackbar(
+                        "Không thể tải hoặc xác minh bản cập nhật",
+                        ft.Icons.ERROR_OUTLINE_ROUNDED,
+                        C.CRITICAL,
+                    )
         elif event.kind is UpdateEventKind.CANCELLED:
+            self._diag_breadcrumb("update_download", "cancelled", "user")
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
-            self._update_banner.visible = False
+            if platform_utils.IS_ANDROID:
+                self._diag_breadcrumb("update_install", "started", "android")
+                self._update_text.value = "Đang mở trình cài đặt Android..."
+                self._update_btn.content = "Đang mở..."
+                self._update_btn.disabled = True
+                self._update_banner.visible = True
+            else:
+                self._diag_breadcrumb("update_install", "succeeded", "os")
+                self._update_banner.visible = False
         self.page.update()
         if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
             await self.page.window.destroy()
@@ -2193,6 +2858,7 @@ class AppController:
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
+        new_status = normalize_submission_status(new_status)
         updated = False
         import time
         with self._data_lock:
@@ -2237,35 +2903,57 @@ class AppController:
             except Exception:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-            
-            # 3. Làm mới UI của dashboard (cập nhật card status badge, đếm số bài đã nộp...)
             self._update_footer()
 
     def _show_detail(self, data: dict):
+        self._dismiss_desktop_filter_menu()
         self._safe_run_task(self._show_detail_async, data)
 
     async def _show_detail_async(self, data: dict):
+        request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
+        self._detail_request_epoch = request_epoch
+
+        def request_is_current() -> bool:
+            return request_epoch == getattr(self, "_detail_request_epoch", 0)
+
         # Ghi nhận nếu màn hình chi tiết được mở từ Lịch để phục vụ quay lại (back-navigation)
         self._detail_from_calendar = self.calendar_view.visible
+        self._diag_screen("detail")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="detail")
         self.view_manager.show_detail_loading(data)
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
+            if not request_is_current():
+                return
             if full_data and "details" in full_data:
                 desc_html = full_data["details"].get("description_html", "")
                 if desc_html:
                     from gui.core.utils import pre_cache_description_images
-                    full_data["details"]["description_html"] = pre_cache_description_images(desc_html)
+                    cached_html = await asyncio.to_thread(
+                        pre_cache_description_images,
+                        desc_html,
+                    )
+                    if not request_is_current():
+                        return
+                    # Cached detail dictionaries are shared with dashboard
+                    # hydration. Prepare the view without mutating that cache.
+                    full_data = dict(full_data)
+                    full_data["details"] = dict(full_data["details"])
+                    full_data["details"]["description_html"] = cached_html
+            if not request_is_current():
+                return
             self.view_manager.show_detail_data(full_data)
         except Exception:
-            self.view_manager.show_detail_error(data)
+            logger.exception("Không thể tải chi tiết activity")
+            if request_is_current():
+                self.view_manager.show_detail_error(data)
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
-        # Tự động tạo bóng đổ nhấp nháy (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
+        # Tự động tạo bóng đổ nhấp nháy mờ nhẹ (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
         crit_hex = C.CRITICAL.lstrip("#")
-        alpha = "40" if pulse_high else "15"
-        blur = 16 if pulse_high else 8
-        spread = 1.5 if pulse_high else 0.5
+        alpha = "45" if pulse_high else "12"
+        blur = 16 if pulse_high else 6
+        spread = 1.2 if pulse_high else 0.2
         shadow = [ft.BoxShadow(
             spread_radius=spread,
             blur_radius=blur,
@@ -2278,36 +2966,64 @@ class AppController:
                 card.shadow = shadow
                 changed = True
         if changed:
-            self.page.update()
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+    async def _pulse_critical_cards_loop_async(self):
+        """Smoothly pulses red glow shadow for critical deadline cards."""
+        pulse_state = False
+        while self._page_alive.is_set():
+            await asyncio.sleep(1.2)
+            if not self._page_alive.is_set():
+                break
+            if not getattr(self, "dashboard", None) or not self.dashboard.visible:
+                continue
+            with self._cards_lock:
+                cards_snapshot = list(self.active_cards or [])
+            has_critical = any(getattr(c, "_is_critical_active", False) for c in cards_snapshot)
+            if not has_critical:
+                continue
+            pulse_state = not pulse_state
+            self._pulse_cards_once(cards_snapshot, pulse_state)
 
     def _countdown_cards_once(self, cards_snapshot: list):
         if not cards_snapshot:
             return
         changed = False
         for card in cards_snapshot:
-            if card.update_countdown():
+            update_countdown = getattr(card, "update_countdown", None)
+            if callable(update_countdown) and update_countdown():
                 changed = True
         if changed:
             self.page.update()
 
-    async def _pulse_loop_async(self):
-        pulse_high = True
-        while self._page_alive.is_set():
-            await asyncio.sleep(1.5)
-            if not self._page_alive.is_set(): break
-            # Skip pulse when dashboard is not visible (calendar/detail/settings open)
-            if not self.dashboard.visible:
-                continue
-            pulse_high = not pulse_high
-            try:
-                if not self.active_cards:
-                    continue
-                with self._cards_lock:
-                    cards_snapshot = list(self.active_cards)
-                self._pulse_cards_once(cards_snapshot, pulse_high)
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+    def _refresh_visible_countdown_views(self, changed: bool = False):
+        if self.detail_view.visible:
+            if self.detail_view.refresh_countdown():
+                self.page.update()
+            with self._cards_lock:
+                cards_snapshot = list(self.active_cards)
+            for card in cards_snapshot:
+                update_countdown = getattr(card, "update_countdown", None)
+                if callable(update_countdown):
+                    update_countdown()
+        elif self.calendar_view.visible:
+            with self._data_lock:
+                calendar_snapshot = list(self.all_data)
+            self.calendar_view.update_data(calendar_snapshot)
+            self.page.update()
+        elif self.dashboard.visible:
+            schedule_changed = self._today_schedule_component.refresh_time_state()
+            if changed:
+                self._render_cards_only()
+                return
+            with self._cards_lock:
+                cards_snapshot = list(self.active_cards)
+            self._countdown_cards_once(cards_snapshot)
+            if schedule_changed:
+                self.page.update()
 
     async def _countdown_loop_async(self):
         while self._page_alive.is_set():
@@ -2317,33 +3033,13 @@ class AppController:
                 for c in (self.active_cards or [])
             )
             interval = 15 if has_critical else 60
-            slept = 0
-            while slept < interval and self._page_alive.is_set():
-                await asyncio.sleep(1)
-                slept += 1
+            await asyncio.sleep(interval)
             if not self._page_alive.is_set(): break
             try:
                 changed = self._refresh_activity_time_state()
-                if self.dashboard.visible:
-                    schedule_changed = self._today_schedule_component.refresh_time_state()
-                    if changed:
-                        self._render_cards_only()
-                        continue
-                    with self._cards_lock:
-                        cards_snapshot = list(self.active_cards)
-                    self._countdown_cards_once(cards_snapshot)
-                    if schedule_changed:
-                        self.page.update()
-                elif self.calendar_view.visible:
-                    with self._data_lock:
-                        calendar_snapshot = list(self.all_data)
-                    self.calendar_view.update_data(calendar_snapshot)
-                    self.page.update()
-                elif self.detail_view.visible and self.detail_view.refresh_countdown():
-                    self.page.update()
+                self._refresh_visible_countdown_views(changed)
             except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+                logger.warning("Countdown refresh failed", exc_info=True)
 
     def _on_disconnect(self, e):
         view_manager = getattr(self, "view_manager", None)
@@ -2359,7 +3055,11 @@ class AppController:
         if tray is not None:
             tray.close(timeout_seconds=1.0)
         self._page_alive.clear()
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._prefetch_cancel_event.set()
+        detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
+        if detail_warm_cancel is not None:
+            detail_warm_cancel.set()
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
             coordinator.close()
