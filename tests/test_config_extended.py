@@ -21,11 +21,11 @@ def test_activation_and_crash_reporting_defaults_round_trip_through_json():
 
     settings = Settings()
     assert settings.AUTO_UPDATE_ENABLED is True
-    assert settings.CRASH_REPORTING_CONSENT == "not_asked"
+    assert settings.CRASH_REPORTING_CONSENT == "enabled"
 
     restored = Settings.model_validate_json(settings.model_dump_json())
     assert restored.AUTO_UPDATE_ENABLED is True
-    assert restored.CRASH_REPORTING_CONSENT == "not_asked"
+    assert restored.CRASH_REPORTING_CONSENT == "enabled"
 
 
 @pytest.mark.parametrize("consent", ["not_asked", "enabled", "disabled"])

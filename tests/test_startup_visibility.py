@@ -99,11 +99,18 @@ def test_startup_screen_publishes_compact_window_with_logo_and_animation():
     assert (page.window.width, page.window.height) == (420, 720)
     assert (page.window.min_width, page.window.max_width) == (420, 420)
     assert page.window.resizable is False
+    assert page.window.maximizable is False
+    assert page.window.minimizable is True
+    assert page.window.title_bar_hidden is True
+    assert page.window.title_bar_buttons_hidden is True
     assert page.window.icon == "icon.ico"
     assert page.window.visible is True
     assert page.title == "UTHelper"
     assert page.update_calls == 1
     controls = list(walk(page.controls[0]))
+    drag_areas = [control for control in controls if isinstance(control, ft.WindowDragArea)]
+    assert len(drag_areas) == 1
+    assert drag_areas[0].maximizable is False
     assert any(isinstance(control, ft.Image) and control.src == "icon.png" for control in controls)
     assert any(isinstance(control, ft.ProgressRing) for control in controls)
     assert any(
@@ -260,6 +267,10 @@ def test_activation_broker_is_ready_before_initial_window_state_is_published(
     controller._init_window()
 
     assert page.window.visible is expected_visible
+    assert page.window.maximizable is False
+    assert page.window.minimizable is True
+    assert page.window.title_bar_hidden is True
+    assert page.window.title_bar_buttons_hidden is True
     assert page.scheduled == (
         [controller.window_activator.show] if force_visible else []
     )

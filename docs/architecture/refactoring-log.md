@@ -55,6 +55,21 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-07-01 | workspace hiện tại | Phase 1 hoàn tất | Bổ sung DTO cho `SubmissionWorkflow`, inject workflow factory từ `AppController`, bỏ fallback tự tạo implementation trong `DetailView` | Đạt 311 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 2/3 tiếp tục | Tách `RefreshCoordinator` khỏi `AppController`; chuyển một phần đọc Moodle trong `DataOrchestrator` qua `MoodleService`; thêm tests coordinator và boundary service | Đạt 317 passed, 22 skipped; `ruff check src tests` pass |
 | 2026-07-01 | workspace hiện tại | Phase 2/3 hoàn tất | Hoàn thiện refresh coordinator cho dataset/status/post-refresh scheduling; chuyển `DataOrchestrator`, `GradeMonitor`, `SubmissionWorkflow` qua `MoodleService`; khóa architecture boundary raw WS | Đạt 322 passed, 22 skipped; `ruff check src tests` pass |
+| 2026-08-24 | `develop` | Bugfix Desktop Filter UI | Fix ViewManager làm mất các overlay layers (filter popup & dismiss) trên main stack sau khi chuyển view/mở detail card; dismiss popup đang mở khi điều hướng | Đạt 1547 passed, 25 skipped |
+| 2026-08-24 | `develop` | Bugfix Schedule Dialog Close | Fix `TodaySchedulePanel.close_surface` đóng trực tiếp instance dialog thay vì phụ thuộc `pop_dialog()` khi có SnackBar; chuyển SnackBar sang `page.overlay` để tránh chiếm slot modal dialog stack | Đạt 1549 passed, 25 skipped |
+| 2026-08-24 | `develop` | Feature Academic Radar | Triển khai hệ thống phân tích kết quả học tập Academic Radar 6 chỉ số (Tổng Lực, Nền Tảng, Bứt Phá, Giữ Nhịp, Về Đích, Trụ Vững), bộ chuẩn hóa dữ liệu Portal/Moodle, chính sách cache 1 lần/ngày, component Radar Canvas, Metric Detail Modal và thay thế toàn diện tab Bảng điểm | Đạt 1564 passed, 25 skipped |
+| 2026-08-24 | `develop` | Redesign Radar Gradient | Tái thiết kế trực quan Academic Radar: gradient đa sắc mềm mại (12%-27% opacity, tông san hô/hổ phách/ngọc lục bảo tinh tế chống hiệu ứng heat map), viền polygon hào quang kép hài hòa theo tông điểm chủ đạo | Đạt 1564 passed, 25 skipped |
+| 2026-08-24 | `develop` | Polish UI/UX Tab Bảng Điểm | Chuẩn hóa toàn diện visual language, spacing (4/8/12/16/20/24), hierarchy và wording: hiệu ứng hover tròn bo cong mượt mà cho nhãn node, kéo nhãn radar lại gần các node (112%-114%) chống clipping ở Giữ Nhịp, summary thẻ Nổi bật / Cần củng cố rõ ràng, câu insight khách quan phi phán xét, KPI đồng đều baseline, course list căn cột QT/Thi/TK thẳng hàng, modal chi tiết dạng stat-detail sheet loại bỏ double-negative "Hụt -3.3" -> "Giảm 3.3", và indicator độ đầy đủ dữ liệu trực quan | Đạt 1564 passed, 25 skipped |
+| 2026-08-24 | `develop` | Sort Overdue Recent First | Khi lọc mức độ "Quá hạn", sắp xếp các thẻ hoạt động theo thứ tự hạn nộp từ ngày gần hiện tại nhất đến xa dần (thay vì xa tới gần) | Đạt 1565 passed, 25 skipped |
+| 2026-08-24 | `develop` | Redesign Settings 2-Column Grid | Tái thiết kế toàn bộ màn Cài đặt (SettingsView) từ danh sách accordion sang mô hình Settings Hub 2-column grid 8 danh mục và In-window Detail View điều hướng mượt mà, gộp các mục cấu hình thông báo/kênh gửi/mốc nhắc toàn diện, hỗ trợ DND toggle động, theme live refresh, sticky save footer per-detail và bảo toàn 100% snapshot/persistence/autostart contract | Đạt 1570 passed, 25 skipped |
+| 2026-08-24 | `develop` | Polish Settings Hub & Details UX | Polish toàn diện hệ thống Settings Hub & Detail Pages: Triển khai dirty state machine cho nút Lưu thay đổi ("Đã lưu" disabled khi sạch, "Lưu thay đổi" khi dirty, "Đang lưu..." khi saving), ẩn sticky footer ở trang Tài khoản, chuẩn hóa profile "Theo sát" (*Không bỏ lỡ gì*), 2-column touch-friendly cho loại hoạt động, hàng ngang cho kênh gửi (Gmail/Discord/Telegram), validation ràng buộc ngưỡng "Sắp tới > Cấp bách" chống lưu sai, stepper 1-10 luồng tải, ẩn/thụt lề tùy chọn khởi động con, và chuẩn hóa wording trợ giúp | Đạt 1575 passed, 25 skipped |
+| 2026-08-24 | `develop` | Refine Hub Header & Cards UI/UX | Căn giữa tiêu đề "Cài đặt", chuyển phiên bản UTHelper xuống footer dưới cùng của Hub, đổi icon Cảnh báo sang ACCESS_TIME_ROUNDED chống trùng chuông thông báo, xóa text description trên các thẻ Hub, tăng kích thước icon container (42x42, border_radius 12), và căn chính giữa cả icon lẫn tiêu đề của từng thẻ cài đặt | Đạt 1575 passed, 25 skipped |
+| 2026-08-24 | `develop` | Fix Milestone Chip Text Contrast | Sửa màu text và checkmark của các chip mốc nhắc deadline (1 tuần, 3 ngày, 1 ngày,...) thành màu ON_ACCENT (trắng) khi được chọn để đảm bảo tương phản cao, rõ ràng, không bị dìm màu trên nền xanh accent | Đạt 1575 passed, 25 skipped |
+| 2026-08-24 | `develop` | Fix Scroll Position Reset & Button Hiding | Giữ Dashboard/Calendar mounted bên dưới DetailView trong main stack để bảo toàn 100% vị trí scroll native của Flutter khi mở/đóng thẻ bài tập; đồng thời sửa lỗi nút cuộn lên nhanh (scroll-to-top button) không ẩn khi về top bằng cách hoàn thiện nhận diện biên trên (top boundary/out of range) và tối ưu độ nhạy hysteresis | Đạt 1575 passed, 25 skipped |
+| 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
+| 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
+| 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+
 
 ---
 
@@ -1404,3 +1419,537 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - This is a production hotfix branched from `main`. The same `hotfix/2.3.1`
   branch must merge into both `main` and `develop` before the protected main
   result is tagged.
+
+## Cross-platform interaction performance (2026-08-11)
+
+- Navigation now mounts only the active Flet view instead of keeping Dashboard,
+  Detail, Calendar, Grades, and Settings in the Flutter tree simultaneously.
+- Collapsed Settings groups lazily attach their body controls. The measured
+  Settings tree dropped from 43.3 KiB / 415 controls to 8.6 KiB / 74 controls;
+  the active-host navigation patch is 8.3 KiB on the Windows 11 benchmark host.
+- Python-driven decorative pulse/shimmer repaint loops were removed, countdown
+  scheduling no longer wakes every second, and mobile detail prefetch is capped
+  at two workers to protect old Android CPUs.
+- Fresh Moodle data is rendered before cache/native notification follow-up;
+  cache persistence now runs off the Flet event loop. The fixed startup-frame
+  delay was reduced from 600 ms to 50 ms.
+- Added `scripts/measure_ui_performance.py` and
+  `docs/testing/cross-platform-performance.md` with budgets and the required
+  Windows 10/11 plus weak/strong physical Android validation matrix.
+- Verification: **1327 tests passed with 25 skipped** in the project virtualenv;
+  repository-wide Ruff, the UI protocol budget script, and `git diff --check`
+  passed. A local two-ABI APK build reached Gradle `assembleRelease` but did not
+  complete within the 10-minute bound; all owned Gradle/Python processes and
+  the ignored 0.13 GB worktree build directory were removed. Physical Android
+  frame-time validation remains required because no ADB/device is available on
+  this host.
+
+## Bounded Android release build resources (2026-08-12)
+
+- A canonical local `scripts/build_android.ps1 -Target apk` retry reproduced a
+  Gradle daemon crash on the 16 GB Windows host. The generated Flet template
+  reserved an 8 GiB Gradle heap, 4 GiB metaspace, and a separate 8 GiB Kotlin
+  daemon; the JVM crash report showed only 582 MiB physical RAM and 1.49 GiB
+  pagefile remaining when a 1.56 GiB native allocation failed.
+- The Android build entry point now rewrites generated `gradle.properties`
+  before both retry and final packaging: Gradle heap is capped at 3 GiB,
+  metaspace at 1 GiB, workers at two, Kotlin compilation runs in-process, and
+  incremental caches remain disabled for the C:/E: cross-drive build.
+- The complete two-pass native-patched build then exited 0. The final
+  `build/apk/UTHelper.apk` is 163,635,530 bytes, has a valid ZIP and APK v2
+  signature, includes `arm64-v8a`, `armeabi-v7a`, and `x86_64`, declares
+  package `com.uthelper.uthelper`, version `2.3.1`, min/target SDK 24/36, an app
+  icon resource, and all required notification/background-sync receivers.
+- This local smoke artifact uses the Android debug certificate and build code
+  1; production signing and canonical build code remain the release workflow's
+  responsibility. No install/runtime test was performed because ADB reported
+  no connected Android device.
+
+## Visible Windows autostart defaults (2026-08-12)
+
+- New installations now default to `START_WITH_WINDOWS=true` and
+  `START_MINIMIZED=false`, so a normal Windows sign-in launches UTHelper with
+  its compact branded window visible instead of silently placing it in the
+  tray.
+- The Windows autostart backend is applied once on first launch and the result
+  is durably marked. Existing installations with an explicit enabled/disabled
+  preference are migrated as already handled, so an upgrade cannot re-enable a
+  choice the user previously turned off. Transient unavailable/error states
+  remain unmarked and are retried on a later launch.
+- `main.py` now loads the persisted start-minimized preference before deciding
+  whether to publish the startup screen. Explicit users who still prefer tray
+  startup retain that behavior.
+
+## Repository README information architecture (2026-08-12)
+
+- Reviewed the current top-level documentation against the README structure of
+  mature repositories including VS Code, Kubernetes, Rust, and Flask. Their
+  root documents use plain headings, establish project scope early, provide a
+  short development path, and delegate operating detail to maintained guides.
+- Preserved the UTHelper logo, title, workflow badges, and metadata badge rows.
+  Replaced only the colloquial emoji tagline in the hero, then removed emoji
+  decoration from headings, tables, CI descriptions, warnings, and the footer.
+- Reorganized the body around product scope, supported platform status, source
+  installation, contributor checks, package entry points, architecture
+  boundaries, security, documentation, and licensing. Removed the empty
+  screenshot placeholder, stale checklist roadmap, duplicated release runbook,
+  and performance/feature claims that lacked stable evidence.
+- Corrected the license description from open source to source-available under
+  PolyForm Noncommercial, and made the independent, unofficial relationship to
+  UTH explicit. All local README links resolve to tracked repository content.
+
+## Activity status hydration and badge consistency (2026-08-12)
+
+- Root-cause analysis of intermittently missing `Chưa nộp` / `Chưa làm`
+  badges found that the authoritative activity feed was persisted before
+  background detail hydration. Enriched status existed only in RAM, so the
+  next cold start restored mostly `unknown` states. A real account-scoped cache
+  contained 34 activities but only three known statuses, matching the mixed
+  cards reported in the UI.
+- Submission and attempt states now cross the data/UI boundary in one canonical
+  vocabulary. Known Moodle English/Vietnamese aliases are normalized while an
+  unavailable or future server state remains `unknown`; the app never invents
+  a negative completion state from an API failure. The old substring fallback
+  that could misread `Not submitted` as `submitted` was removed.
+- Completed prefetch results are merged through the refresh coordinator and
+  saved as a local cache update without moving the authoritative server-sync
+  cursor. Cold starts immediately hydrate incomplete cached cards in the
+  background. Cancellation and generation guards prevent an older prefetch
+  from overwriting a newer refresh.
+- Activity-card reuse now fingerprints all visible status inputs, including
+  `details.status_data`, instead of only ID/deadline/top-level status. Enriched
+  details therefore repaint the badge without disabling card recycling.
+- A read-only live sweep hydrated all 34 current activities: five resolved to
+  `submitted`, 28 to `not_submitted`, and one future assignment correctly
+  remained `unknown` because Moodle exposed no submission state. Its opening
+  time still produced an explicit `Chưa mở`/`Sắp mở` badge, so all 34 cards had
+  a truthful visible state without inventing completion data. Focused
+  lifecycle, persistence, alias, filtering, and race coverage passes **169
+  tests**. The available-environment suite passes **1325
+  tests with 25 skipped**; repository-wide Ruff, bytecode compilation, and
+  `git diff --check` pass. The full shell baseline retains seven unrelated
+  failures because the optional iOS bridge and diagnostics SDK are not
+  installed.
+
+## Adaptive dashboard filter menus (2026-08-12)
+
+- Replaced three separately assembled dashboard popup menus with one reusable
+  `AdaptiveFilterMenu` and immutable `FilterMenuOption` model. Urgency,
+  activity-type, and course filters now share selection, count, ellipsis,
+  accessibility, motion, and theme-refresh behavior while filtering policy
+  remains in `AppController`/`FilterService`.
+- Windows keeps an anchored `PopupMenuButton` with checked 48-pixel rows,
+  bounded geometry, hover/ink feedback, explicit semantics, a 180 ms native
+  open transition, and an animated disclosure arrow. Android/iOS render the
+  same model in a safe-area, draggable, scrollable `BottomSheet` with 52-pixel
+  list rows and selected-row tinting.
+- Dynamic course options fall back to `all` if a course disappears. Structural
+  option signatures skip unchanged rebuilds; a 21-option benchmark measured
+  about 0.002 ms for an unchanged update, 1.13 ms for a changed desktop update,
+  and 0.021 ms for a changed mobile-model update on the Windows test host.
+- The design and research decision log is maintained in
+  `docs/archive/designs/2026-08-12-adaptive-filter-menu-design.md`. Focused
+  component/controller/filter/race coverage passes **112 tests**; the
+  available-environment suite passes **1336 tests with 25 skipped**. Desktop
+  popup and mobile-sheet control trees both serialize through a real Flet
+  session. Repository Ruff, bytecode compilation, UI protocol budgets, and
+  `git diff --check` pass. The full shell baseline retains the same seven
+  unrelated optional iOS bridge/diagnostics SDK failures.
+
+## Runtime diagnostics and mobile Back navigation (2026-08-12)
+
+- Audited the user-owned `logs/app.log`. All repeated production UI failures
+  resolved to one Settings path: `_update_drp_options()` read `Control.page`
+  from a lazily mounted course list, which Flet rejects until that expansion
+  body is attached. The redundant child update was removed; the mounted parent
+  update remains the single publication point. A separate `Session closed`
+  shutdown race is now treated as a successful native window teardown.
+- Pytest had been importing `src.main` and binding the real AppData rotating
+  handler, mixing synthetic network, cache, upload, and rollback failures into
+  the user's runtime log. Test collection now sets an explicit test mode before
+  that import, while the logging ownership test clears it inside its isolated
+  subprocess. Normal packaged/source startup behavior is unchanged.
+- `Page.run_task()` callbacks now execute through one guarded controller
+  boundary. Unhandled UI task exceptions are forwarded to the diagnostics
+  runtime instead of escaping only through `concurrent.futures`; the real
+  asyncio loop is also attached. A newly durable consented report schedules an
+  immediate single-worker delivery pass, and a privacy-safe warning records
+  unconfigured or unconfirmed delivery without exposing DSN/report contents.
+- The release-environment public DSN was verified without printing it. A
+  synthetic, allow-listed report sent through the application transport was
+  confirmed by Sentry ingestion with HTTP 200. Local source config was updated
+  from the same environment-scoped GitHub variable; this asset remains ignored
+  and is not committed. The declared `sentry-sdk` dependency was also installed
+  into the interpreter that owns the local Flet CLI, eliminating the source-run
+  `sdk_unavailable` state.
+- Android/iOS now set the root Flet `View` to require pop confirmation. System
+  Back first closes Settings (including its unsaved-change dialog), Detail,
+  Calendar, or Grades and cancels the native pop; only Back from Dashboard is
+  confirmed to the OS. `on_view_pop` remains as the stacked-View/AppBar
+  fallback.
+- Focused diagnostics, Settings, navigation, lifecycle, submission, and tray
+  coverage passes **180 tests**. The available-environment suite passes **1381
+  tests with 25 skipped**; repository Ruff, bytecode compilation, and
+  `git diff --check` pass. The full shell baseline retains one environment
+  failure for the optional iOS bridge; both the SDK transport tests and the
+  real Sentry probe now pass.
+
+## Filter legibility, Sentry contexts, and Settings policies (2026-08-12)
+
+- Fixed the adaptive-filter trigger's collapsed flex layout. Desktop menus stay
+  anchored below their buttons, use a distinct background/outline/elevation,
+  and expose full labels through tooltips. The reusable course variant allows
+  two-line rows and a wider popup; mobile uses the same two-line label policy.
+- Expanded the diagnostics allow-list with bounded OS build, device class, CPU
+  count, RAM class, and display class. The Sentry event now uses standard OS,
+  runtime, app, and device contexts while continuing to reconstruct the event
+  from scratch without user, request, URL, credential, Moodle/Portal, IP, raw
+  log, breadcrumb, replay, or stable-device fields.
+- Empty frame collections now omit `stacktrace`, fixing Sentry's invalid empty
+  `exception.values.0.stacktrace.frames` processing error. Diagnostics defaults
+  to enabled for new and legacy-undecided settings; an explicit disabled choice
+  remains authoritative and clears the owned queue through the existing live
+  consent boundary.
+- Removed the first-run crash-consent popup. Privacy Settings now contains only
+  the enabled/disabled diagnostic choice plus a dedicated “Điều khoản sử dụng &
+  quyền riêng tư” entry that opens a scrollable notice. Login remains unchanged
+  and has no policy checkbox.
+- Added maintained Terms and updated the public privacy contract, README, docs
+  index, design decision log, and governance coverage. The available-environment
+  suite passes **1377 tests with 25 skipped**; focused post-theme UI coverage
+  passes **108 tests**. Repository Ruff, bytecode compilation, and
+  `git diff --check` pass.
+
+## Semantic theme and contrast audit (2026-08-12)
+
+- Audited GUI color assignments across startup, dashboard, filters, schedule,
+  calendar, detail/submission, grades, login, and Settings. Replaced fixed white
+  foregrounds, fixed grade colors, popup shadow/scrim values, calendar selection
+  colors, update-banner colors, and checkbox checks with semantic roles.
+- Added `Material Graphite`, a neutral layered dark theme derived from Material
+  role-based color guidance. Expanded the runtime contract with elevated surface,
+  strong outline, matching filled-control foregrounds, update, scrim, and shadow
+  roles and mapped them into Flet's `ColorScheme`.
+- Corrected live theme propagation for the mounted update banner, submission
+  actions, diagnostic notification controls, and every static/dynamic element in
+  the Today Schedule panel. The startup splash now honors the selected theme; the
+  boot-failure screen remains intentionally independent.
+- Rebalanced semantic colors in all existing presets. Automated WCAG AA checks now
+  require at least 4.5:1 contrast for small text on page/card surfaces and for all
+  filled semantic control pairs. Custom solid colors receive a computed accessible
+  foreground.
+- Maintained design rules and official research sources are recorded in
+  `docs/design/theme-system.md`. Physical-device keyboard, screen-reader, text-scale,
+  and OLED/LCD validation remains a release-candidate responsibility.
+- The complete application/extension suite passes **1419 tests with 25 skipped**;
+  Ruff, bytecode compilation, semantic contrast governance, and `git diff --check`
+  pass.
+
+## Compact dashboard filter correction (2026-08-12)
+
+- Removed the separate overdue checkbox because “Quá hạn” is already a first-class
+  urgency-menu option. The dashboard now has one unambiguous control for urgency,
+  and the three fixed triggers fit the supported compact 360/420-pixel layouts
+  without a hidden horizontal-scroll affordance.
+- Fixed collapsed trigger labels by assigning the text a deterministic width inside
+  `PopupMenuButton`/`Semantics`; Flet's nested flex constraint could previously
+  reduce even short labels such as “Tất cả” to an ellipsis.
+- Overdue cards remain absent from the default active view, but their real count is
+  always exposed beside “Quá hạn” in the urgency menu. Selecting that option is the
+  single path that reveals overdue cards; legacy `INCLUDE_PAST_DUE` values no longer
+  override dashboard filter state.
+- The complete application/extension suite passes **1420 tests with 25 skipped**;
+  Ruff, bytecode compilation, and `git diff --check` pass.
+
+## Flet filter-trigger renderer regression (2026-08-12)
+
+- A real Flet 0.86.x renderer probe isolated the remaining clipped filter labels
+  from width, ellipsis, `PopupMenuButton`, and `Semantics`. The failure required
+  `Container.padding`, `ink=True`, an event handler, `animate`, and a fixed trigger
+  height together.
+- In that Flet frontend path, the inner InkWell container and outer
+  AnimatedContainer both apply the same padding. A 40-pixel trigger with 8-pixel
+  vertical padding therefore left only 8 pixels for text, rendering mostly
+  Vietnamese diacritics. Removing only trigger-level animation restored the full
+  labels in the renderer probe.
+- Ripple, hover feedback, animated disclosure arrows, and popup/bottom-sheet motion
+  remain enabled. A regression test prevents reintroducing the unsafe property
+  combination until the upstream renderer path changes or padding is moved into a
+  separately verified child.
+- The corrected three-trigger row was captured successfully through a real Flet web
+  renderer at 420 pixels. The complete application/extension suite passes **1421
+  tests with 25 skipped**; Ruff, bytecode compilation, and `git diff --check` pass.
+
+## Cross-platform UI profile override (2026-08-12)
+
+- Added `UTHELPER_UI_PLATFORM=android|ios|desktop` as a presentation-only developer
+  override. Runtime `IS_*` flags remain authoritative for native capabilities;
+  separate `UI_*` flags select SafeArea, adaptive filter menus, terms sizing, and
+  mobile/desktop Settings composition.
+- `detect_platform()` now uses Flet's page platform only as the default presentation
+  profile while keeping Python-host runtime capabilities immutable. Invalid override
+  values are ignored with a bounded log
+  message that does not echo environment contents. Device diagnostics display both
+  runtime flags and the effective UI profile.
+- The usage and safety boundary are maintained in
+  `docs/guides/ui-platform-preview.md`. Android/iOS UI on Windows keeps Windows tray,
+  update, notification, window, and background capabilities; native behavior still
+  requires a physical device or emulator.
+- A full application smoke at a 390×844 Android viewport rendered the mobile profile
+  through the real entrypoint while retaining the Windows runtime. The complete
+  application/extension suite passes **1427 tests with 25 skipped**; Ruff, bytecode
+  compilation, and `git diff --check` pass.
+
+## Compact mobile filter sheets and Back verification (2026-08-13)
+
+- Mobile filter sheets now calculate their height from the title and option rows,
+  capped at 72% of the viewport (and 560 logical pixels) for long course lists.
+  This removes the accidental full-screen sheet while preserving bounded scrolling.
+- Replaced malformed `#RRGGBBAA` color concatenation with Flet color helpers and
+  shared semantic theme tokens. Mobile selected/hover states now use the same
+  `SURFACE_HOVER` treatment as the anchored desktop menu.
+- Re-audited the single-root mobile Back policy: Settings, detail, calendar, and
+  grade overview consume Back and return to Dashboard; Back at Dashboard is allowed
+  to leave the root view, matching normal Android behavior. Tests cover every child
+  view and the Dashboard fall-through. Native emulator verification was unavailable
+  because `adb` is not installed in the current environment.
+- A real 390×844 Flet web smoke confirmed the five-option urgency sheet wraps its
+  content instead of filling the viewport. The complete application/extension suite
+  passes **1430 tests with 25 skipped**; Ruff, bytecode compilation, and
+  `git diff --check` pass.
+- Filter triggers now share the schedule disclosure language: a right-facing rounded
+  chevron when closed and a 90-degree downward rotation while open. This replaces
+  the incorrect 0.5-radian tilt. Desktop open/cancel and mobile open/dismiss states
+  are covered by regression tests and a real 390×844 renderer smoke.
+
+## Detail deadline panel live-theme repair (2026-08-13)
+
+- Fixed the deadline summary panel retaining its startup theme after a live theme
+  switch. Its refresh path navigated the layout using a stale numeric child index;
+  an error banner had shifted the detail container, and the resulting exception was
+  swallowed by a broad compatibility guard.
+- Detail header, divider, deadline labels, and summary surface now have stable control
+  references updated directly by `update_theme()`. The submitted-files accent border
+  also uses Flet's opacity helper instead of ambiguous eight-digit color concatenation.
+- Regression coverage switches an already-constructed Detail view from dark to light
+  and verifies that inserting another layout control cannot break theme propagation.
+- A real 390×844 Flet renderer smoke opened a cached quiz detail under the light
+  theme and confirmed the deadline panel, quiz information card, divider, labels,
+  and browser CTA use one coherent palette. The complete application/extension suite
+  passes **1432 tests with 25 skipped**; Ruff, bytecode compilation, and
+  `git diff --check` pass.
+
+## Live-theme propagation hardening (2026-08-13)
+
+- A repository-wide audit found the same lifecycle defect beyond the deadline panel:
+  Flet controls retain the concrete color string present when they are constructed,
+  while `apply_theme()` changes only the shared semantic tokens. Controls created or
+  rebuilt after a switch therefore looked correct, but mounted, collapsed, cached,
+  or detached controls could keep the previous palette. This explains why the issue
+  depended on navigation order and appeared intermittent.
+- Added a bounded semantic-color refresh that traverses public control children and
+  style values without entering Flet's private serialization graph. Dashboard,
+  Settings (including collapsed and detached controls), Detail and its dialogs,
+  Calendar month/week states, and Grade overview now remap their previous semantic
+  palette before applying view-specific state colors.
+- Replaced remaining layout-index theme updates with stable references in the
+  dashboard, Calendar, Grade overview, and Detail view. Theme refresh no longer
+  depends on an optional banner or another child preserving a numeric position, and
+  exceptions can no longer silently leave a partially updated surface in these paths.
+- Replaced every remaining UI `#RRGGBB` plus two-digit-alpha concatenation with
+  `Colors.with_opacity()`. Flet 0.86 interprets eight-digit hex as `#AARRGGBB`, so the
+  previous construction could turn selected and hover states into unrelated colors.
+  A source contract test prevents this pattern from returning.
+- Corrected the live-theme regression test to use the real `steel_light` preset; the
+  former nonexistent `paper_light` name silently selected the dark fallback and
+  could not prove a dark-to-light transition. New tests cover nested style remapping,
+  opacity preservation, collapsed Settings controls, and hidden Calendar/Grade
+  states.
+- Theme-selector preview cards are explicitly excluded from semantic remapping. Each
+  preview is a fixed visualization of its own preset rather than part of the active
+  application theme; changing the selected theme must only change selection state,
+  never recolor another preset's surface, gradient, swatches, or labels. Regression
+  coverage switches through dark, light, and teal presets and verifies every card's
+  complete palette. Because the global preview callback runs after Settings' local
+  repaint, the selector also restores every preset surface, gradient, swatch, and
+  label after that callback; local exclusion alone was insufficient. A real Flet web
+  smoke selected Ocean Teal and confirmed that Graphite, Midnight, and Ocean retained
+  distinct palettes. The complete application/extension suite passes **1438 tests with 25
+  skipped**; Ruff, bytecode compilation, and `git diff --check` pass.
+
+## Calendar period swipe navigation (2026-08-13)
+
+- Replaced the mounted month/week grid with a reusable three-slot `PageView` whose
+  center page is the current period and whose adjacent pages are the previous and
+  next month or week. After a completed transition, the data anchor advances once,
+  the three pages are rebuilt, and the pager recenters without an infinite page list.
+- Native touch scrolling remains owned by `PageView`. Desktop adds a mouse-only,
+  thresholded horizontal drag detector over the month grid or week strip; clicks,
+  short drags, the selected-day detail panel, Today, mode switching, and header arrows
+  retain their existing behavior through one navigation pipeline.
+- Added guards for rapid repeated requests and pager recenter events. Period pages
+  keep absolute dates, refresh all three slots when data or theme changes, and retain
+  the previous urgency dots/count badges and week-cell states.
+- Real 390×844 Flet renderer checks moved August to September with mouse drag and
+  week 33 to week 34 on the week strip. Renderer testing also exposed and fixed an
+  unbounded-height `PageView` error before completion. Native Android emulator
+  verification remains unavailable because `adb` is not installed in this environment.
+  The complete application/extension suite passes **1461 tests with 25 skipped**;
+  Ruff, bytecode compilation, and `git diff --check` pass.
+- Follow-up interaction testing exposed a stale-frame ordering defect: the legacy
+  detached grid called `page.update()` before the mounted pager was rebuilt. A mode
+  switch therefore published the new header with the old grid, while the next input
+  accidentally flushed the pending pager state; date selection likewise refreshed
+  the detail list but not the mounted cell. Period state and controls are now prepared
+  before the single published frame, and mounted pages are repainted directly on date
+  selection. Mouse and touch taps responded within the 150 ms renderer checkpoint,
+  and month dragging still advanced after the repair. The complete suite now passes
+  **1464 tests with 25 skipped**.
+- A nine-preset Calendar theme audit found a semantic-role collision during live
+  switching: when a source preset reused one RGB value for two roles (Monokai uses
+  the same yellow for accent and warning), generic color replacement could not infer
+  whether a mounted value represented selection or urgency. The active month/week
+  pages are now repainted from their calendar state after semantic traversal, and
+  each month page retains explicit weekday-label references so T2–T7 and CN are
+  restored to secondary/critical roles. Sequential dark/light renderer checks showed
+  correct selected, today, critical, safe, divider, header, and mode-toggle colors;
+  the complete suite passes **1465 tests with 25 skipped**.
+- Removed the residual dashboard filter gap left by the retired overdue checkbox.
+  The three adaptive triggers now consume the available row width with a responsive
+  `4:4:5` flex ratio, keeping Mức độ and Tất cả readable while reserving more room
+  for Môn học. Trigger internals expand with their allocated slot, but desktop popup
+  constraints remain independent, so menus still anchor directly below their source
+  button. Real 390 px and 430 px render checks covered mobile layout, full Vietnamese
+  labels, and the anchored desktop popup; the complete suite passes **1467 tests with
+  25 skipped**.
+
+## Today schedule spotlight and disclosure (2026-08-13)
+
+- Replaced the collapsed inline Portal schedule with a glanceable dashboard spotlight.
+  It selects an in-progress class first, otherwise the earliest upcoming class, skips
+  cancelled/finished sessions, advances at time boundaries without another network
+  request, and reports completion when no relevant class remains.
+- Split time, room, and campus into independent wrapping lines. The card content opens
+  the spotlight class directly, while its 48 px action row opens every class for the
+  day in chronological order, including finished and cancelled context.
+- Added one adaptive disclosure surface: a bounded, safe-area-aware bottom sheet for
+  Android/iOS presentation and a dialog for desktop. List rows drill into class detail
+  within the same surface; explicit and system Back handling returns detail to its
+  parent list or closes a direct-detail surface before any dashboard child view.
+- Open schedule surfaces rebuild from semantic theme roles during live theme changes,
+  and an open detail keeps its selected class while the dashboard spotlight advances.
+  The CI-equivalent application/extension suite passes **1478 tests with 25 skipped**;
+  focused Ruff checks and `git diff --check` pass.
+- Follow-up real-render review found that `AlertDialog` defaults to
+  `ClipBehavior.NONE`, so its full-background content painted square pixels over the
+  rounded top corners. The dialog and its inner surface now share an 18 px radius and
+  anti-alias clipping. Class detail now uses one full-width information card with a
+  consistent 17/16/12/11/10 px type scale, separate time, room, and campus rows, and
+  no redundant second status block.
+- Closing detail previously called `page.pop_dialog()` before clearing its internal
+  state. Flet can synchronously route that pop through the shared Back callback, which
+  still saw an open list-origin detail and repainted the list while closing. Cleanup
+  now happens before the native pop; a re-entrant callback regression test verifies
+  that X closes once and cannot reopen the schedule surface. The complete suite now
+  passes **1481 tests with 25 skipped**.
+
+## THNN Integration (2026-08-20)
+
+- Triển khai tính năng lấy bài tập từ thnn.ut.edu.vn thông qua đăng nhập session và Moodle AJAX.
+- Bổ sung `login_session` và `call_ajax_api` cho `MoodleClient` (`src/core/client.py`).
+- Cập nhật `DataOrchestrator._fetch_via_ws_api` (`src/core/data_orchestrator.py`) để đồng bộ dữ liệu THNN vào các mốc 0h, 6h, 12h, có fallback tải mới nếu app mở muộn, sử dụng catch-up logic để tối ưu hóa hiệu suất và tránh gây đăng xuất.
+- Đổi mới model `Assignment` và helper `ws_events_to_assignments` (`src/models.py`, `src/core/ws_functions.py`) để chứa thuộc tính `site_identity` nhận biết bài tập thuộc portal nào.
+- Refactor `AssignmentDetailView` (`src/gui/components/detail_view.py`) nhằm vô hiệu hóa các nút chức năng thao tác file (Upload/Submit/Delete) cho bài tập từ THNN, thay bằng thông báo "Chưa hỗ trợ nộp bài trực tiếp. Vui lòng mở bằng trình duyệt." kèm CTA chuyển hướng.
+- Tạo mới scraper (`src/core/html_scrapers.py`) để bóc tách thông tin trạng thái bài nộp qua HTML nếu không có quyền AJAX.
+- Verification: Tests related to `DataOrchestrator` pass. Clean code & gitflow compliance ensured.
+
+## Cross-platform reliability and performance hardening (2026-08-21)
+
+- Corrected supplemental Moodle assignment status from `submitted` to `unknown`
+  without adding per-assignment status requests. Courses assignment merge now
+  matches existing activities only on the Courses origin, so equal numeric course
+  module IDs from THNN and Courses remain separate and cannot exchange metadata.
+- THNN calendar export now uses a bounded 2 MiB read and validates HTTP status,
+  final origin/path, content type, and the complete VCALENDAR envelope. Invalid or
+  stale-auth responses get one forced-session retry and preserve the last-known-good
+  activities and successful timestamp.
+- Description images now download in 64 KiB chunks with an 8 MiB cap, image MIME
+  validation, temporary-file cleanup, and atomic publication. The entire cache call
+  runs outside the Flet event loop. A controlled 406.2 ms slow response retained 27
+  heartbeat ticks with a 16.3 ms maximum gap; a logical 32 MiB response peaked at
+  0.26 MiB traced allocation, published no file, and retained the online fallback.
+- Detail prefetch cache writes are generation-owned. Cancellation polls at 50 ms,
+  cancels queued futures, and returns without waiting for running network I/O; a
+  blocked-worker benchmark returned in 0.1–51.0 ms for one to four workers, while
+  late workers could not repopulate a cleared cache. Stale controller epochs no
+  longer hide the active loading indicator.
+- Calendar opening now builds the real period pager once rather than calling
+  `update_data()` and `show()` back-to-back. Under Flet 0.86.5, pager seeds per open
+  fell from 2.0 to 1.0; median Python open time changed from 29.2 to 11.6 ms for 100
+  distributed activities and from 222.1 to 100.8 ms for 500 same-day activities.
+  These are Python/control-tree measurements, not Android frame-time or ANR proof.
+- Corrected the notification tap regression test to await the existing async Flet
+  callback. Removed an orphaned conflict marker and duplicate imports; no diagnostic
+  executor redesign or THNN coordinator was added because benchmark evidence did
+  not justify those broader changes.
+- Verification: **1489 tests passed with 25 skipped** using the extension source on
+  `PYTHONPATH`; Ruff 0.16.4, bytecode compilation, repository governance, the UI
+  protocol performance script, and `git diff --check` pass. Physical Android frame
+  validation remains outside this host-only benchmark.
+
+## v2.4.0 performance release preparation (2026-08-28)
+
+- The performance branch contains backward-compatible user-facing features and
+  reliability improvements after the production `v2.3.1` hotfix, including
+  Academic Radar, THNN activity integration, cross-platform navigation/UI work,
+  and the updater hardening recorded above. Under Semantic Versioning this is a
+  minor release, so the canonical application version advances to `2.4.0`.
+- `pyproject.toml` remains the only authored application version. The Settings
+  hub and desktop version badge read `APP_VERSION`; runtime assets and native
+  package identities continue to be generated from the same source. The derived
+  Android build number for `2.4.0` is `2004000`.
+- This worktree is still a topic branch and is not a production release source:
+  it must be reviewed and merged into `develop`, promoted to `main` with the
+  required merge contract, and only then tagged `v2.4.0` after the protected
+  release checks and external GitHub governance checks pass.
+
+## Detail countdown refresh, immediate startup sync, and late submission grouping (2026-09-11)
+
+- **Issue 1 (DetailView Countdown Freeze)**:
+  - `ViewManager.show_detail` preserves the native Flutter scroll position by keeping `dashboard.visible = True` in the background.
+  - In `AppController._countdown_loop_async`, extracted `_refresh_visible_countdown_views` prioritizing `if self.detail_view.visible:` first, so `DetailView.refresh_countdown()` reliably ticks every minute in real time.
+  - Regression test added in `tests/test_detail_countdown_refresh.py`.
+
+- **Issue 2 (Instant Cache Load + Immediate Parallel Moodle API Fetch)**:
+  - Cache snapshot continues to render immediately on startup for zero wait time.
+  - Concurrent background sync is dispatched right away upon start (`self._load_data_async("startup")`) when credentials exist, setting `force = trigger in ("manual", "startup")` to bypass the 60-second coordinator startup grace.
+  - Initial sync status indicator reflects `"Dữ liệu cache · Đang cập nhật..."` while the background network request runs.
+
+- **Issue 3 (Late Submission Cutoff Grouped into Critical & UI Badge Fix)**:
+  - Assignments where the original deadline has passed but late submission is still permitted (`is_late_submission_active`) are now grouped into **"Cấp bách"** (`urgency = "critical"`).
+  - In `ActivityTimePolicy` and `FilterService`, active late submissions are classified as `urgency = "critical"` instead of regular overdue, ensuring they appear on the home dashboard ("Tất cả mức độ") and in the "Cấp bách" filter.
+  - In `gui.core.utils`:
+    - Fixed `get_urgency_badge("overdue")` which previously fell through to `("AN TOÀN", C.SAFE)`. It now correctly maps to `("QUÁ HẠN", C.CRITICAL)`.
+    - Added `"overdue"` to `urgency_str` and `_URGENCY_DISPLAY_MAP` in `core.display_utils` so that overdue levels are accurately normalized.
+    - Updated `get_status_tag` to return `("NỘP MUỘN", C.WARNING)` when late submission is active.
+    - Added `get_card_countdown` helper returning `Còn X ngày/giờ nộp muộn` (orange `C.WARNING`) and appropriate progress values for both `ActivityCard` and `DetailView`.
+  - In `ActivityCard`, optional rows display submission status (`[ Chưa nộp ]`) and the exact cutoff time (`[ Hạn chót: dd/mm HH:MM ]`), while the card border pulses with critical red glow.
+  - Verification: **1600 passed, 25 skipped**; `ruff check src tests` passes with 0 errors.
+
+## Android release packaging for v2.4.0 (2026-09-12)
+
+- **Root Cause of v2.3.1 Artifacts**:
+  - `serious_python_android-4.5.1` bundles `src/main/assets/app.zip` inside its plugin cache directory. The `packageApp` Gradle task relies on `SERIOUS_PYTHON_APP` to overwrite this zip from the staged Python app. When `compileall` previously failed due to missing standalone Python in build cache, Gradle skipped updating the zip and fell back to the stale `app.zip` (v2.3.1).
+  - Furthermore, `serious_python`'s `runExec` (`package_command.dart`) previously suffered from a pipe buffer deadlock on Windows by draining `stdout` while leaving `stderr` undrained during multi-arch `pip install`.
+- **Resolution**:
+  - Patched `runExec` in `package_command.dart` to drain `proc.stderr` asynchronously in parallel with `stdout`.
+  - Packaged clean uncompressed `STORED` `app.zip` containing canonical release version `2.4.0` directly into `serious_python_android/android/src/main/assets/app.zip` and staged `build/flutter/build/python-app`.
+  - Updated `build/flutter/pubspec.yaml` with canonical release version `2.4.0+2004000`.
+  - Executed clean `assembleRelease` producing `build/apk/UTHelper.apk` and `build/apk/UTHelper-2.4.0.apk` (156.87 MB).
+- **Verification**:
+  - `apkanalyzer manifest application-id`: `com.uthelper.uthelper`
+  - `apkanalyzer manifest version-name`: `2.4.0`
+  - `apkanalyzer manifest version-code`: `2004000`
+  - Internal `assets/app.zip` -> `assets/release-version`: `2.4.0`
+  - `ruff check src tests`: all checks passed (0 errors).
+  - `pytest tests -q --tb=short`: **1600 passed, 25 skipped**.

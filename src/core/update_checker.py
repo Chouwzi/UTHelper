@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 import time
@@ -39,6 +40,7 @@ _MAX_JSON_BYTES = 1024 * 1024
 _APPROVED_GITHUB_HOSTS = frozenset(
     {"github.com", "objects.githubusercontent.com"}
 )
+_CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
 
 
 class UpdateError(RuntimeError):
@@ -47,6 +49,10 @@ class UpdateError(RuntimeError):
 
 class DownloadCancelled(UpdateError):
     """The caller cooperatively cancelled an update download."""
+
+
+class UpdateDiscoveryError(UpdateError):
+    """The latest release could not be checked authoritatively."""
 
 
 class PackageIntegrityError(UpdateError):
@@ -153,10 +159,7 @@ class GitHubReleaseClient:
         target: RuntimeTarget,
     ) -> UpdateCandidate | None:
         try:
-            release = _request_json(
-                self.releases_url,
-                timeout=self.socket_timeout_seconds,
-            )
+            release = self._request_json_with_retry(self.releases_url)
             if release.get("draft") is True or release.get("prerelease") is True:
                 return None
             tag = release.get("tag_name")
@@ -182,10 +185,7 @@ class GitHubReleaseClient:
             manifest_url = _approved_github_url(
                 manifest_assets[0].get("browser_download_url")
             )
-            document = _request_json(
-                manifest_url,
-                timeout=self.socket_timeout_seconds,
-            )
+            document = self._request_json_with_retry(manifest_url)
             manifest = parse_manifest(
                 document,
                 expected_release_version=release_version,
@@ -195,18 +195,73 @@ class GitHubReleaseClient:
                 current_version=current_version,
                 target=target,
             )
-        except urllib.error.HTTPError as exc:
-            if exc.code != 404:
-                logger.warning("Update check HTTP error: %s", exc.code)
+        except UpdateDiscoveryError:
+            raise
         except (
             ManifestError,
-            OSError,
             UnicodeError,
             ValueError,
             json.JSONDecodeError,
-        ):
+        ) as exc:
             logger.warning("Update check rejected an invalid release")
-        return None
+            raise UpdateDiscoveryError("update release metadata is invalid") from exc
+
+    def _request_json_with_retry(self, url: str) -> dict:
+        for attempt in range(3):
+            try:
+                return _request_json(url, timeout=self.socket_timeout_seconds)
+            except urllib.error.HTTPError as exc:
+                transient = exc.code in {408, 429} or 500 <= exc.code <= 599
+                if not transient:
+                    raise UpdateDiscoveryError(
+                        f"update service returned HTTP {exc.code}"
+                    ) from exc
+                error: BaseException = exc
+            except (OSError, urllib.error.URLError) as exc:
+                error = exc
+            if attempt == 2:
+                raise UpdateDiscoveryError(
+                    "update service is temporarily unavailable"
+                ) from error
+            time.sleep(0.25 * (2**attempt))
+        raise AssertionError("unreachable update discovery retry state")
+
+
+class ProgressThrottler:
+    """Coalesce byte progress while preserving the first and final events."""
+
+    def __init__(
+        self,
+        callback: Callable[[int, int], None],
+        *,
+        total: int,
+        clock: Callable[[], float] = time.monotonic,
+        minimum_interval_seconds: float = 0.1,
+        minimum_fraction: float = 0.01,
+    ) -> None:
+        self._callback = callback
+        self._total = int(total)
+        self._clock = clock
+        self._minimum_interval = float(minimum_interval_seconds)
+        self._minimum_bytes = max(1, math.ceil(self._total * minimum_fraction))
+        self._last_done: int | None = None
+        self._last_emitted_at = float("-inf")
+
+    def __call__(self, done: int) -> None:
+        bounded = min(self._total, max(0, int(done)))
+        now = self._clock()
+        should_emit = (
+            self._last_done is None
+            or bounded == self._total
+            or bounded < self._last_done
+            or bounded - self._last_done >= self._minimum_bytes
+            or now - self._last_emitted_at >= self._minimum_interval
+        )
+        if not should_emit:
+            return
+        self._callback(bounded, self._total)
+        self._last_done = bounded
+        self._last_emitted_at = now
 
 
 class VerifiedDownloader:
@@ -253,21 +308,122 @@ class VerifiedDownloader:
             raise PackageIntegrityError("update cache is unavailable")
         destination = self.cache_dir / self._filename(package)
         partial = destination.with_suffix(destination.suffix + ".part")
+        sidecar = partial.with_suffix(partial.suffix + ".json")
+        expected_state = {
+            "url": package.url,
+            "sha256": package.sha256.lower(),
+            "size": package.size,
+        }
+        self._prepare_partial(partial, sidecar, expected_state, package.size)
+        throttled_progress = (
+            ProgressThrottler(progress, total=package.size)
+            if progress is not None
+            else None
+        )
+        if throttled_progress is not None:
+            throttled_progress(partial.stat().st_size if partial.exists() else 0)
+        started = time.monotonic()
         try:
-            partial.unlink(missing_ok=True)
             if cancel.is_set():
                 raise DownloadCancelled("download cancelled")
-            started = time.monotonic()
-            digest = hashlib.sha256()
-            downloaded = 0
-            request = urllib.request.Request(
-                package.url,
-                headers={"User-Agent": _UA},
+            self._write_sidecar(sidecar, expected_state)
+            for attempt in range(3):
+                try:
+                    self._download_attempt(
+                        package,
+                        partial,
+                        cancel=cancel,
+                        started=started,
+                        progress=throttled_progress,
+                    )
+                    break
+                except (OSError, urllib.error.URLError, TimeoutError):
+                    if cancel.is_set():
+                        raise DownloadCancelled("download cancelled")
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.25 * (2**attempt))
+            self._verify_complete_partial(partial, package)
+            os.replace(partial, destination)
+            sidecar.unlink(missing_ok=True)
+            if throttled_progress is not None:
+                throttled_progress(package.size)
+            return destination
+        except DownloadCancelled:
+            self._remove_partial(partial, sidecar)
+            raise
+        except PackageIntegrityError:
+            self._remove_partial(partial, sidecar)
+            raise
+        except BaseException:
+            if not partial.exists():
+                sidecar.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _prepare_partial(
+        partial: Path,
+        sidecar: Path,
+        expected_state: dict,
+        expected_size: int,
+    ) -> None:
+        if not partial.exists():
+            sidecar.unlink(missing_ok=True)
+            return
+        try:
+            state = json.loads(sidecar.read_text(encoding="utf-8"))
+            reusable = (
+                not partial.is_symlink()
+                and partial.is_file()
+                and partial.stat().st_size < expected_size
+                and state == expected_state
             )
-            with urllib.request.urlopen(
-                request,
-                timeout=_SOCKET_TIMEOUT_SECONDS,
-            ) as response, partial.open("xb") as output:
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            reusable = False
+        if not reusable:
+            VerifiedDownloader._remove_partial(partial, sidecar)
+
+    @staticmethod
+    def _write_sidecar(sidecar: Path, state: dict) -> None:
+        temporary = sidecar.with_suffix(sidecar.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary, sidecar)
+
+    def _download_attempt(
+        self,
+        package: ReleasePackage,
+        partial: Path,
+        *,
+        cancel: threading.Event,
+        started: float,
+        progress: ProgressThrottler | None,
+    ) -> None:
+        offset = partial.stat().st_size if partial.exists() else 0
+        headers = {"User-Agent": _UA}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+        request = urllib.request.Request(package.url, headers=headers)
+        with urllib.request.urlopen(
+            request,
+            timeout=_SOCKET_TIMEOUT_SECONDS,
+        ) as response:
+            status = int(getattr(response, "status", 200))
+            if offset and status == 206:
+                self._validate_content_range(response, offset, package.size)
+                mode = "ab"
+                downloaded = offset
+            elif offset and status == 200:
+                mode = "wb"
+                downloaded = 0
+            elif not offset and status == 200:
+                mode = "wb"
+                downloaded = 0
+            else:
+                raise PackageIntegrityError("update range response is invalid")
+            with partial.open(mode) as output:
                 while True:
                     if cancel.is_set():
                         raise DownloadCancelled("download cancelled")
@@ -277,28 +433,44 @@ class VerifiedDownloader:
                     if not chunk:
                         break
                     output.write(chunk)
-                    digest.update(chunk)
                     downloaded += len(chunk)
                     if downloaded > package.size:
                         raise PackageIntegrityError("download exceeds manifest size")
                     if progress is not None:
-                        progress(downloaded, package.size)
+                        progress(downloaded)
                 output.flush()
                 os.fsync(output.fileno())
-            if cancel.is_set():
-                raise DownloadCancelled("download cancelled")
-            if downloaded != package.size:
-                raise PackageIntegrityError("update size mismatch")
-            if digest.hexdigest().lower() != package.sha256.lower():
-                raise PackageIntegrityError("update SHA-256 mismatch")
-            os.replace(partial, destination)
-            return destination
-        except BaseException:
+
+    @staticmethod
+    def _validate_content_range(response, offset: int, total: int) -> None:
+        value = str(response.headers.get("Content-Range", ""))
+        match = _CONTENT_RANGE.fullmatch(value)
+        if (
+            match is None
+            or int(match.group(1)) != offset
+            or int(match.group(2)) < offset
+            or int(match.group(3)) != total
+        ):
+            raise PackageIntegrityError("update content range is invalid")
+
+    @staticmethod
+    def _verify_complete_partial(partial: Path, package: ReleasePackage) -> None:
+        if partial.stat().st_size != package.size:
+            raise PackageIntegrityError("update size mismatch")
+        digest = hashlib.sha256()
+        with partial.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest().lower() != package.sha256.lower():
+            raise PackageIntegrityError("update SHA-256 mismatch")
+
+    @staticmethod
+    def _remove_partial(partial: Path, sidecar: Path) -> None:
+        for path in (partial, sidecar, sidecar.with_suffix(sidecar.suffix + ".tmp")):
             try:
-                partial.unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
             except OSError:
                 pass
-            raise
 
 
 def _asset_for_package(package: ReleasePackage) -> UpdateAsset:
@@ -410,6 +582,8 @@ __all__ = [
     "DownloadCancelled",
     "GitHubReleaseClient",
     "PackageIntegrityError",
+    "ProgressThrottler",
+    "UpdateDiscoveryError",
     "UpdateAsset",
     "UpdateInfo",
     "VerifiedDownloader",

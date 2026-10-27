@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
+from core.activity_status import (
+    normalize_submission_status,
+    prefer_known_submission_status,
+)
 from core.time_utils import parse_datetime
 
 _URGENCY_ORDER = {
@@ -23,6 +28,58 @@ class RefreshDataset:
     submitted_count: int
 
 
+def status_hydration_candidates(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return only Courses cards whose student status can still change."""
+    candidates = []
+    for item in items:
+        if not item.get("url"):
+            continue
+        if item.get("site_identity") == "thnn" or item.get("source") == "thnn_sync":
+            continue
+        activity_type = item.get("type")
+        if activity_type not in {"assignment", "assign", "quiz"}:
+            continue
+        status = normalize_submission_status(item.get("submission_status"))
+        if status == "unknown" or (
+            activity_type == "quiz" and status == "not_submitted"
+        ):
+            candidates.append(item)
+    return candidates
+
+
+def card_detail_prefetch_candidates(
+    items: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return unique Courses cards ordered by temporal proximity."""
+    reference_time = now or datetime.now()
+    candidates: list[tuple[tuple[float, int], dict[str, Any]]] = []
+    seen_urls: set[str] = set()
+
+    for item in items:
+        url = item.get("url")
+        if not url or url in seen_urls:
+            continue
+        if item.get("site_identity") == "thnn" or item.get("source") == "thnn_sync":
+            continue
+
+        seen_urls.add(url)
+        deadline = parse_datetime(item.get("deadline", ""))
+        if deadline is None:
+            sort_key = (float("inf"), 1)
+        else:
+            distance = abs((deadline - reference_time).total_seconds())
+            # At equal distance, an upcoming quiz is more actionable.
+            sort_key = (distance, 0 if deadline >= reference_time else 1)
+        candidates.append((sort_key, item))
+
+    candidates.sort(key=lambda entry: entry[0])
+    return [item for _, item in candidates]
+
+
 def merge_cached_details(
     items: list[dict[str, Any]],
     detail_cache: dict[str, dict[str, Any]],
@@ -35,15 +92,22 @@ def merge_cached_details(
             continue
 
         enriched = detail_cache[url]
+        submission_status = prefer_known_submission_status(
+            enriched.get("submission_status"),
+            item.get("submission_status"),
+        )
+        enriched_details = enriched.get("details")
         merged[index] = {
             **item,
             "type": enriched.get("type", item.get("type", "other")),
             "course": enriched.get("course", item.get("course", "")),
-            "submission_status": enriched.get("submission_status", "unknown"),
-            "details": enriched.get("details", {}),
-            "deadline": enriched.get("deadline", item.get("deadline")),
-            "is_open": enriched.get("is_open", item.get("is_open")),
-            "urgency": enriched.get("urgency", item.get("urgency")),
+            "submission_status": submission_status,
+            "details": enriched_details or item.get("details", {}),
+            # The latest catalog owns event identity. Two cards (for example,
+            # opens/closes) can legitimately share one Moodle module URL.
+            "deadline": item.get("deadline", enriched.get("deadline")),
+            "is_open": item.get("is_open", enriched.get("is_open")),
+            "urgency": item.get("urgency", enriched.get("urgency")),
         }
     return merged
 
@@ -73,10 +137,11 @@ def apply_pending_submission_updates(
         if action_time <= fetch_start_time:
             continue
 
-        item["submission_status"] = new_status
+        canonical_status = normalize_submission_status(new_status)
+        item["submission_status"] = canonical_status
         details = dict(item.get("details", {}))
         status_data = dict(details.get("status_data", {}))
-        status_data["Trạng thái nộp bài"] = new_status
+        status_data["Trạng thái nộp bài"] = canonical_status
         details["status_data"] = status_data
         item["details"] = details
 
@@ -145,12 +210,7 @@ def build_refresh_dataset(
     )
 
 
-def format_refresh_status(clock_label: str, total_count: int, submitted_count: int) -> str:
+def format_refresh_status(clock_label: str, total_count: int, submitted_count: int = 0) -> str:
     """Format the dashboard refresh status line."""
-    progress_text = ""
-    if total_count > 0 and submitted_count > 0:
-        if submitted_count == total_count:
-            progress_text = " · Đã nộp hết ✓"
-        else:
-            progress_text = f" · {submitted_count}/{total_count} đã nộp ✓"
-    return f"Cập nhật lúc {clock_label} · {total_count} hoạt động{progress_text}"
+    return f"Cập nhật lúc {clock_label} · {total_count} hoạt động"
+

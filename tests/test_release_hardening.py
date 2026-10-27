@@ -250,6 +250,11 @@ def test_local_android_build_script_applies_the_native_notification_patch():
 
     assert "ORG_GRADLE_PROJECT_kotlin.incremental" in script
     assert "flet-android-notifications-patch" in script
+    assert "Set-BoundedAndroidGradleConfig" in script
+    assert '"org.gradle.jvmargs" = "-Xmx3G' in script
+    assert '"org.gradle.workers.max" = "2"' in script
+    assert '"kotlin.compiler.execution.strategy" = "in-process"' in script
+    assert '"kotlin.incremental" = "false"' in script
     assert script.count("build $Target --verbose") == 2
 
 

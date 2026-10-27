@@ -38,6 +38,7 @@ class Assignment(BaseModel):
     deadline: datetime
     url: str
     submission_status: str = "unknown" # tình trạng: đã nộp, chưa nộp, đã chấm điểm...
+    site_identity: str = "courses" # thnn, courses
     details: Optional[ActivityDetail] = None
     
     @property

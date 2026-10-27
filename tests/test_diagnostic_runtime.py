@@ -364,6 +364,10 @@ def test_reentrant_capture_is_suppressed_but_outer_hook_still_chains(tmp_path):
 
     assert enqueue_calls == 1
     assert len(runtime.spool.pending()) == 1
+    report = runtime.spool.pending()[0].report
+    assert report.mechanism.value == "threading.excepthook"
+    assert report.handled is False
+    assert report.execution.value == "background_thread"
     chain.assert_called_once_with(args)
     runtime.close(clean=True)
 
@@ -399,6 +403,10 @@ def test_hook_chain_failure_is_contained_without_sensitive_output(tmp_path):
     threading.excepthook(_thread_args(RuntimeError("capture-secret")))
 
     assert len(runtime.spool.pending()) == 1
+    report = runtime.spool.pending()[0].report
+    assert report.mechanism.value == "threading.excepthook"
+    assert report.handled is False
+    assert report.execution.value == "background_thread"
     output = "".join(call.args[0] for call in emergency.write.call_args_list)
     assert "secret" not in output
     runtime.close(clean=True)
@@ -449,7 +457,7 @@ def test_applying_disabled_consent_clears_spool_immediately_without_network(tmp_
     assert runtime.spool.pending() == ()
     assert runtime.record_exception(RuntimeError("after revoke"), AppPhase.GUI) is None
     assert runtime.spool.pending() == ()
-    assert delivery.calls == [CrashConsent.ENABLED]
+    assert delivery.calls == [CrashConsent.ENABLED, CrashConsent.ENABLED]
     runtime.close(clean=True)
 
 
@@ -844,7 +852,7 @@ def test_atomic_marker_replace_failure_cleans_temp_and_runtime_continues(
     runtime.close(clean=True)
 
 
-def test_page_handler_captures_only_exception_and_chains_without_delivery(tmp_path):
+def test_page_handler_captures_exception_chains_and_schedules_delivery(tmp_path):
     executor = _Executor(run=False)
     runtime = _runtime(tmp_path, executor=executor)
     runtime.start()
@@ -861,7 +869,12 @@ def test_page_handler_captures_only_exception_and_chains_without_delivery(tmp_pa
     page.on_error(SimpleNamespace(data="string only secret"))
 
     assert len(runtime.spool.pending()) == 1
-    assert len(executor.submissions) == 1
+    report = runtime.spool.pending()[0].report
+    assert report.mechanism.value == "flet.page_error"
+    assert report.handled is False
+    assert report.execution.value == "main_thread"
+    assert len(executor.submissions) == 2
+    assert executor.submissions[-1][1] == (CrashConsent.ENABLED,)
     assert page.on_error is wrapper
     assert chained.call_count == 2
     runtime.close(clean=True)
@@ -895,10 +908,33 @@ def test_async_handler_captures_exception_and_chains_previous_handler(tmp_path):
     owned(loop, {"message": "no exception secret"})
 
     assert len(runtime.spool.pending()) == 1
+    report = runtime.spool.pending()[0].report
+    assert report.mechanism.value == "asyncio.loop"
+    assert report.handled is False
+    assert report.execution.value == "async_task"
     assert previous.call_count == 2
     runtime.close(clean=True)
     assert loop.get_exception_handler() is previous
     loop.close()
+
+
+def test_semantic_breadcrumbs_are_bounded_and_reject_arbitrary_values(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.start()
+    runtime.set_diagnostic_screen("settings")
+    runtime.record_breadcrumb("settings_save", "started", "user")
+    runtime.record_breadcrumb("private course title", "succeeded", "user")
+    for _ in range(25):
+        runtime.record_breadcrumb("settings_save", "succeeded", "app")
+
+    runtime.record_exception(RuntimeError("private"), AppPhase.GUI)
+
+    report = runtime.spool.pending()[0].report
+    assert report.screen.value == "settings"
+    assert len(report.breadcrumbs) == 20
+    assert {item.action.value for item in report.breadcrumbs} == {"settings_save"}
+    assert "private course title" not in report.model_dump_json()
+    runtime.close(clean=True)
 
 
 def test_delivery_is_submitted_only_and_close_never_waits(tmp_path):

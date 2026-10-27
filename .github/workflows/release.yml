@@ -75,11 +75,15 @@ jobs:
       WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
       WIX_EULA_ACCEPTED: ${{ vars.WIX_EULA_ACCEPTED }}
       SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+      SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
     steps:
       - name: Check out exact tagged source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         timeout-minutes: 3
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Reject incomplete release configuration before native runners
         timeout-minutes: 1
@@ -479,6 +483,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         timeout-minutes: 5
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -672,3 +677,16 @@ jobs:
 
           gh release edit "$TAG" --draft=false --latest
           CREATED_RELEASE_ID=""
+      - name: Link Sentry release to the exact Git commit
+        uses: getsentry/action-release@ff07929a6537bac57790c3451cf4d364aca38528
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+        with:
+          environment: stable
+          release: uthelper@${{ needs['validate-release-source'].outputs.version }}
+          set_commits: auto
+          ignore_missing: false
+          ignore_empty: false
+          disable_telemetry: true

@@ -107,6 +107,9 @@ def _make_loading_view(coordinator):
     view._apply_autostart_ui = lambda result: SettingsView._apply_autostart_ui(
         view, result
     )
+    view._collapse_setting_groups = lambda: SettingsView._collapse_setting_groups(
+        view
+    )
     view._load_autostart_state = lambda generation: (
         SettingsView._load_autostart_state(view, generation)
     )
@@ -330,7 +333,10 @@ def test_settings_load_is_awaited_transaction_with_clean_baseline(monkeypatch):
         assert view._load_generation == 1
         assert view._loading is True
         assert SettingsView.has_changes(view) is False
-        assert view._baseline_snapshot is None
+        # The form is ready immediately; only the native Windows read remains.
+        assert view._baseline_snapshot == view._capture_form_snapshot()
+        assert view._baseline_snapshot.start_with_windows is True
+        assert view.update.call_count == 1
 
         release.set()
         await task
@@ -594,6 +600,7 @@ def _view_manager(settings_view):
     calendar = _control(visible=False)
     grades = _control(visible=False)
     controller = SimpleNamespace()
+    view_host = SimpleNamespace(controls=[dashboard])
     manager = ViewManager(
         page,
         dashboard,
@@ -602,11 +609,12 @@ def _view_manager(settings_view):
         calendar,
         grades,
         controller,
+        view_host=view_host,
     )
     return manager, dashboard
 
 
-def test_view_manager_awaits_settings_load_before_showing_view():
+def test_view_manager_shows_settings_before_native_state_load_finishes():
     async def scenario():
         started = asyncio.Event()
         release = asyncio.Event()
@@ -626,8 +634,10 @@ def test_view_manager_awaits_settings_load_before_showing_view():
 
         pending = asyncio.create_task(manager.show_settings())
         await started.wait()
-        assert dashboard.visible is True
-        assert settings_view.visible is False
+        assert dashboard.visible is False
+        assert settings_view.visible is True
+        assert manager.view_host.controls == [settings_view]
+        manager.page.update.assert_called_once_with()
 
         release.set()
         await pending
@@ -635,6 +645,59 @@ def test_view_manager_awaits_settings_load_before_showing_view():
         assert settings_view.visible is True
 
     asyncio.run(scenario())
+
+
+def test_setting_group_mounts_body_only_while_expanded():
+    view = SettingsView.__new__(SettingsView)
+    view._tiles = []
+    view._tile_bodies = {}
+    view._section_containers = []
+    control = _control(value="kept off tree")
+
+    section = SettingsView._build_setting_group(
+        view,
+        "Hiệu năng",
+        "Lazy controls",
+        [control],
+    )
+    tile = section.content
+    tile.update = Mock()
+
+    assert tile.controls == []
+    tile.on_change(SimpleNamespace(control=tile, data="true"))
+    assert len(tile.controls) == 1
+    assert tile.controls[0].content.controls == [control]
+    tile.update.assert_called_once_with()
+
+    tile.on_change(SimpleNamespace(control=tile, data="false"))
+    assert tile.controls == []
+    assert tile.update.call_count == 2
+
+
+def test_muted_course_options_do_not_read_page_from_unmounted_lazy_control():
+    class UnmountedCourseList:
+        def __init__(self):
+            self.controls = []
+
+        @property
+        def page(self):
+            raise RuntimeError("Control must be added to the page first")
+
+    view = SimpleNamespace(
+        _orchestrator=SimpleNamespace(
+            get_cached_details_snapshot=lambda: {
+                "activity": {"course": "Course A"}
+            }
+        ),
+        _muted_courses_field=_control(""),
+        _muted_courses_list=UnmountedCourseList(),
+        _muted_courses_drp=_control(visible=False),
+    )
+
+    SettingsView._update_drp_options(view)
+
+    assert len(view._muted_courses_list.controls) == 1
+    assert view._muted_courses_drp.visible is True
 
 
 def test_closing_settings_cancels_pending_show_and_prevents_late_reveal(monkeypatch):
@@ -665,11 +728,12 @@ def test_closing_settings_cancels_pending_show_and_prevents_late_reveal(monkeypa
         settings_view.cancel_pending_load.assert_called_once_with()
         assert dashboard.visible is True
         assert settings_view.visible is False
+        assert manager.view_host.controls == [dashboard]
 
     asyncio.run(scenario())
 
 
-def test_disconnect_invalidation_cancels_pending_show_without_page_update():
+def test_disconnect_invalidation_cancels_pending_load_after_initial_reveal():
     async def scenario():
         started = asyncio.Event()
         release = asyncio.Event()
@@ -694,9 +758,10 @@ def test_disconnect_invalidation_cancels_pending_show_without_page_update():
         await pending
 
         settings_view.cancel_pending_load.assert_called_once_with()
-        assert dashboard.visible is True
-        assert settings_view.visible is False
-        manager.page.update.assert_not_called()
+        assert dashboard.visible is False
+        assert settings_view.visible is True
+        assert manager.view_host.controls == [settings_view]
+        manager.page.update.assert_called_once_with()
 
     asyncio.run(scenario())
 

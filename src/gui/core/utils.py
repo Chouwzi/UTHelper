@@ -1,6 +1,8 @@
 import re
 from datetime import datetime
 from core.time_utils import parse_datetime
+from core.activity_status import normalize_submission_status
+from core.activity_time_policy import is_late_submission_active
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
 from core.display_utils import urgency_str, clean_course_name  # re-exported
@@ -48,20 +50,38 @@ def get_countdown(deadline_str: str, act_type: str = "") -> tuple:
 
     if diff.total_seconds() < 0:
         if is_open_event:
-            if months: return f"Đã mở {months} tháng {remaining_days} ngày", False
-            if days: return f"Đã mở {days} ngày {hours} giờ", False
-            if hours: return f"Đã mở {hours} giờ {mins} phút", False
+            if months:
+                return (
+                    f"Đã mở {months} tháng {remaining_days} ngày {hours} giờ {mins} phút",
+                    False,
+                )
+            if days:
+                return f"Đã mở {days} ngày {hours} giờ {mins} phút", False
+            if hours:
+                return f"Đã mở {hours} giờ {mins} phút", False
             return f"Đã mở {mins} phút", False
 
-        if months: return f"Quá hạn {months} tháng {remaining_days} ngày", True
-        if days: return f"Quá hạn {days} ngày {hours} giờ", True
-        if hours: return f"Quá hạn {hours} giờ {mins} phút", True
+        if months:
+            return (
+                f"Quá hạn {months} tháng {remaining_days} ngày {hours} giờ {mins} phút",
+                True,
+            )
+        if days:
+            return f"Quá hạn {days} ngày {hours} giờ {mins} phút", True
+        if hours:
+            return f"Quá hạn {hours} giờ {mins} phút", True
         return f"Quá hạn {mins} phút", True
     else:
         prefix = "Mở sau" if is_open_event else "Còn"
-        if months: return f"{prefix} {months} tháng {remaining_days} ngày", False
-        if days: return f"{prefix} {days} ngày {hours} giờ", False
-        if hours: return f"{prefix} {hours} giờ {mins} phút", False
+        if months:
+            return (
+                f"{prefix} {months} tháng {remaining_days} ngày {hours} giờ {mins} phút",
+                False,
+            )
+        if days:
+            return f"{prefix} {days} ngày {hours} giờ {mins} phút", False
+        if hours:
+            return f"{prefix} {hours} giờ {mins} phút", False
         return f"{prefix} {mins} phút", False
 
 def get_progress_value(deadline_str: str) -> float:
@@ -78,7 +98,7 @@ def get_progress_value(deadline_str: str) -> float:
 
 def get_urgency_color(urgency) -> str:
     u = urgency_str(urgency)
-    if u == "critical":
+    if u in ("critical", "overdue"):
         return C.CRITICAL
     if u == "warning":
         return C.WARNING
@@ -112,6 +132,8 @@ def get_urgency_badge(urgency) -> tuple:
         return "KHẨN CẤP", C.CRITICAL
     if u == "warning":
         return "SẮP HẠN", C.WARNING
+    if u == "overdue":
+        return "QUÁ HẠN", C.CRITICAL
     return "AN TOÀN", C.SAFE
 
 def get_status_tag(data: dict) -> tuple:
@@ -159,6 +181,8 @@ def get_status_tag(data: dict) -> tuple:
                     return "SẮP MỞ", _TYPE_COLORS.get("open", C.TEXT_SECONDARY)
 
             if diff_h < 0:
+                if is_late_submission_active(data):
+                    return "NỘP MUỘN", C.WARNING
                 return "QUÁ HẠN", C.CRITICAL
             if is_open:
                 return "ĐANG MỞ", C.SAFE
@@ -166,6 +190,65 @@ def get_status_tag(data: dict) -> tuple:
     if is_open:
         return "SẮP MỞ", _TYPE_COLORS.get("open", C.TEXT_SECONDARY)
     return "ĐANG MỞ", C.SAFE
+
+def get_card_countdown(data: dict) -> tuple:
+    """Return (text, is_overdue, color, progress_val).
+
+    Handles active late submission by counting down to the cutoff deadline
+    with warning styling, while overdue items with expired/missing cutoffs
+    show critical overdue countdown.
+    """
+    deadline_str = data.get("deadline", "")
+    act_type = data.get("type", "")
+    if not deadline_str:
+        return "", False, C.TEXT_SECONDARY, 0.0
+
+    dt = parse_datetime(deadline_str)
+    if not dt:
+        return "Không xác định", False, C.TEXT_SECONDARY, 0.5
+    if dt.year >= 2099:
+        return "Không có thời hạn", False, C.SAFE, 1.0
+
+    now = datetime.now()
+    diff = dt - now
+    if diff.total_seconds() < 0:
+        if is_late_submission_active(data, now):
+            cutoff = data.get("cutoff_date") or data.get("cutoffdate")
+            cutoff_ts = None
+            if isinstance(cutoff, (int, float)) and cutoff > 0:
+                cutoff_ts = float(cutoff)
+            elif isinstance(cutoff, str) and cutoff.strip():
+                try:
+                    cutoff_ts = float(cutoff)
+                except ValueError:
+                    parsed = parse_datetime(cutoff)
+                    if parsed:
+                        cutoff_ts = parsed.timestamp()
+
+            if cutoff_ts and cutoff_ts > now.timestamp():
+                remaining_s = int(cutoff_ts - now.timestamp())
+                hours_left = remaining_s // 3600
+                mins_left = (remaining_s % 3600) // 60
+                if hours_left >= 24:
+                    days_left = hours_left // 24
+                    cd_text = f"Còn {days_left} ngày nộp muộn"
+                elif hours_left > 0:
+                    cd_text = f"Còn {hours_left} giờ {mins_left:02d} nộp muộn"
+                else:
+                    cd_text = f"Còn {mins_left} phút nộp muộn"
+                progress_val = min(remaining_s / (7 * 86400), 1.0)
+            else:
+                cd_text = "Còn nộp muộn"
+                progress_val = 0.0
+            return cd_text, False, C.WARNING, progress_val
+
+        cd_text, _ = get_countdown(deadline_str, act_type)
+        return cd_text, True, C.CRITICAL, 0.0
+
+    cd_text, overdue = get_countdown(deadline_str, act_type)
+    cd_color = get_countdown_color(deadline_str)
+    progress_val = get_progress_value(deadline_str)
+    return cd_text, overdue, cd_color, progress_val
 
 def get_type_label(activity_type: str) -> str:
     return _TYPE_LABELS.get(activity_type, "KHÁC")
@@ -204,7 +287,7 @@ def get_submission_badge(data: dict):
                 return "Sắp mở", C.WARNING
 
     # Trạng thái nộp lấy ở cấp độ ngoài (top-level)
-    ss = data.get("submission_status", "unknown")
+    ss = normalize_submission_status(data.get("submission_status", "unknown"))
     
     # Dự phòng rà quét status_data bằng cách khớp chuỗi chính xác
     details     = data.get("details", {})
@@ -228,6 +311,8 @@ def get_submission_badge(data: dict):
         return ("Đã nộp" if act_type != "quiz" else "Đã làm"), C.SAFE
     if ss == "not_submitted":
         return ("Chưa nộp" if act_type != "quiz" else "Chưa làm"), C.TEXT_SECONDARY
+    if ss == "draft":
+        return "Bản nháp", C.WARNING
     if act_type == "quiz":
         if ss == "in_progress":
             return "Đang làm", C.WARNING
@@ -253,22 +338,29 @@ def get_submission_badge(data: dict):
             return "Đã chấm", C.SAFE
 
     if submission:
-        if any(x in submission.lower() for x in ["submitted", "đã nộp"]):
+        fallback_status = normalize_submission_status(submission)
+        if fallback_status in ("submitted", "graded"):
             return ("Đã nộp" if act_type != "quiz" else "Đã làm"), C.SAFE
-        if any(x in submission.lower() for x in ["not submitted", "chưa nộp", "no submissions"]):
+        if fallback_status == "not_submitted":
             return ("Chưa nộp" if act_type != "quiz" else "Chưa làm"), C.TEXT_SECONDARY
+        if fallback_status == "draft":
+            return "Bản nháp", C.WARNING
     return None
 
 
 import hashlib
 import os
 import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_DESCRIPTION_IMAGE_CHUNK_BYTES = 64 * 1024
+_DESCRIPTION_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 def get_active_assets_dir() -> Path:
     """Trả về thư mục assets đang hoạt động ở runtime."""
@@ -447,20 +539,56 @@ def pre_cache_description_images(html_content: str) -> str:
 
         downloaded = True
         if not cache_file_path.exists():
+            temporary_path = None
             try:
                 logger.info(f"Downloading Moodle image: {orig_url}")
                 req = urllib.request.Request(auth_url)
                 req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
                 with urllib.request.urlopen(req, timeout=8) as resp:
-                    if resp.status == 200:
-                        with open(cache_file_path, 'wb') as f:
-                            f.write(resp.read())
-                        logger.info(f"Successfully cached image to {cache_file_path}")
-                    else:
-                        downloaded = False
+                    if resp.status != 200:
+                        raise ValueError(f"Image response status was {resp.status}")
+                    headers = getattr(resp, "headers", None)
+                    content_type = ""
+                    if headers is not None and hasattr(headers, "get_content_type"):
+                        content_type = str(headers.get_content_type() or "").casefold()
+                    if content_type and not content_type.startswith("image/"):
+                        raise ValueError(f"Image response content type was {content_type}")
+
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",
+                        prefix=f".{cache_filename}.",
+                        suffix=".tmp",
+                        dir=cache_dir,
+                        delete=False,
+                    ) as temporary_file:
+                        temporary_path = Path(temporary_file.name)
+                        total_bytes = 0
+                        while True:
+                            chunk = resp.read(_DESCRIPTION_IMAGE_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            total_bytes += len(chunk)
+                            if total_bytes > _DESCRIPTION_IMAGE_MAX_BYTES:
+                                raise ValueError("Image response exceeded 8 MiB")
+                            temporary_file.write(chunk)
+                        if total_bytes == 0:
+                            raise ValueError("Image response was empty")
+
+                    os.replace(temporary_path, cache_file_path)
+                    temporary_path = None
+                    logger.info(f"Successfully cached image to {cache_file_path}")
             except Exception as e:
                 logger.warning(f"Failed to cache image {orig_url}: {e}")
                 downloaded = False
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.debug(
+                            "Failed to remove partial image %s",
+                            temporary_path,
+                            exc_info=True,
+                        )
 
         if downloaded and cache_file_path.exists():
             # Mirror sang active assets và lấy đường dẫn tương đối

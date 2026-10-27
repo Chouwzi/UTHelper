@@ -1,5 +1,8 @@
 import os
 import sys
+from datetime import datetime
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -21,6 +24,8 @@ def test_merge_cached_details_overlays_prefetched_fields():
             "type": "other",
             "course": "Old",
             "deadline": "2026-07-02 10:00:00",
+            "is_open": False,
+            "urgency": "safe",
         }
     ]
     cache = {
@@ -40,8 +45,47 @@ def test_merge_cached_details_overlays_prefetched_fields():
     assert result[0]["type"] == "assignment"
     assert result[0]["course"] == "Clean Code"
     assert result[0]["submission_status"] == "submitted"
-    assert result[0]["deadline"] == "2026-07-01 10:00:00"
+    # The current catalog owns event-specific fields. A cached card with the
+    # same module URL may represent its separate "opens" event.
+    assert result[0]["deadline"] == "2026-07-02 10:00:00"
+    assert result[0]["is_open"] is False
+    assert result[0]["urgency"] == "safe"
     assert items[0]["type"] == "other"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("new", "not_submitted"),
+        ("Chưa nộp", "not_submitted"),
+        ("Not submitted", "not_submitted"),
+        ("submitted", "submitted"),
+        ("Đã nộp", "submitted"),
+        ("graded", "graded"),
+        ("Đã chấm điểm", "graded"),
+        ("draft", "draft"),
+        ("Bản nháp", "draft"),
+        (None, "unknown"),
+        ("", "unknown"),
+        ("server-added-state", "unknown"),
+    ],
+)
+def test_merge_cached_details_normalizes_known_statuses(raw, expected):
+    result = merge_cached_details(
+        [{"url": "activity", "submission_status": "unknown"}],
+        {"activity": {"submission_status": raw}},
+    )
+
+    assert result[0]["submission_status"] == expected
+
+
+def test_merge_cached_details_does_not_erase_known_status_with_unknown_enrichment():
+    result = merge_cached_details(
+        [{"url": "activity", "submission_status": "submitted"}],
+        {"activity": {"submission_status": "unknown", "details": {}}},
+    )
+
+    assert result[0]["submission_status"] == "submitted"
 
 
 def test_apply_pending_submission_updates_keeps_new_local_status_and_prunes_old_items():
@@ -104,7 +148,7 @@ def test_prepare_activity_hot_fields_adds_filter_cache_fields():
     assert items[0]["_course_lower"] == "lập trình"
 
 
-def test_build_prefetched_dataset_merges_and_sorts():
+def test_build_prefetched_dataset_keeps_catalog_timing_when_merging_cache():
     items = [
         {"url": "safe", "urgency": "safe", "deadline": "2026-07-02"},
         {"url": "critical", "urgency": "safe", "deadline": "2026-07-03"},
@@ -113,7 +157,9 @@ def test_build_prefetched_dataset_merges_and_sorts():
 
     result = build_prefetched_dataset(items, cache)
 
-    assert [item["url"] for item in result] == ["critical", "safe"]
+    assert [item["url"] for item in result] == ["safe", "critical"]
+    assert result[1]["urgency"] == "safe"
+    assert result[1]["deadline"] == "2026-07-03"
 
 
 def test_build_refresh_dataset_merges_pending_and_counts_submissions():
@@ -145,9 +191,75 @@ def test_build_refresh_dataset_merges_pending_and_counts_submissions():
     assert result.total_count == 2
     assert result.submitted_count == 1
     assert result.items[0]["_title_lower"] == "a"
-    assert result.items[0]["submission_status"] == "Đã nộp"
+    assert result.items[0]["submission_status"] == "submitted"
 
 
-def test_format_refresh_status_includes_submission_progress():
-    assert format_refresh_status("09:30", 3, 2) == "Cập nhật lúc 09:30 · 3 hoạt động · 2/3 đã nộp ✓"
-    assert format_refresh_status("09:30", 2, 2) == "Cập nhật lúc 09:30 · 2 hoạt động · Đã nộp hết ✓"
+def test_format_refresh_status():
+    assert format_refresh_status("09:30", 3) == "Cập nhật lúc 09:30 · 3 hoạt động"
+    assert format_refresh_status("09:30", 2, 2) == "Cập nhật lúc 09:30 · 2 hoạt động"
+
+
+
+def test_card_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():
+    from gui.controllers import refresh_coordinator
+
+    near_future = {
+        "url": "https://courses.test/mod/quiz/view.php?id=1",
+        "type": "quiz",
+        "deadline": "2026-08-21 13:00:00",
+    }
+    recent_past = {
+        "url": "https://courses.test/mod/quiz/view.php?id=2",
+        "type": "quiz",
+        "deadline": "2026-08-21 11:00:00",
+    }
+    far_future = {
+        "url": "https://courses.test/mod/quiz/view.php?id=3",
+        "type": "quiz",
+        "deadline": "2026-09-21 12:00:00",
+    }
+    unknown_deadline = {
+        "url": "https://courses.test/mod/quiz/view.php?id=4",
+        "type": "quiz",
+        "deadline": "",
+    }
+    duplicate_near = {**near_future, "title": "duplicate calendar event"}
+    assignment = {
+        "url": "https://courses.test/mod/assign/view.php?id=5",
+        "type": "assignment",
+        "deadline": "2026-08-21 12:15:00",
+    }
+    attendance = {
+        "url": "https://courses.test/mod/attendance/view.php?id=7",
+        "type": "attendance",
+        "deadline": "2026-08-21 12:30:00",
+    }
+    thnn_quiz = {
+        "url": "https://thnn.test/mod/quiz/view.php?id=6",
+        "type": "quiz",
+        "site_identity": "thnn",
+        "deadline": "2026-08-21 12:15:00",
+    }
+
+    result = refresh_coordinator.card_detail_prefetch_candidates(
+        [
+            far_future,
+            attendance,
+            assignment,
+            recent_past,
+            thnn_quiz,
+            unknown_deadline,
+            near_future,
+            duplicate_near,
+        ],
+        now=datetime(2026, 8, 21, 12, 0, 0),
+    )
+
+    assert result == [
+        assignment,
+        attendance,
+        near_future,
+        recent_past,
+        far_future,
+        unknown_deadline,
+    ]

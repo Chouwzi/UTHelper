@@ -55,7 +55,7 @@ def test_fetch_detail_via_ws_uses_moodle_service_boundary():
 
     assert fake_service.detail_calls == [(77, 12, "assign")]
     assert result["details"]["description_html"] == "<p>Chi tiết</p>"
-    assert result["submission_status"] == "Đã nộp"
+    assert result["submission_status"] == "submitted"
 
 
 def test_fetch_quiz_detail_promotes_normalized_attempt_status():
@@ -80,3 +80,32 @@ def test_fetch_quiz_detail_promotes_normalized_attempt_status():
 
     assert result["submission_status"] == "not_submitted"
     assert result["details"]["quiz_attempt_status"] == "not_submitted"
+
+
+def test_fetch_non_assignment_card_uses_its_real_moodle_module():
+    fake_service = _FakeMoodleService()
+    calls = []
+
+    def fetch_details(**kwargs):
+        calls.append(kwargs)
+        return {"course_full_name": "Network Security"}
+
+    fake_service.get_assign_details_via_ws = fetch_details
+    orchestrator = DataOrchestrator.__new__(DataOrchestrator)
+    orchestrator.moodle_service = fake_service
+
+    result = orchestrator._fetch_detail_via_ws(
+        {
+            "url": "https://courses.test/mod/attendance/view.php?id=77",
+            "course_id": 12,
+            "type": "attendance",
+            "details": {},
+        }
+    )
+
+    assert result["details"]["course_full_name"] == "Network Security"
+    assert calls == [{
+        "cmid": 77,
+        "course_id": 12,
+        "modulename": "attendance",
+    }]

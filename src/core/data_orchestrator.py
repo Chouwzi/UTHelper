@@ -3,9 +3,14 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlsplit
 from core.client import MoodleClient
+from core.activity_status import (
+    normalize_submission_status,
+    prefer_known_submission_status,
+)
 from core.grade_monitor import GradeMonitor
 from core.moodle_service import MoodleService
 from config import settings
@@ -22,13 +27,20 @@ class DataOrchestrator:
     def __init__(self):
         self.client = MoodleClient()
         self.moodle_service = MoodleService(self.client.call_ws_api)
+        self.thnn_client = MoodleClient("https://thnn.ut.edu.vn")
+        self.thnn_service = MoodleService(self.thnn_client.call_ajax_api)
+        self._last_thnn_fetch_ts = 0.0
+        self._thnn_activities_cache = []
+        self._courses_cache = None
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
         self._detail_cache_saved_at: dict[str, float] = {}
         self._detail_cache_lru: OrderedDict[str, None] = OrderedDict()
+        self._detail_cache_generation = 0
         self._detail_cache_ttl_seconds = max(60, int(getattr(settings, "DETAIL_CACHE_TTL_SECONDS", 1800)))
         self._detail_cache_max_entries = max(1, int(getattr(settings, "DETAIL_CACHE_MAX_ENTRIES", 100)))
-        self._detail_lock = threading.Lock()
+        self._detail_lock = threading.RLock()
+        self._detail_inflight: dict[str, threading.Event] = {}
         # Trạng thái cơ chế Smart polling
         self._last_fetch_ts: int = 0
         self._userid_cache: Optional[int] = None
@@ -53,8 +65,15 @@ class DataOrchestrator:
             self._detail_cache_lru.move_to_end(url)
             return cached
 
-    def _set_cached_detail(self, url: str, value: Dict[str, Any]):
+    def _set_cached_detail(
+        self,
+        url: str,
+        value: Dict[str, Any],
+        generation: Optional[int] = None,
+    ) -> bool:
         with self._detail_lock:
+            if generation is not None and generation != self._detail_cache_generation:
+                return False
             self._detail_cache[url] = value
             self._detail_cache_saved_at[url] = time.monotonic()
             self._detail_cache_lru[url] = None
@@ -63,6 +82,7 @@ class DataOrchestrator:
                 old_url, _ = self._detail_cache_lru.popitem(last=False)
                 self._detail_cache.pop(old_url, None)
                 self._detail_cache_saved_at.pop(old_url, None)
+            return True
 
     def get_cached_details_snapshot(self) -> Dict[str, Dict[str, Any]]:
         with self._detail_lock:
@@ -71,6 +91,7 @@ class DataOrchestrator:
     def clear_detail_cache(self):
         """Xóa sạch bộ nhớ đệm chi tiết (dùng khi refresh thủ công)."""
         with self._detail_lock:
+            self._detail_cache_generation += 1
             self._detail_cache.clear()
             self._detail_cache_saved_at.clear()
             self._detail_cache_lru.clear()
@@ -78,15 +99,18 @@ class DataOrchestrator:
 
     def update_cached_submission_status(self, url: str, new_status: str):
         """Cập nhật trạng thái nộp bài trực tiếp trong cache để đồng bộ giao diện."""
+        canonical_status = normalize_submission_status(new_status)
         with self._detail_lock:
             cached = self._detail_cache.get(url)
             if cached:
-                cached["submission_status"] = new_status
+                cached["submission_status"] = canonical_status
                 details = cached.get("details", {})
                 if isinstance(details, dict):
+                    if cached.get("type") == "quiz":
+                        details["quiz_attempt_status"] = canonical_status
                     status_data = details.get("status_data", {})
                     if isinstance(status_data, dict):
-                        status_data["Trạng thái nộp bài"] = new_status
+                        status_data["Trạng thái nộp bài"] = canonical_status
 
     def invalidate_detail_cache(self, url: str):
         """Xóa cache chi tiết của một URL cụ thể (khi có tác vụ ghi như nộp/xóa bài)."""
@@ -179,14 +203,249 @@ class DataOrchestrator:
             self.moodle_service, userid
         )
     
+
+    def _should_sync_thnn(self, now_ts: float) -> bool:
+        if self._last_thnn_fetch_ts == 0.0:
+            return True
+        from datetime import datetime
+        now = datetime.fromtimestamp(now_ts)
+        last = datetime.fromtimestamp(self._last_thnn_fetch_ts)
+        
+        def get_milestone(dt: datetime) -> int:
+            if dt.hour < 6: return 0
+            elif dt.hour < 12: return 6
+            else: return 12
+            
+        if now.date() > last.date():
+            return True
+        if get_milestone(now) > get_milestone(last):
+            return True
+        return False
+
+    def _download_thnn_calendar(self, opener, data: bytes) -> Optional[str]:
+        """Download one bounded calendar export and reject login/malformed payloads."""
+        import urllib.parse
+
+        origin = self.thnn_client.moodle_site_origin.rstrip("/")
+        export_url = f"{origin}/calendar/export.php"
+        with opener.open(export_url, data=data, timeout=20) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            final_url = response.geturl()
+            raw_body = response.read(2 * 1024 * 1024 + 1)
+            headers = getattr(response, "headers", None)
+            content_type = ""
+            if headers is not None and hasattr(headers, "get_content_type"):
+                content_type = str(headers.get_content_type() or "").casefold()
+
+        parsed_origin = urllib.parse.urlsplit(origin)
+        parsed_final = urllib.parse.urlsplit(final_url)
+        if (
+            not 200 <= status < 300
+            or parsed_final.scheme.casefold() != parsed_origin.scheme.casefold()
+            or parsed_final.netloc.casefold() != parsed_origin.netloc.casefold()
+            or "/login/" in parsed_final.path.casefold()
+            or len(raw_body) > 2 * 1024 * 1024
+            or content_type == "text/html"
+        ):
+            return None
+
+        decoded = raw_body.decode("utf-8", errors="replace").lstrip("\ufeff \t\r\n")
+        if not decoded.startswith("BEGIN:VCALENDAR"):
+            return None
+        if not decoded.rstrip().endswith("END:VCALENDAR"):
+            return None
+        return decoded
+
+
+    def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
+        last_known_good = list(self._thnn_activities_cache)
+        try:
+            if not self.thnn_client._sesskey:
+                success = self.thnn_client.login_session()
+                if not success:
+                    return last_known_good
+                    
+            opener = self.thnn_client._ensure_html_opener()
+            import urllib.parse
+            import datetime
+            import re
+            from bs4 import BeautifulSoup
+            
+            # 1. Tải file ICS export từ THNN
+            data = urllib.parse.urlencode({
+                'sesskey': self.thnn_client._sesskey,
+                '_qf__core_calendar_export_form': '1',
+                'events[exportevents]': 'all',
+                'period[timeperiod]': 'recentupcoming',
+                'export': 'Export'
+            }).encode('utf-8')
+            
+            ics_data = self._download_thnn_calendar(opener, data)
+            if ics_data is None:
+                if not self.thnn_client.login_session(force=True):
+                    return last_known_good
+                opener = self.thnn_client._ensure_html_opener()
+                data = urllib.parse.urlencode({
+                    'sesskey': self.thnn_client._sesskey,
+                    '_qf__core_calendar_export_form': '1',
+                    'events[exportevents]': 'all',
+                    'period[timeperiod]': 'recentupcoming',
+                    'export': 'Export'
+                }).encode('utf-8')
+                ics_data = self._download_thnn_calendar(opener, data)
+                if ics_data is None:
+                    return last_known_good
+                
+            events_ics = {}
+            current_event = {}
+            for line in ics_data.split('\n'):
+                line = line.strip()
+                if line == 'BEGIN:VEVENT':
+                    current_event = {}
+                elif line.startswith('UID:'):
+                    m = re.match(r'UID:(\d+)@', line)
+                    if m:
+                        current_event['id'] = int(m.group(1))
+                elif line.startswith('SUMMARY:'):
+                    current_event['name'] = line[8:].replace(r'\,', ',')
+                elif line.startswith('DTEND:'):
+                    dt_str = line[6:]
+                    if dt_str.endswith('Z'):
+                        dt = datetime.datetime.strptime(dt_str, '%Y%m%dT%H%M%SZ')
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                        current_event['timestamp'] = int(dt.timestamp())
+                elif line.startswith('CATEGORIES:'):
+                    current_event['course_name'] = line[11:].replace(r'\,', ',')
+                elif line == 'END:VEVENT':
+                    if 'id' in current_event:
+                        events_ics[current_event['id']] = current_event
+                        
+            # 2. Tải HTML các tháng để map URL
+            now = datetime.datetime.now()
+            months_to_fetch = []
+            for d_month in [-1, 0, 1, 2]:
+                m = now.month + d_month
+                y = now.year + (m - 1) // 12
+                m = ((m - 1) % 12) + 1
+                months_to_fetch.append(int(datetime.datetime(y, m, 1).timestamp()))
+                
+            for ts in months_to_fetch:
+                try:
+                    url = f"https://thnn.ut.edu.vn/calendar/view.php?view=month&time={ts}"
+                    r = opener.open(url, timeout=10)
+                    soup = BeautifulSoup(r.read().decode('utf-8', errors='ignore'), 'html.parser')
+                    for a in soup.find_all('a', attrs={'data-action': 'view-event'}):
+                        ev_id = int(a.get('data-event-id', 0))
+                        href = a.get('href', '')
+                        if ev_id in events_ics and href:
+                            events_ics[ev_id]['url'] = href
+                            if 'mod/assign' in href:
+                                events_ics[ev_id]['modulename'] = 'assign'
+                            elif 'mod/quiz' in href:
+                                events_ics[ev_id]['modulename'] = 'quiz'
+                except Exception as e:
+                    logger.warning(f"Lỗi tải THNN calendar month {ts}: {e}")
+                    
+            # 3. Chuyển đổi format sang định dạng chuẩn của UTHelper
+            results = []
+            import html
+            from datetime import datetime
+            from config import settings
+            
+            for ev in events_ics.values():
+                url = ev.get('url', '')
+                modulename = ev.get('modulename')
+                if url and modulename in ('assign', 'quiz'):
+                    name = ev.get('name', '').replace(' tới hạn', '').replace(' closes', '')
+                    cname = ev.get('course_name', 'THNN Course')
+                    course_id = 0
+                    
+                    cm_id = ""
+                    if 'id=' in url:
+                        cm_id = url.split('id=')[-1].split('&')[0]
+                    
+                    evt_id = ev.get('id', '')
+                    if not evt_id and modulename and cm_id:
+                        evt_id = f"{modulename}_{cm_id}"
+                        
+                    timestart = ev.get('timestamp', 0)
+                    deadline = ''
+                    urgency = 'safe'
+                    if timestart:
+                        try:
+                            deadline = datetime.fromtimestamp(timestart).strftime('%Y-%m-%d %H:%M:%S')
+                            hours_left = (timestart - now_ts) / 3600
+                            if hours_left < 0:
+                                urgency = 'overdue'
+                            elif hours_left < getattr(settings, 'URGENCY_CRITICAL_HOURS', 12):
+                                urgency = 'critical'
+                            elif hours_left < getattr(settings, 'URGENCY_WARNING_HOURS', 24):
+                                urgency = 'warning'
+                        except Exception:
+                            pass
+                            
+                    event_type = modulename
+                    if event_type == 'assign':
+                        event_type = 'assignment'
+                    
+                    act_dict = {
+                        'id': str(evt_id),
+                        'title': html.unescape(name.strip()),
+                        'course_name': html.unescape(cname),
+                        'course': html.unescape(cname),
+                        'course_id': course_id,
+                        'deadline': deadline,
+                        'deadline_str': deadline,
+                        'url': url,
+                        'type': event_type,
+                        'urgency': urgency,
+                        'source': 'thnn_sync',
+                        'submission_status': 'unknown',
+                        'details': {},
+                        'is_open': False,
+                        'site_identity': 'thnn'
+                    }
+                    results.append(act_dict)
+                    
+            self._last_thnn_fetch_ts = float(now_ts)
+            self._thnn_activities_cache = results
+            return results
+        except Exception as e:
+            logger.error(f"Lỗi khi tải THNN activities: {e}")
+            return last_known_good
+
+    def _format_assignment_from_ws(self, a: dict, url: str, identity: str) -> dict:
+        import html
+        from datetime import datetime
+        dd = a.get("duedate", 0)
+        dt = datetime.fromtimestamp(dd).isoformat() if dd > 0 else ""
+        return {
+            'id': str(a.get("id", "0")),
+            'title': html.unescape(a.get("name") or "Bài tập THNN"),
+            'course_name': "THNN Course",
+            'course': "THNN Course",
+            'course_id': str(a.get("course", "0")),
+            'deadline': dt,
+            'deadline_str': dt,
+            'url': url,
+            'type': "assignment",
+            'urgency': "safe",
+            'source': 'ws_api',
+            'submission_status': "submitted" if a.get("nosubmissions") == 0 else "new",
+            'details': {},
+            'is_open': False,
+            'site_identity': identity
+        }
+
     def _fetch_via_ws_api(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng Moodle Web Services API (stateless, JSON).
         
         PERF-OPT: Parallel API calls + eliminated redundant fetches.
-        Kết hợp 2 nguồn:
+        Kết hợp 3 nguồn:
         1. calendar action events (bài chưa nộp, có deadline tương lai)
         2. mod_assign_get_assignments (TẤT CẢ bài tập kể cả đã nộp)
-        Merge lại để bài đã nộp không bị mất khỏi danh sách.
+        3. calendar events + catalog quiz có chọn lọc (quiz đã làm)
+        Merge lại để hoạt động đã hoàn thành không bị mất khỏi danh sách.
         """
         try:
             from datetime import datetime
@@ -264,12 +523,79 @@ class DataOrchestrator:
             # Chuyển đổi các sự kiện Web Service sang định dạng của UTHelper
             results = self.moodle_service.ws_events_to_assignments(events) if events else []
             
-            # Tối ưu PERF: Bước 3 - Gộp bài tập sử dụng dữ liệu đã tải trước (pre-fetched data)
+            # Đồng bộ THNN
+            if self._should_sync_thnn(now_ts):
+                thnn_results = self._fetch_thnn_activities(now_ts)
+            else:
+                thnn_results = self._thnn_activities_cache
+            if thnn_results:
+                results.extend(thnn_results)
+            
+            # Bước 3 - Gộp assignment và khôi phục quiz đã biến mất khỏi
+            # action-events. Hai nhánh chạy song song; benchmark cho thấy nhánh
+            # quiz có chọn lọc ngắn hơn call assignment hiện hữu.
             course_ids = [c['id'] for c in (self._courses_cache or []) if isinstance(c, dict) and 'id' in c]
+            action_quiz_course_ids = {
+                int(item["course_id"])
+                for item in results
+                if isinstance(item, dict)
+                and item.get("type") == "quiz"
+                and item.get("site_identity") != "thnn"
+                and item.get("course_id")
+            }
+            action_quiz_urls = {
+                item["url"]
+                for item in results
+                if isinstance(item, dict)
+                and item.get("type") == "quiz"
+                and item.get("site_identity") != "thnn"
+                and item.get("url")
+            }
             try:
-                results = self._merge_all_assignments(results, userid=userid, course_ids=course_ids)
+                now = datetime.now()
+                month_start = datetime(now.year, now.month, 1)
+                fetch_months = max(1, min(int(getattr(settings, "FETCH_MONTHS", 1)), 3))
+                future_month = now.month + fetch_months
+                future_year = now.year + (future_month - 1) // 12
+                future_month = ((future_month - 1) % 12) + 1
+                window_start = int(month_start.timestamp())
+                window_end = int(datetime(future_year, future_month, 1).timestamp())
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    assignments_future = pool.submit(
+                        self._merge_all_assignments,
+                        results,
+                        userid=userid,
+                        course_ids=course_ids,
+                    )
+                    quizzes_future = pool.submit(
+                        self._fetch_calendar_quizzes,
+                        course_ids,
+                        window_start,
+                        window_end,
+                        action_quiz_course_ids,
+                        action_quiz_urls,
+                    )
+                    results = assignments_future.result(timeout=25)
+                    quiz_results = quizzes_future.result(timeout=25)
+                if quiz_results is None:
+                    raise RuntimeError("Calendar quiz snapshot is incomplete")
+
+                existing_by_url = {
+                    item.get("url"): item
+                    for item in results
+                    if isinstance(item, dict) and item.get("url")
+                }
+                for quiz_item in quiz_results:
+                    existing = existing_by_url.get(quiz_item.get("url"))
+                    if existing is not None:
+                        if quiz_item.get("quiz_id"):
+                            existing["quiz_id"] = quiz_item["quiz_id"]
+                        continue
+                    if not quiz_item.get("catalog_only"):
+                        results.append(quiz_item)
             except Exception as e:
-                logger.warning("Merge assignments failed; snapshot is partial: %s", e)
+                logger.warning("Merge activities failed; snapshot is partial: %s", e)
                 return None
             
             if not results:
@@ -283,6 +609,127 @@ class DataOrchestrator:
         except Exception as e:
             logger.warning("WS API fetch thất bại: %s", e)
             return None
+
+    def _fetch_calendar_quizzes(
+        self,
+        course_ids: List[int],
+        time_start: int,
+        time_end: int,
+        action_quiz_course_ids: Optional[set[int]] = None,
+        action_quiz_urls: Optional[set[str]] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Return quiz cards from the complete calendar, scoped to relevant courses.
+
+        Moodle action-events omit completed quizzes. The legacy calendar keeps
+        those events, but exposes a quiz instance id rather than its course
+        module id. Query only the courses that actually contain a quiz event in
+        this window, then use the quiz catalog to construct canonical URLs.
+        """
+        from datetime import datetime
+
+        if not course_ids:
+            return []
+
+        events = self.moodle_service.get_calendar_events(
+            time_start,
+            time_end,
+            course_ids,
+        )
+        if events is None:
+            return None
+
+        calendar_quiz_course_ids = {
+                int(event["courseid"])
+                for event in events
+                if isinstance(event, dict)
+                and event.get("modulename") == "quiz"
+                and event.get("courseid")
+        }
+        quiz_course_ids = sorted(
+            calendar_quiz_course_ids | set(action_quiz_course_ids or ())
+        )
+        if not quiz_course_ids:
+            return []
+
+        quizzes = self.moodle_service.get_quizzes_by_courses(quiz_course_ids)
+        if not isinstance(quizzes, list):
+            return None
+
+        course_names = {
+            int(course["id"]): html.unescape(course.get("fullname", ""))
+            for course in (self._courses_cache or [])
+            if isinstance(course, dict) and course.get("id")
+        }
+        now_ts = int(datetime.now().timestamp())
+        results: List[Dict[str, Any]] = []
+        seen_cmids: set[int] = set()
+        action_quiz_urls = set(action_quiz_urls or ())
+
+        for quiz in quizzes:
+            if not isinstance(quiz, dict):
+                continue
+            try:
+                course_id = int(quiz.get("course") or 0)
+                cmid = int(quiz.get("coursemodule") or 0)
+                quiz_id = int(quiz.get("id") or 0)
+                deadline_ts = int(quiz.get("timeclose") or 0)
+            except (TypeError, ValueError):
+                continue
+            quiz_url = f"{settings.MOODLE_BASE_URL}/mod/quiz/view.php?id={cmid}"
+            is_action_quiz = quiz_url in action_quiz_urls
+            if not cmid or cmid in seen_cmids or (
+                course_id not in calendar_quiz_course_ids and not is_action_quiz
+            ):
+                continue
+
+            seen_cmids.add(cmid)
+            if (
+                not deadline_ts
+                or deadline_ts < time_start
+                or deadline_ts > time_end
+            ):
+                if is_action_quiz:
+                    results.append(
+                        {
+                            "url": quiz_url,
+                            "quiz_id": quiz_id,
+                            "catalog_only": True,
+                        }
+                    )
+                continue
+            remaining = deadline_ts - now_ts
+            if remaining < 0:
+                urgency = "overdue"
+            elif remaining < settings.URGENCY_CRITICAL_HOURS * 3600:
+                urgency = "critical"
+            elif remaining < settings.URGENCY_WARNING_HOURS * 3600:
+                urgency = "warning"
+            else:
+                urgency = "safe"
+            deadline = datetime.fromtimestamp(deadline_ts).strftime("%Y-%m-%d %H:%M:%S")
+            course_name = course_names.get(course_id, "")
+            results.append(
+                {
+                    "id": f"quiz_{quiz_id}",
+                    "title": html.unescape(quiz.get("name") or "Không tên"),
+                    "course_name": course_name,
+                    "course": course_name,
+                    "course_id": course_id,
+                    "quiz_id": quiz_id,
+                    "deadline": deadline,
+                    "deadline_str": deadline,
+                    "url": quiz_url,
+                    "type": "quiz",
+                    "urgency": urgency,
+                    "source": "ws_quiz_calendar_api",
+                    "submission_status": "unknown",
+                    "details": {},
+                    "is_open": False,
+                    "site_identity": "courses",
+                }
+            )
+
+        return results
     
     async def _fetch_via_ws_api_async(self) -> Optional[List[Dict[str, Any]]]:
         """Lấy activities bằng WS API bất đồng bộ (non-blocking).
@@ -314,6 +761,7 @@ class DataOrchestrator:
         từ đầu tháng hiện tại → FETCH_MONTHS tháng tới (theo setting).
         """
         from datetime import datetime
+        from urllib.parse import urlsplit
         
         now = datetime.now()
         # Đầu tháng hiện tại
@@ -352,11 +800,23 @@ class DataOrchestrator:
         if not all_assigns:
             return calendar_results
         
+        # Chỉ Courses activities được phép khớp với Courses assignments. Numeric
+        # cmid chỉ duy nhất bên trong một Moodle site, không duy nhất giữa các site.
+        courses_url = urlsplit(settings.MOODLE_BASE_URL)
+        courses_origin = (courses_url.scheme.casefold(), courses_url.netloc.casefold())
+
         # Xây dựng bảng tra cứu: cmid → chỉ mục trong calendar_results (để bổ sung thông tin cutoffdate)
         existing_cmids = set()
         cmid_to_index: dict[int, int] = {}
         for idx, item in enumerate(calendar_results):
             url = item.get('url', '')
+            parsed_url = urlsplit(url)
+            item_origin = (
+                parsed_url.scheme.casefold(),
+                parsed_url.netloc.casefold(),
+            )
+            if item_origin != courses_origin:
+                continue
             if 'id=' in url:
                 try:
                     _cmid = int(url.split('id=')[-1].split('&')[0])
@@ -385,6 +845,8 @@ class DataOrchestrator:
                         _existing = calendar_results[_idx]
                         if not _existing.get('course_id') and course_id:
                             _existing['course_id'] = course_id
+                        if assign.get('id'):
+                            _existing['assignment_id'] = assign['id']
                         _cutoff = assign.get('cutoffdate', 0)
                         _due = assign.get('duedate', 0)
                         if _cutoff > 0 and _cutoff != _due:
@@ -436,6 +898,7 @@ class DataOrchestrator:
                     'course_name': course_name,
                     'course': course_name,
                     'course_id': course_id,
+                    'assignment_id': assign.get('id'),
                     'deadline': deadline_str,
                     'deadline_str': deadline_str,
                     'url': assign_url,
@@ -445,6 +908,7 @@ class DataOrchestrator:
                     'submission_status': 'unknown',
                     'details': {},
                     'is_open': False,
+                    'site_identity': 'courses',
                     'cutoff_date': cutoffdate,
                     'late_status': late_status,
                 })
@@ -477,29 +941,119 @@ class DataOrchestrator:
         return FetchOutcome.complete(ws_result)
 
 
+    @staticmethod
+    def _merge_cached_detail_for_activity(
+        activity_data: Dict[str, Any],
+        cached: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Apply shared module detail without replacing the clicked event card."""
+        result = {**cached, **activity_data}
+        current_details = activity_data.get("details")
+        cached_details = cached.get("details")
+        current_details = (
+            current_details if isinstance(current_details, dict) else {}
+        )
+        cached_details = cached_details if isinstance(cached_details, dict) else {}
+        details = {**current_details, **cached_details}
+
+        cached_status_data = cached_details.get("status_data")
+        current_status_data = current_details.get("status_data")
+        cached_status_data = (
+            cached_status_data if isinstance(cached_status_data, dict) else {}
+        )
+        current_status_data = (
+            current_status_data if isinstance(current_status_data, dict) else {}
+        )
+        if cached_status_data or current_status_data:
+            details["status_data"] = {
+                **cached_status_data,
+                **current_status_data,
+            }
+
+        status = prefer_known_submission_status(
+            activity_data.get("submission_status"),
+            cached.get("submission_status"),
+        )
+        result["submission_status"] = status
+        if result.get("type") == "quiz" and status != "unknown":
+            details["quiz_attempt_status"] = status
+        result["details"] = details
+        return result
 
 
-    def fetch_full_details(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> Dict[str, Any]:
+    @staticmethod
+    def _detail_module_name(activity_data: Dict[str, Any]) -> str:
+        """Resolve the actual Moodle module instead of defaulting cards to assign."""
+        path = urlsplit(str(activity_data.get("url", ""))).path.lower()
+        if "/mod/" in path:
+            module = path.split("/mod/", 1)[1].split("/", 1)[0]
+            if module:
+                return module
+        activity_type = str(activity_data.get("type", "other")).lower()
+        return (
+            "assign"
+            if activity_type in {"assignment", "assign"}
+            else activity_type
+        )
+
+
+
+
+    def fetch_full_details(
+        self,
+        activity_data: Dict[str, Any],
+        force_refresh: bool = False,
+        cache_generation: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Tải toàn bộ chi tiết (mô tả, trạng thái nộp bài) qua WS API."""
         url = activity_data.get("url")
         if not url:
             return activity_data
 
-        # Trả về cache nếu đã tải trước đó và không force refresh
+        owned_inflight: threading.Event | None = None
         if not force_refresh:
-            cached = self._get_cached_detail(url)
-            if cached is not None:
-                return cached
-        
-        # WS API (stateless, không kick browser)
-        if settings.MOODLE_WS_TOKEN:
-            ws_result = self._fetch_detail_via_ws(activity_data)
-            if ws_result:
-                self._set_cached_detail(url, ws_result)
-                return ws_result
-        
-        logger.debug("WS API không lấy được chi tiết cho %s.", url)
-        return activity_data
+            with self._detail_lock:
+                # Re-check cache and in-flight state atomically. This prevents
+                # foreground navigation from duplicating an identical warm-up.
+                cached = self._get_cached_detail(url)
+                if cached is not None:
+                    return self._merge_cached_detail_for_activity(
+                        activity_data, cached
+                    )
+                inflight = self._detail_inflight.get(url)
+                if inflight is None:
+                    owned_inflight = threading.Event()
+                    self._detail_inflight[url] = owned_inflight
+
+            if owned_inflight is None:
+                inflight.wait()
+                cached = self._get_cached_detail(url)
+                return (
+                    self._merge_cached_detail_for_activity(activity_data, cached)
+                    if cached is not None
+                    else activity_data
+                )
+
+        if cache_generation is None:
+            with self._detail_lock:
+                cache_generation = self._detail_cache_generation
+
+        try:
+            # WS API (stateless, không kick browser)
+            if settings.MOODLE_WS_TOKEN:
+                ws_result = self._fetch_detail_via_ws(activity_data)
+                if ws_result:
+                    self._set_cached_detail(url, ws_result, cache_generation)
+                    return ws_result
+
+            logger.debug("WS API không lấy được chi tiết cho %s.", url)
+            return activity_data
+        finally:
+            if owned_inflight is not None:
+                with self._detail_lock:
+                    if self._detail_inflight.get(url) is owned_inflight:
+                        self._detail_inflight.pop(url, None)
+                    owned_inflight.set()
     
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Lấy chi tiết bài tập qua WS API - không cần session, không kick browser."""
@@ -532,19 +1086,7 @@ class DataOrchestrator:
             logger.debug("Không có course_id cho WS detail fetch.")
             return None
         
-        # Xác định modulename từ type
-        type_to_module = {
-            'assignment': 'assign',
-            'assign': 'assign',
-            'quiz': 'quiz',
-        }
-        modulename = type_to_module.get(activity_type, 'assign')
-        
-        # Nếu URL chứa /mod/quiz/ thì là quiz
-        if '/mod/quiz/' in url:
-            modulename = 'quiz'
-        elif '/mod/assign/' in url:
-            modulename = 'assign'
+        modulename = self._detail_module_name(activity_data)
         
         try:
             cid = int(course_id) if not isinstance(course_id, int) else course_id
@@ -597,15 +1139,130 @@ class DataOrchestrator:
         status_data = ws_details.get('status_data', {})
         quiz_attempt_status = ws_details.get('quiz_attempt_status')
         if activity_type == 'quiz' and quiz_attempt_status:
-            result['submission_status'] = quiz_attempt_status
+            result['submission_status'] = normalize_submission_status(quiz_attempt_status)
         elif 'Trạng thái nộp bài' in status_data:
-            result['submission_status'] = status_data['Trạng thái nộp bài']
+            result['submission_status'] = normalize_submission_status(
+                status_data['Trạng thái nộp bài']
+            )
         elif 'Trạng thái' in status_data:
-            result['submission_status'] = status_data['Trạng thái']
+            result['submission_status'] = normalize_submission_status(
+                status_data['Trạng thái']
+            )
         
         return result
 
-    def prefetch_one_detail(self, activity_data: Dict[str, Any], force_refresh: bool = False) -> bool:
+    def _fetch_one_activity_status(
+        self, activity_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch student state using IDs already present in the catalog."""
+        activity_type = activity_data.get("type")
+        status = "unknown"
+
+        if activity_type in {"assignment", "assign"}:
+            assignment_id = activity_data.get("assignment_id")
+            if not assignment_id:
+                return None
+            response = self.moodle_service.get_submission_status(int(assignment_id))
+            if response is None:
+                return None
+            last_attempt = response.get("lastattempt", {})
+            submission = last_attempt.get("submission", {})
+            status = normalize_submission_status(submission.get("status"))
+            if status == "unknown":
+                status = normalize_submission_status(last_attempt.get("gradingstatus"))
+        elif activity_type == "quiz":
+            quiz_id = activity_data.get("quiz_id")
+            if not quiz_id:
+                return None
+            attempts = self.moodle_service.get_quiz_attempts(int(quiz_id))
+            if attempts is None:
+                return None
+            states = {
+                normalize_submission_status(attempt.get("state"))
+                for attempt in attempts
+                if isinstance(attempt, dict)
+            }
+            if "submitted" in states:
+                status = "submitted"
+            elif "in_progress" in states:
+                status = "in_progress"
+            elif attempts:
+                status = next((value for value in states if value != "unknown"), "attempted")
+            else:
+                status = "not_submitted"
+        else:
+            return None
+
+        if status == "unknown":
+            return None
+        url = activity_data.get("url")
+        if url:
+            self.update_cached_submission_status(url, status)
+        result = dict(activity_data)
+        result["submission_status"] = status
+        details = dict(result.get("details") or {})
+        status_data = dict(details.get("status_data") or {})
+        status_data["Trạng thái nộp bài"] = status
+        details["status_data"] = status_data
+        if activity_type == "quiz":
+            details["quiz_attempt_status"] = status
+        result["details"] = details
+        return result
+
+    def prefetch_activity_statuses(
+        self,
+        activities: List[Dict[str, Any]],
+        workers: int = 4,
+        cancel_flag=None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Hydrate status only, avoiding per-card assignment/quiz catalog calls."""
+        pending = [activity for activity in activities if activity.get("url")]
+        if not pending or (cancel_flag and cancel_flag()):
+            return {}
+
+        workers = max(1, min(workers, 4))
+        results: Dict[str, Dict[str, Any]] = {}
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {
+            pool.submit(self._fetch_one_activity_status, activity): activity
+            for activity in pending
+        }
+        try:
+            while futures:
+                if cancel_flag and cancel_flag():
+                    break
+                completed, _ = wait(
+                    futures,
+                    timeout=0.05,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    continue
+                for future in completed:
+                    activity = futures.pop(future)
+                    try:
+                        enriched = future.result()
+                    except Exception:
+                        logger.debug(
+                            "Status hydration failed for %s",
+                            activity.get("url"),
+                            exc_info=True,
+                        )
+                        continue
+                    if enriched:
+                        results[activity["url"]] = enriched
+        finally:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+        return results
+
+    def prefetch_one_detail(
+        self,
+        activity_data: Dict[str, Any],
+        force_refresh: bool = False,
+        cache_generation: Optional[int] = None,
+    ) -> bool:
         """
         Prefetch chi tiết một hoạt động vào cache. Trả về True nếu đã cache sẵn hoặc fetch thành công.
         Dùng cho background prefetch - không raise exception.
@@ -616,7 +1273,7 @@ class DataOrchestrator:
         if not force_refresh and self._get_cached_detail(url) is not None:
             return True
         try:
-            self.fetch_full_details(activity_data, force_refresh)
+            self.fetch_full_details(activity_data, force_refresh, cache_generation)
             return self._get_cached_detail(url) is not None
         except Exception:
             return False
@@ -637,24 +1294,50 @@ class DataOrchestrator:
         if not pending:
             return 0
 
+        if cancel_flag and cancel_flag():
+            return 0
+
         workers = max(1, min(workers, 10))
         logger.debug(f"[Orchestrator] Prefetch {len(pending)} items với {workers} workers (force_refresh={force_refresh})")
         done = 0
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(self.prefetch_one_detail, a, force_refresh): a for a in pending}
-            for future in as_completed(futures):
+        with self._detail_lock:
+            cache_generation = self._detail_cache_generation
+
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {
+            pool.submit(
+                self.prefetch_one_detail,
+                activity,
+                force_refresh,
+                cache_generation,
+            )
+            for activity in pending
+        }
+        try:
+            while futures:
                 if cancel_flag and cancel_flag():
-                    pool.shutdown(wait=False, cancel_futures=True)
                     logger.debug("[Orchestrator] Prefetch bị huỷ")
                     break
-                try:
-                    ok = future.result(timeout=30)
-                except TimeoutError:
-                    logger.warning("Prefetch detail timeout after 30s")
-                    ok = False
-                if ok:
-                    done += 1
+                completed, _ = wait(
+                    futures,
+                    timeout=0.05,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    continue
+                futures.difference_update(completed)
+                for future in completed:
+                    try:
+                        ok = future.result()
+                    except Exception:
+                        ok = False
+                    if ok:
+                        done += 1
+        finally:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
         return done
 
@@ -674,7 +1357,9 @@ class DataOrchestrator:
             "deadline": assign.deadline.isoformat(),
             "urgency": assign.urgency,
             "url": assign.url,
-            "submission_status": assign.submission_status,
+            "submission_status": normalize_submission_status(
+                assign.submission_status
+            ),
             "details": {}
         }
 

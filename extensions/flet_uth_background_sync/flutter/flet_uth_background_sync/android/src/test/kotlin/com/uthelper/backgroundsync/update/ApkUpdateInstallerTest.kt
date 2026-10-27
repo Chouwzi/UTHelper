@@ -1,5 +1,7 @@
 package com.uthelper.backgroundsync.update
 
+import java.nio.file.Files
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -86,5 +88,56 @@ class ApkUpdateInstallerTest {
             next,
             installed,
         )
+    }
+
+    @Test
+    fun copiesAndVerifiesOneLocalApkWithoutNetworkTransport() {
+        val directory = Files.createTempDirectory("uthelper-local-apk-test").toFile()
+        try {
+            val source = directory.resolve("source.apk").apply {
+                writeBytes("verified apk".toByteArray())
+            }
+            val staged = directory.resolve("staged.apk.part")
+
+            val verified = copyAndVerifyLocalPackage(
+                source = source,
+                destination = staged,
+                expectedSha256 =
+                    "97bd5a88552319b46e3d5ed350451b18a7558170aa11d7947452c62365c75403",
+                expectedSize = 12,
+            )
+
+            assertEquals(12L, verified.bytes)
+            assertEquals(
+                "97bd5a88552319b46e3d5ed350451b18a7558170aa11d7947452c62365c75403",
+                verified.sha256,
+            )
+            assertEquals("verified apk", staged.readText())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rejectsTamperedLocalApkAndRemovesStagedBytes() {
+        val directory = Files.createTempDirectory("uthelper-local-apk-test").toFile()
+        try {
+            val source = directory.resolve("source.apk").apply {
+                writeBytes("tampered".toByteArray())
+            }
+            val staged = directory.resolve("staged.apk.part")
+
+            assertThrows(IllegalArgumentException::class.java) {
+                copyAndVerifyLocalPackage(
+                    source = source,
+                    destination = staged,
+                    expectedSha256 = "0".repeat(64),
+                    expectedSize = 8,
+                )
+            }
+            assertEquals(false, staged.exists())
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 }

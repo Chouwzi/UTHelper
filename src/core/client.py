@@ -152,13 +152,16 @@ class MoodleClient:
     # Giới hạn tần suất gọi API ở phía Client (Moodle không tự động bóp băng thông từ server-side)
     _MIN_INTERVAL = 0.05  # 50ms = tối đa 20 req/s (trước đây là 200ms - gây lãng phí 1.6s cho mỗi chu kỳ quét)
 
-    def __init__(self):
+    def __init__(self, base_url: str | None = None):
         self._moodle_site: MoodleSite | None = moodle_site_from_origin(
-            settings.MOODLE_BASE_URL
+            base_url if base_url is not None else settings.MOODLE_BASE_URL
         )
         self._last_login_error = ""
         self._portal_token: str = ""   # JWT lấy từ portal API - thời hạn khoảng 30 ngày
         self._last_call_time: float = 0.0  # Nhãn thời gian đơn điệu (monotonic)
+        self._cookie_jar = CookieJar()
+        self._sesskey = ""
+        self._html_opener = None
 
     @property
     def moodle_site_origin(self) -> str:
@@ -201,6 +204,154 @@ class MoodleClient:
         if elapsed < self._MIN_INTERVAL:
             time.sleep(self._MIN_INTERVAL - elapsed)
         self._last_call_time = time.monotonic()
+
+    def _ensure_html_opener(self):
+        if self._html_opener is None:
+            self._html_opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(self._cookie_jar),
+                _SameMoodleOriginRedirectHandler(self.moodle_site_origin),
+            )
+        return self._html_opener
+
+    def _open_html(self, path: str, *, data: dict[str, str] | None = None) -> tuple[str, str]:
+        opener = self._ensure_html_opener()
+        origin = self.moodle_site_origin
+        url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+        encoded = urllib.parse.urlencode(data).encode() if data is not None else None
+        request = urllib.request.Request(
+            url,
+            data=encoded,
+            method="POST" if data is not None else "GET",
+            headers={"User-Agent": _DEFAULT_UA, "Accept": "text/html"},
+        )
+        with opener.open(request, timeout=20) as response:
+            final_url = response.geturl()
+            parsed = urllib.parse.urlsplit(final_url)
+            final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            if final_origin != origin:
+                raise ValueError("Moodle web response changed origin")
+            body = response.read(2 * 1024 * 1024 + 1)
+        if len(body) > 2 * 1024 * 1024:
+            raise ValueError("Moodle web response was too large")
+        return final_url, body.decode("utf-8", errors="replace")
+
+    def login_session(self, username: str = None, password: str = None, force: bool = False) -> bool:
+        """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey."""
+        if not force and self._sesskey:
+            return True
+
+        if not username:
+            username = settings.UTH_USERNAME
+        if not password:
+            password = settings.UTH_PASSWORD
+
+        if not self.moodle_site_origin or not username or not password:
+            self._last_login_error = "invalid_credentials"
+            return False
+
+        try:
+            self._cookie_jar.clear()
+            self._sesskey = ""
+
+            _, login_page = self._open_html("/login/index.php")
+            parsed_login = _MoodleHtmlFormParser()
+            parsed_login.feed(login_page)
+            login_token = parsed_login.inputs.get("logintoken", "")
+            if not login_token:
+                logger.error("Không tìm thấy logintoken trên trang đăng nhập.")
+                self._last_login_error = "server_error"
+                return False
+
+            final_url, _ = self._open_html(
+                "/login/index.php",
+                data={
+                    "anchor": "",
+                    "logintoken": login_token,
+                    "username": username,
+                    "password": password,
+                },
+            )
+            if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                logger.warning("Đăng nhập session thất bại (sai tài khoản hoặc lỗi Moodle).")
+                self._last_login_error = "invalid_credentials"
+                return False
+
+            # Lấy trang Dashboard để trích xuất sesskey
+            _, dashboard_page = self._open_html("/my/")
+            
+            # sesskey thường nằm trong thẻ JS: "sesskey":"123xyz"
+            import re
+            match = re.search(r'"sesskey":"([a-zA-Z0-9]+)"', dashboard_page)
+            if match:
+                self._sesskey = match.group(1)
+                return True
+            
+            # Fallback 1: tìm biến sesskey=...
+            match2 = re.search(r'sesskey=([a-zA-Z0-9]+)', dashboard_page)
+            if match2:
+                self._sesskey = match2.group(1)
+                return True
+
+            logger.error("Không trích xuất được sesskey sau khi login.")
+            self._last_login_error = "server_error"
+            return False
+
+        except Exception as e:
+            logger.error(f"Lỗi login_session: {e}")
+            self._last_login_error = "network_error"
+            return False
+
+    def call_ajax_api(self, function: str, **params) -> Optional[dict]:
+        """Gọi Moodle AJAX service. Trả về None nếu lỗi hoặc HTTP fail."""
+        if not self._sesskey:
+            if not self.login_session():
+                return None
+
+        origin = self.moodle_site_origin
+        url = f"{origin}/lib/ajax/service.php?sesskey={self._sesskey}&info={function}"
+        
+        payload = [{
+            "index": 0,
+            "methodname": function,
+            "args": params
+        }]
+        raw_body = json.dumps(payload).encode("utf-8")
+        
+        request = urllib.request.Request(
+            url,
+            data=raw_body,
+            headers={
+                "User-Agent": _DEFAULT_UA,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest"
+            },
+            method="POST",
+        )
+        
+        opener = self._ensure_html_opener()
+        try:
+            with opener.open(request, timeout=20) as response:
+                body = response.read()
+                try:
+                    data = json.loads(body)
+                except ValueError:
+                    logger.error("AJAX response không phải JSON.")
+                    return None
+                
+                if isinstance(data, list) and len(data) > 0:
+                    resp = data[0]
+                    if resp.get("error"):
+                        logger.error(f"AJAX API error: {resp.get('exception')} - {resp.get('message')}")
+                        # Xóa sesskey nếu lỗi liên quan tới session
+                        if "requireloginerror" in resp.get("errorcode", "") or "sesskey" in resp.get("message", "").lower():
+                            self._sesskey = ""
+                    return resp
+                return None
+        except Exception as e:
+            logger.error(f"Lỗi call_ajax_api: {e}")
+            return None
+
 
     def close(self):
         """Không cần cleanup - urllib không dùng connection pool."""
@@ -697,40 +848,15 @@ class MoodleClient:
         if not origin or not username or not password:
             return False
 
-        opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(CookieJar()),
-            _SameMoodleOriginRedirectHandler(origin),
-        )
-
-        def open_html(path: str, *, data: dict[str, str] | None = None) -> tuple[str, str]:
-            url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
-            encoded = urllib.parse.urlencode(data).encode() if data is not None else None
-            request = urllib.request.Request(
-                url,
-                data=encoded,
-                method="POST" if data is not None else "GET",
-                headers={"User-Agent": _DEFAULT_UA, "Accept": "text/html"},
-            )
-            with opener.open(request, timeout=20) as response:
-                final_url = response.geturl()
-                parsed = urllib.parse.urlsplit(final_url)
-                final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-                if final_origin != origin:
-                    raise ValueError("Moodle web response changed origin")
-                body = response.read(2 * 1024 * 1024 + 1)
-            if len(body) > 2 * 1024 * 1024:
-                raise ValueError("Moodle web response was too large")
-            return final_url, body.decode("utf-8", errors="replace")
-
         try:
-            _, login_page = open_html("/login/index.php")
+            _, login_page = self._open_html("/login/index.php")
             parsed_login = _MoodleHtmlFormParser()
             parsed_login.feed(login_page)
             login_token = parsed_login.inputs.get("logintoken", "")
             if not login_token:
                 return False
 
-            final_url, _ = open_html(
+            final_url, _ = self._open_html(
                 "/login/index.php",
                 data={
                     "anchor": "",
@@ -745,7 +871,7 @@ class MoodleClient:
             query = urllib.parse.urlencode(
                 {"id": cmid, "action": "removesubmissionconfirm"}
             )
-            _, confirmation_page = open_html(f"/mod/assign/view.php?{query}")
+            _, confirmation_page = self._open_html(f"/mod/assign/view.php?{query}")
             parsed_confirmation = _MoodleHtmlFormParser()
             parsed_confirmation.feed(confirmation_page)
             remove_fields: dict[str, str] | None = None
@@ -784,7 +910,7 @@ class MoodleClient:
                 return False
             if before_commit is not None and not before_commit():
                 return False
-            open_html(action_url, data=remove_fields)
+            self._open_html(action_url, data=remove_fields)
             return True
         except Exception as exc:
             logger.warning(

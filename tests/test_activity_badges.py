@@ -39,6 +39,31 @@ def test_assignment_badge_wording_is_unchanged():
     ) == ("Chưa nộp", C.TEXT_SECONDARY)
 
 
+@pytest.mark.parametrize("status", ["new", "Chưa nộp", "Not submitted"])
+def test_assignment_badge_accepts_legacy_not_submitted_statuses(status):
+    assert get_submission_badge(
+        {"type": "assignment", "submission_status": status, "details": {}}
+    ) == ("Chưa nộp", C.TEXT_SECONDARY)
+
+
+def test_english_not_submitted_fallback_is_not_misread_as_submitted():
+    assert get_submission_badge(
+        {
+            "type": "assignment",
+            "submission_status": "unknown",
+            "details": {
+                "status_data": {"Submission status": "Not submitted"}
+            },
+        }
+    ) == ("Chưa nộp", C.TEXT_SECONDARY)
+
+
+def test_draft_status_has_an_explicit_badge():
+    assert get_submission_badge(
+        {"type": "assignment", "submission_status": "draft", "details": {}}
+    ) == ("Bản nháp", C.WARNING)
+
+
 def test_activity_card_renders_quiz_not_started_badge():
     card = ActivityCard(
         {
@@ -53,3 +78,27 @@ def test_activity_card_renders_quiz_not_started_badge():
 
     assert len(card._optional_rows.controls) == 1
     assert card._optional_rows.controls[0].content.value == "Chưa làm"
+
+
+def test_activity_card_rerenders_when_only_status_details_are_enriched():
+    initial = {
+        "id": "assignment-1",
+        "type": "assignment",
+        "title": "Assignment",
+        "deadline": "2026-08-20 12:00:00",
+        "submission_status": "unknown",
+        "details": {},
+    }
+    card = ActivityCard(initial, on_tap=lambda _data: None)
+    assert card._optional_rows.controls == []
+
+    card.update_data(
+        {
+            **initial,
+            "details": {
+                "status_data": {"Trạng thái nộp bài": "Chưa nộp"}
+            },
+        }
+    )
+
+    assert card._optional_rows.controls[0].content.value == "Chưa nộp"

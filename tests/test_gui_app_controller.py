@@ -1,8 +1,12 @@
 import os
 import sys
 import asyncio
+import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+
+import flet as ft
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -15,6 +19,8 @@ from gui.app_controller import (
     _AndroidPackageLauncher,
     _android_release_build_number,
 )
+from gui.components.activity_card import ActivityCard
+from gui.components.today_schedule_panel import TodaySchedulePanel
 
 
 def test_render_cards_refreshes_current_filters():
@@ -26,6 +32,160 @@ def test_render_cards_refreshes_current_filters():
     controller._render_cards()
 
     assert calls == ["refresh"]
+
+
+def test_dashboard_filter_models_share_counts_and_short_trigger_labels():
+    urgency = AppController._urgency_filter_options(
+        {"all": 12, "critical": 1, "warning": 2, "safe": 9, "overdue": 0}
+    )
+    activity_type = AppController._type_filter_options(
+        {"all": 12, "quiz": 4, "assignment": 8}
+    )
+    courses = AppController._course_filter_options(
+        {"all": 12, "Course B": 5, "Course A": 7}
+    )
+
+    assert urgency[0].trigger_label == "Mức độ"
+    assert urgency[1].count == 1
+    assert activity_type[0].trigger_label == "Tất cả"
+    assert activity_type[1].count == 4
+    assert courses[0].trigger_label == "Môn học"
+    assert [option.key for option in courses] == ["all", "Course A", "Course B"]
+
+
+def test_every_dashboard_filter_option_has_an_icon_for_fast_scanning():
+    option_groups = [
+        AppController._urgency_filter_options(),
+        AppController._type_filter_options(),
+        AppController._course_filter_options({"all": 0, "Course": 1}),
+    ]
+
+    assert all(option.icon is not None for group in option_groups for option in group)
+
+
+def test_dashboard_filter_row_distributes_removed_checkbox_space():
+    controller = AppController.__new__(AppController)
+    controller.urgency_filter_menu = SimpleNamespace(control=ft.Container())
+    controller.type_filter_menu = SimpleNamespace(control=ft.Container())
+    controller.course_filter_menu = SimpleNamespace(control=ft.Container())
+
+    row = controller._build_dashboard_filter_row()
+
+    assert row.spacing == 6
+    assert [control.expand for control in row.controls] == [4, 4, 5]
+
+
+def test_desktop_filter_press_atomically_replaces_active_popup():
+    controller = AppController.__new__(AppController)
+    updates = []
+    controller.page = SimpleNamespace(width=420, update=lambda: updates.append(True))
+    controller._window_header = ft.Container(height=34)
+    controller._desktop_filter_popup_host = ft.Container(
+        visible=True,
+        opacity=0,
+        scale=0.96,
+        offset=ft.Offset(0, -0.025),
+        ignore_interactions=True,
+    )
+    controller._desktop_filter_top_dismiss_layer = ft.Container(visible=False)
+    controller._desktop_filter_upper_body_dismiss_layer = ft.Container(
+        visible=False
+    )
+    controller._desktop_filter_dismiss_layer = ft.Container(visible=False)
+    controller._active_desktop_filter_menu = None
+    first_states = []
+    second_states = []
+    first = SimpleNamespace(
+        trigger=ft.Container(height=40),
+        popup_width=224,
+        popup_panel=ft.Container(data="first"),
+        _set_expanded=first_states.append,
+    )
+    second = SimpleNamespace(
+        trigger=ft.Container(height=40),
+        popup_width=232,
+        popup_panel=ft.Container(data="second"),
+        _set_expanded=second_states.append,
+    )
+    first_event = SimpleNamespace(
+        global_position=ft.Offset(70, 165),
+        local_position=ft.Offset(20, 20),
+    )
+    second_event = SimpleNamespace(
+        global_position=ft.Offset(195, 165),
+        local_position=ft.Offset(50, 20),
+    )
+
+    controller._toggle_desktop_filter_menu(first, first_event)
+    assert controller._desktop_filter_popup_host.opacity == 0
+    asyncio.run(controller._animate_desktop_filter_open(first))
+    assert controller._desktop_filter_popup_host.opacity == 1
+    controller._toggle_desktop_filter_menu(second, second_event)
+
+    assert first_states == [True, False]
+    assert second_states == [True]
+    assert controller._active_desktop_filter_menu is second
+    assert controller._desktop_filter_popup_host.content is second.popup_panel
+    assert controller._desktop_filter_popup_host.visible is True
+    assert controller._desktop_filter_popup_host.opacity == 1
+    assert controller._desktop_filter_popup_host.ignore_interactions is False
+    assert controller._desktop_filter_top_dismiss_layer.visible is True
+    assert controller._desktop_filter_upper_body_dismiss_layer.visible is True
+    assert controller._desktop_filter_dismiss_layer.visible is True
+    assert len(updates) == 3
+
+
+def test_pressing_active_desktop_filter_closes_it_without_reopening():
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(width=420, update=lambda: None)
+    controller._window_header = ft.Container(height=34)
+    controller._desktop_filter_popup_host = ft.Container(
+        visible=True,
+        opacity=0,
+        scale=0.96,
+        offset=ft.Offset(0, -0.025),
+        ignore_interactions=True,
+    )
+    controller._desktop_filter_top_dismiss_layer = ft.Container(visible=False)
+    controller._desktop_filter_upper_body_dismiss_layer = ft.Container(
+        visible=False
+    )
+    controller._desktop_filter_dismiss_layer = ft.Container(visible=False)
+    states = []
+    menu = SimpleNamespace(
+        trigger=ft.Container(height=40),
+        popup_width=224,
+        popup_panel=ft.Container(),
+        _set_expanded=states.append,
+    )
+    event = SimpleNamespace(
+        global_position=ft.Offset(70, 165),
+        local_position=ft.Offset(20, 20),
+    )
+    controller._active_desktop_filter_menu = None
+
+    controller._toggle_desktop_filter_menu(menu, event)
+    controller._toggle_desktop_filter_menu(menu, event)
+
+    assert states == [True, False]
+    assert controller._active_desktop_filter_menu is None
+    assert controller._desktop_filter_popup_host.opacity == 0
+    assert controller._desktop_filter_popup_host.ignore_interactions is True
+    assert controller._desktop_filter_top_dismiss_layer.visible is False
+    assert controller._desktop_filter_upper_body_dismiss_layer.visible is False
+    assert controller._desktop_filter_dismiss_layer.visible is False
+
+
+def test_dashboard_header_action_closes_filter_and_runs_on_same_click():
+    controller = AppController.__new__(AppController)
+    calls = []
+    handler = object()
+    controller._dismiss_desktop_filter_menu = lambda: calls.append("dismiss")
+    controller._safe_run_task = lambda received: calls.append(received)
+
+    controller._run_dashboard_header_action(handler)
+
+    assert calls == ["dismiss", handler]
 
 
 class _FakePage:
@@ -75,6 +235,32 @@ def test_countdown_tick_batches_page_update_without_per_card_updates():
     assert controller.page.update_count == 1
 
 
+def test_countdown_tick_skips_schedule_panel_and_updates_real_activity_card():
+    controller = AppController.__new__(AppController)
+    controller.page = _FakePage()
+    panel = TodaySchedulePanel(on_need_data=lambda: None)
+    card = ActivityCard(
+        {
+            "title": "Offline countdown",
+            "course": "Audit",
+            "type": "quiz",
+            "deadline": (datetime.now() + timedelta(minutes=5)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "submission_status": "unknown",
+        },
+        on_tap=lambda _event: None,
+    )
+    card.data["deadline"] = (datetime.now() - timedelta(minutes=1)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    controller._countdown_cards_once([panel, card])
+
+    assert card._countdown_ctrl.value.startswith("Quá hạn")
+    assert controller.page.update_count == 1
+
+
 def test_today_schedule_retry_requests_portal_refresh_instead_of_moodle_data():
     controller = AppController.__new__(AppController)
     calls = []
@@ -109,11 +295,178 @@ def test_today_schedule_state_updates_component_and_page_once():
     assert calls == [("state", state), ("update",)]
 
 
+def test_safe_run_task_reports_unhandled_background_exception(caplog):
+    scheduled = []
+    reported = []
+    page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=lambda handler, *args, **kwargs: scheduled.append(
+            (handler, args, kwargs)
+        ),
+    )
+    controller = AppController.__new__(AppController)
+    controller.page = page
+    controller._unhandled_error_reporter = reported.append
+
+    async def fail():
+        raise RuntimeError("private task detail")
+
+    with caplog.at_level(logging.ERROR, logger="gui.app_controller"):
+        controller._safe_run_task(fail)
+        asyncio.run(scheduled[0][0]())
+
+    assert len(reported) == 1
+    assert isinstance(reported[0], RuntimeError)
+    assert "Background UI task failed" in caplog.text
+
+
+def test_mobile_root_view_intercepts_back_and_cancels_native_pop():
+    async def scenario():
+        root = SimpleNamespace(can_pop=True, on_confirm_pop=None)
+        controller = AppController.__new__(AppController)
+        controller.page = SimpleNamespace(views=[root])
+        controller._navigate_back = AsyncMock(return_value=True)
+
+        controller._configure_mobile_back_navigation()
+
+        assert root.can_pop is False
+        assert root.on_confirm_pop == controller._on_root_view_confirm_pop
+        event_view = SimpleNamespace(confirm_pop=AsyncMock())
+        await controller._on_root_view_confirm_pop(
+            SimpleNamespace(control=event_view)
+        )
+        event_view.confirm_pop.assert_awaited_once_with(False)
+
+    from unittest.mock import AsyncMock, Mock
+
+    asyncio.run(scenario())
+
+
+def test_mobile_root_view_allows_native_pop_from_dashboard():
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller._navigate_back = AsyncMock(return_value=False)
+        event_view = SimpleNamespace(confirm_pop=AsyncMock())
+
+        await controller._on_root_view_confirm_pop(
+            SimpleNamespace(control=event_view)
+        )
+
+        event_view.confirm_pop.assert_awaited_once_with(True)
+
+    asyncio.run(scenario())
+
+
+def test_shared_back_navigation_handles_settings_dialog_and_grades():
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(
+            visible=True,
+            _handle_back=AsyncMock(),
+        )
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller._close_detail = AsyncMock()
+        controller._close_calendar = AsyncMock()
+        controller._close_grades = AsyncMock()
+
+        assert await controller._navigate_back() is True
+        controller.settings_view._handle_back.assert_awaited_once()
+
+        controller.settings_view.visible = False
+        controller.grade_overview_view.visible = True
+        assert await controller._navigate_back() is True
+        controller._close_grades.assert_awaited_once_with()
+
+    asyncio.run(scenario())
+
+
+def test_shared_back_navigation_closes_schedule_surface_before_child_views():
+    from unittest.mock import AsyncMock, Mock
+
+    async def scenario():
+        controller = AppController.__new__(AppController)
+        controller._today_schedule_component = SimpleNamespace(
+            handle_back=Mock(return_value=True),
+        )
+        controller.settings_view = SimpleNamespace(
+            visible=True,
+            _handle_back=AsyncMock(),
+        )
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(visible=False)
+
+        assert await controller._navigate_back() is True
+        controller._today_schedule_component.handle_back.assert_called_once_with()
+        controller.settings_view._handle_back.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_shared_back_navigation_returns_to_dashboard_from_every_child_view():
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(
+            visible=False,
+            _handle_back=AsyncMock(),
+        )
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller._close_detail = AsyncMock()
+        controller._close_calendar = AsyncMock()
+        controller._close_grades = AsyncMock()
+
+        cases = (
+            (controller.settings_view, controller.settings_view._handle_back),
+            (controller.detail_view, controller._close_detail),
+            (controller.calendar_view, controller._close_calendar),
+            (controller.grade_overview_view, controller._close_grades),
+        )
+        for view, handler in cases:
+            view.visible = True
+            assert await controller._navigate_back() is True
+            handler.assert_awaited_once()
+            view.visible = False
+
+        assert await controller._navigate_back() is False
+
+    asyncio.run(scenario())
+
+
+def test_window_close_treats_already_closed_session_as_clean_shutdown(monkeypatch):
+    async def scenario():
+        from unittest.mock import AsyncMock
+
+        controller = AppController.__new__(AppController)
+        controller.page = SimpleNamespace(
+            window=SimpleNamespace(
+                destroy=AsyncMock(side_effect=RuntimeError("Session closed"))
+            )
+        )
+        monkeypatch.setattr(app_controller_module.platform_utils, "IS_MOBILE", False)
+        monkeypatch.setattr(app_controller_module.settings, "MINIMIZE_TO_TRAY", False)
+
+        await controller._on_window_event(SimpleNamespace(type="close", data="close"))
+
+        controller.page.window.destroy.assert_awaited_once_with()
+
+    asyncio.run(scenario())
+
+
 def test_android_build_number_is_deterministic_and_strict():
     assert _android_release_build_number("2.2.3") == 2_002_003
 
 
-def test_android_launcher_forwards_native_identity_version_and_signer():
+def test_android_launcher_forwards_verified_local_path_identity_version_and_signer():
     calls = []
 
     class Bridge:
@@ -147,7 +500,7 @@ def test_android_launcher_forwards_native_identity_version_and_signer():
     assert launcher.launch(Path("UTHelper.apk"), package).acknowledged
     assert calls == [
         (
-            package.url,
+            str(Path("UTHelper.apk")),
             package.sha256,
             package.size,
             "com.uthelper.uthelper",
@@ -231,3 +584,65 @@ def test_update_failure_explains_retry_in_banner_instead_of_stale_ready_copy():
     )
     assert controller._update_btn.content == "Thử lại"
     assert controller._update_btn.disabled is False
+
+
+def test_manual_discovery_failure_is_not_presented_as_download_failure():
+    controller = _update_event_controller()
+    controller._manual_update_check_requested = True
+    controller._update_candidate = None
+    messages = []
+    controller._show_snackbar = lambda message, *_args: messages.append(message)
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.FAILED,
+                message="update service is temporarily unavailable",
+            )
+        )
+    )
+
+    assert messages == ["Không thể kiểm tra cập nhật. Hãy kiểm tra mạng và thử lại."]
+    assert controller._update_text.value == ""
+    assert controller._update_banner.visible is False
+
+
+def test_android_install_banner_waits_for_native_installer_confirmation(monkeypatch):
+    controller = _update_event_controller()
+    controller._update_banner.visible = True
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", False)
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+        )
+    )
+
+    assert controller._update_banner.visible is True
+    assert controller._update_text.value == "Đang mở trình cài đặt Android..."
+    assert controller._update_btn.content == "Đang mở..."
+    assert controller._update_btn.disabled is True
+
+    controller._on_android_update_result({"status": "installer_opened"})
+
+    assert controller._update_banner.visible is False
+
+
+def test_show_snackbar_uses_page_overlay_when_available():
+    controller = AppController.__new__(AppController)
+    overlay_controls = []
+    dialogs = []
+    page = SimpleNamespace(
+        overlay=overlay_controls,
+        show_dialog=dialogs.append,
+        update=lambda: None,
+    )
+    controller.page = page
+
+    controller._show_snackbar("Đã cập nhật dữ liệu")
+
+    assert len(overlay_controls) == 1
+    assert isinstance(overlay_controls[0], ft.SnackBar)
+    assert overlay_controls[0].open is True
+    assert dialogs == []

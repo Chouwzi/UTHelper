@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import asyncio
+import inspect
 from pathlib import Path
 
 from diagnostics.logging_setup import (
@@ -71,16 +72,22 @@ except Exception as exc:
     _APPDATA_DIR = Path.home()
 
 # Set up the sole owned file logger after the platform data directory exists.
-try:
-    _LOGGING_RUNTIME = configure_logging(
-        _APPDATA_DIR,
-        debug=startup_debug_enabled(os.environ),
-    )
-    configure_dependency_logging()
-    _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
-except Exception as exc:
+# Pytest imports this module while collecting startup tests; it must never bind
+# the production AppData log and mix synthetic failures with real user events.
+_TEST_MODE = os.environ.get("UTH_TEST_MODE") == "1"
+if _TEST_MODE:
     _LOGGING_RUNTIME = None
-    _boot_log(f"Log setup failed: {exc}")
+else:
+    try:
+        _LOGGING_RUNTIME = configure_logging(
+            _APPDATA_DIR,
+            debug=startup_debug_enabled(os.environ),
+        )
+        configure_dependency_logging()
+        _boot_log(f"Log file: {_APPDATA_DIR / 'logs' / 'app.log'}")
+    except Exception as exc:
+        _LOGGING_RUNTIME = None
+        _boot_log(f"Log setup failed: {exc}")
 
 # Console encoding fix (Windows-only, harmless on other platforms)
 for _stream in (sys.stdout, sys.stderr):
@@ -90,7 +97,7 @@ for _stream in (sys.stdout, sys.stderr):
         import logging as _fb_log
         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-if _LOGGING_RUNTIME is None:
+if _LOGGING_RUNTIME is None and not _TEST_MODE:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -163,6 +170,8 @@ def _show_startup_screen(
     compact_desktop: bool = True,
 ) -> None:
     """Publish the first frame only after it has final geometry and branding."""
+    from gui.core.theme import C, set_page_theme
+
     if compact_desktop:
         page.window.width = 420
         page.window.height = 720
@@ -171,15 +180,18 @@ def _show_startup_screen(
         page.window.min_height = 720
         page.window.max_height = 720
         page.window.resizable = False
+        page.window.maximizable = False
+        page.window.minimizable = True
+        page.window.title_bar_hidden = True
+        page.window.title_bar_buttons_hidden = True
         page.window.icon = "icon.ico"
     page.title = "UTHelper"
-    page.bgcolor = "#0B1120"
+    set_page_theme(page)
+    page.bgcolor = C.BG
     page.padding = 0
     page.spacing = 0
-    page.theme_mode = ft.ThemeMode.DARK
     page.controls.clear()
-    page.add(
-        ft.Container(
+    splash = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Image(
@@ -192,24 +204,24 @@ def _show_startup_screen(
                         "UTHelper",
                         size=24,
                         weight=ft.FontWeight.BOLD,
-                        color="#F8FAFC",
+                        color=C.TEXT_PRIMARY,
                     ),
                     ft.Text(
                         "Trợ lý học tập UTH",
                         size=12,
-                        color="#94A3B8",
+                        color=C.TEXT_SECONDARY,
                     ),
                     ft.Container(height=18),
                     ft.ProgressRing(
                         width=28,
                         height=28,
                         stroke_width=3,
-                        color="#3B82F6",
+                        color=C.ACCENT,
                     ),
                     ft.Text(
                         "Đang khởi động UTHelper...",
                         size=12,
-                        color="#CBD5E1",
+                        color=C.TEXT_SECONDARY,
                     ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -219,9 +231,35 @@ def _show_startup_screen(
             ),
             alignment=ft.Alignment(0, 0),
             expand=True,
-            bgcolor="#0B1120",
+            bgcolor=C.BG,
         )
-    )
+    if compact_desktop:
+        from gui.components.desktop_window_header import (
+            build_desktop_window_header,
+        )
+
+        def minimize_window(_event):
+            page.window.minimized = True
+            page.update()
+
+        async def close_window(_event):
+            await page.window.destroy()
+
+        page.add(
+            ft.Column(
+                controls=[
+                    build_desktop_window_header(
+                        on_minimize=minimize_window,
+                        on_close=close_window,
+                    ),
+                    splash,
+                ],
+                spacing=0,
+                expand=True,
+            )
+        )
+    else:
+        page.add(splash)
     if compact_desktop:
         page.window.visible = publish
     page.update()
@@ -264,10 +302,19 @@ def main() -> int:
         active_page = page
         if runtime is not None:
             runtime.attach_page(page)
+            runtime.attach_asyncio_loop(asyncio.get_running_loop())
             runtime.mark_phase(AppPhase.GUI)
         try:
-            publish_startup = not autostart_launch or bool(
-                result and result.force_visible
+            # Load the persisted launch preference before deciding whether the
+            # compact startup window should be published. New installations
+            # open normally; only an explicit start-minimized preference keeps
+            # an autostart launch hidden.
+            from config import settings as app_settings
+
+            publish_startup = (
+                not autostart_launch
+                or not app_settings.START_MINIMIZED
+                or bool(result and result.force_visible)
             )
             _show_startup_screen(
                 page,
@@ -278,7 +325,10 @@ def main() -> int:
             if publish_startup:
                 # Yield to the Flet transport so Flutter paints and animates the
                 # branded first frame before synchronous GUI construction.
-                await asyncio.sleep(0.6)
+                # One short yield is enough to publish a branded frame; the
+                # former 600 ms floor made every launch feel slow, especially
+                # with embedded Python on older Android devices.
+                await asyncio.sleep(0.05)
             logger.info("Starting app imports...")
             
             # Flet compatibility shim (MUST run before any GUI imports)
@@ -286,15 +336,15 @@ def main() -> int:
             patch_flet()
             logger.info("Flet compat patched OK")
             
-            # Import config first (may fail on Android if keyring is missing)
-            from config import settings as app_settings
-            configure_logging(
-                _APPDATA_DIR,
-                debug=(
-                    bool(app_settings.DEBUG_MODE)
-                    or startup_debug_enabled(os.environ)
-                ),
-            )
+            # Config is loaded above so startup visibility uses persisted state.
+            if not _TEST_MODE:
+                configure_logging(
+                    _APPDATA_DIR,
+                    debug=(
+                        bool(app_settings.DEBUG_MODE)
+                        or startup_debug_enabled(os.environ)
+                    ),
+                )
             configure_dependency_logging()
             logger.info("Config loaded OK")
             
@@ -303,11 +353,18 @@ def main() -> int:
             logger.info("GUI module imported OK")
             
             # Run the app
-            app_main(
-                page,
-                activation_broker=result.broker if result else None,
-                force_visible=result.force_visible if result else False,
-            )
+            app_options = {
+                "activation_broker": result.broker if result else None,
+                "force_visible": result.force_visible if result else False,
+                "error_reporter": (
+                    (lambda exc: runtime.record_exception(exc, AppPhase.GUI))
+                    if runtime is not None
+                    else None
+                ),
+            }
+            if "diagnostic_recorder" in inspect.signature(app_main).parameters:
+                app_options["diagnostic_recorder"] = runtime
+            app_main(page, **app_options)
             logger.info("App started successfully")
             
         except Exception as exc:

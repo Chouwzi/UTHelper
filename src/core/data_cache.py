@@ -39,12 +39,16 @@ class ActivitySnapshot:
     last_successful_sync_at: Optional[str] = None
     last_attempt_at: Optional[str] = None
     last_error: Optional[str] = None
+    activity_catalog_version: int = 0
+    requires_server_refresh: bool = False
 
 
 class DataCache:
     """Versioned offline activity repository backed by atomic JSON writes."""
 
     SCHEMA_VERSION = 2
+    # v3 persists assignment/quiz instance IDs used by the one-call status path.
+    ACTIVITY_CATALOG_VERSION = 3
 
     def __init__(self, cache_dir: Optional[Path] = None, namespace: Optional[str] = None):
         if cache_dir is None:
@@ -63,14 +67,16 @@ class DataCache:
 
         return SafeFileIO.read_json_safe(self._cache_path, dict)
 
-    @staticmethod
-    def _snapshot_from_payload(payload: dict) -> ActivitySnapshot:
+    @classmethod
+    def _snapshot_from_payload(cls, payload: dict) -> ActivitySnapshot:
         if not isinstance(payload, dict):
             return ActivitySnapshot()
         activities = payload.get("activities", [])
         if not isinstance(activities, list):
             activities = []
         version = int(payload.get("version", 1) or 1)
+        catalog_version = int(payload.get("activity_catalog_version", 0) or 0)
+        requires_server_refresh = catalog_version < cls.ACTIVITY_CATALOG_VERSION
         saved_at = payload.get("saved_at")
         if version < 2:
             # A v1 save only happened after a full fetch or a local mutation.
@@ -81,6 +87,8 @@ class DataCache:
                 generation=0,
                 updated_at=saved_at,
                 last_successful_sync_at=saved_at,
+                activity_catalog_version=catalog_version,
+                requires_server_refresh=requires_server_refresh,
             )
         return ActivitySnapshot(
             activities=activities,
@@ -89,6 +97,8 @@ class DataCache:
             last_successful_sync_at=payload.get("last_successful_sync_at"),
             last_attempt_at=payload.get("last_attempt_at"),
             last_error=payload.get("last_error"),
+            activity_catalog_version=catalog_version,
+            requires_server_refresh=requires_server_refresh,
         )
 
     def load_snapshot(self) -> ActivitySnapshot:
@@ -127,6 +137,11 @@ class DataCache:
             current = self._snapshot_from_payload(self._read_payload())
             return {
                 "version": self.SCHEMA_VERSION,
+                "activity_catalog_version": (
+                    self.ACTIVITY_CATALOG_VERSION
+                    if server_sync
+                    else current.activity_catalog_version
+                ),
                 "generation": current.generation + 1,
                 "updated_at": now,
                 "last_successful_sync_at": (
@@ -165,6 +180,7 @@ class DataCache:
             current = self._snapshot_from_payload(self._read_payload())
             return {
                 "version": self.SCHEMA_VERSION,
+                "activity_catalog_version": current.activity_catalog_version,
                 "generation": current.generation,
                 "updated_at": current.updated_at,
                 "last_successful_sync_at": current.last_successful_sync_at,

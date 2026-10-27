@@ -8,7 +8,12 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from diagnostics.models import AppPhase, CrashConsent, DiagnosticContext, DiagnosticReport
+from diagnostics.models import (
+    AppPhase,
+    CrashConsent,
+    DiagnosticContext,
+    DiagnosticReport,
+)
 from diagnostics.redaction import build_report, sanitize_log_text
 
 
@@ -28,7 +33,7 @@ def test_privacy_document_states_consent_retention_and_forbidden_data():
     root = Path(__file__).resolve().parents[1]
     text = (root / "docs" / "PRIVACY.md").read_text("utf-8").lower()
     for phrase in (
-        "explicit consent",
+        "enabled by default",
         "20 reports",
         "7 days",
         "ip address",
@@ -59,7 +64,22 @@ def valid_report_dict() -> dict[str, object]:
         "install_type": "msi",
         "os_family": "Windows",
         "os_version": "10",
+        "os_build": None,
         "architecture": "AMD64",
+        "device_class": "unknown",
+        "processor_count": None,
+        "cpu_description": None,
+        "processor_frequency_mhz": None,
+        "memory_size": None,
+        "free_memory": None,
+        "usable_memory": None,
+        "app_memory": None,
+        "memory_class": None,
+        "screen_width_pixels": None,
+        "screen_height_pixels": None,
+        "screen_dpi": None,
+        "display_class": None,
+        "gpu": None,
         "python_version": "3.11",
         "flet_version": "0.86.5",
         "flutter_version": None,
@@ -70,6 +90,15 @@ def valid_report_dict() -> dict[str, object]:
         "unclean_previous_exit": False,
         "native_exception_code": None,
         "faulting_module": None,
+        "mechanism": "manual.capture",
+        "handled": True,
+        "execution": "unknown",
+        "screen": "unknown",
+        "operation": None,
+        "data_source": None,
+        "exception_detail": None,
+        "breadcrumbs": (),
+        "packages": {},
     }
 
 
@@ -319,6 +348,47 @@ def test_exception_chain_messages_and_tracebacks_are_not_serialized(
             pytest.fail("serialized report leaked a synthetic exception-chain secret")
     assert report.exception_type == "RuntimeError"
     assert 0 < len(report.frames) <= 40
+
+
+def test_attribute_error_keeps_safe_structure_but_not_private_message(
+    diagnostic_context: DiagnosticContext,
+):
+    try:
+        None.split()  # type: ignore[union-attr]
+    except AttributeError as exc:
+        report = build_report(exc, diagnostic_context)
+
+    assert report.exception_detail is not None
+    assert report.exception_detail.attribute_name == "split"
+    assert report.exception_detail.object_type == "NoneType"
+    assert "object at" not in report.model_dump_json()
+
+
+def test_os_error_keeps_only_numeric_codes(diagnostic_context: DiagnosticContext):
+    report = build_report(
+        FileNotFoundError(2, "private", r"C:\\Users\\Private\\secret.txt"),
+        diagnostic_context,
+    )
+
+    assert report.exception_detail is not None
+    assert report.exception_detail.errno == 2
+    payload = report.model_dump_json()
+    assert "secret.txt" not in payload
+    assert "private" not in payload
+
+
+def test_runtime_derived_attribute_name_is_not_collected(
+    diagnostic_context: DiagnosticContext,
+):
+    private_runtime_name = "student_identifier"
+    try:
+        getattr(None, private_runtime_name)
+    except AttributeError as exc:
+        report = build_report(exc, diagnostic_context)
+
+    assert report.exception_detail is not None
+    assert report.exception_detail.attribute_name is None
+    assert "student_identifier" not in report.model_dump_json()
 
 
 @pytest.mark.parametrize(

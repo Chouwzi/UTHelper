@@ -104,11 +104,12 @@ class _Downloader:
 class _Verifier:
     def __init__(self):
         self.error = None
+        self.result = VerificationResult(True)
 
     def verify(self, path, candidate):
         if self.error is not None:
             raise self.error
-        return VerificationResult(True)
+        return self.result
 
 
 class _Launcher:
@@ -219,7 +220,7 @@ def test_verified_download_never_launches_until_explicit_confirmation(tmp_path):
     assert coordinator.shutdown(timeout_seconds=1.0) is True
 
 
-def test_disabling_automatic_checks_cancels_an_active_download(tmp_path):
+def test_disabling_automatic_checks_does_not_cancel_manual_download(tmp_path):
     coordinator, _, downloader, launcher, events = _coordinator(tmp_path)
     downloader.block = True
     coordinator.start()
@@ -229,8 +230,47 @@ def test_disabling_automatic_checks_cancels_an_active_download(tmp_path):
 
     coordinator.set_automatic_enabled(False)
 
-    assert downloader.cancelled.wait(1.0)
+    assert not downloader.cancelled.wait(0.1)
     assert launcher.cancel_calls == 0
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+    assert downloader.cancelled.wait(1.0)
+
+
+def test_same_candidate_reuses_verified_download_after_confirmation_is_deferred(
+    tmp_path,
+):
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    assert downloader.calls == 1
+    assert launcher.calls == []
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_confirmation_reverifies_retained_package_before_installer_handoff(tmp_path):
+    coordinator, _, downloader, launcher, events = _coordinator(tmp_path)
+    coordinator.request_download(_candidate())
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    coordinator.test_verifier.result = VerificationResult(False, "package changed")
+    events["items"].clear()
+    events["changed"].clear()
+
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.FAILED)
+
+    assert launcher.calls == []
+    assert not downloader.path.exists()
     assert coordinator.shutdown(timeout_seconds=1.0) is True
 
 

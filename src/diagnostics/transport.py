@@ -184,21 +184,133 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
         "schema_version": str(report.schema_version),
         "install_type": report.install_type,
         "os_family": report.os_family,
-        "os_version": report.os_version,
         "architecture": report.architecture,
-        "python_version": report.python_version,
-        "flet_version": report.flet_version,
         "phase": report.phase.value,
         "window_state": report.window_state,
         "unclean_previous_exit": str(report.unclean_previous_exit).lower(),
+        "diagnostic.screen": report.screen.value,
+        "diagnostic.execution": report.execution.value,
+        "error.handled": str(report.handled).lower(),
     }
-    if report.flutter_version is not None:
-        tags["flutter_version"] = report.flutter_version
+    if report.operation is not None:
+        tags["diagnostic.operation"] = report.operation.value
+    if report.data_source is not None:
+        tags["diagnostic.source"] = report.data_source.value
     if report.native_exception_code is not None:
         tags["native_exception_code"] = report.native_exception_code
     if report.faulting_module is not None:
         tags["faulting_module"] = report.faulting_module
-    return {
+    exception_value: dict[str, Any] = {
+        "type": report.exception_type,
+        "mechanism": {
+            "type": report.mechanism.value,
+            "handled": report.handled,
+            "data": {"execution": report.execution.value},
+        },
+    }
+    detail = report.exception_detail
+    if detail is not None:
+        if detail.attribute_name and detail.object_type:
+            exception_value["value"] = (
+                f"{detail.object_type} missing attribute {detail.attribute_name}"
+            )
+        elif detail.symbol_name:
+            exception_value["value"] = f"missing name {detail.symbol_name}"
+        elif detail.module_name:
+            exception_value["value"] = f"missing module {detail.module_name}"
+        elif detail.winerror is not None:
+            exception_value["value"] = f"winerror {detail.winerror}"
+        elif detail.errno is not None:
+            exception_value["value"] = f"errno {detail.errno}"
+    if frames:
+        exception_value["stacktrace"] = {"frames": frames}
+    contexts: dict[str, dict[str, Any]] = {
+        "os": {
+            "type": "os",
+            "name": report.os_family,
+            "version": report.os_version,
+        },
+        "runtime": {
+            "type": "runtime",
+            "name": "CPython",
+            "version": report.python_version,
+        },
+        "app": {
+            "type": "app",
+            "app_name": "UTHelper",
+            "app_version": report.app_version,
+            "build_type": report.install_type,
+            "flet_version": report.flet_version,
+        },
+        "device": {
+            "type": "device",
+            "family": report.device_class,
+            "arch": report.architecture,
+        },
+        "diagnostic_state": {
+            "type": "diagnostic_state",
+            "screen": report.screen.value,
+            "execution": report.execution.value,
+            "mechanism": report.mechanism.value,
+            "handled": report.handled,
+        },
+    }
+    if report.operation is not None:
+        contexts["diagnostic_state"]["operation"] = report.operation.value
+    if report.data_source is not None:
+        contexts["diagnostic_state"]["data_source"] = report.data_source.value
+    if report.os_build is not None:
+        contexts["os"]["build"] = report.os_build
+    if report.flutter_version is not None:
+        contexts["app"]["flutter_version"] = report.flutter_version
+    if report.app_memory is not None:
+        contexts["app"]["app_memory"] = report.app_memory
+    if report.processor_count is not None:
+        contexts["device"]["processor_count"] = report.processor_count
+    if report.cpu_description is not None:
+        contexts["device"]["cpu_description"] = report.cpu_description
+    if report.processor_frequency_mhz is not None:
+        contexts["device"]["processor_frequency"] = (
+            report.processor_frequency_mhz
+        )
+    if report.memory_size is not None:
+        contexts["device"]["memory_size"] = report.memory_size
+    if report.free_memory is not None:
+        contexts["device"]["free_memory"] = report.free_memory
+    if report.usable_memory is not None:
+        contexts["device"]["usable_memory"] = report.usable_memory
+    if report.memory_class is not None:
+        contexts["device"]["memory_class"] = report.memory_class
+    if report.screen_width_pixels is not None:
+        contexts["device"]["screen_width_pixels"] = report.screen_width_pixels
+    if report.screen_height_pixels is not None:
+        contexts["device"]["screen_height_pixels"] = report.screen_height_pixels
+    if (
+        report.screen_width_pixels is not None
+        and report.screen_height_pixels is not None
+    ):
+        contexts["device"]["screen_resolution"] = (
+            f"{report.screen_width_pixels}x{report.screen_height_pixels}"
+        )
+    if report.screen_dpi is not None:
+        contexts["device"]["screen_dpi"] = report.screen_dpi
+    if report.display_class is not None:
+        contexts["device"]["display_class"] = report.display_class
+    if report.gpu is not None:
+        gpu: dict[str, Any] = {
+            "type": "gpu",
+            "name": report.gpu.name,
+        }
+        if report.gpu.vendor_name is not None:
+            gpu["vendor_name"] = report.gpu.vendor_name
+        if report.gpu.driver_version is not None:
+            gpu["driver_version"] = report.gpu.driver_version
+        if report.gpu.memory_size_mb is not None:
+            gpu["memory_size"] = report.gpu.memory_size_mb
+        if report.gpu.api_type is not None:
+            gpu["api_type"] = report.gpu.api_type
+        contexts["gpu"] = gpu
+    event = {
         "event_id": report.event_id.hex,
         "timestamp": report.occurred_at.astimezone(timezone.utc).isoformat(),
         "release": f"uthelper@{report.app_version}",
@@ -207,16 +319,39 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
         "level": "error",
         "logger": "uthelper.diagnostics",
         "fingerprint": [report.fingerprint],
-        "exception": {
+        "exception": {"values": [exception_value]},
+        "tags": tags,
+        "contexts": contexts,
+    }
+    package_versions = report.packages.model_dump(exclude_none=True)
+    if package_versions:
+        event["modules"] = package_versions
+    if report.breadcrumbs:
+        event["breadcrumbs"] = {
             "values": [
                 {
-                    "type": report.exception_type,
-                    "stacktrace": {"frames": frames},
+                    "timestamp": crumb.occurred_at.astimezone(
+                        timezone.utc
+                    ).isoformat(),
+                    "type": "default",
+                    "category": f"uthelper.{crumb.action.value}",
+                    "level": "error" if crumb.outcome.value == "failed" else "info",
+                    "data": {
+                        "action": crumb.action.value,
+                        "outcome": crumb.outcome.value,
+                        "source": crumb.source.value,
+                        "screen": crumb.screen.value,
+                        **(
+                            {"duration": crumb.duration.value}
+                            if crumb.duration is not None
+                            else {}
+                        ),
+                    },
                 }
+                for crumb in report.breadcrumbs
             ]
-        },
-        "tags": tags,
-    }
+        }
+    return event
 
 
 def _strict_before_send(

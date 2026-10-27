@@ -73,3 +73,34 @@ class AutostartSettingsCoordinator:
     async def change(self, enabled: bool) -> AutostartUiState:
         status = await self._service.set_enabled(enabled)
         return _to_ui_state(status, requested=enabled)
+
+
+async def apply_initial_autostart_default(
+    service: AutostartServiceProtocol,
+    settings_value,
+    persist,
+) -> AutostartUiState | None:
+    """Apply the Windows default once without overriding an existing choice."""
+    if getattr(settings_value, "AUTOSTART_DEFAULT_APPLIED", False):
+        return None
+
+    result = _to_ui_state(await service.set_enabled(True), requested=True)
+    if not result.confirmed:
+        # A transient backend/readback failure is not a user decision. Leave
+        # the marker unset so a later launch can retry safely.
+        return result
+    previous_enabled = settings_value.START_WITH_WINDOWS
+    settings_value.START_WITH_WINDOWS = result.enabled
+    settings_value.AUTOSTART_DEFAULT_APPLIED = True
+    if persist():
+        return result
+
+    settings_value.START_WITH_WINDOWS = previous_enabled
+    settings_value.AUTOSTART_DEFAULT_APPLIED = False
+    return AutostartUiState(
+        enabled=previous_enabled,
+        editable=result.editable,
+        success=False,
+        message="Không thể lưu mặc định khởi động cùng Windows.",
+        confirmed=result.confirmed,
+    )

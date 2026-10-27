@@ -61,9 +61,19 @@ class MoodleService:
         """Lấy danh sách tất cả các bài tập trong các môn học được cung cấp."""
         return ws_functions.get_assignments(self.call_ws_api, course_ids)
 
-    def get_calendar_events(self, time_start: int, course_ids: List[int]) -> Optional[List[Dict[str, Any]]]:
+    def get_calendar_events(
+        self,
+        time_start: int,
+        time_end: int,
+        course_ids: List[int],
+    ) -> Optional[List[Dict[str, Any]]]:
         """Lấy các sự kiện lịch chung thuộc về các môn học được chọn."""
-        return ws_functions.get_calendar_events(self.call_ws_api, time_start, course_ids)
+        return ws_functions.get_calendar_events(
+            self.call_ws_api,
+            time_start,
+            time_end,
+            course_ids,
+        )
 
     def get_submission_status(self, assign_id: int) -> Optional[Dict[str, Any]]:
         """Lấy trạng thái nộp bài chi tiết của sinh viên cho bài tập cụ thể."""
@@ -77,7 +87,7 @@ class MoodleService:
         """Lấy danh sách các tệp tin sinh viên đã nộp lên hệ thống cho bài tập cụ thể."""
         return ws_functions.get_submitted_files(self.call_ws_api, assign_id, status=status)
 
-    def get_quizzes_by_courses(self, course_ids: List[int]) -> Optional[Dict[str, Any]]:
+    def get_quizzes_by_courses(self, course_ids: List[int]) -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách các hoạt động trắc nghiệm (quiz) của các môn học được chỉ định."""
         return ws_functions.get_quizzes_by_courses(self.call_ws_api, course_ids)
 
