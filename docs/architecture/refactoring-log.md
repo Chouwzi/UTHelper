@@ -1953,3 +1953,16 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - Internal `assets/app.zip` -> `assets/release-version`: `2.4.0`
   - `ruff check src tests`: all checks passed (0 errors).
   - `pytest tests -q --tb=short`: **1600 passed, 25 skipped**.
+
+## Native build compatibility hotfix v2.4.1 (2026-10-27)
+
+- Fresh Android and iOS CI builds at the `v2.4.0` source failed while compiling
+  current `jni_flutter` and `shared_preferences_android` generated bindings:
+  they require JNI 1.1, while the Flet 0.86.5 template overrides JNI to 1.0.0.
+- Set the supported `tool.flet.flutter.pubspec.dependency_overrides.jni` source
+  configuration to the exact `1.1.0` version. This follows the upstream remedy
+  documented in <https://github.com/flet-dev/flet/issues/6919> and applies to all
+  native builds without editing generated Dart code or relaxing verification.
+- Preserve the existing `v2.4.0` tag and use patch version `2.4.1` (native build
+  number `2004001`) for the corrected build source. Native success and release
+  publication must be confirmed by the protected workflow.
