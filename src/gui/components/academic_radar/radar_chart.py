@@ -9,7 +9,6 @@ from core.academic_radar.color_scale import (
     POLYGON_RADIAL_GRADIENT_COLORS,
     POLYGON_RADIAL_GRADIENT_STOPS,
     hex_with_alpha,
-    score_to_color,
 )
 from core.academic_radar.models import RadarMetric, RadarProfile
 from gui.core.theme import C

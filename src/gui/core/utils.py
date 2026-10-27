@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from core.time_utils import parse_datetime
 from core.activity_status import normalize_submission_status
+from core.activity_time_policy import is_late_submission_active
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
 from core.display_utils import urgency_str, clean_course_name  # re-exported
@@ -97,7 +98,7 @@ def get_progress_value(deadline_str: str) -> float:
 
 def get_urgency_color(urgency) -> str:
     u = urgency_str(urgency)
-    if u == "critical":
+    if u in ("critical", "overdue"):
         return C.CRITICAL
     if u == "warning":
         return C.WARNING
@@ -131,6 +132,8 @@ def get_urgency_badge(urgency) -> tuple:
         return "KHẨN CẤP", C.CRITICAL
     if u == "warning":
         return "SẮP HẠN", C.WARNING
+    if u == "overdue":
+        return "QUÁ HẠN", C.CRITICAL
     return "AN TOÀN", C.SAFE
 
 def get_status_tag(data: dict) -> tuple:
@@ -178,6 +181,8 @@ def get_status_tag(data: dict) -> tuple:
                     return "SẮP MỞ", _TYPE_COLORS.get("open", C.TEXT_SECONDARY)
 
             if diff_h < 0:
+                if is_late_submission_active(data):
+                    return "NỘP MUỘN", C.WARNING
                 return "QUÁ HẠN", C.CRITICAL
             if is_open:
                 return "ĐANG MỞ", C.SAFE
@@ -185,6 +190,65 @@ def get_status_tag(data: dict) -> tuple:
     if is_open:
         return "SẮP MỞ", _TYPE_COLORS.get("open", C.TEXT_SECONDARY)
     return "ĐANG MỞ", C.SAFE
+
+def get_card_countdown(data: dict) -> tuple:
+    """Return (text, is_overdue, color, progress_val).
+
+    Handles active late submission by counting down to the cutoff deadline
+    with warning styling, while overdue items with expired/missing cutoffs
+    show critical overdue countdown.
+    """
+    deadline_str = data.get("deadline", "")
+    act_type = data.get("type", "")
+    if not deadline_str:
+        return "", False, C.TEXT_SECONDARY, 0.0
+
+    dt = parse_datetime(deadline_str)
+    if not dt:
+        return "Không xác định", False, C.TEXT_SECONDARY, 0.5
+    if dt.year >= 2099:
+        return "Không có thời hạn", False, C.SAFE, 1.0
+
+    now = datetime.now()
+    diff = dt - now
+    if diff.total_seconds() < 0:
+        if is_late_submission_active(data, now):
+            cutoff = data.get("cutoff_date") or data.get("cutoffdate")
+            cutoff_ts = None
+            if isinstance(cutoff, (int, float)) and cutoff > 0:
+                cutoff_ts = float(cutoff)
+            elif isinstance(cutoff, str) and cutoff.strip():
+                try:
+                    cutoff_ts = float(cutoff)
+                except ValueError:
+                    parsed = parse_datetime(cutoff)
+                    if parsed:
+                        cutoff_ts = parsed.timestamp()
+
+            if cutoff_ts and cutoff_ts > now.timestamp():
+                remaining_s = int(cutoff_ts - now.timestamp())
+                hours_left = remaining_s // 3600
+                mins_left = (remaining_s % 3600) // 60
+                if hours_left >= 24:
+                    days_left = hours_left // 24
+                    cd_text = f"Còn {days_left} ngày nộp muộn"
+                elif hours_left > 0:
+                    cd_text = f"Còn {hours_left} giờ {mins_left:02d} nộp muộn"
+                else:
+                    cd_text = f"Còn {mins_left} phút nộp muộn"
+                progress_val = min(remaining_s / (7 * 86400), 1.0)
+            else:
+                cd_text = "Còn nộp muộn"
+                progress_val = 0.0
+            return cd_text, False, C.WARNING, progress_val
+
+        cd_text, _ = get_countdown(deadline_str, act_type)
+        return cd_text, True, C.CRITICAL, 0.0
+
+    cd_text, overdue = get_countdown(deadline_str, act_type)
+    cd_color = get_countdown_color(deadline_str)
+    progress_val = get_progress_value(deadline_str)
+    return cd_text, overdue, cd_color, progress_val
 
 def get_type_label(activity_type: str) -> str:
     return _TYPE_LABELS.get(activity_type, "KHÁC")

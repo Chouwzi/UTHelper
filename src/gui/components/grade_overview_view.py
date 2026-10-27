@@ -17,7 +17,7 @@ if _project_root not in sys.path:
 
 import flet as ft
 from core.academic_radar.calculator import calculate_radar_profile
-from core.academic_radar.models import CourseGradeItem, RadarProfile, SemesterGradeData
+from core.academic_radar.models import RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from gui.components.academic_radar.grade_list_view import AcademicGradeListView
 from gui.components.academic_radar.radar_card import AcademicRadarCard

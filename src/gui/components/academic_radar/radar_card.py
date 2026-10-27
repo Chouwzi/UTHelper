@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 import flet as ft
 
-from core.academic_radar.models import RadarMetric, RadarProfile, SemesterGradeData
+from core.academic_radar.models import RadarMetric, RadarProfile
 from gui.components.academic_radar.metric_detail_sheet import MetricDetailSheet
 from gui.components.academic_radar.radar_chart import AcademicRadarChart
 from gui.core.theme import C

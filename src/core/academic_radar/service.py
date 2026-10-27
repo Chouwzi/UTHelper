@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from config import get_data_dir, settings
 from core.academic_radar.calculator import calculate_radar_profile
-from core.academic_radar.models import RadarProfile, SemesterGradeData
+from core.academic_radar.models import CourseGradeItem, RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.portal_client import PortalClient
 

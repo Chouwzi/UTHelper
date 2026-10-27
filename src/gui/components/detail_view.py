@@ -14,7 +14,12 @@ import asyncio
 import logging
 from collections import Counter
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
-from gui.core.utils import get_countdown_color, get_urgency_badge, clean_course_name, format_deadline, get_countdown
+from gui.core.utils import (
+    clean_course_name,
+    format_deadline,
+    get_card_countdown,
+    get_urgency_badge,
+)
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
 from gui.components.detail.submission_presenter import (
     SubmissionUiPolicy,
@@ -737,11 +742,9 @@ class DetailView(ft.Container):
         self._badge_ctrl.visible      = True
 
         deadline_str = data.get("deadline", "")
-        act_type = data.get("type", "")
-        cd_text, overdue = get_countdown(deadline_str, act_type)
+        cd_text, overdue, cd_color, _ = get_card_countdown(data)
         self._countdown_txt.value = cd_text
-        # UX-7: Time-based countdown color consistent with cards
-        self._countdown_txt.color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
+        self._countdown_txt.color = cd_color
         
         details = data.get("details", {})
         open_time_str = details.get("open_time", "")
@@ -784,8 +787,7 @@ class DetailView(ft.Container):
         deadline_str = data.get("deadline", "")
         if not deadline_str:
             return False
-        countdown, overdue = get_countdown(deadline_str, data.get("type", ""))
-        color = C.CRITICAL if overdue else get_countdown_color(deadline_str)
+        countdown, overdue, color, _ = get_card_countdown(data)
         changed = (
             self._countdown_txt.value != countdown
             or self._countdown_txt.color != color

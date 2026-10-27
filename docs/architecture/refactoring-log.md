@@ -68,6 +68,8 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Fix Scroll Position Reset & Button Hiding | Giữ Dashboard/Calendar mounted bên dưới DetailView trong main stack để bảo toàn 100% vị trí scroll native của Flutter khi mở/đóng thẻ bài tập; đồng thời sửa lỗi nút cuộn lên nhanh (scroll-to-top button) không ẩn khi về top bằng cách hoàn thiện nhận diện biên trên (top boundary/out of range) và tối ưu độ nhạy hysteresis | Đạt 1575 passed, 25 skipped |
 | 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
 | 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
+| 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+
 
 ---
 
@@ -1894,3 +1896,60 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `PYTHONPATH`; Ruff 0.16.4, bytecode compilation, repository governance, the UI
   protocol performance script, and `git diff --check` pass. Physical Android frame
   validation remains outside this host-only benchmark.
+
+## v2.4.0 performance release preparation (2026-08-28)
+
+- The performance branch contains backward-compatible user-facing features and
+  reliability improvements after the production `v2.3.1` hotfix, including
+  Academic Radar, THNN activity integration, cross-platform navigation/UI work,
+  and the updater hardening recorded above. Under Semantic Versioning this is a
+  minor release, so the canonical application version advances to `2.4.0`.
+- `pyproject.toml` remains the only authored application version. The Settings
+  hub and desktop version badge read `APP_VERSION`; runtime assets and native
+  package identities continue to be generated from the same source. The derived
+  Android build number for `2.4.0` is `2004000`.
+- This worktree is still a topic branch and is not a production release source:
+  it must be reviewed and merged into `develop`, promoted to `main` with the
+  required merge contract, and only then tagged `v2.4.0` after the protected
+  release checks and external GitHub governance checks pass.
+
+## Detail countdown refresh, immediate startup sync, and late submission grouping (2026-09-11)
+
+- **Issue 1 (DetailView Countdown Freeze)**:
+  - `ViewManager.show_detail` preserves the native Flutter scroll position by keeping `dashboard.visible = True` in the background.
+  - In `AppController._countdown_loop_async`, extracted `_refresh_visible_countdown_views` prioritizing `if self.detail_view.visible:` first, so `DetailView.refresh_countdown()` reliably ticks every minute in real time.
+  - Regression test added in `tests/test_detail_countdown_refresh.py`.
+
+- **Issue 2 (Instant Cache Load + Immediate Parallel Moodle API Fetch)**:
+  - Cache snapshot continues to render immediately on startup for zero wait time.
+  - Concurrent background sync is dispatched right away upon start (`self._load_data_async("startup")`) when credentials exist, setting `force = trigger in ("manual", "startup")` to bypass the 60-second coordinator startup grace.
+  - Initial sync status indicator reflects `"Dữ liệu cache · Đang cập nhật..."` while the background network request runs.
+
+- **Issue 3 (Late Submission Cutoff Grouped into Critical & UI Badge Fix)**:
+  - Assignments where the original deadline has passed but late submission is still permitted (`is_late_submission_active`) are now grouped into **"Cấp bách"** (`urgency = "critical"`).
+  - In `ActivityTimePolicy` and `FilterService`, active late submissions are classified as `urgency = "critical"` instead of regular overdue, ensuring they appear on the home dashboard ("Tất cả mức độ") and in the "Cấp bách" filter.
+  - In `gui.core.utils`:
+    - Fixed `get_urgency_badge("overdue")` which previously fell through to `("AN TOÀN", C.SAFE)`. It now correctly maps to `("QUÁ HẠN", C.CRITICAL)`.
+    - Added `"overdue"` to `urgency_str` and `_URGENCY_DISPLAY_MAP` in `core.display_utils` so that overdue levels are accurately normalized.
+    - Updated `get_status_tag` to return `("NỘP MUỘN", C.WARNING)` when late submission is active.
+    - Added `get_card_countdown` helper returning `Còn X ngày/giờ nộp muộn` (orange `C.WARNING`) and appropriate progress values for both `ActivityCard` and `DetailView`.
+  - In `ActivityCard`, optional rows display submission status (`[ Chưa nộp ]`) and the exact cutoff time (`[ Hạn chót: dd/mm HH:MM ]`), while the card border pulses with critical red glow.
+  - Verification: **1600 passed, 25 skipped**; `ruff check src tests` passes with 0 errors.
+
+## Android release packaging for v2.4.0 (2026-09-12)
+
+- **Root Cause of v2.3.1 Artifacts**:
+  - `serious_python_android-4.5.1` bundles `src/main/assets/app.zip` inside its plugin cache directory. The `packageApp` Gradle task relies on `SERIOUS_PYTHON_APP` to overwrite this zip from the staged Python app. When `compileall` previously failed due to missing standalone Python in build cache, Gradle skipped updating the zip and fell back to the stale `app.zip` (v2.3.1).
+  - Furthermore, `serious_python`'s `runExec` (`package_command.dart`) previously suffered from a pipe buffer deadlock on Windows by draining `stdout` while leaving `stderr` undrained during multi-arch `pip install`.
+- **Resolution**:
+  - Patched `runExec` in `package_command.dart` to drain `proc.stderr` asynchronously in parallel with `stdout`.
+  - Packaged clean uncompressed `STORED` `app.zip` containing canonical release version `2.4.0` directly into `serious_python_android/android/src/main/assets/app.zip` and staged `build/flutter/build/python-app`.
+  - Updated `build/flutter/pubspec.yaml` with canonical release version `2.4.0+2004000`.
+  - Executed clean `assembleRelease` producing `build/apk/UTHelper.apk` and `build/apk/UTHelper-2.4.0.apk` (156.87 MB).
+- **Verification**:
+  - `apkanalyzer manifest application-id`: `com.uthelper.uthelper`
+  - `apkanalyzer manifest version-name`: `2.4.0`
+  - `apkanalyzer manifest version-code`: `2004000`
+  - Internal `assets/app.zip` -> `assets/release-version`: `2.4.0`
+  - `ruff check src tests`: all checks passed (0 errors).
+  - `pytest tests -q --tb=short`: **1600 passed, 25 skipped**.

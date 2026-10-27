@@ -40,6 +40,10 @@ UTHelper là dự án độc lập dành cho sinh viên. Dự án không đại 
 Đại học Giao thông vận tải Thành phố Hồ Chí Minh và không thay thế các cổng
 thông tin chính thức của trường.
 
+Phiên bản mã nguồn hiện tại là `2.4.0`. UI, runtime package và số build nền tảng
+đều được sinh từ version canonical trong `pyproject.toml`; không chỉnh version
+riêng trong từng nền tảng.
+
 ## Tính năng
 
 | Nhóm | Khả năng |

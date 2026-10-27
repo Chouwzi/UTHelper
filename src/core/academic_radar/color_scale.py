@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Tuple
-
 # Defined color stops: (threshold, (R, G, B))
 COLOR_STOPS: list[tuple[float, tuple[int, int, int]]] = [
     (0.0, (0xEF, 0x44, 0x44)),    # #EF4444 Đỏ

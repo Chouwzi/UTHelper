@@ -8,7 +8,6 @@ from core.academic_radar import AcademicGradeService, SemesterGradeData
 
 def test_academic_grade_service_daily_cache(tmp_path):
     cache_file = tmp_path / "portal_grades_cache.json"
-    today_str = date.today().isoformat()
 
     mock_portal = MagicMock()
     service = AcademicGradeService(portal_client=mock_portal, cache_dir=tmp_path)

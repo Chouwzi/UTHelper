@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
 from datetime import datetime
+from core.activity_time_policy import is_late_submission_active
 from core.time_utils import parse_datetime
 from core.display_utils import clean_course_name, urgency_str, _TYPE_FILTER_MAP
 
@@ -47,8 +48,11 @@ class FilterService:
                 dl = parse_datetime(dl_str)
 
             # Tính độ khẩn cấp, xem có bị quá hạn không
-            is_overdue = isinstance(dl, datetime) and dl < now
-            if isinstance(a.get("urgency"), str):
+            is_late_active = is_late_submission_active(a, now)
+            is_overdue = (isinstance(dl, datetime) and dl < now) and not is_late_active
+            if is_late_active:
+                u_str = "critical"
+            elif isinstance(a.get("urgency"), str):
                 u_str = a.get("urgency")
             else:
                 u_str = urgency_str(a.get("urgency")) if not is_overdue else "overdue"

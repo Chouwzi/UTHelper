@@ -31,8 +31,8 @@ from gui.components.settings.system_section import init_system_controls, build_s
 from gui.components.settings.privacy_section import init_privacy_controls, build_privacy_section
 from gui.components.settings.urgency_section import init_urgency_controls, build_urgency_section
 from gui.components.settings.theme_section import init_theme_controls, build_theme_section
-from gui.components.settings.notification_section import init_notification_controls, build_notification_section, build_advanced_section
-from gui.components.settings.integration_section import init_integration_controls, build_integration_section
+from gui.components.settings.notification_section import init_notification_controls, build_notification_section
+from gui.components.settings.integration_section import init_integration_controls
 from gui.components.settings.debug_section import init_debug_controls, build_debug_section
 from gui.controllers.autostart_settings import (
     AutostartSettingsCoordinator,
@@ -1420,7 +1420,7 @@ class SettingsView(ft.Container):
             f"Flet: {flet_ver}",
             f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
             f"UI profile: {UI_PLATFORM} (override={UI_PLATFORM_OVERRIDE or 'none'})",
-            f"App: v{getattr(cfg, 'APP_VERSION', '?')}",
+            f"App: v{APP_VERSION}",
             f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
             f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.CHECK_INTERVAL_MINUTES}m)",
             f"DND: {'ON' if cfg.NOTIFY_DND_ENABLE else 'OFF'} ({cfg.NOTIFY_DND_START}h-{cfg.NOTIFY_DND_END}h)",
@@ -1828,7 +1828,6 @@ class SettingsView(ft.Container):
         def _worker():
             try:
                 from core.update_checker import check_for_update
-                from gui.app_controller import APP_VERSION
                 has_update, version, url, asset = check_for_update(APP_VERSION)
                 if has_update:
                     result = f"Phiên bản mới: v{version}\nURL: {url}\nAsset: {asset or 'N/A'}"

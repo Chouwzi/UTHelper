@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 from gui.app_controller import AppController
 from gui.core.theme import C
+from core.version import APP_VERSION
 
 
 def _walk(control):
@@ -28,7 +29,7 @@ def test_custom_header_contains_title_version_drag_minimize_and_close():
     controller.page = SimpleNamespace()
     controller._safe_run_task = lambda *_args, **_kwargs: None
     controller._app_title = ft.Text("UTHelper")
-    controller._version_badge = ft.Container(content=ft.Text("v2.3.1"))
+    controller._version_badge = ft.Container(content=ft.Text(f"v{APP_VERSION}"))
 
     header = controller._build_desktop_window_header()
     controls = list(_walk(header))
@@ -57,7 +58,7 @@ def test_dashboard_desktop_header_replaces_old_title_row_with_sync_status(monkey
     controller._sync_status = SimpleNamespace(control=status)
     controller.status_text = status.content
     controller._app_title = ft.Text("UTHelper")
-    controller._version_badge = ft.Container(content=ft.Text("v2.3.1"))
+    controller._version_badge = ft.Container(content=ft.Text(f"v{APP_VERSION}"))
     controller.calendar_btn = ft.IconButton(ft.Icons.CALENDAR_MONTH_ROUNDED)
     controller.grades_btn = ft.IconButton(ft.Icons.INSIGHTS_ROUNDED)
     controller.refresh_btn = ft.IconButton(ft.Icons.REFRESH_ROUNDED)
@@ -80,7 +81,7 @@ def test_close_button_rotates_one_full_turn_only_on_hover_enter():
     controller.page = SimpleNamespace()
     controller._safe_run_task = lambda *_args, **_kwargs: None
     controller._app_title = ft.Text("UTHelper")
-    controller._version_badge = ft.Container(content=ft.Text("v2.3.1"))
+    controller._version_badge = ft.Container(content=ft.Text(f"v{APP_VERSION}"))
     header = controller._build_desktop_window_header()
     close = [
         item

@@ -299,10 +299,8 @@ class AppController:
 
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
-        elif needs_initial_sync:
+        else:
             self._safe_run_task(self._load_data_async, "startup")
-        # With credentials, the coordinator waits until cache age + the
-        # one-minute startup grace are due. Manual refresh remains immediate.
 
     def _diag_screen(self, screen: str) -> None:
         recorder = getattr(self, "_diagnostic_recorder", None)
@@ -1904,7 +1902,9 @@ class AppController:
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is None:
             return await self._perform_data_sync(trigger)
-        return await coordinator.request(trigger, force=trigger == "manual")
+        return await coordinator.request(
+            trigger, force=trigger in ("manual", "startup")
+        )
 
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading: return
@@ -1928,7 +1928,12 @@ class AppController:
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
         self.refresh_btn.disabled = True
-        self._set_sync_status("busy", "Đang cập nhật dữ liệu...")
+        status_text = (
+            "Dữ liệu cache · Đang cập nhật..."
+            if self.all_data
+            else "Đang cập nhật dữ liệu..."
+        )
+        self._set_sync_status("busy", status_text)
         self.empty_state.visible  = False
         self.error_state.visible  = False
         self.page.update()
@@ -2994,6 +2999,32 @@ class AppController:
         if changed:
             self.page.update()
 
+    def _refresh_visible_countdown_views(self, changed: bool = False):
+        if self.detail_view.visible:
+            if self.detail_view.refresh_countdown():
+                self.page.update()
+            with self._cards_lock:
+                cards_snapshot = list(self.active_cards)
+            for card in cards_snapshot:
+                update_countdown = getattr(card, "update_countdown", None)
+                if callable(update_countdown):
+                    update_countdown()
+        elif self.calendar_view.visible:
+            with self._data_lock:
+                calendar_snapshot = list(self.all_data)
+            self.calendar_view.update_data(calendar_snapshot)
+            self.page.update()
+        elif self.dashboard.visible:
+            schedule_changed = self._today_schedule_component.refresh_time_state()
+            if changed:
+                self._render_cards_only()
+                return
+            with self._cards_lock:
+                cards_snapshot = list(self.active_cards)
+            self._countdown_cards_once(cards_snapshot)
+            if schedule_changed:
+                self.page.update()
+
     async def _countdown_loop_async(self):
         while self._page_alive.is_set():
             # Adaptive interval: faster when critical items exist
@@ -3006,23 +3037,7 @@ class AppController:
             if not self._page_alive.is_set(): break
             try:
                 changed = self._refresh_activity_time_state()
-                if self.dashboard.visible:
-                    schedule_changed = self._today_schedule_component.refresh_time_state()
-                    if changed:
-                        self._render_cards_only()
-                        continue
-                    with self._cards_lock:
-                        cards_snapshot = list(self.active_cards)
-                    self._countdown_cards_once(cards_snapshot)
-                    if schedule_changed:
-                        self.page.update()
-                elif self.calendar_view.visible:
-                    with self._data_lock:
-                        calendar_snapshot = list(self.all_data)
-                    self.calendar_view.update_data(calendar_snapshot)
-                    self.page.update()
-                elif self.detail_view.visible and self.detail_view.refresh_countdown():
-                    self.page.update()
+                self._refresh_visible_countdown_views(changed)
             except Exception:
                 logger.warning("Countdown refresh failed", exc_info=True)
 

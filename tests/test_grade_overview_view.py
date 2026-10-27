@@ -74,7 +74,6 @@ def test_radar_card_and_chart_interaction():
     p1 = calculate_radar_profile(sem1, previous_semester=sem2)
     p2 = calculate_radar_profile(sem2)
 
-    tapped_metrics = []
     card = AcademicRadarCard(
         profiles=[p1, p2],
         on_semester_change=lambda idx: None,

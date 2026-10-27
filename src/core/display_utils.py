@@ -31,7 +31,7 @@ def clean_course_name(course: str) -> str:
 def urgency_str(urgency) -> str:
     """Normalise UrgencyLevel enum or plain string to lowercase value."""
     raw_lower = str(urgency).lower()
-    for v in ("critical", "warning", "safe"):
+    for v in ("critical", "warning", "safe", "overdue"):
         if v in raw_lower:
             return v
     return "safe"
@@ -58,6 +58,7 @@ _TYPE_DISPLAY_MAP = {
     "url":        ("🔗", "Liên kết"),
     "choice":     ("📊", "Khảo sát"),
     "open":       ("📂", "Đang mở"),
+    "other":      ("📄", "Khác"),
 }
 
 # Urgency display mapping - used by all notifiers
@@ -65,6 +66,7 @@ _URGENCY_DISPLAY_MAP = {
     "critical": ("🔴", "Khẩn cấp"),
     "warning":  ("🟠", "Sắp tới hạn"),
     "safe":     ("🟢", "An toàn"),
+    "overdue":  ("🔴", "Quá hạn"),
 }
 
 
