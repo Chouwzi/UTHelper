@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.4.0"
+version = "2.4.1"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,6 +55,11 @@ module = "main"
 [tool.flet.compile]
 app = true
 packages = true
+
+[tool.flet.flutter.pubspec.dependency_overrides]
+# Flet 0.86.5's template pins 1.0.0; current generated JNI bindings require 1.1.
+# https://github.com/flet-dev/flet/issues/6919
+jni = "1.1.0"
 
 # ── Android-specific configuration ──
 [tool.flet.windows]
