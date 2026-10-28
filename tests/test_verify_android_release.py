@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import zipfile
 
 import pytest
 
@@ -15,6 +16,29 @@ BUILD_NUMBER = 2_002_000
 PACKAGE_ID = "com.uthelper.uthelper"
 FINGERPRINT = "AB" * 32
 COMMIT_SHA = "1" * 40
+
+
+def _write_apk(path: Path, abis=("arm64-v8a", "armeabi-v7a", "x86_64")):
+    with zipfile.ZipFile(path, "w") as archive:
+        for abi in abis:
+            archive.writestr(f"lib/{abi}/libapp.so", b"native-fixture")
+
+
+@pytest.mark.parametrize("abis,valid", [(("arm64-v8a",), True), (("x86_64",), False), (("arm64-v8a", "x86_64"), False)])
+def test_arm64_release_requires_exact_native_abi_inventory(tmp_path, monkeypatch, abis, valid):
+    apk = tmp_path / f"UTHelper-{VERSION}-arm64-v8a.apk"
+    _write_apk(apk, abis)
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    options = dict(
+        apk=apk, version=VERSION, build_number=BUILD_NUMBER, package_id=PACKAGE_ID,
+        certificate_sha256=FINGERPRINT, commit_sha=COMMIT_SHA, workflow_run_id="12345",
+        output=tmp_path / "evidence.json", android_home=_sdk(tmp_path), architecture="arm64",
+    )
+    if valid:
+        assert verify_android_release(**options)["architecture"] == "arm64"
+    else:
+        with pytest.raises(AndroidVerificationError, match="native ABI"):
+            verify_android_release(**options)
 
 
 def _sdk(tmp_path: Path) -> Path:
@@ -62,7 +86,7 @@ def _fake_run(command, **kwargs):
 
 def test_verify_android_release_emits_exact_native_evidence(tmp_path, monkeypatch):
     apk = tmp_path / f"UTHelper-{VERSION}.apk"
-    apk.write_bytes(b"PK\x03\x04signed-apk")
+    _write_apk(apk)
     output = tmp_path / "evidence.json"
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
@@ -85,6 +109,7 @@ def test_verify_android_release_emits_exact_native_evidence(tmp_path, monkeypatc
     assert evidence["certificate_fingerprint"] == FINGERPRINT
     assert evidence["checks"] == [
         "apk_signature",
+        "native_abis",
         "notification_receivers",
         "package_id",
         "sha256",
@@ -114,7 +139,7 @@ def test_verify_android_release_rejects_non_apk_magic(tmp_path, bad_bytes):
 
 def test_verify_android_release_rejects_wrong_signer(tmp_path, monkeypatch):
     apk = tmp_path / f"UTHelper-{VERSION}.apk"
-    apk.write_bytes(b"PK\x03\x04signed-apk")
+    _write_apk(apk)
 
     def wrong_signer(command, **kwargs):
         result = _fake_run(command, **kwargs)
@@ -149,7 +174,7 @@ def test_verify_android_release_accepts_supported_apksigner_labels(
     tmp_path, monkeypatch, certificate_line
 ):
     apk = tmp_path / f"UTHelper-{VERSION}.apk"
-    apk.write_bytes(b"PK\x03\x04signed-apk")
+    _write_apk(apk)
 
     def labelled_signer(command, **kwargs):
         result = _fake_run(command, **kwargs)
@@ -177,7 +202,7 @@ def test_verify_android_release_rejects_any_additional_signer_identity(
     tmp_path, monkeypatch
 ):
     apk = tmp_path / f"UTHelper-{VERSION}.apk"
-    apk.write_bytes(b"PK\x03\x04signed-apk")
+    _write_apk(apk)
 
     def mixed_signers(command, **kwargs):
         result = _fake_run(command, **kwargs)
@@ -205,7 +230,7 @@ def test_verify_android_release_rejects_any_additional_signer_identity(
 
 def test_verify_android_release_rejects_noncanonical_build_number(tmp_path):
     apk = tmp_path / f"UTHelper-{VERSION}.apk"
-    apk.write_bytes(b"PK\x03\x04signed-apk")
+    _write_apk(apk)
 
     with pytest.raises(AndroidVerificationError, match="canonical"):
         verify_android_release(
@@ -225,7 +250,7 @@ def test_verify_android_release_rejects_receiver_names_outside_receiver_elements
     tmp_path, monkeypatch
 ):
     apk = tmp_path / f"UTHelper-{VERSION}.apk"
-    apk.write_bytes(b"PK\x03\x04signed-apk")
+    _write_apk(apk)
 
     def misleading_manifest(command, **kwargs):
         result = _fake_run(command, **kwargs)

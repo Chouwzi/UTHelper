@@ -11,6 +11,7 @@ import re
 import subprocess
 from typing import Sequence
 import xml.etree.ElementTree as ET
+import zipfile
 
 try:
     from scripts.release_metadata import ReleaseMetadataError, release_build_number
@@ -104,9 +105,13 @@ def verify_android_release(
     workflow_run_id: str,
     output: Path,
     android_home: Path | None = None,
+    architecture: str = "universal",
 ) -> dict[str, object]:
     apk = apk.resolve()
-    if not apk.is_file() or apk.name != f"UTHelper-{version}.apk":
+    suffix = "-arm64-v8a" if architecture == "arm64" else ""
+    if architecture not in {"universal", "arm64"}:
+        raise AndroidVerificationError("Unsupported Android architecture")
+    if not apk.is_file() or apk.name != f"UTHelper-{version}{suffix}.apk":
         raise AndroidVerificationError("Android release APK filename is not canonical")
     if not _VERSION.fullmatch(version) or build_number <= 0:
         raise AndroidVerificationError("Android release version metadata is invalid")
@@ -168,6 +173,23 @@ def verify_android_release(
     if invalid_receivers:
         raise AndroidVerificationError("APK notification receiver wiring is incomplete")
 
+    try:
+        with zipfile.ZipFile(apk) as archive:
+            abis = {
+                name.split("/")[1]
+                for name in archive.namelist()
+                if name.startswith("lib/") and name.endswith(".so")
+                and len(name.split("/")) == 3
+            }
+    except zipfile.BadZipFile as exc:
+        raise AndroidVerificationError("APK native library archive is invalid") from exc
+    expected_abis = (
+        {"arm64-v8a"} if architecture == "arm64"
+        else {"arm64-v8a", "armeabi-v7a", "x86_64"}
+    )
+    if abis != expected_abis:
+        raise AndroidVerificationError("APK native ABI inventory does not match architecture")
+
     with apk.open("rb") as stream:
         apk_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     evidence: dict[str, object] = {
@@ -177,7 +199,7 @@ def verify_android_release(
         "sha256": apk_sha256,
         "version": version,
         "product_id": package_id,
-        "architecture": "universal",
+        "architecture": architecture,
         "signature_kind": "apk-pinned",
         "signer_identity": package_id,
         "certificate_fingerprint": expected_fingerprint,
@@ -186,6 +208,7 @@ def verify_android_release(
         "checks": sorted(
             (
                 "apk_signature",
+                "native_abis",
                 "package_id",
                 "version_name",
                 "version_code",
@@ -217,6 +240,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--workflow-run-id", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--architecture", choices=("universal", "arm64"), default="universal")
     return parser
 
 
@@ -231,6 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         commit_sha=args.commit_sha,
         workflow_run_id=args.workflow_run_id,
         output=args.output,
+        architecture=args.architecture,
     )
     return 0
 

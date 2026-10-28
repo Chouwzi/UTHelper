@@ -1,12 +1,24 @@
 param(
     [ValidateSet("apk", "aab")]
-    [string]$Target = "apk"
+    [string]$Target = "apk",
+    [ValidateSet("universal", "arm64-v8a", "armeabi-v7a", "x86_64")]
+    [string]$Architecture = "arm64-v8a",
+    [switch]$LegacyPackaging = $true,
+    [string]$OutputDir
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $fletCommand = Get-Command flet -ErrorAction Stop
 $patchCommand = Get-Command flet-android-notifications-patch -ErrorAction Stop
+
+# Default to the measured small ARM64 build. Universal remains available for
+# compatibility. Legacy packaging extracts native libraries during installation.
+$fletOptions = @("--cleanup-app")
+if ($Architecture -ne "universal") { $fletOptions += @("--arch", $Architecture) }
+if ($LegacyPackaging) { $fletOptions += "--android-legacy-packaging" }
+else { $fletOptions += "--no-android-legacy-packaging" }
+if ($OutputDir) { $fletOptions += @("--output", $OutputDir) }
 
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUTF8 = "1"
@@ -66,7 +78,7 @@ try {
     if (Test-Path -LiteralPath $gradleProperties -PathType Leaf) {
         Set-BoundedAndroidGradleConfig -GradlePropertiesPath $gradleProperties
     }
-    & $fletCommand.Source build $Target --verbose
+    & $fletCommand.Source build $Target @fletOptions --verbose
     $firstExit = $LASTEXITCODE
     if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "build/flutter"))) {
         throw "Flet did not create build/flutter (exit $firstExit)."
@@ -86,7 +98,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics config generation failed before final Android build."
     }
-    & $fletCommand.Source build $Target --verbose
+    & $fletCommand.Source build $Target @fletOptions --verbose
     if ($LASTEXITCODE -ne 0) {
         throw "Final Android build failed with exit code $LASTEXITCODE."
     }

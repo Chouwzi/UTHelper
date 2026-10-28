@@ -44,6 +44,18 @@ this directory. Product tests belong in `tests/` so pytest and CI collect them.
 
 - `measure_windows_performance.py` — bounded CPU and memory sampling for a selected
   Windows launch mode; it is not part of CI.
+- `measure_package.py` — read-only APK/IPA structure, size and CRC-checked archive
+  reads; archive timings are not installation timings.
+- `measure_windows_install.ps1` — repeated real MSI install/uninstall and native
+  activation smoke checks, restricted to disposable GitHub-hosted Windows runners.
+- `measure_android_install.py` — rotated clean-install measurements restricted to
+  the isolated `com.uthelper.benchmark` package; preserves the real app's profile.
+- `prepare_package_benchmark.py` — stage cleanup variants in a disposable benchmark
+  checkout, preserving application settings and saving both TOML configurations.
+
+See [package performance](../docs/testing/package-performance.md) for experimental
+Android architecture/compression profiles, iOS measurements and Windows installer
+comparisons. Production release defaults are independent of the diagnostic matrix.
 
 ## Repository governance
 

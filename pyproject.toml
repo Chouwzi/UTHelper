@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.4.1"
+version = "2.5.0"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,12 +56,16 @@ module = "main"
 app = true
 packages = true
 
+[tool.flet.cleanup]
+# Keep adjacent runtime bytecode; remove redundant build-time cache directories.
+app = true
+
 [tool.flet.flutter.pubspec.dependency_overrides]
 # Flet 0.86.5's template pins 1.0.0; current generated JNI bindings require 1.1.
 # https://github.com/flet-dev/flet/issues/6919
 jni = "1.1.0"
 
-# ── Android-specific configuration ──
+# ── Windows-specific configuration ──
 [tool.flet.windows]
 dependencies = [
     "pystray>=0.19.5",
@@ -73,7 +77,13 @@ dependencies = [
     "lxml>=6.1.0",
 ]
 
+[tool.flet.windows.cleanup]
+# PyWin32 compiled help is not used at runtime; retain every runtime module.
+package_files = ["**.chm"]
+
+# ── Android-specific configuration ──
 [tool.flet.android]
+legacy_packaging = true
 bundle_id = "com.uthelper.uthelper"
 adaptive_icon_background = "#0F172A"
 dependencies = [

@@ -453,6 +453,20 @@ def select_candidate(
     )
     if len(matches) > 1:
         raise ManifestError("ambiguous package candidates")
+    if (
+        not matches and target.platform.lower() == "android"
+        and target.architecture.lower() == "arm64"
+    ):
+        # Older releases and clients retain the canonical universal APK contract.
+        matches = tuple(
+            package
+            for package in manifest.packages
+            if package.platform == "android"
+            and package.architecture == "universal"
+            and package.install_channel == target.install_channel.lower()
+        )
+        if len(matches) > 1:
+            raise ManifestError("ambiguous package candidates")
     if not matches:
         return None
     package = matches[0]

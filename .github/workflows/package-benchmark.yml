@@ -1,0 +1,256 @@
+name: Package benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform group to measure
+        type: choice
+        options: [all, android, ios, windows]
+        default: all
+      wix_eula:
+        description: Existing owner-accepted WiX EULA marker (wix7), required for Windows
+        type: string
+        default: ''
+      windows_profile:
+        description: Windows comparison group
+        type: choice
+        options: [both, documentation-only]
+        default: both
+      android_namespace:
+        description: Isolate device experiments from an installed UTHelper
+        type: choice
+        options: [original, isolated]
+        default: original
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-benchmark-${{ github.ref }}-${{ inputs.platform || 'all' }}-${{ inputs.windows_profile || 'both' }}-${{ inputs.android_namespace || 'original' }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    if: inputs.platform == 'all' || inputs.platform == 'android'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: universal-modern
+            flags: '--no-android-legacy-packaging'
+          - name: universal-clean
+            flags: '--no-android-legacy-packaging'
+          - name: arm64-modern
+            flags: '--arch arm64-v8a --no-android-legacy-packaging'
+          - name: arm64-legacy
+            flags: '--arch arm64-v8a --android-legacy-packaging'
+    steps:
+      - name: Check out benchmark source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Set up Java
+        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build diagnostic APK from source configuration
+        shell: bash
+        env:
+          FLAGS: ${{ matrix.flags }}
+          VARIANT: ${{ matrix.name }}
+          APP_CLEANUP: ${{ matrix.name == 'universal-modern' && 'false' || 'true' }}
+          APP_ID: ${{ inputs.android_namespace == 'isolated' && 'com.uthelper.benchmark' || 'com.uthelper.uthelper' }}
+        run: |
+          set -euo pipefail
+          pip install -e ".[android-build]"
+          python scripts/prepare_package_benchmark.py --app-cleanup "$APP_CLEANUP" --evidence measurements
+          VERSION=$(python scripts/release_metadata.py --print-version)
+          BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
+          python scripts/release_metadata.py --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          set --
+          if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
+          flet build apk --bundle-id "$APP_ID" --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose || test -d build/flutter
+          flet-android-notifications-patch --project-root build/flutter
+          python scripts/release_metadata.py --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          flet build apk --bundle-id "$APP_ID" --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
+          mkdir -p measurements
+          mapfile -t PACKAGES < <(find build/apk -maxdepth 1 -type f -name '*.apk')
+          test "${#PACKAGES[@]}" -eq 1
+          APK="${PACKAGES[0]}"
+          ANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          test "$("$ANALYZER" manifest version-name "$APK")" = "$VERSION"
+          test "$("$ANALYZER" manifest version-code "$APK")" = "$BUILD"
+          test "$("$ANALYZER" manifest application-id "$APK")" = "$APP_ID"
+          "$ANALYZER" manifest print "$APK" > measurements/android-manifest.xml
+          for receiver in ScheduledNotificationReceiver ScheduledNotificationBootReceiver ActionBroadcastReceiver DeadlineAlarmReceiver RescheduleReceiver; do
+            grep -q "$receiver" measurements/android-manifest.xml
+          done
+          TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          "$TOOLS/apksigner" verify "$APK"
+          cp "$APK" "measurements/$VARIANT-diagnostic.apk"
+          python scripts/measure_package.py "$APK" --output "measurements/$VARIANT.json"
+          cp build/flutter/pubspec.yaml measurements/
+          cp build/flutter/pubspec.lock measurements/
+          printf '%s\n' "$GITHUB_SHA" > measurements/source-commit.txt
+          printf '%s\n' 'DEBUG-SIGNED EXPERIMENT ONLY. Not a production update; never replace a release asset.' > measurements/DIAGNOSTIC_ONLY.txt
+      - name: Save diagnostic measurements
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: package-android-${{ matrix.name }}
+          path: measurements/
+          if-no-files-found: error
+          retention-days: 7
+
+  ios:
+    if: inputs.platform == 'all' || inputs.platform == 'ios'
+    runs-on: macos-latest
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            flags: ''
+          - name: cleanup
+            flags: ''
+    steps:
+      - name: Check out benchmark source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Build and verify unsigned device IPA
+        shell: bash
+        env:
+          FLAGS: ${{ matrix.flags }}
+          VARIANT: ${{ matrix.name }}
+          APP_CLEANUP: ${{ matrix.name == 'baseline' && 'false' || 'true' }}
+        run: |
+          set -euo pipefail
+          pip install -e .
+          python scripts/prepare_package_benchmark.py --app-cleanup "$APP_CLEANUP" --evidence measurements
+          VERSION=$(python scripts/release_metadata.py --print-version)
+          BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
+          python scripts/release_metadata.py --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          set --
+          if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
+          flet build ipa --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
+          mkdir -p measurements
+          find build/ipa -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' > archives.txt
+          test "$(wc -l < archives.txt | tr -d ' ')" -eq 1
+          ARCHIVE=$(sed -n '1p' archives.txt)
+          python scripts/package_unsigned_ipa.py --archive "$ARCHIVE" \
+            --output "measurements/$VARIANT-diagnostic.ipa" --evidence "measurements/$VARIANT-verification.json" \
+            --version "$VERSION" --build-number "$BUILD" --bundle-id com.uthelper.UTHelper \
+            --commit-sha "$GITHUB_SHA" --workflow-run-id "$GITHUB_RUN_ID"
+          python scripts/measure_package.py "measurements/$VARIANT-diagnostic.ipa" --output "measurements/$VARIANT.json"
+          cp build/flutter/pubspec.lock measurements/
+          printf '%s\n' "$GITHUB_SHA" > measurements/source-commit.txt
+          printf '%s\n' 'UNSIGNED EXPERIMENT ONLY. Device installation requires user signing. Not a production update.' > measurements/DIAGNOSTIC_ONLY.txt
+      - name: Save diagnostic measurements
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: package-ios-${{ matrix.name }}
+          path: measurements/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-latest
+    timeout-minutes: 65
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      WIX_EULA_ACCEPTED: ${{ inputs.wix_eula }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.windows_profile == 'documentation-only' && '[{"name":"documentation"}]' || '[{"name":"baseline"},{"name":"cleanup"}]') }}
+    steps:
+      - name: Check out benchmark source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build baseline or cleaned Windows bundle
+        shell: pwsh
+        env:
+          APP_CLEANUP: ${{ matrix.name == 'baseline' && 'false' || 'true' }}
+          HELP_CLEANUP: ${{ matrix.name == 'documentation' && 'true' || 'false' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pip install -e ".[windows]"
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python scripts/prepare_package_benchmark.py --app-cleanup $env:APP_CLEANUP --help-cleanup $env:HELP_CLEANUP --evidence measurements
+          if ($LASTEXITCODE -ne 0) { throw 'Benchmark configuration staging failed' }
+          $version = python scripts/release_metadata.py --print-version
+          $build = python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' $version
+          python scripts/release_metadata.py --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          New-Item -ItemType Directory -Path build/support -Force | Out-Null
+          $template = 'build/support/template.zip'
+          Invoke-WebRequest -Uri 'https://github.com/flet-dev/flet/releases/download/v0.86.5/flet-build-template.zip' -OutFile $template -TimeoutSec 60
+          if ((Get-FileHash $template -Algorithm SHA256).Hash.ToLowerInvariant() -ne '8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73') { throw 'Template hash changed' }
+          python scripts/prepare_flet_diagnostics_template.py --source $template --output build/support/template-diagnostics.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Template validation failed' }
+          flet build windows --build-version $version --build-number $build --template build/support/template-diagnostics.zip --yes --verbose
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+          python scripts/verify_flutter_diagnostics.py --template build/support/template-diagnostics.zip --project-root build/flutter
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter diagnostics verification failed' }
+          python scripts/prepare_windows_bundle.py build/windows
+          python scripts/verify_windows_bundle.py build/windows --expected-version $version
+          if ($LASTEXITCODE -ne 0) { throw 'Bundle verification failed' }
+      - name: Measure real install and uninstall for two CAB levels
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:WIX_EULA_ACCEPTED -ne 'wix7') { throw 'Owner-accepted WiX EULA is required' }
+          $version = python scripts/release_metadata.py --print-version
+          $bundle = (Resolve-Path build/windows).Path
+          New-Item -ItemType Directory -Path measurements -Force | Out-Null
+          foreach ($level in @('high', 'medium')) {
+            $folder = "build/benchmark-installer/$level"
+            New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            # Change a private copy of authored WiX source, never the shipping installer.
+            (Get-Content packaging/windows/Package.wxs -Raw).Replace('CompressionLevel="high"', "CompressionLevel=`"$level`"") | Set-Content "$folder/Package.wxs" -Encoding utf8
+            Copy-Item packaging/windows/UTHelper.Package.wixproj "$folder/Benchmark.wixproj"
+            $destination = (Resolve-Path $folder).Path + [IO.Path]::DirectorySeparatorChar
+            dotnet build "$folder/Benchmark.wixproj" -c Release '-p:AcceptEula=wix7' "-p:Version=$version" "-p:AppBundle=$bundle" "-p:OutputPath=$destination"
+            if ($LASTEXITCODE -ne 0) { throw "MSI $level build failed" }
+            ./scripts/measure_windows_install.ps1 -MsiPath "$folder/UTHelper-$version.msi" -OutputPath "measurements/$level.json"
+            if ($LASTEXITCODE -ne 0) { throw "MSI $level measurement failed" }
+          }
+          $env:GITHUB_SHA | Set-Content measurements/source-commit.txt
+          'UNSIGNED EXPERIMENT ONLY. Installer samples used only on this disposable runner.' | Set-Content measurements/DIAGNOSTIC_ONLY.txt
+      - name: Save diagnostic measurements
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: package-windows-${{ matrix.name }}
+          path: measurements/
+          if-no-files-found: error
+          retention-days: 7
