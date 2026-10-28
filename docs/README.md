@@ -25,6 +25,8 @@ UI và metadata đóng gói được sinh từ nguồn này.
   real-device evidence expected per platform.
 - [Package performance](testing/package-performance.md) — measured APK/IPA size,
   packaging tradeoffs and isolated Windows installation benchmarks.
+- [Android device performance](testing/android-device-performance.md) — physical
+  tablet runtime checks and isolated install measurements that preserve user data.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.
 
 ## Architecture history

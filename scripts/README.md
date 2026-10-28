@@ -48,6 +48,8 @@ this directory. Product tests belong in `tests/` so pytest and CI collect them.
   reads; archive timings are not installation timings.
 - `measure_windows_install.ps1` — repeated real MSI install/uninstall and native
   activation smoke checks, restricted to disposable GitHub-hosted Windows runners.
+- `measure_android_install.py` — rotated clean-install measurements restricted to
+  the isolated `com.uthelper.benchmark` package; preserves the real app's profile.
 - `prepare_package_benchmark.py` — stage cleanup variants in a disposable benchmark
   checkout, preserving application settings and saving both TOML configurations.
 

@@ -51,9 +51,11 @@ for an unbuilt replacement.
 
 All four builds passed APK signature verification, exact application/version/build
 checks and the five notification/background receiver checks. This is native build
-and package evidence, not a device execution test. No Android device is connected;
-the owner selected host measurements first. Mobile install time, first launch,
-memory, battery and frame timing remain unmeasured.
+and package evidence, not a device execution test. The initial experiment used
+host measurements at the owner's request. A subsequently connected Samsung tablet
+is covered in the [Android device report](android-device-performance.md), which
+separates authenticated runtime checks from isolated fresh-install measurements.
+Battery and low-end-phone acceptance remain outside these samples.
 
 The package reader also performs three complete sequential reads with CRC checks.
 These are warm-cache host decompression measurements on separate hosted VMs, not
