@@ -12,12 +12,17 @@ on:
         description: Existing owner-accepted WiX EULA marker (wix7), required for Windows
         type: string
         default: ''
+      windows_profile:
+        description: Windows comparison group
+        type: choice
+        options: [both, documentation-only]
+        default: both
 
 permissions:
   contents: read
 
 concurrency:
-  group: package-benchmark-${{ github.ref }}-${{ inputs.platform || 'all' }}
+  group: package-benchmark-${{ github.ref }}-${{ inputs.platform || 'all' }}-${{ inputs.windows_profile || 'both' }}
   cancel-in-progress: true
 
 jobs:
@@ -167,11 +172,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: baseline
-            flags: ''
-          - name: cleanup
-            flags: '--cleanup-app'
+        include: ${{ fromJSON(inputs.windows_profile == 'documentation-only' && '[{"name":"documentation","flags":"--cleanup-app --cleanup-package-files **.chm"}]' || '[{"name":"baseline","flags":""},{"name":"cleanup","flags":"--cleanup-app"}]') }}
     steps:
       - name: Check out benchmark source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
