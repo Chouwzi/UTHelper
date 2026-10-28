@@ -65,6 +65,34 @@ def _schema3_package(**changes):
     return value
 
 
+@pytest.mark.parametrize("target_arch,expected_arch", [("arm64", "arm64"), ("universal", "universal")])
+def test_android_prefers_exact_abi_without_breaking_existing_clients(target_arch, expected_arch):
+    packages = [
+        _schema3_package(
+            platform="android", architecture=arch, package_type="apk", install_channel="sideload",
+            signature_kind="apk-pinned", install_strategy={"kind": "android_package_installer"},
+            url=f"https://github.com/Chouwzi/UTHelper/releases/download/v2.2.0/{arch}.apk",
+        ) for arch in ("universal", "arm64")
+    ]
+    document = _schema3(packages[0])
+    document["packages"] = packages
+    manifest = parse_manifest(document, expected_release_version="2.2.0")
+    candidate = select_candidate(manifest, current_version="2.1.0", target=RuntimeTarget("android", target_arch, "sideload"))
+    assert candidate.package.architecture == expected_arch
+
+
+def test_arm64_client_can_still_update_from_older_universal_only_manifest():
+    package = _schema3_package(
+        platform="android", architecture="universal", package_type="apk", install_channel="sideload",
+        signature_kind="apk-pinned", install_strategy={"kind": "android_package_installer"},
+        url="https://github.com/Chouwzi/UTHelper/releases/download/v2.2.0/universal.apk",
+    )
+    manifest = parse_manifest(_schema3(package), expected_release_version="2.2.0")
+    candidate = select_candidate(manifest, current_version="2.1.0", target=RuntimeTarget("android", "arm64", "sideload"))
+    assert candidate.package.architecture == "universal"
+    assert select_candidate(manifest, current_version="2.1.0", target=RuntimeTarget("android", "arm64", "other")) is None
+
+
 def test_schema2_selects_only_exact_runtime_target():
     manifest = parse_manifest(
         _schema2([_package()]),

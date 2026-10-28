@@ -2,7 +2,7 @@
 
 - Status: Accepted (iOS and Windows trust model superseded by the 2026-08-09 sideload/self-signed design)
 - Date: 2026-07-19
-- Updated: 2026-08-09
+- Updated: 2026-10-28
 
 ## Context
 
@@ -17,9 +17,15 @@ stable package identity, deterministic selection, or end-to-end verification.
 
 - `pyproject.toml` is the only authored application version. A protected
   `vX.Y.Z` tag must equal it and point to a commit contained in `main`.
-- A public release contains exactly six assets: one unsigned device IPA, signed APK, x64 Burn
+- From 2.5.0, a public release contains exactly seven assets: one unsigned device
+  IPA, signed ARM64 APK, signed universal compatibility APK, x64 Burn
   EXE, x64 machine-scoped MSI, `release-manifest.json`, and `SHA256SUMS`.
   MSIX, AppInstaller, ZIP, and GitHub Pages are not production release paths.
+- Android ARM64 processes select the ARM64 APK. Unknown/32-bit/x86 runtimes and
+  older clients retain the canonical universal filename/manifest target. An ARM64
+  client falls back to universal only when an older manifest has no exact ARM64
+  candidate. Both APKs use native compression, the same package ID, version code
+  and pinned production signer. Native ABI inventories are verified independently.
 - Schema 3 identifies platform, architecture, package type, install channel,
   trusted signer identity/fingerprint, byte size, SHA-256, and the explicit
   install strategy. It declares iOS as `unsigned-resign-required`, Android as
@@ -40,10 +46,10 @@ stable package identity, deterministic selection, or end-to-end verification.
   with Sideloadly/AltStore, and iOS never self-installs it.
 - Each native release job builds, verifies, emits SHA-bound evidence, and
   creates a GitHub artifact attestation. The final protected job reconstructs
-  only the three named current-run artifacts and verifies the exact inventory.
-- Publication is a fail-closed transaction: attest all six files, verify every
+  only the four named current-run artifacts and verifies the exact inventory.
+- Publication is a fail-closed transaction: attest all seven files, verify every
   attestation against `.github/workflows/release.yml`, create an empty draft,
-  upload six explicitly named files, re-download them through the GitHub API,
+  upload seven explicitly named files, re-download them through the GitHub API,
   compare names, sizes, API digests, local hashes, and checksum contents, then
   make the draft public. Cleanup may delete only the same numeric draft ID while
   its tag and draft state still match; it never deletes by tag or rewrites a tag.

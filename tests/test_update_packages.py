@@ -31,6 +31,21 @@ from platform_utils.windows_update import (
 )
 
 
+@pytest.mark.parametrize("machine,bits,architecture", [
+    ("aarch64", 8, "arm64"), ("arm64-v8a", 8, "arm64"),
+    ("aarch64", 4, "universal"), ("armv7l", 4, "universal"),
+    ("x86_64", 8, "universal"), ("unknown", 8, "universal"),
+])
+def test_android_target_uses_small_apk_only_for_64_bit_arm(monkeypatch, machine, bits, architecture):
+    from platform_utils import update_packages
+
+    monkeypatch.setattr(update_packages.platform_utils, "IS_WINDOWS", False)
+    monkeypatch.setattr(update_packages.platform_utils, "IS_ANDROID", True)
+    monkeypatch.setattr(update_packages.platform, "machine", lambda: machine)
+    monkeypatch.setattr(update_packages.struct, "calcsize", lambda _: bits)
+    assert detect_runtime_target() == RuntimeTarget("android", architecture, "sideload")
+
+
 def test_compiled_windows_release_pin_is_exact_sha256_identity():
     assert TRUSTED_WINDOWS_SIGNER_SHA256 == frozenset(
         {"7E3547EE6A31325A47BE22049E238BA83CA1D90AFB8A30D053060D02678A0B3C"}

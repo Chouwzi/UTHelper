@@ -29,6 +29,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/release_inventory.py``.
 REQUIRED_PACKAGE_NAMES = (
     "UTHelper-{version}.ipa",
     "UTHelper-{version}.apk",
+    "UTHelper-{version}-arm64-v8a.apk",
     "UTHelper-Setup-{version}.exe",
     "UTHelper-{version}.msi",
 )
@@ -76,6 +77,7 @@ _EXPECTED = {
         frozenset(
             {
                 "apk_signature",
+                "native_abis",
                 "notification_receivers",
                 "package_id",
                 "sha256",
@@ -188,6 +190,8 @@ def _read_evidence(path: Path, package: Path, version: str) -> VerificationEvide
         raise InventoryError("verification evidence fields are invalid")
     suffix = package.suffix.lower()
     platform_name, product_id, architecture, expected_checks = _EXPECTED[suffix]
+    if suffix == ".apk" and package.name == f"UTHelper-{version}-arm64-v8a.apk":
+        architecture = "arm64"
     checks = raw["checks"]
     if (
         not isinstance(checks, list)
@@ -260,7 +264,7 @@ def _validate_manifest(path: Path, inventory: ReleaseInventory) -> None:
         manifest = parse_manifest(raw, expected_release_version=inventory.version)
     except (OSError, UnicodeError, json.JSONDecodeError, ManifestError) as exc:
         raise InventoryError("release manifest is invalid") from exc
-    if manifest.schema_version != 3 or len(manifest.packages) != 4:
+    if manifest.schema_version != 3 or len(manifest.packages) != len(REQUIRED_PACKAGE_NAMES):
         raise InventoryError("release manifest must contain schema 3 exact inventory")
     expected_by_name = {item.name: item for item in inventory.packages}
     seen = set()

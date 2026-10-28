@@ -3,7 +3,7 @@
 This directory separates maintained documentation from historical implementation
 records. Start here instead of searching by filename.
 
-Version ứng dụng hiện tại: `2.4.1`. `pyproject.toml` là nguồn version canonical;
+Version ứng dụng hiện tại: `2.5.0`. `pyproject.toml` là nguồn version canonical;
 UI và metadata đóng gói được sinh từ nguồn này.
 
 ## Maintained documentation
@@ -23,6 +23,10 @@ UI và metadata đóng gói được sinh từ nguồn này.
   iOS, or desktop presentation on another runtime.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
+- [Package performance](testing/package-performance.md) — measured APK/IPA size,
+  packaging tradeoffs and isolated Windows installation benchmarks.
+- [Android device performance](testing/android-device-performance.md) — physical
+  tablet runtime checks and isolated install measurements that preserve user data.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.
 
 ## Architecture history
