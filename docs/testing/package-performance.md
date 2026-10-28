@@ -13,6 +13,8 @@ user signing. Neither is a production update.
   source `c400ec3c4e3a3a36b4083040f7a628ec4644d778`.
 - Windows: [installation matrix run 40623030510](https://github.com/Chouwzi/UTHelper/actions/runs/40623030510),
   source `9972a2a5df2f391e1f412a7706c0aed674940606`.
+- Windows help-file cleanup: [run 40624562664](https://github.com/Chouwzi/UTHelper/actions/runs/40624562664),
+  source `f49b1cc` (the full revision is retained in the JSON results).
 
 The commits differ only in benchmark tooling; application source and packaging
 defaults are identical. Baseline and candidate are rebuilt rather than comparing
@@ -88,14 +90,21 @@ measured after install. Build time and ZIP read time are not installer time.
 | Baseline | medium | 50.912 | 12.174 | 17.724 | 147.849 / 3,471 |
 | Application cleanup | high | 47.990 | 10.710 | 16.190 | 147.827 / 3,468 |
 | Application cleanup | medium | 50.908 | 14.510 | 19.608 | 147.827 / 3,468 |
+| Application + help-file cleanup | high | 45.693 | 15.713 | 26.716 | 145.306 / 3,467 |
+| Application + help-file cleanup | medium | 48.603 | 13.427 | 21.154 | 145.306 / 3,467 |
 
-All 12 installation/uninstallation cycles and their native activation smoke checks
-passed. Cleanup removes only about 23 KiB from a clean hosted build. Its faster
+All 18 installation/uninstallation cycles and their native activation smoke checks
+passed. Application cleanup removes only about 23 KiB from a clean hosted build. Its faster
 high-compression installation on another VM is not evidence that removing those
 23 KiB caused a speedup. Medium compression costs about 2.94 MiB more download and
 does not consistently improve installation. Keep high compression in production;
-do not claim an installer speed improvement from these samples. A separate trial
-removes only compiled help (`.chm`) files, retaining all runtime modules.
+do not claim an installer speed improvement from these samples. The help-file trial
+removes one PyWin32 compiled help (`.chm`) file, retaining all runtime modules. It
+saves 2.52 MiB installed and about 2.30 MiB in the high-compression MSI compared
+with application cleanup alone. The high-compression MSI is 4.75% smaller than
+baseline. Its slower install samples also came from another VM; the results do
+not establish a causal speed improvement or regression. Help-file cleanup is
+retained for its measured size reduction and passing native activation checks.
 
 The [machine-readable results](package-performance-results.json) retain all samples,
 artifact hashes, source commits and run links. Refresh them from the diagnostic
@@ -107,6 +116,8 @@ artifacts and the operator's private baseline directory.
 
 - Enable application cleanup through the supported Flet source configuration;
   all three platforms built successfully with it. Compilation remains enabled.
+- Remove only Windows package help files with the tested `**.chm` glob in
+  `[tool.flet.windows.cleanup]`; keep all runtime dependencies.
 - Expose explicit Android architecture/legacy/output-directory options in the
   existing patched build script. Universal and modern packaging remain defaults.
 - Keep Windows high CAB compression. Do not remove Pillow, lxml, SSL, Pydantic,
@@ -119,6 +130,14 @@ The benchmark workflow is manual and read-only with respect to repository conten
 release assets and secrets. It accepts `platform=android|ios|windows|all`; Windows
 also requires the owner's existing WiX EULA acceptance marker. It publishes only
 short-lived diagnostic artifacts, never a GitHub release.
+
+The workflow stages explicit cleanup settings in its disposable checkout with
+`prepare_package_benchmark.py`. Baseline disables application cleanup and retains
+help files; cleanup enables application cleanup only; the Windows
+`documentation-only` profile enables both. Original and staged authored TOML are
+saved as evidence. This avoids inheriting newly adopted defaults into the
+baseline. Flet 0.86.5 does not support `--no-cleanup-app`; source configuration is
+used instead. No generated Dart source is edited.
 
 Local Android candidates use the same required two-pass notification patch path:
 

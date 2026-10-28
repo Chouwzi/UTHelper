@@ -289,6 +289,70 @@
       "sha256": "072c8ca9d8abe58270863e9d8f642dd1a3e6ebf486c787d4513d41cb59c704a1",
       "source_commit": "9972a2a5df2f391e1f412a7706c0aed674940606",
       "variant": "windows-cleanup/medium"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 47912156,
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40624562664",
+      "samples": [
+        {
+          "install_seconds": 15.7133532,
+          "installed_bytes": 152364789.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 26.7159555
+        },
+        {
+          "install_seconds": 16.8434126,
+          "installed_bytes": 152364789.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 28.6138152
+        },
+        {
+          "install_seconds": 14.2106526,
+          "installed_bytes": 152364789.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 20.9050572
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "0f995b50659dae07797395ea5f3b19bc317959df9ca5f7dc7ae352d0c92b9326",
+      "source_commit": "f49b1cc7baf30d6e5f4b8d400a7b96624c7f1455",
+      "variant": "windows-documentation/high"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 50963676,
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40624562664",
+      "samples": [
+        {
+          "install_seconds": 13.3765913,
+          "installed_bytes": 152364789.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 20.9482769
+        },
+        {
+          "install_seconds": 13.45746,
+          "installed_bytes": 152364789.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 21.1536978
+        },
+        {
+          "install_seconds": 13.4265665,
+          "installed_bytes": 152364789.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 22.1149521
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "dc54699acfe37c71fff229ac023d802bf150532110f17ec4c7c515972d034dff",
+      "source_commit": "f49b1cc7baf30d6e5f4b8d400a7b96624c7f1455",
+      "variant": "windows-documentation/medium"
     }
   ],
   "schema_version": 1,

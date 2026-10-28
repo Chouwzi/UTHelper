@@ -35,13 +35,13 @@ jobs:
       matrix:
         include:
           - name: universal-modern
-            flags: '--no-cleanup-app'
+            flags: ''
           - name: universal-clean
-            flags: '--cleanup-app'
+            flags: ''
           - name: arm64-modern
-            flags: '--arch arm64-v8a --cleanup-app'
+            flags: '--arch arm64-v8a'
           - name: arm64-legacy
-            flags: '--arch arm64-v8a --cleanup-app --android-legacy-packaging'
+            flags: '--arch arm64-v8a --android-legacy-packaging'
     steps:
       - name: Check out benchmark source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -62,9 +62,11 @@ jobs:
         env:
           FLAGS: ${{ matrix.flags }}
           VARIANT: ${{ matrix.name }}
+          APP_CLEANUP: ${{ matrix.name == 'universal-modern' && 'false' || 'true' }}
         run: |
           set -euo pipefail
           pip install -e ".[android-build]"
+          python scripts/prepare_package_benchmark.py --app-cleanup "$APP_CLEANUP" --evidence measurements
           VERSION=$(python scripts/release_metadata.py --print-version)
           BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
           python scripts/release_metadata.py --runtime-output src/assets/release-version
@@ -113,9 +115,9 @@ jobs:
       matrix:
         include:
           - name: baseline
-            flags: '--no-cleanup-app'
+            flags: ''
           - name: cleanup
-            flags: '--cleanup-app'
+            flags: ''
     steps:
       - name: Check out benchmark source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -131,9 +133,11 @@ jobs:
         env:
           FLAGS: ${{ matrix.flags }}
           VARIANT: ${{ matrix.name }}
+          APP_CLEANUP: ${{ matrix.name == 'baseline' && 'false' || 'true' }}
         run: |
           set -euo pipefail
           pip install -e .
+          python scripts/prepare_package_benchmark.py --app-cleanup "$APP_CLEANUP" --evidence measurements
           VERSION=$(python scripts/release_metadata.py --print-version)
           BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
           python scripts/release_metadata.py --runtime-output src/assets/release-version
@@ -172,7 +176,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.windows_profile == 'documentation-only' && '[{"name":"documentation","flags":"--cleanup-app --cleanup-package-files **.chm"}]' || '[{"name":"baseline","flags":"--no-cleanup-app"},{"name":"cleanup","flags":"--cleanup-app"}]') }}
+        include: ${{ fromJSON(inputs.windows_profile == 'documentation-only' && '[{"name":"documentation"}]' || '[{"name":"baseline"},{"name":"cleanup"}]') }}
     steps:
       - name: Check out benchmark source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -190,11 +194,14 @@ jobs:
       - name: Build baseline or cleaned Windows bundle
         shell: pwsh
         env:
-          FLAGS: ${{ matrix.flags }}
+          APP_CLEANUP: ${{ matrix.name == 'baseline' && 'false' || 'true' }}
+          HELP_CLEANUP: ${{ matrix.name == 'documentation' && 'true' || 'false' }}
         run: |
           $ErrorActionPreference = 'Stop'
           pip install -e ".[windows]"
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python scripts/prepare_package_benchmark.py --app-cleanup $env:APP_CLEANUP --help-cleanup $env:HELP_CLEANUP --evidence measurements
+          if ($LASTEXITCODE -ne 0) { throw 'Benchmark configuration staging failed' }
           $version = python scripts/release_metadata.py --print-version
           $build = python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' $version
           python scripts/release_metadata.py --runtime-output src/assets/release-version
@@ -205,8 +212,7 @@ jobs:
           if ((Get-FileHash $template -Algorithm SHA256).Hash.ToLowerInvariant() -ne '8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73') { throw 'Template hash changed' }
           python scripts/prepare_flet_diagnostics_template.py --source $template --output build/support/template-diagnostics.zip
           if ($LASTEXITCODE -ne 0) { throw 'Template validation failed' }
-          $options = @($env:FLAGS -split ' ' | Where-Object { $_ })
-          flet build windows --build-version $version --build-number $build --template build/support/template-diagnostics.zip @options --yes --verbose
+          flet build windows --build-version $version --build-number $build --template build/support/template-diagnostics.zip --yes --verbose
           if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
           python scripts/verify_flutter_diagnostics.py --template build/support/template-diagnostics.zip --project-root build/flutter
           if ($LASTEXITCODE -ne 0) { throw 'Flutter diagnostics verification failed' }
