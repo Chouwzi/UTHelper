@@ -15,10 +15,12 @@ user signing. Neither is a production update.
   source `9972a2a5df2f391e1f412a7706c0aed674940606`.
 - Windows help-file cleanup: [run 40624562664](https://github.com/Chouwzi/UTHelper/actions/runs/40624562664),
   source `f49b1cc` (the full revision is retained in the JSON results).
+- Final source-configuration confirmation: [run 40626799330](https://github.com/Chouwzi/UTHelper/actions/runs/40626799330),
+  source `8b52f459fca2765a63c7002b03bd86a70cec3147`.
 
-The commits differ only in benchmark tooling; application source and packaging
-defaults are identical. Baseline and candidate are rebuilt rather than comparing
-different application releases. `pubspec.lock`, source revision, package hash,
+The initial matrix runs use identical application source and dependency constraints;
+candidates change packaging options. Baseline and candidate are rebuilt rather
+than comparing different application releases. `pubspec.lock`, source revision, package hash,
 manifest and measurements accompany the diagnostic artifacts. The first macOS
 baseline failed on Bash's empty-array handling; the corrected iOS run replaces
 that measurement. The first Windows measurement stopped before installation
@@ -35,6 +37,17 @@ MiB means 1,048,576 bytes. Expanded archive bytes are not an Android storage rep
 | Universal, application cleanup | 155.925 | 174.037 | 0.007% |
 | ARM64, modern native packaging, cleanup | 64.228 | 83.309 | 58.81% |
 | ARM64, legacy native compression, cleanup | 34.610 | 83.309 | 77.81% |
+
+The universal APK carries 48.004 MiB of ARM64 native libraries, 40.315 MiB of
+ARM32 libraries and 50.413 MiB of x86-64 libraries. In the ARM64 set alone,
+`libapp.so` is 14.376 MiB, `libflutter.so` is 11.045 MiB and `libpython3.14.so`
+is 5.559 MiB, before Python packages, stdlib and supporting native dependencies.
+Python has a real runtime cost, but shipping three architectures is the largest
+measured opportunity here. A stack rewrite is not required for the 59% reduction.
+Any future Dart-only rewrite needs a feature-parity prototype and the same
+notification, background-sync, authentication and update checks before its size
+or speed can be compared fairly; this experiment does not claim a measured win
+for an unbuilt replacement.
 
 All four builds passed APK signature verification, exact application/version/build
 checks and the five notification/background receiver checks. This is native build
@@ -92,10 +105,12 @@ measured after install. Build time and ZIP read time are not installer time.
 | Application cleanup | medium | 50.908 | 14.510 | 19.608 | 147.827 / 3,468 |
 | Application + help-file cleanup | high | 45.693 | 15.713 | 26.716 | 145.306 / 3,467 |
 | Application + help-file cleanup | medium | 48.603 | 13.427 | 21.154 | 145.306 / 3,467 |
+| Source-config confirmation | high | 45.681 | 13.585 | 21.438 | 145.306 / 3,467 |
+| Source-config confirmation | medium | 48.595 | 13.804 | 21.580 | 145.306 / 3,467 |
 
-All 18 installation/uninstallation cycles and their native activation smoke checks
-passed. Application cleanup removes only about 23 KiB from a clean hosted build. Its faster
-high-compression installation on another VM is not evidence that removing those
+All 24 installation/uninstallation cycles and their native activation smoke checks
+passed. Application cleanup removes only about 23 KiB from a clean hosted build.
+Its faster high-compression installation on another VM is not evidence that removing those
 23 KiB caused a speedup. Medium compression costs about 2.94 MiB more download and
 does not consistently improve installation. Keep high compression in production;
 do not claim an installer speed improvement from these samples. The help-file trial
@@ -105,6 +120,11 @@ with application cleanup alone. The high-compression MSI is 4.75% smaller than
 baseline. Its slower install samples also came from another VM; the results do
 not establish a causal speed improvement or regression. Help-file cleanup is
 retained for its measured size reduction and passing native activation checks.
+The final source-config build repeated all six install/activation checks on
+Windows build 26100, an AMD EPYC 7763 host with four logical CPUs allocated to
+the runner. Its staged and authored configurations are semantically identical;
+the selected defaults reproduce the measured profile. Separate builds vary by
+small packaging overhead, so the high-compression result is about 45.68–45.69 MiB.
 
 The [machine-readable results](package-performance-results.json) retain all samples,
 artifact hashes, source commits and run links. Refresh them from the diagnostic
