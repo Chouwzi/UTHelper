@@ -56,6 +56,10 @@ module = "main"
 app = true
 packages = true
 
+[tool.flet.cleanup]
+# Keep adjacent runtime bytecode; remove redundant build-time cache directories.
+app = true
+
 [tool.flet.flutter.pubspec.dependency_overrides]
 # Flet 0.86.5's template pins 1.0.0; current generated JNI bindings require 1.1.
 # https://github.com/flet-dev/flet/issues/6919

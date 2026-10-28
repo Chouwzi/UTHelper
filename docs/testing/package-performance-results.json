@@ -1,0 +1,296 @@
+{
+  "measurements": [
+    {
+      "archive_read": {
+        "median_seconds": 0.2518943390000459,
+        "scope": "host sequential decompression with CRC; warm-cache, not OS install",
+        "seconds": [
+          0.2611800120000112,
+          0.24720042000001285,
+          0.2518943390000459
+        ]
+      },
+      "artifact": "UTHelper.apk",
+      "bytes": 36291515,
+      "entry_count": 571,
+      "expanded_bytes": 87356315,
+      "host": {
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "native_abis": [
+        "arm64-v8a"
+      ],
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40544518112",
+      "scope": "archive structure and sequential reads; not installation or frame timing",
+      "sha256": "77cda2448b1c118e702800343d3bbd513c3017e8e51b1ae9616eda17dfe182cc",
+      "source_commit": "639876cb5cf34f4feb316adba091c03771230ecd",
+      "variant": "android-arm64-legacy/arm64-legacy"
+    },
+    {
+      "archive_read": {
+        "median_seconds": 0.1573023099999773,
+        "scope": "host sequential decompression with CRC; warm-cache, not OS install",
+        "seconds": [
+          0.15747567999994772,
+          0.15678534000005584,
+          0.1573023099999773
+        ]
+      },
+      "artifact": "UTHelper.apk",
+      "bytes": 67347963,
+      "entry_count": 571,
+      "expanded_bytes": 87356315,
+      "host": {
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "native_abis": [
+        "arm64-v8a"
+      ],
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40544518112",
+      "scope": "archive structure and sequential reads; not installation or frame timing",
+      "sha256": "4a21f1ce89346d11e838c46fb023487a89c69fdad0912f9938379e34e5f7de1c",
+      "source_commit": "639876cb5cf34f4feb316adba091c03771230ecd",
+      "variant": "android-arm64-modern/arm64-modern"
+    },
+    {
+      "archive_read": {
+        "median_seconds": 0.18132401600007597,
+        "scope": "host sequential decompression with CRC; warm-cache, not OS install",
+        "seconds": [
+          0.18132401600007597,
+          0.18120450300000357,
+          0.18166117900000245
+        ]
+      },
+      "artifact": "UTHelper.apk",
+      "bytes": 163499557,
+      "entry_count": 699,
+      "expanded_bytes": 182490911,
+      "host": {
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "native_abis": [
+        "arm64-v8a",
+        "armeabi-v7a",
+        "x86_64"
+      ],
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40544518112",
+      "scope": "archive structure and sequential reads; not installation or frame timing",
+      "sha256": "d1cd724ddcffd6662e82edf4d9a384a52ca3b5c534fb4b00e219ade03f9f1f3c",
+      "source_commit": "639876cb5cf34f4feb316adba091c03771230ecd",
+      "variant": "android-universal-clean/universal-clean"
+    },
+    {
+      "archive_read": {
+        "median_seconds": 0.1810958620000065,
+        "scope": "host sequential decompression with CRC; warm-cache, not OS install",
+        "seconds": [
+          0.18115615399995022,
+          0.1810958620000065,
+          0.18069049800010362
+        ]
+      },
+      "artifact": "UTHelper.apk",
+      "bytes": 163510745,
+      "entry_count": 699,
+      "expanded_bytes": 182514588,
+      "host": {
+        "machine": "x86_64",
+        "system": "Linux"
+      },
+      "native_abis": [
+        "arm64-v8a",
+        "armeabi-v7a",
+        "x86_64"
+      ],
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40544518112",
+      "scope": "archive structure and sequential reads; not installation or frame timing",
+      "sha256": "e5a7dafedd30cc832ef23819854d5408299e1e40fc5c5536be1bbb2019343277",
+      "source_commit": "639876cb5cf34f4feb316adba091c03771230ecd",
+      "variant": "android-universal-modern/universal-modern"
+    },
+    {
+      "archive_read": {
+        "median_seconds": 0.1705503750000048,
+        "scope": "host sequential decompression with CRC; warm-cache, not OS install",
+        "seconds": [
+          0.1811076250000383,
+          0.1669790000000262,
+          0.1705503750000048
+        ]
+      },
+      "artifact": "baseline-diagnostic.ipa",
+      "bytes": 36704553,
+      "entry_count": 3471,
+      "expanded_bytes": 89424793,
+      "host": {
+        "machine": "arm64",
+        "system": "Darwin"
+      },
+      "native_abis": [],
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40545771860",
+      "scope": "archive structure and sequential reads; not installation or frame timing",
+      "sha256": "b70e3b15a88e00aa9ad89237c1177dbb102568459ba06d41c1aeab319df2441c",
+      "source_commit": "c400ec3c4e3a3a36b4083040f7a628ec4644d778",
+      "variant": "ios-baseline/baseline"
+    },
+    {
+      "archive_read": {
+        "median_seconds": 0.22567983300001515,
+        "scope": "host sequential decompression with CRC; warm-cache, not OS install",
+        "seconds": [
+          0.21189595799995686,
+          0.22567983300001515,
+          0.25661533399994596
+        ]
+      },
+      "artifact": "cleanup-diagnostic.ipa",
+      "bytes": 36691320,
+      "entry_count": 3467,
+      "expanded_bytes": 89401637,
+      "host": {
+        "machine": "arm64",
+        "system": "Darwin"
+      },
+      "native_abis": [],
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40545771860",
+      "scope": "archive structure and sequential reads; not installation or frame timing",
+      "sha256": "78f3cca7021e80a114f7d4c0e19d0b0e1001689ea97ec503ce088b53440bdbe7",
+      "source_commit": "c400ec3c4e3a3a36b4083040f7a628ec4644d778",
+      "variant": "ios-cleanup/cleanup"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 50300570,
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40623030510",
+      "samples": [
+        {
+          "install_seconds": 13.4556383,
+          "installed_bytes": 155030802.0,
+          "installed_files": 3471,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 19.1555686
+        },
+        {
+          "install_seconds": 12.3984377,
+          "installed_bytes": 155030802.0,
+          "installed_files": 3471,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 18.0833468
+        },
+        {
+          "install_seconds": 12.1200647,
+          "installed_bytes": 155030802.0,
+          "installed_files": 3471,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 17.8119949
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "37f1b564d2993744b7d6c986b573bd302903c9547dc8744f9a4be5418a297c3b",
+      "source_commit": "9972a2a5df2f391e1f412a7706c0aed674940606",
+      "variant": "windows-baseline/high"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 53384858,
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40623030510",
+      "samples": [
+        {
+          "install_seconds": 12.5396575,
+          "installed_bytes": 155030802.0,
+          "installed_files": 3471,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 17.7236579
+        },
+        {
+          "install_seconds": 12.1389538,
+          "installed_bytes": 155030802.0,
+          "installed_files": 3471,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 17.6352606
+        },
+        {
+          "install_seconds": 12.1738439,
+          "installed_bytes": 155030802.0,
+          "installed_files": 3471,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 17.7384267
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "4b53b8b1acff7c66882a39b4765f75d5117811855a8833e3fa9b7add15ecad7c",
+      "source_commit": "9972a2a5df2f391e1f412a7706c0aed674940606",
+      "variant": "windows-baseline/medium"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 50320683,
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40623030510",
+      "samples": [
+        {
+          "install_seconds": 11.9370449,
+          "installed_bytes": 155007688.0,
+          "installed_files": 3468,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 17.2310095
+        },
+        {
+          "install_seconds": 10.7099169,
+          "installed_bytes": 155007688.0,
+          "installed_files": 3468,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 16.1899527
+        },
+        {
+          "install_seconds": 10.4740664,
+          "installed_bytes": 155007688.0,
+          "installed_files": 3468,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 15.7165341
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "d45a2b577e7e6260bd816021357a8898bc93a95c3f937f87606f098f58d345fc",
+      "source_commit": "9972a2a5df2f391e1f412a7706c0aed674940606",
+      "variant": "windows-cleanup/high"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 53380395,
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40623030510",
+      "samples": [
+        {
+          "install_seconds": 13.1471596,
+          "installed_bytes": 155007688.0,
+          "installed_files": 3468,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 19.6476585
+        },
+        {
+          "install_seconds": 14.5096592,
+          "installed_bytes": 155007688.0,
+          "installed_files": 3468,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 19.6079558
+        },
+        {
+          "install_seconds": 15.4843346,
+          "installed_bytes": 155007688.0,
+          "installed_files": 3468,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 17.6231703
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "072c8ca9d8abe58270863e9d8f642dd1a3e6ebf486c787d4513d41cb59c704a1",
+      "source_commit": "9972a2a5df2f391e1f412a7706c0aed674940606",
+      "variant": "windows-cleanup/medium"
+    }
+  ],
+  "schema_version": 1,
+  "scope": "Diagnostic builds and host/hosted-runner measurements. No physical-mobile install or frame evidence. See package-performance.md for method and limits."
+}

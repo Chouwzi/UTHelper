@@ -35,7 +35,7 @@ jobs:
       matrix:
         include:
           - name: universal-modern
-            flags: ''
+            flags: '--no-cleanup-app'
           - name: universal-clean
             flags: '--cleanup-app'
           - name: arm64-modern
@@ -113,7 +113,7 @@ jobs:
       matrix:
         include:
           - name: baseline
-            flags: ''
+            flags: '--no-cleanup-app'
           - name: cleanup
             flags: '--cleanup-app'
     steps:
@@ -172,7 +172,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.windows_profile == 'documentation-only' && '[{"name":"documentation","flags":"--cleanup-app --cleanup-package-files **.chm"}]' || '[{"name":"baseline","flags":""},{"name":"cleanup","flags":"--cleanup-app"}]') }}
+        include: ${{ fromJSON(inputs.windows_profile == 'documentation-only' && '[{"name":"documentation","flags":"--cleanup-app --cleanup-package-files **.chm"}]' || '[{"name":"baseline","flags":"--no-cleanup-app"},{"name":"cleanup","flags":"--cleanup-app"}]') }}
     steps:
       - name: Check out benchmark source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

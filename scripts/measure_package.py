@@ -7,6 +7,7 @@ from collections import defaultdict
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import platform
 import statistics
@@ -39,7 +40,11 @@ def inspect_package(path: Path, *, read_repeats: int = 0) -> dict:
         "artifact": path.name,
         "bytes": path.stat().st_size,
         "sha256": file_sha256(path),
-        "host": {"system": platform.system(), "machine": platform.machine()},
+        "host": {
+            "system": platform.system(), "machine": platform.machine(),
+            "python": platform.python_version(), "processor": platform.processor(),
+            "logical_cpus": os.cpu_count(),
+        },
         "scope": "archive structure and sequential reads; not installation or frame timing",
     }
     groups = defaultdict(lambda: {"stored_bytes": 0, "expanded_bytes": 0, "files": 0})

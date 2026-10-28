@@ -23,6 +23,8 @@ UI và metadata đóng gói được sinh từ nguồn này.
   iOS, or desktop presentation on another runtime.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
+- [Package performance](testing/package-performance.md) — measured APK/IPA size,
+  packaging tradeoffs and isolated Windows installation benchmarks.
 - [Architecture decisions](adr/) — accepted decisions that constrain current code.
 
 ## Architecture history

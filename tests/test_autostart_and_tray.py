@@ -301,7 +301,10 @@ def test_close_winning_setup_race_prevents_tray_publish_and_thread_start(monkeyp
     assert tray._thread is None
 
 class TestAutostart(unittest.TestCase):
-    def test_autostart_windows(self):
+    @patch("platform_utils.autostart.has_package_identity", return_value=False)
+    def test_autostart_windows(self, _has_package_identity):
+        # This integration case verifies the Run key. A packaged test host uses
+        # StartupTask in production, which has no UTHelper_Test_Autostart task.
         # We only run actual registry test if on Windows
         if sys.platform != "win32":
             self.skipTest("Autostart tests are Windows-only")

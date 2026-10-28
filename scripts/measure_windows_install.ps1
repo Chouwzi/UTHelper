@@ -77,6 +77,11 @@ try {
         bytes = (Get-Item -LiteralPath $msi).Length
         sha256 = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
         scope = "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing"
+        host = @{
+            windows = [Environment]::OSVersion.VersionString
+            logical_cpus = [Environment]::ProcessorCount
+            processor = (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)
+        }
         samples = @($samples.ToArray())
     }
     $destination = [IO.Path]::GetFullPath($OutputPath)
