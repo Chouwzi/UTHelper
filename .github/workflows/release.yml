@@ -93,6 +93,14 @@ jobs:
     needs: [validate-release-source, validate-release-credentials]
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: universal
+            suffix: ''
+          - architecture: arm64
+            suffix: '-arm64-v8a'
     environment: release
     permissions:
       contents: read
@@ -131,6 +139,8 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
           ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          APK_SUFFIX: ${{ matrix.suffix }}
         run: |
           set -euo pipefail
           test -n "$ANDROID_KEYSTORE_BASE64"
@@ -149,13 +159,16 @@ jobs:
           export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
           export FLET_ANDROID_SIGNING_KEY_ALIAS="$ANDROID_KEY_ALIAS"
 
+          set -- --android-legacy-packaging
+          if [ "$ARCHITECTURE" = arm64 ]; then set -- "$@" --arch arm64-v8a; fi
+
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
+          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+          flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose
 
           grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter-packages/flet_uth_background_sync/android/build.gradle
           grep -R -q "androidx.room:room-runtime:2.8.4" build/flutter-packages/flet_uth_background_sync/android/build.gradle
@@ -182,7 +195,7 @@ jobs:
           grep -q "RescheduleReceiver" final-android-manifest.xml
 
           mkdir -p release evidence
-          FINAL_APK="release/UTHelper-$VERSION.apk"
+          FINAL_APK="release/UTHelper-$VERSION$APK_SUFFIX.apk"
           mv "$APK" "$FINAL_APK"
           python scripts/verify_android_release.py \
             --apk "$FINAL_APK" \
@@ -192,20 +205,21 @@ jobs:
             --certificate-sha256 "$ANDROID_SIGNING_CERT_SHA256" \
             --commit-sha "$GITHUB_SHA" \
             --workflow-run-id "$GITHUB_RUN_ID" \
-            --output "evidence/UTHelper-$VERSION.apk.verification.json"
+            --architecture "$ARCHITECTURE" \
+            --output "evidence/UTHelper-$VERSION$APK_SUFFIX.apk.verification.json"
       - name: Attest signed APK
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
         timeout-minutes: 5
         with:
-          subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk
+          subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}${{ matrix.suffix }}.apk
       - name: Upload signed Android package and evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         timeout-minutes: 5
         with:
-          name: release-android
+          name: release-android-${{ matrix.architecture }}
           path: |
-            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk
-            evidence/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk.verification.json
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}${{ matrix.suffix }}.apk
+            evidence/UTHelper-${{ needs['validate-release-source'].outputs.version }}${{ matrix.suffix }}.apk.verification.json
           if-no-files-found: error
           retention-days: 7
 
@@ -498,7 +512,13 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         timeout-minutes: 5
         with:
-          name: release-android
+          name: release-android-universal
+          path: incoming/android
+      - name: Download ARM64 Android release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 5
+        with:
+          name: release-android-arm64
           path: incoming/android
       - name: Download iOS release artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -545,11 +565,12 @@ jobs:
           subject-path: |
             release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa
             release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.apk
+            release/UTHelper-${{ needs['validate-release-source'].outputs.version }}-arm64-v8a.apk
             release/UTHelper-Setup-${{ needs['validate-release-source'].outputs.version }}.exe
             release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.msi
             release/release-manifest.json
             release/SHA256SUMS
-      - name: Verify attestations and atomically publish six assets
+      - name: Verify attestations and atomically publish seven assets
         timeout-minutes: 10
         shell: bash
         env:
@@ -561,6 +582,7 @@ jobs:
           ASSETS=(
             "release/UTHelper-$VERSION.ipa"
             "release/UTHelper-$VERSION.apk"
+            "release/UTHelper-$VERSION-arm64-v8a.apk"
             "release/UTHelper-Setup-$VERSION.exe"
             "release/UTHelper-$VERSION.msi"
             "release/release-manifest.json"
@@ -600,13 +622,15 @@ jobs:
           }
           trap cleanup_draft EXIT
 
+          NOTES=()
+          if [ -f "docs/releases/$VERSION.md" ]; then NOTES=(-F "body=@docs/releases/$VERSION.md"); fi
           release_record=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$TAG" \
             -f target_commitish="$GITHUB_SHA" \
             -f name="UTHelper $VERSION" \
             -F draft=true \
             -F prerelease=false \
-            -F generate_release_notes=true)
+            -F generate_release_notes=true "${NOTES[@]}")
           CREATED_RELEASE_ID=$(printf '%s' "$release_record" | jq -er '.id')
           [[ "$CREATED_RELEASE_ID" =~ ^[0-9]+$ ]]
           gh api "repos/$GITHUB_REPOSITORY/releases/$CREATED_RELEASE_ID" | \
@@ -615,6 +639,7 @@ jobs:
           gh release upload "$TAG" \
             "release/UTHelper-$VERSION.ipa" \
             "release/UTHelper-$VERSION.apk" \
+            "release/UTHelper-$VERSION-arm64-v8a.apk" \
             "release/UTHelper-Setup-$VERSION.exe" \
             "release/UTHelper-$VERSION.msi" \
             "release/release-manifest.json" \
@@ -632,6 +657,7 @@ jobs:
           expected = {
               f"UTHelper-{version}.ipa",
               f"UTHelper-{version}.apk",
+              f"UTHelper-{version}-arm64-v8a.apk",
               f"UTHelper-Setup-{version}.exe",
               f"UTHelper-{version}.msi",
               "release-manifest.json",
@@ -640,7 +666,7 @@ jobs:
           record = json.loads(Path("remote-release.json").read_text(encoding="utf-8"))
           assets = record.get("assets", [])
           names = {asset.get("name") for asset in assets}
-          if names != expected or len(assets) != 6:
+          if names != expected or len(assets) != 7:
               raise SystemExit(f"remote draft asset names mismatch: {sorted(names)}")
           lines = []
           for asset in sorted(assets, key=lambda item: item["name"]):
@@ -671,8 +697,8 @@ jobs:
               if hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(peer.read_bytes()).digest():
                   raise SystemExit(f"remote digest mismatch: {path.name}")
           sums = (local / "SHA256SUMS").read_text(encoding="utf-8")
-          if not sums.endswith("\n") or "\r" in sums or len(sums.splitlines()) != 5:
-              raise SystemExit("SHA256SUMS is not the exact deterministic five-entry inventory")
+          if not sums.endswith("\n") or "\r" in sums or len(sums.splitlines()) != 6:
+              raise SystemExit("SHA256SUMS is not the exact deterministic six-entry inventory")
           PY
 
           gh release edit "$TAG" --draft=false --latest

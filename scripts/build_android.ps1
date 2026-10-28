@@ -2,8 +2,8 @@ param(
     [ValidateSet("apk", "aab")]
     [string]$Target = "apk",
     [ValidateSet("universal", "arm64-v8a", "armeabi-v7a", "x86_64")]
-    [string]$Architecture = "universal",
-    [switch]$LegacyPackaging,
+    [string]$Architecture = "arm64-v8a",
+    [switch]$LegacyPackaging = $true,
     [string]$OutputDir
 )
 
@@ -12,11 +12,12 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $fletCommand = Get-Command flet -ErrorAction Stop
 $patchCommand = Get-Command flet-android-notifications-patch -ErrorAction Stop
 
-# Preserve universal compatibility unless a device architecture is explicitly
-# selected. Legacy packaging trades download size for extraction at install time.
+# Default to the measured small ARM64 build. Universal remains available for
+# compatibility. Legacy packaging extracts native libraries during installation.
 $fletOptions = @("--cleanup-app")
 if ($Architecture -ne "universal") { $fletOptions += @("--arch", $Architecture) }
 if ($LegacyPackaging) { $fletOptions += "--android-legacy-packaging" }
+else { $fletOptions += "--no-android-legacy-packaging" }
 if ($OutputDir) { $fletOptions += @("--output", $OutputDir) }
 
 $env:PYTHONIOENCODING = "utf-8"

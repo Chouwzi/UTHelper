@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.4.1"
+version = "2.5.0"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -83,6 +83,7 @@ package_files = ["**.chm"]
 
 # ── Android-specific configuration ──
 [tool.flet.android]
+legacy_packaging = true
 bundle_id = "com.uthelper.uthelper"
 adaptive_icon_background = "#0F172A"
 dependencies = [

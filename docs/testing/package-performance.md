@@ -1,5 +1,15 @@
 # Package size and installation benchmark
 
+## Release adoption (2.5.0)
+
+The owner selected the tested smaller Android profile for release. Starting at
+2.5.0, release builds emit a compressed ARM64 APK plus a compressed universal
+compatibility APK under its existing filename. The updater prefers ARM64 on
+64-bit ARM processes and retains universal compatibility for older clients and
+other architectures. Windows uses application cleanup and the tested `.chm`
+removal while retaining high CAB compression. Historical 2.4.1 measurements below
+remain the baseline; new release sizes are verified from the built assets.
+
 ## Scope and provenance
 
 The experiment keeps the UTHelper 2.4.1 application, dependencies, native plugins,
@@ -141,7 +151,8 @@ artifacts and the operator's private baseline directory.
 - Remove only Windows package help files with the tested `**.chm` glob in
   `[tool.flet.windows.cleanup]`; keep all runtime dependencies.
 - Expose explicit Android architecture/legacy/output-directory options in the
-  existing patched build script. Universal and modern packaging remain defaults.
+  existing patched build script. The subsequently selected release defaults are
+  described above; diagnostic modern profiles explicitly disable compression.
 - Keep Windows high CAB compression. Do not remove Pillow, lxml, SSL, Pydantic,
   Python runtime or notification components to manufacture a smaller result.
 - Do not change the production updater or publish benchmark artifacts as releases.
@@ -164,7 +175,7 @@ used instead. No generated Dart source is edited.
 Local Android candidates use the same required two-pass notification patch path:
 
 ```powershell
-./scripts/build_android.ps1 -Architecture arm64-v8a -OutputDir build/apk-arm64-modern
+./scripts/build_android.ps1 -Architecture arm64-v8a -LegacyPackaging:$false -OutputDir build/apk-arm64-modern
 ./scripts/build_android.ps1 -Architecture arm64-v8a -LegacyPackaging -OutputDir build/apk-arm64-legacy
 ```
 
@@ -179,10 +190,9 @@ directories after producing adjacent runtime bytecode; never recursively delete
 all `.pyc` files. Do not edit generated Dart code or re-zip a production APK to
 implement these changes: build from the authored configuration and verify again.
 
-The release inventory and updater currently require a universal APK. Adding
-architecture-specific production assets is a separate coordinated change to
-inventory, runtime selection, signature verification and compatibility fallback;
-the benchmark does not silently replace that working update path.
+The 2.5.0 release adoption coordinates the additional ARM64 asset with inventory,
+runtime selection, native ABI/signature verification and universal compatibility.
+No older published asset is replaced.
 
 ## Supporting sources
 

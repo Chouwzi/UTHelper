@@ -41,6 +41,7 @@ CHECKS = {
     ],
     ".apk": [
         "apk_signature",
+        "native_abis",
         "notification_receivers",
         "package_id",
         "sha256",
@@ -78,7 +79,7 @@ def write_valid_release(tmp_path, *, version=VERSION, with_manifest=False, with_
             "sha256": _sha(path),
             "version": version,
             "product_id": PRODUCT[path.suffix],
-            "architecture": ARCH[path.suffix],
+            "architecture": "arm64" if name.endswith("-arm64-v8a.apk") else ARCH[path.suffix],
             "signature_kind": SIGNATURE_KIND[path.suffix],
             "signer_identity": "" if path.suffix == ".ipa" else PRODUCT[path.suffix],
             "certificate_fingerprint": "" if path.suffix == ".ipa" else "AB" * 32,
@@ -114,13 +115,14 @@ def write_valid_release(tmp_path, *, version=VERSION, with_manifest=False, with_
     return release, evidence
 
 
-def test_exact_inventory_accepts_four_required_packages_and_matching_evidence(tmp_path):
+def test_exact_inventory_accepts_five_required_packages_and_matching_evidence(tmp_path):
     release, evidence = write_valid_release(tmp_path)
     inventory = verify_release_inventory(release, evidence, VERSION, REPOSITORY)
 
     assert [item.name for item in inventory.packages] == [
         "UTHelper-2.2.0.ipa",
         "UTHelper-2.2.0.apk",
+        "UTHelper-2.2.0-arm64-v8a.apk",
         "UTHelper-Setup-2.2.0.exe",
         "UTHelper-2.2.0.msi",
     ]
@@ -222,7 +224,7 @@ def test_sha256sums_is_deterministic_and_covers_packages_plus_manifest(tmp_path)
     assert output.read_bytes() == first
     assert first.endswith(b"\n") and b"\r\n" not in first
     assert b"SHA256SUMS" not in first
-    assert len(first.decode("ascii").splitlines()) == 5
+    assert len(first.decode("ascii").splitlines()) == 6
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra", "tampered", "traversal"])
@@ -263,7 +265,7 @@ def test_generator_emits_schema_three_with_manual_ios_sideload(tmp_path):
     )
 
     assert manifest["schema_version"] == 3
-    assert len(manifest["packages"]) == 4
+    assert len(manifest["packages"]) == 5
     ios = manifest["packages"][0]
     assert ios["install_channel"] == "sideload"
     assert ios["install_strategy"] == {"kind": "manual_sideload"}

@@ -3,7 +3,7 @@
 This directory separates maintained documentation from historical implementation
 records. Start here instead of searching by filename.
 
-Version ứng dụng hiện tại: `2.4.1`. `pyproject.toml` là nguồn version canonical;
+Version ứng dụng hiện tại: `2.5.0`. `pyproject.toml` là nguồn version canonical;
 UI và metadata đóng gói được sinh từ nguồn này.
 
 ## Maintained documentation
