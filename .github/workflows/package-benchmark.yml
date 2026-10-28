@@ -17,12 +17,17 @@ on:
         type: choice
         options: [both, documentation-only]
         default: both
+      android_namespace:
+        description: Isolate device experiments from an installed UTHelper
+        type: choice
+        options: [original, isolated]
+        default: original
 
 permissions:
   contents: read
 
 concurrency:
-  group: package-benchmark-${{ github.ref }}-${{ inputs.platform || 'all' }}-${{ inputs.windows_profile || 'both' }}
+  group: package-benchmark-${{ github.ref }}-${{ inputs.platform || 'all' }}-${{ inputs.windows_profile || 'both' }}-${{ inputs.android_namespace || 'original' }}
   cancel-in-progress: true
 
 jobs:
@@ -63,6 +68,7 @@ jobs:
           FLAGS: ${{ matrix.flags }}
           VARIANT: ${{ matrix.name }}
           APP_CLEANUP: ${{ matrix.name == 'universal-modern' && 'false' || 'true' }}
+          APP_ID: ${{ inputs.android_namespace == 'isolated' && 'com.uthelper.benchmark' || 'com.uthelper.uthelper' }}
         run: |
           set -euo pipefail
           pip install -e ".[android-build]"
@@ -73,11 +79,11 @@ jobs:
           python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
           set --
           if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
-          flet build apk --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose || test -d build/flutter
+          flet build apk --bundle-id "$APP_ID" --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/release_metadata.py --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
-          flet build apk --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
+          flet build apk --bundle-id "$APP_ID" --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
           mkdir -p measurements
           mapfile -t PACKAGES < <(find build/apk -maxdepth 1 -type f -name '*.apk')
           test "${#PACKAGES[@]}" -eq 1
@@ -85,7 +91,7 @@ jobs:
           ANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test "$("$ANALYZER" manifest version-name "$APK")" = "$VERSION"
           test "$("$ANALYZER" manifest version-code "$APK")" = "$BUILD"
-          test "$("$ANALYZER" manifest application-id "$APK")" = com.uthelper.uthelper
+          test "$("$ANALYZER" manifest application-id "$APK")" = "$APP_ID"
           "$ANALYZER" manifest print "$APK" > measurements/android-manifest.xml
           for receiver in ScheduledNotificationReceiver ScheduledNotificationBootReceiver ActionBroadcastReceiver DeadlineAlarmReceiver RescheduleReceiver; do
             grep -q "$receiver" measurements/android-manifest.xml
