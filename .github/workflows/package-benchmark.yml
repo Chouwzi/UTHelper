@@ -8,6 +8,10 @@ on:
         type: choice
         options: [all, android, ios, windows]
         default: all
+      wix_eula:
+        description: Existing owner-accepted WiX EULA marker (wix7), required for Windows
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -159,7 +163,7 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
-      WIX_EULA_ACCEPTED: ${{ vars.WIX_EULA_ACCEPTED }}
+      WIX_EULA_ACCEPTED: ${{ inputs.wix_eula }}
     strategy:
       fail-fast: false
       matrix:
