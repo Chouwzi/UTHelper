@@ -292,6 +292,80 @@
     },
     {
       "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 47899868,
+      "host": {
+        "logical_cpus": 4,
+        "processor": "AMD EPYC 7763 64-Core Processor                ",
+        "windows": "Microsoft Windows NT 10.0.26100.0"
+      },
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40626799330",
+      "samples": [
+        {
+          "install_seconds": 17.6783466,
+          "installed_bytes": 152364907.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 23.6715223
+        },
+        {
+          "install_seconds": 13.5847791,
+          "installed_bytes": 152364907.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 21.412796
+        },
+        {
+          "install_seconds": 13.4815058,
+          "installed_bytes": 152364907.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 21.4381331
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "8b9688fbf17eb2151f248edcfc881dd4fb692acfab5fe73f825f4cb572e98b65",
+      "source_commit": "8b52f459fca2765a63c7002b03bd86a70cec3147",
+      "variant": "windows-documentation-confirmation/high"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
+      "bytes": 50955484,
+      "host": {
+        "logical_cpus": 4,
+        "processor": "AMD EPYC 7763 64-Core Processor                ",
+        "windows": "Microsoft Windows NT 10.0.26100.0"
+      },
+      "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40626799330",
+      "samples": [
+        {
+          "install_seconds": 13.8041353,
+          "installed_bytes": 152364907.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 21.4415946
+        },
+        {
+          "install_seconds": 13.9449229,
+          "installed_bytes": 152364907.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 21.5804642
+        },
+        {
+          "install_seconds": 13.644793,
+          "installed_bytes": 152364907.0,
+          "installed_files": 3467,
+          "smoke": "manual/autostart/hidden/activation passed",
+          "uninstall_seconds": 22.2816712
+        }
+      ],
+      "scope": "real MSI install/uninstall and activation smoke on a disposable hosted Windows runner; warm OS cache, not physical-device frame timing",
+      "sha256": "0b3c0bdc765731f4a722992ca5a69874b3331815e85960798f21f0c2abf3ce37",
+      "source_commit": "8b52f459fca2765a63c7002b03bd86a70cec3147",
+      "variant": "windows-documentation-confirmation/medium"
+    },
+    {
+      "artifact": "UTHelper-2.4.1.msi",
       "bytes": 47912156,
       "run_url": "https://github.com/Chouwzi/UTHelper/actions/runs/40624562664",
       "samples": [
