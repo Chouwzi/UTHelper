@@ -16,8 +16,10 @@ from core.update_coordinator import UpdateEvent, UpdateEventKind
 from core.update_models import ReleasePackage
 from gui.app_controller import (
     AppController,
-    _AndroidPackageLauncher,
-    _android_release_build_number,
+)
+from platform_utils.android_updates import (
+    AndroidPackageLauncher as _AndroidPackageLauncher,
+    android_release_build_number as _android_release_build_number,
 )
 from gui.components.activity_card import ActivityCard
 from gui.components.today_schedule_panel import TodaySchedulePanel
@@ -480,8 +482,10 @@ def test_android_launcher_forwards_verified_local_path_identity_version_and_sign
             pass
 
     def run_task(handler, *args):
-        asyncio.run(handler(*args))
-        return object()
+        from concurrent.futures import Future
+        result = Future()
+        result.set_result(asyncio.run(handler(*args)))
+        return result
 
     package = ReleasePackage(
         platform="android",
@@ -521,6 +525,7 @@ def test_update_confirmation_uses_required_windows_affirmative_copy(monkeypatch)
     controller._show_update_confirmation()
 
     assert shown[0].actions[1].content == "Cài đặt và thoát"
+    assert shown[0].modal is False  # Escape remains a safe dismissal action.
 
 
 def test_update_confirmation_explains_ios_sideload_and_resigning(monkeypatch):
@@ -564,8 +569,8 @@ def test_update_download_replaces_stale_available_copy_with_progress_state():
         )
     )
 
-    assert controller._update_text.value == "Đang tải và xác minh v2.3.0..."
-    assert controller._update_btn.content == "Đang tải và xác minh..."
+    assert controller._update_text.value == "Đang tải v2.3.0 · 0%"
+    assert controller._update_btn.content == "Đang tải"
     assert controller._update_btn.disabled is True
     assert controller._update_progress.visible is True
 
@@ -615,18 +620,20 @@ def test_android_install_banner_waits_for_native_installer_confirmation(monkeypa
 
     asyncio.run(
         controller._apply_update_event(
-            UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+            UpdateEvent(UpdateEventKind.INSTALLING, controller._update_candidate)
         )
     )
 
     assert controller._update_banner.visible is True
-    assert controller._update_text.value == "Đang mở trình cài đặt Android..."
-    assert controller._update_btn.content == "Đang mở..."
+    assert controller._update_text.value == "Đang mở trình cài đặt…"
+    assert controller._update_btn.content == "Đang mở"
     assert controller._update_btn.disabled is True
 
-    controller._on_android_update_result({"status": "installer_opened"})
-
-    assert controller._update_banner.visible is False
+    asyncio.run(controller._apply_update_event(
+        UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+    ))
+    assert controller._update_text.value == "Đã mở trình cài đặt"
+    assert controller._update_btn.disabled is False
 
 
 def test_show_snackbar_uses_page_overlay_when_available():
@@ -646,3 +653,58 @@ def test_show_snackbar_uses_page_overlay_when_available():
     assert isinstance(overlay_controls[0], ft.SnackBar)
     assert overlay_controls[0].open is True
     assert dialogs == []
+
+
+def test_download_ready_keeps_app_usable_until_explicit_install_click():
+    controller = _update_event_controller()
+    dialogs = []
+    controller._show_update_confirmation = lambda: dialogs.append("confirm")
+    asyncio.run(controller._apply_update_event(
+        UpdateEvent(UpdateEventKind.READY_TO_INSTALL, controller._update_candidate)
+    ))
+    assert dialogs == []
+    assert controller._update_btn.content == "Cài đặt"
+    controller._request_update_download()
+    assert dialogs == ["confirm"]
+
+
+def test_permission_retry_confirms_cached_package_without_downloading():
+    controller = _update_event_controller()
+    dialogs = []
+    controller._show_update_confirmation = lambda: dialogs.append("confirm")
+    # No downloader is installed: this action must go directly to confirmation.
+    asyncio.run(controller._apply_update_event(
+        UpdateEvent(UpdateEventKind.INSTALL_PERMISSION_REQUIRED, controller._update_candidate)
+    ))
+    assert "Cho phép cài" in controller._update_text.value
+    assert controller._update_btn.disabled is False
+    controller._request_update_download()
+    assert dialogs == ["confirm"]
+
+
+def test_install_failure_is_distinct_from_download_failure():
+    controller = _update_event_controller()
+    asyncio.run(controller._apply_update_event(UpdateEvent(
+        UpdateEventKind.INSTALL_FAILED, controller._update_candidate,
+        message="installed_signer_mismatch",
+    )))
+    assert controller._update_text.value == "Chữ ký bản cập nhật không khớp ứng dụng đang cài."
+    assert controller._update_btn.disabled is False
+    controller._update_candidate.manifest.release_notes_url = "https://github.com/Chouwzi/UTHelper/releases/tag/v2.3.0"
+    opened = []
+    controller._open_external_update_url = opened.append
+    assert controller._update_btn.content == "Bản phát hành"
+    controller._request_update_download()
+    assert opened == [controller._update_candidate.manifest.release_notes_url]
+
+
+def test_download_state_remains_available_in_settings():
+    controller = _update_event_controller()
+    statuses = []
+    controller.settings_view.set_update_status = lambda *args, **kwargs: statuses.append((args, kwargs))
+    asyncio.run(controller._apply_update_event(UpdateEvent(
+        UpdateEventKind.DOWNLOAD_PROGRESS, controller._update_candidate, progress=0.42,
+    )))
+    assert statuses[0][0] == ("Đang tải v2.3.0 · 42%",)
+    assert statuses[0][1]["progress"] == 0.42
+    assert statuses[0][1]["action_label"] is None

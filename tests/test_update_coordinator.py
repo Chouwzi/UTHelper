@@ -116,10 +116,11 @@ class _Launcher:
     def __init__(self):
         self.calls = []
         self.cancel_calls = 0
+        self.result = LaunchResult(True)
 
     def launch(self, path, package):
         self.calls.append((path, package))
-        return LaunchResult(True)
+        return self.result
 
     def cancel(self):
         self.cancel_calls += 1
@@ -213,10 +214,18 @@ def test_verified_download_never_launches_until_explicit_confirmation(tmp_path):
     _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
     assert downloader.calls == 1
     assert launcher.calls == []
+    kinds = [item.kind for item in events["items"]]
+    assert kinds.index(UpdateEventKind.VERIFYING) < kinds.index(
+        UpdateEventKind.READY_TO_INSTALL
+    )
 
     coordinator.confirm_install()
     _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
     assert len(launcher.calls) == 1
+    kinds = [item.kind for item in events["items"]]
+    assert kinds.index(UpdateEventKind.INSTALLING) < kinds.index(
+        UpdateEventKind.INSTALL_LAUNCHED
+    )
     assert coordinator.shutdown(timeout_seconds=1.0) is True
 
 
@@ -256,6 +265,163 @@ def test_same_candidate_reuses_verified_download_after_confirmation_is_deferred(
     assert downloader.calls == 1
     assert launcher.calls == []
     assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_same_candidate_recheck_retains_verified_download(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, _, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.check_now()
+    _wait_for(events, UpdateEventKind.UPDATE_AVAILABLE)
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_install_failure_retry_reuses_verified_download(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    launcher.result = LaunchResult(False, "installer is unavailable", "launch_failed")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer opened", "installer_opened")
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+
+    assert downloader.calls == 1
+    assert len(launcher.calls) == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_permission_required_keeps_package_for_confirmed_retry(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    launcher.result = LaunchResult(
+        False,
+        "Allow installing apps to continue",
+        "permission_required",
+    )
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_PERMISSION_REQUIRED)
+    assert events["items"][-1].message == "Allow installing apps to continue"
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer opened", "installer_opened")
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+
+    assert downloader.calls == 1
+    assert len(launcher.calls) == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_existing_download_is_observed_after_update_check_without_duplicate_queue(
+    tmp_path,
+):
+    coordinator, _, downloader, _, events = _coordinator(tmp_path)
+    pending_calls = []
+    downloader.block = True
+    downloader.has_pending_download = lambda package: pending_calls.append(package) or True
+
+    coordinator.start()
+    _wait_for(events, UpdateEventKind.UPDATE_AVAILABLE)
+    assert downloader.started.wait(1.0)
+    candidate = _candidate()
+    for _ in range(5):
+        coordinator.request_download(candidate)
+
+    assert downloader.calls == 1
+    assert pending_calls == [candidate.package]
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+    assert downloader.cancelled.wait(1.0)
+
+
+def test_explicit_download_cancellation_allows_a_cached_candidate_retry(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, _, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    downloader.block = True
+    coordinator.request_download(candidate)
+    assert downloader.started.wait(1.0)
+    coordinator.cancel_download()
+    _wait_for(events, UpdateEventKind.CANCELLED)
+
+    downloader.block = False
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    assert downloader.calls == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_shutdown_detaches_durable_download_and_preserves_completed_path(tmp_path):
+    class _DetachableDownloader(_Downloader):
+        def __init__(self, path):
+            super().__init__(path)
+            self.detached = threading.Event()
+
+        def has_pending_download(self, _package):
+            return True
+
+        def detach(self):
+            self.detached.set()
+
+        def download(self, package, *, cancel, progress=None):
+            self.calls += 1
+            self.started.set()
+            assert cancel.wait(2.0)
+            assert self.detached.is_set()
+            self.path.write_bytes(b"payload")
+            return self.path
+
+    coordinator, _, _, _, _ = _coordinator(tmp_path)
+    downloader = _DetachableDownloader(tmp_path / "UTHelper.msi")
+    coordinator._downloader = downloader
+    coordinator.start()
+    assert downloader.started.wait(1.0)
+
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+    assert downloader.detached.is_set()
+    assert downloader.path.is_file()
 
 
 def test_confirmation_reverifies_retained_package_before_installer_handoff(tmp_path):

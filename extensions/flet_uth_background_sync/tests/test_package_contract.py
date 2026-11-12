@@ -73,6 +73,34 @@ def test_android_updater_requires_local_checksum_and_package_installer():
     assert "expectedVersionCode" in updater
     assert "expectedCertificateSha256" in updater
     assert "AtomicBoolean" in updater
+    assert '"stage" to update.stage' in next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(
+        encoding="utf-8"
+    )
+    assert "REQUEST_INSTALL_PACKAGES" in (
+        ANDROID / "src/main/AndroidManifest.xml"
+    ).read_text(encoding="utf-8")
+
+
+def test_android_download_uses_pinned_durable_download_manager_request():
+    downloader = next(ANDROID.rglob("ApkUpdateDownloadManager.kt")).read_text(
+        encoding="utf-8"
+    )
+    manifest = (ANDROID / "src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+
+    assert "DownloadManager.Request" in downloader
+    assert '"pending"' in downloader
+    assert '"running"' in downloader
+    assert '"paused"' in downloader
+    assert '"completed"' in downloader
+    assert '"failed"' in downloader
+    assert '"missing"' in downloader
+    assert "setDestinationInExternalFilesDir" in downloader
+    assert "VISIBILITY_VISIBLE)" in downloader
+    assert "VISIBILITY_VISIBLE_NOTIFY_COMPLETED" not in downloader
+    assert '"Đang tải bản cập nhật"' in downloader
+    assert 'uri.host?.equals("github.com", ignoreCase = true)' in downloader
+    assert "REQUEST_INSTALL_PACKAGES" in manifest
+    assert "getExternalFilesDir" in downloader
 
 
 def test_python_service_forwards_configuration(monkeypatch):
@@ -81,8 +109,10 @@ def test_python_service_forwards_configuration(monkeypatch):
     service = AndroidBackgroundSync()
     captured = {}
 
-    async def invoke(name, arguments=None):
+    async def invoke(name, arguments=None, timeout=None):
         captured.update(name=name, arguments=arguments)
+        if timeout is not None:
+            captured["timeout"] = timeout
         return {"enabled": True}
 
     monkeypatch.setattr(service, "_invoke_method", invoke)
@@ -125,11 +155,54 @@ def test_python_service_forwards_configuration(monkeypatch):
             "expected_version_code": 2_002_000,
             "expected_certificate_sha256": "cd" * 32,
         },
+        "timeout": 190,
     }
 
     asyncio.run(service.cancel_update())
     assert captured["name"] == "cancel_update"
     assert captured["arguments"] is None
+
+
+def test_python_service_forwards_android_update_download_identity_and_deadlines(monkeypatch):
+    from flet_uth_background_sync import AndroidBackgroundSync
+
+    service = AndroidBackgroundSync()
+    captured = {}
+
+    async def invoke(name, arguments=None, timeout=None):
+        captured.update(name=name, arguments=arguments, timeout=timeout)
+        return {"status": "pending"}
+
+    monkeypatch.setattr(service, "_invoke_method", invoke)
+    identity = (
+        "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper-2.5.1.apk",
+        "ab" * 32,
+        123,
+        "com.uthelper.uthelper",
+        2_005_001,
+        "cd" * 32,
+    )
+    asyncio.run(service.start_update_download(*identity))
+    assert captured == {
+        "name": "start_update_download",
+        "arguments": {
+            "url": identity[0],
+            "sha256": identity[1],
+            "expected_size": identity[2],
+            "expected_package_id": identity[3],
+            "expected_version_code": identity[4],
+            "expected_certificate_sha256": identity[5],
+        },
+        "timeout": 30,
+    }
+
+    asyncio.run(service.get_update_download_status(*identity))
+    assert captured["name"] == "get_update_download_status"
+    assert captured["timeout"] == 30
+
+    asyncio.run(service.cancel_update_download(*identity))
+    assert captured["name"] == "cancel_update_download"
+    assert captured["timeout"] == 30
 
 
 def test_flutter_package_registers_ios_user_notifications_adapter():
