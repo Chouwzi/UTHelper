@@ -14,10 +14,10 @@ def init_system_controls(view):
     )
     view._check_update_btn = ft.Button(
         "Kiểm tra ngay",
-        icon=ft.Icons.REFRESH_ROUNDED,
         on_click=getattr(view, "_handle_check_update", None),
         bgcolor=C.SURFACE,
-        color=C.ACCENT,
+        color=C.TEXT_PRIMARY,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
     )
     # Thiết lập riêng trên Desktop (Windows)
     view._sw_start_with_windows = ft.Switch(
@@ -113,7 +113,11 @@ def build_system_section(view) -> ft.Control:
         view._make_themed_label("Cập nhật"),
         view._sw_auto_update,
         ft.Row([view._check_update_btn], alignment=ft.MainAxisAlignment.START),
-        view._build_hint("Chỉ kiểm tra phiên bản mới. Cài đặt và khởi động lại luôn cần xác nhận."),
+    ])
+    update_status_group = getattr(view, "_update_status_group", None)
+    if update_status_group is not None:
+        controls.append(update_status_group)
+    controls.extend([
         ft.Divider(height=16, color=C.BORDER),
         view._make_themed_label("Đồng bộ dữ liệu"),
         view._interval_field,

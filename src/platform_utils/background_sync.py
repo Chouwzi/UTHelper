@@ -124,6 +124,22 @@ class AndroidBackgroundBridge:
         if self.service:
             await self.service.cancel_update()
 
+    async def start_update_download(self, *identity) -> dict[str, Any]:
+        if not self.service:
+            return {"status": "unavailable"}
+        return await self.service.start_update_download(*identity)
+
+    async def get_update_download_status(self, *identity) -> dict[str, Any]:
+        if not self.service:
+            return {"status": "unavailable"}
+        return await self.service.get_update_download_status(*identity)
+
+    async def cancel_update_download(self, *identity) -> dict[str, Any]:
+        if not self.service:
+            return {"status": "unavailable"}
+        await self.service.cancel_update_download(*identity)
+        return {"status": "cancelled"}
+
     async def show_notification(
         self,
         *,

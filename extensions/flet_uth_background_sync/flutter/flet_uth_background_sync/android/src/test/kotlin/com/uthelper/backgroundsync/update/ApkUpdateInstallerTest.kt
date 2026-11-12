@@ -1,7 +1,11 @@
 package com.uthelper.backgroundsync.update
 
 import java.nio.file.Files
+import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -140,4 +144,104 @@ class ApkUpdateInstallerTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun permissionRetryCanReuseSameVerifiedCacheAfterSourceDisappears() {
+        val directory = Files.createTempDirectory("uthelper-permission-retry-test").toFile()
+        try {
+            val contents = "verified permission retry".toByteArray()
+            val expectedSha256 = sha256(contents)
+            val source = directory.resolve("download-manager.apk").apply {
+                writeBytes(contents)
+            }
+            val cached = directory.resolve("update-$expectedSha256.apk")
+            val partial = directory.resolve("update-$expectedSha256.apk.part")
+
+            val first = prepareVerifiedUpdatePackage(
+                localPath = source.absolutePath,
+                cachedApk = cached,
+                partialApk = partial,
+                expectedSha256 = expectedSha256,
+                expectedSize = contents.size.toLong(),
+            )
+            assertFalse(first.reusedCache)
+            assertEquals(partial, first.file)
+            assertTrue(partial.renameTo(cached))
+            source.delete()
+
+            val retry = prepareVerifiedUpdatePackage(
+                localPath = "",
+                cachedApk = cached,
+                partialApk = partial,
+                expectedSha256 = expectedSha256,
+                expectedSize = contents.size.toLong(),
+            )
+            assertTrue(retry.reusedCache)
+            assertEquals(cached, retry.file)
+            assertEquals(contents.size.toLong(), retry.verification.bytes)
+            assertEquals(expectedSha256, retry.verification.sha256)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun permissionRetryRejectsTamperedCacheWhenOriginalSourceIsGone() {
+        val directory = Files.createTempDirectory("uthelper-permission-retry-test").toFile()
+        try {
+            val contents = "verified permission retry".toByteArray()
+            val expectedSha256 = sha256(contents)
+            val cached = directory.resolve("update-$expectedSha256.apk").apply {
+                writeBytes(contents)
+            }
+            val partial = directory.resolve("update-$expectedSha256.apk.part")
+            cached.writeBytes("tampered package contents".toByteArray())
+
+            assertThrows(IllegalArgumentException::class.java) {
+                prepareVerifiedUpdatePackage(
+                    localPath = "",
+                    cachedApk = cached,
+                    partialApk = partial,
+                    expectedSha256 = expectedSha256,
+                    expectedSize = contents.size.toLong(),
+                )
+            }
+            assertFalse(cached.exists())
+            assertFalse(partial.exists())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancellationDuringCachedVerificationPreservesValidCache() {
+        val directory = Files.createTempDirectory("uthelper-cancel-cache-test").toFile()
+        try {
+            val contents = "verified permission retry".toByteArray()
+            val expectedSha256 = sha256(contents)
+            val cached = directory.resolve("update-$expectedSha256.apk").apply {
+                writeBytes(contents)
+            }
+            val partial = directory.resolve("update-$expectedSha256.apk.part")
+
+            assertThrows(CancellationException::class.java) {
+                prepareVerifiedUpdatePackage(
+                    localPath = "",
+                    cachedApk = cached,
+                    partialApk = partial,
+                    expectedSha256 = expectedSha256,
+                    expectedSize = contents.size.toLong(),
+                    cancelled = AtomicBoolean(true),
+                )
+            }
+            assertTrue(cached.exists())
+            assertFalse(partial.exists())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
 }
