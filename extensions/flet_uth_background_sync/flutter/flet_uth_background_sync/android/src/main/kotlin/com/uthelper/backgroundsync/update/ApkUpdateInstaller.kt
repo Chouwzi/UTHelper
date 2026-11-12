@@ -252,11 +252,6 @@ class ApkUpdateInstaller(private val context: Context) {
                 expectedSize = expectedSize,
                 cancelled = cancelled,
             )
-            stage = if (prepared.reusedCache) {
-                "cached_package_verification"
-            } else {
-                "downloaded_package_verification"
-            }
             val verified = prepared.verification
             val archivePath = prepared.file
 
@@ -310,11 +305,21 @@ class ApkUpdateInstaller(private val context: Context) {
             }
 
             stage = "installer_handoff"
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.uthupdates",
-                stagedApk,
-            )
+            val uri = try {
+                FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.uthupdates",
+                    stagedApk,
+                )
+            } catch (_: Exception) {
+                return InstallUpdateResult(
+                    status = "failed",
+                    stage = stage,
+                    bytes = packageBytes,
+                    sha256 = packageSha256,
+                    reason = "file_provider_unavailable",
+                )
+            }
             try {
                 context.startActivity(
                     Intent(Intent.ACTION_VIEW).apply {

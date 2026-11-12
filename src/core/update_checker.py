@@ -523,7 +523,8 @@ class VerifiedDownloader:
                         response,
                         min(float(_SOCKET_TIMEOUT_SECONDS), remaining),
                     )
-                    chunk = response.read(_DOWNLOAD_CHUNK_SIZE)
+                    # Avoid waiting for a full buffer before checking progress/deadline.
+                    chunk = response.read1(_DOWNLOAD_CHUNK_SIZE)
                     self._remaining_seconds(deadline)
                     if cancel.is_set():
                         raise DownloadCancelled("download cancelled")

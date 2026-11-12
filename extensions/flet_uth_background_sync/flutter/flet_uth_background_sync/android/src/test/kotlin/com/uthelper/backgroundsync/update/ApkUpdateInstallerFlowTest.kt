@@ -1,13 +1,20 @@
 package com.uthelper.backgroundsync.update
 
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.pm.PackageInfo
+import android.content.pm.ProviderInfo
 import android.content.pm.Signature
 import android.net.Uri
+import android.os.Bundle
 import android.provider.Settings
 import java.io.File
 import java.security.MessageDigest
+import com.uthelper.backgroundsync.R
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -31,6 +38,7 @@ class ApkUpdateInstallerFlowTest {
         val context: Context = app
         val packageFile = fixturePackage(context)
         val identity = installIdentity(context, packageFile)
+        registerInstallerProvider(context)
         val installer = ApkUpdateInstaller(context)
         Shadows.shadowOf(context.packageManager).setCanRequestPackageInstalls(true)
 
@@ -43,7 +51,7 @@ class ApkUpdateInstallerFlowTest {
             expectedCertificateSha256 = identity.certificateSha256,
         )
 
-        assertEquals("installer_opened", result.status)
+        assertEquals("stage=${result.stage}, reason=${result.reason}", "installer_opened", result.status)
         assertEquals("installer_handoff", result.stage)
         assertEquals(archiveBytes.size.toLong(), result.bytes)
         assertEquals(identity.sha256, result.sha256)
@@ -66,6 +74,7 @@ class ApkUpdateInstallerFlowTest {
         val context: Context = app
         val packageFile = fixturePackage(context)
         val identity = installIdentity(context, packageFile)
+        registerInstallerProvider(context)
         val installer = ApkUpdateInstaller(context)
         val shadowPackageManager = Shadows.shadowOf(context.packageManager)
         shadowPackageManager.setCanRequestPackageInstalls(false)
@@ -103,7 +112,7 @@ class ApkUpdateInstallerFlowTest {
             expectedCertificateSha256 = identity.certificateSha256,
         )
 
-        assertEquals("installer_opened", retried.status)
+        assertEquals("stage=${retried.stage}, reason=${retried.reason}", "installer_opened", retried.status)
         assertEquals("installer_handoff", retried.stage)
         assertEquals(identity.sha256, retried.sha256)
         val installerIntent = Shadows.shadowOf(app).getNextStartedActivity()
@@ -116,6 +125,54 @@ class ApkUpdateInstallerFlowTest {
         File(context.cacheDir, "test-release.apk").apply {
             writeBytes(archiveBytes)
         }.canonicalFile
+
+    private fun registerInstallerProvider(context: Context) {
+        val authority = "${context.packageName}.uthupdates"
+        val provider = ProviderInfo().apply {
+            packageName = context.packageName
+            name = UthUpdateFileProvider::class.java.name
+            this.authority = authority
+            exported = false
+            grantUriPermissions = true
+            applicationInfo = context.applicationInfo
+            metaData = Bundle().apply {
+                putInt("android.support.FILE_PROVIDER_PATHS", R.xml.uth_update_paths)
+            }
+        }
+        Shadows.shadowOf(context.packageManager).addOrUpdateProvider(provider)
+        val shadowPackageManager = Shadows.shadowOf(context.packageManager)
+        val installerActivity = ActivityInfo().apply {
+            packageName = context.packageName
+            name = "${context.packageName}.TestPackageInstallerActivity"
+            applicationInfo = context.applicationInfo
+        }
+        val installerComponent = ComponentName(context.packageName, installerActivity.name)
+        shadowPackageManager.addOrUpdateActivity(installerActivity)
+        shadowPackageManager.addIntentFilterForActivity(
+            installerComponent,
+            IntentFilter(Intent.ACTION_VIEW).apply {
+                addCategory(Intent.CATEGORY_DEFAULT)
+                addDataScheme("content")
+                addDataType("application/vnd.android.package-archive")
+            },
+        )
+        val resolved = context.packageManager.resolveContentProvider(
+            authority,
+            PackageManager.GET_META_DATA,
+        )
+        assertNotNull("unit-test provider metadata for $authority", resolved)
+        assertEquals(
+            R.xml.uth_update_paths,
+            resolved!!.metaData.getInt("android.support.FILE_PROVIDER_PATHS"),
+        )
+        assertNotNull(
+            "test provider XML for ${resolved.authority}",
+            resolved.loadXmlMetaData(
+                context.packageManager,
+                "android.support.FILE_PROVIDER_PATHS",
+            ),
+        )
+    }
 
     private fun installIdentity(context: Context, packageFile: File): InstallIdentity {
         val signature = Signature(signerBytes)

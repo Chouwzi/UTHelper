@@ -15,10 +15,12 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows
+import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implements
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], shadows = [PendingShadowDownloadManager::class])
 class ApkUpdateDownloadManagerTest {
     private val url =
         "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper-2.5.1.apk"
@@ -40,6 +42,15 @@ class ApkUpdateDownloadManagerTest {
         val shadowRequest = Shadows.shadowOf(request)
         assertEquals(DownloadManager.Request.VISIBILITY_VISIBLE, shadowRequest.notificationVisibility)
         assertEquals("Đang tải bản cập nhật", shadowRequest.description.toString())
+        val persistedRow = manager.query(DownloadManager.Query()).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+        }
+        assertEquals(
+            "expected request destination URI",
+            shadowRequest.destination.toString(),
+            persistedRow,
+        )
 
         context.getSharedPreferences("uth_update_downloads", Context.MODE_PRIVATE)
             .edit()
@@ -48,7 +59,7 @@ class ApkUpdateDownloadManagerTest {
 
         val restoredDownloader = ApkUpdateDownloadManager(context)
         val restored = restoredDownloader.status(identity)
-        assertEquals("pending", restored.status)
+        assertEquals("status=${restored.status}, reason=${restored.reason}", "pending", restored.status)
         assertEquals(started.downloadId, restored.downloadId)
 
         val reused = restoredDownloader.start(identity)
@@ -130,4 +141,14 @@ class ApkUpdateDownloadManagerTest {
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { "%02x".format(it) }
+}
+
+/** Robolectric leaves a newly enqueued request's status at Java-default 0; Android reports pending. */
+@Implements(DownloadManager::class)
+class PendingShadowDownloadManager : org.robolectric.shadows.ShadowDownloadManager() {
+    @Implementation
+    override fun enqueue(request: DownloadManager.Request): Long =
+        super.enqueue(request).also {
+            Shadows.shadowOf(request).setStatus(DownloadManager.STATUS_PENDING)
+        }
 }

@@ -120,6 +120,7 @@ def _update_install_error_message(status: str) -> str:
         "size_mismatch": "Gói cập nhật chưa đầy đủ. Hãy tải lại.",
         "already_installed": "Bản cập nhật này đã được cài đặt.",
         "package_installer_unavailable": "Không tìm thấy trình cài đặt trên thiết bị.",
+        "file_provider_unavailable": "Không chuyển được gói tới trình cài đặt. Hãy thử lại.",
         "permission_settings_unavailable": "Không mở được quyền cài ứng dụng. Hãy kiểm tra Cài đặt Android.",
     }
     return messages.get(status, "Không mở được trình cài đặt. Hãy thử lại.")
@@ -726,7 +727,7 @@ class AppController:
         self._update_text = ft.Text(
             "Có phiên bản mới!",
             size=12,
-            color=C.UPDATE,
+            color=C.TEXT_PRIMARY,
             weight=ft.FontWeight.W_500,
             expand=True,
         )
@@ -740,7 +741,7 @@ class AppController:
         self._update_btn = ft.TextButton(
             "Cập nhật",
             style=ft.ButtonStyle(
-                color=C.UPDATE, shape=ft.RoundedRectangleBorder(radius=8),
+                color=C.TEXT_PRIMARY, shape=ft.RoundedRectangleBorder(radius=8),
             ),
             on_click=self._request_update_download,
         )
@@ -2391,11 +2392,11 @@ class AppController:
         # Update banner is a semantic elevated surface, not a fixed brown card.
         self._update_banner.bgcolor = _C.SURFACE_ELEVATED
         self._update_banner.border = ft.Border.all(1, _C.UPDATE)
-        self._update_text.color = _C.UPDATE
+        self._update_text.color = _C.TEXT_PRIMARY
         self._update_progress.color = _C.UPDATE
         self._update_progress.bgcolor = _C.BORDER
         self._update_btn.style = ft.ButtonStyle(
-            color=_C.UPDATE, shape=ft.RoundedRectangleBorder(radius=8),
+            color=_C.TEXT_PRIMARY, shape=ft.RoundedRectangleBorder(radius=8),
         )
         self._update_cancel_btn.style = ft.ButtonStyle(
             color=_C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),

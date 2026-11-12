@@ -16,7 +16,7 @@ def init_system_controls(view):
         "Kiểm tra ngay",
         on_click=getattr(view, "_handle_check_update", None),
         bgcolor=C.SURFACE,
-        color=C.ACCENT,
+        color=C.TEXT_PRIMARY,
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
     )
     # Thiết lập riêng trên Desktop (Windows)

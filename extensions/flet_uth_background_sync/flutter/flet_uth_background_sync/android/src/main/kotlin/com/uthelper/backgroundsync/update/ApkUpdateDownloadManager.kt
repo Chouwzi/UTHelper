@@ -243,21 +243,34 @@ class ApkUpdateDownloadManager(private val context: Context) {
         manager: DownloadManager,
         identity: UpdateDownloadIdentity,
     ): Long? {
-        val expectedLocalUri = Uri.fromFile(destinationFor(identity)).toString()
+        val expectedDestination = destinationFor(identity)
         manager.query(DownloadManager.Query()).use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID)
             val localUriColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI)
             val uriColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI)
             while (cursor.moveToNext()) {
+                val localUri = cursor.getString(localUriColumn)
                 if (
                     cursor.getString(uriColumn) == identity.url &&
-                    cursor.getString(localUriColumn) == expectedLocalUri
+                    isExpectedDestination(localUri, expectedDestination)
                 ) {
                     return cursor.getLong(idColumn)
                 }
             }
         }
         return null
+    }
+
+    private fun isExpectedDestination(localUri: String?, expectedDestination: File): Boolean {
+        if (localUri.isNullOrBlank()) return false
+        val uri = Uri.parse(localUri)
+        if (uri.scheme != "file") return false
+        val downloadedFile = uri.path ?: return false
+        return try {
+            File(downloadedFile).canonicalFile == expectedDestination.canonicalFile
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun readDownloadId(identity: UpdateDownloadIdentity): Long? {

@@ -174,7 +174,7 @@ class SettingsView(ft.Container):
             "",
             visible=False,
             bgcolor=C.SURFACE,
-            color=C.ACCENT,
+            color=C.TEXT_PRIMARY,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
             on_click=self._handle_update_action,
         )

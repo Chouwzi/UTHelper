@@ -136,6 +136,9 @@ class _Response:
     def read(self, size=-1):
         return self._stream.read(size)
 
+    def read1(self, size=-1):
+        return self.read(size)
+
 
 class _ChunkedResponse(_Response):
     def __init__(self, chunks, after_first=None):
@@ -166,6 +169,36 @@ class _InterruptedResponse(_Response):
             self._returned_chunk = True
             return self._stream.read()
         raise ConnectionResetError("simulated connection reset")
+
+
+class _AdvancingClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class _DeadlineRead1Response(_Response):
+    def __init__(self, data, clock, *, chunk_size=1024, delay_seconds=0.1):
+        super().__init__(data)
+        self.clock = clock
+        self.chunk_size = chunk_size
+        self.delay_seconds = delay_seconds
+        self.read_calls = 0
+        self.read1_calls = 0
+
+    def read(self, _size=-1):
+        self.read_calls += 1
+        raise AssertionError("downloader used an aggregating read")
+
+    def read1(self, size=-1):
+        self.read1_calls += 1
+        self.clock.advance(self.delay_seconds)
+        return self._stream.read(min(size, self.chunk_size))
 
 
 def _release_package(data: bytes) -> ReleasePackage:
@@ -535,6 +568,43 @@ def test_downloader_does_not_retry_or_sleep_after_deadline(tmp_path, monkeypatch
     assert len(requests) == 1
     assert requests[0][1] == 10
     assert sleeps == []
+
+
+def test_downloader_checks_deadline_and_reports_progress_between_single_reads(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"x" * (8 * 1024)
+    package = _release_package(data)
+    clock = _AdvancingClock()
+    response = _DeadlineRead1Response(data, clock)
+    requests = []
+    progress = []
+    monkeypatch.setattr(update_checker.time, "monotonic", clock)
+
+    def open_request(request, timeout):
+        requests.append((request, timeout))
+        return response
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+
+    with pytest.raises(TimeoutError, match="total deadline"):
+        update_checker.VerifiedDownloader(
+            cache_dir=tmp_path,
+            total_timeout_seconds=0.25,
+        ).download(
+            package,
+            cancel=threading.Event(),
+            progress=lambda done, total: progress.append((done, total)),
+        )
+
+    assert requests[0][1] == 0.25
+    assert response.read_calls == 0
+    assert response.read1_calls == 3
+    assert clock.now >= 0.3
+    assert [done for done, _total in progress] == [0, 1024, 2048]
+    partial = tmp_path / "UTHelper-2.2.0.apk.part"
+    assert partial.read_bytes() == b"x" * 2048
 
 
 def test_progress_throttler_bounds_events_and_keeps_endpoints():
