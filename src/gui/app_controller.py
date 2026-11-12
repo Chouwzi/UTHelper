@@ -17,7 +17,6 @@ from notifiers.manager import NotificationManager
 import threading
 from pathlib import Path
 
-from packaging.version import InvalidVersion, Version
 
 from core.data_orchestrator import DataOrchestrator
 from core.moodle_service import MoodleService
@@ -36,6 +35,10 @@ from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_t
 from core.update_checker import GitHubReleaseClient, VerifiedDownloader
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
+from platform_utils.android_updates import (
+    AndroidPackageDownloader,
+    AndroidPackageLauncher,
+)
 from config import get_sync_interval_minutes, save_settings, settings
 from platform_utils.update_packages import (
     DownloadedPackageVerifier,
@@ -91,26 +94,6 @@ def _save_setting(key: str, value):
         logging.getLogger(__name__).warning(f"Failed to save setting {key}: {e}")
 
 
-def _android_release_build_number(version: str) -> int:
-    """Derive the Flet Android build number from a strict X.Y.Z version."""
-    try:
-        parsed = Version(version)
-    except InvalidVersion as exc:
-        raise ValueError("invalid Android release version") from exc
-    if (
-        str(parsed) != version
-        or len(parsed.release) != 3
-        or parsed.pre
-        or parsed.post
-        or parsed.dev
-        or parsed.local
-        or any(part < 0 or part > 999 for part in parsed.release)
-    ):
-        raise ValueError("Android release version must be numeric X.Y.Z")
-    major, minor, patch = parsed.release
-    return major * 1_000_000 + minor * 1_000 + patch
-
-
 class _UnavailablePackageLauncher:
     def launch(self, _path: Path, _package: ReleasePackage) -> LaunchResult:
         return LaunchResult(False, "installer is unavailable on this platform")
@@ -119,65 +102,27 @@ class _UnavailablePackageLauncher:
         return None
 
 
-class _AndroidPackageLauncher:
-    """Thin adapter from the synchronous coordinator to the native bridge."""
-
-    PACKAGE_ID = "com.uthelper.uthelper"
-
-    def __init__(self, bridge, task_runner, release_version_provider, result_sink=None):
-        self._bridge = bridge
-        self._task_runner = task_runner
-        self._release_version_provider = release_version_provider
-        self._result_sink = result_sink
-
-    def launch(self, path: Path, package: ReleasePackage) -> LaunchResult:
-        if (
-            package.platform != "android"
-            or package.package_type != "apk"
-            or self._bridge is None
-            or not self._bridge.available
-        ):
-            return LaunchResult(False, "Android installer bridge is unavailable")
-        try:
-            version_code = _android_release_build_number(
-                self._release_version_provider()
-            )
-            task = self._task_runner(self._install, Path(path), package, version_code)
-        except (RuntimeError, TypeError, ValueError):
-            logger.warning("Android installer scheduling failed", exc_info=True)
-            return LaunchResult(False, "Android installer scheduling failed")
-        return LaunchResult(task is not None, "Android installer scheduled")
-
-    async def _install(
-        self,
-        path: Path,
-        package: ReleasePackage,
-        version_code: int,
-    ) -> None:
-        try:
-            result = await self._bridge.install_update(
-                str(path),
-                package.sha256,
-                package.size,
-                self.PACKAGE_ID,
-                version_code,
-                package.certificate_fingerprint,
-            )
-        except Exception:
-            logger.warning("Android installer bridge failed", exc_info=True)
-            result = {"status": "bridge_failed"}
-        if self._result_sink is not None:
-            self._result_sink(result)
-        if result.get("status") not in {"installer_opened", "permission_required"}:
-            logger.warning("Android installer rejected update: %s", result.get("status"))
-
-    def cancel(self) -> None:
-        if self._bridge is None or not self._bridge.available:
-            return
-        try:
-            self._task_runner(self._bridge.cancel_update)
-        except (RuntimeError, TypeError):
-            logger.debug("Android installer cancellation scheduling failed", exc_info=True)
+def _update_install_error_message(status: str) -> str:
+    messages = {
+        "invalid_apk": "Không đọc được gói cập nhật. Hãy tải lại.",
+        "package_mismatch": "Gói cập nhật không dành cho ứng dụng này.",
+        "release_version_mismatch": "Phiên bản gói cập nhật không hợp lệ.",
+        "installed_signer_mismatch": "Chữ ký bản cập nhật không khớp ứng dụng đang cài.",
+        "manifest_signer_mismatch": "Chữ ký gói cập nhật không hợp lệ.",
+        "apk_signature_invalid": "Không xác minh được chữ ký gói cập nhật.",
+        "release_metadata_invalid": "Thông tin bản cập nhật không hợp lệ.",
+        "archive_identity_unavailable": "Không đọc được định danh gói cập nhật. Hãy thử lại.",
+        "source_unavailable": "Không tìm thấy gói đã tải. Hãy tải lại.",
+        "verification_timeout": "Xác minh bản cập nhật quá lâu. Hãy thử lại.",
+        "package_staging_failed": "Không chuẩn bị được gói cài đặt. Hãy kiểm tra bộ nhớ rồi thử lại.",
+        "update_verification_failed": "Không xác minh được gói cập nhật. Hãy thử lại.",
+        "sha256_mismatch": "Gói cập nhật bị hỏng. Hãy tải lại.",
+        "size_mismatch": "Gói cập nhật chưa đầy đủ. Hãy tải lại.",
+        "already_installed": "Bản cập nhật này đã được cài đặt.",
+        "package_installer_unavailable": "Không tìm thấy trình cài đặt trên thiết bị.",
+        "permission_settings_unavailable": "Không mở được quyền cài ứng dụng. Hãy kiểm tra Cài đặt Android.",
+    }
+    return messages.get(status, "Không mở được trình cài đặt. Hãy thử lại.")
 
 
 class AppController:
@@ -395,6 +340,7 @@ class AppController:
 
     def _create_update_coordinator(self) -> UpdateCoordinator:
         target = detect_runtime_target()
+        downloader = VerifiedDownloader()
         if target.platform == "windows":
             from platform_utils.windows_update import (
                 WindowsPackageLauncher,
@@ -405,18 +351,22 @@ class AppController:
             launcher = WindowsPackageLauncher()
         elif target.platform == "android":
             verifier = DownloadedPackageVerifier()
-            launcher = _AndroidPackageLauncher(
+            launcher = AndroidPackageLauncher(
                 self._android_background,
                 self._safe_run_task,
                 lambda: self._update_candidate.manifest.release_version,
-                self._on_android_update_result,
+            )
+            downloader = AndroidPackageDownloader(
+                self._android_background,
+                self._safe_run_task,
+                lambda: self._update_candidate.manifest.release_version,
             )
         else:
             verifier = DownloadedPackageVerifier()
             launcher = _UnavailablePackageLauncher()
         return UpdateCoordinator(
             GitHubReleaseClient(),
-            VerifiedDownloader(),
+            downloader,
             verifier,
             launcher,
             target,
@@ -437,33 +387,6 @@ class AppController:
         self._diag_breadcrumb("update_check", "started", "github")
         self._manual_update_check_requested = True
         self._update_coordinator.check_now()
-
-    def _on_android_update_result(self, result: dict) -> None:
-        status = result.get("status")
-        if status == "installer_opened":
-            self._diag_breadcrumb("update_install", "succeeded", "android")
-            self._update_banner.visible = False
-            self.page.update()
-        elif status == "permission_required":
-            self._update_banner.visible = True
-            self._update_btn.disabled = False
-            self._update_btn.content = "Mở trình cài đặt"
-            self._show_snackbar(
-                "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
-                ft.Icons.SECURITY_ROUNDED,
-                C.WARNING,
-            )
-            self.page.update()
-        else:
-            self._update_banner.visible = True
-            self._update_btn.disabled = False
-            self._update_btn.content = "Thử lại"
-            self._show_snackbar(
-                "Android đã từ chối gói cập nhật",
-                ft.Icons.ERROR_OUTLINE_ROUNDED,
-                C.CRITICAL,
-            )
-            self.page.update()
 
     def _submission_workflow_factory(self, client):
         """Build a fresh workflow only for the orchestrator's current client."""
@@ -800,9 +723,6 @@ class AppController:
         self._safe_run_task(handler)
 
     def _init_banner_and_states(self):
-        self._update_icon = ft.Icon(
-            ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color=C.UPDATE
-        )
         self._update_text = ft.Text(
             "Có phiên bản mới!",
             size=12,
@@ -812,7 +732,6 @@ class AppController:
         )
         self._update_progress = ft.ProgressBar(
             value=0,
-            width=0,
             height=3,
             color=C.UPDATE,
             bgcolor=C.BORDER,
@@ -820,13 +739,21 @@ class AppController:
         )
         self._update_btn = ft.TextButton(
             "Cập nhật",
-            icon=ft.Icons.DOWNLOAD_ROUNDED,
-            style=ft.ButtonStyle(color=C.UPDATE),
+            style=ft.ButtonStyle(
+                color=C.UPDATE, shape=ft.RoundedRectangleBorder(radius=8),
+            ),
             on_click=self._request_update_download,
+        )
+        self._update_cancel_btn = ft.TextButton(
+            "Hủy tải", visible=False,
+            style=ft.ButtonStyle(
+                color=C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=lambda _event: self._update_coordinator.cancel_download(),
         )
         self._update_banner = ft.Container(
             content=ft.Column([
-                ft.Row([self._update_icon, self._update_text, self._update_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([self._update_text, self._update_btn, self._update_cancel_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self._update_progress,
             ], spacing=2, tight=True),
             bgcolor=C.SURFACE_ELEVATED,
@@ -1007,6 +934,8 @@ class AppController:
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
             on_check_update=self._check_updates_now,
+            on_update_action=self._request_update_download,
+            on_cancel_update=lambda: self._update_coordinator.cancel_download(),
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
@@ -2462,11 +2391,15 @@ class AppController:
         # Update banner is a semantic elevated surface, not a fixed brown card.
         self._update_banner.bgcolor = _C.SURFACE_ELEVATED
         self._update_banner.border = ft.Border.all(1, _C.UPDATE)
-        self._update_icon.color = _C.UPDATE
         self._update_text.color = _C.UPDATE
         self._update_progress.color = _C.UPDATE
         self._update_progress.bgcolor = _C.BORDER
-        self._update_btn.style = ft.ButtonStyle(color=_C.UPDATE)
+        self._update_btn.style = ft.ButtonStyle(
+            color=_C.UPDATE, shape=ft.RoundedRectangleBorder(radius=8),
+        )
+        self._update_cancel_btn.style = ft.ButtonStyle(
+            color=_C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
+        )
 
         # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
@@ -2625,24 +2558,47 @@ class AppController:
         EmailNotifier().notify([dummy])
 
     def _on_update_event(self, event: UpdateEvent) -> None:
+        if event.candidate is not None:
+            if event.candidate != self._update_candidate:
+                self._update_ready = False
+            self._update_candidate = event.candidate
         self._safe_run_task(self._apply_update_event, event)
 
     def _request_update_download(self, _event=None) -> None:
         candidate = getattr(self, "_update_candidate", None)
         if candidate is not None:
-            self._update_coordinator.request_download(candidate)
+            if getattr(self, "_update_open_release_page", False):
+                self._open_external_update_url(candidate.manifest.release_notes_url)
+            elif getattr(self, "_update_ready", False):
+                self._show_update_confirmation()
+            else:
+                self._update_coordinator.request_download(candidate)
 
     async def _apply_update_event(self, event: UpdateEvent) -> None:
         candidate = event.candidate
         if candidate is not None:
             self._update_candidate = candidate
+            if event.kind is not UpdateEventKind.INSTALL_FAILED:
+                self._update_open_release_page = False
         check_button = getattr(self.settings_view, "_check_update_btn", None)
+        cancel_button = getattr(self, "_update_cancel_btn", None)
+        self._update_btn.visible = event.kind not in {
+            UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS,
+            UpdateEventKind.VERIFYING, UpdateEventKind.INSTALLING,
+        }
+        if cancel_button is not None:
+            cancel_button.visible = event.kind in {
+                UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS,
+            }
         if event.kind is UpdateEventKind.CHECKING:
             self._diag_breadcrumb("update_check", "started", "github")
             if check_button is not None:
                 check_button.disabled = True
                 check_button.content = "Đang kiểm tra..."
         elif event.kind is UpdateEventKind.UP_TO_DATE:
+            self._update_ready = False
+            self._update_candidate = None
+            self._update_banner.visible = False
             self._diag_breadcrumb("update_check", "succeeded", "github")
             if check_button is not None:
                 check_button.disabled = False
@@ -2660,26 +2616,29 @@ class AppController:
             if check_button is not None:
                 check_button.disabled = False
                 check_button.content = "Kiểm tra ngay"
-            self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
-            self._update_icon.color = C.UPDATE
             self._update_text.value = (
-                f"Phiên bản mới v{candidate.manifest.release_version} đã sẵn sàng!"
+                f"Có bản cập nhật v{candidate.manifest.release_version}"
             )
             self._update_btn.visible = True
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
-            self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
+            self._update_btn.icon = None
             self._update_progress.visible = False
             self._update_banner.visible = True
+            if getattr(self, "_update_ready", False):
+                self._update_text.value = "Đã tải xong bản cập nhật"
+                self._update_btn.content = "Cài đặt"
         elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
             if event.kind is UpdateEventKind.DOWNLOADING:
                 self._diag_breadcrumb("update_download", "started", "github")
             if candidate is not None:
                 self._update_text.value = (
-                    f"Đang tải và xác minh v{candidate.manifest.release_version}..."
+                    f"Đang tải v{candidate.manifest.release_version} · {int((event.progress or 0) * 100)}%"
                 )
             self._update_btn.disabled = True
-            self._update_btn.content = "Đang tải và xác minh..."
+            self._update_ready = False
+            self._update_btn.content = "Đang tải"
+            self._update_banner.visible = True
             self._update_progress.visible = True
             self._update_progress.value = event.progress or 0.0
         elif event.kind in {
@@ -2688,9 +2647,44 @@ class AppController:
         }:
             self._diag_breadcrumb("update_download", "succeeded", "github")
             self._update_btn.disabled = False
-            self._update_btn.content = "Cập nhật"
+            self._update_ready = True
+            self._update_btn.content = "Cài đặt" if event.kind is UpdateEventKind.READY_TO_INSTALL else "Mở trang tải"
+            self._update_text.value = "Đã tải xong bản cập nhật" if event.kind is UpdateEventKind.READY_TO_INSTALL else "Có bản cập nhật"
             self._update_progress.visible = False
-            self._show_update_confirmation()
+            self._update_banner.visible = True
+        elif event.kind is UpdateEventKind.VERIFYING:
+            self._update_text.value = "Đang xác minh bản cập nhật…"
+            self._update_btn.content = "Đang xác minh"
+            self._update_btn.disabled = True
+            self._update_progress.visible = True
+            self._update_progress.value = None
+        elif event.kind is UpdateEventKind.INSTALLING:
+            self._diag_breadcrumb("update_install", "started", "os")
+            self._update_text.value = "Đang mở trình cài đặt…"
+            self._update_btn.content = "Đang mở"
+            self._update_btn.disabled = True
+        elif event.kind is UpdateEventKind.INSTALL_PERMISSION_REQUIRED:
+            self._update_ready = True
+            self._update_banner.visible = True
+            self._update_text.value = "Cho phép cài ứng dụng, rồi quay lại và nhấn Cài đặt."
+            self._update_btn.content = "Cài đặt"
+            self._update_btn.disabled = False
+            self._update_progress.visible = False
+        elif event.kind is UpdateEventKind.INSTALL_FAILED:
+            self._diag_breadcrumb("update_install", "failed", "os")
+            self._update_ready = True
+            self._update_banner.visible = True
+            self._update_text.value = _update_install_error_message(event.message)
+            self._update_btn.content = "Thử lại"
+            self._update_open_release_page = event.message in {
+                "installed_signer_mismatch", "manifest_signer_mismatch",
+                "apk_signature_invalid", "release_metadata_invalid",
+                "package_mismatch", "release_version_mismatch", "invalid_apk",
+            }
+            if self._update_open_release_page:
+                self._update_btn.content = "Bản phát hành"
+            self._update_btn.disabled = False
+            self._update_progress.visible = False
         elif event.kind is UpdateEventKind.FAILED:
             if candidate is None:
                 self._diag_breadcrumb("update_check", "failed", "github")
@@ -2707,6 +2701,7 @@ class AppController:
                         C.CRITICAL,
                     )
             else:
+                self._update_ready = False
                 self._diag_breadcrumb("update_download", "failed", "github")
                 should_notify = self._update_banner.visible
                 self._manual_update_check_requested = False
@@ -2720,6 +2715,10 @@ class AppController:
                     "Không thể tải hoặc xác minh "
                     f"v{candidate.manifest.release_version}. Hãy thử lại."
                 )
+                if "insufficient_space" in event.message:
+                    self._update_text.value = "Không đủ dung lượng. Hãy giải phóng bộ nhớ rồi thử lại."
+                elif "storage_unavailable" in event.message:
+                    self._update_text.value = "Không truy cập được bộ nhớ tải về. Hãy thử lại."
                 if should_notify:
                     self._show_snackbar(
                         "Không thể tải hoặc xác minh bản cập nhật",
@@ -2727,20 +2726,32 @@ class AppController:
                         C.CRITICAL,
                     )
         elif event.kind is UpdateEventKind.CANCELLED:
+            self._update_ready = False
+            self._update_text.value = "Đã hủy tải bản cập nhật"
             self._diag_breadcrumb("update_download", "cancelled", "user")
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
-            if platform_utils.IS_ANDROID:
-                self._diag_breadcrumb("update_install", "started", "android")
-                self._update_text.value = "Đang mở trình cài đặt Android..."
-                self._update_btn.content = "Đang mở..."
-                self._update_btn.disabled = True
-                self._update_banner.visible = True
-            else:
-                self._diag_breadcrumb("update_install", "succeeded", "os")
-                self._update_banner.visible = False
+            self._diag_breadcrumb("update_install", "succeeded", "os")
+            self._update_text.value = "Đã mở trình cài đặt"
+            self._update_btn.content = "Mở lại"
+            self._update_btn.disabled = False
+            self._update_banner.visible = platform_utils.IS_ANDROID
+        status_setter = getattr(self.settings_view, "set_update_status", None)
+        if callable(status_setter) and candidate is not None:
+            status_setter(
+                self._update_text.value,
+                progress=self._update_progress.value,
+                show_progress=self._update_progress.visible,
+                action_label=self._update_btn.content if not self._update_btn.disabled else None,
+                can_cancel=bool(cancel_button and cancel_button.visible),
+            )
+        elif callable(status_setter):
+            if event.kind is UpdateEventKind.UP_TO_DATE:
+                status_setter("Bạn đang dùng phiên bản mới nhất")
+            elif event.kind is UpdateEventKind.FAILED:
+                status_setter("Không thể kiểm tra cập nhật. Hãy kiểm tra mạng và thử lại.")
         self.page.update()
         if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
             await self.page.window.destroy()
@@ -2748,10 +2759,17 @@ class AppController:
     def _show_update_confirmation(self) -> None:
         if platform_utils.IS_WINDOWS:
             affirmative = "Cài đặt và thoát"
+            content = "Ứng dụng sẽ đóng để cài bản cập nhật."
         elif platform_utils.IS_ANDROID:
             affirmative = "Mở trình cài đặt"
+            content = "Mở trình cài đặt Android cho bản cập nhật đã tải?"
         else:
             affirmative = "Mở trang tải IPA"
+            content = (
+                "Tải IPA trên máy tính, sau đó ký lại bằng cùng Apple ID và bundle ID "
+                "qua Sideloadly/AltStore. Chứng thực cá nhân có thể cần được làm mới "
+                "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
+            )
 
         def cancel(_event):
             self.page.pop_dialog()
@@ -2760,20 +2778,19 @@ class AppController:
             self.page.pop_dialog()
             self._update_coordinator.confirm_install()
 
-        content = (
-            "Tải IPA trên máy tính, sau đó ký lại bằng cùng Apple ID và bundle ID "
-            "qua Sideloadly/AltStore. Chứng thực cá nhân có thể cần được làm mới "
-            "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
-            if not platform_utils.IS_WINDOWS and not platform_utils.IS_ANDROID
-            else "UTHelper sẽ chỉ mở trình cài đặt sau khi bạn xác nhận."
-        )
         dialog = ft.AlertDialog(
-            modal=True,
+            modal=False,
             title=ft.Text("Xác nhận cập nhật"),
             content=ft.Text(content),
             actions=[
-                ft.TextButton("Hủy", on_click=cancel),
-                ft.TextButton(affirmative, on_click=confirm),
+                ft.TextButton(
+                    "Hủy", on_click=cancel, autofocus=True,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+                ),
+                ft.TextButton(
+                    affirmative, on_click=confirm,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+                ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
             bgcolor=C.BG,

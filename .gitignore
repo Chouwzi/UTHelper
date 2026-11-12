@@ -104,6 +104,7 @@ flet_build/
 
 # ── Android SDK/Gradle ──
 .gradle/
+.kotlin/
 local.properties
 *.hprof
 

@@ -19,7 +19,7 @@ apply plugin: 'kotlin-kapt'
 
 android {
     namespace 'com.uthelper.backgroundsync'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         minSdk 23
@@ -33,6 +33,10 @@ android {
     kotlinOptions {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
+
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
 }
 
 dependencies {
@@ -45,4 +49,5 @@ dependencies {
     implementation 'androidx.room:room-ktx:2.8.4'
     kapt 'androidx.room:room-compiler:2.8.4'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
 }

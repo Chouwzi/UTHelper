@@ -85,6 +85,11 @@ jobs:
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 
+      - name: Test native update and background sync contracts
+        timeout-minutes: 15
+        working-directory: build/flutter/android
+        run: ./gradlew :flet_uth_background_sync:testDebugUnitTest --no-daemon
+
       - name: 🔎 Verify notification manifest wiring
         run: |
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)

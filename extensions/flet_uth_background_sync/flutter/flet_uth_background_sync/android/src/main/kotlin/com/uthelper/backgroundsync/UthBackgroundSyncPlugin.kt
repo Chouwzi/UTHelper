@@ -15,7 +15,9 @@ import com.uthelper.backgroundsync.data.UthDatabase
 import com.uthelper.backgroundsync.notification.AlarmScheduler
 import com.uthelper.backgroundsync.notification.NotificationReconciler
 import com.uthelper.backgroundsync.security.CredentialVault
+import com.uthelper.backgroundsync.update.ApkUpdateDownloadManager
 import com.uthelper.backgroundsync.update.ApkUpdateInstaller
+import com.uthelper.backgroundsync.update.UpdateDownloadIdentity
 import com.uthelper.backgroundsync.worker.BackgroundSyncScheduler
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
@@ -33,6 +35,7 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val updateInstaller by lazy { ApkUpdateInstaller(context) }
+    private val updateDownloader by lazy { ApkUpdateDownloadManager(context) }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -180,9 +183,21 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 )
                 mapOf(
                     "status" to update.status,
+                    "stage" to update.stage,
                     "bytes" to update.bytes,
                     "sha256" to update.sha256,
+                    "reason" to update.reason,
                 )
+            }
+            "start_update_download" -> execute(result) {
+                updateDownloader.start(updateIdentity(call)).toMap()
+            }
+            "get_update_download_status" -> execute(result) {
+                updateDownloader.status(updateIdentity(call)).toMap()
+            }
+            "cancel_update_download" -> execute(result) {
+                updateDownloader.cancel(updateIdentity(call))
+                null
             }
             "cancel_update" -> {
                 updateInstaller.cancel()
@@ -204,6 +219,27 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             else -> result.notImplemented()
         }
     }
+
+    private fun updateIdentity(call: MethodCall): UpdateDownloadIdentity =
+        UpdateDownloadIdentity(
+            url = call.argument<String>("url").orEmpty(),
+            sha256 = call.argument<String>("sha256").orEmpty(),
+            expectedSize = call.argument<Number>("expected_size")?.toLong() ?: 0L,
+            expectedPackageId = call.argument<String>("expected_package_id").orEmpty(),
+            expectedVersionCode = call.argument<Number>("expected_version_code")?.toLong() ?: 0L,
+            expectedCertificateSha256 =
+                call.argument<String>("expected_certificate_sha256").orEmpty(),
+        )
+
+    private fun com.uthelper.backgroundsync.update.UpdateDownloadResult.toMap(): Map<String, Any?> =
+        mapOf(
+            "status" to status,
+            "download_id" to downloadId,
+            "downloaded" to downloaded,
+            "total" to total,
+            "local_path" to localPath,
+            "reason" to reason,
+        )
 
     private fun execute(
         result: MethodChannel.Result,

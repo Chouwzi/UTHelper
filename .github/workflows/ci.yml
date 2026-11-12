@@ -124,7 +124,7 @@ jobs:
       - name: Run tests
         run: |
           cd src
-          python -m pytest ../tests/ -q \
+          python -m pytest ../tests/ ../extensions/flet_uth_background_sync/tests/ -q \
             --tb=short \
             --cov=. \
             --cov-report=term-missing \
