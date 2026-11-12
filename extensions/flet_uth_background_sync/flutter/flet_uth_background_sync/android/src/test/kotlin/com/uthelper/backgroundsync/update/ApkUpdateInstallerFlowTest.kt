@@ -139,8 +139,12 @@ class ApkUpdateInstallerFlowTest {
                 putInt("android.support.FILE_PROVIDER_PATHS", R.xml.uth_update_paths)
             }
         }
-        Shadows.shadowOf(context.packageManager).addOrUpdateProvider(provider)
         val shadowPackageManager = Shadows.shadowOf(context.packageManager)
+        // Standalone library tests have no consumer applicationId to resolve this manifest value.
+        shadowPackageManager.addOrUpdateProvider(provider)
+        // Mirror Android provider initialization; FileProvider.attachInfo clears its static
+        // per-authority path cache before resolving this test Context's cache directory.
+        UthUpdateFileProvider().attachInfo(context, provider)
         val installerActivity = ActivityInfo().apply {
             packageName = context.packageName
             name = "${context.packageName}.TestPackageInstallerActivity"
