@@ -831,9 +831,18 @@ def get_pages_by_courses(call_api: Callable, courseid: int) -> Optional[List[Dic
     """mod_page_get_pages_by_courses - nội dung HTML chi tiết của các mod_page."""
     try:
         result = call_api("mod_page_get_pages_by_courses", **{"courseids[0]": courseid})
-        if isinstance(result, dict):
-            pages = result.get("pages", [])
-            return pages if isinstance(pages, list) else []
+        if isinstance(result, dict) and "exception" not in result:
+            pages = result.get("pages")
+            if isinstance(pages, list):
+                return pages
+            logger.error("Malformed get_pages_by_courses payload (course=%s)", courseid)
+            return None
+        if isinstance(result, dict) and "exception" in result:
+            logger.error(
+                "WS error get_pages_by_courses (course=%s): %s",
+                courseid,
+                result.get("message") or result.get("errorcode") or "exception",
+            )
         return None
     except Exception as e:
         logger.error("Lỗi get_pages_by_courses (course=%s): %s", courseid, e)
@@ -848,7 +857,12 @@ def update_activity_completion_manually(call_api: Callable, cmid: int, completed
             cmid=cmid,
             completed=1 if completed else 0,
         )
-        return isinstance(result, dict) and bool(result.get("status", False))
+        return (
+            isinstance(result, dict)
+            and "exception" not in result
+            and not result.get("warnings")
+            and result.get("status") is True
+        )
     except Exception as e:
         logger.error("Lỗi update_activity_completion_manually (cmid=%s): %s", cmid, e)
         return False

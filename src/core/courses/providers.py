@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import math
 import posixpath
-import urllib.error
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 from urllib.parse import urljoin, urlsplit
 
@@ -55,6 +56,22 @@ _TEXT_EXTS = frozenset(
         ".log",
     }
 )
+_PDF_MIMES = frozenset({"application/pdf", "application/x-pdf"})
+_CSV_MIMES = frozenset({"text/csv", "application/csv", "text/tab-separated-values"})
+_ARCHIVE_MIMES = frozenset(
+    {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-zip",
+        "application/vnd.rar",
+        "application/x-rar-compressed",
+        "application/x-rar",
+        "application/x-tar",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-compressed",
+    }
+)
 _WEBVIEW_ACTIVITY_MODS = frozenset(
     {"quiz", "attendance", "choice", "feedback", "groupselect", "scorm"}
 )
@@ -65,19 +82,28 @@ _EXTERNAL_LINK_SELECTORS = (
     "a[href*='meet.google.com']",
     "a[href*='drive.google.com']",
 )
+_NON_CONTENT_TAGS = ("script", "style", "noscript", "template")
+
+
+class CourseProviderError(RuntimeError):
+    """Raised when a course catalog provider encounters a transport or API failure."""
+
+
+class ThnnSessionError(CourseProviderError):
+    """Raised when the THNN Moodle session is invalid or re-login fails."""
 
 
 def classify_preview_kind(filename: str, mimetype: str = "") -> PreviewKind:
     """Classify a file attachment into a supported preview category."""
     ext = posixpath.splitext((filename or "").strip().lower())[1]
-    mime = (mimetype or "").lower()
-    if ext == ".pdf" or "pdf" in mime:
+    mime = (mimetype or "").split(";", 1)[0].strip().lower()
+    if ext == ".pdf" or mime in _PDF_MIMES:
         return "pdf"
     if ext == ".docx":
         return "docx"
     if ext == ".xlsx":
         return "xlsx"
-    if ext in {".csv", ".tsv"} or "csv" in mime:
+    if ext in {".csv", ".tsv"} or mime in _CSV_MIMES:
         return "csv"
     if ext == ".pptx":
         return "pptx"
@@ -85,7 +111,7 @@ def classify_preview_kind(filename: str, mimetype: str = "") -> PreviewKind:
         return "image"
     if ext in _TEXT_EXTS or mime.startswith("text/"):
         return "text"
-    if ext in _ARCHIVE_EXTS or "zip" in mime or "rar" in mime or "tar" in mime:
+    if ext in _ARCHIVE_EXTS or mime in _ARCHIVE_MIMES:
         return "archive"
     return "unsupported"
 
@@ -121,9 +147,72 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _unescape_text(value: Any) -> str:
+    return html.unescape(str(value or "")).strip()
+
+
+def _safe_http_url(url: Any, fallback: str = "") -> str:
+    if not isinstance(url, str):
+        return fallback
+    raw = url.strip()
+    if not raw or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        return fallback
+    parsed = urlsplit(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return fallback
+    return raw
+
+
+def _sanitize_course_html(raw_html: Any) -> str:
+    if not raw_html:
+        return ""
+    soup = BeautifulSoup(str(raw_html), BS4_PARSER)
+    for tag in list(soup.find_all(_NON_CONTENT_TAGS)):
+        if not getattr(tag, "decomposed", False):
+            tag.decompose()
+    return HTMLSanitizer.sanitize(str(soup))
+
+
+def _same_origin(url_a: str, url_b: str) -> bool:
+    a, b = urlsplit(url_a), urlsplit(url_b)
+    return (a.scheme.lower(), a.netloc.lower()) == (b.scheme.lower(), b.netloc.lower())
+
+
+def _is_ajax_session_error(res: dict[str, Any]) -> bool:
+    exc = res.get("exception")
+    exc_code = exc.get("errorcode", "") if isinstance(exc, dict) else ""
+    exc_msg = exc.get("message", "") if isinstance(exc, dict) else ""
+    errorcode = f"{res.get('errorcode') or ''} {exc_code}".lower()
+    message = f"{res.get('message') or ''} {exc_msg}".lower()
+    return (
+        "requirelogin" in errorcode
+        or "invalidsesskey" in errorcode
+        or "sesskey" in message
+    )
+
+
+def _resolve_thnn_completion_mode(cm: dict[str, Any]) -> int:
+    raw_completion = cm.get("completion")
+    if (
+        raw_completion is not None
+        and not isinstance(raw_completion, bool)
+        and _as_int(raw_completion, -1) in {0, 1, 2}
+    ):
+        return _as_int(raw_completion)
+    if not (cm.get("hascompletion") or cm.get("isoverallcomplete") is not None):
+        return 0
+    if cm.get("isautomatic") is False:
+        return 1
+    return 2
+
+
 def _build_attachment(raw: dict[str, Any]) -> CourseAttachment:
-    file_name = str(raw.get("filename") or raw.get("file_name") or "file").strip()
-    file_url = str(raw.get("fileurl") or raw.get("file_url") or "").strip()
+    file_name = _unescape_text(raw.get("filename") or raw.get("file_name")) or "file"
+    file_url = _safe_http_url(raw.get("fileurl") or raw.get("file_url"), fallback="")
     mime = str(raw.get("mimetype") or raw.get("mime_type") or "").strip()
     ext = posixpath.splitext(file_name.lower())[1]
     kind = classify_preview_kind(file_name, mime)
@@ -137,11 +226,6 @@ def _build_attachment(raw: dict[str, Any]) -> CourseAttachment:
         preview_kind=kind,
         is_archive=(kind == "archive"),
     )
-
-
-def _same_origin(url_a: str, url_b: str) -> bool:
-    a, b = urlsplit(url_a), urlsplit(url_b)
-    return (a.scheme.lower(), a.netloc.lower()) == (b.scheme.lower(), b.netloc.lower())
 
 
 class CourseCatalogProvider(Protocol):
@@ -175,44 +259,38 @@ class CoursesWsProvider:
 
     def _resolve_userid(self) -> Optional[int]:
         if self._userid_resolver:
-            return self._userid_resolver()
+            uid = _as_int(self._userid_resolver())
+            return uid if uid > 0 else None
         info = self._service.get_site_info()
         if not isinstance(info, dict):
             return None
-        uid = info.get("userid")
-        if uid is None or isinstance(uid, bool):
-            return None
-        try:
-            return int(uid)
-        except (TypeError, ValueError):
-            return None
+        uid = _as_int(info.get("userid"))
+        return uid if uid > 0 else None
 
     def fetch_courses(self) -> list[CourseSummary]:
         userid = self._resolve_userid()
         if not userid:
             return []
-        raw_courses = self._service.get_user_courses(userid)
-        if not isinstance(raw_courses, list):
-            return []
+        raw_courses = _as_list(self._service.get_user_courses(userid))
         summaries: list[CourseSummary] = []
         for raw in raw_courses:
             if not isinstance(raw, dict):
                 continue
             cid = _as_int(raw.get("id"))
-            if not cid:
+            if cid <= 0:
                 continue
-            fullname = str(raw.get("fullname") or "")
-            shortname = str(raw.get("shortname") or "")
+            fullname = _unescape_text(raw.get("fullname"))
+            shortname = _unescape_text(raw.get("shortname"))
             parsed = parse_course_identity(shortname, fullname)
-            summary_html = HTMLSanitizer.sanitize(str(raw.get("summary") or ""))
+            summary_html = _sanitize_course_html(raw.get("summary"))
             summary_text = BeautifulSoup(summary_html, BS4_PARSER).get_text(" ", strip=True)
             contact = extract_teacher_and_meet_info([summary_html])
             progress_val = raw.get("progress")
-            progress = (
-                float(progress_val) / 100.0
-                if isinstance(progress_val, (int, float)) and not isinstance(progress_val, bool)
-                else None
-            )
+            progress: Optional[float] = None
+            if isinstance(progress_val, (int, float)) and not isinstance(progress_val, bool):
+                numeric_progress = float(progress_val)
+                if math.isfinite(numeric_progress):
+                    progress = min(1.0, max(0.0, numeric_progress / 100.0))
             summaries.append(
                 CourseSummary(
                     id=cid,
@@ -230,7 +308,7 @@ class CoursesWsProvider:
                     meet_url=contact.meet_url,
                     progress=progress,
                     summary_text=summary_text,
-                    web_url=f"{self._origin}/course/view.php?id={cid}",
+                    web_url=_safe_http_url(f"{self._origin}/course/view.php?id={cid}"),
                 )
             )
         return summaries
@@ -240,19 +318,20 @@ class CoursesWsProvider:
     ) -> CourseModuleItem:
         cmid = _as_int(mod.get("id"))
         modname = str(mod.get("modname") or "unknown").lower()
-        contents = tuple(
-            _build_attachment(att)
-            for att in (mod.get("contents") or [])
-            if isinstance(att, dict) and (att.get("fileurl") or att.get("file_url"))
-        )
-        desc_html = HTMLSanitizer.sanitize(str(mod.get("description") or ""))
+        attachments: list[CourseAttachment] = []
+        for raw_att in _as_list(mod.get("contents")):
+            if not isinstance(raw_att, dict):
+                continue
+            att = _build_attachment(raw_att)
+            if att.file_url:
+                attachments.append(att)
+        contents = tuple(attachments)
+
+        desc_html = _sanitize_course_html(mod.get("description"))
         inline_html = pages_by_cmid.get(cmid, "") or desc_html
-        external_url = ""
-        if modname == "url" and contents:
-            candidate_url = contents[0].file_url
-            if urlsplit(candidate_url).scheme.lower() in {"http", "https"}:
-                external_url = candidate_url
-        web_url = str(mod.get("url") or f"{self._origin}/mod/{modname}/view.php?id={cmid}")
+        external_url = contents[0].file_url if modname == "url" and contents else ""
+        fallback_web_url = _safe_http_url(f"{self._origin}/mod/{modname}/view.php?id={cmid}")
+        web_url = _safe_http_url(mod.get("url"), fallback=fallback_web_url)
         completion_data = mod.get("completiondata")
         completion_state = (
             _as_int(completion_data.get("state")) if isinstance(completion_data, dict) else 0
@@ -262,7 +341,7 @@ class CoursesWsProvider:
             cmid=cmid,
             instance_id=_as_int(mod.get("instance")),
             modname=modname,
-            name=str(mod.get("name") or ""),
+            name=_unescape_text(mod.get("name")),
             section_id=sec_id,
             url=external_url or web_url,
             web_url=web_url,
@@ -276,18 +355,17 @@ class CoursesWsProvider:
         )
 
     def fetch_course_sections(self, course_id: int) -> list[CourseSection]:
-        raw_sections = self._service.get_course_contents(course_id)
-        if not isinstance(raw_sections, list):
+        raw_sections = _as_list(self._service.get_course_contents(course_id))
+        if not raw_sections:
             return []
-        pages = self._service.get_pages_by_courses(course_id)
+        pages = _as_list(self._service.get_pages_by_courses(course_id))
         pages_by_cmid: dict[int, str] = {}
-        if isinstance(pages, list):
-            for p in pages:
-                if not isinstance(p, dict):
-                    continue
-                cmid = _as_int(p.get("coursemodule"))
-                if cmid:
-                    pages_by_cmid[cmid] = HTMLSanitizer.sanitize(str(p.get("content") or ""))
+        for p in pages:
+            if not isinstance(p, dict):
+                continue
+            cmid = _as_int(p.get("coursemodule"))
+            if cmid > 0:
+                pages_by_cmid[cmid] = _sanitize_course_html(p.get("content"))
 
         sections: list[CourseSection] = []
         for sec in raw_sections:
@@ -295,11 +373,11 @@ class CoursesWsProvider:
                 continue
             sec_id = _as_int(sec.get("id"))
             sec_num = _as_int(sec.get("section"))
-            sec_name = str(sec.get("name") or f"Chủ đề {sec_num}")
-            sec_summary = HTMLSanitizer.sanitize(str(sec.get("summary") or ""))
+            sec_name = _unescape_text(sec.get("name")) or f"Chủ đề {sec_num}"
+            sec_summary = _sanitize_course_html(sec.get("summary"))
             modules = tuple(
                 self._parse_ws_module(mod, sec_id, pages_by_cmid)
-                for mod in (sec.get("modules") or [])
+                for mod in _as_list(sec.get("modules"))
                 if isinstance(mod, dict)
             )
             sections.append(
@@ -317,9 +395,7 @@ class CoursesWsProvider:
         return sections
 
     def fetch_updates_since(self, course_id: int, since: int) -> set[int]:
-        instances = self._service.get_course_updates_since(course_id, since)
-        if not isinstance(instances, list):
-            return set()
+        instances = _as_list(self._service.get_course_updates_since(course_id, since))
         return {
             cid
             for item in instances
@@ -330,26 +406,24 @@ class CoursesWsProvider:
         userid = self._resolve_userid()
         if not userid:
             return []
-        raw_items = self._service.get_grade_items(course_id, userid)
-        if not isinstance(raw_items, list):
-            return []
+        raw_items = _as_list(self._service.get_grade_items(course_id, userid))
         grades: list[CourseGradeItem] = []
         for idx, item in enumerate(raw_items):
             if not isinstance(item, dict):
                 continue
-            name = str(item.get("itemname") or item.get("itemtype") or "").strip()
+            name = _unescape_text(item.get("itemname") or item.get("itemtype"))
             if not name:
                 continue
             grades.append(
                 CourseGradeItem(
                     id=_as_int(item.get("id"), idx),
                     item_name=name,
-                    item_module=str(item.get("itemmodule") or ""),
-                    grade_formatted=str(item.get("gradeformatted") or "-"),
-                    range_formatted=str(item.get("rangeformatted") or ""),
-                    percentage=str(item.get("percentageformatted") or ""),
-                    weight=str(item.get("weightformatted") or ""),
-                    feedback_html=HTMLSanitizer.sanitize(str(item.get("feedback") or "")),
+                    item_module=_unescape_text(item.get("itemmodule")),
+                    grade_formatted=_unescape_text(item.get("gradeformatted")) or "-",
+                    range_formatted=_unescape_text(item.get("rangeformatted")),
+                    percentage=_unescape_text(item.get("percentageformatted")),
+                    weight=_unescape_text(item.get("weightformatted")),
+                    feedback_html=_sanitize_course_html(item.get("feedback")),
                 )
             )
         return grades
@@ -360,7 +434,10 @@ class CoursesWsProvider:
     def download_file(self, url: str) -> Optional[bytes]:
         if self._client is None:
             return None
-        return self._client.download_file(url)
+        safe_url = _safe_http_url(url)
+        if not safe_url or not _same_origin(safe_url, self._origin):
+            return None
+        return self._client.download_file(safe_url)
 
 
 class ThnnCourseProvider:
@@ -379,96 +456,112 @@ class ThnnCourseProvider:
                 return val.strip().rstrip("/")
         return "https://thnn.ut.edu.vn"
 
-    def fetch_courses(self) -> list[CourseSummary]:
-        res = self._client.call_ajax_api(
-            "core_course_get_enrolled_courses_by_timeline_classification",
-            classification="all",
-            limit=50,
-            offset=0,
-            sort="fullname",
-        )
-        if not isinstance(res, dict) or res.get("error"):
-            return []
-        data = res.get("data")
-        if not isinstance(data, dict):
-            return []
-        raw_courses = data.get("courses")
-        if not isinstance(raw_courses, list):
-            return []
+    def _call_ajax_with_relogin(self, fn: str, **params: Any) -> dict[str, Any]:
+        res = self._client.call_ajax_api(fn, **params)
+        if isinstance(res, dict) and res.get("error") and _is_ajax_session_error(res):
+            if not self._client.login_session(force=True):
+                raise ThnnSessionError(f"THNN session re-login failed for {fn}")
+            res = self._client.call_ajax_api(fn, **params)
+        if not isinstance(res, dict):
+            raise CourseProviderError(f"THNN AJAX call returned invalid response for {fn}")
+        if res.get("error"):
+            msg = str(res.get("message") or res.get("errorcode") or "AJAX error")
+            if _is_ajax_session_error(res):
+                raise ThnnSessionError(f"THNN session error in {fn}: {msg}")
+            raise CourseProviderError(f"THNN AJAX error in {fn}: {msg}")
+        return res
 
+    def fetch_courses(self) -> list[CourseSummary]:
         base = self._base_url()
+        limit = 50
+        max_pages = 20
+        offset = 0
+        seen_ids: set[int] = set()
         summaries: list[CourseSummary] = []
-        for raw in raw_courses:
-            if not isinstance(raw, dict):
-                continue
-            cid = _as_int(raw.get("id"))
-            if not cid:
-                continue
-            fullname = str(raw.get("fullname") or "")
-            shortname = str(raw.get("shortname") or "")
-            parsed = parse_course_identity(shortname, fullname)
-            summaries.append(
-                CourseSummary(
-                    id=cid,
-                    source="thnn",
-                    fullname=fullname,
-                    shortname=shortname,
-                    display_name=parsed.display_name,
-                    course_code=parsed.course_code,
-                    semester_label=parsed.semester_label,
-                    semester_sort_key=parsed.semester_sort_key,
-                    program_tag="THNN",
-                    web_url=str(raw.get("viewurl") or f"{base}/course/view.php?id={cid}"),
-                )
+
+        for _ in range(max_pages):
+            res = self._call_ajax_with_relogin(
+                "core_course_get_enrolled_courses_by_timeline_classification",
+                classification="all",
+                limit=limit,
+                offset=offset,
+                sort="fullname",
             )
+            data = res.get("data")
+            raw_courses = _as_list(data.get("courses")) if isinstance(data, dict) else []
+            if not raw_courses:
+                break
+            for raw in raw_courses:
+                if not isinstance(raw, dict):
+                    continue
+                cid = _as_int(raw.get("id"))
+                if cid <= 0 or cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                fullname = _unescape_text(raw.get("fullname"))
+                shortname = _unescape_text(raw.get("shortname"))
+                parsed = parse_course_identity(shortname, fullname)
+                fallback_view = _safe_http_url(f"{base}/course/view.php?id={cid}")
+                summaries.append(
+                    CourseSummary(
+                        id=cid,
+                        source="thnn",
+                        fullname=fullname,
+                        shortname=shortname,
+                        display_name=parsed.display_name,
+                        course_code=parsed.course_code,
+                        semester_label=parsed.semester_label,
+                        semester_sort_key=parsed.semester_sort_key,
+                        program_tag="THNN",
+                        web_url=_safe_http_url(raw.get("viewurl"), fallback=fallback_view),
+                    )
+                )
+            if len(raw_courses) < limit:
+                break
+            offset += limit
         return summaries
 
     def fetch_course_sections(self, course_id: int) -> list[CourseSection]:
-        res = self._client.call_ajax_api("core_courseformat_get_state", courseid=course_id)
-        if not isinstance(res, dict) or res.get("error"):
-            return []
+        res = self._call_ajax_with_relogin("core_courseformat_get_state", courseid=course_id)
         data = res.get("data")
         if not isinstance(data, dict):
             return []
 
         cm_map = {
             cid: c
-            for c in (data.get("cm") or [])
+            for c in _as_list(data.get("cm"))
             if isinstance(c, dict) and (cid := _as_int(c.get("id"))) > 0
         }
         base = self._base_url()
         sections: list[CourseSection] = []
-        for sec in data.get("section") or []:
+        for sec in _as_list(data.get("section")):
             if not isinstance(sec, dict):
                 continue
             sec_id = _as_int(sec.get("id"))
             sec_num = _as_int(sec.get("section"))
-            sec_name = str(sec.get("title") or f"Chủ đề {sec_num}")
+            sec_name = _unescape_text(sec.get("title")) or f"Chủ đề {sec_num}"
             mods: list[CourseModuleItem] = []
-            for cmid_raw in sec.get("cmlist") or []:
+            for cmid_raw in _as_list(sec.get("cmlist")):
                 cmid_key = _as_int(cmid_raw)
-                if not cmid_key:
+                if cmid_key <= 0:
                     continue
                 cm = cm_map.get(cmid_key)
                 if not cm:
                     continue
                 cmid = _as_int(cm.get("id"))
                 modname = str(cm.get("module") or "unknown").lower()
-                raw_url = str(cm.get("url") or f"{base}/mod/{modname}/view.php?id={cmid}")
+                fallback_url = _safe_http_url(f"{base}/mod/{modname}/view.php?id={cmid}")
+                raw_url = _safe_http_url(cm.get("url"), fallback=fallback_url)
                 mods.append(
                     CourseModuleItem(
                         cmid=cmid,
                         instance_id=0,
                         modname=modname,
-                        name=str(cm.get("name") or ""),
+                        name=_unescape_text(cm.get("name")),
                         section_id=sec_id,
                         url=raw_url,
                         web_url=raw_url,
-                        completion_mode=(
-                            1
-                            if cm.get("isoverallcomplete") is not None or cm.get("hascompletion")
-                            else 0
-                        ),
+                        completion_mode=_resolve_thnn_completion_mode(cm),
                         completion_state=_as_int(cm.get("completionstate")),
                         open_strategy=classify_open_strategy(modname, ()),
                     )
@@ -488,30 +581,23 @@ class ThnnCourseProvider:
 
     def resolve_module_external_url(self, module: CourseModuleItem) -> str:
         """Lazily resolve external target URL from THNN mod_url/mod_googlemeet/mod_resource HTML."""
-        if not module.web_url:
+        web_url = _safe_http_url(module.web_url)
+        if not web_url:
             return ""
-        if getattr(self._client, "_sesskey", None) == "" and hasattr(
-            self._client, "login_session"
-        ):
-            self._client.login_session()
         base = self._base_url()
-        parsed = urlsplit(module.web_url)
-        path = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+        if not _same_origin(web_url, base):
+            return web_url
         try:
-            final_url, html_text = self._client._open_html(path)
-        except urllib.error.HTTPError as exc:
-            # Moodle mod_url "Automatic" mode redirects cross-origin, which MoodleClient blocks safely.
-            redirected_url = str(getattr(exc, "url", "") or "")
-            if (
-                exc.msg == "Untrusted Moodle redirect"
-                and redirected_url
-                and urlsplit(redirected_url).scheme.lower() in {"http", "https"}
-            ):
-                return redirected_url
-            raise
-        resolved_final = urljoin(f"{base}/", final_url) if final_url else ""
-        if resolved_final and not _same_origin(resolved_final, base):
-            return resolved_final
+            final_url, html_text, redirected_cross_origin = self._client.open_session_url(web_url)
+        except Exception as exc:
+            logger.warning("Failed to resolve THNN module URL (%s): %s", web_url, exc)
+            return web_url
+
+        safe_final = _safe_http_url(urljoin(f"{base}/", final_url) if final_url else "")
+        if redirected_cross_origin or (safe_final and not _same_origin(safe_final, base)):
+            return safe_final or web_url
+        if safe_final and urlsplit(safe_final).path == "/login/index.php":
+            return web_url
 
         soup = BeautifulSoup(html_text or "", BS4_PARSER)
         for selector in _EXTERNAL_LINK_SELECTORS:
@@ -519,10 +605,10 @@ class ThnnCourseProvider:
             href = str(anchor.get("href") or "").strip() if anchor else ""
             if not href:
                 continue
-            candidate = urljoin(f"{base}/", href)
-            if urlsplit(candidate).scheme.lower() in {"http", "https"}:
+            candidate = _safe_http_url(urljoin(f"{base}/", href))
+            if candidate:
                 return candidate
-        return resolved_final or module.web_url
+        return safe_final or web_url
 
     def fetch_course_grades(self, course_id: int) -> list[CourseGradeItem]:
         return []
@@ -530,4 +616,8 @@ class ThnnCourseProvider:
     def download_file(self, url: str) -> Optional[bytes]:
         if self._client is None:
             return None
-        return self._client.download_file(url)
+        safe_url = _safe_http_url(url)
+        base = self._base_url()
+        if not safe_url or not _same_origin(safe_url, base):
+            return None
+        return self._client.download_session_file(safe_url)
