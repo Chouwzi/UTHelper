@@ -495,3 +495,103 @@ def test_default_user_data_dir_and_filename_sanitization(tmp_path, monkeypatch):
     long_path = default_preview.put_bytes("https://x/long", 0, long_name, b"pdf")
     assert long_path.name.endswith(".pdf")
     assert len(long_path.name) <= len(long_path.name.split("_", 1)[0]) + 1 + 120
+
+
+def test_course_cache_store_concurrent_reads_and_writes_across_instances(tmp_path):
+    ns = "https://courses.ut.edu.vn|concurrent-rw"
+    seed_store = CourseCacheStore(cache_dir=tmp_path, namespace=ns)
+    seeded_course = CourseSummary(
+        id=101,
+        source="courses",
+        fullname="Kỹ thuật phần mềm",
+        shortname="KTPM",
+        display_name="Kỹ thuật phần mềm",
+    )
+    seeded_section = CourseSection(
+        id=1,
+        course_id=101,
+        source="courses",
+        section_num=0,
+        name="Chủ đề 0",
+        modules=(
+            CourseModuleItem(
+                cmid=77,
+                instance_id=5,
+                modname="resource",
+                name="Slide 1",
+                section_id=1,
+            ),
+        ),
+    )
+    seed_store.save_catalog([seeded_course], synced_at=100)
+    seed_store.save_course_detail("courses", 101, [seeded_section], [], synced_at=100)
+
+    barrier = threading.Barrier(8)
+    observed_empty_catalog: list[int] = []
+    observed_empty_detail: list[int] = []
+
+    def writer_pins(worker_id: int) -> None:
+        store = CourseCacheStore(cache_dir=tmp_path, namespace=ns)
+        barrier.wait()
+        for step in range(8):
+            store.set_pinned(f"courses:{worker_id}_{step}", True)
+            store.set_unseen(f"thnn:{worker_id}_{step}", True)
+
+    def writer_catalog_and_detail(worker_id: int) -> None:
+        store = CourseCacheStore(cache_dir=tmp_path, namespace=ns)
+        barrier.wait()
+        for step in range(8):
+            store.save_catalog([seeded_course], synced_at=200 + step)
+            store.record_recent(
+                RecentMaterialEntry(
+                    course_key="courses:101",
+                    course_name="Kỹ thuật phần mềm",
+                    cmid=77,
+                    title=f"Slide {worker_id}-{step}",
+                    attachment_url=f"https://courses.ut.edu.vn/{worker_id}_{step}.pdf",
+                    file_name=f"{worker_id}_{step}.pdf",
+                    opened_at=300 + step,
+                ),
+                limit=20,
+            )
+            store.save_course_detail(
+                "courses", 101, [seeded_section], [], synced_at=200 + step
+            )
+
+    def reader_loop() -> None:
+        store = CourseCacheStore(cache_dir=tmp_path, namespace=ns)
+        barrier.wait()
+        for _ in range(25):
+            cat = store.load_catalog()
+            if len(cat.courses) != 1:
+                observed_empty_catalog.append(len(cat.courses))
+            detail = store.load_course_detail("courses", 101)
+            if len(detail.sections) != 1:
+                observed_empty_detail.append(len(detail.sections))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(writer_pins, 0),
+            pool.submit(writer_pins, 1),
+            pool.submit(writer_catalog_and_detail, 2),
+            pool.submit(writer_catalog_and_detail, 3),
+            pool.submit(reader_loop),
+            pool.submit(reader_loop),
+            pool.submit(reader_loop),
+            pool.submit(reader_loop),
+        ]
+        for fut in futures:
+            fut.result()
+
+    assert observed_empty_catalog == []
+    assert observed_empty_detail == []
+
+    final_snap = seed_store.load_catalog()
+    assert len(final_snap.courses) == 1
+    assert set(final_snap.pinned_keys) == {
+        f"courses:{w}_{s}" for w in (0, 1) for s in range(8)
+    }
+    assert set(final_snap.unseen_keys) == {
+        f"thnn:{w}_{s}" for w in (0, 1) for s in range(8)
+    }
+    assert len(final_snap.recent_items) == 16

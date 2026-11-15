@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar, get_args
@@ -28,6 +30,21 @@ _VALID_SOURCES = frozenset(get_args(CourseSource))
 _VALID_OPEN_STRATEGIES = frozenset(get_args(OpenStrategy))
 _VALID_PREVIEW_KINDS = frozenset(get_args(PreviewKind))
 _T = TypeVar("_T")
+
+_STORE_LOCKS: dict[str, threading.RLock] = {}
+_STORE_LOCKS_GUARD = threading.Lock()
+
+
+def _get_store_lock(path: Path) -> threading.RLock:
+    """Return a canonical per-path RLock stable across store instances and leaf renames."""
+    raw = Path(os.path.abspath(str(path)))
+    canonical = os.path.normcase(os.path.abspath(str(raw.parent.resolve() / raw.name)))
+    with _STORE_LOCKS_GUARD:
+        lock = _STORE_LOCKS.get(canonical)
+        if lock is None:
+            lock = threading.RLock()
+            _STORE_LOCKS[canonical] = lock
+        return lock
 
 
 @dataclass(frozen=True)
@@ -294,26 +311,28 @@ class CourseCacheStore:
 
     def load_catalog(self) -> CatalogCacheSnapshot:
         """Load the cached course catalog, pins, unseen flags, and recent items."""
-        payload = self._read_catalog_dict()
-        if not payload:
-            return CatalogCacheSnapshot()
+        with _get_store_lock(self._catalog_path):
+            payload = self._read_catalog_dict()
+            if not payload:
+                return CatalogCacheSnapshot()
 
-        return CatalogCacheSnapshot(
-            courses=_parse_dict_items(payload.get("courses"), _summary_from_dict),
-            pinned_keys=_string_list(payload.get("pinned_keys")),
-            unseen_keys=_string_list(payload.get("unseen_keys")),
-            recent_items=_parse_dict_items(payload.get("recent_items"), _recent_from_dict),
-            catalog_synced_at=_safe_int(payload.get("catalog_synced_at"), 0),
-        )
+            return CatalogCacheSnapshot(
+                courses=_parse_dict_items(payload.get("courses"), _summary_from_dict),
+                pinned_keys=_string_list(payload.get("pinned_keys")),
+                unseen_keys=_string_list(payload.get("unseen_keys")),
+                recent_items=_parse_dict_items(payload.get("recent_items"), _recent_from_dict),
+                catalog_synced_at=_safe_int(payload.get("catalog_synced_at"), 0),
+            )
 
     def save_catalog(self, courses: list[CourseSummary], *, synced_at: int) -> None:
         """Persist the latest course catalog while preserving pins/unseen/recent metadata."""
-        self._dir.mkdir(parents=True, exist_ok=True)
-        with SafeFileIO.transaction(self._catalog_path):
-            existing = self._read_catalog_dict()
-            existing["courses"] = [asdict(course) for course in courses]
-            existing["catalog_synced_at"] = int(synced_at)
-            self._write_catalog_payload(existing)
+        with _get_store_lock(self._catalog_path):
+            self._dir.mkdir(parents=True, exist_ok=True)
+            with SafeFileIO.transaction(self._catalog_path):
+                existing = self._read_catalog_dict()
+                existing["courses"] = [asdict(course) for course in courses]
+                existing["catalog_synced_at"] = int(synced_at)
+                self._write_catalog_payload(existing)
 
     def _update_catalog_string_list(
         self,
@@ -323,18 +342,19 @@ class CourseCacheStore:
         *,
         prepend: bool = False,
     ) -> list[str]:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        with SafeFileIO.transaction(self._catalog_path):
-            existing = self._read_catalog_dict()
-            keys = [k for k in _string_list(existing.get(field_name)) if k != course_key]
-            if present:
-                if prepend:
-                    keys.insert(0, course_key)
-                else:
-                    keys.append(course_key)
-            existing[field_name] = keys
-            self._write_catalog_payload(existing)
-            return keys
+        with _get_store_lock(self._catalog_path):
+            self._dir.mkdir(parents=True, exist_ok=True)
+            with SafeFileIO.transaction(self._catalog_path):
+                existing = self._read_catalog_dict()
+                keys = [k for k in _string_list(existing.get(field_name)) if k != course_key]
+                if present:
+                    if prepend:
+                        keys.insert(0, course_key)
+                    else:
+                        keys.append(course_key)
+                existing[field_name] = keys
+                self._write_catalog_payload(existing)
+                return keys
 
     def set_pinned(self, course_key: str, pinned: bool) -> list[str]:
         """Pin or unpin a course key and return the updated ordered pin list."""
@@ -352,48 +372,50 @@ class CourseCacheStore:
         self, entry: RecentMaterialEntry, limit: int = 10
     ) -> list[RecentMaterialEntry]:
         """Prepend a recently opened material, deduplicated by attachment URL."""
-        self._dir.mkdir(parents=True, exist_ok=True)
         max_items = max(1, int(limit))
-        with SafeFileIO.transaction(self._catalog_path):
-            existing = self._read_catalog_dict()
-            parsed_existing: list[RecentMaterialEntry] = []
-            raw_items = existing.get("recent_items")
-            if isinstance(raw_items, list):
-                for item in raw_items:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("attachment_url") == entry.attachment_url:
-                        continue
-                    parsed = _recent_from_dict(item)
-                    if parsed is not None:
-                        parsed_existing.append(parsed)
+        with _get_store_lock(self._catalog_path):
+            self._dir.mkdir(parents=True, exist_ok=True)
+            with SafeFileIO.transaction(self._catalog_path):
+                existing = self._read_catalog_dict()
+                parsed_existing: list[RecentMaterialEntry] = []
+                raw_items = existing.get("recent_items")
+                if isinstance(raw_items, list):
+                    for item in raw_items:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("attachment_url") == entry.attachment_url:
+                            continue
+                        parsed = _recent_from_dict(item)
+                        if parsed is not None:
+                            parsed_existing.append(parsed)
 
-            entries = [entry, *parsed_existing][:max_items]
-            existing["recent_items"] = [asdict(item) for item in entries]
-            self._write_catalog_payload(existing)
-            return entries
+                entries = [entry, *parsed_existing][:max_items]
+                existing["recent_items"] = [asdict(item) for item in entries]
+                self._write_catalog_payload(existing)
+                return entries
 
     def load_course_detail(self, source: CourseSource, course_id: int) -> CourseDetailSnapshot:
         """Load cached sections, grades, and known cmids for a single course."""
         detail_path = self._detail_path(source, course_id)
-        payload = SafeFileIO.read_json_safe(detail_path, dict)
-        if not isinstance(payload, dict) or not payload:
-            return CourseDetailSnapshot()
+        with _get_store_lock(detail_path):
+            payload = SafeFileIO.read_json_safe(detail_path, dict)
+            if not isinstance(payload, dict) or not payload:
+                return CourseDetailSnapshot()
 
-        known_cmids: list[int] = []
-        raw_cmids = payload.get("known_cmids")
-        if isinstance(raw_cmids, list):
-            for raw_cmid in raw_cmids:
-                cmid = _safe_opt_int(raw_cmid)
-                if cmid is not None:
-                    known_cmids.append(cmid)
+            known_cmids: list[int] = []
+            raw_cmids = payload.get("known_cmids")
+            if isinstance(raw_cmids, list):
+                for raw_cmid in raw_cmids:
+                    cmid = _safe_opt_int(raw_cmid)
+                    if cmid is not None:
+                        known_cmids.append(cmid)
 
-        return CourseDetailSnapshot(
-            sections=_parse_dict_items(payload.get("sections"), _section_from_dict),
-            grades=_parse_dict_items(payload.get("grades"), _grade_from_dict),
-            last_synced_at=_safe_int(payload.get("last_synced_at"), 0),
-            known_cmids=known_cmids,
-        )
+            return CourseDetailSnapshot(
+                sections=_parse_dict_items(payload.get("sections"), _section_from_dict),
+                grades=_parse_dict_items(payload.get("grades"), _grade_from_dict),
+                last_synced_at=_safe_int(payload.get("last_synced_at"), 0),
+                known_cmids=known_cmids,
+            )
 
     def save_course_detail(
         self,
@@ -407,18 +429,19 @@ class CourseCacheStore:
     ) -> None:
         """Persist sections, grades, and known cmids for a single course."""
         detail_path = self._detail_path(source, course_id)
-        self._dir.mkdir(parents=True, exist_ok=True)
-        resolved_cmids = (
-            [m.cmid for s in sections for m in s.modules]
-            if known_cmids is None
-            else [int(x) for x in known_cmids]
-        )
-        payload = {
-            "version": self.SCHEMA_VERSION,
-            "sections": [asdict(section) for section in sections],
-            "grades": [asdict(grade) for grade in grades],
-            "last_synced_at": int(synced_at),
-            "known_cmids": resolved_cmids,
-        }
-        if not SafeFileIO.write_json_atomic(detail_path, payload):
-            logger.warning("Failed to persist course detail cache: %s", detail_path)
+        with _get_store_lock(detail_path):
+            self._dir.mkdir(parents=True, exist_ok=True)
+            resolved_cmids = (
+                [m.cmid for s in sections for m in s.modules]
+                if known_cmids is None
+                else [int(x) for x in known_cmids]
+            )
+            payload = {
+                "version": self.SCHEMA_VERSION,
+                "sections": [asdict(section) for section in sections],
+                "grades": [asdict(grade) for grade in grades],
+                "last_synced_at": int(synced_at),
+                "known_cmids": resolved_cmids,
+            }
+            if not SafeFileIO.write_json_atomic(detail_path, payload):
+                logger.warning("Failed to persist course detail cache: %s", detail_path)
