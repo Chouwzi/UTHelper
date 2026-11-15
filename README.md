@@ -111,6 +111,7 @@ Cài project, extension native và công cụ kiểm tra:
 ```powershell
 python -m pip install -e ".[windows]"
 python -m pip install -e extensions\flet_uth_background_sync
+python -m pip install -e extensions\flet_uth_quiz
 python -m pip install pytest pytest-timeout ruff
 ```
 
@@ -126,6 +127,13 @@ python scripts\measure_ui_performance.py
 Các test live dùng tài khoản hoặc course thật bị tắt theo mặc định. Không đưa
 credential, cookie, token, HAR chưa che dữ liệu hoặc payload sinh viên vào
 commit, fixture hay log CI.
+
+Luồng làm quiz trong app dùng custom Flet client trên Windows, Android và iOS.
+Trên Windows, chạy `flet build windows --yes` một lần rồi `flet run src\main.py`;
+build lại khi sửa Dart trong `extensions/flet_uth_quiz`. Client Flet có sẵn và
+bản web vẫn dùng đường mở trình duyệt. Xem
+[kiểm chứng quiz](docs/testing/embedded-quiz.md) để phân biệt test nguồn, build
+native và nghiệm thu lưu/nộp bài trên Moodle.
 
 Đọc [CONTRIBUTING.md](CONTRIBUTING.md) trước khi mở pull request. Repository dùng
 Gitflow: tính năng và bugfix đi vào `develop`; release ổn định đi từ `develop`

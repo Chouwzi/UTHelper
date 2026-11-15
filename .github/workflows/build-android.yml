@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 concurrency:
@@ -41,6 +41,7 @@ jobs:
       - name: 📦 Install project and Flet CLI
         run: |
           pip install -e ".[android-build]"
+          pip install "flet[cli]==0.86.5"
           flet --version
 
       - name: 🔨 Build APK

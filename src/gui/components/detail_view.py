@@ -35,6 +35,7 @@ from core.submission_models import (
     normalize_filepath,
 )
 from core.moodle_sites import moodle_site_from_origin, moodle_site_from_url
+from core.activity_status import normalize_submission_status
 from core.use_cases.submission_workflow import (
     FinalizeSubmissionIntent,
     SelectedSubmissionFile,
@@ -90,14 +91,21 @@ def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None):
+    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None, quiz_player_view=None, get_quiz_account_id=None):
         super().__init__()
-        self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
+        self._init_variables(
+            page,
+            get_client,
+            on_status_changed,
+            submission_workflow_factory,
+            quiz_player_view,
+            get_quiz_account_id,
+        )
         self._init_controls()
         self._init_layout(on_close)
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
+    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory, quiz_player_view=None, get_quiz_account_id=None):
         self._page          = page
         self.visible        = False
         self.expand         = True
@@ -107,6 +115,9 @@ class DetailView(ft.Container):
         self._get_client    = get_client   
         self._on_status_changed = on_status_changed
         self._submission_workflow_factory = submission_workflow_factory
+        self._quiz_player_view = quiz_player_view
+        self._get_quiz_account_id = get_quiz_account_id
+        self._quiz_launch_target = None
         self._selected_files = []          
         self._is_uploading  = False
         self._submission_snapshot: SubmissionSnapshot | None = None
@@ -597,6 +608,27 @@ class DetailView(ft.Container):
             ink=True,
             alignment=ft.Alignment(0, 0),
         )
+        self._quiz_open_btn = ft.Button(
+            "Làm bài",
+            icon=ft.Icons.QUIZ_OUTLINED,
+            on_click=self._open_quiz,
+            bgcolor=C.ACCENT,
+            color=C.ON_ACCENT,
+            expand=True,
+            tooltip="Làm bài trong ứng dụng",
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=13),
+            ),
+            visible=False,
+        )
+        self._quiz_runtime_notice = ft.Text(
+            "",
+            size=12,
+            color=C.TEXT_SECONDARY,
+            text_align=ft.TextAlign.CENTER,
+            visible=False,
+        )
 
         self._opentime_row = ft.Row(controls=[
                     ft.Text("Mở từ", size=11, color=C.TEXT_SECONDARY,
@@ -700,7 +732,15 @@ class DetailView(ft.Container):
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
                             ft.Container(
-                                content=self._open_btn,
+                                content=ft.Column(
+                                    controls=[
+                                        self._open_btn,
+                                        self._quiz_open_btn,
+                                        self._quiz_runtime_notice,
+                                    ],
+                                    spacing=8,
+                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                                ),
                                 padding=ft.Padding.only(
                                     left=16, right=16, top=8, bottom=20),
                             ),
@@ -725,6 +765,14 @@ class DetailView(ft.Container):
         self._submitted_area.visible = False
         self._open_btn.visible = False
         self._header_open_btn.visible = False
+        quiz_open_btn = getattr(self, "_quiz_open_btn", None)
+        if quiz_open_btn is not None:
+            quiz_open_btn.visible = False
+        quiz_runtime_notice = getattr(self, "_quiz_runtime_notice", None)
+        if quiz_runtime_notice is not None:
+            quiz_runtime_notice.visible = False
+        if hasattr(self, "_quiz_launch_target"):
+            self._quiz_launch_target = None
         self._title_text.value  = data.get("title", "Đang tải...")
         self._course_text.value = clean_course_name(data.get("course", ""))
         self._current_url       = data.get("url", "")
@@ -806,6 +854,9 @@ class DetailView(ft.Container):
         browser_available = self._is_safe_browser_url(self._current_url)
         self._open_btn.visible = browser_available
         self._header_open_btn.visible = browser_available
+        self._quiz_open_btn.visible = False
+        self._quiz_runtime_notice.visible = False
+        self._quiz_launch_target = None
         self._content_col.controls.clear()
 
         # UX-8: Dynamic CTA based on submission status and type
@@ -936,6 +987,45 @@ class DetailView(ft.Container):
             self._open_btn.border = None
             self._cta_text.color = C.ON_ACCENT
             self._cta_icon.color = C.ON_ACCENT
+
+        if act_type == "quiz" and self._quiz_player_view is not None:
+            account_id = ""
+            if callable(self._get_quiz_account_id):
+                try:
+                    account_id = self._get_quiz_account_id() or ""
+                except Exception:
+                    logger.debug("Quiz account identity is unavailable", exc_info=True)
+            try:
+                target, player_state = self._quiz_player_view.prepare_activity(
+                    data, account_id
+                )
+            except Exception:
+                logger.warning("Unable to prepare embedded quiz target")
+                target, player_state = None, None
+            if target is not None and player_state is None:
+                self._quiz_launch_target = target
+                self._open_btn.visible = False
+                status_key = normalize_submission_status(sub_status)
+                self._quiz_open_btn.content = (
+                    "Mở bài"
+                    if status_key
+                    in {
+                        "draft",
+                        "submitted",
+                        "graded",
+                        "in_progress",
+                        "attempted",
+                        "abandoned",
+                    }
+                    else "Làm bài"
+                )
+                self._quiz_open_btn.tooltip = self._quiz_open_btn.content
+                self._quiz_open_btn.visible = True
+            elif target is not None and player_state == "player_unavailable":
+                self._quiz_runtime_notice.value = (
+                    "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+                )
+                self._quiz_runtime_notice.visible = True
 
         details = data.get("details", {})
 
@@ -1179,6 +1269,33 @@ class DetailView(ft.Container):
         # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
         # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
         await ft.UrlLauncher().launch_url(self._current_url)
+
+    async def _open_quiz(self, _event=None):
+        target = self._quiz_launch_target
+        if target is None or self._quiz_player_view is None:
+            return
+        opened = self._quiz_player_view.open_activity(target, self._current_data)
+        if not opened and not self._quiz_player_view.visible:
+            self._open_btn.visible = True
+            self._quiz_open_btn.visible = False
+            self._quiz_runtime_notice.value = (
+                "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+            )
+            self._quiz_runtime_notice.visible = True
+        if opened:
+            try:
+                self._page.update()
+            except Exception:
+                pass
+
+    async def focus_quiz_opener(self) -> None:
+        """Restore keyboard focus after the quiz surface closes when possible."""
+        if not self._quiz_open_btn.visible:
+            return
+        try:
+            await self._quiz_open_btn.focus()
+        except Exception:
+            pass
 
     # In-App Submission
 

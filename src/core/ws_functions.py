@@ -485,6 +485,14 @@ def _get_quiz_detail(
     
     if not quiz_data:
         return details
+
+    quiz_security = {
+        field: quiz_data[field]
+        for field in ("browsersecurity", "activerulenames")
+        if field in quiz_data
+    }
+    if quiz_security:
+        details["quiz_security"] = quiz_security
     
     # Mô tả
     details['description_html'] = quiz_data.get('intro', '') or ''

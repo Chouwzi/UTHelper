@@ -119,12 +119,13 @@ jobs:
         run: |
           pip install -e .
           pip install -e extensions/flet_uth_background_sync
+          pip install -e extensions/flet_uth_quiz
           pip install pytest pytest-cov keyring
 
       - name: Run tests
         run: |
           cd src
-          python -m pytest ../tests/ -q \
+          python -m pytest ../tests/ ../extensions/flet_uth_quiz/tests/ -q \
             --tb=short \
             --cov=. \
             --cov-report=term-missing \

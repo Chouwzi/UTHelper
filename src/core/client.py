@@ -14,6 +14,11 @@ from core.moodle_sites import (
     MoodleSite,
     moodle_site_from_origin,
 )
+from core.quiz_player import (
+    _begin_quiz_session_login,
+    _end_quiz_session_login,
+    quiz_session_key,
+)
 import logging
 import sys as _sys
 
@@ -250,6 +255,17 @@ class MoodleClient:
             return False
 
         try:
+            session_key = quiz_session_key(self._moodle_site, username)
+        except ValueError:
+            self._last_login_error = "invalid_credentials"
+            return False
+        if not _begin_quiz_session_login(session_key):
+            # Leave the existing cookie jar and sesskey intact while a quiz
+            # player holds this account/site session.
+            self._last_login_error = "quiz_session_active"
+            return False
+
+        try:
             self._cookie_jar.clear()
             self._sesskey = ""
 
@@ -300,6 +316,8 @@ class MoodleClient:
             logger.error(f"Lỗi login_session: {e}")
             self._last_login_error = "network_error"
             return False
+        finally:
+            _end_quiz_session_login(session_key)
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle AJAX service. Trả về None nếu lỗi hoặc HTTP fail."""
