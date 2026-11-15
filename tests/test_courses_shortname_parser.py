@@ -346,3 +346,27 @@ def test_extract_teacher_phone_rejects_nine_digits_and_accepts_ten_to_eleven_dig
     assert nine_then_ten.teacher_phone == "0918116115"
 
 
+def test_extract_teacher_info_ignores_style_script_noscript_template_and_comments():
+    fragment = """
+    <!-- Giảng viên: Comment Fake (comment@ut.edu.vn) 0900000001 -->
+    <style>
+      /* Giảng viên: Style Fake; email: style@ut.edu.vn; 0900000002 */
+      .course-box { color: red; }
+    </style>
+    <script>
+      const msg = "Giảng viên: Script Fake | script@ut.edu.vn | 0900000003";
+    </script>
+    <noscript><p>Giảng viên: Noscript Fake | <a href="mailto:noscript@ut.edu.vn">noscript</a> | 0900000004</p></noscript>
+    <template><p>Giảng viên: Template Fake | <a href="https://meet.google.com/fake-meet-id">Meet</a> | 0900000005</p></template>
+    <p>Giảng viên: Võ Văn Bình</p>
+    <p>Email: binh.vo@ut.edu.vn</p>
+    <p>SĐT: 0918 116 115</p>
+    """
+    info = extract_teacher_and_meet_info([fragment])
+    assert info.teacher_name == "Võ Văn Bình"
+    assert info.teacher_email == "binh.vo@ut.edu.vn"
+    assert info.teacher_phone == "0918116115"
+    assert info.meet_url == ""
+
+
+

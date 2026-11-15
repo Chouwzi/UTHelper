@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from bs4 import BeautifulSoup, Comment, NavigableString
+from bs4 import BeautifulSoup, CData, NavigableString
 
 from core.html_compat import BS4_PARSER
 
@@ -174,15 +174,16 @@ def parse_course_identity(shortname: str, fullname: str) -> ParsedCourseIdentity
 
 def _soup_to_lines(soup: BeautifulSoup) -> str:
     """Convert parsed HTML to newline-delimited block text without splitting inline tags."""
-    # Collapse source formatting newlines inside existing text nodes before adding block breaks.
+    # Collapse source formatting newlines inside content text nodes before adding block breaks.
     for node in list(soup.descendants):
-        if isinstance(node, Comment):
-            node.extract()
-        elif isinstance(node, NavigableString):
+        node_type = type(node)
+        if node_type is NavigableString or node_type is CData:
             raw = str(node)
             normalized = re.sub(r"\s+", " ", raw)
             if normalized != raw:
-                node.replace_with(normalized)
+                node.replace_with(
+                    CData(normalized) if node_type is CData else NavigableString(normalized)
+                )
 
     for br in soup.find_all("br"):
         br.replace_with("\n")
@@ -207,6 +208,8 @@ def extract_teacher_and_meet_info(html_fragments: Iterable[str]) -> TeacherConta
         if not fragment:
             continue
         soup = BeautifulSoup(fragment, BS4_PARSER)
+        for tag in soup.find_all(("style", "script", "noscript", "template")):
+            tag.decompose()
         for anchor in soup.find_all("a", href=True):
             href = str(anchor["href"]).strip()
             if not meet_url and _MEET_URL_RE.match(href):
