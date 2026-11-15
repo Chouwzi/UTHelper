@@ -71,6 +71,10 @@ class RadarProfile:
     gpa_10: float | None = None
     gpa_4: float | None = None
     credits_earned: float | None = None
+    credits_registered: float | None = None
+    cumulative_gpa_10: float | None = None
+    cumulative_gpa_4: float | None = None
+    credits_cumulative: float | None = None
     classification: str | None = None
     training_point: float | None = None
     insight_text: str = ""
