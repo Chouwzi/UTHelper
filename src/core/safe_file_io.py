@@ -171,17 +171,17 @@ class SafeFileIO:
         
         @contextlib.contextmanager
         def _transaction():
-            lock_path = filepath.with_suffix(".lock")
-            if lock_path.exists():
-                try:
-                    if time.time() - os.path.getmtime(lock_path) > 10.0:
-                        os.remove(lock_path)
-                except Exception:
-                    pass
-
             canonical = _canonical_lock_path(filepath)
             mem_lock = get_memory_lock(canonical)
             with mem_lock:
+                lock_path = filepath.with_suffix(".lock")
+                if lock_path.exists():
+                    try:
+                        if time.time() - os.path.getmtime(lock_path) > 10.0:
+                            os.remove(lock_path)
+                    except Exception:
+                        pass
+
                 file_lock = SafeFileIO.get_file_lock(filepath)
                 with file_lock.acquire(timeout=timeout):
                     if not hasattr(_thread_local, "_safe_io_transactions"):

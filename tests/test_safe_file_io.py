@@ -67,15 +67,19 @@ def test_safe_file_io_windows_permission_error_retry(tmp_path):
 def test_get_memory_lock_is_stable_across_leaf_existence_and_case(tmp_path):
     target = tmp_path / "Sample_Cache.json"
     lock_before = get_memory_lock(target)
+    lock_dot_segment = get_memory_lock(tmp_path / "." / "Sample_Cache.json")
     target.write_text("{}", encoding="utf-8")
     lock_existing = get_memory_lock(target)
-    lock_alt_case = get_memory_lock(Path(str(target).lower()))
     target.unlink()
     lock_after_unlink = get_memory_lock(target)
 
+    assert lock_before is lock_dot_segment
     assert lock_before is lock_existing
-    assert lock_before is lock_alt_case
     assert lock_before is lock_after_unlink
+
+    if os.path.normcase("A") == os.path.normcase("a"):
+        lock_alt_case = get_memory_lock(Path(str(target).lower()))
+        assert lock_before is lock_alt_case
 
 
 def test_read_json_safe_waits_for_memory_lock_during_atomic_write(tmp_path):

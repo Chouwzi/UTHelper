@@ -417,7 +417,6 @@ def test_preview_file_cache_touch_lru_and_expiry_and_clear(tmp_path):
     os.utime(p1, (now - 20, now - 20))
     os.utime(p2, (now - 10, now - 10))
     assert cache.get_cached_path("https://x/1.pdf", 1, "../../dir/a.pdf") == p1
-    os.utime(p2, (now - 10, now - 10))
 
     # Adding p3 (50 bytes) exceeds 120 bytes -> p2 (oldest) evicted, p1 & p3 kept.
     p3 = cache.put_bytes("https://x/3.pdf", 1, "c.pdf", b"c" * 50)
@@ -437,16 +436,16 @@ def test_preview_file_cache_touch_lru_and_expiry_and_clear(tmp_path):
     assert cache.get_cached_path("https://x/big.pdf", 1, "big.pdf") is None
     assert not big.exists()
 
-    # Stale .tmp cleanup and clear() remove everything including temp files.
+    # Stale .tmp.* cleanup and clear() remove everything including staging temp files.
     kept = cache.put_bytes("https://x/k.pdf", 1, "k.pdf", b"k" * 10)
-    stale_tmp = tmp_path / "stale.pdf.1.1.tmp"
+    stale_tmp = tmp_path / ".tmp.stale.pdf.1.1"
     stale_tmp.write_bytes(b"stale")
     os.utime(stale_tmp, (time.time() - 600, time.time() - 600))
     cache.evict_if_needed()
     assert not stale_tmp.exists()
     assert kept.exists()
 
-    fresh_tmp = tmp_path / "orphan.tmp"
+    fresh_tmp = tmp_path / ".tmp.orphan.1.1"
     fresh_tmp.write_bytes(b"tmp")
     cache.clear()
     assert list(tmp_path.iterdir()) == []
@@ -472,7 +471,7 @@ def test_preview_file_cache_concurrent_puts_leave_no_temp_files(tmp_path):
         thread.join()
 
     assert errors == []
-    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+    assert not any(p.name.startswith(".tmp.") for p in tmp_path.iterdir())
 
 
 def test_default_user_data_dir_and_filename_sanitization(tmp_path, monkeypatch):
@@ -595,3 +594,235 @@ def test_course_cache_store_concurrent_reads_and_writes_across_instances(tmp_pat
         f"thnn:{w}_{s}" for w in (0, 1) for s in range(8)
     }
     assert len(final_snap.recent_items) == 16
+
+
+def test_preview_file_cache_multi_instance_concurrency(tmp_path):
+    barrier = threading.Barrier(6)
+    errors: list[Exception] = []
+
+    def writer(worker_id: int) -> None:
+        cache = PreviewFileCache(cache_dir=tmp_path, max_bytes=2048)
+        barrier.wait()
+        try:
+            for step in range(12):
+                url = f"https://x/{worker_id}/{step % 3}.pdf"
+                path = cache.put_bytes(url, 100, f"doc_{step % 3}.pdf", b"payload" * 4)
+                assert path.parent == tmp_path
+                cache.evict_if_needed(keep=path)
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def reader() -> None:
+        cache = PreviewFileCache(cache_dir=tmp_path, max_bytes=2048)
+        barrier.wait()
+        try:
+            for step in range(24):
+                url = f"https://x/{step % 3}/{step % 3}.pdf"
+                found = cache.get_cached_path(url, 100, f"doc_{step % 3}.pdf")
+                if found is not None:
+                    assert found.is_file()
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = (
+            [pool.submit(writer, i) for i in range(3)]
+            + [pool.submit(reader) for _ in range(3)]
+        )
+        for fut in futures:
+            fut.result()
+
+    assert errors == []
+    assert not any(p.name.startswith(".tmp.") for p in tmp_path.iterdir())
+
+    # Concurrent clear alongside writers/readers must also remain exception-free.
+    clear_barrier = threading.Barrier(4)
+
+    def clearer() -> None:
+        cache = PreviewFileCache(cache_dir=tmp_path, max_bytes=2048)
+        clear_barrier.wait()
+        try:
+            for _ in range(8):
+                cache.clear()
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def churner(worker_id: int) -> None:
+        cache = PreviewFileCache(cache_dir=tmp_path, max_bytes=2048)
+        clear_barrier.wait()
+        try:
+            for step in range(10):
+                url = f"https://x/clear/{worker_id}/{step}.pdf"
+                cache.put_bytes(url, 1, "c.pdf", b"abc")
+                cache.get_cached_path(url, 1, "c.pdf")
+                cache.evict_if_needed()
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(clearer),
+            pool.submit(churner, 0),
+            pool.submit(churner, 1),
+            pool.submit(churner, 2),
+        ]
+        for fut in futures:
+            fut.result()
+
+    assert errors == []
+    PreviewFileCache(cache_dir=tmp_path).clear()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preview_file_cache_tmp_extension_non_collision_and_rollback(tmp_path, monkeypatch):
+    cache = PreviewFileCache(cache_dir=tmp_path, max_bytes=120)
+
+    # Cached files legitimately ending in ".tmp" must not be misclassified as staging temp files.
+    tmp_named = cache.put_bytes("https://x/notes", 1, "notes.tmp", b"hello-tmp")
+    assert tmp_named.name.endswith("_notes.tmp")
+    assert not tmp_named.name.startswith(".tmp.")
+    cache.evict_if_needed()
+    assert cache.get_cached_path("https://x/notes", 1, "notes.tmp") == tmp_named
+
+    # Distinct raw filenames sharing sanitized forms must never collide.
+    p_q = cache.put_bytes("https://x/same", 1, "a?.pdf", b"first")
+    p_b = cache.put_bytes("https://x/same", 1, "a!.pdf", b"second")
+    assert p_q != p_b
+    assert p_q.read_bytes() == b"first"
+    assert p_b.read_bytes() == b"second"
+
+    # Boolean / non-finite time_modified values fall back cleanly to 0 without crashing.
+    p_bool = cache.put_bytes("https://x/mtime", True, "m.pdf", b"m1")  # type: ignore[arg-type]
+    assert cache.get_cached_path("https://x/mtime", 0, "m.pdf") == p_bool
+    p_inf = cache.put_bytes("https://x/mtime", float("inf"), "m.pdf", b"m2")  # type: ignore[arg-type]
+    assert p_inf == p_bool
+    assert p_inf.read_bytes() == b"m2"
+
+    # Rollback when os.replace raises leaves prior entry intact and no staging .tmp.* files.
+    target = cache.put_bytes("https://x/rollback", 10, "r.pdf", b"prior")
+
+    def failing_replace(_src, _dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        cache.put_bytes("https://x/rollback", 10, "r.pdf", b"corrupt-new")
+
+    assert target.read_bytes() == b"prior"
+    assert not any(p.name.startswith(".tmp.") for p in tmp_path.iterdir())
+
+
+def test_cache_store_validation_write_failures_and_parsing_edge_cases(tmp_path, monkeypatch):
+    from core.safe_file_io import SafeFileIO
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="edge-cases")
+
+    # Empty/whitespace course_key rejected cleanly.
+    with pytest.raises(ValueError):
+        store.set_pinned("", True)
+    with pytest.raises(ValueError):
+        store.set_pinned("   ", False)
+    with pytest.raises(ValueError):
+        store.set_unseen("", True)
+
+    # Seed persisted state, then simulate write_json_atomic failure.
+    store.set_pinned("courses:1", True)
+    store.set_unseen("courses:1", True)
+    r1 = RecentMaterialEntry(
+        course_key="courses:1",
+        course_name="SE",
+        cmid=1,
+        title="One",
+        attachment_url="https://courses.ut.edu.vn/1.pdf",
+        file_name="1.pdf",
+        opened_at=10,
+    )
+    r2 = RecentMaterialEntry(
+        course_key="courses:1",
+        course_name="SE",
+        cmid=2,
+        title="Two",
+        attachment_url="https://courses.ut.edu.vn/2.pdf",
+        file_name="2.pdf",
+        opened_at=20,
+    )
+    store.record_recent(r1)
+
+    monkeypatch.setattr(SafeFileIO, "write_json_atomic", staticmethod(lambda *_a, **_k: False))
+    assert store.set_pinned("courses:2", True) == ["courses:1"]
+    assert store.set_unseen("courses:2", True) == ["courses:1"]
+    assert store.record_recent(r2) == [r1]
+    monkeypatch.undo()
+
+    # Non-finite progress (NaN/Inf), visible=None -> True, negative cmid in recent_items.
+    store._catalog_path.write_text(
+        json.dumps(
+            {
+                "courses": [
+                    {
+                        "id": 1,
+                        "source": "courses",
+                        "fullname": "NaN Course",
+                        "shortname": "NC",
+                        "display_name": "NaN Course",
+                        "progress": float("nan"),
+                    },
+                    {
+                        "id": 2,
+                        "source": "courses",
+                        "fullname": "Inf Course",
+                        "shortname": "IC",
+                        "display_name": "Inf Course",
+                        "progress": float("inf"),
+                    },
+                ],
+                "recent_items": [
+                    {
+                        "course_key": "courses:1",
+                        "course_name": "SE",
+                        "cmid": -5,
+                        "title": "Bad",
+                        "attachment_url": "https://courses.ut.edu.vn/bad.pdf",
+                        "file_name": "bad.pdf",
+                        "opened_at": 100,
+                    }
+                ],
+            },
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+    cat = store.load_catalog()
+    assert [c.progress for c in cat.courses] == [None, None]
+    assert cat.recent_items == []
+
+    detail_path = store._detail_path("courses", 1)
+    detail_path.write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {
+                        "id": 10,
+                        "course_id": 1,
+                        "source": "courses",
+                        "section_num": 0,
+                        "name": "Visible None",
+                        "visible": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.load_course_detail("courses", 1).sections[0].visible is True
+
+    # known_cmids filters invalid/bool/negative items on save_course_detail.
+    store.save_course_detail(
+        "courses",
+        1,
+        [],
+        [],
+        synced_at=999,
+        known_cmids=[10, True, -3, "bad", 20],  # type: ignore[list-item]
+    )
+    assert store.load_course_detail("courses", 1).known_cmids == [10, 20]

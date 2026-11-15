@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import posixpath
 import re
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from core.safe_file_io import get_memory_lock
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_SAFE_NAME_LEN = 120
 _STALE_TMP_AGE_SECONDS = 300.0
+_STAGING_PREFIX = ".tmp."
+
+
+def _safe_mtime_int(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        numeric = float(value)
+        return int(numeric) if math.isfinite(numeric) else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _safe_filename(name: str) -> str:
@@ -48,11 +62,12 @@ class PreviewFileCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_bytes = max(1, int(max_bytes))
         self.max_age_seconds = max(60, int(max_age_seconds))
-        self._lock = threading.RLock()
+        self._lock = get_memory_lock(self.cache_dir / "__preview_dir__.lock")
 
     def _entry_path(self, key_url: str, time_modified: int, file_name: str) -> Path:
+        safe_mtime = _safe_mtime_int(time_modified)
         digest = hashlib.sha256(
-            f"{key_url}|{int(time_modified or 0)}".encode("utf-8")
+            f"{key_url}\0{safe_mtime}\0{file_name}".encode("utf-8")
         ).hexdigest()[:24]
         safe = _safe_filename(file_name)
         return self.cache_dir / f"{digest}_{safe}"
@@ -94,7 +109,7 @@ class PreviewFileCache:
             path = self._entry_path(key_url, time_modified, file_name)
             tmp = (
                 self.cache_dir
-                / f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+                / f"{_STAGING_PREFIX}{path.name}.{os.getpid()}.{threading.get_ident()}"
             )
             try:
                 with open(tmp, "wb") as handle:
@@ -128,7 +143,7 @@ class PreviewFileCache:
                 except OSError:
                     continue
 
-                if item.name.endswith(".tmp"):
+                if item.name.startswith(_STAGING_PREFIX):
                     if (now - st.st_mtime) > _STALE_TMP_AGE_SECONDS:
                         try:
                             item.unlink(missing_ok=True)
