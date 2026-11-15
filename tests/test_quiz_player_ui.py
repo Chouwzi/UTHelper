@@ -392,7 +392,9 @@ def test_controller_rebuild_colors_refreshes_quiz_player_theme():
         apply_theme(previous_theme)
 
 
-def test_failed_task_scheduler_releases_lease_and_shows_recovery():
+def test_failed_task_scheduler_releases_lease_and_shows_recovery(monkeypatch):
+    enable_native_runtime(monkeypatch)
+
     class UnschedulablePage(HeadlessPage):
         def run_task(self, _callback, *_args):
             raise RuntimeError("task runner unavailable")
