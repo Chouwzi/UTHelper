@@ -9,7 +9,7 @@ long-lived production and integration branches, adapted to GitHub pull requests.
 - `main` is production-ready. A change reaching `main` is a release candidate and is
   tagged only after the protected release checks pass.
 - `develop` is the integration branch for the next release.
-- `feature/*`, `bugfix/*`, `fix/*`, `docs/*`, `chore/*`, `refactor/*`, `perf/*`,
+- `feature/*` (or `feat/*`), `bugfix/*`, `fix/*`, `docs/*`, `chore/*`, `refactor/*`, `perf/*`,
   `test/*`, `ci/*`, `build/*`, and `codex/*` branch from `develop` and return to
   `develop` through a pull request.
 - `release/*` branches from `develop` when a stabilization branch is needed. It

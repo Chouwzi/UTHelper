@@ -10,7 +10,7 @@ def test_main_accepts_only_release_promotion_or_hotfixes():
     for head in ("develop", "release/2.3.0", "hotfix/2.2.12"):
         assert validate_pull_request("main", head) is None
 
-    for head in ("feature/calendar", "codex/cleanup", "main", "release/"):
+    for head in ("feature/calendar", "feat/calendar", "codex/cleanup", "main", "release/"):
         assert validate_pull_request("main", head) is not None
 
 
@@ -18,6 +18,7 @@ def test_develop_accepts_topics_and_main_back_sync():
     for head in (
         "main",
         "feature/calendar",
+        "feat/calendar",
         "bugfix/upload",
         "hotfix/2.2.12",
         "release/2.3.0",
@@ -26,7 +27,7 @@ def test_develop_accepts_topics_and_main_back_sync():
     ):
         assert validate_pull_request("develop", head) is None
 
-    for head in ("unknown", "feature/", "master"):
+    for head in ("unknown", "feature/", "feat/", "feat-calendar", "master"):
         assert validate_pull_request("develop", head) is not None
 
 

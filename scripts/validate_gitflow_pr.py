@@ -7,6 +7,7 @@ import argparse
 
 DEVELOP_PREFIXES = (
     "feature/",
+    "feat/",
     "bugfix/",
     "fix/",
     "hotfix/",

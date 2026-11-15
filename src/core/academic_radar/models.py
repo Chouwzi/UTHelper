@@ -75,6 +75,10 @@ class RadarProfile:
     training_point: float | None = None
     insight_text: str = ""
     scoring_version: int = 1
+    credits_registered: float | None = None
+    cumulative_gpa_10: float | None = None
+    cumulative_gpa_4: float | None = None
+    credits_cumulative: float | None = None
 
 
 @dataclass(frozen=True)

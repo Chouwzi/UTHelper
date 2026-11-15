@@ -333,3 +333,32 @@ def test_polygon_viability_threshold():
     profile = calculate_radar_profile(sem)
 
     assert profile.is_polygon_viable is False
+
+
+def test_profile_carries_credit_totals_and_cumulative_summary():
+    raw = {
+        "id": 1,
+        "tongKetDot": {
+            "diemTBHocLucTichLuy": 8.1,
+            "diemTBTinChiTichLuy": 3.2,
+            "soTCTichLuy": 60,
+        },
+        "diems": [
+            {"soTinChi": 3, "diemTongKet": 8},
+            {"soTinChi": 2},
+            {"soTinChi": 0},
+        ],
+    }
+    profile = calculate_radar_profile(SemesterNormalizer().normalize_semester(raw))
+    assert profile.credits_registered == 5
+    assert profile.cumulative_gpa_10 == 8.1
+    assert profile.cumulative_gpa_4 == 3.2
+    assert profile.credits_cumulative == 60
+
+
+def test_profile_missing_credit_data_remains_unknown():
+    profile = calculate_radar_profile(SemesterGradeData(id=1, name="Empty"))
+    assert profile.credits_registered is None
+    assert profile.credits_cumulative is None
+    assert profile.cumulative_gpa_10 is None
+    assert profile.cumulative_gpa_4 is None

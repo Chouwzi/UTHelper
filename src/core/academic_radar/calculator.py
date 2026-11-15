@@ -459,4 +459,10 @@ def calculate_radar_profile(
         training_point=float(training_point) if training_point is not None else None,
         insight_text=insight,
         scoring_version=config.scoring_version,
+        credits_registered=(
+            sum(c.credits for c in courses if c.credits > 0) if courses else None
+        ),
+        cumulative_gpa_10=summary.get("diemTBHocLucTichLuy"),
+        cumulative_gpa_4=summary.get("diemTBTinChiTichLuy"),
+        credits_cumulative=summary.get("soTCTichLuy"),
     )

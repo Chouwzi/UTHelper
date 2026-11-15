@@ -96,10 +96,12 @@ def test_startup_screen_publishes_compact_window_with_logo_and_animation():
 
     _show_startup_screen(page, ft, publish=True)
 
-    assert (page.window.width, page.window.height) == (420, 720)
-    assert (page.window.min_width, page.window.max_width) == (420, 420)
-    assert page.window.resizable is False
-    assert page.window.maximizable is False
+    assert (page.window.width, page.window.height) == (1120, 760)
+    assert page.window.min_width == 420
+    assert page.window.min_height == 560
+    assert page.window.max_width is None
+    assert page.window.resizable is True
+    assert page.window.maximizable is True
     assert page.window.minimizable is True
     assert page.window.title_bar_hidden is True
     assert page.window.title_bar_buttons_hidden is True
@@ -267,7 +269,7 @@ def test_activation_broker_is_ready_before_initial_window_state_is_published(
     controller._init_window()
 
     assert page.window.visible is expected_visible
-    assert page.window.maximizable is False
+    assert page.window.maximizable is True
     assert page.window.minimizable is True
     assert page.window.title_bar_hidden is True
     assert page.window.title_bar_buttons_hidden is True
