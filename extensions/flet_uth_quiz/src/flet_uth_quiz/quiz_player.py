@@ -1,7 +1,5 @@
 """Python facade for the native Moodle quiz WebView."""
 
-from __future__ import annotations
-
 import re
 from typing import Optional
 from urllib.parse import urlsplit
@@ -28,10 +26,10 @@ class UthQuizPlayer(LayoutControl):
     url: str
     session_key: str
     expand: bool | int | None = True
-    on_ready: Optional[ft.EventHandler[ft.ControlEvent]] = None
-    on_close: Optional[ft.EventHandler[ft.ControlEvent]] = None
-    on_error: Optional[ft.EventHandler[ft.ControlEvent]] = None
-    on_external_link: Optional[ft.EventHandler[ft.ControlEvent]] = None
+    on_ready: Optional[ft.ControlEventHandler["UthQuizPlayer"]] = None
+    on_close: Optional[ft.ControlEventHandler["UthQuizPlayer"]] = None
+    on_error: Optional[ft.ControlEventHandler["UthQuizPlayer"]] = None
+    on_external_link: Optional[ft.ControlEventHandler["UthQuizPlayer"]] = None
 
     def __post_init__(self, ref: object | None = None) -> None:
         super().__post_init__(ref)

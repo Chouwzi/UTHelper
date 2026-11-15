@@ -3,6 +3,34 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.mark.parametrize(
+    ("event_name", "code"),
+    [("ready", "ready"), ("close", "closed"), ("error", "load_timeout"),
+     ("external_link", "external_link")],
+)
+def test_native_events_dispatch_through_flet(event_name, code, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from flet_uth_quiz import UthQuizPlayer
+
+    received = []
+    control = UthQuizPlayer(
+        url="https://courses.ut.edu.vn/mod/quiz/view.php?id=42",
+        session_key="a1" * 32,
+        **{f"on_{event_name}": lambda event: received.append(event)},
+    )
+    session = SimpleNamespace(index={control._i: control}, after_event=AsyncMock())
+    monkeypatch.setattr(type(control), "page", property(lambda self: SimpleNamespace(session=session)))
+
+    asyncio.run(control._trigger_event(event_name, code))
+
+    assert len(received) == 1
+    assert received[0].data == code
+    assert received[0].control is control
+    session.after_event.assert_awaited_once_with(control)
+
+
 def test_control_constructs_with_safe_event_handlers():
     from flet_uth_quiz import UthQuizPlayer
 
