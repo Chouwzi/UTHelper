@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 
 @pytest.mark.parametrize(
     ("event_name", "code"),
     [("ready", "ready"), ("close", "closed"), ("error", "load_timeout"),
-     ("external_link", "external_link")],
+     ("external_link", "external_link"),
+     ("session_expired", "session_expired")],
 )
 def test_native_events_dispatch_through_flet(event_name, code, monkeypatch):
     import asyncio
@@ -46,9 +50,100 @@ def test_control_constructs_with_safe_event_handlers():
 
     assert control._c == "UthQuizPlayer"
     assert control.expand is True
+    assert control.require_session is False
     assert control.url.startswith("https://moodle.example.edu/")
     assert control.session_key == "a1" * 32
     assert set(received) == set()
+
+
+def test_bootstrap_sends_cookies_over_data_channel_not_invoke_arguments(monkeypatch):
+    from flet_uth_quiz import UthQuizPlayer
+
+    class FakeChannel:
+        payload = None
+
+        def send(self, payload):
+            self.payload = payload
+
+    control = UthQuizPlayer(
+        url="https://courses.ut.edu.vn/mod/quiz/view.php?id=42",
+        session_key="a1" * 32,
+        require_session=True,
+    )
+    channel = FakeChannel()
+    control._session_channel = channel
+    control._session_channel_id = 17
+    control._session_channel_ready.set()
+    invocation = {}
+
+    async def invoke(name, arguments, timeout=None):
+        invocation.update(name=name, arguments=arguments, timeout=timeout)
+        return True
+
+    monkeypatch.setattr(control, "_invoke_method", invoke)
+    secret_cookie = "test-session-cookie-4d932"
+    cookies = [
+        {
+            "name": "MoodleSession",
+            "value": secret_cookie,
+            "domain": None,
+            "path": "/",
+            "secure": True,
+            "http_only": True,
+            "same_site": "Lax",
+            "expires": None,
+        }
+    ]
+
+    assert asyncio.run(control.bootstrap_session(cookies)) is True
+    assert json.loads(channel.payload) == {"cookies": cookies}
+    assert invocation == {
+        "name": "bootstrap_session",
+        "arguments": {"channel_id": 17},
+        "timeout": 15,
+    }
+    assert secret_cookie not in repr(invocation)
+    assert secret_cookie not in repr(control)
+    assert "cookies" not in repr(control)
+
+
+def test_bootstrap_failure_hides_runtime_details(monkeypatch):
+    from flet_uth_quiz import UthQuizPlayer
+
+    class FakeChannel:
+        def send(self, _payload):
+            pass
+
+    control = UthQuizPlayer(
+        url="https://courses.ut.edu.vn/mod/quiz/view.php?id=42",
+        session_key="a1" * 32,
+        require_session=True,
+    )
+    control._session_channel = FakeChannel()
+    control._session_channel_id = 17
+    control._session_channel_ready.set()
+
+    async def invoke(*_args, **_kwargs):
+        raise TimeoutError("timeout included secret-session-value")
+
+    monkeypatch.setattr(control, "_invoke_method", invoke)
+    cookies = [
+        {
+            "name": "MoodleSession",
+            "value": "secret-session-value",
+            "domain": None,
+            "path": "/",
+            "secure": True,
+            "http_only": True,
+            "same_site": None,
+            "expires": None,
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="^session_unavailable$") as error:
+        asyncio.run(control.bootstrap_session(cookies))
+    assert "secret-session-value" not in repr(error.value)
+    assert error.value.__suppress_context__
 
 
 @pytest.mark.parametrize(
@@ -91,7 +186,12 @@ def test_flutter_extension_registers_native_widget_and_privacy_boundaries():
     assert "onCreateWindow" in widget
     assert "onCloseWindow" in widget
     assert "load_timeout" in widget
-    assert "CookieManager.instance().deleteAllCookies()" in widget
+    assert "_cookieManager().deleteAllCookies()" in widget
+    assert "openDataChannel()" in widget
+    assert "data_channel_open" in widget
+    assert "channel.messages.listen(_onSessionPayload)" in widget
+    assert "channel_id" in widget
+    assert "setCookie(" in widget
     assert "session_key" in widget
     assert "window.location" not in widget
     assert "evaluateJavascript" not in widget

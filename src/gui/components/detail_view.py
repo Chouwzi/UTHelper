@@ -629,6 +629,19 @@ class DetailView(ft.Container):
             text_align=ft.TextAlign.CENTER,
             visible=False,
         )
+        self._quiz_auth_btn = ft.Button(
+            "Đăng nhập",
+            icon=ft.Icons.LOGIN_ROUNDED,
+            on_click=self._login_for_quiz,
+            bgcolor=C.ACCENT,
+            color=C.ON_ACCENT,
+            expand=True,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=13),
+            ),
+            visible=False,
+        )
 
         self._opentime_row = ft.Row(controls=[
                     ft.Text("Mở từ", size=11, color=C.TEXT_SECONDARY,
@@ -736,6 +749,7 @@ class DetailView(ft.Container):
                                     controls=[
                                         self._open_btn,
                                         self._quiz_open_btn,
+                                        self._quiz_auth_btn,
                                         self._quiz_runtime_notice,
                                     ],
                                     spacing=8,
@@ -771,6 +785,9 @@ class DetailView(ft.Container):
         quiz_runtime_notice = getattr(self, "_quiz_runtime_notice", None)
         if quiz_runtime_notice is not None:
             quiz_runtime_notice.visible = False
+        quiz_auth_btn = getattr(self, "_quiz_auth_btn", None)
+        if quiz_auth_btn is not None:
+            quiz_auth_btn.visible = False
         if hasattr(self, "_quiz_launch_target"):
             self._quiz_launch_target = None
         self._title_text.value  = data.get("title", "Đang tải...")
@@ -855,6 +872,7 @@ class DetailView(ft.Container):
         self._open_btn.visible = browser_available
         self._header_open_btn.visible = browser_available
         self._quiz_open_btn.visible = False
+        self._quiz_auth_btn.visible = False
         self._quiz_runtime_notice.visible = False
         self._quiz_launch_target = None
         self._content_col.controls.clear()
@@ -1026,6 +1044,8 @@ class DetailView(ft.Container):
                     "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
                 )
                 self._quiz_runtime_notice.visible = True
+            elif player_state == "missing_account":
+                self._quiz_auth_btn.visible = True
 
         details = data.get("details", {})
 
@@ -1274,7 +1294,19 @@ class DetailView(ft.Container):
         target = self._quiz_launch_target
         if target is None or self._quiz_player_view is None:
             return
-        opened = self._quiz_player_view.open_activity(target, self._current_data)
+        account_id = ""
+        if callable(self._get_quiz_account_id):
+            try:
+                account_id = self._get_quiz_account_id() or ""
+            except Exception:
+                logger.debug("Quiz account identity is unavailable", exc_info=True)
+        open_for_account = getattr(
+            self._quiz_player_view, "open_activity_for_account", None
+        )
+        if callable(open_for_account):
+            opened = open_for_account(target, self._current_data, account_id)
+        else:
+            opened = self._quiz_player_view.open_activity(target, self._current_data)
         if not opened and not self._quiz_player_view.visible:
             self._open_btn.visible = True
             self._quiz_open_btn.visible = False
@@ -1287,6 +1319,24 @@ class DetailView(ft.Container):
                 self._page.update()
             except Exception:
                 pass
+
+    async def _login_for_quiz(self, _event=None):
+        player_view = self._quiz_player_view
+        request_app_auth = getattr(player_view, "request_app_auth", None)
+        if not callable(request_app_auth):
+            return
+
+        async def refresh_quiz_target():
+            self.update_detail(dict(self._current_data))
+            try:
+                self._page.update()
+            except Exception:
+                pass
+
+        try:
+            await request_app_auth(refresh_quiz_target)
+        except Exception:
+            logger.warning("Quiz app login could not be opened")
 
     async def focus_quiz_opener(self) -> None:
         """Restore keyboard focus after the quiz surface closes when possible."""

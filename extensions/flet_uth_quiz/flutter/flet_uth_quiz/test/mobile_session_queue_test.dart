@@ -1,13 +1,13 @@
 import 'dart:async';
 
-import 'package:flet_uth_quiz/src/android_session_queue.dart';
+import 'package:flet_uth_quiz/src/mobile_session_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
     'disposing a queued session does not bypass the active session',
     () async {
-      final queue = AndroidSessionQueue();
+      final queue = MobileSessionQueue();
       final first = await queue.acquire(cancelled: Completer<void>().future);
       expect(first, isNotNull);
 
@@ -16,12 +16,11 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       var thirdCompleted = false;
-      final thirdFuture = queue
-          .acquire(cancelled: Completer<void>().future)
-          .then((lease) {
-            thirdCompleted = true;
-            return lease;
-          });
+      final thirdFuture =
+          queue.acquire(cancelled: Completer<void>().future).then((lease) {
+        thirdCompleted = true;
+        return lease;
+      });
 
       cancelSecond.complete();
       expect(await second, isNull);

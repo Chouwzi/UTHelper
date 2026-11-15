@@ -179,23 +179,27 @@ class QuizSessionLease:
         self.session_key = session_key
         self._ready = ready
         self._released = False
-        self._release_lock = threading.Lock()
 
     @property
     def is_ready(self) -> bool:
         """Whether an HTML login already in progress has finished."""
         return self._ready.is_set()
 
+    @property
+    def is_active(self) -> bool:
+        """Whether this particular lease still holds the session."""
+        with _session_state:
+            return not self._released and _active_leases.get(self.session_key, 0) > 0
+
     def wait_until_ready(self, timeout: float | None = None) -> bool:
         """Wait until a login that predates this lease has completed."""
         return self._ready.wait(timeout)
 
     def release(self) -> None:
-        with self._release_lock:
+        with _session_state:
             if self._released:
                 return
             self._released = True
-        with _session_state:
             count = _active_leases.get(self.session_key, 0)
             if count <= 1:
                 _active_leases.pop(self.session_key, None)
@@ -230,12 +234,26 @@ def acquire_quiz_session_lease(session_key: str) -> QuizSessionLease:
     return QuizSessionLease(session_key, ready)
 
 
-def _begin_quiz_session_login(session_key: str) -> bool:
-    """Reserve a short-lived HTML login slot unless a quiz holds the session."""
+def _begin_quiz_session_login(
+    session_key: str,
+    *,
+    lease: QuizSessionLease | None = None,
+) -> bool:
+    """Reserve one HTML login slot, optionally owned by an active player lease."""
     with _session_state:
-        if _active_leases.get(session_key, 0):
+        if _inflight_logins.get(session_key, 0):
             return False
-        _inflight_logins[session_key] = _inflight_logins.get(session_key, 0) + 1
+        active_leases = _active_leases.get(session_key, 0)
+        if lease is None:
+            if active_leases:
+                return False
+        elif (
+            lease.session_key != session_key
+            or lease._released
+            or not active_leases
+        ):
+            return False
+        _inflight_logins[session_key] = 1
         return True
 
 

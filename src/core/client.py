@@ -15,6 +15,7 @@ from core.moodle_sites import (
     moodle_site_from_origin,
 )
 from core.quiz_player import (
+    QuizSessionLease,
     _begin_quiz_session_login,
     _end_quiz_session_login,
     quiz_session_key,
@@ -240,9 +241,16 @@ class MoodleClient:
             raise ValueError("Moodle web response was too large")
         return final_url, body.decode("utf-8", errors="replace")
 
-    def login_session(self, username: str = None, password: str = None, force: bool = False) -> bool:
+    def login_session(
+        self,
+        username: str = None,
+        password: str = None,
+        force: bool = False,
+        *,
+        quiz_lease: QuizSessionLease | None = None,
+    ) -> bool:
         """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey."""
-        if not force and self._sesskey:
+        if not force and self._sesskey and quiz_lease is None:
             return True
 
         if not username:
@@ -259,7 +267,13 @@ class MoodleClient:
         except ValueError:
             self._last_login_error = "invalid_credentials"
             return False
-        if not _begin_quiz_session_login(session_key):
+        if quiz_lease is not None and (
+            quiz_lease.session_key != session_key or not quiz_lease.is_active
+        ):
+            self._last_login_error = "quiz_session_lease_invalid"
+            return False
+
+        if not _begin_quiz_session_login(session_key, lease=quiz_lease):
             # Leave the existing cookie jar and sesskey intact while a quiz
             # player holds this account/site session.
             self._last_login_error = "quiz_session_active"
@@ -313,7 +327,12 @@ class MoodleClient:
             return False
 
         except Exception as e:
-            logger.error(f"Lỗi login_session: {e}")
+            if quiz_lease is not None:
+                logger.warning(
+                    "Quiz HTML session login failed (%s)", type(e).__name__
+                )
+            else:
+                logger.error(f"Lỗi login_session: {e}")
             self._last_login_error = "network_error"
             return False
         finally:

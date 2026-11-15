@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _READY_TIMEOUT_SECONDS = 12
 _LOGIN_WAIT_TIMEOUT_SECONDS = 15
+_SESSION_PREPARE_TIMEOUT_SECONDS = 30
 
 
 def _native_runtime_supported(page=None) -> bool:
@@ -51,6 +52,12 @@ def _default_lease_provider():
     return acquire_quiz_session_lease
 
 
+def _default_session_provider():
+    from core.quiz_web_session import prepare_quiz_web_session
+
+    return prepare_quiz_web_session
+
+
 class QuizPlayerView(ft.Container):
     """A dismissible full-screen player that leaves quiz work to Moodle."""
 
@@ -62,6 +69,9 @@ class QuizPlayerView(ft.Container):
         player_factory: Callable | None = None,
         target_builder: Callable | None = None,
         lease_provider: Callable | None = None,
+        session_provider: Callable | None = None,
+        account_id_provider: Callable | None = None,
+        on_auth_required: Callable | None = None,
         ready_timeout_seconds: float = _READY_TIMEOUT_SECONDS,
     ):
         self._page = page
@@ -69,12 +79,19 @@ class QuizPlayerView(ft.Container):
         self._player_factory = player_factory
         self._target_builder = target_builder
         self._lease_provider = lease_provider
+        self._session_provider = session_provider
+        self._account_id_provider = account_id_provider
+        self._on_auth_required = on_auth_required
         self._ready_timeout_seconds = max(0.1, float(ready_timeout_seconds))
 
         self._player = None
         self._lease = None
         self._target = None
         self._activity: dict[str, Any] | None = None
+        self._account_id = ""
+        self._pending_cookies: list[dict[str, Any]] | None = None
+        self._bootstrap_started = False
+        self._auth_request_active = False
         self._generation = 0
         self._ready = False
         self._close_pending = False
@@ -142,9 +159,15 @@ class QuizPlayerView(ft.Container):
             ),
             visible=False,
         )
+        self._auth_button = ft.TextButton(
+            "Đăng nhập lại",
+            icon=ft.Icons.LOGIN_ROUNDED,
+            on_click=self._request_authentication,
+            visible=False,
+        )
         self._error_actions = ft.Container(
             content=ft.Column(
-                controls=[self._browser_button],
+                controls=[self._auth_button, self._browser_button],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             padding=ft.Padding.only(top=10),
@@ -310,6 +333,9 @@ class QuizPlayerView(ft.Container):
         self._ready = False
         self._close_pending = False
         self._after_close = None
+        self._auth_request_active = False
+        self._bootstrap_started = False
+        self._clear_pending_cookies()
         self._external_notice.visible = False
         self._external_notice_row.visible = False
         self._error_actions.visible = False
@@ -330,10 +356,21 @@ class QuizPlayerView(ft.Container):
             return False
 
         self._safe_update()
-        if not self._run_task(self._mount_when_session_ready, generation, factory):
+        if not self._run_task(
+            self._prepare_session_and_mount, generation, factory
+        ):
             self._show_mount_error("player_unavailable")
             return False
         return True
+
+    def open_activity_for_account(
+        self,
+        target,
+        activity: Mapping[str, Any],
+        account_id: str,
+    ) -> bool:
+        self._account_id = str(account_id or "")
+        return self.open_activity(target, activity)
 
     def _run_task(self, coroutine, *args):
         runner = getattr(self._page, "run_task", None)
@@ -352,7 +389,9 @@ class QuizPlayerView(ft.Container):
             logger.debug("Quiz player task could not be scheduled")
             return False
 
-    async def _mount_when_session_ready(self, generation: int, factory: Callable):
+    async def _prepare_session_and_mount(
+        self, generation: int, factory: Callable
+    ):
         lease = self._lease
         if lease is None:
             return
@@ -362,22 +401,66 @@ class QuizPlayerView(ft.Container):
                 _LOGIN_WAIT_TIMEOUT_SECONDS,
             )
             if not ready:
-                self._show_mount_error("player_unavailable")
+                if (
+                    generation == self._generation
+                    and self.visible
+                    and self._lease is lease
+                ):
+                    self._show_mount_error("player_unavailable")
                 return
         if generation != self._generation or not self.visible or self._lease is not lease:
             return
 
         try:
+            provider = self._session_provider or _default_session_provider()
+            session_task = asyncio.create_task(
+                asyncio.to_thread(provider, self._target, lease)
+            )
+            done, _ = await asyncio.wait(
+                {session_task},
+                timeout=_SESSION_PREPARE_TIMEOUT_SECONDS,
+            )
+            if not done:
+                session_task.add_done_callback(self._clear_late_session_result)
+                if (
+                    generation == self._generation
+                    and self.visible
+                    and self._lease is lease
+                ):
+                    self._show_recovery_message("session_timeout")
+                return
+            session = session_task.result()
+            cookies = session.to_native_cookies()
+            del session
+            if (
+                generation != self._generation
+                or not self.visible
+                or self._lease is not lease
+            ):
+                self._clear_cookies(cookies)
+                return
+            if not cookies:
+                if (
+                    generation == self._generation
+                    and self.visible
+                    and self._lease is lease
+                ):
+                    self._show_recovery_message("session_cookie_missing")
+                return
+            self._pending_cookies = cookies
+            self._bootstrap_started = False
             self._player = factory(
                 url=self._target.url,
                 session_key=self._target.session_key,
-                on_ready=lambda event=None: self._on_player_ready(
-                    generation, event
-                ),
+                require_session=True,
+                on_ready=self._bootstrap_callbacks(generation),
                 on_close=lambda event=None: self._on_player_close(
                     generation, event
                 ),
                 on_error=lambda event=None: self._on_player_error(
+                    generation, event
+                ),
+                on_session_expired=lambda event=None: self._on_session_expired(
                     generation, event
                 ),
                 on_external_link=lambda event=None: self._on_external_link(
@@ -388,8 +471,51 @@ class QuizPlayerView(ft.Container):
             self._safe_update()
             self._run_task(self._wait_for_ready, generation)
         except Exception as exc:
-            logger.warning("Quiz player mount failed (%s)", type(exc).__name__)
-            self._show_mount_error("player_unavailable")
+            reason = getattr(exc, "reason", "")
+            logger.info("Quiz session preparation failed (%s)", type(exc).__name__)
+            if (
+                generation == self._generation
+                and self.visible
+                and self._lease is lease
+            ):
+                self._clear_pending_cookies()
+                self._show_recovery_message(reason or "session_unavailable")
+
+    @classmethod
+    def _clear_late_session_result(cls, future):
+        try:
+            session = future.result()
+            cookies = session.to_native_cookies()
+            cls._clear_cookies(cookies)
+            clear = getattr(session, "clear", None)
+            if callable(clear):
+                clear()
+            del session
+        except Exception:
+            # Never surface an expired worker result or an exception that may
+            # contain a server response or credential detail.
+            return
+
+    @staticmethod
+    def _clear_cookies(cookies):
+        if not isinstance(cookies, list):
+            return
+        for cookie in cookies:
+            if isinstance(cookie, dict):
+                cookie.clear()
+        cookies.clear()
+
+    def _clear_pending_cookies(self):
+        cookies = self._pending_cookies
+        self._pending_cookies = None
+        if cookies is not None:
+            self._clear_cookies(cookies)
+
+    def _bootstrap_callbacks(self, generation: int):
+        async def on_ready(event=None):
+            await self._on_player_ready(generation, event)
+
+        return on_ready
 
     async def _wait_for_ready(self, generation: int):
         await asyncio.sleep(self._ready_timeout_seconds)
@@ -402,14 +528,36 @@ class QuizPlayerView(ft.Container):
             return
         self._show_recovery_message("player_unavailable")
 
-    def _on_player_ready(self, generation: int, _event=None):
+    async def _on_player_ready(self, generation: int, _event=None):
         if generation != self._generation or not self.visible:
             return
-        self._ready = True
-        self._status_panel.visible = False
-        self._loading.visible = False
-        self._error_actions.visible = False
-        self._safe_update()
+        if self._bootstrap_started:
+            return
+        player = self._player
+        cookies = self._pending_cookies
+        if player is None or cookies is None:
+            return
+        self._bootstrap_started = True
+        self._pending_cookies = None
+        try:
+            bootstrapped = await player.bootstrap_session(cookies)
+            if generation != self._generation or not self.visible:
+                return
+            if bootstrapped is False:
+                self._show_recovery_message("login_failed")
+                return
+            self._ready = True
+            self._status_panel.visible = False
+            self._loading.visible = False
+            self._error_actions.visible = False
+            self._auth_button.visible = False
+            self._safe_update()
+        except Exception as exc:
+            logger.info("Quiz session bootstrap failed (%s)", type(exc).__name__)
+            if generation == self._generation and self.visible:
+                self._show_recovery_message("login_failed")
+        finally:
+            self._clear_cookies(cookies)
 
     def _on_player_close(self, generation: int, _event=None):
         if generation != self._generation or not self.visible:
@@ -426,6 +574,11 @@ class QuizPlayerView(ft.Container):
             self._show_mount_error(code)
         else:
             self._show_recovery_message(code)
+
+    def _on_session_expired(self, generation: int, _event=None):
+        if generation != self._generation or not self.visible:
+            return
+        self._show_recovery_message("session_expired")
 
     def _on_external_link(self, generation: int, _event=None):
         if generation != self._generation or not self.visible:
@@ -449,10 +602,12 @@ class QuizPlayerView(ft.Container):
         self._status_panel.visible = True
         self._error_actions.visible = True
         self._browser_button.visible = True
+        self._auth_button.visible = False
         player = self._player
         self._player = None
         self._player_host.content = None
         self._ready = False
+        self._clear_pending_cookies()
         self._release_lease()
         if player is not None:
             self._generation += 1
@@ -465,6 +620,17 @@ class QuizPlayerView(ft.Container):
             "load_timeout": "Trang không phản hồi. Hãy kiểm tra kết nối hoặc mở bằng trình duyệt.",
             "navigation_error": "Không thể tải trang. Hãy kiểm tra kết nối hoặc mở bằng trình duyệt.",
             "player_unavailable": "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt.",
+            "session_timeout": "Chưa lấy được phiên Moodle. Thử lại hoặc mở bằng trình duyệt.",
+            "session_unavailable": "Không thể đăng nhập Moodle trong ứng dụng. Đăng nhập lại hoặc mở bằng trình duyệt.",
+            "session_lease_inactive": "Phiên Moodle đã hết hạn. Đăng nhập lại hoặc mở bằng trình duyệt.",
+            "session_site_mismatch": "Không thể dùng phiên Moodle cho trang này. Đăng nhập lại hoặc mở bằng trình duyệt.",
+            "session_not_ready": "Đang chờ phiên Moodle. Thử lại sau hoặc mở bằng trình duyệt.",
+            "missing_credentials": "Hãy đăng nhập UTHelper để làm bài trong ứng dụng.",
+            "account_mismatch": "Tài khoản Moodle đã thay đổi. Đăng nhập lại để làm bài.",
+            "site_credentials_unavailable": "Chưa có thông tin đăng nhập cho trang Moodle này.",
+            "login_failed": "Không đăng nhập được Moodle. Kiểm tra tài khoản trong UTHelper.",
+            "session_cookie_missing": "Không nhận được phiên Moodle. Đăng nhập lại hoặc mở bằng trình duyệt.",
+            "session_expired": "Phiên Moodle hết hạn. Đăng nhập lại sau khi đóng bài.",
         }
         self._status_text.value = messages.get(
             code,
@@ -472,9 +638,104 @@ class QuizPlayerView(ft.Container):
         )
         self._loading.visible = False
         self._status_panel.visible = True
-        self._error_actions.visible = code == "player_unavailable"
-        self._browser_button.visible = code == "player_unavailable"
+        auth_reasons = {
+            "missing_credentials",
+            "account_mismatch",
+            "site_credentials_unavailable",
+            "login_failed",
+            "session_cookie_missing",
+            "session_lease_inactive",
+        }
+        needs_auth = code in auth_reasons
+        can_offer_auth = callable(self._on_auth_required) and code != "session_expired"
+        self._error_actions.visible = code in {
+            "player_unavailable",
+            "session_timeout",
+            "session_unavailable",
+            *auth_reasons,
+            "session_expired",
+        }
+        self._browser_button.visible = self._error_actions.visible
+        self._auth_button.visible = needs_auth and can_offer_auth
         self._safe_update()
+
+    async def _request_authentication(self, _event=None):
+        if (
+            not callable(self._on_auth_required)
+            or not self.visible
+            or self._auth_request_active
+            or self._ready
+        ):
+            return
+        self._auth_request_active = True
+        try:
+            await self._call_maybe_async(
+                self._on_auth_required, self._retry_after_auth
+            )
+        finally:
+            self._auth_request_active = False
+
+    async def request_app_auth(self, retry_callback: Callable):
+        """Open the app credential dialog for a quiz without a player yet."""
+        if callable(self._on_auth_required):
+            await self._call_maybe_async(self._on_auth_required, retry_callback)
+
+    async def _retry_after_auth(self):
+        if (
+            not self.visible
+            or self._activity is None
+            or self._lease is None
+            or self._ready
+        ):
+            return
+        # Invalidate every callback from the failed pre-bootstrap widget before
+        # replacing it. Active quiz pages never use this retry path.
+        self._generation += 1
+        generation = self._generation
+        self._clear_pending_cookies()
+        self._player_host.content = None
+        self._player = None
+        self._bootstrap_started = False
+        self._status_text.value = "Đang kết nối với Moodle..."
+        self._loading.visible = True
+        self._status_panel.visible = True
+        self._auth_button.visible = False
+        self._browser_button.visible = False
+        self._error_actions.visible = False
+
+        account_id = self._account_id
+        if callable(self._account_id_provider):
+            try:
+                account_id = self._account_id_provider() or ""
+            except Exception:
+                account_id = ""
+        if not account_id:
+            self._show_recovery_message("missing_credentials")
+            return
+        if account_id.casefold() != self._account_id.casefold():
+            try:
+                target, state = self.prepare_activity(self._activity, account_id)
+                if target is None or state is not None:
+                    self._show_recovery_message(state or "session_unavailable")
+                    return
+                lease_provider = self._lease_provider or _default_lease_provider()
+                new_lease = lease_provider(target.session_key)
+            except Exception as exc:
+                self._show_recovery_message(
+                    getattr(exc, "reason", "session_unavailable")
+                )
+                return
+            self._release_lease()
+            self._target = target
+            self._lease = new_lease
+            self._account_id = account_id
+
+        factory = self._resolve_player_factory()
+        if factory is None:
+            self._show_mount_error("player_unavailable")
+            return
+        if not self._run_task(self._prepare_session_and_mount, generation, factory):
+            self._show_mount_error("player_unavailable")
 
     async def _open_in_browser(self, _event=None):
         target = self._target
@@ -562,6 +823,7 @@ class QuizPlayerView(ft.Container):
         activity = self._activity
         after_close = self._after_close
         self._after_close = None
+        self._account_id = ""
         self._generation += 1
         self.visible = False
         self._player_host.content = None
@@ -569,8 +831,10 @@ class QuizPlayerView(ft.Container):
         self._target = None
         self._activity = None
         self._ready = False
+        self._auth_request_active = False
         self._status_panel.visible = False
         self._error_actions.visible = False
+        self._clear_pending_cookies()
         self._release_lease()
         self._restore_desktop_window()
         self._safe_update()

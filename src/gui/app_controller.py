@@ -349,6 +349,26 @@ class AppController:
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
+    async def _show_quiz_auth_dialog(self, retry_callback):
+        """Reuse the app credential dialog, then retry Moodle session setup."""
+        from gui.components.login_dialog import show_login_dialog
+
+        self._diag_screen("login")
+        self._diag_breadcrumb("login", "started", "quiz_player", screen="login")
+
+        async def _on_login_success():
+            self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
+            self._diag_screen("home")
+            try:
+                self._portal_client.clear_token()
+            except Exception:
+                logger.debug("Portal token clear failed after quiz login", exc_info=True)
+            self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
+            await self._load_data_async()
+            await retry_callback()
+
+        await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
         from platform_utils.autostart import create_autostart_service
@@ -1003,6 +1023,8 @@ class AppController:
         self.quiz_player_view = QuizPlayerView(
             self.page,
             on_closed=self._on_quiz_player_closed,
+            account_id_provider=lambda: settings.UTH_USERNAME,
+            on_auth_required=self._show_quiz_auth_dialog,
         )
         self.detail_view   = DetailView(
             self.page,
