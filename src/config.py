@@ -213,6 +213,7 @@ class Settings(BaseModel):
     )
     SETTINGS_SCHEMA_VERSION: int = Field(default=4, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
+    COURSES_SYNC_INTERVAL_HOURS: int = Field(default=6, description="Chu kỳ làm tươi nền danh mục môn học (giờ)")
     # Deprecated compatibility fields. Runtime scheduling uses only
     # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
     # settings file can still be read without silently losing its values.
