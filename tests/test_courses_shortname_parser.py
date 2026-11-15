@@ -200,6 +200,41 @@ def test_parse_rejects_single_four_digit_year_and_cross_field_semester_match():
     assert single_in_short_valid_in_full.semester_label == "HKI 2026-2027"
     assert single_in_short_valid_in_full.semester_sort_key == (2026, 3)
 
+    single_year_2021 = parse_course_identity(
+        shortname="AI_2021",
+        fullname="[HKI 2021] Nhập môn AI",
+    )
+    assert single_year_2021.semester_label == "Khác"
+    assert single_year_2021.semester_sort_key == (0, 0)
+
+    dashed_20_21 = parse_course_identity(
+        shortname="AI_2020",
+        fullname="[HKI 20-21] Nhập môn AI",
+    )
+    assert dashed_20_21.semester_label == "HKI 2020-2021"
+    assert dashed_20_21.semester_sort_key == (2020, 3)
+
+    adjacent_tokens = parse_course_identity(
+        shortname="HKI 2026_HKI2627",
+        fullname="Môn học",
+    )
+    assert adjacent_tokens.semester_label == "HKI 2026-2027"
+    assert adjacent_tokens.semester_sort_key == (2026, 3)
+
+    adjacent_underscore_tokens = parse_course_identity(
+        shortname="HKI_2026_HKI2627",
+        fullname="Môn học",
+    )
+    assert adjacent_underscore_tokens.semester_label == "HKI 2026-2027"
+    assert adjacent_underscore_tokens.semester_sort_key == (2026, 3)
+
+    adjacent_long_tokens = parse_course_identity(
+        shortname="HKI_2026-2029_HKI2026-2027",
+        fullname="Môn học",
+    )
+    assert adjacent_long_tokens.semester_label == "HKI 2026-2027"
+    assert adjacent_long_tokens.semester_sort_key == (2026, 3)
+
 
 def test_parse_uth_shortname_handles_separated_semester_underscores_entities_and_dashes():
     spaced_sem = parse_course_identity(
@@ -267,4 +302,47 @@ def test_extract_teacher_and_meet_info_mailto_zoom_subdomain_punctuation_and_non
     assert info.teacher_email == "binh.vo@ut.edu.vn"
     assert info.meet_url == "https://uth.zoom.us/j/0912345678?pwd=xyz"
     assert info.teacher_phone == ""
+
+
+def test_extract_teacher_info_preserves_pretty_printed_table_and_wrapped_paragraphs():
+    pretty_table_html = """
+    <table>
+      <tr>
+        <td>Giảng viên:</td>
+        <td>Võ Văn Bình</td>
+      </tr>
+      <tr>
+        <td>Email:</td>
+        <td>binh.vo@ut.edu.vn</td>
+      </tr>
+      <tr>
+        <td>SĐT:</td>
+        <td>028 3899 2862</td>
+      </tr>
+    </table>
+    """
+    table_info = extract_teacher_and_meet_info([pretty_table_html])
+    assert table_info.teacher_name == "Võ Văn Bình"
+    assert table_info.teacher_email == "binh.vo@ut.edu.vn"
+    assert table_info.teacher_phone == "02838992862"
+
+    wrapped_p_html = """
+    <p>Giảng viên:
+      <strong>Võ Văn Bình</strong>
+    </p>
+    <p>Email:
+      binh.vo@ut.edu.vn</p>
+    """
+    wrapped_info = extract_teacher_and_meet_info([wrapped_p_html])
+    assert wrapped_info.teacher_name == "Võ Văn Bình"
+    assert wrapped_info.teacher_email == "binh.vo@ut.edu.vn"
+
+
+def test_extract_teacher_phone_rejects_nine_digits_and_accepts_ten_to_eleven_digits():
+    nine_digit_only = extract_teacher_and_meet_info(["<p>Mã: 012345678</p>"])
+    assert nine_digit_only.teacher_phone == ""
+
+    nine_then_ten = extract_teacher_and_meet_info(["<p>Mã: 012345678 - SĐT: 0918 116 115</p>"])
+    assert nine_then_ten.teacher_phone == "0918116115"
+
 

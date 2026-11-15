@@ -7,17 +7,17 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, NavigableString
 
 from core.html_compat import BS4_PARSER
 
 _PROGRAM_RE = re.compile(r"^\[(?P<prog>[A-Za-z0-9_-]{2,10})\]_")
 _SEMESTER_LONG_RE = re.compile(
-    r"(?:^|[_\s\[-])(?P<term>HK(?:I{1,2}|H|HE|3))[-_\s]*(?P<y1>20\d{2})[-–](?P<y2>20\d{2})(?:$|[_\s\]-])",
+    r"(?:^|(?<=[_\s\[-]))(?P<term>HK(?:I{1,2}|H|HE|3))[-_\s]*(?P<y1>20\d{2})[-–](?P<y2>20\d{2})(?=$|[_\s\]-])",
     re.IGNORECASE,
 )
 _SEMESTER_COMPACT_RE = re.compile(
-    r"(?:^|[\[\s_])(?P<term>HK(?:I{1,2}|H|HE|3))\s*(?P<y1>\d{2})[-–]?(?P<y2>\d{2})(?:$|[\]\s_-])",
+    r"(?:^|(?<=[\[\s_-]))(?P<term>HK(?:I{1,2}|H|HE|3))\s*(?P<y1>\d{2})(?P<sep>[-–]?)(?P<y2>\d{2})(?=$|[\]\s_-])",
     re.IGNORECASE,
 )
 _CODE_RE = re.compile(r"(?<!\d)(\d{10,14})(?!\d)")
@@ -27,7 +27,7 @@ _TRAILING_CAMPUS_RE = re.compile(
 )
 _BRACKET_PREFIX_RE = re.compile(r"^(?:\[[^\]]+\]\s*[-–_]?\s*)+")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_PHONE_RE = re.compile(r"(?<!\d)(0\d{2,3}[ .\-]?\d{3}[ .\-]?\d{3,4})(?!\d)")
+_PHONE_RE = re.compile(r"(?<!\d)(0\d{2,3}[ .\-]?\d{3,4}[ .\-]?\d{3,4})(?!\d)")
 _TEACHER_RE = re.compile(
     r"(?:Giảng[ \t]*viên|GV(?:[ \t]*phụ[ \t]*trách)?)[ \t]*[:\-][ \t]*([^\n\r(;,\|]{3,60})",
     re.IGNORECASE,
@@ -97,8 +97,13 @@ def _find_valid_semester_match(
     pattern: re.Pattern[str], text: str, *, year_offset: int
 ) -> Optional[tuple[re.Match[str], str, tuple[int, int]]]:
     for match in pattern.finditer(text):
-        y1 = year_offset + int(match.group("y1"))
-        y2 = year_offset + int(match.group("y2"))
+        raw_y1 = match.group("y1")
+        raw_y2 = match.group("y2")
+        if year_offset == 2000 and not match.groupdict().get("sep") and raw_y1 in {"19", "20"}:
+            # Reject bare 4-digit calendar years such as [HKI 2021] or [HKI 1999] without a separator.
+            continue
+        y1 = year_offset + int(raw_y1)
+        y2 = year_offset + int(raw_y2)
         # Academic years always span consecutive calendar years; rejects single 4-digit years like 2026 -> 20-26.
         if y2 != y1 + 1:
             continue
@@ -111,6 +116,7 @@ def _extract_display_name_from_short(
     without_prog: str, sem_match: re.Match[str], course_code: str
 ) -> str:
     remainder = f"{without_prog[:sem_match.start()]} {without_prog[sem_match.end():]}"
+    remainder = re.sub(r"\[\s*\]", " ", remainder)
     if course_code:
         remainder = re.sub(rf"\[?{re.escape(course_code)}\]?", " ", remainder)
     return re.sub(r"\s+", " ", remainder.replace("_", " ")).strip(" -–_")
@@ -168,6 +174,16 @@ def parse_course_identity(shortname: str, fullname: str) -> ParsedCourseIdentity
 
 def _soup_to_lines(soup: BeautifulSoup) -> str:
     """Convert parsed HTML to newline-delimited block text without splitting inline tags."""
+    # Collapse source formatting newlines inside existing text nodes before adding block breaks.
+    for node in list(soup.descendants):
+        if isinstance(node, Comment):
+            node.extract()
+        elif isinstance(node, NavigableString):
+            raw = str(node)
+            normalized = re.sub(r"\s+", " ", raw)
+            if normalized != raw:
+                node.replace_with(normalized)
+
     for br in soup.find_all("br"):
         br.replace_with("\n")
     for tag in soup.find_all(_BLOCK_TAGS):
@@ -214,9 +230,11 @@ def extract_teacher_and_meet_info(html_fragments: Iterable[str]) -> TeacherConta
             if m_email:
                 teacher_email = m_email.group(0)
         if not teacher_phone:
-            m_phone = _PHONE_RE.search(non_url_text)
-            if m_phone:
-                teacher_phone = re.sub(r"\D", "", m_phone.group(1))
+            for m_phone in _PHONE_RE.finditer(non_url_text):
+                digits = re.sub(r"\D", "", m_phone.group(1))
+                if 10 <= len(digits) <= 11:
+                    teacher_phone = digits
+                    break
         if not meet_url:
             m_meet = _MEET_URL_RE.search(text)
             if m_meet:
