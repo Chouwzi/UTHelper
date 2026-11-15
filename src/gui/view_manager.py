@@ -35,6 +35,26 @@ class ViewManager:
         self._empty_detail = empty_detail or ft.Container(expand=True, ignore_interactions=True)
         self._settings_navigation_generation = 0
 
+    def _sync_detail_host(self) -> None:
+        """Lớp panel chi tiết chỉ nhận thao tác khi đang thực sự hiện chi tiết.
+
+        Ở chế độ cửa sổ nhỏ/vừa lớp này phủ lên cả vùng nút của các màn khác
+        (bảng điểm, lịch, cài đặt...); nếu không tắt tương tác thì các nút bên
+        dưới (làm mới, tính GPA...) không bấm được.
+        """
+        host = getattr(self.controller, "_detail_host", None)
+        if host is None:
+            return
+        active = bool(
+            getattr(self.detail_view, "visible", False)
+            and self.detail_switcher is not None
+            and self.detail_switcher.content is self.detail_view
+        )
+        try:
+            host.ignore_interactions = not active
+        except Exception:
+            pass
+
     def _dismiss_menu_if_open(self) -> None:
         dismiss = getattr(self.controller, "_dismiss_desktop_filter_menu", None)
         if callable(dismiss):
@@ -73,6 +93,7 @@ class ViewManager:
             self.tab_switcher.content = self.dashboard
         else:
             self._show_only(self.dashboard)
+        self._sync_detail_host()
         
         # Đặt lại màu sắc của các nút trên thanh điều hướng về trạng thái không active
         self.controller.calendar_btn.icon_color = C.TEXT_SECONDARY
@@ -95,6 +116,7 @@ class ViewManager:
             self.tab_switcher.content = self.calendar_view
         else:
             self._show_only(self.calendar_view)
+        self._sync_detail_host()
         self.controller.calendar_btn.icon_color = C.ACCENT
         self.page.update()
 
@@ -135,6 +157,7 @@ class ViewManager:
             self.tab_switcher.content = self.settings_view
         else:
             self._show_only(self.settings_view)
+        self._sync_detail_host()
         # Publish immediate visual feedback before any native settings lookup.
         self.page.update()
 
@@ -157,6 +180,7 @@ class ViewManager:
             self.tab_switcher.content = self.grade_overview_view
         else:
             self._show_only(self.grade_overview_view)
+        self._sync_detail_host()
         self.controller.grades_btn.icon_color = C.ACCENT
         self.page.update()
 
@@ -165,9 +189,14 @@ class ViewManager:
         self.grade_overview_view.update_grades(courses_grades, grade_items)
         self.page.update()
 
-    def show_academic_radar_data(self, semesters, profiles):
+    def show_academic_radar_data(self, semesters, profiles, progress=None):
         """Cập nhật dữ liệu hồ sơ học tập Academic Radar và danh sách học phần."""
-        self.grade_overview_view.update_academic_data(semesters, profiles)
+        self.grade_overview_view.update_academic_data(semesters, profiles, progress)
+        self.page.update()
+
+    def show_credit_progress(self, progress):
+        """Cập nhật tiến độ tín chỉ ra trường (tải sau khi bảng điểm đã hiện)."""
+        self.grade_overview_view.set_credit_progress(progress)
         self.page.update()
 
     async def close_grades(self):
@@ -208,6 +237,7 @@ class ViewManager:
             self.detail_switcher.content = self.detail_view
         else:
             self._show_only(origin, self.detail_view)
+        self._sync_detail_host()
         self.page.update()
 
     def show_detail_data(self, full_data):
@@ -229,6 +259,7 @@ class ViewManager:
             destination.visible = True
             destination.opacity = 1.0
             self.detail_switcher.content = self._empty_detail
+            self._sync_detail_host()
         else:
             destination.visible = True
             if destination is self.dashboard:

@@ -14,6 +14,7 @@ def build_desktop_window_header(
     *,
     on_minimize: Callable,
     on_close: Callable,
+    on_maximize: Callable | None = None,
     title_control: ft.Control | None = None,
     version_control: ft.Control | None = None,
 ) -> ft.Container:
@@ -51,7 +52,7 @@ def build_desktop_window_header(
             expand=True,
         ),
         expand=True,
-        maximizable=False,
+        maximizable=on_maximize is not None,
     )
     minimize = ft.IconButton(
         # Material's MINIMIZE glyph sits on the baseline by design. A centered
@@ -65,6 +66,18 @@ def build_desktop_window_header(
         hover_color=C.SURFACE_HOVER,
         on_click=on_minimize,
     )
+    maximize = None
+    if on_maximize is not None:
+        maximize = ft.IconButton(
+            ft.Icons.CROP_SQUARE_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=15,
+            tooltip="Phóng to / Khôi phục",
+            padding=0,
+            size_constraints=button_constraints,
+            hover_color=C.SURFACE_HOVER,
+            on_click=on_maximize,
+        )
     close = ft.IconButton(
         ft.Icons.CLOSE_ROUNDED,
         icon_color=C.TEXT_SECONDARY,
@@ -94,7 +107,7 @@ def build_desktop_window_header(
     close.on_hover = rotate_close_on_hover
     return ft.Container(
         content=ft.Row(
-            controls=[drag_area, minimize, close],
+            controls=[drag_area, minimize, *([maximize] if maximize else []), close],
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),

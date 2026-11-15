@@ -17,9 +17,12 @@ if _project_root not in sys.path:
 
 import flet as ft
 from core.academic_radar.calculator import calculate_radar_profile
+from core.academic_radar.gpa_planner import CreditProgress
 from core.academic_radar.models import RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from gui.components.academic_radar.grade_list_view import AcademicGradeListView
+from gui.components.academic_radar.gpa_target_card import GpaTargetCard
+from gui.components.academic_radar.graduation_gpa_card import GraduationGpaCard
 from gui.components.academic_radar.radar_card import AcademicRadarCard
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 
@@ -67,10 +70,18 @@ class GradeOverviewView(ft.Container):
             tooltip="Làm mới bảng điểm từ Portal",
             on_click=self._handle_refresh,
         )
+        self._planner_btn = ft.IconButton(
+            icon=ft.Icons.CALCULATE_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Tính GPA mong muốn",
+            on_click=self._open_planner,
+        )
         self._header = ft.Row(
             controls=[
                 self._back_btn,
                 self._title,
+                self._planner_btn,
                 self._refresh_btn,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -111,6 +122,11 @@ class GradeOverviewView(ft.Container):
             page=self._get_page(),
             visible=False,
         )
+        # Form tính GPA mong muốn mở bằng nút trên header (dialog)
+        self._gpa_target_card = GpaTargetCard()
+        self._graduation_card = GraduationGpaCard()
+        self._progress: Optional[CreditProgress] = None
+        self._planner_dialog: Optional[ft.AlertDialog] = None
         self._grade_list_view = AcademicGradeListView(courses=[], visible=False)
 
         # Main scrollable body
@@ -173,6 +189,7 @@ class GradeOverviewView(ft.Container):
         self,
         semesters: list[SemesterGradeData],
         profiles: list[RadarProfile],
+        progress: Optional[CreditProgress] = None,
     ) -> None:
         """Populates the view with full academic transcript and computed radar profiles."""
         self._loading_row.visible = False
@@ -192,6 +209,8 @@ class GradeOverviewView(ft.Container):
 
         self._empty_state.visible = False
         self._radar_card.visible = True
+        if progress is not None:
+            self._progress = progress
         self._grade_list_view.visible = True
 
         self._radar_card._page_ref = self._get_page()
@@ -244,6 +263,100 @@ class GradeOverviewView(ft.Container):
         profile = calculate_radar_profile(sem_data)
         self.update_academic_data([sem_data], [profile])
 
+    def set_credit_progress(self, progress: Optional[CreditProgress]) -> None:
+        """Cập nhật số tín chỉ ra trường (tải sau khi bảng điểm đã hiện)."""
+        self._progress = progress
+        self._graduation_card.set_data(self._semesters, progress)
+
+    def _notify(self, page: Optional[ft.Page], message: str) -> None:
+        if page is None:
+            return
+        try:
+            page.show_dialog(ft.SnackBar(ft.Text(message)))
+        except Exception:
+            logger.debug("Snackbar failed", exc_info=True)
+
+    def _open_planner(self, e: ft.ControlEvent | None = None) -> None:
+        """Mở form tính GPA mong muốn (trong kỳ + ra trường)."""
+        logger.info("GPA planner button clicked (semesters=%d)", len(self._semesters))
+        page = self._get_page()
+        if page is None:
+            try:
+                page = e.control.page if e is not None else None
+            except Exception:
+                page = None
+        try:
+            if not self._semesters:
+                self._notify(page, "Chưa có dữ liệu bảng điểm. Hãy đợi tải xong hoặc bấm làm mới.")
+                return
+            if page is None:
+                logger.error("Planner dialog: no page available")
+                return
+            self._show_planner_dialog(page)
+        except Exception as exc:
+            logger.exception("Failed to open GPA planner dialog")
+            self._notify(page, f"Không mở được form tính GPA: {exc}")
+
+    def _show_planner_dialog(self, page: ft.Page) -> None:
+        # Dựng thẻ mới theo theme hiện tại, giữ lại số đã nhập lần trước
+        sem = (
+            self._semesters[self._selected_semester_idx]
+            if 0 <= self._selected_semester_idx < len(self._semesters)
+            else self._semesters[0]
+        )
+        self._gpa_target_card = GpaTargetCard(target_text=self._gpa_target_card._target_text)
+        self._gpa_target_card.set_semester(sem)
+        self._graduation_card = GraduationGpaCard(target_text=self._graduation_card._target_text)
+        self._graduation_card.set_data(self._semesters, self._progress)
+
+        # Khung cuộn phải có chiều cao giới hạn, nếu không Flutter không dựng được dialog
+        try:
+            page_h = float(getattr(page, "height", None) or 0)
+        except (TypeError, ValueError):
+            page_h = 0.0
+        body_h = max(260.0, min(520.0, page_h * 0.65)) if page_h else 460.0
+        try:
+            page_w = float(getattr(page, "width", None) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        body_w = max(280.0, min(440.0, page_w - 80)) if page_w else 440.0
+
+        dialog = ft.AlertDialog(
+            modal=False,
+            title=ft.Text("Tính GPA mong muốn", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+            content=ft.Container(
+                content=ft.Column(
+                    controls=[self._gpa_target_card, self._graduation_card],
+                    spacing=12,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                width=body_w,
+                height=body_h,
+            ),
+            actions=[ft.TextButton("Đóng", on_click=lambda _: self._close_planner(page, dialog))],
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+        self._planner_dialog = dialog
+        try:
+            page.show_dialog(dialog)
+            logger.info("GPA planner dialog shown")
+        except Exception:
+            logger.warning("page.show_dialog failed; falling back to overlay", exc_info=True)
+            page.overlay.append(dialog)
+            dialog.open = True
+            page.update()
+
+    def _close_planner(self, page: ft.Page, dialog: ft.AlertDialog) -> None:
+        dialog.open = False
+        try:
+            dialog.update()
+        except Exception:
+            try:
+                page.update()
+            except Exception:
+                pass
+
     def _on_semester_changed(self, index: int) -> None:
         self._selected_semester_idx = index
         if 0 <= index < len(self._semesters):
@@ -276,6 +389,7 @@ class GradeOverviewView(ft.Container):
         self._loading.color = C.ACCENT
         self._loading_text.color = C.TEXT_SECONDARY
         self._empty_text.color = C.TEXT_SECONDARY
+        self._planner_btn.icon_color = C.TEXT_SECONDARY
 
         if self._radar_card.visible:
             self._radar_card._build_ui()
