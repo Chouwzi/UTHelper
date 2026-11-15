@@ -827,6 +827,33 @@ def get_course_contents(call_api: Callable, courseid: int) -> Optional[List[Dict
         return None
 
 
+def get_pages_by_courses(call_api: Callable, courseid: int) -> Optional[List[Dict[str, Any]]]:
+    """mod_page_get_pages_by_courses - nội dung HTML chi tiết của các mod_page."""
+    try:
+        result = call_api("mod_page_get_pages_by_courses", **{"courseids[0]": courseid})
+        if isinstance(result, dict):
+            pages = result.get("pages", [])
+            return pages if isinstance(pages, list) else []
+        return None
+    except Exception as e:
+        logger.error("Lỗi get_pages_by_courses (course=%s): %s", courseid, e)
+        return None
+
+
+def update_activity_completion_manually(call_api: Callable, cmid: int, completed: bool) -> bool:
+    """core_completion_update_activity_completion_status_manually - tick hoàn thành thủ công."""
+    try:
+        result = call_api(
+            "core_completion_update_activity_completion_status_manually",
+            cmid=cmid,
+            completed=1 if completed else 0,
+        )
+        return isinstance(result, dict) and bool(result.get("status", False))
+    except Exception as e:
+        logger.error("Lỗi update_activity_completion_manually (cmid=%s): %s", cmid, e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Event → Assignment converter
 # ---------------------------------------------------------------------------

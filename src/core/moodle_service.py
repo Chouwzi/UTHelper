@@ -257,3 +257,13 @@ class MoodleService:
     def get_course_contents(self, courseid: int) -> Optional[List[Dict[str, Any]]]:
         """Lấy nội dung toàn bộ bài học, tài liệu giảng dạy trong môn học."""
         return ws_functions.get_course_contents(self.call_ws_api, courseid)
+
+    def get_pages_by_courses(self, courseid: int) -> Optional[List[Dict[str, Any]]]:
+        """Lấy nội dung HTML chi tiết các mod_page trong môn học."""
+        return ws_functions.get_pages_by_courses(self.call_ws_api, courseid)
+
+    def set_activity_completion_manually(self, cmid: int, completed: bool) -> bool:
+        """Cập nhật trạng thái hoàn thành thủ công của module."""
+        return ws_functions.update_activity_completion_manually(
+            self.call_ws_api, cmid, completed
+        )
