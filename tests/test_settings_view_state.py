@@ -61,8 +61,8 @@ def _make_state_only_view():
             for key in ("quiz", "assignment", "attendance", "forum", "resource", "choice", "zeta", "alpha")
         },
         _milestones_field=_control(),
-        _milestone_chips={31: _control(selected=False), 7: _control(selected=False)},
         _milestone_summary=_control(),
+        _milestone_chips={31: _control(selected=False), 7: _control(selected=False)},
         _muted_courses_field=_control(),
         _profile_cards={
             "quiet": _control(border=None, bgcolor=None),

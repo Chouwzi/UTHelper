@@ -2,6 +2,14 @@ import flet as ft
 from gui.core.theme import C
 from config import settings
 
+
+# Selection chips use a consistent high-contrast appearance in every theme:
+# selected = blue background / white text; unselected = white background / dark text.
+_CHIP_SELECTED_TEXT = "#FFFFFF"
+_CHIP_UNSELECTED_BG = "#FFFFFF"
+_CHIP_UNSELECTED_TEXT = "#111827"
+
+
 def init_notification_controls(view):
     """Khởi tạo các control thiết lập cấu hình thông báo và chế độ Do Not Disturb (DND)."""
     # Định nghĩa cấu hình có sẵn của các Notification Profile
@@ -141,12 +149,16 @@ def init_notification_controls(view):
     for minutes, label in _milestone_options:
         is_sel = minutes in _current_milestones
         view._milestone_chips[minutes] = ft.Chip(
-            label=ft.Text(label, size=12, color=C.ON_ACCENT if is_sel else C.TEXT_PRIMARY),
+            label=ft.Text(
+                label,
+                size=12,
+                color=_CHIP_SELECTED_TEXT if is_sel else _CHIP_UNSELECTED_TEXT,
+            ),
             selected=is_sel,
             show_checkmark=True,
-            check_color=C.ON_ACCENT,
+            check_color=_CHIP_SELECTED_TEXT,
             selected_color=C.ACCENT,
-            bgcolor=C.SURFACE,
+            bgcolor=_CHIP_UNSELECTED_BG,
             on_select=view._handle_milestone_toggle(minutes),
         )
     view._milestone_chips_row = ft.Row(
@@ -188,13 +200,13 @@ def init_notification_controls(view):
             label=ft.Text(
                 f"{hours} giờ trước",
                 size=12,
-                color=C.ON_ACCENT if selected else C.TEXT_PRIMARY,
+                color=_CHIP_SELECTED_TEXT if selected else _CHIP_UNSELECTED_TEXT,
             ),
             selected=selected,
             show_checkmark=True,
-            check_color=C.ON_ACCENT,
+            check_color=_CHIP_SELECTED_TEXT,
             selected_color=C.ACCENT,
-            bgcolor=C.SURFACE,
+            bgcolor=_CHIP_UNSELECTED_BG,
             on_select=view._handle_class_schedule_lead_toggle(hours),
         )
     view._class_schedule_lead_chips_row = ft.Row(
@@ -206,20 +218,6 @@ def init_notification_controls(view):
     view._class_schedule_lead_field = ft.TextField(
         value=", ".join(str(value) for value in _current_class_leads),
         visible=False,
-    )
-    view._class_schedule_summary = ft.Text(
-        "Chưa chọn mốc nhắc." if not _current_class_leads else
-        "Sẽ nhắc trước " + ", ".join(f"{value} giờ" for value in _current_class_leads),
-        size=12,
-        color=C.TEXT_SECONDARY,
-        italic=True,
-    )
-    view._class_schedule_hint = ft.Text(
-        "Hỗ trợ cả buổi học trực tiếp và trực tuyến. Buổi học bị hủy/tạm ngưng "
-        "sẽ không được nhắc; lịch được cập nhật khi đồng bộ UTH Portal.",
-        size=11,
-        color=C.TEXT_SECONDARY,
-        italic=True,
     )
 
     # Khu vực cấu hình môn học tắt thông báo (Bỏ qua môn học)
@@ -381,8 +379,6 @@ def build_notification_section(view) -> ft.Control:
             ft.Text("Chọn một hoặc nhiều mốc nhắc trước giờ học:" , size=11, color=C.TEXT_SECONDARY),
             view._class_schedule_lead_chips_row,
             view._class_schedule_lead_field,
-            view._class_schedule_summary,
-            view._class_schedule_hint,
             ft.Container(height=4),
             view._sw_ignore_sub,
             ft.Divider(height=16, color=C.BORDER),

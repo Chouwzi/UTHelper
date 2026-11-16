@@ -598,11 +598,18 @@ class SettingsView(ft.Container):
             # Update milestone chips
             for h, chip in self._milestone_chips.items():
                 chip.selected = h in prof["milestones"]
-                chip.check_color = C.ON_ACCENT
+                chip.selected_color = C.ACCENT
+                chip.bgcolor = "#FFFFFF"
+                chip.check_color = "#FFFFFF"
                 lbl = getattr(chip, "label", None)
                 if lbl and hasattr(lbl, "color"):
-                    lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                    lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
             self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
+            active_count = sum(1 for h in prof["milestones"] if h in self._milestone_chips)
+            self._milestone_summary.value = (
+                f"Bạn sẽ nhận {active_count} lần nhắc cho mỗi deadline"
+                if active_count else "Không có mốc nhắc nhở nào"
+            )
             # Update card styles
             for k, card in self._profile_cards.items():
                 is_sel = (k == profile_key)
@@ -620,23 +627,8 @@ class SettingsView(ft.Container):
         return handler
 
 
-    def _update_class_schedule_summary(self) -> None:
-        active = sorted(
-            hours for hours, chip in self._class_schedule_lead_chips.items()
-            if bool(getattr(chip, "selected", False))
-        )
-        self._class_schedule_lead_field.value = ", ".join(str(value) for value in active)
-        if active:
-            self._class_schedule_summary.value = (
-                "Sẽ nhắc trước " + ", ".join(f"{value} giờ" for value in active)
-            )
-        else:
-            self._class_schedule_summary.value = "Chưa chọn mốc nhắc."
-
     def _handle_class_schedule_toggle(self, _event) -> None:
         self._on_form_field_change()
-        self._update_class_schedule_summary()
-        self._class_schedule_summary.update()
 
     def _handle_class_schedule_lead_toggle(self, hours: int):
         def handler(event):
@@ -645,15 +637,23 @@ class SettingsView(ft.Container):
                 chip.selected = bool(
                     getattr(getattr(event, "control", None), "selected", chip.selected)
                 )
-            chip.check_color = C.ON_ACCENT
+            chip.check_color = "#FFFFFF"
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = "#FFFFFF"
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
-            self._update_class_schedule_summary()
+                label.color = "#FFFFFF" if chip.selected else "#111827"
+            update_chip = getattr(chip, "update", None)
+            if callable(update_chip):
+                update_chip()
+            active = sorted(
+                value for value, item in self._class_schedule_lead_chips.items()
+                if bool(getattr(item, "selected", False))
+            )
+            self._class_schedule_lead_field.value = ", ".join(str(value) for value in active)
             if hasattr(self, "_on_form_field_change"):
                 self._on_form_field_change()
             self._class_schedule_lead_field.update()
-            self._class_schedule_summary.update()
         return handler
 
     def _handle_milestone_toggle(self, minutes: int):
@@ -663,14 +663,23 @@ class SettingsView(ft.Container):
             chip = self._milestone_chips[minutes]
             if getattr(e, "control", None) is not chip:
                 chip.selected = bool(getattr(getattr(e, "control", None), "selected", chip.selected))
-            chip.check_color = C.ON_ACCENT
+            chip.check_color = "#FFFFFF"
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = "#FFFFFF"
             lbl = getattr(chip, "label", None)
             if lbl and hasattr(lbl, "color"):
-                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
+            update_chip = getattr(chip, "update", None)
+            if callable(update_chip):
+                update_chip()
             # Sync to hidden field
             active = sorted([h for h, c in self._milestone_chips.items() if c.selected], reverse=True)
             self._milestones_field.value = ", ".join(str(h) for h in active)
-            self._milestone_summary.value = f"Bạn sẽ nhận {len(active)} lần nhắc cho mỗi deadline" if active else "Không có mốc nhắc nhở nào"
+            active_count = len(active)
+            self._milestone_summary.value = (
+                f"Bạn sẽ nhận {active_count} lần nhắc cho mỗi deadline"
+                if active_count else "Không có mốc nhắc nhở nào"
+            )
             if hasattr(self, "_on_form_field_change"):
                 self._on_form_field_change()
             self.update()
@@ -1098,14 +1107,18 @@ class SettingsView(ft.Container):
                 col.controls[1].color = C.TEXT_PRIMARY  # label
                 col.controls[2].color = C.TEXT_SECONDARY  # desc
 
-        # Milestone chips
-        for h, chip in getattr(self, '_milestone_chips', {}).items():
-            chip.selected_color = C.ACCENT
-            chip.check_color = C.ON_ACCENT
-            chip.bgcolor = C.SURFACE
-            lbl = getattr(chip, "label", None)
-            if lbl and hasattr(lbl, "color"):
-                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+        # Deadline and class schedule chips use fixed high-contrast states.
+        for chip_group in (
+            getattr(self, "_milestone_chips", {}),
+            getattr(self, "_class_schedule_lead_chips", {}),
+        ):
+            for chip in chip_group.values():
+                chip.selected_color = C.ACCENT
+                chip.check_color = "#FFFFFF"
+                chip.bgcolor = "#FFFFFF"
+                lbl = getattr(chip, "label", None)
+                if lbl and hasattr(lbl, "color"):
+                    lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
 
         for checkbox in getattr(self, '_notify_type_checks', {}).values():
             checkbox.fill_color = {ft.ControlState.SELECTED: C.ACCENT}
@@ -1113,8 +1126,8 @@ class SettingsView(ft.Container):
             if checkbox.label_style:
                 checkbox.label_style.color = C.TEXT_PRIMARY
 
-        # Summary texts (profile, DND, milestone)
-        for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary', '_class_schedule_summary'):
+        # Summary texts retained for the original notification settings.
+        for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):
             txt = getattr(self, attr, None)
             if txt:
                 txt.color = C.TEXT_SECONDARY
@@ -1309,20 +1322,23 @@ class SettingsView(ft.Container):
         _default_milestones = [4320, 1440, 180, 60, 30, 5]
         for h, chip in self._milestone_chips.items():
             chip.selected = h in _default_milestones
-            chip.check_color = C.ON_ACCENT
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = "#FFFFFF"
+            chip.check_color = "#FFFFFF"
             lbl = getattr(chip, "label", None)
             if lbl and hasattr(lbl, "color"):
-                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
         self._milestones_field.value = "4320, 1440, 180, 60, 30, 5"
         self._milestone_summary.value = "Bạn sẽ nhận 6 lần nhắc cho mỗi deadline"
         self._sw_class_schedule.value = False
         for hours, chip in self._class_schedule_lead_chips.items():
             chip.selected = True
-            chip.check_color = C.ON_ACCENT
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = "#FFFFFF"
+            chip.check_color = "#FFFFFF"
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = C.ON_ACCENT
-        self._update_class_schedule_summary()
+                label.color = "#FFFFFF"
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
@@ -2283,27 +2299,29 @@ class SettingsView(ft.Container):
         )
         for minutes, chip in self._milestone_chips.items():
             chip.selected = minutes in snapshot.notify_milestones_minutes
-            chip.check_color = C.ON_ACCENT
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = "#FFFFFF"
+            chip.check_color = "#FFFFFF"
             lbl = getattr(chip, "label", None)
             if lbl and hasattr(lbl, "color"):
-                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
         active_count = sum(
             minutes in snapshot.notify_milestones_minutes
             for minutes in self._milestone_chips
         )
         self._milestone_summary.value = (
             f"Bạn sẽ nhận {active_count} lần nhắc cho mỗi deadline"
-            if active_count
-            else "Không có mốc nhắc nhở nào"
+            if active_count else "Không có mốc nhắc nhở nào"
         )
         self._sw_class_schedule.value = snapshot.notify_class_schedule_enabled
         for hours, chip in self._class_schedule_lead_chips.items():
             chip.selected = hours in snapshot.notify_class_schedule_lead_hours
-            chip.check_color = C.ON_ACCENT
+            chip.selected_color = C.ACCENT
+            chip.bgcolor = "#FFFFFF"
+            chip.check_color = "#FFFFFF"
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
-        self._update_class_schedule_summary()
+                label.color = "#FFFFFF" if chip.selected else "#111827"
         self._muted_courses_field.value = ", ".join(snapshot.notify_muted_courses)
         for key, card in self._profile_cards.items():
             selected = key == snapshot.notification_profile
