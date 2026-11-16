@@ -11,6 +11,7 @@ import flet as ft
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from gui.app_controller import AppController
+from gui.components.desktop_window_header import build_desktop_window_header
 from gui.core.theme import C
 from core.version import APP_VERSION
 
@@ -24,7 +25,7 @@ def _walk(control):
         yield from _walk(child)
 
 
-def test_custom_header_contains_title_version_drag_minimize_and_close():
+def test_custom_header_contains_title_version_drag_minimize_maximize_and_close():
     controller = AppController.__new__(AppController)
     controller.page = SimpleNamespace()
     controller._safe_run_task = lambda *_args, **_kwargs: None
@@ -40,16 +41,35 @@ def test_custom_header_contains_title_version_drag_minimize_and_close():
     assert header.height == 34
     assert header.bgcolor == C.BG
     assert len(drag_areas) == 1
-    assert drag_areas[0].maximizable is False
+    assert drag_areas[0].maximizable is True
     assert len(cursor_regions) == 1
     assert cursor_regions[0].mouse_cursor == ft.MouseCursor.GRAB
     assert [button.icon for button in buttons] == [
         ft.Icons.HORIZONTAL_RULE_ROUNDED,
+        ft.Icons.CROP_SQUARE_ROUNDED,
         ft.Icons.CLOSE_ROUNDED,
     ]
     assert controller._app_title in controls
     assert controller._version_badge in controls
     assert controller._app_title.weight == ft.FontWeight.W_700
+
+
+def test_custom_header_without_on_maximize_preserves_non_maximizable_layout():
+    header = build_desktop_window_header(
+        on_minimize=lambda _e: None,
+        on_close=lambda _e: None,
+        on_maximize=None,
+    )
+    controls = list(_walk(header))
+    drag_areas = [item for item in controls if isinstance(item, ft.WindowDragArea)]
+    buttons = [item for item in controls if isinstance(item, ft.IconButton)]
+
+    assert len(drag_areas) == 1
+    assert drag_areas[0].maximizable is False
+    assert [button.icon for button in buttons] == [
+        ft.Icons.HORIZONTAL_RULE_ROUNDED,
+        ft.Icons.CLOSE_ROUNDED,
+    ]
 
 
 def test_dashboard_desktop_header_replaces_old_title_row_with_sync_status(monkeypatch):

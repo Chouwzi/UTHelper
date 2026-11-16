@@ -1508,17 +1508,49 @@ class SettingsView(ft.Container):
         self._debug_info_text.update()
 
     def _do_clear_data_cache(self):
-        """Clear offline activities data cache."""
+        """Clear offline activities, courses catalog, and document preview caches."""
         try:
+            from config import _USER_DATA_DIR
+            from core.courses.preview_cache import PreviewFileCache
             from core.data_cache import DataCache
+
             cache = DataCache()
             cache.clear()
+            preview_cache = PreviewFileCache(
+                cache_dir=_USER_DATA_DIR / "preview_cache"
+            )
+            preview_cache.clear()
+            external_dir = preview_cache.cache_dir / "external"
+            if external_dir.is_dir():
+                for item in external_dir.iterdir():
+                    if item.is_file():
+                        try:
+                            item.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            for pattern in (
+                "courses_catalog_*.json",
+                "course_tree_*.json",
+                "courses_cache_*.json",
+                "courses_catalog_*.lock",
+                "course_tree_*.lock",
+                "courses_cache_*.lock",
+            ):
+                for path in _USER_DATA_DIR.glob(pattern):
+                    if path.is_file():
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
             self._debug_info_text.value = "Cache offline đã xóa. Dữ liệu sẽ được tải lại từ Moodle."
             self._debug_info_text.color = C.SAFE
         except Exception as ex:
             self._debug_info_text.value = f"Lỗi xóa data cache: {ex}"
             self._debug_info_text.color = C.CRITICAL
-        self._debug_info_text.update()
+        try:
+            self._debug_info_text.update()
+        except Exception:
+            pass
 
     def _do_show_notif_history(self):
         """Show recent notification history entries."""
@@ -1972,8 +2004,17 @@ class SettingsView(ft.Container):
     def _do_show_cache_stats(self):
         """Show cache sizes and statistics."""
         import os
+        from pathlib import Path
         from config import _USER_DATA_DIR
+        from core.courses.preview_cache import PreviewFileCache
         from core.safe_file_io import SafeFileIO
+
+        def _safe_file_size(p: Path) -> int:
+            try:
+                return p.stat().st_size
+            except OSError:
+                return 0
+
         stats = []
         for label, fname in [("Cache thông báo", "notifications_cache.json"),
                               ("Lịch sử thông báo", "notification_history.json"),
@@ -1990,6 +2031,34 @@ class SettingsView(ft.Container):
             else:
                 stats.append(f"{label}: trống")
 
+        preview_cache = PreviewFileCache(cache_dir=_USER_DATA_DIR / "preview_cache")
+        preview_files = [
+            p
+            for p in preview_cache.cache_dir.rglob("*")
+            if p.is_file() and not p.name.startswith(".tmp.")
+        ]
+        if preview_files:
+            preview_size = sum(_safe_file_size(p) for p in preview_files)
+            stats.append(
+                f"Cache xem trước tài liệu: {len(preview_files)} tệp ({preview_size:,} B)"
+            )
+        else:
+            stats.append("Cache xem trước tài liệu: trống")
+
+        course_cache_files: list[Path] = []
+        seen_course_paths: set[Path] = set()
+        for pattern in ("courses_catalog_*.json", "course_tree_*.json", "courses_cache_*.json"):
+            for p in _USER_DATA_DIR.glob(pattern):
+                if p.is_file() and p not in seen_course_paths:
+                    seen_course_paths.add(p)
+                    course_cache_files.append(p)
+        if course_cache_files:
+            course_size = sum(_safe_file_size(p) for p in course_cache_files)
+            stats.append(
+                f"Cache môn học: {len(course_cache_files)} tệp ({course_size:,} B)"
+            )
+        else:
+            stats.append("Cache môn học: trống")
 
         detail = self._orchestrator.get_cached_details_snapshot() if hasattr(self._orchestrator, 'get_cached_details_snapshot') else {}
         stats.append(f"Detail cache (RAM): {len(detail)} mục")
@@ -1998,7 +2067,10 @@ class SettingsView(ft.Container):
             stats.append(f"Settings: {os.path.getsize(str(sp)):,} B")
         self._debug_cache_stats.value = "\n".join(stats)
         self._debug_cache_stats.color = C.TEXT_PRIMARY
-        self._debug_cache_stats.update()
+        try:
+            self._debug_cache_stats.update()
+        except Exception:
+            pass
 
     # Force data refresh
     def _do_force_refresh(self):

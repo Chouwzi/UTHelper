@@ -69,6 +69,7 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
 | 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
 | 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-17 | `feature/courses-tab` | Môn học / Courses & THNN Unified Workspace | Tích hợp workspace Môn học hợp nhất Courses & THNN (`core/courses/*`, `CoursesTabView`, `DocumentReaderView`, `ArchiveExplorerView`), điều hướng thích ứng 5 tab `AdaptiveNavShell` (`NavigationBar` <600px / `NavigationRail` >=600px), `CoursesCoordinator`, phím tắt `Ctrl+K`/`/`/`Esc`, cửa sổ Desktop co giãn `1120x760` (tối thiểu `420x560`), và thống kê/dọn cache xem trước + cache môn học trong `SettingsView` | Đạt 1785 passed, 25 skipped; `ruff check src tests` pass |
 
 
 ---
@@ -1966,3 +1967,32 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Preserve the existing `v2.4.0` tag and use patch version `2.4.1` (native build
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
+
+## Môn học / Courses & THNN Unified Workspace (2026-11-17)
+
+- **Scope & Boundaries (`feature/courses-tab`)**:
+  - Kept `core/courses/*` pure of `gui` imports (`models`, `shortname_parser`,
+    `cache_store`, `preview_cache`, `providers`, `catalog_service`,
+    `archive_service`, `document_converter`, `local_preview_server`).
+  - Added `src/gui/components/courses/adaptive_nav.py` (`AdaptiveNavShell`,
+    `NAV_DESTINATIONS`, `RAIL_BREAKPOINT = 600`, `RAIL_WIDTH = 88`) coordinating
+    the 5-tab `NavigationBar` (`< 600px`) and `NavigationRail` (`>= 600px`).
+  - Added `src/gui/controllers/courses_coordinator.py` (`CoursesCoordinator`)
+    to decouple `AppController` from `PreviewFileCache`, `ArchiveService`,
+    `LocalPreviewServer`, `DocumentReaderView`/`ArchiveExplorerView` overlays,
+    optional `UthQuizWebView` fallback, `FilePicker().save_file`, and safe
+    external launch guards (routing executable extensions to Save As).
+  - Updated `src/gui/view_manager.py` (`show_courses`, destination sync,
+    `courses_view` origin tracking behind `detail_switcher`),
+    `src/gui/components/desktop_window_header.py` (optional maximize button),
+    `src/main.py` and `src/gui/app_controller.py` (resizable `1120x760` desktop
+    bounds, `on_resize` responsiveness, `RAIL_WIDTH` filter menu offset,
+    `Ctrl+K`/`/`/`Esc` shortcuts, `_navigate_back` priority, theme propagation,
+    and disconnect cleanup), and `src/gui/components/settings_view.py`
+    (cache stats and cleanup for `PreviewFileCache` and `courses_catalog_*` /
+    `course_tree_*` / `courses_cache_*`).
+- **Verification**:
+  - Added `tests/test_courses_app_integration.py` and updated
+    `tests/test_desktop_window_header.py` and `tests/test_startup_visibility.py`.
+  - `python -m pytest tests -q --tb=short`: **1785 passed, 25 skipped**.
+  - `ruff check src tests`: all checks passed (0 errors).
