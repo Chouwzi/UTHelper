@@ -13,6 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
 _ITEM_ID_RE = re.compile(r"[0-9a-f]{16}")
+_CSP_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "image/svg+xml"})
 _HTML_CSP = (
     "default-src 'none'; "
     "style-src 'unsafe-inline'; "
@@ -32,9 +33,13 @@ class _PreviewEntry:
     token: str
 
 
-def _is_html_content_type(content_type: str) -> bool:
+def _requires_strict_csp(content_type: str) -> bool:
     mime = content_type.split(";", 1)[0].strip().lower()
-    return mime == "text/html"
+    return mime in _CSP_CONTENT_TYPES
+
+
+def _is_ascii_digits(value: str) -> bool:
+    return bool(value) and value.isascii() and value.isdigit()
 
 
 def _parse_byte_range(range_header: str, total: int) -> Optional[tuple[int, int]]:
@@ -57,7 +62,7 @@ def _parse_byte_range(range_header: str, total: int) -> Optional[tuple[int, int]
     if not start_str and not end_str:
         return None
     if not start_str:
-        if not end_str.isdigit():
+        if not _is_ascii_digits(end_str):
             return None
         suffix_len = int(end_str)
         if suffix_len <= 0:
@@ -65,7 +70,7 @@ def _parse_byte_range(range_header: str, total: int) -> Optional[tuple[int, int]
         start = max(0, total - suffix_len)
         return start, total - 1
 
-    if not start_str.isdigit():
+    if not _is_ascii_digits(start_str):
         return None
     start = int(start_str)
     if start >= total:
@@ -73,7 +78,7 @@ def _parse_byte_range(range_header: str, total: int) -> Optional[tuple[int, int]
 
     if not end_str:
         return start, total - 1
-    if not end_str.isdigit():
+    if not _is_ascii_digits(end_str):
         return None
     end = int(end_str)
     if start > end:
@@ -119,7 +124,7 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, private")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        if content_type and _is_html_content_type(content_type):
+        if content_type and _requires_strict_csp(content_type):
             self.send_header("Content-Security-Policy", _HTML_CSP)
 
     def _send_empty_status(self, status: int, *, content_range: Optional[str] = None) -> None:
@@ -217,32 +222,41 @@ class LocalPreviewServer:
         with self._lock:
             return self._port
 
-    def _ensure_started(self) -> int:
-        with self._lock:
-            if (
-                self._server is not None
-                and self._thread is not None
-                and self._thread.is_alive()
-                and self._port > 0
-            ):
-                return self._port
+    def _ensure_started_locked(self) -> int:
+        if (
+            self._server is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+            and self._port > 0
+        ):
+            return self._port
 
-            server = _PreviewThreadingHTTPServer(
-                ("127.0.0.1", 0),
-                _PreviewRequestHandler,
-                self,
-            )
-            port = int(server.server_address[1])
-            thread = threading.Thread(
-                target=server.serve_forever,
-                name="UTHelper-LocalPreviewServer",
-                daemon=True,
-            )
-            thread.start()
-            self._server = server
-            self._thread = thread
-            self._port = port
-            return port
+        if self._server is not None:
+            dead_server = self._server
+            self._server = None
+            self._thread = None
+            self._port = 0
+            try:
+                dead_server.server_close()
+            except Exception:
+                pass
+
+        server = _PreviewThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _PreviewRequestHandler,
+            self,
+        )
+        port = int(server.server_address[1])
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="UTHelper-LocalPreviewServer",
+            daemon=True,
+        )
+        thread.start()
+        self._server = server
+        self._thread = thread
+        self._port = port
+        return port
 
     def register_bytes(self, body: bytes, content_type: str) -> str:
         """Store raw bytes with a fresh token and return the loopback preview URL."""
@@ -252,19 +266,23 @@ class LocalPreviewServer:
         if not isinstance(content_type, str):
             raise TypeError("content_type must be a string")
         cleaned_ct = content_type.strip()
-        if not cleaned_ct or "\r" in cleaned_ct or "\n" in cleaned_ct:
+        if not cleaned_ct or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned_ct):
             raise ValueError("Invalid content_type")
+        try:
+            cleaned_ct.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise ValueError("content_type must be latin-1 encodable") from exc
         if len(payload) > self._max_total_bytes:
             raise ValueError(
                 f"Preview item size ({len(payload)} bytes) exceeds max_total_bytes ({self._max_total_bytes})"
             )
 
-        port = self._ensure_started()
         item_id = secrets.token_hex(8)
         token = secrets.token_urlsafe(24)
         entry = _PreviewEntry(body=payload, content_type=cleaned_ct, token=token)
 
         with self._lock:
+            port = self._ensure_started_locked()
             while self._items and (
                 len(self._items) >= self._max_items
                 or self._total_bytes + len(payload) > self._max_total_bytes
@@ -281,6 +299,42 @@ class LocalPreviewServer:
         if not isinstance(html_text, str):
             raise TypeError("html_text must be a string")
         return self.register_bytes(html_text.encode("utf-8"), "text/html; charset=utf-8")
+
+    def has_active_url(self, url: str) -> bool:
+        """Return True iff ``url`` references a currently live entry on this server."""
+        if not isinstance(url, str) or not url:
+            return False
+        try:
+            parsed = urlsplit(url)
+            url_port = parsed.port
+        except ValueError:
+            return False
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1":
+            return False
+        item_id = parsed.path.lstrip("/")
+        if not _ITEM_ID_RE.fullmatch(item_id):
+            return False
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        tokens = qs.get("token")
+        if tokens is None or len(tokens) != 1:
+            return False
+        provided_token = tokens[0]
+
+        with self._lock:
+            if (
+                self._server is None
+                or self._thread is None
+                or not self._thread.is_alive()
+                or self._port <= 0
+                or url_port != self._port
+            ):
+                return False
+            entry = self._items.get(item_id)
+            if entry is None:
+                return False
+            return secrets.compare_digest(
+                provided_token.encode("utf-8"), entry.token.encode("utf-8")
+            )
 
     def _resolve_entry(
         self, item_id: str, provided_token: Optional[str]
@@ -310,10 +364,11 @@ class LocalPreviewServer:
             self._total_bytes = 0
 
         if server is not None:
-            try:
-                server.shutdown()
-            except Exception:
-                pass
+            if thread is not None and thread.is_alive():
+                try:
+                    server.shutdown()
+                except Exception:
+                    pass
             try:
                 server.server_close()
             except Exception:

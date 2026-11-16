@@ -13,7 +13,12 @@ from core.courses.archive_service import (
     ArchiveTreeResult,
 )
 from core.courses.models import PreviewKind
-from gui.components.courses._shared import build_offline_banner, safe_control_update
+from gui.components.courses._shared import (
+    build_offline_banner,
+    build_viewer_header,
+    refresh_viewer_header,
+    safe_control_update,
+)
 from gui.core.theme import C
 from gui.view_models.courses_state import format_file_size
 
@@ -79,50 +84,23 @@ class ArchiveExplorerView(ft.Container):
             else f"{self._tree.format_name.upper()} · {size_text}"
         )
 
-        self._back_btn = ft.IconButton(
-            icon=ft.Icons.ARROW_BACK_ROUNDED,
-            tooltip="Quay lại",
-            icon_color=C.TEXT_PRIMARY,
-            on_click=self._handle_back_btn,
-        )
-        self._title_text = ft.Text(
-            self._name,
-            size=15,
-            weight=ft.FontWeight.W_600,
-            color=C.TEXT_PRIMARY,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-        )
-        self._subtitle_text = ft.Text(
-            subtitle_text,
-            size=11,
-            color=C.TEXT_SECONDARY,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-        )
         self._save_btn = ft.IconButton(
             icon=ft.Icons.SAVE_ALT_ROUNDED,
             tooltip="Lưu tệp nén gốc",
             icon_color=C.TEXT_PRIMARY,
             on_click=lambda _e: self._on_save_raw(self._name, self._bytes),
         )
-        self._header_container = ft.Container(
-            bgcolor=C.SURFACE,
-            border=ft.Border.only(bottom=ft.BorderSide(1, C.BORDER)),
-            padding=ft.Padding.symmetric(horizontal=8, vertical=6),
-            content=ft.Row(
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[
-                    self._back_btn,
-                    ft.Column(
-                        expand=True,
-                        spacing=1,
-                        controls=[self._title_text, self._subtitle_text],
-                    ),
-                    self._save_btn,
-                ],
-            ),
+        (
+            self._header_container,
+            self._back_btn,
+            self._title_text,
+            self._subtitle_text,
+        ) = build_viewer_header(
+            title=self._name,
+            subtitle=subtitle_text,
+            back_tooltip="Quay lại",
+            on_back=self._handle_back_btn,
+            trailing_actions=[self._save_btn],
         )
 
         self._breadcrumb_row = ft.Row(scroll=ft.ScrollMode.AUTO, spacing=2)
@@ -245,6 +223,7 @@ class ArchiveExplorerView(ft.Container):
             border=ft.Border.all(1, C.BORDER),
             border_radius=10,
             padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            ink=True,
             on_click=lambda _e, target=node: self._open_node(target),
             content=ft.Row(
                 spacing=10,
@@ -282,51 +261,53 @@ class ArchiveExplorerView(ft.Container):
             self._tree.unsupported_reason
             or "Định dạng nén chưa được hỗ trợ xem trực tiếp."
         )
-        return ft.Container(
-            expand=True,
-            alignment=ft.Alignment.CENTER,
+        card = ft.Container(
+            width=420,
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=14,
             padding=24,
-            content=ft.Container(
-                width=420,
-                bgcolor=C.SURFACE,
-                border=ft.Border.all(1, C.BORDER),
-                border_radius=14,
-                padding=24,
-                content=ft.Column(
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=12,
-                    tight=True,
-                    controls=[
-                        ft.Icon(
-                            ft.Icons.ARCHIVE_OUTLINED,
-                            size=42,
-                            color=C.WARNING,
+            content=ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
+                tight=True,
+                controls=[
+                    ft.Icon(
+                        ft.Icons.ARCHIVE_OUTLINED,
+                        size=42,
+                        color=C.WARNING,
+                    ),
+                    ft.Text(
+                        self._name,
+                        size=15,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        reason,
+                        size=12,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Button(
+                        "Lưu & Mở bằng ZArchiver / Files",
+                        icon=ft.Icons.SAVE_ALT_ROUNDED,
+                        bgcolor=C.ACCENT,
+                        color=C.ON_ACCENT,
+                        on_click=lambda _e: self._on_save_raw(
+                            self._name, self._bytes
                         ),
-                        ft.Text(
-                            self._name,
-                            size=15,
-                            weight=ft.FontWeight.W_600,
-                            color=C.TEXT_PRIMARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Text(
-                            reason,
-                            size=12,
-                            color=C.TEXT_SECONDARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Button(
-                            "Lưu & Mở bằng ZArchiver / Files",
-                            icon=ft.Icons.SAVE_ALT_ROUNDED,
-                            bgcolor=C.ACCENT,
-                            color=C.ON_ACCENT,
-                            on_click=lambda _e: self._on_save_raw(
-                                self._name, self._bytes
-                            ),
-                        ),
-                    ],
-                ),
+                    ),
+                ],
             ),
+        )
+        return ft.Column(
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+            controls=[ft.Container(padding=24, content=card)],
         )
 
     def _render(self) -> None:
@@ -337,7 +318,10 @@ class ArchiveExplorerView(ft.Container):
 
         if self._error_message:
             self._banner_host.visible = True
-            self._banner_host.content = build_offline_banner(self._error_message)
+            self._banner_host.content = build_offline_banner(
+                self._error_message,
+                icon=ft.Icons.ERROR_OUTLINE_ROUNDED,
+            )
         else:
             self._banner_host.visible = False
             self._banner_host.content = None
@@ -382,13 +366,12 @@ class ArchiveExplorerView(ft.Container):
     def update_theme(self) -> None:
         """Apply current global theme tokens C and re-render rows."""
         self.bgcolor = C.BG
-        self._header_container.bgcolor = C.SURFACE
-        self._header_container.border = ft.Border.only(
-            bottom=ft.BorderSide(1, C.BORDER)
+        refresh_viewer_header(
+            self._header_container,
+            self._back_btn,
+            self._title_text,
+            self._subtitle_text,
         )
-        self._back_btn.icon_color = C.TEXT_PRIMARY
-        self._title_text.color = C.TEXT_PRIMARY
-        self._subtitle_text.color = C.TEXT_SECONDARY
         self._save_btn.icon_color = C.TEXT_PRIMARY
         self._breadcrumb_bar.bgcolor = C.SURFACE
         self._breadcrumb_bar.border = ft.Border.only(

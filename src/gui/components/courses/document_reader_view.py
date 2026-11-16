@@ -17,7 +17,12 @@ from core.courses.document_converter import (
 )
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import PreviewKind
-from gui.components.courses._shared import build_filter_chip, safe_control_update
+from gui.components.courses._shared import (
+    build_filter_chip,
+    build_viewer_header,
+    refresh_viewer_header,
+    safe_control_update,
+)
 from gui.core.theme import C
 from gui.core.theme_presets import THEME_PRESETS
 from gui.view_models.courses_state import format_file_size
@@ -44,19 +49,22 @@ def _split_markdown_by_outline(
     outline_idx = 0
 
     for block in blocks:
-        if outline_idx < len(outline):
-            item = outline[outline_idx]
+        normalized_block = _WHITESPACE_RE.sub(" ", block.strip())
+        matched = False
+        for idx in range(outline_idx, len(outline)):
+            item = outline[idx]
             prefix = f"{'#' * max(1, item.level)} "
             expected = prefix + _WHITESPACE_RE.sub(" ", item.title.strip())
-            normalized_block = _WHITESPACE_RE.sub(" ", block.strip())
             if normalized_block == expected:
                 if current_blocks:
                     sections.append((current_anchor, "\n\n".join(current_blocks)))
                 current_anchor = item.anchor_id
                 current_blocks = [block]
-                outline_idx += 1
-                continue
-        current_blocks.append(block)
+                outline_idx = idx + 1
+                matched = True
+                break
+        if not matched:
+            current_blocks.append(block)
 
     if current_blocks:
         sections.append((current_anchor, "\n\n".join(current_blocks)))
@@ -94,29 +102,9 @@ class DocumentReaderView(ft.Container):
         self._converted_cache: dict[bool, ConvertedDocument] = {}
         self._html_urls: dict[bool, str] = {}
         self._pdf_url: Optional[str] = None
+        self._active_webview_url: Optional[str] = None
 
         size_text = format_file_size(len(self._data)) or "0 B"
-        self._back_btn = ft.IconButton(
-            icon=ft.Icons.ARROW_BACK_ROUNDED,
-            tooltip="Đóng trình đọc",
-            icon_color=C.TEXT_PRIMARY,
-            on_click=lambda _e: self._on_close(),
-        )
-        self._title_text = ft.Text(
-            self._file_name,
-            size=15,
-            weight=ft.FontWeight.W_600,
-            color=C.TEXT_PRIMARY,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-        )
-        self._subtitle_text = ft.Text(
-            f"{self._kind.upper()} · {size_text}",
-            size=11,
-            color=C.TEXT_SECONDARY,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-        )
         self._night_btn = ft.IconButton(
             icon=ft.Icons.DARK_MODE_OUTLINED,
             tooltip="Chế độ đọc tối",
@@ -136,27 +124,21 @@ class DocumentReaderView(ft.Container):
             icon_color=C.TEXT_PRIMARY,
             on_click=lambda _e: self._on_open_external(self._file_name, self._data),
         )
-        self._header_container = ft.Container(
-            bgcolor=C.SURFACE,
-            border=ft.Border.only(bottom=ft.BorderSide(1, C.BORDER)),
-            padding=ft.Padding.symmetric(horizontal=8, vertical=6),
-            content=ft.Row(
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[
-                    self._back_btn,
-                    ft.Column(
-                        expand=True,
-                        spacing=1,
-                        controls=[self._title_text, self._subtitle_text],
-                    ),
-                    self._night_btn,
-                    self._save_btn,
-                    self._ext_btn,
-                ],
-            ),
+        (
+            self._header_container,
+            self._back_btn,
+            self._title_text,
+            self._subtitle_text,
+        ) = build_viewer_header(
+            title=self._file_name,
+            subtitle=f"{self._kind.upper()} · {size_text}",
+            back_tooltip="Đóng trình đọc",
+            on_back=lambda _e: self._on_close(),
+            trailing_actions=[self._night_btn, self._save_btn, self._ext_btn],
         )
-        self._body_host = ft.Container(expand=True, content=self._build_body())
+
+        self._body_host = ft.Container(expand=True)
+        self._body_host.content = self._build_body()
         self.content = ft.Column(
             expand=True,
             spacing=0,
@@ -169,7 +151,7 @@ class DocumentReaderView(ft.Container):
         except RuntimeError:
             return None
 
-    def _reader_palette(self) -> tuple[str, str, str, str, str]:
+    def _reader_palette(self) -> tuple[str, str, str, str, str, str, str]:
         if self._dark_reader:
             preset = THEME_PRESETS["material_graphite"]
             return (
@@ -178,8 +160,18 @@ class DocumentReaderView(ft.Container):
                 preset["text_primary"],
                 preset["text_secondary"],
                 preset["border"],
+                preset["accent"],
+                preset["on_accent"],
             )
-        return C.BG, C.SURFACE, C.TEXT_PRIMARY, C.TEXT_SECONDARY, C.BORDER
+        return (
+            C.BG,
+            C.SURFACE,
+            C.TEXT_PRIMARY,
+            C.TEXT_SECONDARY,
+            C.BORDER,
+            C.ACCENT,
+            C.ON_ACCENT,
+        )
 
     def _get_converted(self) -> ConvertedDocument:
         key = bool(self._dark_reader)
@@ -194,18 +186,28 @@ class DocumentReaderView(ft.Container):
             self._converted_cache[key] = cached
         return cached
 
-    def _register_pdf_url(self) -> str:
-        if self._pdf_url and self._preview_server.port > 0:
+    def _try_register_pdf_url(self) -> Optional[str]:
+        if self._pdf_url and self._preview_server.has_active_url(self._pdf_url):
             return self._pdf_url
-        url = self._preview_server.register_bytes(self._data, "application/pdf")
+        try:
+            url = self._preview_server.register_bytes(self._data, "application/pdf")
+        except ValueError:
+            self._pdf_url = None
+            return None
         self._pdf_url = url
         return url
 
-    def _register_html_url(self, dark_mode: bool, html_document: str) -> str:
+    def _try_register_html_url(
+        self, dark_mode: bool, html_document: str
+    ) -> Optional[str]:
         cached = self._html_urls.get(dark_mode)
-        if cached and self._preview_server.port > 0:
+        if cached and self._preview_server.has_active_url(cached):
             return cached
-        url = self._preview_server.register_html(html_document)
+        try:
+            url = self._preview_server.register_html(html_document)
+        except ValueError:
+            self._html_urls.pop(dark_mode, None)
+            return None
         self._html_urls[dark_mode] = url
         return url
 
@@ -313,68 +315,76 @@ class DocumentReaderView(ft.Container):
         button_label: str,
         on_primary: Callable[[], None],
     ) -> ft.Control:
-        return ft.Container(
-            expand=True,
-            alignment=ft.Alignment.CENTER,
+        card = ft.Container(
+            width=420,
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=14,
             padding=24,
-            content=ft.Container(
-                width=420,
-                bgcolor=C.SURFACE,
-                border=ft.Border.all(1, C.BORDER),
-                border_radius=14,
-                padding=24,
-                content=ft.Column(
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=12,
-                    tight=True,
-                    controls=[
-                        ft.Icon(icon, size=44, color=C.ACCENT),
-                        ft.Text(
-                            title,
-                            size=15,
-                            weight=ft.FontWeight.W_600,
-                            color=C.TEXT_PRIMARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Text(
-                            subtitle,
-                            size=12,
-                            color=C.TEXT_SECONDARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Row(
-                            alignment=ft.MainAxisAlignment.CENTER,
-                            spacing=10,
-                            wrap=True,
-                            controls=[
-                                ft.Button(
-                                    button_label,
-                                    icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                                    bgcolor=C.ACCENT,
-                                    color=C.ON_ACCENT,
-                                    on_click=lambda _e: on_primary(),
+            content=ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
+                tight=True,
+                controls=[
+                    ft.Icon(icon, size=44, color=C.ACCENT),
+                    ft.Text(
+                        title,
+                        size=15,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        subtitle,
+                        size=12,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=10,
+                        wrap=True,
+                        controls=[
+                            ft.Button(
+                                button_label,
+                                icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                                bgcolor=C.ACCENT,
+                                color=C.ON_ACCENT,
+                                on_click=lambda _e: on_primary(),
+                            ),
+                            ft.OutlinedButton(
+                                "Lưu tệp",
+                                icon=ft.Icons.SAVE_ALT_ROUNDED,
+                                on_click=lambda _e: self._on_save(
+                                    self._file_name, self._data
                                 ),
-                                ft.OutlinedButton(
-                                    "Lưu tệp",
-                                    icon=ft.Icons.SAVE_ALT_ROUNDED,
-                                    on_click=lambda _e: self._on_save(
-                                        self._file_name, self._data
-                                    ),
-                                ),
-                            ],
-                        ),
-                    ],
-                ),
+                            ),
+                        ],
+                    ),
+                ],
             ),
+        )
+        return ft.Column(
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+            controls=[ft.Container(padding=24, content=card)],
         )
 
     def _build_spreadsheet_body(self, converted: ConvertedDocument) -> ft.Control:
-        bg_color, surface_color, text_primary, text_secondary, border_color = (
-            self._reader_palette()
-        )
+        (
+            bg_color,
+            surface_color,
+            text_primary,
+            text_secondary,
+            border_color,
+            accent_color,
+            on_accent_color,
+        ) = self._reader_palette()
+        self._body_host.bgcolor = bg_color
         sheets = converted.sheets
-        idx = min(self._sheet_index, len(sheets) - 1)
-        self._sheet_index = max(0, idx)
+        self._sheet_index = max(0, min(self._sheet_index, len(sheets) - 1))
         sheet: SpreadsheetSheet = sheets[self._sheet_index]
 
         controls: list[ft.Control] = []
@@ -393,6 +403,11 @@ class DocumentReaderView(ft.Container):
                                 selected=(i == self._sheet_index),
                                 on_select=lambda _e, i=i: self._select_sheet(i),
                                 bold_selected=True,
+                                bgcolor=surface_color,
+                                selected_color=accent_color,
+                                text_color=text_primary,
+                                selected_text_color=on_accent_color,
+                                border_color=border_color,
                             )
                             for i, sh in enumerate(sheets)
                         ],
@@ -493,9 +508,16 @@ class DocumentReaderView(ft.Container):
         return ft.Column(expand=True, spacing=0, controls=controls)
 
     def _build_pptx_body(self, converted: ConvertedDocument) -> ft.Control:
-        _bg, surface_color, text_primary, text_secondary, border_color = (
-            self._reader_palette()
-        )
+        (
+            bg_color,
+            surface_color,
+            text_primary,
+            text_secondary,
+            border_color,
+            accent_color,
+            _on_accent,
+        ) = self._reader_palette()
+        self._body_host.bgcolor = bg_color
         cards: list[ft.Control] = []
         for slide_num, body_text, notes_text in converted.slides:
             card_controls: list[ft.Control] = [
@@ -503,7 +525,7 @@ class DocumentReaderView(ft.Container):
                     f"Slide {slide_num}",
                     size=14,
                     weight=ft.FontWeight.W_700,
-                    color=C.ACCENT,
+                    color=accent_color,
                 ),
                 ft.Text(
                     body_text or "(Slide không có văn bản)",
@@ -555,9 +577,16 @@ class DocumentReaderView(ft.Container):
         return list_view
 
     def _build_text_or_markdown_body(self, converted: ConvertedDocument) -> ft.Control:
-        _bg, surface_color, text_primary, text_secondary, border_color = (
-            self._reader_palette()
-        )
+        (
+            bg_color,
+            surface_color,
+            text_primary,
+            text_secondary,
+            border_color,
+            accent_color,
+            _on_accent,
+        ) = self._reader_palette()
+        self._body_host.bgcolor = bg_color
         is_plain_text = self._kind == "text" and not self._file_name.lower().endswith(
             (".md", ".markdown")
         )
@@ -602,11 +631,30 @@ class DocumentReaderView(ft.Container):
                 color=text_primary, size=13, weight=ft.FontWeight.W_600
             ),
             table_body_text_style=ft.TextStyle(color=text_primary, size=13),
-            blockquote_text_style=ft.TextStyle(color=text_secondary, size=13, italic=True),
+            table_cells_decoration=ft.BoxDecoration(
+                border=ft.Border.all(1, border_color)
+            ),
+            blockquote_text_style=ft.TextStyle(
+                color=text_secondary, size=13, italic=True
+            ),
+            blockquote_decoration=ft.BoxDecoration(
+                bgcolor=surface_color,
+                border=ft.Border.only(left=ft.BorderSide(3, accent_color)),
+            ),
+            blockquote_padding=10,
             code_text_style=ft.TextStyle(
                 color=text_primary, size=12, font_family=_MONO_FONT
             ),
-            a_text_style=ft.TextStyle(color=C.ACCENT),
+            codeblock_decoration=ft.BoxDecoration(
+                bgcolor=surface_color,
+                border=ft.Border.all(1, border_color),
+                border_radius=8,
+            ),
+            codeblock_padding=10,
+            horizontal_rule_decoration=ft.BoxDecoration(
+                border=ft.Border.only(bottom=ft.BorderSide(1, border_color))
+            ),
+            a_text_style=ft.TextStyle(color=accent_color),
         )
         sections = _split_markdown_by_outline(
             converted.markdown_text or "(Tài liệu trống)",
@@ -648,10 +696,15 @@ class DocumentReaderView(ft.Container):
                 text_secondary=text_secondary,
                 border_color=border_color,
             )
-            return ft.Column(expand=True, spacing=0, controls=[outline_bar, surface_card])
+            return ft.Column(
+                expand=True, spacing=0, controls=[outline_bar, surface_card]
+            )
         return surface_card
 
     def _build_body(self) -> ft.Control:
+        self._active_webview_url = None
+        self._body_host.bgcolor = None
+
         if not self._data or self._kind == "unsupported":
             return self._build_fallback_card(
                 icon=ft.Icons.INSERT_DRIVE_FILE_OUTLINED,
@@ -666,6 +719,23 @@ class DocumentReaderView(ft.Container):
             )
 
         if self._kind == "image":
+            image_error = ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+                controls=[
+                    ft.Icon(
+                        ft.Icons.BROKEN_IMAGE_OUTLINED,
+                        size=40,
+                        color=C.TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        "Không thể hiển thị hình ảnh.",
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                    ),
+                ],
+            )
             return ft.Container(
                 expand=True,
                 alignment=ft.Alignment.CENTER,
@@ -674,15 +744,22 @@ class DocumentReaderView(ft.Container):
                     expand=True,
                     min_scale=0.5,
                     max_scale=5.0,
-                    content=ft.Image(src=self._data, fit=ft.BoxFit.CONTAIN),
+                    content=ft.Image(
+                        src=self._data,
+                        fit=ft.BoxFit.CONTAIN,
+                        error_content=image_error,
+                    ),
                 ),
             )
 
         if self._kind == "pdf":
-            pdf_url = self._register_pdf_url()
-            wv = self._build_webview(pdf_url)
-            if wv is not None:
-                return wv
+            if self._webview_builder is not None:
+                pdf_url = self._try_register_pdf_url()
+                if pdf_url:
+                    wv = self._build_webview(pdf_url)
+                    if wv is not None:
+                        self._active_webview_url = pdf_url
+                        return wv
             return self._build_fallback_card(
                 icon=ft.Icons.PICTURE_AS_PDF_OUTLINED,
                 title=self._file_name,
@@ -694,12 +771,14 @@ class DocumentReaderView(ft.Container):
         if self._kind in {"docx", "xlsx", "csv", "pptx", "text"}:
             converted = self._get_converted()
             if converted.html_document and self._webview_builder is not None:
-                html_url = self._register_html_url(
+                html_url = self._try_register_html_url(
                     bool(self._dark_reader), converted.html_document
                 )
-                wv = self._build_webview(html_url)
-                if wv is not None:
-                    return wv
+                if html_url:
+                    wv = self._build_webview(html_url)
+                    if wv is not None:
+                        self._active_webview_url = html_url
+                        return wv
 
             if self._kind in {"xlsx", "csv"} and converted.sheets:
                 return self._build_spreadsheet_body(converted)
@@ -718,15 +797,21 @@ class DocumentReaderView(ft.Container):
     def update_theme(self) -> None:
         """Apply current global theme tokens while preserving reader mode & sheet state."""
         self.bgcolor = C.BG
-        self._header_container.bgcolor = C.SURFACE
-        self._header_container.border = ft.Border.only(
-            bottom=ft.BorderSide(1, C.BORDER)
+        refresh_viewer_header(
+            self._header_container,
+            self._back_btn,
+            self._title_text,
+            self._subtitle_text,
         )
-        self._back_btn.icon_color = C.TEXT_PRIMARY
-        self._title_text.color = C.TEXT_PRIMARY
-        self._subtitle_text.color = C.TEXT_SECONDARY
         self._save_btn.icon_color = C.TEXT_PRIMARY
         self._ext_btn.icon_color = C.TEXT_PRIMARY
         self._sync_night_button()
-        self._body_host.content = self._build_body()
+
+        preserve_webview = (
+            self._active_webview_url is not None
+            and self._preview_server.has_active_url(self._active_webview_url)
+            and (self._kind == "pdf" or self._dark_reader)
+        )
+        if not preserve_webview:
+            self._body_host.content = self._build_body()
         safe_control_update(self)

@@ -7,6 +7,8 @@ import http.client
 import io
 import re
 import socket
+import tarfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -441,6 +443,88 @@ def test_preview_server_stop_idempotent_and_broken_pipe_safe():
         srv.stop()
 
 
+def test_preview_server_has_active_url_csp_variants_empty_range_and_concurrency():
+    srv = LocalPreviewServer(max_items=2, max_total_bytes=4096)
+    try:
+        # Empty payload & single-byte 0-0 range
+        empty_url = srv.register_bytes(b"", "application/octet-stream")
+        assert srv.has_active_url(empty_url) is True
+        assert _http_request(empty_url)[0] == 200
+        assert _http_request(empty_url, headers={"Range": "bytes=0-0"})[0] == 416
+        status_e, hdrs_e, _ = _http_request(empty_url, headers={"Range": "bytes=0-"})
+        assert status_e == 416
+        assert hdrs_e["content-range"] == "bytes */0"
+
+        one_byte_url = srv.register_bytes(b"Z", "text/plain")
+        st1, hdrs1, body1 = _http_request(one_byte_url, headers={"Range": "bytes=0-0"})
+        assert st1 == 206
+        assert body1 == b"Z"
+        assert hdrs1["content-range"] == "bytes 0-0/1"
+
+        # Non-ASCII digits rejected in Range (both latin-1 HTTP and unit parser check)
+        from core.courses.local_preview_server import _parse_byte_range
+
+        assert _http_request(one_byte_url, headers={"Range": "bytes=\u00b2-"})[0] == 416
+        assert _parse_byte_range("bytes=\u0660-\u0660", 10) is None
+
+        # Strict CSP enforced on XHTML and SVG too
+        svg_url = srv.register_bytes(b"<svg></svg>", "image/svg+xml")
+        st_svg, hdrs_svg, _ = _http_request(svg_url)
+        assert st_svg == 200
+        assert "default-src 'none'" in hdrs_svg["content-security-policy"]
+        # empty_url was evicted because max_items=2
+        assert srv.has_active_url(empty_url) is False
+
+        xhtml_url = srv.register_bytes(b"<html/>", "application/xhtml+xml; charset=utf-8")
+        st_xh, hdrs_xh, _ = _http_request(xhtml_url)
+        assert st_xh == 200
+        assert "default-src 'none'" in hdrs_xh["content-security-policy"]
+
+        # has_active_url rejects invalid/mismatched URLs
+        assert srv.has_active_url("") is False
+        assert srv.has_active_url("http://127.0.0.1:99999/0000000000000000?token=x") is False
+        assert srv.has_active_url(xhtml_url + "wrong") is False
+
+        # Content-Type validation: control chars and non-latin-1 rejected
+        with pytest.raises(ValueError):
+            srv.register_bytes(b"a", "text/plain\x00")
+        with pytest.raises(ValueError):
+            srv.register_bytes(b"a", "text/plain; charset=\u2603")
+
+        # Dead-thread socket cleanup before restart (real thread exited without stop())
+        real_srv = srv._server
+        real_thread = srv._thread
+        assert real_srv is not None and real_thread is not None
+        real_srv.shutdown()
+        real_thread.join(timeout=2.0)
+        assert not real_thread.is_alive()
+        restarted_url = srv.register_bytes(b"ok", "text/plain")
+        assert srv._server is not real_srv
+        assert srv.has_active_url(restarted_url) is True
+        assert _http_request(restarted_url)[0] == 200
+
+        # Concurrent register_bytes & stop stress test
+        errors: list[Exception] = []
+
+        def _worker():
+            try:
+                for i in range(10):
+                    srv.register_bytes(f"p{i}".encode(), "text/plain")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        srv.stop()
+        for t in threads:
+            t.join(timeout=3.0)
+        assert not errors
+    finally:
+        srv.stop()
+    assert srv.has_active_url(restarted_url) is False
+
+
 # ======================================================================
 # 2. DocumentReaderView tests
 # ======================================================================
@@ -780,6 +864,195 @@ def test_document_reader_pptx_text_and_unsupported_fallback(
     on_ext.assert_called_once_with("binary.bin", b"\x00\x01\x02")
 
 
+def test_document_reader_tier_b_pdf_lazy_server_oversized_and_url_revalidation():
+    # Tier B PDF without webview_builder must NOT start LocalPreviewServer
+    srv = LocalPreviewServer(max_items=2, max_total_bytes=64)
+    try:
+        pdf_tier_b = DocumentReaderView(
+            file_name="notes.pdf",
+            data=b"%PDF-1.4\nhello",
+            kind="pdf",
+            preview_server=srv,
+            on_close=Mock(),
+            on_save=Mock(),
+            on_open_external=Mock(),
+            webview_builder=None,
+        )
+        assert srv.port == 0
+        assert pdf_tier_b._pdf_url is None
+
+        # Oversized PDF (> max_total_bytes) gracefully degrades to Tier B card
+        oversized_pdf = DocumentReaderView(
+            file_name="huge.pdf",
+            data=b"%PDF-" + b"x" * 100,
+            kind="pdf",
+            preview_server=srv,
+            on_close=Mock(),
+            on_save=Mock(),
+            on_open_external=Mock(),
+            webview_builder=lambda u: ft.Text(u),
+        )
+        assert any(
+            isinstance(c, (ft.Button, ft.OutlinedButton)) and c.content == "Mở bằng ứng dụng PDF"
+            for c in _walk_controls(oversized_pdf)
+        )
+
+        # Oversized DOCX HTML (> max_total_bytes) gracefully falls back to Tier B Markdown
+        docx_bytes = _build_minimal_docx([("Tiêu đề", "Heading1"), ("Đoạn ngắn", None)])
+        oversized_docx = DocumentReaderView(
+            file_name="huge.docx",
+            data=docx_bytes,
+            kind="docx",
+            preview_server=srv,
+            on_close=Mock(),
+            on_save=Mock(),
+            on_open_external=Mock(),
+            webview_builder=lambda u: ft.Text(u),
+        )
+        assert any(isinstance(c, ft.Markdown) for c in _walk_controls(oversized_docx))
+    finally:
+        srv.stop()
+
+    # Evicted or stopped URL re-registers cleanly on rebuild / update_theme
+    big_srv = LocalPreviewServer(max_items=1, max_total_bytes=1024 * 1024)
+    try:
+        built_urls: list[str] = []
+
+        def _wv(url: str) -> ft.Control:
+            built_urls.append(url)
+            return ft.Container(key=f"wv-{len(built_urls)}", content=ft.Text(url))
+
+        reader = DocumentReaderView(
+            file_name="small.pdf",
+            data=b"%PDF-1.4\n",
+            kind="pdf",
+            preview_server=big_srv,
+            on_close=Mock(),
+            on_save=Mock(),
+            on_open_external=Mock(),
+            webview_builder=_wv,
+        )
+        assert len(built_urls) == 1
+        first_url = built_urls[0]
+        assert big_srv.has_active_url(first_url) is True
+
+        # update_theme on active PDF Tier A skips rebuilding WebView while URL is active
+        reader.update_theme()
+        assert len(built_urls) == 1
+
+        # Evict first_url, then update_theme re-registers cleanly
+        big_srv.register_bytes(b"other", "text/plain")
+        assert big_srv.has_active_url(first_url) is False
+        reader.update_theme()
+        assert len(built_urls) == 2
+        assert built_urls[1] != first_url
+        assert big_srv.has_active_url(built_urls[1]) is True
+    finally:
+        big_srv.stop()
+
+
+def test_document_reader_dark_contrast_outline_recovery_image_and_sheet_clamp(
+    preview_server: LocalPreviewServer,
+):
+    from gui.components.courses.document_reader_view import _split_markdown_by_outline
+    from core.courses.document_converter import DocumentOutlineItem
+
+    # _split_markdown_by_outline scans forward past a mismatched/truncated heading
+    outline = [
+        DocumentOutlineItem(anchor_id="sec-1", level=1, title="First"),
+        DocumentOutlineItem(anchor_id="sec-2", level=2, title="Missing Heading"),
+        DocumentOutlineItem(anchor_id="sec-3", level=2, title="Third"),
+    ]
+    sections = _split_markdown_by_outline("# First\n\nBody 1\n\n## Third\n\nBody 3", outline)
+    anchors = [aid for aid, _ in sections]
+    assert anchors == ["sec-1", "sec-3"]
+
+    # Light app theme + _dark_reader=True applies material_graphite canvas & Markdown decorations
+    apply_theme("steel_light")
+    graphite = THEME_PRESETS["material_graphite"]
+    docx_bytes = _build_minimal_docx([("Đầu mục", "Heading1"), ("Nội dung", None)])
+    reader = DocumentReaderView(
+        file_name="dark_test.docx",
+        data=docx_bytes,
+        kind="docx",
+        preview_server=preview_server,
+        on_close=Mock(),
+        on_save=Mock(),
+        on_open_external=Mock(),
+    )
+    reader._toggle_reader_mode()
+    assert reader._body_host.bgcolor == graphite["bg"]
+    md = next(c for c in _walk_controls(reader) if isinstance(c, ft.Markdown))
+    assert md.md_style_sheet is not None
+    assert md.md_style_sheet.codeblock_decoration is not None
+    assert md.md_style_sheet.codeblock_decoration.bgcolor == graphite["surface"]
+    assert md.md_style_sheet.blockquote_decoration is not None
+    assert md.md_style_sheet.a_text_style is not None
+    assert md.md_style_sheet.a_text_style.color == graphite["accent"]
+
+    # Multi-sheet XLSX dark reader styles sheet chips with dark palette + clamps out-of-bounds index
+    xlsx_bytes = _build_minimal_xlsx([("S1", [["A"], ["1"]]), ("S2", [["B"], ["2"]])])
+    xlsx_reader = DocumentReaderView(
+        file_name="multi.xlsx",
+        data=xlsx_bytes,
+        kind="xlsx",
+        preview_server=preview_server,
+        on_close=Mock(),
+        on_save=Mock(),
+        on_open_external=Mock(),
+    )
+    xlsx_reader._toggle_reader_mode()
+    xlsx_reader._select_sheet(99)
+    assert xlsx_reader._sheet_index == 1
+    assert xlsx_reader._body_host.bgcolor == graphite["bg"]
+    sheet_chips = [c for c in _walk_controls(xlsx_reader) if isinstance(c, ft.Chip)]
+    assert len(sheet_chips) == 2
+    assert sheet_chips[0].bgcolor == graphite["surface"]
+    assert sheet_chips[1].selected_color == graphite["accent"]
+
+    # PPTX dark reader uses material_graphite canvas & accent
+    pptx_reader = DocumentReaderView(
+        file_name="deck.pptx",
+        data=_build_minimal_pptx([("Slide text", "Note")]),
+        kind="pptx",
+        preview_server=preview_server,
+        on_close=Mock(),
+        on_save=Mock(),
+        on_open_external=Mock(),
+    )
+    pptx_reader._toggle_reader_mode()
+    assert pptx_reader._body_host.bgcolor == graphite["bg"]
+    assert any(
+        isinstance(c, ft.Text) and c.value == "Slide 1" and c.color == graphite["accent"]
+        for c in _walk_controls(pptx_reader)
+    )
+
+    # Corrupt image provides error_content fallback; empty image falls back cleanly
+    img_reader = DocumentReaderView(
+        file_name="bad.png",
+        data=b"not-a-valid-png",
+        kind="image",
+        preview_server=preview_server,
+        on_close=Mock(),
+        on_save=Mock(),
+        on_open_external=Mock(),
+    )
+    img_ctrl = next(c for c in _walk_controls(img_reader) if isinstance(c, ft.Image))
+    assert img_ctrl.error_content is not None
+
+    empty_img_reader = DocumentReaderView(
+        file_name="empty.png",
+        data=b"",
+        kind="image",
+        preview_server=preview_server,
+        on_close=Mock(),
+        on_save=Mock(),
+        on_open_external=Mock(),
+    )
+    assert [c for c in _walk_controls(empty_img_reader) if isinstance(c, ft.Image)] == []
+    assert any("Tệp trống" in t for t in _all_texts(empty_img_reader))
+
+
 # ======================================================================
 # 3. ArchiveExplorerView tests
 # ======================================================================
@@ -941,3 +1214,67 @@ def test_archive_explorer_unsupported_rar_inspect_security_error_and_theme():
     apply_theme("steel_light")
     rar_explorer.update_theme()
     assert rar_explorer.bgcolor == C.BG
+
+
+def test_archive_explorer_jump_to_bounds_error_icon_theme_and_targz():
+    # Build valid .tar.gz archive
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w:gz") as tf:
+        payload = b"hello tar"
+        info = tarfile.TarInfo("folder/hello.txt")
+        info.size = len(payload)
+        tf.addfile(info, io.BytesIO(payload))
+
+    opened: list[tuple[str, bytes, str]] = []
+    explorer = ArchiveExplorerView(
+        archive_name="bundle.tar.gz",
+        archive_bytes=tar_buf.getvalue(),
+        archive_service=ArchiveService(),
+        on_close=Mock(),
+        on_open_entry=lambda name, b, k: opened.append((name, b, k)),
+        on_save_raw=Mock(),
+    )
+    folder_row = next(
+        c
+        for c in _walk_controls(explorer)
+        if isinstance(c, ft.Container) and c.on_click is not None and "folder" in _all_texts(c)
+    )
+    assert folder_row.ink is True
+    folder_row.on_click(None)
+
+    file_row = next(
+        c
+        for c in _walk_controls(explorer)
+        if isinstance(c, ft.Container) and c.on_click is not None and "hello.txt" in _all_texts(c)
+    )
+    file_row.on_click(None)
+    assert opened == [("hello.txt", b"hello tar", "text")]
+
+    # _jump_to out-of-bounds is a no-op; valid index jumps cleanly
+    explorer._jump_to(99)
+    assert len(explorer._stack) == 2
+    explorer._jump_to(0)
+    assert len(explorer._stack) == 1
+
+    # Error banner uses ERROR_OUTLINE_ROUNDED icon and survives update_theme()
+    explorer._svc.extract_entry_bytes = Mock(side_effect=OSError("io fail"))  # type: ignore[method-assign]
+    folder_row2 = next(
+        c
+        for c in _walk_controls(explorer)
+        if isinstance(c, ft.Container) and c.on_click is not None and "folder" in _all_texts(c)
+    )
+    folder_row2.on_click(None)
+    file_row2 = next(
+        c
+        for c in _walk_controls(explorer)
+        if isinstance(c, ft.Container) and c.on_click is not None and "hello.txt" in _all_texts(c)
+    )
+    file_row2.on_click(None)
+    icons = [c.icon for c in _walk_controls(explorer._banner_host) if isinstance(c, ft.Icon)]
+    assert ft.Icons.ERROR_OUTLINE_ROUNDED in icons
+
+    apply_theme("steel_light")
+    explorer.update_theme()
+    assert explorer.bgcolor == C.BG
+    icons_after = [c.icon for c in _walk_controls(explorer._banner_host) if isinstance(c, ft.Icon)]
+    assert ft.Icons.ERROR_OUTLINE_ROUNDED in icons_after
