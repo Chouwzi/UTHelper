@@ -26,14 +26,16 @@ class _FakeCoursesProvider:
     source = "courses"
 
     def __init__(self) -> None:
-        self.delta_updates: set[int] = set()
+        self.delta_updates: set[int] | None = set()
         self.sections_calls = 0
         self.grades_calls = 0
         self.download_calls = 0
+        self.completion_calls = 0
         self.courses_error: Exception | None = None
         self.sections_error: Exception | None = None
         self.updates_error: Exception | None = None
         self.grades_error: Exception | None = None
+        self.completion_error: Exception | None = None
         self.download_result: bytes | None = b"pdf-bytes"
         self.completion_result = True
         self.courses = [
@@ -80,9 +82,11 @@ class _FakeCoursesProvider:
             raise self.sections_error
         return list(self.sections)
 
-    def fetch_updates_since(self, course_id: int, since: int) -> set[int]:
+    def fetch_updates_since(self, course_id: int, since: int) -> set[int] | None:
         if self.updates_error is not None:
             raise self.updates_error
+        if self.delta_updates is None:
+            return None
         return set(self.delta_updates)
 
     def fetch_course_grades(self, course_id: int) -> list[CourseGradeItem]:
@@ -92,6 +96,9 @@ class _FakeCoursesProvider:
         return list(self.grades)
 
     def set_manual_completion(self, cmid: int, completed: bool) -> bool:
+        self.completion_calls += 1
+        if self.completion_error is not None:
+            raise self.completion_error
         return self.completion_result
 
     def download_file(self, url: str) -> bytes | None:
@@ -108,11 +115,14 @@ class _FakeThnnProvider:
         self.grades_calls = 0
         self.download_calls = 0
         self.resolve_calls = 0
+        self.completion_calls = 0
         self.courses_error: Exception | None = None
         self.sections_error: Exception | None = None
         self.grades_error: Exception | None = None
         self.download_error: Exception | None = None
         self.resolve_error: Exception | None = None
+        self.completion_error: Exception | None = None
+        self.completion_result = True
         self.resolved_url = "https://meet.google.com/thnn-resolved"
         self.download_result: bytes | None = b"thnn-bytes"
         self.courses = [
@@ -191,6 +201,16 @@ class _FakeThnnProvider:
             if self.resolve_error is not None:
                 raise self.resolve_error
             return self.resolved_url
+        finally:
+            self._track_exit()
+
+    def set_manual_completion(self, cmid: int, completed: bool) -> bool:
+        self._track_enter()
+        try:
+            self.completion_calls += 1
+            if self.completion_error is not None:
+                raise self.completion_error
+            return self.completion_result
         finally:
             self._track_exit()
 
@@ -492,7 +512,7 @@ def test_thnn_lock_serializes_all_concurrent_thnn_operations(tmp_path):
         web_url="https://thnn.ut.edu.vn/mod/url/view.php?id=77",
     )
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futures = [
             pool.submit(svc.refresh_catalog, True),
             pool.submit(svc.sync_course_delta, "thnn", 4458, True),
@@ -505,11 +525,19 @@ def test_thnn_lock_serializes_all_concurrent_thnn_operations(tmp_path):
                 "a.pdf",
             ),
             pool.submit(svc.resolve_module_url, "thnn", mod),
+            pool.submit(svc.toggle_completion, "thnn", 4458, 77, True),
+            pool.submit(
+                svc.fetch_attachment_bytes,
+                "thnn",
+                "https://thnn.ut.edu.vn/pluginfile.php/1/b.pdf",
+            ),
         ]
         for fut in futures:
             fut.result()
 
     assert t_prov.max_concurrent_calls == 1
+    assert t_prov.completion_calls == 1
+    assert t_prov.download_calls == 2
 
 
 def test_fetch_or_cache_preview_file_hits_cache_and_handles_missing(tmp_path):
@@ -553,7 +581,7 @@ def test_fetch_or_cache_preview_file_hits_cache_and_handles_missing(tmp_path):
         is None
     )
 
-    # Provider error returns None without crashing
+    # Provider error returns None without crashing and records error
     t_prov.download_error = CourseProviderError("forbidden")
     assert (
         svc.fetch_or_cache_preview_file(
@@ -561,6 +589,15 @@ def test_fetch_or_cache_preview_file_hits_cache_and_handles_missing(tmp_path):
         )
         is None
     )
+    assert "forbidden" in svc.last_thnn_error
+
+    # Subsequent successful preview download clears last_thnn_error
+    t_prov.download_error = None
+    ok_thnn = svc.fetch_or_cache_preview_file(
+        "thnn", "https://thnn.ut.edu.vn/ok.pdf", 1, "ok.pdf"
+    )
+    assert ok_thnn is not None and ok_thnn.read_bytes() == b"thnn-bytes"
+    assert svc.last_thnn_error == ""
 
     # Missing provider returns None
     svc_no_prov = CourseCatalogService(cache_store=cache, preview_cache=preview)
@@ -598,6 +635,11 @@ def test_resolve_module_url_uses_thnn_resolver_and_falls_back(tmp_path):
 
     t_prov.resolve_error = ThnnSessionError("expired")
     assert svc.resolve_module_url("thnn", thnn_mod) == "https://thnn.ut.edu.vn/mod/url/view.php?id=1"
+    assert "expired" in svc.last_thnn_error
+
+    t_prov.resolve_error = None
+    assert svc.resolve_module_url("thnn", thnn_mod) == "https://meet.google.com/thnn-resolved"
+    assert svc.last_thnn_error == ""
 
     courses_mod = CourseModuleItem(
         cmid=2,
@@ -741,6 +783,10 @@ def test_fetch_attachment_bytes_success_and_error(tmp_path):
     c_prov.download_result = None
     with pytest.raises(CourseProviderError):
         svc.fetch_attachment_bytes("courses", "https://courses.ut.edu.vn/a.pdf")
+    assert "Failed to download attachment" in svc.last_courses_error
+    c_prov.download_result = b"pdf-bytes"
+    assert svc.fetch_attachment_bytes("courses", "https://courses.ut.edu.vn/a.pdf") == b"pdf-bytes"
+    assert svc.last_courses_error == ""
 
 
 def test_staleness_mark_seen_grades_recents_and_validation_guards(tmp_path):
@@ -824,3 +870,553 @@ def test_staleness_mark_seen_grades_recents_and_validation_guards(tmp_path):
         svc.fetch_or_cache_preview_file("invalid", "https://x/a.pdf", 1, "a.pdf")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         svc.resolve_module_url("invalid", CourseModuleItem(1, 1, "url", "x", 1))  # type: ignore[arg-type]
+
+
+def test_sync_course_delta_handles_empty_set_vs_none_updates_and_clears_error(tmp_path):
+    now = [1000]
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="delta-none")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        time_fn=lambda: now[0],
+    )
+    svc.refresh_catalog(include_thnn=False)
+    svc.sync_course_delta("courses", 10, force=False)
+    assert c_prov.sections_calls == 1
+
+    # Seed a prior courses error to verify set() delta check clears it.
+    now[0] += 30
+    c_prov.updates_error = CourseProviderError("transient delta error")
+    err_res = svc.sync_course_delta("courses", 10, force=False)
+    assert err_res.changed is False
+    assert "transient delta error" in svc.last_courses_error
+
+    # Returning set() skips fetch_course_sections and clears last_courses_error.
+    c_prov.updates_error = None
+    c_prov.delta_updates = set()
+    no_change = svc.sync_course_delta("courses", 10, force=False)
+    assert no_change.changed is False
+    assert no_change.error == ""
+    assert c_prov.sections_calls == 1
+    assert svc.last_courses_error == ""
+
+    # Immediate re-open within 15s is debounced because set() recorded check time.
+    now[0] += 5
+    debounced = svc.sync_course_delta("courses", 10, force=False)
+    assert debounced.changed is False
+    assert c_prov.sections_calls == 1
+
+    # Returning None (unsupported/soft fail) falls back to fetch_course_sections.
+    now[0] += 30
+    c_prov.delta_updates = None
+    c_prov.sections = [
+        CourseSection(
+            id=1,
+            course_id=10,
+            source="courses",
+            section_num=1,
+            name="Buổi 1",
+            modules=(
+                *c_prov.sections[0].modules,
+                CourseModuleItem(
+                    cmid=102,
+                    instance_id=3,
+                    modname="resource",
+                    name="Slide 2",
+                    section_id=1,
+                ),
+            ),
+        )
+    ]
+    fallback_res = svc.sync_course_delta("courses", 10, force=False)
+    assert c_prov.sections_calls == 2
+    assert fallback_res.changed is True
+    assert fallback_res.new_cmids == {102}
+
+
+def test_sync_course_delta_preserves_and_clears_is_new_across_sync_cycles(tmp_path):
+    now = [1000]
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="is-new-cycle")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        time_fn=lambda: now[0],
+    )
+    svc.refresh_catalog(include_thnn=False)
+
+    res1 = svc.sync_course_delta("courses", 10, force=False)
+    assert res1.sections[0].modules[0].is_new is False
+
+    # Add module 101 -> marked is_new=True
+    now[0] += 30
+    c_prov.delta_updates = {101}
+    c_prov.sections = [
+        CourseSection(
+            id=1,
+            course_id=10,
+            source="courses",
+            section_num=1,
+            name="Buổi 1",
+            modules=(
+                *c_prov.sections[0].modules,
+                CourseModuleItem(
+                    cmid=101,
+                    instance_id=2,
+                    modname="resource",
+                    name="New Slide",
+                    section_id=1,
+                ),
+            ),
+        )
+    ]
+    res2 = svc.sync_course_delta("courses", 10, force=False)
+    assert res2.new_cmids == {101}
+    assert res2.sections[0].modules[0].is_new is False
+    assert res2.sections[0].modules[1].is_new is True
+
+    # Debounced check preserves is_new=True
+    now[0] += 5
+    res3 = svc.sync_course_delta("courses", 10, force=False)
+    assert res3.changed is False
+    assert res3.sections[0].modules[1].is_new is True
+
+    # No-change delta check (set()) preserves is_new=True without calling sections
+    now[0] += 30
+    c_prov.delta_updates = set()
+    calls_before = c_prov.sections_calls
+    res4 = svc.sync_course_delta("courses", 10, force=False)
+    assert c_prov.sections_calls == calls_before
+    assert res4.changed is False
+    assert res4.sections[0].modules[1].is_new is True
+
+    # Subsequent full section fetch with same cmids clears is_new=False
+    now[0] += 30
+    c_prov.delta_updates = {101}
+    res5 = svc.sync_course_delta("courses", 10, force=False)
+    assert c_prov.sections_calls == calls_before + 1
+    assert res5.changed is True
+    assert res5.new_cmids == set()
+    assert all(not mod.is_new for mod in res5.sections[0].modules)
+    persisted = svc.open_course_cached("courses", 10)
+    assert all(not mod.is_new for mod in persisted.sections[0].modules)
+
+
+def test_sync_course_delta_and_load_grades_preserve_nonempty_cache_on_empty_response(
+    tmp_path, caplog
+):
+    now = [1000]
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="empty-preserve")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    c_prov.grades = [CourseGradeItem(id=1, item_name="Midterm", grade_formatted="8.5")]
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        time_fn=lambda: now[0],
+    )
+    svc.refresh_catalog(include_thnn=False)
+    svc.sync_course_delta("courses", 10, force=True)
+    assert len(svc.load_course_grades("courses", 10, force=True)) == 1
+
+    # Provider returns [] on force sync when cache already has sections/grades
+    now[0] = 2000
+    c_prov.sections = []
+    c_prov.grades = []
+    with caplog.at_level(logging.WARNING):
+        res = svc.sync_course_delta("courses", 10, force=True)
+        grades = svc.load_course_grades("courses", 10, force=True)
+
+    assert res.changed is False
+    assert res.last_synced_at == 1000
+    assert len(res.sections) == 1
+    assert res.sections[0].modules[0].cmid == 100
+    assert len(res.grades) == 1
+    assert len(grades) == 1
+    assert grades[0].grade_formatted == "8.5"
+    cached = svc.open_course_cached("courses", 10)
+    assert cached.last_synced_at == 1000
+    assert cached.known_cmids == [100]
+    assert len(cached.sections) == 1
+    assert len(cached.grades) == 1
+    assert any("preserving cached sections" in rec.message for rec in caplog.records)
+    assert any("preserving cached grades" in rec.message for rec in caplog.records)
+
+
+def test_toggle_completion_uncheck_invalid_cmid_errors_and_empty_cache_guard(tmp_path):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="toggle-guard")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    c_prov.courses.append(
+        CourseSummary(
+            id=20,
+            source="courses",
+            fullname="Empty Detail Course",
+            shortname="EDC",
+            display_name="Empty Detail Course",
+            completed_count=2,
+            total_trackable=4,
+            progress=0.5,
+        )
+    )
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        time_fn=lambda: 2000,
+    )
+    svc.refresh_catalog(include_thnn=False)
+    svc.sync_course_delta("courses", 10, force=True)
+
+    # Check -> catalog completed_count=1, progress=1.0
+    assert svc.toggle_completion("courses", 10, cmid=100, completed=True) is True
+    courses, _, _ = svc.load_cached_catalog()
+    c10 = next(c for c in courses if c.id == 10)
+    assert c10.completed_count == 1
+    assert c10.total_trackable == 1
+    assert c10.progress == pytest.approx(1.0)
+
+    # Uncheck -> detail state=0, catalog completed_count=0, progress=0.0
+    assert svc.toggle_completion("courses", 10, cmid=100, completed=False) is True
+    detail = svc.open_course_cached("courses", 10)
+    assert detail.sections[0].modules[0].completion_state == 0
+    courses, _, _ = svc.load_cached_catalog()
+    c10 = next(c for c in courses if c.id == 10)
+    assert c10.completed_count == 0
+    assert c10.total_trackable == 1
+    assert c10.progress == pytest.approx(0.0)
+
+    # Invalid cmid values do not contact provider
+    calls_before = c_prov.completion_calls
+    for bad_cmid in (0, -1, True, False):
+        assert svc.toggle_completion("courses", 10, cmid=bad_cmid, completed=True) is False
+    assert c_prov.completion_calls == calls_before
+
+    # Provider CourseProviderError records error and leaves cache untouched
+    c_prov.completion_error = CourseProviderError("completion WS failed")
+    assert svc.toggle_completion("courses", 10, cmid=100, completed=True) is False
+    assert "completion WS failed" in svc.last_courses_error
+    assert svc.open_course_cached("courses", 10).sections[0].modules[0].completion_state == 0
+
+    # Provider returning False leaves cache untouched
+    c_prov.completion_error = None
+    c_prov.completion_result = False
+    assert svc.toggle_completion("courses", 10, cmid=100, completed=True) is False
+    assert svc.open_course_cached("courses", 10).sections[0].modules[0].completion_state == 0
+
+    # Empty course detail or missing cmid does not zero out catalog progress/counts
+    c_prov.completion_result = True
+    assert svc.toggle_completion("courses", 20, cmid=999, completed=True) is True
+    assert svc.open_course_cached("courses", 20).sections == []
+    courses, _, _ = svc.load_cached_catalog()
+    c20 = next(c for c in courses if c.id == 20)
+    assert c20.completed_count == 2
+    assert c20.total_trackable == 4
+    assert c20.progress == pytest.approx(0.5)
+
+
+def test_unsafe_urls_invalid_filenames_and_preview_put_bytes_oserror(
+    tmp_path, monkeypatch, caplog
+):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="url-safety")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    t_prov = _FakeThnnProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        thnn_provider=t_prov,
+    )
+
+    unsafe_urls = (
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "https://courses.ut.edu.vn/a\nb.pdf",
+        "https://courses.ut.edu.vn/a b.pdf",
+        "https://[bad",
+        "",
+        "   ",
+        None,
+    )
+    for bad_url in unsafe_urls:
+        assert (
+            svc.fetch_or_cache_preview_file("courses", bad_url, 1, "doc.pdf")  # type: ignore[arg-type]
+            is None
+        )
+        with pytest.raises(CourseProviderError):
+            svc.fetch_attachment_bytes("courses", bad_url)  # type: ignore[arg-type]
+        assert svc.last_courses_error != ""
+
+    assert c_prov.download_calls == 0
+
+    # Invalid file_name returns None without touching provider
+    for bad_name in ("", "   ", None):
+        assert (
+            svc.fetch_or_cache_preview_file(
+                "courses",
+                "https://courses.ut.edu.vn/valid.pdf",
+                1,
+                bad_name,  # type: ignore[arg-type]
+            )
+            is None
+        )
+    assert c_prov.download_calls == 0
+
+    # put_bytes OSError logs warning and returns None
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(preview, "put_bytes", _boom)
+    with caplog.at_level(logging.WARNING):
+        res = svc.fetch_or_cache_preview_file(
+            "courses", "https://courses.ut.edu.vn/valid.pdf", 1, "valid.pdf"
+        )
+    assert res is None
+    assert any("disk full" in rec.message for rec in caplog.records)
+
+    # resolve_module_url filters unsafe module URLs and unsafe THNN resolver results
+    mod_unsafe_primary = CourseModuleItem(
+        cmid=1,
+        instance_id=0,
+        modname="url",
+        name="Link",
+        section_id=1,
+        url="javascript:alert(1)",
+        web_url="https://courses.ut.edu.vn/mod/url/view.php?id=1",
+    )
+    assert (
+        svc.resolve_module_url("courses", mod_unsafe_primary)
+        == "https://courses.ut.edu.vn/mod/url/view.php?id=1"
+    )
+
+    mod_all_unsafe = CourseModuleItem(
+        cmid=2,
+        instance_id=0,
+        modname="url",
+        name="Bad",
+        section_id=1,
+        url="file:///etc/passwd",
+        web_url="https://[bad",
+    )
+    assert svc.resolve_module_url("courses", mod_all_unsafe) == ""
+
+    thnn_mod = CourseModuleItem(
+        cmid=3,
+        instance_id=0,
+        modname="url",
+        name="THNN Meet",
+        section_id=1,
+        url="",
+        web_url="https://thnn.ut.edu.vn/mod/url/view.php?id=3",
+    )
+    for bad_resolved in ("javascript:evil()", "https://thnn.ut.edu.vn/a\nb", "https://[bad"):
+        t_prov.resolved_url = bad_resolved
+        assert (
+            svc.resolve_module_url("thnn", thnn_mod)
+            == "https://thnn.ut.edu.vn/mod/url/view.php?id=3"
+        )
+
+
+def test_refresh_catalog_preserves_metadata_unseen_flag_and_catalog_synced_at_on_courses_failure(
+    tmp_path,
+):
+    now = [1000]
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="refresh-meta")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    t_prov = _FakeThnnProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        thnn_provider=t_prov,
+        time_fn=lambda: now[0],
+    )
+
+    seeded_course = CourseSummary(
+        id=10,
+        source="courses",
+        fullname="CS 101",
+        shortname="CS101",
+        display_name="CS 101",
+        semester_label="HKI 2026-2027",
+        semester_sort_key=(2026, 3),
+        teacher_name="Cô Lan",
+        teacher_email="lan@uth.edu.vn",
+        teacher_phone="0901234567",
+        meet_url="https://meet.google.com/abc-defg-hij",
+        progress=0.75,
+        completed_count=3,
+        total_trackable=4,
+        last_synced_at=900,
+        has_unseen_updates=True,
+    )
+    cache.save_catalog([seeded_course], synced_at=1000)
+
+    # Fresh summary without cached metadata preserves teacher/meet/progress/counts/synced/unseen
+    now[0] = 2000
+    refreshed = svc.refresh_catalog(include_thnn=True)
+    courses_item = next(c for c in refreshed if c.course_key == "courses:10")
+    assert courses_item.teacher_name == "Cô Lan"
+    assert courses_item.teacher_email == "lan@uth.edu.vn"
+    assert courses_item.teacher_phone == "0901234567"
+    assert courses_item.meet_url == "https://meet.google.com/abc-defg-hij"
+    assert courses_item.progress == pytest.approx(0.75)
+    assert courses_item.completed_count == 3
+    assert courses_item.total_trackable == 4
+    assert courses_item.last_synced_at == 900
+    assert courses_item.has_unseen_updates is True
+    assert svc.load_cached_catalog()[2] == 2000
+
+    # Primary courses provider fails while THNN succeeds -> catalog_synced_at stays 2000!
+    now[0] = 7000
+    c_prov.courses_error = CourseProviderError("courses WS down")
+    t_prov.courses = [
+        CourseSummary(
+            id=4459,
+            source="thnn",
+            fullname="Anh văn 5",
+            shortname="AV5",
+            display_name="Anh văn 5",
+            semester_label="HKII 2025-2026",
+            semester_sort_key=(2025, 2),
+        )
+    ]
+    partial = svc.refresh_catalog(include_thnn=True)
+    assert {c.course_key for c in partial} == {"courses:10", "thnn:4459"}
+    _, _, synced_at = svc.load_cached_catalog()
+    assert synced_at == 2000
+    assert svc.is_catalog_stale(1) is True
+
+
+def test_thnn_lock_prevents_older_error_from_overwriting_newer_success(tmp_path):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="thnn-error-order")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    class _OrderedThnnProvider(_FakeThnnProvider):
+        def fetch_courses(self) -> list[CourseSummary]:
+            if not first_entered.is_set():
+                first_entered.set()
+                assert release_first.wait(timeout=2.0)
+                raise ThnnSessionError("older failure")
+            return list(self.courses)
+
+    t_prov = _OrderedThnnProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        thnn_provider=t_prov,
+        time_fn=lambda: 1000,
+    )
+
+    lock_states: list[tuple[str, str, bool]] = []
+    orig_record = svc._record_provider_error
+    orig_clear = svc._clear_provider_error
+
+    def _wrapped_record(source, context, exc):
+        locked = svc._thnn_lock.locked()
+        lock_states.append(("record", source, locked))
+        if source == "thnn" and not locked:
+            # Expose the race window if error recording ever escapes _thnn_lock.
+            time.sleep(0.05)
+        return orig_record(source, context, exc)
+
+    def _wrapped_clear(source):
+        lock_states.append(("clear", source, svc._thnn_lock.locked()))
+        return orig_clear(source)
+
+    svc._record_provider_error = _wrapped_record  # type: ignore[method-assign]
+    svc._clear_provider_error = _wrapped_clear  # type: ignore[method-assign]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_fut = pool.submit(svc.refresh_catalog, True)
+        assert first_entered.wait(timeout=2.0)
+        second_fut = pool.submit(svc.refresh_catalog, True)
+        release_first.set()
+        first_fut.result()
+        second_fut.result()
+
+    assert svc.last_thnn_error == ""
+    thnn_states = [held for _, src, held in lock_states if src == "thnn"]
+    assert thnn_states and all(thnn_states)
+
+
+def test_sync_course_delta_computes_new_cmids_and_grades_against_latest_detail(tmp_path):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="latest-detail-race")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    entered_fetch = threading.Event()
+    allow_finish = threading.Event()
+
+    class _SlowSectionsProvider(_FakeCoursesProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pause_next_fetch = False
+
+        def fetch_course_sections(self, course_id: int) -> list[CourseSection]:
+            if self.pause_next_fetch:
+                self.pause_next_fetch = False
+                entered_fetch.set()
+                assert allow_finish.wait(timeout=2.0)
+            return super().fetch_course_sections(course_id)
+
+    c_prov = _SlowSectionsProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        time_fn=lambda: 1000,
+    )
+    svc.refresh_catalog(include_thnn=False)
+    # Initial sync seeds known_cmids=[100]
+    svc.sync_course_delta("courses", 10, force=True)
+
+    # Next sync sees 101 in sections; pause mid-network while another call updates cache to know 101 + grade
+    c_prov.pause_next_fetch = True
+    c_prov.sections = [
+        CourseSection(
+            id=1,
+            course_id=10,
+            source="courses",
+            section_num=1,
+            name="Buổi 1",
+            modules=(
+                *c_prov.sections[0].modules,
+                CourseModuleItem(
+                    cmid=101,
+                    instance_id=2,
+                    modname="resource",
+                    name="Mid-flight Slide",
+                    section_id=1,
+                ),
+            ),
+        )
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut = pool.submit(svc.sync_course_delta, "courses", 10, True)
+        assert entered_fetch.wait(timeout=2.0)
+        cache.save_course_detail(
+            "courses",
+            10,
+            c_prov.sections,
+            [CourseGradeItem(id=1, item_name="Lab", grade_formatted="9.0")],
+            synced_at=999,
+            known_cmids=[100, 101],
+        )
+        allow_finish.set()
+        res = fut.result()
+
+    assert res.changed is True
+    assert res.new_cmids == set()
+    assert len(res.grades) == 1
+    assert res.grades[0].grade_formatted == "9.0"
+    assert all(not mod.is_new for mod in res.sections[0].modules)

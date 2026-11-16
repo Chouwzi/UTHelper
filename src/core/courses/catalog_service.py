@@ -9,7 +9,8 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar, get_args
+from typing import Any, Callable, NoReturn, Optional, TypeVar, get_args
+from urllib.parse import urlsplit
 
 from core.courses.cache_store import (
     CatalogCacheSnapshot,
@@ -79,6 +80,23 @@ def _format_error(exc: BaseException) -> str:
     return str(exc).strip() or type(exc).__name__
 
 
+def _safe_http_url(url: Any) -> str:
+    if not isinstance(url, str):
+        return ""
+    cleaned = url.strip()
+    if not cleaned or any(
+        ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in cleaned
+    ):
+        return ""
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return cleaned
+
+
 def _apply_course_flags(
     courses: list[CourseSummary],
     pinned_keys: list[str],
@@ -123,6 +141,7 @@ def _merge_course_with_cached(
         total_trackable=prev.total_trackable,
         progress=fresh.progress if fresh.progress is not None else prev.progress,
         last_synced_at=prev.last_synced_at,
+        has_unseen_updates=(fresh.has_unseen_updates or prev.has_unseen_updates),
     )
 
 
@@ -210,9 +229,32 @@ class CourseCatalogService:
         self._time_fn = time_fn
         self._thnn_lock = threading.Lock()
         self._catalog_lock = threading.Lock()
+        self._error_lock = threading.Lock()
         self._last_delta_check: dict[str, int] = {}
-        self.last_thnn_error: str = ""
-        self.last_courses_error: str = ""
+        self._last_thnn_error: str = ""
+        self._last_courses_error: str = ""
+
+    @property
+    def last_thnn_error(self) -> str:
+        """Most recent THNN provider error message, or empty string if healthy."""
+        with self._error_lock:
+            return self._last_thnn_error
+
+    @last_thnn_error.setter
+    def last_thnn_error(self, value: str) -> None:
+        with self._error_lock:
+            self._last_thnn_error = value
+
+    @property
+    def last_courses_error(self) -> str:
+        """Most recent Courses WS provider error message, or empty string if healthy."""
+        with self._error_lock:
+            return self._last_courses_error
+
+    @last_courses_error.setter
+    def last_courses_error(self, value: str) -> None:
+        with self._error_lock:
+            self._last_courses_error = value
 
     def _now_seconds(self) -> int:
         return max(0, _safe_finite_int(self._time_fn(), fallback=int(time.time())))
@@ -220,28 +262,47 @@ class CourseCatalogService:
     def _provider_for(self, source: CourseSource) -> Optional[CourseCatalogProvider]:
         return self._courses_provider if source == "courses" else self._thnn_provider
 
-    def _call_provider(self, source: CourseSource, fn: Callable[[], _T]) -> _T:
+    def _execute_provider_call(
+        self, source: CourseSource, context: str, fn: Callable[[], _T]
+    ) -> _T:
+        try:
+            result = fn()
+        except CourseProviderError as exc:
+            self._record_provider_error(source, context, exc)
+            raise
+        self._clear_provider_error(source)
+        return result
+
+    def _call_provider(
+        self,
+        source: CourseSource,
+        fn: Callable[[], _T],
+        *,
+        context: str = "provider_call",
+    ) -> _T:
         if source == "thnn":
             with self._thnn_lock:
-                return fn()
-        return fn()
+                return self._execute_provider_call(source, context, fn)
+        return self._execute_provider_call(source, context, fn)
 
     def _record_provider_error(
         self, source: CourseSource, context: str, exc: BaseException
     ) -> str:
         msg = _format_error(exc)
-        if source == "thnn":
-            self.last_thnn_error = msg
-        else:
-            self.last_courses_error = msg
+        with self._error_lock:
+            if source == "thnn":
+                self._last_thnn_error = msg
+            else:
+                self._last_courses_error = msg
         logger.warning("%s %s failed: %s", source.upper(), context, msg)
         return msg
 
     def _clear_provider_error(self, source: CourseSource) -> None:
-        if source == "thnn":
-            self.last_thnn_error = ""
-        else:
-            self.last_courses_error = ""
+        with self._error_lock:
+            if source == "thnn":
+                self._last_thnn_error = ""
+            else:
+                self._last_courses_error = ""
 
     def load_cached_catalog(self) -> tuple[list[CourseSummary], list[RecentMaterialEntry], int]:
         """Return cached courses with pin/unseen flags, recent items, and last sync time."""
@@ -265,27 +326,31 @@ class CourseCatalogService:
         if self._courses_provider is not None:
             try:
                 candidate = self._call_provider(
-                    "courses", self._courses_provider.fetch_courses
+                    "courses",
+                    self._courses_provider.fetch_courses,
+                    context="fetch_courses",
                 )
                 if candidate:
                     fresh_courses = list(candidate)
-                    self._clear_provider_error("courses")
                 else:
                     logger.warning(
                         "COURSES provider returned empty catalog; preserving cached courses"
                     )
-            except CourseProviderError as exc:
-                self._record_provider_error("courses", "fetch_courses", exc)
+            except CourseProviderError:
+                pass
 
         fresh_thnn: Optional[list[CourseSummary]] = None
         if include_thnn and self._thnn_provider is not None:
             try:
                 fresh_thnn = list(
-                    self._call_provider("thnn", self._thnn_provider.fetch_courses)
+                    self._call_provider(
+                        "thnn",
+                        self._thnn_provider.fetch_courses,
+                        context="fetch_courses",
+                    )
                 )
-                self._clear_provider_error("thnn")
-            except CourseProviderError as exc:
-                self._record_provider_error("thnn", "fetch_courses", exc)
+            except CourseProviderError:
+                pass
 
         with self._catalog_lock:
             snap = self._cache.load_catalog()
@@ -307,7 +372,13 @@ class CourseCatalogService:
                     )
 
             if fresh_courses is not None or fresh_thnn is not None:
-                self._cache.save_catalog(merged, synced_at=self._now_seconds())
+                should_advance = fresh_courses is not None or (
+                    self._courses_provider is None and fresh_thnn is not None
+                )
+                synced_at = (
+                    self._now_seconds() if should_advance else snap.catalog_synced_at
+                )
+                self._cache.save_catalog(merged, synced_at=synced_at)
             return _apply_course_flags(merged, snap.pinned_keys, snap.unseen_keys)
 
     def open_course_cached(self, source: CourseSource, course_id: int) -> CourseDetailSnapshot:
@@ -397,38 +468,52 @@ class CourseCatalogService:
                         changed_ids = self._call_provider(
                             valid_source,
                             lambda: updates_fn(valid_id, cached.last_synced_at),
+                            context="fetch_updates_since",
                         )
                     except CourseProviderError as exc:
-                        err = self._record_provider_error(
-                            valid_source, "fetch_updates_since", exc
-                        )
-                        return _cached_result(error=err)
-                    with self._catalog_lock:
-                        self._last_delta_check[course_key] = now
-                    if not changed_ids:
-                        return _cached_result()
+                        return _cached_result(error=_format_error(exc))
+                    if changed_ids is not None:
+                        with self._catalog_lock:
+                            self._last_delta_check[course_key] = now
+                        if not changed_ids:
+                            return _cached_result()
 
         try:
             fresh_sections = list(
                 self._call_provider(
                     valid_source,
                     lambda: provider.fetch_course_sections(valid_id),
+                    context="fetch_course_sections",
                 )
             )
         except CourseProviderError as exc:
-            err = self._record_provider_error(valid_source, "fetch_course_sections", exc)
-            return _cached_result(error=err)
-
-        self._clear_provider_error(valid_source)
-        has_prior_sync = cached.last_synced_at > 0 or bool(cached.known_cmids)
-        old_cmids = set(cached.known_cmids)
-        fresh_cmids = [mod.cmid for sec in fresh_sections for mod in sec.modules]
-        new_cmids = (set(fresh_cmids) - old_cmids) if has_prior_sync else set()
-        marked_sections = _mark_new_modules(fresh_sections, new_cmids)
+            return _cached_result(error=_format_error(exc))
 
         with self._catalog_lock:
-            self._last_delta_check[course_key] = now
             latest_detail = self._cache.load_course_detail(valid_source, valid_id)
+            if not fresh_sections and latest_detail.sections:
+                logger.warning(
+                    "%s fetch_course_sections returned empty for course %s; preserving cached sections",
+                    valid_source.upper(),
+                    valid_id,
+                )
+                return CourseSyncResult(
+                    sections=latest_detail.sections,
+                    grades=latest_detail.grades,
+                    changed=False,
+                    new_cmids=set(),
+                    last_synced_at=latest_detail.last_synced_at,
+                )
+
+            self._last_delta_check[course_key] = now
+            has_prior_sync = latest_detail.last_synced_at > 0 or bool(
+                latest_detail.known_cmids
+            )
+            old_cmids = set(latest_detail.known_cmids)
+            fresh_cmids = [mod.cmid for sec in fresh_sections for mod in sec.modules]
+            new_cmids = (set(fresh_cmids) - old_cmids) if has_prior_sync else set()
+            marked_sections = _mark_new_modules(fresh_sections, new_cmids)
+
             self._cache.save_course_detail(
                 valid_source,
                 valid_id,
@@ -471,16 +556,23 @@ class CourseCatalogService:
         try:
             grades = list(
                 self._call_provider(
-                    valid_source, lambda: provider.fetch_course_grades(valid_id)
+                    valid_source,
+                    lambda: provider.fetch_course_grades(valid_id),
+                    context="fetch_course_grades",
                 )
             )
-        except CourseProviderError as exc:
-            self._record_provider_error(valid_source, "fetch_course_grades", exc)
+        except CourseProviderError:
             return cached.grades
 
-        self._clear_provider_error(valid_source)
         with self._catalog_lock:
             latest = self._cache.load_course_detail(valid_source, valid_id)
+            if not grades and latest.grades:
+                logger.warning(
+                    "%s fetch_course_grades returned empty for course %s; preserving cached grades",
+                    valid_source.upper(),
+                    valid_id,
+                )
+                return latest.grades
             self._cache.save_course_detail(
                 valid_source,
                 valid_id,
@@ -536,10 +628,13 @@ class CourseCatalogService:
 
         try:
             ok = bool(
-                self._call_provider(valid_source, lambda: setter(cmid, bool(completed)))
+                self._call_provider(
+                    valid_source,
+                    lambda: setter(cmid, bool(completed)),
+                    context="set_manual_completion",
+                )
             )
-        except CourseProviderError as exc:
-            self._record_provider_error(valid_source, "set_manual_completion", exc)
+        except CourseProviderError:
             return False
         if not ok:
             return False
@@ -547,7 +642,11 @@ class CourseCatalogService:
         new_state = 1 if completed else 0
         course_key = f"{valid_source}:{valid_id}"
         with self._catalog_lock:
-            cached = self._cache.load_course_detail(valid_source, valid_id)
+            latest = self._cache.load_course_detail(valid_source, valid_id)
+            if not latest.sections or not any(
+                mod.cmid == cmid for sec in latest.sections for mod in sec.modules
+            ):
+                return True
             updated_sections = [
                 replace(
                     sec,
@@ -558,15 +657,15 @@ class CourseCatalogService:
                         for mod in sec.modules
                     ),
                 )
-                for sec in cached.sections
+                for sec in latest.sections
             ]
             self._cache.save_course_detail(
                 valid_source,
                 valid_id,
                 updated_sections,
-                cached.grades,
-                synced_at=cached.last_synced_at,
-                known_cmids=cached.known_cmids,
+                latest.grades,
+                synced_at=latest.last_synced_at,
+                known_cmids=latest.known_cmids,
             )
             self._update_catalog_course_locked(
                 course_key,
@@ -574,21 +673,50 @@ class CourseCatalogService:
             )
         return True
 
-    def _download_bytes(self, source: CourseSource, file_url: str) -> Optional[bytes]:
+    def _raise_download_error(self, source: CourseSource, message: str) -> NoReturn:
+        exc = CourseProviderError(message)
+        self._record_provider_error(source, "download_file", exc)
+        raise exc
+
+    def _download_bytes(
+        self, source: CourseSource, file_url: str, *, raise_on_empty: bool = False
+    ) -> Optional[bytes]:
         valid_source = _validate_source(source)
-        if not isinstance(file_url, str) or not file_url.strip():
+        safe_url = _safe_http_url(file_url)
+        if not safe_url:
+            if raise_on_empty:
+                self._raise_download_error(
+                    valid_source, f"Invalid or unsafe attachment URL for {valid_source}"
+                )
             return None
         provider = self._provider_for(valid_source)
         if provider is None:
+            if raise_on_empty:
+                self._raise_download_error(
+                    valid_source, f"Failed to download attachment from {valid_source}"
+                )
             return None
-        raw = self._call_provider(valid_source, lambda: provider.download_file(file_url))
-        return raw if raw else None
+
+        def _fetch() -> Optional[bytes]:
+            raw = provider.download_file(safe_url)
+            if not raw:
+                if raise_on_empty:
+                    raise CourseProviderError(
+                        f"Failed to download attachment from {valid_source}"
+                    )
+                return None
+            return raw
+
+        return self._call_provider(valid_source, _fetch, context="download_file")
 
     def fetch_attachment_bytes(self, source: CourseSource, file_url: str) -> bytes:
         """Download raw attachment bytes from the site provider under session guards."""
-        raw = self._download_bytes(source, file_url)
+        raw = self._download_bytes(source, file_url, raise_on_empty=True)
         if not raw:
-            raise CourseProviderError(f"Failed to download attachment from {source}")
+            self._raise_download_error(
+                _validate_source(source),
+                f"Failed to download attachment from {source}",
+            )
         return raw
 
     def fetch_or_cache_preview_file(
@@ -596,41 +724,55 @@ class CourseCatalogService:
     ) -> Optional[Path]:
         """Return a cached preview file path or download and persist it on miss."""
         valid_source = _validate_source(source)
-        if not isinstance(file_url, str) or not file_url.strip():
+        safe_url = _safe_http_url(file_url)
+        if not safe_url or not isinstance(file_name, str) or not file_name.strip():
             return None
         cached_path = self._preview_cache.get_cached_path(
-            file_url, time_modified, file_name
+            safe_url, time_modified, file_name
         )
         if cached_path is not None:
             return cached_path
 
         try:
-            raw = self._download_bytes(valid_source, file_url)
-        except CourseProviderError as exc:
-            self._record_provider_error(valid_source, "download_file", exc)
+            raw = self._download_bytes(valid_source, safe_url)
+        except CourseProviderError:
             return None
         if not raw:
             return None
-        return self._preview_cache.put_bytes(file_url, time_modified, file_name, raw)
+        try:
+            return self._preview_cache.put_bytes(
+                safe_url, time_modified, file_name, raw
+            )
+        except OSError as exc:
+            logger.warning(
+                "Failed to cache preview file %r for %s: %s",
+                file_name,
+                valid_source,
+                _format_error(exc),
+            )
+            return None
 
     def resolve_module_url(self, source: CourseSource, module: CourseModuleItem) -> str:
         """Resolve an external target URL for a module, using THNN lazy resolution when needed."""
         valid_source = _validate_source(source)
-        fallback = module.url or module.web_url
+        fallback = _safe_http_url(module.url) or _safe_http_url(module.web_url)
         if valid_source == "thnn" and self._thnn_provider is not None:
             resolver = getattr(self._thnn_provider, "resolve_module_external_url", None)
             if callable(resolver):
                 try:
-                    resolved = self._call_provider("thnn", lambda: resolver(module))
-                except CourseProviderError as exc:
-                    self._record_provider_error("thnn", "resolve_module_external_url", exc)
+                    resolved = self._call_provider(
+                        "thnn",
+                        lambda: resolver(module),
+                        context="resolve_module_external_url",
+                    )
+                except CourseProviderError:
                     return fallback
                 except Exception as exc:
                     logger.warning(
                         "THNN resolve_module_external_url failed (cmid=%s): %s",
                         module.cmid,
-                        exc,
+                        _format_error(exc),
                     )
                     return fallback
-                return resolved or fallback
+                return _safe_http_url(resolved) or fallback
         return fallback
