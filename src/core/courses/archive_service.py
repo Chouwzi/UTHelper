@@ -1,8 +1,11 @@
-"""Path-safe interactive archive explorer for .zip, .tar.gz, and optional desktop .rar."""
+"""Path-safe interactive archive explorer for .zip, .tar.*, and optional desktop .rar."""
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import io
+import lzma
 import os
 import shutil
 import stat
@@ -10,6 +13,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import threading
 import zipfile
 import zlib
 from contextlib import contextmanager
@@ -20,8 +24,14 @@ from typing import IO, Callable, Iterator, Optional
 from core.courses.models import PreviewKind
 from core.courses.providers import classify_preview_kind
 
-_TAR_EXTENSIONS = (".tar", ".tar.gz", ".tgz")
+_TAR_EXTENSIONS = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
 _READ_CHUNK_SIZE = 65536
+_MAX_STDERR_BYTES = 64 * 1024
+_MAX_LISTING_LINE_BYTES = 256 * 1024
+_RAR_LIST_TIMEOUT_SECONDS = 15.0
+_RAR_EXTRACT_TIMEOUT_SECONDS = 20.0
+_TAR_BASE_HEADER_SLACK = 64 * 1024
+_TAR_PER_ENTRY_SLACK = 4096
 
 
 class ArchiveSecurityError(ValueError):
@@ -34,6 +44,18 @@ class _RarInspectionError(RuntimeError):
 
 class _RarEncryptedError(_RarInspectionError):
     """Internal error raised when a RAR archive is password-protected."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RarEntry:
+    """Normalized entry parsed from 7z or UnRAR technical listing output."""
+
+    raw_path: str
+    clean_path: str
+    is_dir: bool
+    size: int
+    is_link: bool = False
+    encrypted: bool = False
 
 
 @dataclass
@@ -68,8 +90,8 @@ def sanitize_archive_member_path(raw_path: str) -> str:
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_path):
         raise ArchiveSecurityError(f"Control character forbidden in archive path: {raw_path!r}")
 
-    normalized = raw_path.replace("\\", "/").strip()
-    if not normalized:
+    normalized = raw_path.replace("\\", "/")
+    if not normalized.strip():
         raise ArchiveSecurityError("Blank archive member path")
     if normalized.startswith("/"):
         raise ArchiveSecurityError(f"Absolute or UNC path forbidden: {raw_path!r}")
@@ -80,8 +102,12 @@ def sanitize_archive_member_path(raw_path: str) -> str:
     for segment in normalized.split("/"):
         if segment in ("", "."):
             continue
-        if segment.strip() == "..":
-            raise ArchiveSecurityError(f"Path traversal forbidden: {raw_path!r}")
+        if not segment.strip():
+            raise ArchiveSecurityError(f"Whitespace-only path segment forbidden: {raw_path!r}")
+        if segment.rstrip(". ") in ("", ".", ".."):
+            raise ArchiveSecurityError(
+                f"Unsafe or traversal path segment forbidden: {raw_path!r}"
+            )
         segments.append(segment)
 
     if not segments:
@@ -95,14 +121,17 @@ def find_windows_rar_cli() -> Optional[str]:
         found = shutil.which(candidate)
         if found:
             return found
-    for fixed in (
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "7-Zip" / "7z.exe",
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "WinRAR" / "UnRAR.exe",
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "7-Zip" / "7z.exe",
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "WinRAR" / "UnRAR.exe",
-    ):
-        if fixed.is_file():
-            return str(fixed)
+    if os.name == "nt":
+        prog_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+        prog_files_x86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+        for fixed in (
+            Path(prog_files) / "7-Zip" / "7z.exe",
+            Path(prog_files) / "WinRAR" / "UnRAR.exe",
+            Path(prog_files_x86) / "7-Zip" / "7z.exe",
+            Path(prog_files_x86) / "WinRAR" / "UnRAR.exe",
+        ):
+            if fixed.is_file():
+                return str(fixed)
     return None
 
 
@@ -112,11 +141,22 @@ find_rar_cli = find_windows_rar_cli
 def _is_root_dot_dir(raw_name: str, is_dir: bool) -> bool:
     if not is_dir:
         return False
-    return raw_name.replace("\\", "/").strip() in {".", "./", "./."}
+    return raw_name.replace("\\", "/") in {".", "./", "./."}
 
 
-def _is_zip_symlink(info: zipfile.ZipInfo) -> bool:
-    return stat.S_ISLNK(info.external_attr >> 16)
+def _zip_member_kind(info: zipfile.ZipInfo) -> str:
+    mode = info.external_attr >> 16
+    if (
+        stat.S_ISLNK(mode)
+        or stat.S_ISFIFO(mode)
+        or stat.S_ISCHR(mode)
+        or stat.S_ISBLK(mode)
+        or stat.S_ISSOCK(mode)
+    ):
+        return "special"
+    if info.is_dir() or info.filename.endswith(("/", "\\")):
+        return "dir"
+    return "regular"
 
 
 def _parse_nonneg_int(raw_value: str) -> int:
@@ -144,6 +184,179 @@ def _read_stream_capped(stream: IO[bytes], max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _drain_stream_bounded(
+    stream: Optional[IO[bytes]], max_bytes: int, sink: list[bytes]
+) -> None:
+    """Drain an output stream completely to prevent pipe deadlock while capping kept bytes."""
+    if stream is None:
+        return
+    kept = 0
+    while True:
+        try:
+            chunk = stream.read(_READ_CHUNK_SIZE)
+        except (OSError, ValueError):
+            break
+        if not chunk:
+            break
+        if kept < max_bytes:
+            take = chunk[: max_bytes - kept]
+            sink.append(take)
+            kept += len(take)
+
+
+def _iter_lines_bounded(
+    stream: Optional[IO[bytes]],
+    max_line_bytes: int,
+    max_total_bytes: int,
+) -> Iterator[str]:
+    """Stream UTF-8 lines incrementally from a byte pipe with line and total caps."""
+    if stream is None:
+        return
+    buf = bytearray()
+    total_bytes = 0
+    while True:
+        chunk = stream.read(_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_total_bytes:
+            raise ArchiveSecurityError("RAR listing output exceeds safety limits")
+        buf.extend(chunk)
+        while True:
+            nl_idx = buf.find(b"\n")
+            if nl_idx == -1:
+                if len(buf) > max_line_bytes:
+                    raise ArchiveSecurityError("RAR listing line exceeds safety limits")
+                break
+            if nl_idx > max_line_bytes:
+                raise ArchiveSecurityError("RAR listing line exceeds safety limits")
+            raw_line = bytes(buf[:nl_idx])
+            del buf[: nl_idx + 1]
+            yield raw_line.decode("utf-8", errors="replace").rstrip("\r")
+    if buf:
+        if len(buf) > max_line_bytes:
+            raise ArchiveSecurityError("RAR listing line exceeds safety limits")
+        yield bytes(buf).decode("utf-8", errors="replace").rstrip("\r")
+
+
+class _ByteLimitStream:
+    """Bounded stream wrapper for tarfile that halts decompression bombs early."""
+
+    def __init__(self, stream: IO[bytes], max_bytes: int) -> None:
+        self._stream = stream
+        self._max_bytes = max(0, max_bytes)
+        self._pos = 0
+        self._bytes_consumed = 0
+
+    def allow_entry_overhead(self, extra_bytes: int) -> None:
+        """Grant modest tar header/padding allowance as real entries are parsed."""
+        self._max_bytes += max(0, extra_bytes)
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            chunks: list[bytes] = []
+            while True:
+                remaining = self._max_bytes - self._bytes_consumed
+                chunk = self._stream.read(min(_READ_CHUNK_SIZE, remaining + 1))
+                if not chunk:
+                    break
+                self._bytes_consumed += len(chunk)
+                self._pos += len(chunk)
+                if self._bytes_consumed > self._max_bytes:
+                    raise ArchiveSecurityError("Archive exceeds safety limits")
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        if size == 0:
+            return b""
+        remaining = self._max_bytes - self._bytes_consumed
+        data = self._stream.read(min(size, remaining + 1))
+        if data:
+            self._bytes_consumed += len(data)
+            self._pos += len(data)
+            if self._bytes_consumed > self._max_bytes:
+                raise ArchiveSecurityError("Archive exceeds safety limits")
+        return data
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._pos + offset
+        elif whence == io.SEEK_END:
+            raise OSError("SEEK_END is not supported on bounded tar stream")
+        else:
+            raise ValueError(f"Unsupported whence: {whence}")
+
+        if target < 0:
+            raise ValueError(f"Negative seek position: {target}")
+        if target > self._max_bytes:
+            raise ArchiveSecurityError("Archive exceeds safety limits")
+
+        if target > self._pos:
+            if isinstance(self._stream, io.BytesIO):
+                new_pos = self._stream.seek(target, io.SEEK_SET)
+                delta = max(0, new_pos - self._pos)
+                self._bytes_consumed += delta
+                self._pos = new_pos
+                if self._bytes_consumed > self._max_bytes:
+                    raise ArchiveSecurityError("Archive exceeds safety limits")
+                return self._pos
+            skip = target - self._pos
+            while skip > 0:
+                chunk = self.read(min(_READ_CHUNK_SIZE, skip))
+                if not chunk:
+                    break
+                skip -= len(chunk)
+            return self._pos
+
+        if target < self._pos:
+            self._pos = self._stream.seek(target, io.SEEK_SET)
+        return self._pos
+
+
+class _PathKindTracker:
+    """Tracks normalized archive paths to reject file-vs-directory collisions."""
+
+    def __init__(self) -> None:
+        self._dirs: set[str] = set()
+        self._files: set[str] = set()
+
+    def record(self, clean_path: str, is_dir: bool) -> None:
+        parts = clean_path.split("/")
+        for idx in range(len(parts) - 1):
+            ancestor = "/".join(parts[: idx + 1])
+            if ancestor in self._files:
+                raise ArchiveSecurityError(
+                    f"Conflicting file and directory path in archive: {ancestor!r}"
+                )
+            self._dirs.add(ancestor)
+        if is_dir:
+            if clean_path in self._files:
+                raise ArchiveSecurityError(
+                    f"Conflicting file and directory path in archive: {clean_path!r}"
+                )
+            self._dirs.add(clean_path)
+        else:
+            if clean_path in self._dirs:
+                raise ArchiveSecurityError(
+                    f"Conflicting file and directory path in archive: {clean_path!r}"
+                )
+            self._files.add(clean_path)
+
+
 def _insert_entry(
     root: ArchiveNode,
     clean_path: str,
@@ -163,35 +376,42 @@ def _insert_entry(
             if index is not None
             else next((child for child in curr.children if child.name == part), None)
         )
+        expected_is_dir = is_dir if last else True
         if existing is None:
-            node_is_dir = is_dir if last else True
             existing = ArchiveNode(
                 name=part,
                 full_path=rel,
-                is_dir=node_is_dir,
-                size=0 if node_is_dir else size,
-                compressed_size=0 if node_is_dir else comp_size,
-                preview_kind="unsupported" if node_is_dir else classify_preview_kind(part),
+                is_dir=expected_is_dir,
+                size=0 if expected_is_dir else size,
+                compressed_size=0 if expected_is_dir else comp_size,
+                preview_kind="unsupported" if expected_is_dir else classify_preview_kind(part),
             )
             curr.children.append(existing)
             if index is not None:
                 index[rel] = existing
-        elif not last and not existing.is_dir:
-            existing.is_dir = True
-            existing.size = 0
-            existing.compressed_size = 0
-            existing.preview_kind = "unsupported"
+        elif existing.is_dir != expected_is_dir:
+            raise ArchiveSecurityError(f"Conflicting file and directory path in archive: {rel!r}")
+        elif last and not expected_is_dir:
+            existing.size = size
+            existing.compressed_size = comp_size
+            existing.preview_kind = classify_preview_kind(part)
         curr = existing
 
 
-def _sort_and_count_files(node: ArchiveNode) -> int:
-    node.children.sort(key=lambda child: (0 if child.is_dir else 1, child.name.lower(), child.name))
+def _sort_and_count_files(root: ArchiveNode) -> int:
+    """Sort every directory node children dirs-first alphabetically using an explicit stack."""
     total_files = 0
-    for child in node.children:
-        if child.is_dir:
-            total_files += _sort_and_count_files(child)
-        else:
-            total_files += 1
+    stack: list[ArchiveNode] = [root]
+    while stack:
+        node = stack.pop()
+        node.children.sort(
+            key=lambda child: (0 if child.is_dir else 1, child.name.lower(), child.name)
+        )
+        for child in node.children:
+            if child.is_dir:
+                stack.append(child)
+            else:
+                total_files += 1
     return total_files
 
 
@@ -205,7 +425,259 @@ def _temporary_rar_file(data: bytes) -> Iterator[Path]:
         yield tmp_path
     finally:
         if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+@contextmanager
+def _managed_rar_process(
+    cmd: list[str], timeout_seconds: float
+) -> Iterator[tuple[subprocess.Popen[bytes], threading.Event, list[bytes], threading.Thread]]:
+    """Spawn a RAR CLI process with bounded stderr draining and a hard timeout watchdog."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    timed_out = threading.Event()
+
+    def _on_timeout() -> None:
+        timed_out.set()
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    timer = threading.Timer(timeout_seconds, _on_timeout)
+    timer.daemon = True
+    timer.start()
+
+    stderr_chunks: list[bytes] = []
+    stderr_thread = threading.Thread(
+        target=_drain_stream_bounded,
+        args=(proc.stderr, _MAX_STDERR_BYTES, stderr_chunks),
+        daemon=True,
+    )
+    stderr_thread.start()
+
+    try:
+        yield proc, timed_out, stderr_chunks, stderr_thread
+    finally:
+        timer.cancel()
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError):
+                    pass
+        stderr_thread.join(timeout=1.0)
+
+
+def _is_unix_special_mode(attrs: str) -> bool:
+    return (
+        len(attrs) >= 10
+        and attrs[0] in ("l", "b", "c", "p", "s")
+        and attrs[1] in ("r", "-")
+        and attrs[2] in ("w", "-")
+    )
+
+
+def _has_link_attribute(attrs: str) -> bool:
+    return "L" in attrs or _is_unix_special_mode(attrs)
+
+
+class _7zSltStreamParser:
+    """Incremental parser for `7z l -slt -sccUTF-8` stdout lines."""
+
+    def __init__(self, check_caps: Callable[[int, int], None]) -> None:
+        self._check_caps = check_caps
+        self.entries: list[_RarEntry] = []
+        self.header_encrypted = False
+        self.header_preview: list[str] = []
+        self._preview_chars = 0
+        self._in_entries = False
+        self._entry_count = 0
+        self._total_bytes = 0
+        self._reset_current()
+
+    def _reset_current(self) -> None:
+        self._cur_path = ""
+        self._cur_size = 0
+        self._cur_dir = False
+        self._cur_encrypted = False
+        self._cur_link = False
+
+    def _flush(self) -> None:
+        if not self._cur_path:
+            self._reset_current()
+            return
+        if not _is_root_dot_dir(self._cur_path, self._cur_dir):
+            self._entry_count += 1
+            self._total_bytes += self._cur_size
+            self._check_caps(self._entry_count, self._total_bytes)
+            clean = sanitize_archive_member_path(self._cur_path)
+            self.entries.append(
+                _RarEntry(
+                    raw_path=self._cur_path,
+                    clean_path=clean,
+                    is_dir=self._cur_dir,
+                    size=self._cur_size,
+                    is_link=self._cur_link,
+                    encrypted=self._cur_encrypted,
+                )
+            )
+        self._reset_current()
+
+    def feed(self, line: str) -> None:
+        stripped = line.strip()
+        if not self._in_entries:
+            if self._preview_chars < 8192 and stripped:
+                self.header_preview.append(stripped)
+                self._preview_chars += len(stripped)
+            if stripped == "----------":
+                self._in_entries = True
+            elif stripped == "Encrypted = +":
+                self.header_encrypted = True
+            return
+
+        if not stripped:
+            self._flush()
+            return
+
+        if line.startswith("Path = "):
+            if self._cur_path:
+                self._flush()
+            self._cur_path = line[7:]
+        elif line.startswith("Size = "):
+            self._cur_size = _parse_nonneg_int(line[7:])
+        elif line.startswith("Folder = "):
+            self._cur_dir = line[9:].strip() == "+"
+        elif line.startswith("Encrypted = "):
+            self._cur_encrypted = line[12:].strip() == "+"
+        elif line.startswith("Symbolic Link = ") and line[16:].strip():
+            self._cur_link = True
+        elif line.startswith("Hard Link = ") and line[12:].strip():
+            self._cur_link = True
+        elif line.startswith("Attributes = "):
+            if _has_link_attribute(line[13:].strip()):
+                self._cur_link = True
+        elif line.startswith("Mode = "):
+            if line[7:].strip().lower().startswith(("l", "b", "c", "p", "s")):
+                self._cur_link = True
+
+    def finish(self) -> list[_RarEntry]:
+        self._flush()
+        return self.entries
+
+
+class _UnrarLtStreamParser:
+    """Incremental parser for `UnRAR lt -p- -scf` stdout lines."""
+
+    def __init__(self, check_caps: Callable[[int, int], None]) -> None:
+        self._check_caps = check_caps
+        self.entries: list[_RarEntry] = []
+        self.header_encrypted = False
+        self.header_preview: list[str] = []
+        self._preview_chars = 0
+        self._in_entries = False
+        self._entry_count = 0
+        self._total_bytes = 0
+        self._reset_current()
+
+    def _reset_current(self) -> None:
+        self._cur_name = ""
+        self._cur_type = ""
+        self._cur_size = 0
+        self._cur_dir = False
+        self._cur_link = False
+        self._cur_encrypted = False
+        self._attr_dir_hint = False
+
+    def _flush(self) -> None:
+        if not self._cur_name:
+            self._reset_current()
+            return
+        is_dir = self._cur_dir or (self._attr_dir_hint and not self._cur_type)
+        if not _is_root_dot_dir(self._cur_name, is_dir):
+            self._entry_count += 1
+            self._total_bytes += self._cur_size
+            self._check_caps(self._entry_count, self._total_bytes)
+            clean = sanitize_archive_member_path(self._cur_name)
+            self.entries.append(
+                _RarEntry(
+                    raw_path=self._cur_name,
+                    clean_path=clean,
+                    is_dir=is_dir,
+                    size=self._cur_size,
+                    is_link=self._cur_link,
+                    encrypted=self._cur_encrypted,
+                )
+            )
+        self._reset_current()
+
+    def feed(self, line: str) -> None:
+        stripped = line.strip()
+        if not stripped:
+            if self._in_entries:
+                self._flush()
+            return
+
+        left_trimmed = line.lstrip(" ")
+        if left_trimmed.startswith("Name: "):
+            self._in_entries = True
+            if self._cur_name:
+                self._flush()
+            self._cur_name = left_trimmed[6:]
+            return
+
+        if not self._in_entries:
+            if self._preview_chars < 8192:
+                self.header_preview.append(stripped)
+                self._preview_chars += len(stripped)
+            if (
+                left_trimmed.startswith("Details: ")
+                and "encrypted headers" in left_trimmed.lower()
+            ):
+                self.header_encrypted = True
+            return
+
+        if left_trimmed.startswith("Type: "):
+            self._cur_type = left_trimmed[6:].strip().lower()
+            if self._cur_type == "directory":
+                self._cur_dir = True
+            elif self._cur_type != "file":
+                self._cur_link = True
+        elif left_trimmed.startswith("Target: "):
+            if left_trimmed[8:].strip():
+                self._cur_link = True
+        elif left_trimmed.startswith("Size: "):
+            self._cur_size = _parse_nonneg_int(left_trimmed[6:])
+        elif left_trimmed.startswith("Attributes: "):
+            attrs = left_trimmed[12:].strip()
+            if _has_link_attribute(attrs):
+                self._cur_link = True
+            if "D" in attrs:
+                self._attr_dir_hint = True
+        elif left_trimmed.startswith("Flags: "):
+            if "encrypted" in left_trimmed[7:].strip().lower():
+                self._cur_encrypted = True
+
+    def finish(self) -> list[_RarEntry]:
+        self._flush()
+        return self.entries
 
 
 class ArchiveService:
@@ -253,7 +725,15 @@ class ArchiveService:
                 return self._inspect_tar(file_name, data, root)
             except ArchiveSecurityError:
                 raise
-            except (tarfile.TarError, EOFError, OSError, zlib.error, struct.error, ValueError):
+            except (
+                tarfile.TarError,
+                EOFError,
+                OSError,
+                zlib.error,
+                lzma.LZMAError,
+                struct.error,
+                ValueError,
+            ):
                 return ArchiveTreeResult(
                     file_name=file_name,
                     format_name="tar",
@@ -273,13 +753,53 @@ class ArchiveService:
             unsupported_reason="Định dạng nén chưa được hỗ trợ.",
         )
 
+    @contextmanager
+    def _open_tar_stream(
+        self, file_name: str, data: bytes
+    ) -> Iterator[tuple[tarfile.TarFile, _ByteLimitStream]]:
+        lower = (file_name or "").strip().lower()
+        bio = io.BytesIO(data)
+        decompressed: IO[bytes]
+        if data.startswith(b"\x1f\x8b"):
+            decompressed = gzip.GzipFile(fileobj=bio, mode="rb")
+        elif data.startswith(b"BZh"):
+            decompressed = bz2.BZ2File(bio, mode="rb")
+        elif data.startswith(b"\xfd7zXZ\x00"):
+            decompressed = lzma.LZMAFile(bio, mode="rb")
+        elif lower.endswith((".tar.gz", ".tgz")):
+            decompressed = gzip.GzipFile(fileobj=bio, mode="rb")
+        elif lower.endswith((".tar.bz2", ".tbz2")):
+            decompressed = bz2.BZ2File(bio, mode="rb")
+        elif lower.endswith((".tar.xz", ".txz")):
+            decompressed = lzma.LZMAFile(bio, mode="rb")
+        else:
+            decompressed = bio
+
+        limit_stream = _ByteLimitStream(
+            decompressed,
+            max_bytes=self._max_total + _TAR_BASE_HEADER_SLACK,
+        )
+        tf: Optional[tarfile.TarFile] = None
+        try:
+            tf = tarfile.open(fileobj=limit_stream, mode="r:")
+            yield tf, limit_stream
+        finally:
+            if tf is not None:
+                tf.close()
+            if decompressed is not bio:
+                decompressed.close()
+            bio.close()
+
     def _inspect_zip(self, file_name: str, data: bytes, root: ArchiveNode) -> ArchiveTreeResult:
         index: dict[str, ArchiveNode] = {}
+        tracker = _PathKindTracker()
         entry_count = 0
         total_bytes = 0
+        any_encrypted = False
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             for info in zf.infolist():
-                is_dir = info.is_dir() or info.filename.endswith(("/", "\\"))
+                kind = _zip_member_kind(info)
+                is_dir = kind == "dir"
                 if _is_root_dot_dir(info.filename, is_dir):
                     continue
                 entry_count += 1
@@ -287,8 +807,11 @@ class ArchiveService:
                 total_bytes += entry_size
                 self._check_caps(entry_count, total_bytes)
                 clean = sanitize_archive_member_path(info.filename)
-                if _is_zip_symlink(info):
+                if info.flag_bits & 0x1:
+                    any_encrypted = True
+                if kind == "special":
                     continue
+                tracker.record(clean, is_dir)
                 _insert_entry(
                     root,
                     clean,
@@ -297,15 +820,27 @@ class ArchiveService:
                     max(0, info.compress_size),
                     index=index,
                 )
+        if any_encrypted:
+            return ArchiveTreeResult(
+                file_name=file_name,
+                format_name="zip",
+                supported=False,
+                root=ArchiveNode(name=file_name, full_path="", is_dir=True),
+                unsupported_reason=(
+                    "Tệp ZIP được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp. "
+                    "Hãy lưu về máy để mở bằng ứng dụng hỗ trợ."
+                ),
+            )
         total_files = _sort_and_count_files(root)
         return ArchiveTreeResult(file_name, "zip", True, root, total_files=total_files)
 
     def _inspect_tar(self, file_name: str, data: bytes, root: ArchiveNode) -> ArchiveTreeResult:
         index: dict[str, ArchiveNode] = {}
+        tracker = _PathKindTracker()
         entry_count = 0
         total_bytes = 0
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
-            for member in tf.getmembers():
+        with self._open_tar_stream(file_name, data) as (tf, limit_stream):
+            while (member := tf.next()) is not None:
                 is_dir = member.isdir()
                 if _is_root_dot_dir(member.name, is_dir):
                     continue
@@ -313,9 +848,11 @@ class ArchiveService:
                 entry_size = max(0, member.size)
                 total_bytes += entry_size
                 self._check_caps(entry_count, total_bytes)
+                limit_stream.allow_entry_overhead(_TAR_PER_ENTRY_SLACK)
                 clean = sanitize_archive_member_path(member.name)
                 if not (member.isfile() or is_dir):
                     continue
+                tracker.record(clean, is_dir)
                 _insert_entry(root, clean, is_dir, entry_size, 0, index=index)
         total_files = _sort_and_count_files(root)
         return ArchiveTreeResult(file_name, "tar", True, root, total_files=total_files)
@@ -361,9 +898,23 @@ class ArchiveService:
                 ),
             )
 
+        if any(entry.encrypted for entry in entries):
+            return ArchiveTreeResult(
+                file_name=file_name,
+                format_name="rar",
+                supported=False,
+                root=root,
+                unsupported_reason=(
+                    "Tệp RAR được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp. "
+                    "Hãy lưu về máy để mở bằng WinRAR / 7-Zip / ZArchiver."
+                ),
+            )
+
         index: dict[str, ArchiveNode] = {}
-        for clean, is_dir, size in entries:
-            _insert_entry(root, clean, is_dir, size, 0, index=index)
+        for entry in entries:
+            if entry.is_link:
+                continue
+            _insert_entry(root, entry.clean_path, entry.is_dir, entry.size, 0, index=index)
         total_files = _sort_and_count_files(root)
         return ArchiveTreeResult(file_name, "rar", True, root, total_files=total_files)
 
@@ -376,178 +927,202 @@ class ArchiveService:
             return self._extract_zip_entry(data, target)
 
         if lower.endswith(_TAR_EXTENSIONS):
-            return self._extract_tar_entry(data, target)
+            return self._extract_tar_entry(file_name, data, target)
 
         if lower.endswith(".rar"):
-            if target.startswith(("-", "@")):
-                raise ArchiveSecurityError(f"Unsafe RAR member prefix: {target!r}")
+            if target.startswith(("-", "@")) or "*" in target or "?" in target:
+                raise ArchiveSecurityError(f"Unsafe RAR member target: {target!r}")
             cli = self._rar_finder()
             if not cli:
                 raise RuntimeError("No RAR extractor CLI available")
             with _temporary_rar_file(data) as tmp_path:
-                return self._extract_rar_entry_cli(cli, tmp_path, target)
+                try:
+                    entries = self._list_rar_cli(cli, tmp_path)
+                except _RarEncryptedError as exc:
+                    raise ArchiveSecurityError(
+                        "Encrypted RAR archive cannot be extracted"
+                    ) from exc
+                matches = [entry for entry in entries if entry.clean_path == target]
+                if not matches:
+                    raise FileNotFoundError(target)
+                if any(entry.is_link for entry in matches):
+                    raise ArchiveSecurityError(f"Link entry cannot be extracted: {target}")
+                selected = matches[-1]
+                if selected.is_dir:
+                    raise FileNotFoundError(target)
+                if any(entry.encrypted for entry in matches) or selected.encrypted:
+                    raise ArchiveSecurityError(
+                        f"Encrypted RAR entry cannot be extracted: {target}"
+                    )
+                if selected.size > self._max_entry:
+                    raise ArchiveSecurityError("Selected entry exceeds max single entry size")
+                return self._extract_rar_entry_cli(
+                    cli, tmp_path, selected.raw_path, target_name=target
+                )
 
         raise ValueError(f"Unsupported archive format: {file_name}")
 
     def _extract_zip_entry(self, data: bytes, target: str) -> bytes:
+        tracker = _PathKindTracker()
+        entry_count = 0
+        total_bytes = 0
+        latest_regular: Optional[zipfile.ZipInfo] = None
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
             for info in zf.infolist():
-                is_dir = info.is_dir() or info.filename.endswith(("/", "\\"))
-                if _is_root_dot_dir(info.filename, is_dir) or is_dir:
+                kind = _zip_member_kind(info)
+                is_dir = kind == "dir"
+                if _is_root_dot_dir(info.filename, is_dir):
                     continue
+                entry_count += 1
+                entry_size = max(0, info.file_size)
+                total_bytes += entry_size
+                self._check_caps(entry_count, total_bytes)
                 clean = sanitize_archive_member_path(info.filename)
+                if kind != "special":
+                    tracker.record(clean, is_dir)
                 if clean != target:
                     continue
-                if _is_zip_symlink(info):
-                    raise ArchiveSecurityError(f"Symlink entry cannot be extracted: {target}")
-                if info.file_size > self._max_entry:
-                    raise ArchiveSecurityError("Selected entry exceeds max single entry size")
-                with zf.open(info, "r") as stream:
-                    return _read_stream_capped(stream, self._max_entry)
-        raise FileNotFoundError(target)
-
-    def _extract_tar_entry(self, data: bytes, target: str) -> bytes:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
-            for member in tf.getmembers():
-                is_dir = member.isdir()
-                if _is_root_dot_dir(member.name, is_dir) or is_dir:
-                    continue
-                clean = sanitize_archive_member_path(member.name)
-                if clean != target:
-                    continue
-                if not member.isfile():
+                if kind == "special":
                     raise ArchiveSecurityError(f"Link or special entry cannot be extracted: {target}")
+                if is_dir:
+                    continue
+                if info.flag_bits & 0x1:
+                    raise ArchiveSecurityError(
+                        f"Tệp ZIP được bảo vệ bằng mật khẩu (encrypted), không thể giải nén: {target}"
+                    )
+                latest_regular = info
+            if latest_regular is None:
+                raise FileNotFoundError(target)
+            if latest_regular.file_size > self._max_entry:
+                raise ArchiveSecurityError("Selected entry exceeds max single entry size")
+            with zf.open(latest_regular, "r") as stream:
+                return _read_stream_capped(stream, self._max_entry)
+
+    def _extract_tar_entry(self, file_name: str, data: bytes, target: str) -> bytes:
+        tracker = _PathKindTracker()
+        entry_count = 0
+        total_bytes = 0
+        latest_bytes: Optional[bytes] = None
+        with self._open_tar_stream(file_name, data) as (tf, limit_stream):
+            while (member := tf.next()) is not None:
+                is_dir = member.isdir()
+                if _is_root_dot_dir(member.name, is_dir):
+                    continue
+                entry_count += 1
+                entry_size = max(0, member.size)
+                total_bytes += entry_size
+                self._check_caps(entry_count, total_bytes)
+                limit_stream.allow_entry_overhead(_TAR_PER_ENTRY_SLACK)
+                clean = sanitize_archive_member_path(member.name)
+                is_regular = member.isfile()
+                if is_regular or is_dir:
+                    tracker.record(clean, is_dir)
+                if clean != target:
+                    continue
+                if is_dir:
+                    continue
+                if not is_regular:
+                    raise ArchiveSecurityError(
+                        f"Link or special entry cannot be extracted: {target}"
+                    )
                 if member.size > self._max_entry:
                     raise ArchiveSecurityError("Selected entry exceeds max single entry size")
                 extracted = tf.extractfile(member)
                 if extracted is None:
                     raise FileNotFoundError(target)
                 with extracted:
-                    return _read_stream_capped(extracted, self._max_entry)
+                    latest_bytes = _read_stream_capped(extracted, self._max_entry)
+        if latest_bytes is not None:
+            return latest_bytes
         raise FileNotFoundError(target)
 
-    def _list_rar_cli(self, cli: str, rar_path: Path) -> list[tuple[str, bool, int]]:
+    def _list_rar_cli(self, cli: str, rar_path: Path) -> list[_RarEntry]:
         is_7z = "7z" in Path(cli).name.lower()
         cmd = (
-            [cli, "l", "-slt", "-p-", "--", str(rar_path)]
+            [cli, "l", "-slt", "-sccUTF-8", "-p-", "--", str(rar_path)]
             if is_7z
-            else [cli, "lb", "-p-", "--", str(rar_path)]
+            else [cli, "lt", "-p-", "-scf", "--", str(rar_path)]
         )
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=15,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        parser: _7zSltStreamParser | _UnrarLtStreamParser = (
+            _7zSltStreamParser(self._check_caps)
+            if is_7z
+            else _UnrarLtStreamParser(self._check_caps)
         )
+        max_listing_bytes = max(1024 * 1024, (self._max_entries + 16) * 4096)
+
+        with _managed_rar_process(cmd, _RAR_LIST_TIMEOUT_SECONDS) as (
+            proc,
+            timed_out,
+            stderr_chunks,
+            stderr_thread,
+        ):
+            for line in _iter_lines_bounded(
+                proc.stdout, _MAX_LISTING_LINE_BYTES, max_listing_bytes
+            ):
+                parser.feed(line)
+            proc.wait()
+            stderr_thread.join(timeout=2.0)
+            if timed_out.is_set():
+                raise subprocess.TimeoutExpired(cmd, _RAR_LIST_TIMEOUT_SECONDS)
+
+        stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
-            details = "\n".join(part for part in (proc.stderr, proc.stdout) if part).strip()
+            header_text = "\n".join(parser.header_preview)
+            details = "\n".join(part for part in (stderr_text, header_text) if part).strip()
             lower_details = details.lower()
-            if "password" in lower_details or "encrypted" in lower_details:
+            if (
+                parser.header_encrypted
+                or "password" in lower_details
+                or "encrypted" in lower_details
+            ):
                 raise _RarEncryptedError(details or "Encrypted RAR archive")
             raise _RarInspectionError(details or "Failed to list RAR")
 
-        if is_7z:
-            return self._parse_7z_slt_output(proc.stdout)
-        return self._parse_unrar_lb_output(proc.stdout)
-
-    def _parse_7z_slt_output(self, stdout: str) -> list[tuple[str, bool, int]]:
-        results: list[tuple[str, bool, int]] = []
-        in_entries = False
-        header_encrypted = False
-        any_encrypted = False
-        entry_count = 0
-        total_bytes = 0
-
-        cur_path = ""
-        cur_size = 0
-        cur_dir = False
-        cur_encrypted = False
-        cur_symlink = False
-
-        for line in stdout.splitlines() + [""]:
-            stripped = line.strip()
-            if not in_entries:
-                if stripped == "----------":
-                    in_entries = True
-                elif stripped == "Encrypted = +":
-                    header_encrypted = True
-                continue
-
-            if not stripped:
-                if cur_path:
-                    if not _is_root_dot_dir(cur_path, cur_dir):
-                        entry_count += 1
-                        total_bytes += cur_size
-                        self._check_caps(entry_count, total_bytes)
-                        clean = sanitize_archive_member_path(cur_path)
-                        if cur_encrypted:
-                            any_encrypted = True
-                        if not cur_symlink:
-                            results.append((clean, cur_dir, cur_size))
-                cur_path = ""
-                cur_size = 0
-                cur_dir = False
-                cur_encrypted = False
-                cur_symlink = False
-            elif line.startswith("Path = "):
-                cur_path = line[7:].strip()
-            elif line.startswith("Size = "):
-                cur_size = _parse_nonneg_int(line[7:])
-            elif line.startswith("Folder = "):
-                cur_dir = line[9:].strip() == "+"
-            elif line.startswith("Encrypted = "):
-                cur_encrypted = line[12:].strip() == "+"
-            elif line.startswith("Symbolic Link = ") and line[16:].strip():
-                cur_symlink = True
-
-        if header_encrypted or any_encrypted:
+        if parser.header_encrypted:
             raise _RarEncryptedError("Encrypted RAR archive")
-        return results
+        entries = parser.finish()
+        tracker = _PathKindTracker()
+        for entry in entries:
+            if not entry.is_link:
+                tracker.record(entry.clean_path, entry.is_dir)
+        return entries
 
-    def _parse_unrar_lb_output(self, stdout: str) -> list[tuple[str, bool, int]]:
-        results: list[tuple[str, bool, int]] = []
-        entry_count = 0
-        for raw_line in stdout.splitlines():
-            stripped = raw_line.strip()
-            if not stripped:
-                continue
-            is_dir = stripped.endswith(("/", "\\"))
-            if _is_root_dot_dir(stripped, True):
-                continue
-            entry_count += 1
-            self._check_caps(entry_count, 0)
-            clean = sanitize_archive_member_path(stripped)
-            results.append((clean, is_dir, 0))
-        return results
-
-    def _extract_rar_entry_cli(self, cli: str, rar_path: Path, target: str) -> bytes:
-        target = sanitize_archive_member_path(target)
-        if target.startswith(("-", "@")):
-            raise ArchiveSecurityError(f"Unsafe RAR member prefix: {target!r}")
+    def _extract_rar_entry_cli(
+        self,
+        cli: str,
+        rar_path: Path,
+        raw_path: str,
+        *,
+        target_name: str,
+    ) -> bytes:
+        raw_stripped = raw_path.lstrip()
+        if raw_stripped.startswith(("-", "@")) or "*" in raw_path or "?" in raw_path:
+            raise ArchiveSecurityError(f"Unsafe RAR member target: {raw_path!r}")
         is_7z = "7z" in Path(cli).name.lower()
         cmd = (
-            [cli, "x", "-so", "-p-", "--", str(rar_path), target]
+            [cli, "x", "-so", "-sccUTF-8", "-p-", "--", str(rar_path), raw_path]
             if is_7z
-            else [cli, "p", "-inul", "-p-", "--", str(rar_path), target]
+            else [cli, "p", "-ierr", "-idq", "-p-", "-scf", "-@", "--", str(rar_path), raw_path]
         )
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            timeout=20,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        with _managed_rar_process(cmd, _RAR_EXTRACT_TIMEOUT_SECONDS) as (
+            proc,
+            timed_out,
+            stderr_chunks,
+            stderr_thread,
+        ):
+            stdout_stream = proc.stdout if proc.stdout is not None else io.BytesIO(b"")
+            payload = _read_stream_capped(stdout_stream, self._max_entry)
+            proc.wait()
+            stderr_thread.join(timeout=2.0)
+            if timed_out.is_set():
+                raise subprocess.TimeoutExpired(cmd, _RAR_EXTRACT_TIMEOUT_SECONDS)
+
         if proc.returncode != 0:
-            err_lower = (proc.stderr or b"").lower()
-            if b"password" in err_lower or b"encrypted" in err_lower:
-                raise RuntimeError("Encrypted RAR entry cannot be extracted")
-            raise FileNotFoundError(target)
-        if len(proc.stdout) > self._max_entry:
-            raise ArchiveSecurityError("Extracted RAR entry exceeds size cap")
-        return proc.stdout
+            err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+            err_lower = err_text.lower()
+            if "password" in err_lower or "encrypted" in err_lower:
+                raise ArchiveSecurityError(
+                    f"Encrypted RAR entry cannot be extracted: {target_name}"
+                )
+            raise FileNotFoundError(target_name)
+        return payload
