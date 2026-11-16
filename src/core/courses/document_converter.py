@@ -13,11 +13,16 @@ import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from dataclasses import dataclass, field
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
+from xml.parsers import expat
 
 from core.courses.models import PreviewKind
 
 _MAX_XML_BYTES = 16 * 1024 * 1024
+_MAX_TOTAL_XML_BYTES = 48 * 1024 * 1024
+_MAX_ZIP_ENTRIES = 5000
+_MAX_SHARED_STRINGS = 100_000
+_MAX_SHARED_STRING_CHARS = 32_768
 _MAX_MEDIA_BYTES = 2 * 1024 * 1024
 _MAX_TOTAL_MEDIA_BYTES = 12 * 1024 * 1024
 _MAX_MEDIA_COUNT = 50
@@ -26,6 +31,9 @@ _MAX_CSV_BYTES = 4 * 1024 * 1024
 _MAX_XLSX_SHEETS = 20
 _MAX_TABLE_ROWS = 1000
 _MAX_TABLE_COLS = 100
+_MAX_CELL_PREVIEW_CHARS = 4096
+_MAX_RENDER_CHARS = 4 * 1024 * 1024
+_HTML_SHELL_OVERHEAD_RESERVE = 4096
 _MAX_PPTX_SLIDES = 200
 _READ_CHUNK_SIZE = 65536
 
@@ -36,10 +44,13 @@ _V_NS = "urn:schemas-microsoft-com:vml"
 _XL_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
-_DTD_PATTERN = re.compile(rb"<!\s*(?:doctype|entity)\b", re.IGNORECASE)
 _HEADING_STYLE_PATTERN = re.compile(r"^(?:heading\s*|tiêu\s*đề\s*)(\d+)$", re.IGNORECASE)
+_HEADING_NEWLINE_PATTERN = re.compile(r"\s*[\r\n]+\s*")
 _CELL_REF_PATTERN = re.compile(r"^([A-Za-z]+)")
 _PPTX_SLIDE_PATH_PATTERN = re.compile(r"ppt/slides/slide(\d+)\.xml")
+_RENDER_TRUNCATION_NOTICE = (
+    "… [Nội dung đã được rút gọn do vượt quá giới hạn hiển thị 4 MiB]"
+)
 
 _SAFE_RASTER_MIMES = {
     ".png": "image/png",
@@ -49,11 +60,11 @@ _SAFE_RASTER_MIMES = {
     ".webp": "image/webp",
     ".bmp": "image/bmp",
 }
-_DISGUISED_MARKUP_PREFIXES = (b"<svg", b"<!doctype", b"<html", b"<script", b"<?xml")
 
 _CONVERSION_ERRORS = (
     zipfile.BadZipFile,
     ET.ParseError,
+    csv.Error,
     KeyError,
     ValueError,
     EOFError,
@@ -179,10 +190,14 @@ def _base_html_shell(title: str, body_html: str, *, dark_mode: bool = False) -> 
         "border:1px solid var(--border);border-radius:8px;}"
         "table{border-collapse:collapse;width:100%;font-size:0.92rem;}"
         "th,td{border:1px solid var(--border);padding:6px 10px;text-align:left;"
+        "vertical-align:top;white-space:pre-wrap;word-break:break-word;}"
+        "thead th{background:var(--th-bg);font-weight:600;}"
+        ".table-wrap.sheet .sheet-table th,.table-wrap.sheet .sheet-table td{"
         "white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis;}"
-        "thead th{position: sticky;top:0;z-index:2;background:var(--th-bg);font-weight:600;}"
-        "th:first-child,td:first-child{position: sticky;left:0;z-index:1;background:var(--surface);}"
-        "thead th:first-child{z-index:3;background:var(--th-bg);}"
+        ".table-wrap.sheet .sheet-table thead th{position: sticky;top:0;z-index:2;}"
+        ".table-wrap.sheet .sheet-table th:first-child,.table-wrap.sheet .sheet-table td:first-child{"
+        "position: sticky;left:0;z-index:1;background:var(--surface);}"
+        ".table-wrap.sheet .sheet-table thead th:first-child{z-index:3;background:var(--th-bg);}"
         ".doc-figure{margin:12px 0;}"
         ".doc-image{max-width:100%;height:auto;border-radius:6px;border:1px solid var(--border);}"
         ".slide-card{background:var(--surface);border:1px solid var(--border);"
@@ -199,9 +214,79 @@ def _base_html_shell(title: str, body_html: str, *, dark_mode: bool = False) -> 
     )
 
 
-def _read_zip_entry_capped(zf: zipfile.ZipFile, name: str, max_bytes: int) -> bytes:
-    """Read a ZIP member incrementally, aborting if uncompressed bytes exceed max_bytes."""
+@dataclass
+class _RenderBudget:
+    """Mutable HTML and Markdown character budgets for a single conversion."""
+
+    html_remaining: int
+    md_remaining: int
+    truncated: bool = False
+
+    @classmethod
+    def for_title(cls, title: str) -> "_RenderBudget":
+        title_overhead = len(html.escape(title))
+        notice_overhead = len(_RENDER_TRUNCATION_NOTICE) + 32
+        return cls(
+            html_remaining=max(
+                0,
+                _MAX_RENDER_CHARS - _HTML_SHELL_OVERHEAD_RESERVE - title_overhead,
+            ),
+            md_remaining=max(0, _MAX_RENDER_CHARS - notice_overhead),
+        )
+
+    def try_consume(self, html_len: int, md_len: int) -> bool:
+        """Reserve character budget for HTML and Markdown fragments if both fit."""
+        if self.truncated:
+            return False
+        if html_len > self.html_remaining or md_len > self.md_remaining:
+            self.truncated = True
+            return False
+        self.html_remaining -= html_len
+        self.md_remaining -= md_len
+        return True
+
+
+def _truncate_preview_text(
+    text: str, max_chars: int = _MAX_CELL_PREVIEW_CHARS
+) -> str:
+    """Truncate overly long cell or block text with an ellipsis."""
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
+def _append_render_truncation_notice(
+    html_blocks: list[str], md_blocks: list[str]
+) -> None:
+    """Append an escaped HTML and Markdown truncation notice when budget is hit."""
+    html_blocks.append(f'<p class="notice">{html.escape(_RENDER_TRUNCATION_NOTICE)}</p>')
+    md_blocks.append(_RENDER_TRUNCATION_NOTICE)
+
+
+def _open_ooxml_zip(data: bytes) -> zipfile.ZipFile:
+    """Open an OOXML ZIP archive while enforcing the maximum entry count limit."""
+    zf = zipfile.ZipFile(io.BytesIO(data), "r")
+    try:
+        if len(zf.infolist()) > _MAX_ZIP_ENTRIES:
+            raise ValueError(f"ZIP archive exceeds {_MAX_ZIP_ENTRIES} entry limit")
+    except BaseException:
+        zf.close()
+        raise
+    return zf
+
+
+def _read_zip_entry_capped(
+    zf: zipfile.ZipFile,
+    name: str,
+    max_bytes: int,
+    *,
+    xml_budget: Optional[list[int]] = None,
+) -> bytes:
+    """Read a ZIP member incrementally, enforcing entry and cumulative byte caps."""
     info = zf.getinfo(name)
+    effective_max = min(max_bytes, xml_budget[0]) if xml_budget is not None else max_bytes
     buf = bytearray()
     with zf.open(info, "r") as stream:
         while True:
@@ -209,16 +294,53 @@ def _read_zip_entry_capped(zf: zipfile.ZipFile, name: str, max_bytes: int) -> by
             if not chunk:
                 break
             buf.extend(chunk)
-            if len(buf) > max_bytes:
-                raise ValueError(f"ZIP entry exceeds {max_bytes} byte limit: {name}")
+            if len(buf) > effective_max:
+                raise ValueError(
+                    f"ZIP entry exceeds {effective_max} byte limit: {name}"
+                )
+    if xml_budget is not None:
+        xml_budget[0] -= len(buf)
     return bytes(buf)
 
 
 def _parse_xml_safe(raw: bytes) -> ET.Element:
-    """Parse XML bytes after rejecting DTD and ENTITY declarations."""
-    if _DTD_PATTERN.search(raw) or (b"\x00" in raw and _DTD_PATTERN.search(raw.replace(b"\x00", b""))):
-        raise ValueError("XML DTD/ENTITY declarations are forbidden")
-    return ET.fromstring(raw)
+    """Parse XML bytes via Expat while rejecting DTD and entity declarations."""
+    builder = ET.TreeBuilder()
+    parser = expat.ParserCreate(None, "}")
+    parser.buffer_text = True
+    names: dict[str, str] = {}
+
+    def _fix_name(name: str) -> str:
+        fixed = names.get(name)
+        if fixed is None:
+            fixed = ("{" + name) if "}" in name else name
+            names[name] = fixed
+        return fixed
+
+    def _reject_dtd(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("XML DTD/entity declarations are forbidden")
+
+    def _start_element(tag: str, attrib: dict[str, str]) -> None:
+        fixed_attrib = (
+            {_fix_name(key): value for key, value in attrib.items()} if attrib else {}
+        )
+        builder.start(_fix_name(tag), fixed_attrib)
+
+    def _end_element(tag: str) -> None:
+        builder.end(_fix_name(tag))
+
+    parser.StartDoctypeDeclHandler = _reject_dtd
+    parser.EntityDeclHandler = _reject_dtd
+    parser.UnparsedEntityDeclHandler = _reject_dtd
+    parser.ExternalEntityRefHandler = _reject_dtd
+    parser.StartElementHandler = _start_element
+    parser.EndElementHandler = _end_element
+    parser.CharacterDataHandler = builder.data
+    try:
+        parser.Parse(raw, True)
+    except expat.ExpatError as exc:
+        raise ET.ParseError(str(exc)) from exc
+    return builder.close()
 
 
 def _resolve_ooxml_target(base_dir: str, target: str) -> Optional[str]:
@@ -244,11 +366,14 @@ def _parse_relationships(
     base_dir: str,
     *,
     type_suffix: Optional[str] = None,
+    xml_budget: Optional[list[int]] = None,
 ) -> dict[str, str]:
     """Parse an OOXML .rels file into a safe {rId: archive_member_path} map."""
     if rels_path not in zf_names:
         return {}
-    raw = _read_zip_entry_capped(zf, rels_path, _MAX_XML_BYTES)
+    raw = _read_zip_entry_capped(
+        zf, rels_path, _MAX_XML_BYTES, xml_budget=xml_budget
+    )
     root = _parse_xml_safe(raw)
     mapping: dict[str, str] = {}
     for rel in root:
@@ -273,11 +398,21 @@ def _local_name(tag: str) -> str:
     return tag
 
 
-def _decode_text_bytes(raw: bytes) -> str:
-    """Decode text bytes using UTF-8-SIG, falling back to CP1258 then replacement."""
+def _decode_text_bytes(raw: bytes, *, truncated: bool = False) -> str:
+    """Decode text bytes using UTF-8-SIG, trimming truncated UTF-8 tails before CP1258."""
     try:
         return raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
+    except UnicodeDecodeError as exc:
+        if (
+            truncated
+            and exc.reason == "unexpected end of data"
+            and exc.end == len(exc.object)
+            and exc.start >= len(exc.object) - 3
+        ):
+            try:
+                return exc.object[: exc.start].decode("utf-8")
+            except UnicodeDecodeError:
+                pass
         try:
             return unicodedata.normalize("NFC", raw.decode("cp1258"))
         except UnicodeDecodeError:
@@ -290,39 +425,85 @@ def _escape_md_cell(text: str) -> str:
     return single_line.replace("|", "\\|")
 
 
-def _render_table_html_and_markdown(rows: list[list[str]]) -> tuple[str, str]:
-    """Render rectangular table HTML (with sticky CSS hooks) and Markdown pipe table."""
+def _render_table_html_and_markdown(
+    rows: list[list[str]],
+    *,
+    sheet_style: bool = False,
+    budget: Optional[_RenderBudget] = None,
+) -> tuple[str, str]:
+    """Render rectangular table HTML and Markdown pipe table within render budgets."""
+    active_budget = budget if budget is not None else _RenderBudget.for_title("")
     if not rows:
-        return '<p class="muted">(Bảng trống)</p>', ""
+        empty_html = '<p class="muted">(Bảng trống)</p>'
+        if not active_budget.try_consume(len(empty_html) + 1, 0):
+            return "", ""
+        return empty_html, ""
     capped_rows = rows[:_MAX_TABLE_ROWS]
     col_count = min(_MAX_TABLE_COLS, max((len(row) for row in capped_rows), default=0))
     if col_count == 0:
-        return '<p class="muted">(Bảng trống)</p>', ""
+        empty_html = '<p class="muted">(Bảng trống)</p>'
+        if not active_budget.try_consume(len(empty_html) + 1, 0):
+            return "", ""
+        return empty_html, ""
 
-    normalized = [
-        [row[idx] if idx < len(row) else "" for idx in range(col_count)]
-        for row in capped_rows
-    ]
-
-    header_cells = "".join(f"<th>{html.escape(cell)}</th>" for cell in normalized[0])
-    body_rows_html = "".join(
-        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>"
-        for row in normalized[1:]
+    wrap_cls = "table-wrap sheet" if sheet_style else "table-wrap"
+    table_open = (
+        f'<div class="{wrap_cls}"><table class="sheet-table">'
+        if sheet_style
+        else f'<div class="{wrap_cls}"><table>'
     )
-    tbody_html = f"<tbody>{body_rows_html}</tbody>" if body_rows_html else ""
-    table_html = (
-        '<div class="table-wrap">'
-        f"<table><thead><tr>{header_cells}</tr></thead>{tbody_html}</table>"
-        "</div>"
-    )
+    table_close = "</table></div>"
 
-    md_lines = [
-        "| " + " | ".join(_escape_md_cell(cell) for cell in normalized[0]) + " |",
-        "| " + " | ".join("---" for _ in range(col_count)) + " |",
+    header_row = [
+        _truncate_preview_text(capped_rows[0][idx] if idx < len(capped_rows[0]) else "")
+        for idx in range(col_count)
     ]
-    for row in normalized[1:]:
-        md_lines.append("| " + " | ".join(_escape_md_cell(cell) for cell in row) + " |")
+    header_cells = "".join(f"<th>{html.escape(cell)}</th>" for cell in header_row)
+    thead_html = f"<thead><tr>{header_cells}</tr></thead>"
+    md_header = "| " + " | ".join(_escape_md_cell(cell) for cell in header_row) + " |"
+    md_sep = "| " + " | ".join("---" for _ in range(col_count)) + " |"
+
+    fixed_html_len = (
+        len(table_open) + len(thead_html) + len("<tbody></tbody>") + len(table_close)
+    )
+    fixed_md_len = len(md_header) + 1 + len(md_sep)
+    if not active_budget.try_consume(fixed_html_len, fixed_md_len):
+        return "", ""
+
+    body_rows_html: list[str] = []
+    md_lines = [md_header, md_sep]
+    for row in capped_rows[1:]:
+        cells = [
+            _truncate_preview_text(row[idx] if idx < len(row) else "")
+            for idx in range(col_count)
+        ]
+        row_html = (
+            "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in cells) + "</tr>"
+        )
+        row_md = "| " + " | ".join(_escape_md_cell(cell) for cell in cells) + " |"
+        if not active_budget.try_consume(len(row_html), len(row_md) + 1):
+            break
+        body_rows_html.append(row_html)
+        md_lines.append(row_md)
+
+    tbody_html = f"<tbody>{''.join(body_rows_html)}</tbody>" if body_rows_html else ""
+    table_html = f"{table_open}{thead_html}{tbody_html}{table_close}"
     return table_html, "\n".join(md_lines)
+
+
+def _is_valid_raster_magic(ext: str, raw: bytes) -> bool:
+    """Validate raster image magic bytes matching the archive file extension."""
+    if ext == ".png":
+        return raw.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext in {".jpg", ".jpeg"}:
+        return raw.startswith(b"\xff\xd8\xff")
+    if ext == ".gif":
+        return raw.startswith((b"GIF87a", b"GIF89a"))
+    if ext == ".webp":
+        return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    if ext == ".bmp":
+        return raw.startswith(b"BM")
+    return False
 
 
 def _iter_docx_body_blocks(container: ET.Element) -> Iterator[ET.Element]:
@@ -356,7 +537,7 @@ def _docx_heading_level(p_el: ET.Element) -> Optional[int]:
     outline_lvl = p_pr.find(f"{{{_W_NS}}}outlineLvl")
     if outline_lvl is not None:
         raw_lvl = (outline_lvl.attrib.get(f"{{{_W_NS}}}val") or "").strip()
-        if raw_lvl.isdigit():
+        if raw_lvl.isascii() and raw_lvl.isdigit():
             num = int(raw_lvl)
             if 0 <= num <= 8:
                 return min(num + 1, 6)
@@ -398,6 +579,48 @@ def _docx_paragraph_image_rids(p_el: ET.Element) -> list[str]:
     return rids
 
 
+def _append_bounded_text_block(
+    html_blocks: list[str],
+    md_blocks: list[str],
+    budget: _RenderBudget,
+    *,
+    raw_text: str,
+    build_html: Callable[[str], str],
+    build_md: Callable[[str], str],
+) -> tuple[bool, bool]:
+    """Append a text block within render budget. Returns (was_appended, can_continue)."""
+    if budget.truncated:
+        return False, False
+    max_raw = min(budget.html_remaining, budget.md_remaining)
+    candidate = raw_text
+    pre_truncated = False
+    if len(candidate) > max_raw:
+        if html_blocks:
+            budget.truncated = True
+            return False, False
+        limit = max(1, min(budget.html_remaining, budget.md_remaining) // 6)
+        candidate = _truncate_preview_text(candidate, limit)
+        pre_truncated = True
+
+    block_html = build_html(candidate)
+    block_md = build_md(candidate)
+    if not budget.try_consume(len(block_html) + 1, len(block_md) + 2):
+        if html_blocks or pre_truncated:
+            return False, False
+        limit = max(1, min(budget.html_remaining, budget.md_remaining) // 6)
+        candidate = _truncate_preview_text(raw_text, limit)
+        block_html = build_html(candidate)
+        block_md = build_md(candidate)
+        budget.html_remaining = max(0, budget.html_remaining - len(block_html) - 1)
+        budget.md_remaining = max(0, budget.md_remaining - len(block_md) - 2)
+        budget.truncated = True
+    html_blocks.append(block_html)
+    md_blocks.append(block_md)
+    if pre_truncated:
+        budget.truncated = True
+    return True, not budget.truncated
+
+
 def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert DOCX bytes into outline, Markdown, and XSS-safe HTML with raster media."""
     outline: list[DocumentOutlineItem] = []
@@ -405,13 +628,21 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
     md_blocks: list[str] = []
     rendered_media: set[str] = set()
     media_state = {"count": 0, "bytes": 0}
+    xml_budget = [_MAX_TOTAL_XML_BYTES]
+    render_budget = _RenderBudget.for_title(title)
 
-    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+    with _open_ooxml_zip(data) as zf:
         zf_names = set(zf.namelist())
-        doc_raw = _read_zip_entry_capped(zf, "word/document.xml", _MAX_XML_BYTES)
+        doc_raw = _read_zip_entry_capped(
+            zf, "word/document.xml", _MAX_XML_BYTES, xml_budget=xml_budget
+        )
         doc_root = _parse_xml_safe(doc_raw)
         rels = _parse_relationships(
-            zf, zf_names, "word/_rels/document.xml.rels", "word"
+            zf,
+            zf_names,
+            "word/_rels/document.xml.rels",
+            "word",
+            xml_budget=xml_budget,
         )
 
         def _try_embed_media(zip_path: str) -> Optional[str]:
@@ -427,10 +658,7 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                 raw_img = _read_zip_entry_capped(zf, zip_path, _MAX_MEDIA_BYTES)
             except _CONVERSION_ERRORS:
                 return None
-            if not raw_img:
-                return None
-            head = raw_img.lstrip()[:20].lower()
-            if head.startswith(_DISGUISED_MARKUP_PREFIXES):
+            if not raw_img or not _is_valid_raster_magic(ext, raw_img):
                 return None
             if media_state["bytes"] + len(raw_img) > _MAX_TOTAL_MEDIA_BYTES:
                 return None
@@ -448,29 +676,52 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         body = doc_root.find(f"{{{_W_NS}}}body")
         if body is not None:
             for block in _iter_docx_body_blocks(body):
+                if render_budget.truncated:
+                    break
                 if block.tag == f"{{{_W_NS}}}p":
                     level = _docx_heading_level(block)
                     text = _docx_paragraph_text(block).strip()
                     if level is not None and text:
                         anchor_id = f"sec-{len(outline) + 1}"
-                        outline.append(
-                            DocumentOutlineItem(
-                                anchor_id=anchor_id, level=level, title=text
+                        appended, can_continue = _append_bounded_text_block(
+                            html_blocks,
+                            md_blocks,
+                            render_budget,
+                            raw_text=text,
+                            build_html=lambda t, lv=level, aid=anchor_id: (
+                                f'<h{lv} id="{aid}">{html.escape(t)}</h{lv}>'
+                            ),
+                            build_md=lambda t, lv=level: (
+                                f"{'#' * lv} "
+                                f"{_HEADING_NEWLINE_PATTERN.sub(' ', t).strip()}"
+                            ),
+                        )
+                        if appended:
+                            outline.append(
+                                DocumentOutlineItem(
+                                    anchor_id=anchor_id, level=level, title=text
+                                )
                             )
-                        )
-                        html_blocks.append(
-                            f'<h{level} id="{anchor_id}">{html.escape(text)}</h{level}>'
-                        )
-                        md_blocks.append(f"{'#' * level} {text}")
+                        if not can_continue:
+                            break
                     elif text:
-                        escaped_p = html.escape(text).replace("\n", "<br/>")
-                        html_blocks.append(f"<p>{escaped_p}</p>")
                         p_pr = block.find(f"{{{_W_NS}}}pPr")
                         is_list = (
                             p_pr is not None
                             and p_pr.find(f"{{{_W_NS}}}numPr") is not None
                         )
-                        md_blocks.append(f"- {text}" if is_list else text)
+                        _, can_continue = _append_bounded_text_block(
+                            html_blocks,
+                            md_blocks,
+                            render_budget,
+                            raw_text=text,
+                            build_html=lambda t: (
+                                f"<p>{html.escape(t).replace(chr(10), '<br/>')}</p>"
+                            ),
+                            build_md=lambda t, lst=is_list: f"- {t}" if lst else t,
+                        )
+                        if not can_continue:
+                            break
 
                     for rid in _docx_paragraph_image_rids(block):
                         target = rels.get(rid)
@@ -492,17 +743,25 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                 "\n".join(p for p in cell_paras if p)
                             )
                         table_rows.append(row_cells)
-                    tbl_html, tbl_md = _render_table_html_and_markdown(table_rows)
-                    html_blocks.append(tbl_html)
+                    tbl_html, tbl_md = _render_table_html_and_markdown(
+                        table_rows, sheet_style=False, budget=render_budget
+                    )
+                    if tbl_html:
+                        html_blocks.append(tbl_html)
                     if tbl_md:
                         md_blocks.append(tbl_md)
+                    if render_budget.truncated:
+                        break
 
-        for name in sorted(zf_names):
-            if name.startswith("word/media/") and name not in rendered_media:
-                img_html = _try_embed_media(name)
-                if img_html:
-                    html_blocks.append(img_html)
+        if not render_budget.truncated:
+            for name in sorted(zf_names):
+                if name.startswith("word/media/") and name not in rendered_media:
+                    img_html = _try_embed_media(name)
+                    if img_html:
+                        html_blocks.append(img_html)
 
+    if render_budget.truncated:
+        _append_render_truncation_notice(html_blocks, md_blocks)
     if not html_blocks:
         html_blocks.append('<p class="muted">(Tài liệu trống)</p>')
     return ConvertedDocument(
@@ -514,16 +773,29 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
     )
 
 
-def _extract_xlsx_text_container(container: ET.Element) -> str:
+def _extract_xlsx_text_container(
+    container: ET.Element, *, max_chars: Optional[int] = None
+) -> str:
     """Extract text from an XLSX <si> or <is> element, skipping <rPh> phonetic runs."""
     direct_t = container.find(f"{{{_XL_NS}}}t")
     if direct_t is not None and direct_t.text is not None:
-        return direct_t.text
+        return (
+            direct_t.text[:max_chars]
+            if max_chars is not None and len(direct_t.text) > max_chars
+            else direct_t.text
+        )
     parts: list[str] = []
+    total_chars = 0
     for run in container.findall(f"{{{_XL_NS}}}r"):
         t_el = run.find(f"{{{_XL_NS}}}t")
         if t_el is not None and t_el.text:
+            if max_chars is not None and total_chars + len(t_el.text) > max_chars:
+                remaining = max_chars - total_chars
+                if remaining > 0:
+                    parts.append(t_el.text[:remaining])
+                break
             parts.append(t_el.text)
+            total_chars += len(t_el.text)
     return "".join(parts)
 
 
@@ -547,13 +819,17 @@ def _parse_xlsx_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
     if cell_type == "s":
         if v_el is not None and v_el.text is not None:
             raw_idx = v_el.text.strip()
-            if raw_idx.isdigit():
+            if raw_idx.isascii() and raw_idx.isdigit():
                 idx = int(raw_idx)
                 if 0 <= idx < len(shared_strings):
                     return shared_strings[idx]
         return ""
     if cell_type == "inlineStr":
-        return _extract_xlsx_text_container(is_el) if is_el is not None else ""
+        return (
+            _extract_xlsx_text_container(is_el, max_chars=_MAX_SHARED_STRING_CHARS)
+            if is_el is not None
+            else ""
+        )
     if cell_type == "b":
         if v_el is None or v_el.text is None:
             return ""
@@ -566,7 +842,7 @@ def _parse_xlsx_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
     if v_el is not None and v_el.text is not None:
         return v_el.text
     if is_el is not None:
-        return _extract_xlsx_text_container(is_el)
+        return _extract_xlsx_text_container(is_el, max_chars=_MAX_SHARED_STRING_CHARS)
     return ""
 
 
@@ -576,32 +852,52 @@ def _convert_xlsx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
     outline: list[DocumentOutlineItem] = []
     html_sections: list[str] = []
     md_sections: list[str] = []
+    xml_budget = [_MAX_TOTAL_XML_BYTES]
+    render_budget = _RenderBudget.for_title(title)
 
-    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+    with _open_ooxml_zip(data) as zf:
         zf_names = set(zf.namelist())
-        wb_raw = _read_zip_entry_capped(zf, "xl/workbook.xml", _MAX_XML_BYTES)
+        wb_raw = _read_zip_entry_capped(
+            zf, "xl/workbook.xml", _MAX_XML_BYTES, xml_budget=xml_budget
+        )
         wb_root = _parse_xml_safe(wb_raw)
 
         shared_strings: list[str] = []
         if "xl/sharedStrings.xml" in zf_names:
-            sst_raw = _read_zip_entry_capped(zf, "xl/sharedStrings.xml", _MAX_XML_BYTES)
+            sst_raw = _read_zip_entry_capped(
+                zf, "xl/sharedStrings.xml", _MAX_XML_BYTES, xml_budget=xml_budget
+            )
             sst_root = _parse_xml_safe(sst_raw)
             for si in sst_root.findall(f"{{{_XL_NS}}}si"):
-                shared_strings.append(_extract_xlsx_text_container(si))
+                if len(shared_strings) >= _MAX_SHARED_STRINGS:
+                    break
+                shared_strings.append(
+                    _extract_xlsx_text_container(
+                        si, max_chars=_MAX_SHARED_STRING_CHARS
+                    )
+                )
 
+        wb_rels_path = "xl/_rels/workbook.xml.rels"
+        has_wb_rels = wb_rels_path in zf_names
         rels = _parse_relationships(
-            zf, zf_names, "xl/_rels/workbook.xml.rels", "xl"
+            zf, zf_names, wb_rels_path, "xl", xml_budget=xml_budget
         )
 
         sheet_els = wb_root.findall(f".//{{{_XL_NS}}}sheet")[:_MAX_XLSX_SHEETS]
         for idx, sheet_el in enumerate(sheet_els):
+            if render_budget.truncated:
+                break
             sheet_name = sheet_el.attrib.get("name") or f"Sheet {idx + 1}"
-            rid = sheet_el.attrib.get(f"{{{_R_NS}}}id") or ""
-            sheet_path = rels.get(rid) or f"xl/worksheets/sheet{idx + 1}.xml"
-            if sheet_path not in zf_names:
+            rid = (sheet_el.attrib.get(f"{{{_R_NS}}}id") or "").strip()
+            sheet_path = rels.get(rid) if rid else None
+            if sheet_path is None and (not has_wb_rels or not rid):
+                sheet_path = f"xl/worksheets/sheet{idx + 1}.xml"
+            if not sheet_path or sheet_path not in zf_names:
                 continue
 
-            ws_raw = _read_zip_entry_capped(zf, sheet_path, _MAX_XML_BYTES)
+            ws_raw = _read_zip_entry_capped(
+                zf, sheet_path, _MAX_XML_BYTES, xml_budget=xml_budget
+            )
             ws_root = _parse_xml_safe(ws_raw)
             sheet_data = ws_root.find(f"{{{_XL_NS}}}sheetData")
             rows: list[list[str]] = []
@@ -628,19 +924,34 @@ def _convert_xlsx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             while rows and not rows[-1]:
                 rows.pop()
 
-            sheets.append(SpreadsheetSheet(name=sheet_name, rows=rows))
             anchor_id = f"sheet-{idx + 1}"
+            header_html = f'<section><h2 id="{anchor_id}">{html.escape(sheet_name)}</h2>'
+            footer_html = "</section>"
+            header_md = f"## {sheet_name}\n\n"
+            if not render_budget.try_consume(
+                len(header_html) + len(footer_html) + 1, len(header_md) + 2
+            ):
+                break
+
+            tbl_html, tbl_md = _render_table_html_and_markdown(
+                rows, sheet_style=True, budget=render_budget
+            )
+            if not tbl_html:
+                break
+
+            sheets.append(SpreadsheetSheet(name=sheet_name, rows=rows))
             outline.append(
                 DocumentOutlineItem(anchor_id=anchor_id, level=1, title=sheet_name)
             )
-            tbl_html, tbl_md = _render_table_html_and_markdown(rows)
-            html_sections.append(
-                f'<section><h2 id="{anchor_id}">{html.escape(sheet_name)}</h2>{tbl_html}</section>'
-            )
+            html_sections.append(f"{header_html}{tbl_html}{footer_html}")
             md_sections.append(
                 f"## {sheet_name}\n\n{tbl_md}" if tbl_md else f"## {sheet_name}"
             )
+            if render_budget.truncated:
+                break
 
+    if render_budget.truncated:
+        _append_render_truncation_notice(html_sections, md_sections)
     if not html_sections:
         html_sections.append('<p class="muted">(Bảng tính trống)</p>')
     return ConvertedDocument(
@@ -658,7 +969,8 @@ def _convert_xlsx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
 def _convert_csv(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert CSV or TSV bytes into a bounded SpreadsheetSheet and sticky HTML table."""
     delimiter = "\t" if title.strip().lower().endswith(".tsv") else ","
-    text = _decode_text_bytes(data[:_MAX_CSV_BYTES])
+    truncated_bytes = len(data) > _MAX_CSV_BYTES
+    text = _decode_text_bytes(data[:_MAX_CSV_BYTES], truncated=truncated_bytes)
     reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
     rows: list[list[str]] = []
     for row in reader:
@@ -668,12 +980,21 @@ def _convert_csv(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocume
 
     sheet_name = posixpath.basename(title.replace("\\", "/")) or "CSV"
     sheet = SpreadsheetSheet(name=sheet_name, rows=rows)
-    tbl_html, tbl_md = _render_table_html_and_markdown(rows)
+    render_budget = _RenderBudget.for_title(title)
+    tbl_html, tbl_md = _render_table_html_and_markdown(
+        rows, sheet_style=True, budget=render_budget
+    )
+    html_parts = [tbl_html] if tbl_html else []
+    md_parts = [tbl_md] if tbl_md else []
+    if render_budget.truncated:
+        _append_render_truncation_notice(html_parts, md_parts)
     return ConvertedDocument(
         kind="csv",
         title=title,
-        html_document=_base_html_shell(title, tbl_html, dark_mode=dark_mode),
-        markdown_text=tbl_md,
+        html_document=_base_html_shell(
+            title, "\n".join(html_parts), dark_mode=dark_mode
+        ),
+        markdown_text="\n\n".join(md_parts),
         sheets=[sheet],
     )
 
@@ -710,15 +1031,23 @@ def _extract_drawingml_text(root: ET.Element, *, skip_slide_num: bool = False) -
     return "\n".join(paragraphs)
 
 
-def _resolve_pptx_slide_paths(zf: zipfile.ZipFile, zf_names: set[str]) -> list[str]:
+def _resolve_pptx_slide_paths(
+    zf: zipfile.ZipFile, zf_names: set[str], *, xml_budget: list[int]
+) -> list[str]:
     """Resolve PPTX slide archive paths in presentation order, with numeric fallback."""
     ordered: list[str] = []
     seen: set[str] = set()
     if "ppt/presentation.xml" in zf_names:
-        pres_raw = _read_zip_entry_capped(zf, "ppt/presentation.xml", _MAX_XML_BYTES)
+        pres_raw = _read_zip_entry_capped(
+            zf, "ppt/presentation.xml", _MAX_XML_BYTES, xml_budget=xml_budget
+        )
         pres_root = _parse_xml_safe(pres_raw)
         pres_rels = _parse_relationships(
-            zf, zf_names, "ppt/_rels/presentation.xml.rels", "ppt"
+            zf,
+            zf_names,
+            "ppt/_rels/presentation.xml.rels",
+            "ppt",
+            xml_budget=xml_budget,
         )
         for sld_id in pres_root.findall(f".//{{{_P_NS}}}sldId"):
             rid = sld_id.attrib.get(f"{{{_R_NS}}}id") or ""
@@ -741,19 +1070,112 @@ def _resolve_pptx_slide_paths(zf: zipfile.ZipFile, zf_names: set[str]) -> list[s
     return [name for _, name in numbered[:_MAX_PPTX_SLIDES]]
 
 
+def _format_pptx_notes_markdown(notes_text: str) -> str:
+    """Format single- or multi-line PPTX speaker notes as a Markdown blockquote."""
+    lines = notes_text.splitlines()
+    if not lines:
+        return ""
+    formatted = [f"> **Ghi chú:** {lines[0]}"]
+    for line in lines[1:]:
+        formatted.append(f"> {line}" if line else ">")
+    return "\n".join(formatted)
+
+
+def _build_pptx_slide_rendered(
+    idx: int, anchor_id: str, body_text: str, notes_text: str
+) -> tuple[str, str]:
+    """Render HTML card and Markdown section for a single PPTX slide."""
+    body_html = (
+        "<p>" + html.escape(body_text).replace("\n", "<br/>") + "</p>"
+        if body_text
+        else '<p class="muted">(Slide trống)</p>'
+    )
+    notes_html = (
+        '<div class="slide-notes"><strong>Ghi chú:</strong> '
+        + html.escape(notes_text).replace("\n", "<br/>")
+        + "</div>"
+        if notes_text
+        else ""
+    )
+    card_html = (
+        f'<section class="slide-card" id="{anchor_id}">'
+        f"<h3>Slide {idx}</h3>{body_html}{notes_html}"
+        "</section>"
+    )
+    md_parts = [f"### Slide {idx}"]
+    if body_text:
+        md_parts.append(body_text)
+    if notes_text:
+        md_parts.append(_format_pptx_notes_markdown(notes_text))
+    return card_html, "\n\n".join(md_parts)
+
+
+def _render_bounded_pptx_card(
+    idx: int,
+    anchor_id: str,
+    body_text: str,
+    notes_text: str,
+    render_budget: _RenderBudget,
+    *,
+    has_prior_cards: bool,
+) -> Optional[tuple[str, str, bool]]:
+    """Build a PPTX slide card within render budget, returning (html, md, did_truncate)."""
+    raw_limit = min(render_budget.html_remaining, render_budget.md_remaining)
+    pre_truncated = False
+    rendered_body = body_text
+    rendered_notes = notes_text
+    if len(rendered_body) > raw_limit or len(rendered_notes) > raw_limit:
+        if has_prior_cards:
+            render_budget.truncated = True
+            return None
+        half_limit = max(1, raw_limit // 12)
+        rendered_body = _truncate_preview_text(rendered_body, half_limit)
+        rendered_notes = _truncate_preview_text(rendered_notes, half_limit)
+        pre_truncated = True
+
+    card_html, card_md = _build_pptx_slide_rendered(
+        idx, anchor_id, rendered_body, rendered_notes
+    )
+    if render_budget.try_consume(len(card_html) + 1, len(card_md) + 2):
+        if pre_truncated:
+            render_budget.truncated = True
+        return card_html, card_md, pre_truncated
+
+    if has_prior_cards or pre_truncated:
+        return None
+
+    half_limit = max(1, raw_limit // 12)
+    card_html, card_md = _build_pptx_slide_rendered(
+        idx,
+        anchor_id,
+        _truncate_preview_text(body_text, half_limit),
+        _truncate_preview_text(notes_text, half_limit),
+    )
+    render_budget.html_remaining = max(
+        0, render_budget.html_remaining - len(card_html) - 1
+    )
+    render_budget.md_remaining = max(
+        0, render_budget.md_remaining - len(card_md) - 2
+    )
+    render_budget.truncated = True
+    return card_html, card_md, True
+
+
 def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert PPTX bytes into ordered slides, mapped speaker notes, HTML, and Markdown."""
     slides: list[tuple[int, str, str]] = []
     outline: list[DocumentOutlineItem] = []
     html_cards: list[str] = []
     md_sections: list[str] = []
+    xml_budget = [_MAX_TOTAL_XML_BYTES]
+    render_budget = _RenderBudget.for_title(title)
 
-    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+    with _open_ooxml_zip(data) as zf:
         zf_names = set(zf.namelist())
-        slide_paths = _resolve_pptx_slide_paths(zf, zf_names)
+        slide_paths = _resolve_pptx_slide_paths(zf, zf_names, xml_budget=xml_budget)
 
-        # First pass: resolve explicit per-slide .rels notes mappings so fallback
-        # never misattributes another slide's notesSlideN.xml.
+        # First pass: resolve explicit per-slide .rels notes mappings and filename-matched
+        # fallback notes so positional notesSlide{idx}.xml never steals another slide's note.
         explicit_notes: list[tuple[bool, Optional[str]]] = []
         claimed_notes: set[str] = set()
         for slide_path in slide_paths:
@@ -764,7 +1186,12 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             mapped_note: Optional[str] = None
             if has_rels:
                 note_rels = _parse_relationships(
-                    zf, zf_names, rels_path, slide_dir, type_suffix="/notesslide"
+                    zf,
+                    zf_names,
+                    rels_path,
+                    slide_dir,
+                    type_suffix="/notesslide",
+                    xml_budget=xml_budget,
                 )
                 for candidate in note_rels.values():
                     if candidate in zf_names:
@@ -773,60 +1200,74 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                         break
             explicit_notes.append((has_rels, mapped_note))
 
-        for idx, (slide_path, (has_rels, mapped_note)) in enumerate(
-            zip(slide_paths, explicit_notes), start=1
+        resolved_notes: list[Optional[str]] = []
+        for slide_path, (has_rels, mapped_note) in zip(slide_paths, explicit_notes):
+            note_path = mapped_note
+            if note_path is None and not has_rels:
+                slide_match = _PPTX_SLIDE_PATH_PATTERN.fullmatch(slide_path)
+                if slide_match:
+                    file_note = f"ppt/notesSlides/notesSlide{int(slide_match.group(1))}.xml"
+                    if file_note in zf_names and file_note not in claimed_notes:
+                        note_path = file_note
+                        claimed_notes.add(file_note)
+            resolved_notes.append(note_path)
+
+        for idx, (slide_path, (has_rels, _), pre_resolved_note) in enumerate(
+            zip(slide_paths, explicit_notes, resolved_notes), start=1
         ):
-            slide_raw = _read_zip_entry_capped(zf, slide_path, _MAX_XML_BYTES)
+            if render_budget.truncated:
+                break
+            slide_raw = _read_zip_entry_capped(
+                zf, slide_path, _MAX_XML_BYTES, xml_budget=xml_budget
+            )
             slide_root = _parse_xml_safe(slide_raw)
             body_text = _extract_drawingml_text(slide_root)
 
-            notes_path = mapped_note
+            notes_path = pre_resolved_note
             if notes_path is None and not has_rels:
-                fallback_note = f"ppt/notesSlides/notesSlide{idx}.xml"
-                if fallback_note in zf_names and fallback_note not in claimed_notes:
-                    notes_path = fallback_note
+                idx_note = f"ppt/notesSlides/notesSlide{idx}.xml"
+                if idx_note in zf_names and idx_note not in claimed_notes:
+                    notes_path = idx_note
+                    claimed_notes.add(idx_note)
 
             notes_text = ""
             if notes_path is not None:
-                notes_raw = _read_zip_entry_capped(zf, notes_path, _MAX_XML_BYTES)
+                notes_raw = _read_zip_entry_capped(
+                    zf, notes_path, _MAX_XML_BYTES, xml_budget=xml_budget
+                )
                 notes_root = _parse_xml_safe(notes_raw)
                 notes_text = _extract_drawingml_text(notes_root, skip_slide_num=True)
 
-            slides.append((idx, body_text, notes_text))
             anchor_id = f"slide-{idx}"
-            first_line = next((ln.strip() for ln in body_text.splitlines() if ln.strip()), "")
+            rendered = _render_bounded_pptx_card(
+                idx,
+                anchor_id,
+                body_text,
+                notes_text,
+                render_budget,
+                has_prior_cards=bool(html_cards),
+            )
+            if rendered is None:
+                break
+            card_html, card_md, stop_after = rendered
+
+            slides.append((idx, body_text, notes_text))
+            first_line = next(
+                (ln.strip() for ln in body_text.splitlines() if ln.strip()), ""
+            )
             outline_label = (
                 f"Slide {idx}: {first_line[:60]}" if first_line else f"Slide {idx}"
             )
             outline.append(
                 DocumentOutlineItem(anchor_id=anchor_id, level=1, title=outline_label)
             )
+            html_cards.append(card_html)
+            md_sections.append(card_md)
+            if stop_after:
+                break
 
-            body_html = (
-                "<p>" + html.escape(body_text).replace("\n", "<br/>") + "</p>"
-                if body_text
-                else '<p class="muted">(Slide trống)</p>'
-            )
-            notes_html = (
-                '<div class="slide-notes"><strong>Ghi chú:</strong> '
-                + html.escape(notes_text).replace("\n", "<br/>")
-                + "</div>"
-                if notes_text
-                else ""
-            )
-            html_cards.append(
-                f'<section class="slide-card" id="{anchor_id}">'
-                f"<h3>Slide {idx}</h3>{body_html}{notes_html}"
-                "</section>"
-            )
-
-            md_parts = [f"### Slide {idx}"]
-            if body_text:
-                md_parts.append(body_text)
-            if notes_text:
-                md_parts.append(f"> **Ghi chú:** {notes_text}")
-            md_sections.append("\n\n".join(md_parts))
-
+    if render_budget.truncated:
+        _append_render_truncation_notice(html_cards, md_sections)
     if not html_cards:
         html_cards.append('<p class="muted">(Bài trình bày không có slide)</p>')
     return ConvertedDocument(
@@ -842,7 +1283,7 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
 def _convert_text(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert plain-text or source-code bytes while escaping HTML output."""
     truncated = len(data) > _MAX_TEXT_BYTES
-    text = _decode_text_bytes(data[:_MAX_TEXT_BYTES])
+    text = _decode_text_bytes(data[:_MAX_TEXT_BYTES], truncated=truncated)
     if truncated:
         text += "\n\n... [Nội dung đã được rút gọn do vượt quá 2 MiB]"
     body_html = f'<pre class="code-view"><code>{html.escape(text)}</code></pre>'
