@@ -7,6 +7,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private static let channelName = "com.uthelper/background_sync"
     private static let requestPrefix = "uth.deadline."
     private static let immediatePrefix = "uth.immediate."
+    private static let classSchedulePrefix = "uth.class."
     private static let settingsKey = "uth.notification.settings"
     private static let receiptsKey = "uth.notification.receipts"
 
@@ -48,6 +49,12 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             let activities = arguments?["activities"] as? [[String: Any]] ?? []
             reconcile(activities: activities, allowImmediate: true, result: result)
 
+        case "schedule_class_sessions":
+            let arguments = call.arguments as? [String: Any] ?? [:]
+            let sessions = arguments["sessions"] as? [[String: Any]] ?? []
+            let enabled = bool(arguments["enabled"], default: true)
+            reconcileClassSessions(sessions, enabled: enabled, result: result)
+
         case "get_cached_activities":
             result([])
 
@@ -72,7 +79,9 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
 
         case "reconcile_cached":
             center.getPendingNotificationRequests { requests in
-                let pending = requests.filter { $0.identifier.hasPrefix(Self.requestPrefix) }.count
+                let pending = requests.filter {
+                    $0.identifier.hasPrefix(Self.requestPrefix) || $0.identifier.hasPrefix(Self.classSchedulePrefix)
+                }.count
                 self.finish(result, [
                     "desired": pending,
                     "scheduled": 0,
@@ -193,13 +202,24 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             }
         }
 
+        // iOS has a finite pending local-notification budget. Retain the next
+        // 64 deadlines ourselves instead of relying on silent system eviction.
+        let scheduledRequests = desired.values
+            .sorted {
+                let left = $0.trigger?.nextTriggerDate() ?? .distantFuture
+                let right = $1.trigger?.nextTriggerDate() ?? .distantFuture
+                return left < right
+            }
+            .prefix(64)
+        let selectedRequests = Array(scheduledRequests)
+
         center.getPendingNotificationRequests { existing in
             let oldIdentifiers = Set(
                 existing
                     .map(\.identifier)
                     .filter { $0.hasPrefix(Self.requestPrefix) }
             )
-            let desiredIdentifiers = Set(desired.keys)
+            let desiredIdentifiers = Set(selectedRequests.map(\.identifier))
             let removed = oldIdentifiers.subtracting(desiredIdentifiers)
             if !removed.isEmpty {
                 self.center.removePendingNotificationRequests(withIdentifiers: Array(removed))
@@ -208,7 +228,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             let group = DispatchGroup()
             let lock = NSLock()
             var failures: [String] = []
-            for request in Array(desired.values) + immediate {
+            for request in selectedRequests + immediate {
                 group.enter()
                 self.center.add(request) { error in
                     if let error {
@@ -226,9 +246,111 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                 result([
                     "imported": activities.count,
                     "authoritative": true,
-                    "scheduled": desired.count,
+                    "scheduled": selectedRequests.count,
+                    "deferred": max(0, desired.count - selectedRequests.count),
                     "cancelled": removed.count,
                     "delivered": failures.isEmpty ? immediate.count : 0,
+                    "failed": failures.count,
+                    "errors": failures,
+                ])
+            }
+        }
+    }
+
+    private func reconcileClassSessions(
+        _ sessions: [[String: Any]],
+        enabled: Bool,
+        result: @escaping FlutterResult
+    ) {
+        center.getPendingNotificationRequests { existing in
+            let oldIdentifiers = existing.map(\.identifier).filter {
+                $0.hasPrefix(Self.classSchedulePrefix)
+            }
+            let existingOtherCount = existing.filter {
+                !$0.identifier.hasPrefix(Self.classSchedulePrefix)
+            }.count
+            if !oldIdentifiers.isEmpty {
+                self.center.removePendingNotificationRequests(withIdentifiers: oldIdentifiers)
+                self.center.removeDeliveredNotifications(withIdentifiers: oldIdentifiers)
+            }
+
+            guard enabled else {
+                self.finish(result, [
+                    "desired": 0,
+                    "scheduled": 0,
+                    "cancelled": oldIdentifiers.count,
+                ])
+                return
+            }
+
+            let now = Date().timeIntervalSince1970
+            let candidates = sessions.compactMap { session -> (String, Date, UNMutableNotificationContent)? in
+                let reminderID = self.text(session["reminder_id"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let subject = self.text(session["subject"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let room = self.text(session["room"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let campus = self.text(session["campus"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let deliveryMode = self.text(session["delivery_mode"]).lowercased()
+                let leadHours = self.integer(session["lead_hours"], default: 0)
+                let locationIsValid = deliveryMode == "online" ||
+                    (deliveryMode == "in_person" && (!room.isEmpty || !campus.isEmpty))
+                let scheduledEpoch = (session["scheduled_at_epoch_seconds"] as? NSNumber)?.doubleValue ?? 0
+                let startEpoch = (session["start_at_epoch_seconds"] as? NSNumber)?.doubleValue ?? 0
+                guard !reminderID.isEmpty, !subject.isEmpty, locationIsValid,
+                      (1...3).contains(leadHours), scheduledEpoch > now,
+                      startEpoch > scheduledEpoch else { return nil }
+
+                let scheduled = Date(timeIntervalSince1970: scheduledEpoch)
+                let start = Date(timeIntervalSince1970: startEpoch)
+                let content = UNMutableNotificationContent()
+                let modeLabel = deliveryMode == "online" ? "Trực tuyến" : "Trực tiếp"
+                content.title = "Sắp đến giờ học (\(modeLabel)): \(subject)"
+                var details = ["Còn \(leadHours) giờ nữa", "Bắt đầu lúc \(DateFormatter.localizedString(from: start, dateStyle: .none, timeStyle: .short))"]
+                if !room.isEmpty { details.append("Phòng \(room)") }
+                if !campus.isEmpty { details.append(campus) }
+                let note = self.text(session["note"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !note.isEmpty { details.append(note) }
+                content.body = details.joined(separator: " · ")
+                content.sound = .default
+                content.userInfo = [
+                    "reminder_id": reminderID,
+                    "session_id": self.text(session["session_id"]),
+                ]
+                return (reminderID, scheduled, content)
+            }.sorted { $0.1 < $1.1 }
+
+            // Keep class reminders bounded and reserve the remaining slots after
+            // existing deadline requests, because iOS limits pending local requests.
+            let availableSlots = max(0, 64 - existingOtherCount)
+            let bounded = Array(candidates.prefix(availableSlots))
+            let group = DispatchGroup()
+            let lock = NSLock()
+            var failures: [String] = []
+            for (reminderID, scheduled, content) in bounded {
+                let identifier = Self.classSchedulePrefix + self.stableIdentifier(reminderID)
+                let components = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute, .second],
+                    from: scheduled
+                )
+                let request = UNNotificationRequest(
+                    identifier: identifier,
+                    content: content,
+                    trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                )
+                group.enter()
+                self.center.add(request) { error in
+                    if let error {
+                        lock.lock()
+                        failures.append(error.localizedDescription)
+                        lock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                self.finish(result, [
+                    "desired": candidates.count,
+                    "scheduled": bounded.count - failures.count,
+                    "cancelled": oldIdentifiers.count,
                     "failed": failures.count,
                     "errors": failures,
                 ])
@@ -347,7 +469,9 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private func clearNotifications() {
         center.getPendingNotificationRequests { requests in
             let identifiers = requests.map(\.identifier).filter {
-                $0.hasPrefix(Self.requestPrefix) || $0.hasPrefix(Self.immediatePrefix)
+                $0.hasPrefix(Self.requestPrefix)
+                    || $0.hasPrefix(Self.immediatePrefix)
+                    || $0.hasPrefix(Self.classSchedulePrefix)
             }
             self.center.removePendingNotificationRequests(withIdentifiers: identifiers)
             self.center.removeDeliveredNotifications(withIdentifiers: identifiers)

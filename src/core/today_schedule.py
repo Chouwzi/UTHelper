@@ -139,6 +139,20 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return default
+
+
 def _parse_clock(value: Any) -> time | None:
     if not isinstance(value, str):
         return None
@@ -187,7 +201,7 @@ def parse_portal_day(
                 campus=str(row.get("coSoToDisplay") or "").strip(),
                 period_start=_optional_int(row.get("tuTiet")),
                 period_end=_optional_int(row.get("denTiet")),
-                cancelled=bool(row.get("isTamNgung", False)),
+                cancelled=_parse_bool(row.get("isTamNgung", False)),
                 note=str(row.get("ghiChu") or row.get("noteToDisplay") or "").strip(),
             )
         )

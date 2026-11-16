@@ -119,7 +119,7 @@ flet-uth-background-sync = "extensions/flet_uth_background_sync"
 # Allow cleartext HTTP for Moodle instances without HTTPS
 NSAppTransportSecurity = { NSAllowsArbitraryLoads = true }
 # Permission descriptions (required by App Store)
-NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để nhắc deadline bài tập."
+NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để nhắc deadline bài tập và lịch học."
 
 [dependency-groups]
 dev = [

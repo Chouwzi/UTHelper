@@ -14,6 +14,7 @@ class RescheduleReceiver : BroadcastReceiver() {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 NotificationReconciler(context).reschedulePersisted()
+                ClassScheduleAlarmScheduler(context).reschedulePersisted()
             } finally {
                 pending.finish()
             }

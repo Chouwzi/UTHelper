@@ -54,6 +54,69 @@ class NotificationDispatcher(private val context: Context) {
         }.getOrDefault(false)
     }
 
+    fun showClassSchedule(
+        notificationId: Int,
+        subject: String,
+        courseCode: String,
+        room: String,
+        campus: String,
+        note: String,
+        deliveryMode: String,
+        leadHours: Int,
+        startAtEpochSeconds: Long,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return false
+        ensureClassScheduleChannel()
+        val timeLabel = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(startAtEpochSeconds * 1000L))
+        val modeLabel = if (deliveryMode == "online") "Trực tuyến" else "Trực tiếp"
+        val details = mutableListOf(modeLabel, "Còn $leadHours giờ nữa", "Bắt đầu lúc $timeLabel")
+        if (room.isNotBlank()) details.add("Phòng $room")
+        if (campus.isNotBlank()) details.add(campus)
+        if (courseCode.isNotBlank()) details.add(courseCode)
+        if (note.isNotBlank()) details.add(note)
+        val body = details.joinToString(" · ")
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val contentIntent = launchIntent?.let {
+            PendingIntent.getActivity(
+                context, notificationId, it,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
+        val notification = NotificationCompat.Builder(context, CLASS_CHANNEL_ID)
+            .setSmallIcon(context.applicationInfo.icon)
+            .setContentTitle("Sắp đến giờ học: $subject")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(contentIntent)
+            .build()
+        return runCatching {
+            NotificationManagerCompat.from(context).notify(notificationId, notification)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun ensureClassScheduleChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CLASS_CHANNEL_ID,
+                "Nhắc lịch học",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Nhắc trước giờ bắt đầu buổi học trực tiếp hoặc trực tuyến"
+            }
+        )
+    }
+
     fun showAuthenticationRequired(): Boolean {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                 context,
@@ -108,5 +171,6 @@ class NotificationDispatcher(private val context: Context) {
     companion object {
         private const val CHANNEL_ID = "uth_deadline_reminders"
         private const val AUTH_NOTIFICATION_ID = 0x55_54_48
+        private const val CLASS_CHANNEL_ID = "uth_class_schedule_reminders"
     }
 }

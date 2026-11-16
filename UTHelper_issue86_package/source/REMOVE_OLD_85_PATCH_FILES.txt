@@ -1,0 +1,16 @@
+Remove these leftover files if they exist in the working repository.
+They were introduced by the earlier failed / combined patch attempt, not by the
+original UTHelper project or this clean Issue #86 implementation:
+
+README_TEST_85_86.txt
+tests/test_repeat_reminder_bridge_payload.py
+src/config.py.rej
+src/gui/app_controller.py.rej
+src/gui/components/settings/notification_section.py.rej
+src/gui/components/settings_view.py.rej
+src/gui/view_models/settings_form.py.rej
+tests/test_config.py.rej
+tests/test_settings_form_snapshot.py.rej
+
+Do not delete the repository .git directory. Do not delete the original UTHelper
+notifications or deadline milestone settings; they remain part of the base app.

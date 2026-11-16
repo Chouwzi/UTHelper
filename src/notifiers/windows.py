@@ -182,6 +182,113 @@ class WindowsNotifier(BaseNotifier):
                 logger.info(f"THÔNG BÁO (Log): {title} - {msg}")
                 return False
 
+    def notify_class_schedule_reminder(self, value: dict) -> bool:
+        """Deliver an online or in-person class reminder as a Windows toast."""
+        subject = str(value.get("subject") or "Buổi học sắp bắt đầu").strip()
+        start_at = self._parse_iso(value.get("class_start_at"))
+        start_label = start_at.strftime("%H:%M") if start_at else "sắp tới"
+        delivery_mode = str(value.get("delivery_mode") or "").strip().casefold()
+        mode_label = "Trực tuyến" if delivery_mode == "online" else "Trực tiếp"
+        try:
+            lead_hours = int(value.get("lead_hours", 1))
+        except (TypeError, ValueError):
+            lead_hours = 1
+        details = [mode_label, f"Còn {lead_hours} giờ nữa", f"Bắt đầu lúc {start_label}"]
+        room = str(value.get("room") or "").strip()
+        campus = str(value.get("campus") or "").strip()
+        if room:
+            details.append(f"Phòng {room}")
+        if campus:
+            details.append(campus)
+        note = str(value.get("note") or "").strip()
+        if note:
+            details.append(note)
+        title = f"📚 Sắp đến giờ học: {subject}"
+        body = " · ".join(details)
+
+        try:
+            from windows_toasts import InteractableWindowsToaster, Toast
+
+            toaster = InteractableWindowsToaster(
+                self.app_id, notifierAUMID=self.aumid
+            )
+            toast = Toast()
+            toast.text_fields = [title, body]
+            toaster.show_toast(toast)
+            self.last_error = ""
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            logger.warning("Windows class reminder toast failed: %s", exc)
+            if self.tray_app:
+                try:
+                    self.tray_app.notify(title, body)
+                    return True
+                except Exception:
+                    logger.warning("Windows tray class reminder failed", exc_info=True)
+            return False
+
+    def reconcile_class_schedule_reminders(self, reminders) -> ScheduleResult:
+        """Replace class reminders without disturbing deadline reminders."""
+        self._ensure_schedule_runtime()
+        desired: dict[str, dict] = {}
+        for reminder in reminders:
+            session = reminder.session
+            key = f"class_schedule:{reminder.reminder_id}"
+            desired[key] = {
+                "kind": "class_schedule",
+                "reminder_id": reminder.reminder_id,
+                "subject": session.subject,
+                "course_code": session.course_code,
+                "room": session.room,
+                "campus": session.campus,
+                "note": session.note,
+                "delivery_mode": reminder.delivery_mode,
+                "lead_hours": reminder.lead_hours,
+                "class_start_at": session.start_at.isoformat(),
+                "scheduled_at": reminder.scheduled_at.isoformat(),
+                "retry_at": "",
+            }
+
+        with self._schedule_condition:
+            previous = self._schedule_state
+            existing_class = {
+                key: value
+                for key, value in previous.items()
+                if key.startswith("class_schedule:")
+            }
+            deadline_items = {
+                key: value
+                for key, value in previous.items()
+                if not key.startswith("class_schedule:")
+            }
+            result = ScheduleResult(desired=len(desired))
+            result.cancelled = sum(
+                1 for key, value in existing_class.items()
+                if key not in desired or not self._same_schedule(value, desired.get(key))
+            )
+            result.scheduled = sum(
+                1 for key, value in desired.items()
+                if key not in existing_class or not self._same_schedule(existing_class.get(key), value)
+            )
+            for key, value in desired.items():
+                old_value = existing_class.get(key)
+                if self._same_schedule(old_value, value) and old_value:
+                    value["retry_at"] = old_value.get("retry_at", "")
+            self._schedule_state = {**deadline_items, **desired}
+            try:
+                self._save_schedule_state_locked()
+                self.last_schedule_error = ""
+            except Exception as exc:
+                result.failed += 1
+                result.errors.append(str(exc))
+                self.last_schedule_error = str(exc)
+                logger.warning("Cannot persist Windows class reminders: %s", exc)
+            self._schedule_condition.notify_all()
+
+        self._start_schedule_worker()
+        return result
+
     def reconcile_schedules(
         self, reminders: list[ScheduledReminder]
     ) -> ScheduleResult:
@@ -201,23 +308,34 @@ class WindowsNotifier(BaseNotifier):
 
         with self._schedule_condition:
             previous = self._schedule_state
+            previous_deadlines = {
+                key: value
+                for key, value in previous.items()
+                if not key.startswith("class_schedule:")
+            }
+            class_items = {
+                key: value
+                for key, value in previous.items()
+                if key.startswith("class_schedule:")
+            }
             result.cancelled = sum(
                 1
-                for key, value in previous.items()
+                for key, value in previous_deadlines.items()
                 if key not in desired or not self._same_schedule(value, desired.get(key))
             )
             result.scheduled = sum(
                 1
                 for key, value in desired.items()
-                if key not in previous or not self._same_schedule(previous.get(key), value)
+                if key not in previous_deadlines or not self._same_schedule(previous_deadlines.get(key), value)
             )
 
             # Preserve retry metadata only when the actual reminder is unchanged.
             for key, value in desired.items():
-                old_value = previous.get(key)
+                old_value = previous_deadlines.get(key)
                 if self._same_schedule(old_value, value) and old_value:
                     value["retry_at"] = old_value.get("retry_at", "")
-            self._schedule_state = desired
+            # Deadline reconciliation must not delete class-schedule reminders.
+            self._schedule_state = {**class_items, **desired}
             try:
                 self._save_schedule_state_locked()
                 self.last_schedule_error = ""
@@ -367,12 +485,19 @@ class WindowsNotifier(BaseNotifier):
 
     def _deliver_pending(self, key: str, value: dict) -> None:
         now = datetime.now()
-        deadline = self._parse_iso(value.get("deadline"))
+        is_class = value.get("kind") == "class_schedule"
+        deadline = self._parse_iso(
+            value.get("class_start_at") if is_class else value.get("deadline")
+        )
         if deadline is not None and deadline <= now:
             self._remove_schedule_if_current(key, value)
             return
 
-        delivered = self.notify([self._scheduled_activity(value)]) is True
+        delivered = (
+            self.notify_class_schedule_reminder(value)
+            if is_class
+            else self.notify([self._scheduled_activity(value)]) is True
+        )
         with self._schedule_condition:
             if self._schedule_state.get(key) != value:
                 return
@@ -384,9 +509,12 @@ class WindowsNotifier(BaseNotifier):
                 receipts = SafeFileIO.read_json_safe(self._receipt_path, list)
                 receipts.append(
                     {
-                        "activity_key": value.get("activity_key", ""),
+                        "activity_key": value.get("activity_key", value.get("reminder_id", "")),
                         "deadline_revision": value.get("deadline_revision", ""),
-                        "milestone": value.get("milestone"),
+                        "milestone": value.get(
+                            "milestone",
+                            f"class_schedule_{value.get('lead_hours', 1)}h" if is_class else None,
+                        ),
                         "channel": "windows",
                         "delivered_at": now.isoformat(),
                     }

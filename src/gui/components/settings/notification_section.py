@@ -164,7 +164,64 @@ def init_notification_controls(view):
         value=", ".join(map(str, _current_milestones)),
         visible=False,
     )
-    
+
+    # Class schedule reminders: both online and in-person sessions.
+    class_schedule_enabled = bool(
+        getattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", False)
+    )
+    _current_class_leads = tuple(
+        int(value)
+        for value in getattr(settings, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1, 2, 3])
+        if int(value) in {1, 2, 3}
+    )
+    view._sw_class_schedule = ft.Switch(
+        value=class_schedule_enabled,
+        active_color=C.ACCENT,
+        label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+        label="Nhắc lịch học trực tiếp và trực tuyến",
+        on_change=view._handle_class_schedule_toggle,
+    )
+    view._class_schedule_lead_chips = {}
+    for hours in (1, 2, 3):
+        selected = hours in _current_class_leads
+        view._class_schedule_lead_chips[hours] = ft.Chip(
+            label=ft.Text(
+                f"{hours} giờ trước",
+                size=12,
+                color=C.ON_ACCENT if selected else C.TEXT_PRIMARY,
+            ),
+            selected=selected,
+            show_checkmark=True,
+            check_color=C.ON_ACCENT,
+            selected_color=C.ACCENT,
+            bgcolor=C.SURFACE,
+            on_select=view._handle_class_schedule_lead_toggle(hours),
+        )
+    view._class_schedule_lead_chips_row = ft.Row(
+        controls=list(view._class_schedule_lead_chips.values()),
+        wrap=True,
+        spacing=6,
+        run_spacing=4,
+    )
+    view._class_schedule_lead_field = ft.TextField(
+        value=", ".join(str(value) for value in _current_class_leads),
+        visible=False,
+    )
+    view._class_schedule_summary = ft.Text(
+        "Chưa chọn mốc nhắc." if not _current_class_leads else
+        "Sẽ nhắc trước " + ", ".join(f"{value} giờ" for value in _current_class_leads),
+        size=12,
+        color=C.TEXT_SECONDARY,
+        italic=True,
+    )
+    view._class_schedule_hint = ft.Text(
+        "Hỗ trợ cả buổi học trực tiếp và trực tuyến. Buổi học bị hủy/tạm ngưng "
+        "sẽ không được nhắc; lịch được cập nhật khi đồng bộ UTH Portal.",
+        size=11,
+        color=C.TEXT_SECONDARY,
+        italic=True,
+    )
+
     # Khu vực cấu hình môn học tắt thông báo (Bỏ qua môn học)
     view._muted_courses_list = ft.Column(spacing=2)
     view._muted_count_text = ft.Text("0 môn", size=12, color=C.TEXT_SECONDARY)
@@ -317,6 +374,15 @@ def build_notification_section(view) -> ft.Control:
             view._milestone_chips_row,
             view._milestone_summary,
             view._milestones_field,
+            ft.Container(height=4),
+            ft.Container(height=8),
+            view._make_themed_label("Nhắc lịch học"),
+            view._sw_class_schedule,
+            ft.Text("Chọn một hoặc nhiều mốc nhắc trước giờ học:" , size=11, color=C.TEXT_SECONDARY),
+            view._class_schedule_lead_chips_row,
+            view._class_schedule_lead_field,
+            view._class_schedule_summary,
+            view._class_schedule_hint,
             ft.Container(height=4),
             view._sw_ignore_sub,
             ft.Divider(height=16, color=C.BORDER),

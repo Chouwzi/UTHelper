@@ -42,6 +42,17 @@ class AndroidBackgroundSync(Service):
             {"activities": activities, "authoritative": authoritative},
         )
 
+    async def schedule_class_sessions(
+        self,
+        sessions: list[dict[str, Any]],
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Schedule local reminders derived from an already-fetched Portal snapshot."""
+        return await self._invoke_method(
+            "schedule_class_sessions",
+            {"sessions": sessions, "enabled": enabled},
+        )
+
     async def get_diagnostics(self) -> dict[str, Any]:
         return await self._invoke_method("get_diagnostics")
 

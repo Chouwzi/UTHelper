@@ -166,7 +166,7 @@ class TestSettingsSerialization:
     def test_legacy_poll_interval_migrates_when_check_missing(self):
         migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 4
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
 
     def test_legacy_notification_milestones_migrate_to_minutes(self):
         migrated = migrate_settings_data({
@@ -187,7 +187,7 @@ class TestSettingsSerialization:
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})
 
         assert migrated["AUTO_UPDATE_ENABLED"] is True
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 4
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
         assert Settings(**migrated).AUTO_UPDATE_ENABLED is True
         assert (
             Settings.model_fields["AUTO_UPDATE_ENABLED"].description
@@ -224,3 +224,14 @@ class TestSecretFieldsMapping:
         s = Settings()
         for attr_name in _SECRET_FIELDS:
             assert hasattr(s, attr_name), f"Settings missing attribute {attr_name}"
+
+
+def test_class_schedule_reminder_settings_have_safe_defaults_and_migrate():
+    migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 4})
+
+    assert migrated["NOTIFY_CLASS_SCHEDULE_ENABLED"] is False
+    assert migrated["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1, 2, 3]
+    assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
+    settings = Settings(**migrated)
+    assert settings.NOTIFY_CLASS_SCHEDULE_ENABLED is False
+    assert settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS == [1, 2, 3]

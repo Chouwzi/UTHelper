@@ -299,3 +299,32 @@ def test_concurrent_startup_and_fast_expand_coalesce_to_one_portal_fetch(tmp_pat
     asyncio.run(run_both())
 
     assert calls == ["fetch"]
+
+
+def test_parse_portal_day_treats_string_false_as_active_and_string_true_as_cancelled():
+    payload = {
+        "success": True,
+        "body": [
+            {
+                "id": 1,
+                "tenMonHoc": "Lớp trực tuyến",
+                "tuGio": "07:00",
+                "denGio": "09:00",
+                "isTamNgung": "false",
+                "ghiChu": "Học trực tuyến qua Zoom",
+            },
+            {
+                "id": 2,
+                "tenMonHoc": "Lớp tạm ngưng",
+                "tuGio": "10:00",
+                "denGio": "12:00",
+                "isTamNgung": "true",
+                "tenPhong": "F.302",
+            },
+        ],
+    }
+
+    sessions = parse_portal_day(payload, date(2026, 8, 11))
+
+    assert sessions[0].cancelled is False
+    assert sessions[1].cancelled is True

@@ -13,6 +13,7 @@ import com.uthelper.backgroundsync.data.ForegroundActivityImporter
 import com.uthelper.backgroundsync.data.SyncStateEntity
 import com.uthelper.backgroundsync.data.UthDatabase
 import com.uthelper.backgroundsync.notification.AlarmScheduler
+import com.uthelper.backgroundsync.notification.ClassScheduleAlarmScheduler
 import com.uthelper.backgroundsync.notification.NotificationReconciler
 import com.uthelper.backgroundsync.security.CredentialVault
 import com.uthelper.backgroundsync.update.ApkUpdateInstaller
@@ -105,6 +106,11 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     )
                 }
             }
+            "schedule_class_sessions" -> execute(result) {
+                val sessions = call.argument<List<*>>("sessions") ?: emptyList<Any>()
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                ClassScheduleAlarmScheduler(context).reconcile(sessions, enabled)
+            }
             "import_activities" -> execute(result) {
                 val database = UthDatabase.get(context)
                 val dao = database.dao()
@@ -190,6 +196,7 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
             "logout" -> execute(result) {
                 BackgroundSyncScheduler(context).cancelAll()
+                ClassScheduleAlarmScheduler(context).cancelAll()
                 val database = UthDatabase.get(context)
                 database.dao().reminders().forEach(AlarmScheduler(context)::cancel)
                 database.withTransaction {
