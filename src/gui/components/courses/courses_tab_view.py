@@ -34,6 +34,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _format_err(exc: BaseException) -> str:
+    return str(exc).strip() or type(exc).__name__
+
+
 async def _invoke_callback(fn: Optional[Callable[..., Any]], *args: Any) -> Any:
     if not callable(fn):
         return None
@@ -54,19 +58,13 @@ class CoursesTabView(ft.Container):
         page: Optional[ft.Page] = None,
         catalog_service: Optional[CourseCatalogService] = None,
         on_open_assignment: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
-        on_open_webview_activity: Optional[
-            Callable[[CourseSummary, CourseModuleItem], Any]
-        ] = None,
+        on_open_webview_activity: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         on_open_attachment_viewer: Optional[
             Callable[[CourseSummary, CourseModuleItem, CourseAttachment], Any]
         ] = None,
-        on_download_attachment: Optional[
-            Callable[[CourseSummary, CourseAttachment], Any]
-        ] = None,
+        on_download_attachment: Optional[Callable[[CourseSummary, CourseAttachment], Any]] = None,
         on_launch_url: Optional[Callable[[str], Any]] = None,
-        on_open_inline_page: Optional[
-            Callable[[CourseSummary, CourseModuleItem], Any]
-        ] = None,
+        on_open_inline_page: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, **kwargs)
@@ -84,29 +82,36 @@ class CoursesTabView(ft.Container):
         self._layout_mode: CoursesLayoutMode = "wide"
         self._overlays: list[ft.Control] = []
         self._theme_snapshot = semantic_palette()
+        self._catalog_request_seq = 0
+        self._detail_request_seq = 0
+        self._grade_request_seq = 0
 
         self._list_pane = CourseListPane(
-            on_select_course=lambda key: self._run_task(self._select_course_async, key),
-            on_toggle_pin=lambda key: self._run_task(self._toggle_pin_async, key),
-            on_open_recent=lambda entry: self._run_task(self._open_recent_async, entry),
+            on_select_course=lambda key: self._schedule_task(self._select_course_async, key),
+            on_toggle_pin=lambda key: self._schedule_task(self._toggle_pin_async, key),
+            on_open_recent=lambda entry: self._schedule_task(self._open_recent_async, entry),
             on_filter_change=self._handle_filter_change,
             on_refresh_catalog=self.refresh,
         )
         self._detail_pane = CourseDetailPane(
             on_back_mobile=self.handle_back,
-            on_refresh_course=lambda: self._run_task(self._refresh_single_course_async),
-            on_open_module=lambda mod: self._run_task(self._handle_open_module_async, mod),
-            on_download_attachment=lambda att: self._run_task(
+            on_refresh_course=lambda: self._schedule_task(self._refresh_single_course_async),
+            on_open_module=lambda mod: self._schedule_task(self._handle_open_module_async, mod),
+            on_download_attachment=lambda att: self._schedule_task(
                 self._download_selected_attachment_async, att
             ),
-            on_toggle_completion=lambda mod, done: self._run_task(
+            on_toggle_completion=lambda mod, done: self._schedule_task(
                 self._toggle_completion_async, mod, done
             ),
-            on_copy_text=lambda text: self._run_task(self._copy_text_async, text),
-            on_launch_url=lambda url: self._run_task(self._launch_url_safe, url),
-            on_subtab_change=lambda idx: self._run_task(self._on_subtab_change_async, idx),
+            on_copy_text=lambda text: self._schedule_task(self._copy_text_async, text),
+            on_launch_url=lambda url: self._schedule_task(self._launch_url_safe, url),
+            on_subtab_change=lambda idx: self._schedule_task(self._on_subtab_change_async, idx),
         )
 
+        self._tablet_content = ft.Container(expand=True, width=820.0)
+        self._tablet_wrapper = ft.Container(
+            expand=True, alignment=ft.Alignment.TOP_CENTER, content=self._tablet_content
+        )
         self._main_host = ft.Container(expand=True)
         self._root_stack = ft.Stack(expand=True, controls=[self._main_host])
 
@@ -140,29 +145,32 @@ class CoursesTabView(ft.Container):
             except Exception:
                 pass
 
-    def _dispatch_callback(
-        self, fn: Optional[Callable[..., Any]], *args: Any
-    ) -> None:
+    def _schedule_task(self, coro_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
+        page = self._get_page()
+        run_task = getattr(page, "run_task", None) if page is not None else None
+        if callable(run_task):
+            run_task(coro_fn, *args, **kwargs)
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro_fn(*args, **kwargs))
+            return True
+        except RuntimeError:
+            return False
+
+    def _dispatch_callback(self, fn: Optional[Callable[..., Any]], *args: Any) -> None:
         if not callable(fn):
+            return
+        if inspect.iscoroutinefunction(fn):
+            self._schedule_task(fn, *args)
             return
         result = fn(*args)
         if inspect.isawaitable(result):
             async def _await_res() -> None:
                 await result
 
-            self._run_task(_await_res)
-
-    def _run_task(self, coro_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-        page = self._get_page()
-        run_task = getattr(page, "run_task", None) if page is not None else None
-        if callable(run_task):
-            run_task(coro_fn, *args, **kwargs)
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(coro_fn(*args, **kwargs))
-        except RuntimeError:
-            pass
+            if not self._schedule_task(_await_res) and inspect.iscoroutine(result):
+                result.close()
 
     def _collect_provider_notice(
         self, course: Optional[CourseSummary] = None, explicit_error: str = ""
@@ -175,8 +183,7 @@ class CoursesTabView(ft.Container):
         thnn_err = str(getattr(self._svc, "last_thnn_error", "") or "").strip()
         if course is not None:
             return thnn_err if course.source == "thnn" else courses_err
-        parts = [p for p in (courses_err, thnn_err) if p]
-        return " | ".join(parts)
+        return " | ".join(p for p in (courses_err, thnn_err) if p)
 
     def _rebuild_layout(self) -> None:
         if self._layout_mode == "wide":
@@ -191,28 +198,21 @@ class CoursesTabView(ft.Container):
             )
             return
 
-        show_detail = (
-            self._state.in_detail_mobile and self._state.selected_course() is not None
-        )
+        show_detail = self._state.in_detail_mobile and self._state.selected_course() is not None
         active_pane: ft.Control = self._detail_pane if show_detail else self._list_pane
         if self._layout_mode == "tablet_portrait":
-            target_width = min(820.0, max(320.0, self._current_width))
-            self._main_host.content = ft.Container(
-                expand=True,
-                alignment=ft.Alignment.TOP_CENTER,
-                content=ft.Container(
-                    content=active_pane,
-                    width=target_width,
-                    expand=True,
-                ),
-            )
+            self._tablet_content.content = active_pane
+            self._tablet_content.width = min(820.0, max(320.0, self._current_width))
+            self._main_host.content = self._tablet_wrapper
         else:
             self._main_host.content = active_pane
 
     def _render(self) -> None:
         self._rebuild_layout()
-        self._list_pane.render(self._state)
-        self._detail_pane.render(self._state, show_back=(self._layout_mode != "wide"))
+        self._list_pane.render(self._state, update=False)
+        self._detail_pane.render(
+            self._state, show_back=(self._layout_mode != "wide"), update=False
+        )
         self._safe_update()
 
     def set_width(self, width: float) -> None:
@@ -225,8 +225,17 @@ class CoursesTabView(ft.Container):
         self._layout_mode = compute_courses_layout_mode(width)
         self._render()
 
-    def push_overlay(self, control: ft.Control) -> None:
-        """Push a modal/reader overlay onto the Courses view stack."""
+    def push_overlay(self, control: ft.Control, *, tag: str = "") -> None:
+        """Push a modal/reader overlay onto the stack, replacing same-tag/modal overlays."""
+        if tag:
+            control.data = tag
+            is_modal = tag.startswith("courses_modal:")
+            self._overlays = [
+                item
+                for item in self._overlays
+                if getattr(item, "data", None) != tag
+                and not (is_modal and str(getattr(item, "data", "")).startswith("courses_modal:"))
+            ]
         self._overlays.append(control)
         self._root_stack.controls = [self._main_host, *self._overlays]
         self._safe_update()
@@ -252,72 +261,82 @@ class CoursesTabView(ft.Container):
 
     def load_initial(self) -> None:
         """Schedule initial 0ms cached catalog load and background staleness check."""
-        page = self._get_page()
-        if page is not None and callable(getattr(page, "run_task", None)):
-            page.run_task(self.load_initial_async)
+        if self._schedule_task(self.load_initial_async):
             return
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.load_initial_async())
-            return
-        except RuntimeError:
-            pass
         if self._svc is not None:
-            courses, recent, synced_at = self._svc.load_cached_catalog()
-            self._state.set_courses(courses)
-            self._state.recent_items = list(recent)
-            self._state.last_synced_at = synced_at
-            self._state.offline_notice = self._collect_provider_notice()
+            try:
+                courses, recent, synced_at = self._svc.load_cached_catalog()
+                self._state.set_courses(courses)
+                self._state.recent_items = list(recent)
+                if self._state.selected_course() is None:
+                    self._state.last_synced_at = synced_at
+                self._state.offline_notice = self._collect_provider_notice()
+            except Exception as exc:
+                logger.warning("Failed to load cached catalog: %s", exc)
+                self._state.offline_notice = f"Không thể tải danh sách môn học: {_format_err(exc)}"
             self._render()
 
     async def load_initial_async(self) -> None:
         """Load cached catalog immediately and refresh if stale or empty."""
         if self._svc is None:
             return
-        courses, recent, synced_at = await asyncio.to_thread(
-            self._svc.load_cached_catalog
-        )
-        self._state.set_courses(courses)
-        self._state.recent_items = list(recent)
-        self._state.last_synced_at = synced_at
-        self._state.offline_notice = self._collect_provider_notice()
-        self._render()
+        cat_seq = self._catalog_request_seq
+        try:
+            courses, recent, synced_at = await asyncio.to_thread(self._svc.load_cached_catalog)
+            if cat_seq != self._catalog_request_seq:
+                return
+            self._state.set_courses(courses)
+            self._state.recent_items = list(recent)
+            if self._state.selected_course() is None:
+                self._state.last_synced_at = synced_at
+            self._state.offline_notice = self._collect_provider_notice()
+            self._render()
 
-        stale = await asyncio.to_thread(
-            self._svc.is_catalog_stale, self.CATALOG_STALE_HOURS
-        )
-        if stale or not courses:
-            await self.refresh_catalog_async(include_thnn=True)
+            stale = await asyncio.to_thread(self._svc.is_catalog_stale, self.CATALOG_STALE_HOURS)
+            if cat_seq != self._catalog_request_seq:
+                return
+            if stale or not courses:
+                await self.refresh_catalog_async(include_thnn=True)
+        except Exception as exc:
+            logger.warning("Initial catalog load failed: %s", exc)
+            if cat_seq == self._catalog_request_seq:
+                self._state.offline_notice = f"Không thể tải danh sách môn học: {_format_err(exc)}"
+                self._render()
 
     def refresh(self) -> None:
         """Trigger asynchronous course catalog refresh."""
-        self._run_task(self.refresh_catalog_async, True)
+        self._schedule_task(self.refresh_catalog_async, True)
 
     async def refresh_catalog_async(self, include_thnn: bool = True) -> None:
         """Refresh course catalog from providers while preserving offline cache."""
         if self._svc is None:
             return
+        self._catalog_request_seq += 1
+        req_id = self._catalog_request_seq
         self._state.loading_catalog = True
         self._render()
         explicit_err = ""
         try:
             courses = await asyncio.to_thread(self._svc.refresh_catalog, include_thnn)
+            if req_id != self._catalog_request_seq:
+                return
+            _, recent, synced_at = await asyncio.to_thread(self._svc.load_cached_catalog)
+            if req_id != self._catalog_request_seq:
+                return
             self._state.set_courses(courses)
-            _, recent, synced_at = await asyncio.to_thread(
-                self._svc.load_cached_catalog
-            )
             self._state.recent_items = list(recent)
             if self._state.selected_course() is None:
                 self._state.last_synced_at = synced_at
         except Exception as exc:
             logger.warning("Failed to refresh course catalog: %s", exc)
-            explicit_err = str(exc).strip() or type(exc).__name__
+            explicit_err = _format_err(exc)
         finally:
-            self._state.offline_notice = self._collect_provider_notice(
-                explicit_error=explicit_err
-            )
-            self._state.loading_catalog = False
-            self._render()
+            if req_id == self._catalog_request_seq:
+                self._state.offline_notice = self._collect_provider_notice(
+                    explicit_error=explicit_err
+                )
+                self._state.loading_catalog = False
+                self._render()
 
     def _handle_filter_change(self, semester: str, query: str) -> None:
         self._state.semester_filter = semester
@@ -327,16 +346,25 @@ class CoursesTabView(ft.Container):
     async def _toggle_pin_async(self, course_key: str) -> None:
         if self._svc is None:
             return
-        courses = await asyncio.to_thread(self._svc.toggle_pin, course_key)
-        self._state.set_courses(courses)
+        try:
+            courses = await asyncio.to_thread(self._svc.toggle_pin, course_key)
+            self._state.set_courses(courses)
+        except Exception as exc:
+            logger.warning("Failed to toggle course pin (%s): %s", course_key, exc)
+            self._state.offline_notice = f"Không thể ghim môn học: {_format_err(exc)}"
         self._render()
 
-    async def _select_course_async(self, course_key: str) -> None:
-        course = next(
-            (c for c in self._state.courses if c.course_key == course_key), None
-        )
+    def _is_active_detail(self, req_id: int, target_key: str) -> bool:
+        return req_id == self._detail_request_seq and self._state.selected_course_key == target_key
+
+    async def _select_course_async(self, course_key: str) -> Optional[int]:
+        course = next((c for c in self._state.courses if c.course_key == course_key), None)
         if course is None:
-            return
+            return None
+        self._detail_request_seq += 1
+        self._grade_request_seq += 1
+        req_id = self._detail_request_seq
+        grade_req_id = self._grade_request_seq
         target_key = course.course_key
         prev_key = self._state.selected_course_key
         self._state.select_course(target_key)
@@ -351,32 +379,28 @@ class CoursesTabView(ft.Container):
         if self._svc is None:
             self._state.loading_detail = False
             self._render()
-            return
+            return req_id
 
         try:
-            cached = await asyncio.to_thread(
-                self._svc.open_course_cached, course.source, course.id
-            )
-            if self._state.selected_course_key != target_key:
-                return
+            cached = await asyncio.to_thread(self._svc.open_course_cached, course.source, course.id)
+            if not self._is_active_detail(req_id, target_key):
+                return req_id
             self._state.sections = list(cached.sections)
             self._state.grades = list(cached.grades)
             self._state.last_synced_at = cached.last_synced_at
             self._render()
 
             if course.has_unseen_updates:
-                updated_courses = await asyncio.to_thread(
-                    self._svc.mark_course_seen, target_key
-                )
+                updated_courses = await asyncio.to_thread(self._svc.mark_course_seen, target_key)
                 self._state.set_courses(updated_courses)
-                if self._state.selected_course_key != target_key:
-                    return
+                if not self._is_active_detail(req_id, target_key):
+                    return req_id
 
             res = await asyncio.to_thread(
                 self._svc.sync_course_delta, course.source, course.id, False
             )
-            if self._state.selected_course_key != target_key:
-                return
+            if not self._is_active_detail(req_id, target_key):
+                return req_id
             self._state.sections = list(res.sections)
             if res.grades:
                 self._state.grades = list(res.grades)
@@ -388,25 +412,36 @@ class CoursesTabView(ft.Container):
             if res.changed:
                 refreshed, _, _ = await asyncio.to_thread(self._svc.load_cached_catalog)
                 self._state.set_courses(refreshed)
-                if self._state.selected_course_key != target_key:
-                    return
+                if not self._is_active_detail(req_id, target_key):
+                    return req_id
 
             if self._state.active_subtab == 2 and not self._state.grades:
                 grades = await asyncio.to_thread(
                     self._svc.load_course_grades, course.source, course.id, False
                 )
-                if self._state.selected_course_key != target_key:
-                    return
+                if not self._is_active_detail(req_id, target_key) or (
+                    grade_req_id != self._grade_request_seq
+                ):
+                    return req_id
                 self._state.grades = list(grades)
+        except Exception as exc:
+            logger.warning("Failed to select course %s: %s", target_key, exc)
+            if self._is_active_detail(req_id, target_key):
+                self._state.offline_notice = f"Không thể tải nội dung môn học: {_format_err(exc)}"
         finally:
-            if self._state.selected_course_key == target_key:
+            if self._is_active_detail(req_id, target_key):
                 self._state.loading_detail = False
                 self._render()
+        return req_id
 
     async def _refresh_single_course_async(self) -> None:
         course = self._state.selected_course()
         if course is None or self._svc is None:
             return
+        self._detail_request_seq += 1
+        self._grade_request_seq += 1
+        req_id = self._detail_request_seq
+        grade_req_id = self._grade_request_seq
         target_key = course.course_key
         self._state.loading_detail = True
         self._render()
@@ -414,7 +449,7 @@ class CoursesTabView(ft.Container):
             res = await asyncio.to_thread(
                 self._svc.sync_course_delta, course.source, course.id, True
             )
-            if self._state.selected_course_key != target_key:
+            if not self._is_active_detail(req_id, target_key):
                 return
             self._state.sections = list(res.sections)
             self._state.last_synced_at = res.last_synced_at
@@ -422,30 +457,36 @@ class CoursesTabView(ft.Container):
                 grades = await asyncio.to_thread(
                     self._svc.load_course_grades, course.source, course.id, True
                 )
-                if self._state.selected_course_key != target_key:
+                if not self._is_active_detail(req_id, target_key) or (
+                    grade_req_id != self._grade_request_seq
+                ):
                     return
                 self._state.grades = list(grades)
             refreshed, _, _ = await asyncio.to_thread(self._svc.load_cached_catalog)
             self._state.set_courses(refreshed)
-            if self._state.selected_course_key != target_key:
+            if not self._is_active_detail(req_id, target_key):
                 return
             self._state.offline_notice = self._collect_provider_notice(
                 course, explicit_error=res.error
             )
+        except Exception as exc:
+            logger.warning("Failed to refresh course %s: %s", target_key, exc)
+            if self._is_active_detail(req_id, target_key):
+                self._state.offline_notice = f"Không thể đồng bộ môn học: {_format_err(exc)}"
         finally:
-            if self._state.selected_course_key == target_key:
+            if self._is_active_detail(req_id, target_key):
                 self._state.loading_detail = False
                 self._render()
 
     async def _on_subtab_change_async(self, index: int) -> None:
         self._state.active_subtab = index
-        if index != 2 or self._svc is None:
-            self._render()
-            return
         course = self._state.selected_course()
-        if course is None:
-            self._render()
+        if index != 2 or self._svc is None or course is None:
+            self._detail_pane.sync_subtab(index, update=False)
+            self._safe_update()
             return
+        self._grade_request_seq += 1
+        grade_req_id = self._grade_request_seq
         target_key = course.course_key
         self._state.loading_detail = True
         self._render()
@@ -453,43 +494,58 @@ class CoursesTabView(ft.Container):
             grades = await asyncio.to_thread(
                 self._svc.load_course_grades, course.source, course.id, False
             )
-            if self._state.selected_course_key != target_key:
+            if grade_req_id != self._grade_request_seq or (
+                self._state.selected_course_key != target_key
+            ):
                 return
             self._state.grades = list(grades)
             self._state.offline_notice = self._collect_provider_notice(course)
+        except Exception as exc:
+            logger.warning("Failed to load grades for %s: %s", target_key, exc)
+            if grade_req_id == self._grade_request_seq and (
+                self._state.selected_course_key == target_key
+            ):
+                self._state.offline_notice = f"Không thể tải điểm môn học: {_format_err(exc)}"
         finally:
-            if self._state.selected_course_key == target_key:
+            if grade_req_id == self._grade_request_seq and (
+                self._state.selected_course_key == target_key
+            ):
                 self._state.loading_detail = False
                 self._render()
 
-    async def _toggle_completion_async(
-        self, mod: CourseModuleItem, completed: bool
-    ) -> None:
+    async def _toggle_completion_async(self, mod: CourseModuleItem, completed: bool) -> None:
         course = self._state.selected_course()
         if course is None or self._svc is None:
             return
         target_key = course.course_key
-        ok = await asyncio.to_thread(
-            self._svc.toggle_completion, course.source, course.id, mod.cmid, completed
-        )
-        if self._state.selected_course_key != target_key:
-            return
-        if ok:
-            cached = await asyncio.to_thread(
-                self._svc.open_course_cached, course.source, course.id
+        detail_req_id = self._detail_request_seq
+        try:
+            ok = await asyncio.to_thread(
+                self._svc.toggle_completion, course.source, course.id, mod.cmid, completed
             )
-            if self._state.selected_course_key != target_key:
+            if not self._is_active_detail(detail_req_id, target_key):
                 return
-            self._state.sections = list(cached.sections)
-            refreshed, _, _ = await asyncio.to_thread(self._svc.load_cached_catalog)
-            self._state.set_courses(refreshed)
-            if self._state.selected_course_key != target_key:
+            if ok:
+                cached = await asyncio.to_thread(
+                    self._svc.open_course_cached, course.source, course.id
+                )
+                if not self._is_active_detail(detail_req_id, target_key):
+                    return
+                self._state.sections = list(cached.sections)
+                refreshed, _, _ = await asyncio.to_thread(self._svc.load_cached_catalog)
+                self._state.set_courses(refreshed)
+                if not self._is_active_detail(detail_req_id, target_key):
+                    return
+            else:
+                self._state.offline_notice = (
+                    self._collect_provider_notice(course)
+                    or "Không thể cập nhật trạng thái hoàn thành."
+                )
+        except Exception as exc:
+            logger.warning("Failed to toggle completion (cmid=%s): %s", mod.cmid, exc)
+            if not self._is_active_detail(detail_req_id, target_key):
                 return
-        else:
-            self._state.offline_notice = (
-                self._collect_provider_notice(course)
-                or "Không thể cập nhật trạng thái hoàn thành."
-            )
+            self._state.offline_notice = f"Không thể cập nhật hoàn thành: {_format_err(exc)}"
         self._render()
 
     async def _record_recent_best_effort(
@@ -514,23 +570,33 @@ class CoursesTabView(ft.Container):
         try:
             updated = await asyncio.to_thread(self._svc.record_recent, entry)
             self._state.recent_items = list(updated)
-            self._list_pane.render(self._state)
+            self._list_pane.render(self._state, update=False)
+            self._safe_update()
         except Exception:
             logger.debug("Ignoring record_recent failure", exc_info=True)
 
     async def _open_recent_async(self, entry: RecentMaterialEntry) -> None:
-        await self._select_course_async(entry.course_key)
-        if self._state.selected_course_key != entry.course_key:
-            return
-        for sec in self._state.sections:
-            for mod in sec.modules:
-                if mod.cmid == entry.cmid:
-                    await self._handle_open_module_async(mod)
-                    return
+        try:
+            started_seq = await self._select_course_async(entry.course_key)
+            if (
+                started_seq is None
+                or started_seq != self._detail_request_seq
+                or self._state.selected_course_key != entry.course_key
+            ):
+                return
+            if self._layout_mode != "wide" and not self._state.in_detail_mobile:
+                return
+            for sec in self._state.sections:
+                for mod in sec.modules:
+                    if mod.cmid == entry.cmid:
+                        await self._handle_open_module_async(mod)
+                        return
+        except Exception as exc:
+            logger.warning("Failed to open recent material (%s): %s", entry.cmid, exc)
+            self._state.offline_notice = f"Không thể mở tài liệu gần đây: {_format_err(exc)}"
+            self._render()
 
-    async def _download_selected_attachment_async(
-        self, att: CourseAttachment
-    ) -> None:
+    async def _download_selected_attachment_async(self, att: CourseAttachment) -> None:
         course = self._state.selected_course()
         if course is not None:
             await _invoke_callback(self._on_download_attachment, course, att)
@@ -544,30 +610,40 @@ class CoursesTabView(ft.Container):
             logger.debug("Clipboard copy failed", exc_info=True)
             return
         page = self._get_page()
-        if page is not None:
-            sb = ft.SnackBar(
-                content=ft.Text(f"Đã sao chép: {text}", size=13, color=C.TEXT_PRIMARY),
-                bgcolor=C.SURFACE,
-                duration=2000,
-            )
-            overlay = getattr(page, "overlay", None)
-            if overlay is not None:
-                overlay.append(sb)
-                sb.open = True
-            else:
-                show_dialog = getattr(page, "show_dialog", None)
-                if callable(show_dialog):
-                    try:
-                        show_dialog(sb)
-                    except (AttributeError, TypeError):
-                        return
-                else:
-                    return
-            if callable(getattr(page, "update", None)):
+        if page is None:
+            return
+        sb = ft.SnackBar(
+            content=ft.Text(f"Đã sao chép: {text}", size=13, color=C.TEXT_PRIMARY),
+            bgcolor=C.SURFACE,
+            duration=2000,
+        )
+        overlay = getattr(page, "overlay", None)
+        if overlay is not None:
+            overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
+
+            def _on_dismiss(_e=None) -> None:
+                sb.open = False
                 try:
-                    page.update()
-                except Exception:
+                    overlay.remove(sb)
+                except ValueError:
                     pass
+
+            sb.on_dismiss = _on_dismiss
+            overlay.append(sb)
+            sb.open = True
+        else:
+            show_dialog = getattr(page, "show_dialog", None)
+            if not callable(show_dialog):
+                return
+            try:
+                show_dialog(sb)
+            except (AttributeError, TypeError):
+                return
+        if callable(getattr(page, "update", None)):
+            try:
+                page.update()
+            except Exception:
+                pass
 
     async def _launch_url_safe(self, url: str) -> None:
         safe = safe_http_url(url)
@@ -582,17 +658,35 @@ class CoursesTabView(ft.Container):
     def _handle_folder_item_click(
         self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
     ) -> None:
-        page = self._get_page()
-        if page is not None and callable(getattr(page, "run_task", None)):
-            page.run_task(self._open_folder_attachment_async, course, mod, att)
+        if self._schedule_task(self._open_folder_attachment_async, course, mod, att):
             return
-        try:
-            asyncio.get_running_loop()
-            self._run_task(self._open_folder_attachment_async, course, mod, att)
+        target = self._on_open_attachment_viewer
+        if callable(target):
+            self._dispatch_callback(target, course, mod, att)
+        else:
+            self._dispatch_callback(self._on_download_attachment, course, att)
+
+    def _handle_folder_download_click(
+        self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
+    ) -> None:
+        if self._schedule_task(self._download_folder_attachment_async, course, mod, att):
             return
-        except RuntimeError:
-            pass
-        self._dispatch_callback(self._on_open_attachment_viewer, course, mod, att)
+        self._dispatch_callback(self._on_download_attachment, course, att)
+
+    async def _open_folder_attachment_async(
+        self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
+    ) -> None:
+        await self._record_recent_best_effort(course, mod, att)
+        if callable(self._on_open_attachment_viewer):
+            await _invoke_callback(self._on_open_attachment_viewer, course, mod, att)
+        else:
+            await _invoke_callback(self._on_download_attachment, course, att)
+
+    async def _download_folder_attachment_async(
+        self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
+    ) -> None:
+        await self._record_recent_best_effort(course, mod, att)
+        await _invoke_callback(self._on_download_attachment, course, att)
 
     def _push_inline_reader_overlay(self, mod: CourseModuleItem) -> None:
         body_text, links = extract_readable_html_and_links(
@@ -614,17 +708,14 @@ class CoursesTabView(ft.Container):
                 color=C.TEXT_PRIMARY,
                 selectable=True,
             ),
-            *(
-                [ft.Divider(color=C.BORDER), *link_controls]
-                if link_controls
-                else []
-            ),
+            *([ft.Divider(color=C.BORDER), *link_controls] if link_controls else []),
         ]
-        self.push_overlay(self._build_modal_overlay(mod.name, body_controls))
+        self.push_overlay(
+            self._build_modal_overlay(mod.name, body_controls),
+            tag=f"courses_modal:inline:{mod.cmid}",
+        )
 
-    def _push_folder_overlay(
-        self, course: CourseSummary, mod: CourseModuleItem
-    ) -> None:
+    def _push_folder_overlay(self, course: CourseSummary, mod: CourseModuleItem) -> None:
         rows: list[ft.Control] = []
         for att in mod.attachments:
             size_label = format_file_size(att.file_size)
@@ -666,30 +757,20 @@ class CoursesTabView(ft.Container):
                                 icon_size=18,
                                 icon_color=C.TEXT_SECONDARY,
                                 tooltip="Tải xuống",
-                                on_click=lambda _e, item=att: self._dispatch_callback(
-                                    self._on_download_attachment,
-                                    course,
-                                    item,
+                                on_click=lambda _e, item=att: self._handle_folder_download_click(
+                                    course, mod, item
                                 ),
                             ),
                         ],
                     ),
                 )
             )
-        self.push_overlay(self._build_modal_overlay(mod.name, rows))
+        self.push_overlay(
+            self._build_modal_overlay(mod.name, rows),
+            tag=f"courses_modal:folder:{mod.cmid}",
+        )
 
-    async def _open_folder_attachment_async(
-        self,
-        course: CourseSummary,
-        mod: CourseModuleItem,
-        att: CourseAttachment,
-    ) -> None:
-        await self._record_recent_best_effort(course, mod, att)
-        await _invoke_callback(self._on_open_attachment_viewer, course, mod, att)
-
-    def _build_modal_overlay(
-        self, title: str, body_controls: list[ft.Control]
-    ) -> ft.Control:
+    def _build_modal_overlay(self, title: str, body_controls: list[ft.Control]) -> ft.Control:
         card = ft.Container(
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
@@ -740,65 +821,80 @@ class CoursesTabView(ft.Container):
         if course is None:
             return
         strategy = mod.open_strategy
-
-        if strategy == "assignment_detail":
-            await _invoke_callback(self._on_open_assignment, course, mod)
-            return
-        if strategy == "webview_activity":
-            await _invoke_callback(self._on_open_webview_activity, course, mod)
-            return
-        if strategy == "external_url":
-            if self._svc is not None and hasattr(self._svc, "resolve_module_url"):
-                resolved = await asyncio.to_thread(
-                    self._svc.resolve_module_url, course.source, mod
+        try:
+            if strategy == "assignment_detail":
+                await _invoke_callback(self._on_open_assignment, course, mod)
+                return
+            if strategy == "webview_activity":
+                await _invoke_callback(self._on_open_webview_activity, course, mod)
+                return
+            if strategy == "external_url":
+                resolved = ""
+                if self._svc is not None and hasattr(self._svc, "resolve_module_url"):
+                    resolved = await asyncio.to_thread(
+                        self._svc.resolve_module_url, course.source, mod
+                    )
+                safe_url = (
+                    safe_http_url(resolved)
+                    or safe_http_url(mod.url)
+                    or safe_http_url(mod.web_url)
                 )
-            else:
-                resolved = mod.url or mod.web_url
-            await self._record_recent_best_effort(course, mod)
-            await self._launch_url_safe(resolved)
-            return
-        if (
-            strategy == "inline_page"
-            and not mod.attachments
-            and (mod.inline_html or mod.description_html)
-        ):
-            await self._record_recent_best_effort(course, mod)
-            if callable(self._on_open_inline_page):
-                await _invoke_callback(self._on_open_inline_page, course, mod)
-            else:
-                self._push_inline_reader_overlay(mod)
-            return
-        if strategy == "folder_files" and len(mod.attachments) > 1:
-            self._push_folder_overlay(course, mod)
-            return
-        if mod.attachments:
-            att = mod.attachments[0]
-            await self._record_recent_best_effort(course, mod, att)
-            if callable(self._on_open_attachment_viewer):
-                await _invoke_callback(
-                    self._on_open_attachment_viewer, course, mod, att
-                )
-            else:
-                await _invoke_callback(self._on_download_attachment, course, att)
-            return
-        await self._launch_url_safe(mod.web_url or mod.url)
+                await self._record_recent_best_effort(course, mod)
+                if safe_url:
+                    await _invoke_callback(self._on_launch_url, safe_url)
+                return
+            if (
+                strategy == "inline_page"
+                and not mod.attachments
+                and (mod.inline_html or mod.description_html)
+            ):
+                await self._record_recent_best_effort(course, mod)
+                if callable(self._on_open_inline_page):
+                    await _invoke_callback(self._on_open_inline_page, course, mod)
+                else:
+                    self._push_inline_reader_overlay(mod)
+                return
+            if strategy == "folder_files" and len(mod.attachments) > 1:
+                self._push_folder_overlay(course, mod)
+                return
+            if mod.attachments:
+                att = mod.attachments[0]
+                await self._record_recent_best_effort(course, mod, att)
+                if callable(self._on_open_attachment_viewer):
+                    await _invoke_callback(self._on_open_attachment_viewer, course, mod, att)
+                else:
+                    await _invoke_callback(self._on_download_attachment, course, att)
+                return
+            fallback_url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
+            if fallback_url:
+                await _invoke_callback(self._on_launch_url, fallback_url)
+        except Exception as exc:
+            logger.warning("Failed to open module %s: %s", mod.cmid, exc)
+            self._state.offline_notice = f"Không thể mở mục này: {_format_err(exc)}"
+            self._render()
 
     async def focus_search(self) -> None:
-        """Return to catalog list if in mobile detail and focus search field."""
+        """Close active overlays, return to list on narrow screens, and focus search."""
+        changed = False
+        if self._overlays:
+            self._overlays.clear()
+            self._root_stack.controls = [self._main_host]
+            changed = True
         if self._layout_mode != "wide" and self._state.in_detail_mobile:
             self._state.in_detail_mobile = False
             self._render()
+            changed = False
+        if changed:
+            self._safe_update()
         await self._list_pane.focus_search()
 
     def update_theme(self) -> None:
-        """Apply updated global palette tokens across panes and open overlays."""
+        """Apply updated global palette tokens across panes and open overlays once."""
         current = semantic_palette()
         self.bgcolor = C.BG
-        self._list_pane.update_theme()
-        self._detail_pane.update_theme()
+        self._list_pane.update_theme(update=False, rerender=False)
+        self._detail_pane.update_theme(update=False, rerender=False)
         if self._overlays:
-            refresh_semantic_control_colors(
-                self._overlays, self._theme_snapshot, current
-            )
+            refresh_semantic_control_colors(self._overlays, self._theme_snapshot, current)
         self._theme_snapshot = current
         self._render()

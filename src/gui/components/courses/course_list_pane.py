@@ -8,12 +8,17 @@ from typing import Callable, Optional
 import flet as ft
 
 from core.courses.models import CourseSummary, RecentMaterialEntry
+from gui.components.courses._shared import (
+    build_filter_chip,
+    build_offline_banner,
+    safe_control_update,
+)
 from gui.core.theme import C
 from gui.view_models.courses_state import CoursesState
 
 
 def _safe_progress(course: CourseSummary) -> Optional[float]:
-    if course.progress is not None:
+    if course.progress is not None and not isinstance(course.progress, bool):
         try:
             val = float(course.progress)
         except (TypeError, ValueError):
@@ -21,7 +26,11 @@ def _safe_progress(course: CourseSummary) -> Optional[float]:
         else:
             if math.isfinite(val):
                 return min(1.0, max(0.0, val))
-    if course.total_trackable > 0:
+    if (
+        not isinstance(course.total_trackable, bool)
+        and not isinstance(course.completed_count, bool)
+        and course.total_trackable > 0
+    ):
         return min(1.0, max(0.0, course.completed_count / course.total_trackable))
     return None
 
@@ -119,11 +128,7 @@ class CourseListPane(ft.Container):
         )
 
     def _safe_update(self) -> None:
-        try:
-            if self.page is not None:
-                self.update()
-        except Exception:
-            pass
+        safe_control_update(self)
 
     def _handle_search_change(self, e) -> None:
         query = str(getattr(e.control, "value", "") or "")
@@ -164,30 +169,19 @@ class CourseListPane(ft.Container):
             options.append(("thnn", "THNN"))
 
         active_lower = (state.semester_filter or "all").strip().lower()
-        chips: list[ft.Control] = []
-        for key, label in options:
-            selected = (
-                active_lower == "thnn"
-                if key.lower() == "thnn"
-                else state.semester_filter == key
+        return [
+            build_filter_chip(
+                label,
+                selected=(
+                    active_lower == "thnn"
+                    if key.lower() == "thnn"
+                    else state.semester_filter == key
+                ),
+                on_select=self._handle_semester_select(key),
+                bold_selected=True,
             )
-            chips.append(
-                ft.Chip(
-                    label=ft.Text(
-                        label,
-                        size=12,
-                        weight=ft.FontWeight.W_600 if selected else ft.FontWeight.W_400,
-                        color=C.ON_ACCENT if selected else C.TEXT_PRIMARY,
-                    ),
-                    selected=selected,
-                    show_checkmark=False,
-                    selected_color=C.ACCENT,
-                    bgcolor=C.SURFACE,
-                    border_side=ft.BorderSide(1, C.ACCENT if selected else C.BORDER),
-                    on_select=self._handle_semester_select(key),
-                )
-            )
-        return chips
+            for key, label in options
+        ]
 
     def _build_recent_banner(self, state: CoursesState) -> Optional[ft.Control]:
         if not state.recent_items:
@@ -359,7 +353,7 @@ class CourseListPane(ft.Container):
             content=ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=controls),
         )
 
-    def render(self, state: CoursesState) -> None:
+    def render(self, state: CoursesState, *, update: bool = True) -> None:
         """Render search bar, chips, notices, recent resume, and filtered courses."""
         self._last_state = state
         if (self._search_field.value or "") != state.search_query:
@@ -370,21 +364,7 @@ class CourseListPane(ft.Container):
         self._progress_strip.visible = bool(state.loading_catalog and state.courses)
 
         if state.offline_notice:
-            self._notice_slot.controls = [
-                ft.Container(
-                    bgcolor=C.SURFACE,
-                    border=ft.Border.all(1, C.WARNING),
-                    border_radius=10,
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                    content=ft.Row(
-                        spacing=8,
-                        controls=[
-                            ft.Icon(ft.Icons.WIFI_OFF_ROUNDED, size=16, color=C.WARNING),
-                            ft.Text(state.offline_notice, size=12, color=C.TEXT_PRIMARY, expand=True),
-                        ],
-                    ),
-                )
-            ]
+            self._notice_slot.controls = [build_offline_banner(state.offline_notice)]
             self._notice_slot.visible = True
         else:
             self._notice_slot.controls = []
@@ -404,9 +384,10 @@ class CourseListPane(ft.Container):
                 self._build_course_card(course, selected=(course.course_key == state.selected_course_key))
                 for course in filtered
             ]
-        self._safe_update()
+        if update:
+            self._safe_update()
 
-    def update_theme(self) -> None:
+    def update_theme(self, *, update: bool = True, rerender: bool = True) -> None:
         """Apply current global theme palette C to persistent controls and re-render."""
         self.bgcolor = C.BG
         self._title_text.color = C.TEXT_PRIMARY
@@ -419,7 +400,7 @@ class CourseListPane(ft.Container):
         self._search_field.hint_style = ft.TextStyle(color=C.TEXT_SECONDARY, size=12)
         self._progress_strip.color = C.ACCENT
         self._progress_strip.bgcolor = C.BORDER
-        if self._last_state is not None:
-            self.render(self._last_state)
-        else:
+        if rerender and self._last_state is not None:
+            self.render(self._last_state, update=update)
+        elif update:
             self._safe_update()

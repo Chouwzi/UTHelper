@@ -13,6 +13,11 @@ from core.courses.models import (
     CourseModuleItem,
     CourseSummary,
 )
+from gui.components.courses._shared import (
+    build_filter_chip,
+    build_offline_banner,
+    safe_control_update,
+)
 from gui.core.theme import C
 from gui.view_models.courses_state import (
     CoursesState,
@@ -190,11 +195,16 @@ class CourseDetailPane(ft.Container):
         )
 
     def _safe_update(self) -> None:
-        try:
-            if self.page is not None:
-                self.update()
-        except Exception:
-            pass
+        safe_control_update(self)
+
+    def sync_subtab(self, index: int, *, update: bool = True) -> None:
+        """Sync selected tab index without rebuilding section ExpansionTile controls."""
+        clamped = max(0, min(2, int(index)))
+        self._tabs.selected_index = clamped
+        if self._last_state is not None:
+            self._last_state.active_subtab = clamped
+        if update:
+            self._safe_update()
 
     def _handle_tabs_change(self, e) -> None:
         raw = getattr(e, "data", None)
@@ -228,13 +238,9 @@ class CourseDetailPane(ft.Container):
             scroll=ft.ScrollMode.AUTO,
             spacing=6,
             controls=[
-                ft.Chip(
-                    label=ft.Text(label, size=12, color=C.ON_ACCENT if active_key == key else C.TEXT_PRIMARY),
+                build_filter_chip(
+                    label,
                     selected=(active_key == key),
-                    show_checkmark=False,
-                    selected_color=C.ACCENT,
-                    bgcolor=C.SURFACE,
-                    border_side=ft.BorderSide(1, C.ACCENT if active_key == key else C.BORDER),
                     on_select=lambda _e, k=key: self._set_filter(attr, k),
                 )
                 for key, label in options
@@ -363,7 +369,7 @@ class CourseDetailPane(ft.Container):
                     content=ft.Text("Mới", size=10, weight=ft.FontWeight.W_700, color=C.ON_UPDATE),
                 )
             )
-        if mod.attachments:
+        if len(mod.attachments) == 1:
             first_att = mod.attachments[0]
             trailing.append(
                 ft.IconButton(
@@ -441,7 +447,7 @@ class CourseDetailPane(ft.Container):
             self._build_filter_chips(_MODULE_FILTERS, state.module_filter, "module_filter")
         ]
         tiles: list[ft.Control] = []
-        for idx, sec in enumerate(state.sections):
+        for sec in state.sections:
             mods = [m for m in sec.modules if module_matches_type_filter(m, state.module_filter)]
             if (not mods and state.module_filter != "all") or (not mods and not sec.visible):
                 continue
@@ -449,7 +455,7 @@ class CourseDetailPane(ft.Container):
                 ft.ExpansionTile(
                     title=ft.Text(sec.name or f"Chủ đề {sec.section_num}", size=14, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY),
                     subtitle=ft.Text(f"{len(mods)} mục", size=11, color=C.TEXT_SECONDARY),
-                    expanded=(idx == 0 or any(m.is_new for m in mods)),
+                    expanded=(not tiles or any(m.is_new for m in mods)),
                     bgcolor=C.SURFACE,
                     collapsed_bgcolor=C.SURFACE,
                     text_color=C.TEXT_PRIMARY,
@@ -555,7 +561,7 @@ class CourseDetailPane(ft.Container):
             )
         ]
 
-    def render(self, state: CoursesState, *, show_back: bool) -> None:
+    def render(self, state: CoursesState, *, show_back: bool, update: bool = True) -> None:
         """Render the selected course header, warnings, and 3 workspace sub-tabs."""
         self._last_state = state
         self._last_show_back = show_back
@@ -563,7 +569,8 @@ class CourseDetailPane(ft.Container):
         if course is None:
             self._empty_placeholder.visible = True
             self._detail_column.visible = False
-            self._safe_update()
+            if update:
+                self._safe_update()
             return
 
         self._empty_placeholder.visible = False
@@ -572,21 +579,7 @@ class CourseDetailPane(ft.Container):
         self._header_slot.controls = self._build_header(course, state, show_back=show_back)
 
         if state.offline_notice:
-            self._notice_slot.controls = [
-                ft.Container(
-                    bgcolor=C.SURFACE,
-                    border=ft.Border.all(1, C.WARNING),
-                    border_radius=10,
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                    content=ft.Row(
-                        spacing=8,
-                        controls=[
-                            ft.Icon(ft.Icons.WIFI_OFF_ROUNDED, size=16, color=C.WARNING),
-                            ft.Text(state.offline_notice, size=12, color=C.TEXT_PRIMARY, expand=True),
-                        ],
-                    ),
-                )
-            ]
+            self._notice_slot.controls = [build_offline_banner(state.offline_notice)]
             self._notice_slot.visible = True
         else:
             self._notice_slot.controls = []
@@ -596,9 +589,10 @@ class CourseDetailPane(ft.Container):
         self._content_tab_body.controls = self._build_content_tab(state)
         self._resources_tab_body.controls = self._build_resources_tab(state)
         self._grades_tab_body.controls = self._build_grades_tab(course, state)
-        self._safe_update()
+        if update:
+            self._safe_update()
 
-    def update_theme(self) -> None:
+    def update_theme(self, *, update: bool = True, rerender: bool = True) -> None:
         """Apply current global theme tokens C to persistent controls and re-render."""
         self.bgcolor = C.BG
         self._back_btn.icon_color = C.TEXT_PRIMARY
@@ -612,7 +606,7 @@ class CourseDetailPane(ft.Container):
         if isinstance(placeholder_col, ft.Column) and len(placeholder_col.controls) >= 2:
             placeholder_col.controls[0].color = C.TEXT_SECONDARY
             placeholder_col.controls[1].color = C.TEXT_SECONDARY
-        if self._last_state is not None:
-            self.render(self._last_state, show_back=self._last_show_back)
-        else:
+        if rerender and self._last_state is not None:
+            self.render(self._last_state, show_back=self._last_show_back, update=update)
+        elif update:
             self._safe_update()

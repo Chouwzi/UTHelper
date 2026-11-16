@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import threading
+import warnings
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -21,13 +24,16 @@ from core.courses.models import (
     RecentMaterialEntry,
 )
 from gui.components.courses import CourseDetailPane, CourseListPane, CoursesTabView
+from gui.components.courses.course_list_pane import _safe_progress
 from gui.core.theme import C, apply_theme
 from gui.view_models.courses_state import (
     CoursesState,
     compute_courses_layout_mode,
+    extract_readable_html_and_links,
     flatten_course_resources,
     format_file_size,
     module_matches_type_filter,
+    safe_http_url,
 )
 
 
@@ -957,3 +963,434 @@ def test_courses_state_thnn_filter_is_case_insensitive_and_pane_highlights_chip(
     ]
     assert len(thnn_chips) == 1
     assert thnn_chips[0].selected is True
+
+
+def test_aba_and_concurrent_request_tokens_prevent_stale_races():
+    c_a = _make_course(1, display_name="Course A")
+    c_b = _make_course(2, display_name="Course B")
+    sec_a_old = CourseSection(id=1, course_id=1, source="courses", section_num=1, name="Old A")
+    sec_a_new = CourseSection(id=2, course_id=1, source="courses", section_num=1, name="Fresh A")
+    sec_b = CourseSection(id=3, course_id=2, source="courses", section_num=1, name="Course B Sec")
+
+    gate_a_old = threading.Event()
+    entered_a_old = threading.Event()
+    calls = {"sync": 0, "cat": 0, "grades": 0}
+    gate_cat1 = threading.Event()
+    entered_cat1 = threading.Event()
+    gate_grades1 = threading.Event()
+    entered_grades1 = threading.Event()
+
+    class RaceService(FakeCatalogService):
+        def sync_course_delta(self, source: str, course_id: int, force: bool = False):
+            calls["sync"] += 1
+            if calls["sync"] == 1:
+                entered_a_old.set()
+                gate_a_old.wait(timeout=2)
+                return CourseSyncResult(
+                    sections=[sec_a_old],
+                    grades=[],
+                    changed=True,
+                    new_cmids=set(),
+                    last_synced_at=100,
+                )
+            if course_id == 2:
+                return CourseSyncResult(
+                    sections=[sec_b], grades=[], changed=True, new_cmids=set(), last_synced_at=200
+                )
+            return CourseSyncResult(
+                sections=[sec_a_new], grades=[], changed=True, new_cmids=set(), last_synced_at=300
+            )
+
+        def refresh_catalog(self, include_thnn: bool = False):
+            calls["cat"] += 1
+            if calls["cat"] == 1:
+                entered_cat1.set()
+                gate_cat1.wait(timeout=2)
+                return [c_a]
+            return [c_a, c_b]
+
+        def load_course_grades(self, source: str, course_id: int, force: bool = False):
+            calls["grades"] += 1
+            if calls["grades"] == 1:
+                entered_grades1.set()
+                gate_grades1.wait(timeout=2)
+                return [CourseGradeItem(id=1, item_name="Stale Grade")]
+            return [CourseGradeItem(id=2, item_name="Fresh Grade")]
+
+    svc = RaceService(
+        courses=[c_a, c_b],
+        detail_map={
+            ("courses", 1): CourseDetailSnapshot(sections=[sec_a_new], grades=[]),
+            ("courses", 2): CourseDetailSnapshot(sections=[sec_b], grades=[]),
+        },
+    )
+    view = CoursesTabView(page=None, catalog_service=svc)
+    view.load_initial()
+
+    # 1. ABA race on _select_course_async: A (slow) -> B -> A (fast), slow A must NOT overwrite Fresh A!
+    async def run_aba():
+        t1 = asyncio.create_task(view._select_course_async("courses:1"))
+        await asyncio.to_thread(entered_a_old.wait, 2)
+        await view._select_course_async("courses:2")
+        await view._select_course_async("courses:1")
+        gate_a_old.set()
+        await t1
+
+    asyncio.run(run_aba())
+    assert view._state.selected_course_key == "courses:1"
+    assert view._state.sections == [sec_a_new]
+    assert view._state.last_synced_at == 300
+
+    # 2. Concurrent refresh_catalog_async: slow call 1 must not clobber call 2's courses or loading_catalog
+    async def run_cat_race():
+        t1 = asyncio.create_task(view.refresh_catalog_async())
+        await asyncio.to_thread(entered_cat1.wait, 2)
+        t2 = asyncio.create_task(view.refresh_catalog_async())
+        await t2
+        gate_cat1.set()
+        await t1
+
+    asyncio.run(run_cat_race())
+    assert view._state.courses == [c_a, c_b]
+    assert view._state.loading_catalog is False
+
+    # 3. Concurrent _on_subtab_change_async vs course refresh: stale grades must be dropped
+    async def run_grade_race():
+        t1 = asyncio.create_task(view._on_subtab_change_async(2))
+        await asyncio.to_thread(entered_grades1.wait, 2)
+        await view._refresh_single_course_async()
+        gate_grades1.set()
+        await t1
+
+    asyncio.run(run_grade_race())
+    assert [g.item_name for g in view._state.grades] == ["Fresh Grade"]
+
+
+def test_open_recent_respects_mobile_back_cancellation():
+    c1 = _make_course(1)
+    mod = CourseModuleItem(
+        cmid=11,
+        instance_id=11,
+        modname="resource",
+        name="Slide",
+        section_id=1,
+        attachments=(_make_attachment("slide.pdf"),),
+        open_strategy="preview_file",
+    )
+    sec = CourseSection(id=1, course_id=1, source="courses", section_num=1, name="S1", modules=(mod,))
+    entered = threading.Event()
+    gate = threading.Event()
+
+    class SlowCacheSvc(FakeCatalogService):
+        def open_course_cached(self, source: str, course_id: int):
+            entered.set()
+            gate.wait(timeout=2)
+            return super().open_course_cached(source, course_id)
+
+    svc = SlowCacheSvc(
+        courses=[c1],
+        detail_map={("courses", 1): CourseDetailSnapshot(sections=[sec], grades=[])},
+    )
+    on_viewer = Mock()
+    view = CoursesTabView(page=None, catalog_service=svc, on_open_attachment_viewer=on_viewer)
+    view.load_initial()
+    view.set_width(400)  # mobile mode
+
+    recent = RecentMaterialEntry(
+        course_key="courses:1",
+        course_name="C1",
+        cmid=11,
+        title="Slide",
+        attachment_url="https://courses.ut.edu.vn/pluginfile.php/1/slide.pdf",
+        file_name="slide.pdf",
+        opened_at=1_770_000_000,
+    )
+
+    async def run_recent_and_back():
+        task = asyncio.create_task(view._open_recent_async(recent))
+        await asyncio.to_thread(entered.wait, 2)
+        assert view.handle_back() is True  # User exited mobile detail while loading!
+        gate.set()
+        await task
+
+    asyncio.run(run_recent_and_back())
+    on_viewer.assert_not_called()
+
+
+def test_async_exceptions_recover_ui_state_and_revert_checkbox():
+    c1 = _make_course(1)
+    mod = CourseModuleItem(
+        cmid=42,
+        instance_id=42,
+        modname="page",
+        name="Checklist",
+        section_id=1,
+        completion_mode=1,
+        completion_state=0,
+        open_strategy="inline_page",
+    )
+    sec = CourseSection(id=1, course_id=1, source="courses", section_num=1, name="S1", modules=(mod,))
+
+    class BrokenService(FakeCatalogService):
+        def toggle_pin(self, course_key: str):
+            raise RuntimeError("pin boom")
+
+        def toggle_completion(self, source: str, course_id: int, cmid: int, completed: bool) -> bool:
+            raise RuntimeError("completion boom")
+
+        def load_course_grades(self, source: str, course_id: int, force: bool = False):
+            raise RuntimeError("grades boom")
+
+    svc = BrokenService(
+        courses=[c1],
+        detail_map={("courses", 1): CourseDetailSnapshot(sections=[sec], grades=[])},
+    )
+    view = CoursesTabView(page=None, catalog_service=svc)
+    view.load_initial()
+    asyncio.run(view._select_course_async(c1.course_key))
+
+    # _toggle_pin_async catches exception and sets offline_notice
+    asyncio.run(view._toggle_pin_async(c1.course_key))
+    assert view._state.offline_notice
+
+    # _on_subtab_change_async catches exception, resets loading_detail, sets offline_notice
+    view._state.offline_notice = ""
+    asyncio.run(view._on_subtab_change_async(2))
+    assert view._state.loading_detail is False
+    assert view._state.offline_notice
+
+    # _toggle_completion_async reverts checkbox visually back to False when provider raises
+    cbs = [c for c in _walk_controls(view._detail_pane._content_tab_body) if isinstance(c, ft.Checkbox)]
+    assert len(cbs) == 1
+    cbs[0].value = True  # Simulate user toggle before async failure
+    view._state.offline_notice = ""
+    asyncio.run(view._toggle_completion_async(mod, True))
+    assert view._state.offline_notice
+    cbs_after = [c for c in _walk_controls(view._detail_pane._content_tab_body) if isinstance(c, ft.Checkbox)]
+    assert cbs_after[0].value is False
+
+
+def test_snackbar_prunes_stale_snackbars_and_removes_on_dismiss(monkeypatch):
+    monkeypatch.setattr(ft.Clipboard, "set", AsyncMock())
+    stale_sb = ft.SnackBar(content=ft.Text("old"), open=True)
+    fake_page = SimpleNamespace(overlay=[stale_sb, ft.Container()], update=Mock())
+    view = CoursesTabView(page=fake_page, catalog_service=FakeCatalogService())
+
+    asyncio.run(view._copy_text_async("new@ut.edu.vn"))
+    snackbars = [item for item in fake_page.overlay if isinstance(item, ft.SnackBar)]
+    assert len(snackbars) == 1
+    assert snackbars[0] is not stale_sb
+    assert len(fake_page.overlay) == 2  # Preserved non-SnackBar overlay container
+
+    # Triggering on_dismiss closes and removes the SnackBar from page.overlay
+    assert callable(snackbars[0].on_dismiss)
+    snackbars[0].on_dismiss(None)
+    assert snackbars[0].open is False
+    assert snackbars[0] not in fake_page.overlay
+
+
+def test_subtab_0_1_preserves_expansion_tiles_single_update_theme_and_tablet_wrapper(monkeypatch):
+    course = _make_course(10)
+    mod = CourseModuleItem(cmid=1, instance_id=1, modname="assign", name="HW1", section_id=1, open_strategy="assignment_detail")
+    sec = CourseSection(id=1, course_id=10, source="courses", section_num=1, name="S1", modules=(mod,))
+    svc = FakeCatalogService(courses=[course], detail_map={("courses", 10): CourseDetailSnapshot(sections=[sec], grades=[])})
+
+    fake_page = SimpleNamespace(overlay=[], update=Mock())
+    view = CoursesTabView(page=fake_page, catalog_service=svc)
+    update_mock = Mock()
+    view.update = update_mock
+    monkeypatch.setattr(CoursesTabView, "page", property(lambda _self: fake_page))
+
+    view.load_initial()
+    asyncio.run(view._select_course_async(course.course_key))
+
+    tiles_before = [c for c in _walk_controls(view._detail_pane._content_tab_body) if isinstance(c, ft.ExpansionTile)]
+    assert len(tiles_before) == 1
+
+    # Subtab switch 0 -> 1 -> 0 does NOT rebuild ExpansionTile controls
+    asyncio.run(view._on_subtab_change_async(1))
+    asyncio.run(view._on_subtab_change_async(0))
+    tiles_after = [c for c in _walk_controls(view._detail_pane._content_tab_body) if isinstance(c, ft.ExpansionTile)]
+    assert tiles_after[0] is tiles_before[0]
+
+    # Persistent tablet wrapper reused across resizes
+    view.set_width(700)
+    wrapper_1 = view._main_host.content
+    assert view._tablet_content.width == 700.0
+    view.set_width(780)
+    assert view._main_host.content is wrapper_1
+    assert view._tablet_content.width == 780.0
+
+    # Single-pass update_theme() including overlay color remapping
+    apply_theme("midnight_blue")
+    view._theme_snapshot = dict(view._theme_snapshot)
+    overlay_card = ft.Container(bgcolor=C.SURFACE, content=ft.Text("Reader", color=C.TEXT_PRIMARY))
+    view.push_overlay(overlay_card)
+    update_mock.reset_mock()
+    apply_theme("nord_frost")
+    view.update_theme()
+    assert update_mock.call_count == 1
+    assert overlay_card.bgcolor == C.SURFACE
+    assert overlay_card.content.color == C.TEXT_PRIMARY
+    apply_theme("midnight_blue")
+
+
+def test_duplicate_overlay_guard_focus_search_and_url_fallback_and_no_coro_warnings():
+    course = _make_course(20)
+    att1 = _make_attachment("a.pdf")
+    att2 = _make_attachment("b.pdf")
+    m_page = CourseModuleItem(
+        cmid=5,
+        instance_id=5,
+        modname="page",
+        name="Page",
+        section_id=1,
+        inline_html="<p>Hello</p>",
+        open_strategy="inline_page",
+    )
+    m_folder = CourseModuleItem(
+        cmid=6,
+        instance_id=6,
+        modname="folder",
+        name="Folder",
+        section_id=1,
+        attachments=(att1, att2),
+        open_strategy="folder_files",
+    )
+    m_unsafe_primary = CourseModuleItem(
+        cmid=7,
+        instance_id=7,
+        modname="forum",
+        name="Forum",
+        section_id=1,
+        web_url="javascript:alert(1)",
+        url="https://ut.edu.vn/fallback-ok",
+        open_strategy="web_fallback",
+    )
+    on_launch = Mock()
+    on_download = Mock()
+    view = CoursesTabView(
+        page=None,
+        catalog_service=FakeCatalogService(courses=[course]),
+        on_launch_url=on_launch,
+        on_download_attachment=on_download,
+    )
+    view.load_initial()
+    view._state.select_course(course.course_key)
+
+    # Duplicate overlay guard: double-opening inline_page or folder_files keeps only 1 modal overlay
+    asyncio.run(view._handle_open_module_async(m_page))
+    asyncio.run(view._handle_open_module_async(m_page))
+    assert len(view._overlays) == 1
+    asyncio.run(view._handle_open_module_async(m_folder))
+    assert len(view._overlays) == 1
+
+    # Folder item click falls back cleanly to on_download_attachment when on_open_attachment_viewer is None
+    folder_rows = [
+        c for c in _walk_controls(view._overlays[-1])
+        if isinstance(c, ft.Container) and c.on_click is not None
+    ]
+    folder_rows[0].on_click(None)
+    on_download.assert_called_once_with(course, att1)
+
+    # focus_search() clears active overlays before focusing search field
+    focus_mock = AsyncMock()
+    view._list_pane._search_field.focus = focus_mock
+    asyncio.run(view.focus_search())
+    assert view._overlays == []
+    focus_mock.assert_awaited_once()
+
+    # Safe URL fallback priority: invalid web_url does not shadow valid mod.url
+    asyncio.run(view._handle_open_module_async(m_unsafe_primary))
+    on_launch.assert_called_once_with("https://ut.edu.vn/fallback-ok")
+
+    # Zero unawaited coroutine warnings when scheduling/dispatching without event loop
+    async def async_cb(*_args):
+        return None
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        view._dispatch_callback(async_cb, "x")
+        view._dispatch_callback(lambda *_a: async_cb(), "y")
+        gc.collect()
+    unawaited = [
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning) and "was never awaited" in str(w.message)
+    ]
+    assert unawaited == []
+
+
+def test_edge_helpers_first_visible_section_expansion_and_stale_error_guard():
+    assert safe_http_url("  https://ut.edu.vn/a  ") == "https://ut.edu.vn/a"
+    assert safe_http_url("javascript:alert(1)") == ""
+    assert safe_http_url("https://ut.edu.vn/a\nb") == ""
+
+    text, links = extract_readable_html_and_links(
+        "<p>Line 1</p><script>bad()</script><a href='https://ut.edu.vn'>UTH</a><a href='data:text/html,hi'>X</a>"
+    )
+    assert "Line 1" in text and "bad()" not in text
+    assert links == [("UTH", "https://ut.edu.vn")]
+
+    # _safe_progress rejects bool, NaN, and clamps [0, 1]
+    assert _safe_progress(_make_course(1, progress=True, total_trackable=0)) is None  # type: ignore[arg-type]
+    assert _safe_progress(_make_course(1, progress=float("nan"), total_trackable=0)) is None
+    assert _safe_progress(_make_course(1, progress=-0.4, total_trackable=0)) == 0.0
+    assert _safe_progress(_make_course(1, progress=1.8, total_trackable=0)) == 1.0
+
+    # First visible section expands when section 0 is filtered out, and multi-file folder hides single download icon
+    m_assign = CourseModuleItem(cmid=1, instance_id=1, modname="assign", name="HW", section_id=1, open_strategy="assignment_detail")
+    m_folder = CourseModuleItem(
+        cmid=2,
+        instance_id=2,
+        modname="folder",
+        name="Multi",
+        section_id=2,
+        attachments=(_make_attachment("1.pdf"), _make_attachment("2.pdf")),
+        open_strategy="folder_files",
+    )
+    sec0 = CourseSection(id=1, course_id=1, source="courses", section_num=0, name="Sec0", modules=(m_assign,))
+    sec1 = CourseSection(id=2, course_id=1, source="courses", section_num=1, name="Sec1", modules=(m_folder,))
+    pane = CourseDetailPane()
+    pane.render(
+        CoursesState(
+            courses=[_make_course(1)],
+            selected_course_key="courses:1",
+            sections=[sec0, sec1],
+            module_filter="materials",
+        ),
+        show_back=False,
+    )
+    tiles = [c for c in _walk_controls(pane._content_tab_body) if isinstance(c, ft.ExpansionTile)]
+    assert len(tiles) == 1
+    assert tiles[0].expanded is True
+    dl_icons = [c for c in _walk_controls(tiles[0]) if isinstance(c, ft.IconButton) and c.icon == ft.Icons.DOWNLOAD_ROUNDED]
+    assert dl_icons == []
+
+    # Stale failure from deselected course does not overwrite active course's offline_notice
+    c1 = _make_course(1)
+    c2 = _make_course(2)
+    entered = threading.Event()
+    gate = threading.Event()
+
+    class DeselectedErrorSvc(FakeCatalogService):
+        def sync_course_delta(self, source: str, course_id: int, force: bool = False):
+            if course_id == 1:
+                entered.set()
+                gate.wait(timeout=2)
+                raise RuntimeError("stale boom")
+            return super().sync_course_delta(source, course_id, force)
+
+    view = CoursesTabView(page=None, catalog_service=DeselectedErrorSvc(courses=[c1, c2]))
+    view.load_initial()
+
+    async def run_stale_err():
+        t1 = asyncio.create_task(view._select_course_async("courses:1"))
+        await asyncio.to_thread(entered.wait, 2)
+        await view._select_course_async("courses:2")
+        view._state.offline_notice = ""
+        gate.set()
+        await t1
+
+    asyncio.run(run_stale_err())
+    assert view._state.selected_course_key == "courses:2"
+    assert view._state.offline_notice == ""
