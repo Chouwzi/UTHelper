@@ -158,12 +158,19 @@ class CourseListPane(ft.Container):
         options: list[tuple[str, str]] = [("all", "Tất cả")]
         semesters = state.available_semesters()
         options.extend((sem, sem) for sem in semesters)
-        if any(c.source == "thnn" for c in state.courses) and "THNN" not in semesters:
-            options.append(("THNN", "THNN"))
+        if any(c.source == "thnn" for c in state.courses) and not any(
+            sem.lower() == "thnn" for sem in semesters
+        ):
+            options.append(("thnn", "THNN"))
 
+        active_lower = (state.semester_filter or "all").strip().lower()
         chips: list[ft.Control] = []
         for key, label in options:
-            selected = state.semester_filter == key
+            selected = (
+                active_lower == "thnn"
+                if key.lower() == "thnn"
+                else state.semester_filter == key
+            )
             chips.append(
                 ft.Chip(
                     label=ft.Text(

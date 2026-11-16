@@ -197,13 +197,19 @@ class CourseDetailPane(ft.Container):
             pass
 
     def _handle_tabs_change(self, e) -> None:
-        idx = getattr(e.control, "selected_index", None)
-        if idx is None and getattr(e, "data", None) is not None:
+        raw = getattr(e, "data", None)
+        if raw is None:
+            raw = getattr(getattr(e, "control", None), "selected_index", 0)
+        if isinstance(raw, bool):
+            idx = 0
+        else:
             try:
-                idx = int(e.data)
+                idx = int(raw)
             except (TypeError, ValueError):
                 idx = 0
-        idx = int(idx or 0)
+        if not (0 <= idx < 3):
+            idx = 0
+        self._tabs.selected_index = idx
         if self._last_state is not None:
             self._last_state.active_subtab = idx
         if callable(self._on_subtab_change):

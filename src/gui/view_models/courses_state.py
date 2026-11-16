@@ -264,13 +264,14 @@ class CoursesState:
     def filtered_courses(self) -> list[CourseSummary]:
         """Filter catalog courses by active semester chip and search query."""
         sem = (self.semester_filter or "all").strip()
+        sem_lower = sem.lower()
         query = (self.search_query or "").strip().casefold()
 
         matched: list[CourseSummary] = []
         for course in self.courses:
-            if sem and sem != "all":
-                if sem == "THNN":
-                    if course.source != "thnn" and course.semester_label != "THNN":
+            if sem_lower and sem_lower != "all":
+                if sem_lower == "thnn":
+                    if course.source != "thnn" and course.semester_label.lower() != "thnn":
                         continue
                 elif course.semester_label != sem:
                     continue

@@ -861,3 +861,99 @@ def test_detail_pane_grades_list_meet_button_and_view_focus_search():
     asyncio.run(view.focus_search())
     assert view._state.in_detail_mobile is False
     focus_mock.assert_awaited_once()
+
+
+def test_tabs_on_change_reads_e_data_before_selected_index_and_loads_grades():
+    on_subtab = Mock()
+    pane = CourseDetailPane(on_subtab_change=on_subtab)
+    course = _make_course(200)
+    state = CoursesState(courses=[course], selected_course_key=course.course_key, active_subtab=0)
+    pane.render(state, show_back=False)
+    assert pane._tabs.selected_index == 0
+
+    # Flet 0.86 Tabs.on_change passes new tab index in e.data while e.control.selected_index may still be 0
+    pane._tabs.on_change(SimpleNamespace(control=pane._tabs, data="2"))
+    on_subtab.assert_called_once_with(2)
+    assert state.active_subtab == 2
+
+    # Validate int, invalid, and out-of-range values cleanly
+    on_subtab.reset_mock()
+    pane._tabs.on_change(SimpleNamespace(control=pane._tabs, data=1))
+    on_subtab.assert_called_once_with(1)
+
+    on_subtab.reset_mock()
+    pane._tabs.on_change(SimpleNamespace(control=pane._tabs, data="invalid"))
+    on_subtab.assert_called_once_with(0)
+
+    on_subtab.reset_mock()
+    pane._tabs.on_change(SimpleNamespace(control=pane._tabs, data="9"))
+    on_subtab.assert_called_once_with(0)
+
+    on_subtab.reset_mock()
+    pane._tabs.on_change(SimpleNamespace(control=pane._tabs, data="-1"))
+    on_subtab.assert_called_once_with(0)
+
+    # End-to-end with CoursesTabView: switching to subtab "2" triggers lazy grade load
+    grade = CourseGradeItem(id=1, item_name="Cuối kỳ", grade_formatted="9.0")
+    svc = FakeCatalogService(courses=[course])
+    svc.grades_map[("courses", 200)] = [grade]
+    view = CoursesTabView(page=None, catalog_service=svc)
+    view.load_initial()
+    asyncio.run(view._select_course_async(course.course_key))
+    assert view._state.grades == []
+
+    view._detail_pane._tabs.selected_index = 0
+    # Simulate _on_subtab_change_async triggered via Tabs.on_change e.data="2"
+    captured: list[int] = []
+    view._detail_pane._on_subtab_change = lambda idx: captured.append(idx)
+    view._detail_pane._tabs.on_change(
+        SimpleNamespace(control=view._detail_pane._tabs, data="2")
+    )
+    assert captured == [2]
+    asyncio.run(view._on_subtab_change_async(captured[0]))
+    assert view._state.active_subtab == 2
+    assert view._state.grades == [grade]
+
+
+def test_copy_text_async_updates_page_for_snackbar_overlay_and_dialog_fallback(monkeypatch):
+    monkeypatch.setattr(ft.Clipboard, "set", AsyncMock())
+
+    # Case 1: mounted view with page.overlay — page.update() MUST be called, not only self.update()
+    fake_page = SimpleNamespace(overlay=[], update=Mock())
+    view = CoursesTabView(page=fake_page, catalog_service=FakeCatalogService())
+    view.update = Mock()
+    monkeypatch.setattr(CoursesTabView, "page", property(lambda _self: fake_page))
+
+    asyncio.run(view._copy_text_async("gv@ut.edu.vn"))
+    assert len(fake_page.overlay) == 1
+    assert isinstance(fake_page.overlay[0], ft.SnackBar)
+    assert fake_page.overlay[0].open is True
+    fake_page.update.assert_called_once()
+
+    # Case 2: fallback when page.overlay is None — uses page.show_dialog and page.update()
+    dialog_page = SimpleNamespace(overlay=None, show_dialog=Mock(), update=Mock())
+    view_dlg = CoursesTabView(page=dialog_page, catalog_service=FakeCatalogService())
+    monkeypatch.setattr(CoursesTabView, "page", property(lambda _self: dialog_page))
+
+    asyncio.run(view_dlg._copy_text_async("0123456789"))
+    dialog_page.show_dialog.assert_called_once()
+    assert isinstance(dialog_page.show_dialog.call_args[0][0], ft.SnackBar)
+    dialog_page.update.assert_called_once()
+
+
+def test_courses_state_thnn_filter_is_case_insensitive_and_pane_highlights_chip():
+    c_reg = _make_course(1, source="courses", display_name="Giải tích")
+    c_thnn = _make_course(2, source="thnn", display_name="THNN Linux", program_tag="THNN")
+
+    state = CoursesState(courses=[c_reg, c_thnn], semester_filter="thnn")
+    assert state.filtered_courses() == [c_thnn]
+
+    pane = CourseListPane()
+    pane.render(state)
+    chips = [c for c in _walk_controls(pane._chips_row) if isinstance(c, ft.Chip)]
+    thnn_chips = [
+        c for c in chips
+        if (c.label.value if isinstance(c.label, ft.Text) else "") == "THNN"
+    ]
+    assert len(thnn_chips) == 1
+    assert thnn_chips[0].selected is True

@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import flet as ft
 
@@ -27,6 +27,9 @@ from gui.view_models.courses_state import (
     format_file_size,
     safe_http_url,
 )
+
+if TYPE_CHECKING:
+    from core.courses.catalog_service import CourseCatalogService
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,7 @@ class CoursesTabView(ft.Container):
         self,
         *,
         page: Optional[ft.Page] = None,
-        catalog_service: Any = None,
+        catalog_service: Optional[CourseCatalogService] = None,
         on_open_assignment: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         on_open_webview_activity: Optional[
             Callable[[CourseSummary, CourseModuleItem], Any]
@@ -551,11 +554,19 @@ class CoursesTabView(ft.Container):
             if overlay is not None:
                 overlay.append(sb)
                 sb.open = True
-                self._safe_update()
             else:
+                show_dialog = getattr(page, "show_dialog", None)
+                if callable(show_dialog):
+                    try:
+                        show_dialog(sb)
+                    except (AttributeError, TypeError):
+                        return
+                else:
+                    return
+            if callable(getattr(page, "update", None)):
                 try:
-                    page.show_dialog(sb)
-                except (AttributeError, TypeError):
+                    page.update()
+                except Exception:
                     pass
 
     async def _launch_url_safe(self, url: str) -> None:
