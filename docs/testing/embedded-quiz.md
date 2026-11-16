@@ -6,11 +6,21 @@ document records evidence separately from the remaining acceptance work.
 
 ## Contract
 
-Courses and THNN quizzes open their original Moodle overview inside a native
-WebView. Moodle owns login, access checks, start/resume, question rendering,
-autosave, navigation, summary, submission and review permissions. Opening an
-activity's details does not create an attempt. The app does not parse questions,
-choose answers, replay submissions or infer success from navigation events.
+Courses and THNN quizzes open directly into the original Moodle attempt inside
+a native WebView. On Open, the app authenticates and inspects the overview
+without creating an attempt. An unfinished attempt resumes immediately; a new
+attempt requires confirmation, with a quiz password when Moodle requires one.
+The app submits Moodle's own entry form once and loads its returned attempt or
+summary URL. Moodle owns access checks, question rendering, autosave,
+navigation, submission and review permissions. Opening an activity's details
+does not create an attempt. The app does not parse questions, choose answers,
+replay submissions or infer success from navigation events.
+
+The Open button remains visible and disabled when authoritative attempt data
+shows no remaining attempts and no unfinished attempt. Unknown availability
+stays actionable until the overview can be inspected. Browser/review access
+remains available. Windows enters fullscreen only for Moodle securewindow;
+ordinary quizzes retain the existing window. Mobile uses the full app surface.
 
 Only trusted HTTPS `/mod/quiz/view.php?id=...` URLs launch the player; `id` is a
 course-module identifier, distinct from quiz and attempt identifiers. SCORM and
@@ -22,13 +32,15 @@ rules remain enforced by Moodle's original page. No SEB User-Agent, exam key,
 TLS exception, script stripping or access-rule bypass is provided. Moodle's
 `securewindow` rule is a supported ordinary popup case, not SEB.
 
-Quiz content, answers and credentials are not passed through control events or
-diagnostics. Opening a quiz authenticates with the saved UTH account through the
+Quiz content, answers and credentials are not passed through native quiz
+lifecycle events or diagnostics. Opening a quiz authenticates with the saved UTH account through the
 target site's normal HTML login, then transfers only that site's session cookie
-to the native player before loading the overview. Courses tokens and cookies are
+to the native player before loading the resolved attempt. Courses tokens and cookies are
 never used as THNN credentials. The established shared UTH username/password
-login remains available on both exact trusted sites. Passwords do not cross the
-native bridge, and the personal browser's session is not imported.
+login remains available on both exact trusted sites. Account passwords do not
+cross the quiz bootstrap bridge, and the personal browser's session is not
+imported. Quiz passwords are submitted only to Moodle's discovered preflight
+form; the app clears its password field after use or cancellation.
 
 An account/site lease prevents a background HTML login from replacing the active
 Moodle session. Existing requests that predate the lease must finish before the
@@ -64,10 +76,10 @@ worktree at `89c3b3d` and its uncommitted edits were preserved. Baseline source
 suite: **1,631 passed, 25 skipped**. Skipped tests require their declared live or
 platform conditions.
 
-Implementation source verification: **1,714 passed, 25 skipped** (six existing
+Direct-entry source verification: **1,744 passed, 25 skipped** (six existing
 Sentry deprecation warnings), including both native extension packages. Ruff and
 the Gitflow direction check passed. The extension's Dart analyzer reported no
-issues and its Android queue cancellation test passed. These are source checks,
+issues and all six Flutter extension tests passed. These are source checks,
 not provider or native-device acceptance. Flutter package pins are Flet 0.86.5
 and `flutter_inappwebview` 6.1.5.
 
@@ -77,8 +89,8 @@ Courses login page inside the fullscreen player. This exposed an event-type
 resolution error that compilation and mock UI tests did not cover. Commit
 `2408463` fixes the Python lifecycle annotations; four regression cases now
 dispatch ready/close/error/external-link through Flet's actual event dispatcher.
-The native login page then loaded without the callback error. Authentication,
-quiz popup, answer saving and submission have not yet been accepted.
+The native login page then loaded without the callback error. At that earlier
+checkpoint, authentication and quiz interaction had not been accepted.
 
 The owner clarified that opening a quiz must reuse the saved account rather than
 show another login page. The initial manual-login behavior is superseded by the
@@ -86,10 +98,10 @@ session bootstrap described above. Fresh normal HTML logins with the saved UTH
 account succeeded on both Courses and THNN; only the resulting session-cookie
 attributes were inspected. No attempt write was made by these checks.
 
-All twelve PR checks passed at `2408463`, including Android APK and iOS simulator
-diagnostic builds. These establish compilation of that revision, not device or
-provider acceptance. Native CI and Windows testing for the later saved-account
-session bootstrap must be checked separately.
+All twelve PR checks passed at `0713d0d`, including the saved-account bootstrap,
+Android APK and iOS simulator diagnostic builds. These establish compilation
+and source checks of that revision, not device or provider acceptance. The later
+direct-entry changes require their own CI and native acceptance.
 
 The saved-account implementation also built successfully on Windows. Its Python
 extension tests cover the one-shot DataChannel cookie handoff, secret-free
@@ -97,14 +109,35 @@ invoke arguments/control representation, and fixed safe errors. The native
 WebView waits without loading the quiz until its site session has been applied.
 Android/iOS share a serialized store with cleanup because iOS's default cookie
 manager cannot install cookies into a separate incognito store. Native UI
-verification of the new automatic login was interrupted by the user's Escape
-stop signal before the quiz was opened; automatic login, popup and submission
-therefore remain unaccepted, despite successful compilation and source checks.
+verification at that earlier checkpoint was interrupted by the user's Escape
+stop signal before the quiz was opened. The later direct-entry check below
+supersedes its automatic-login/rendering status.
 
 Read-only Courses access/catalog/attempt checks on the owner-approved quiz
 confirmed `quizaccess_securewindow`, no access-prevention reasons, and an
 existing in-progress attempt. These checks did not start, save or finish an
 attempt. Private identifiers, captures and credentials stay outside the commit.
+
+On 2026-11-16, the direct-entry provider check authenticated with the saved
+account and identified the existing attempt as resumable, securewindow enabled,
+without a password preflight. Submitting Moodle's resume form once returned
+`/mod/quiz/attempt.php`; before/after attempt identifiers were unchanged and
+states remained finished/inprogress. This verifies the provider entry path,
+not native rendering, answer saving or submission. Source password tests use
+Moodle's separate preflight form, including its hidden form marker and submit
+control; no password-protected live quiz has been accepted yet.
+
+The direct-entry Windows client compiled successfully. The first interactive
+open showed `entry_outcome_uncertain`; its underlying HTTP failure was not
+captured, so a transient connection problem remains a hypothesis. A later
+private Flet integration run recorded successful login, overview inspection and
+resume to the attempt page (the entry POST completed in about 1.1 seconds). The
+owner confirmed that questions were visible in the native player. This is
+human-confirmed rendering evidence: the Windows automation helper returned
+`failed to activate captured window` and captured another app's pixels, so it
+could not establish answer/save/submit interactions. No answer was changed or
+submitted by these checks. The owner's narrow-window error screenshot also
+exposed clipped status text; the status row now constrains and wraps it.
 
 Before release, record each result independently:
 
@@ -129,5 +162,7 @@ Before release, record each result independently:
 - [Flet 0.86.5: custom extensions and clients](https://github.com/flet-dev/flet/blob/v0.86.5/website/docs/extend/user-extensions.md)
 - [InAppWebView: engines and build requirements](https://inappwebview.dev/docs/intro/)
 - [Moodle 4.3.5: quiz Web Services](https://github.com/moodle/moodle/blob/v4.3.5/mod/quiz/classes/external.php)
+- [Moodle 4.3.5: attempt entry and preflight checks](https://github.com/moodle/moodle/blob/v4.3.5/mod/quiz/startattempt.php)
+- [Moodle 4.3.5: overview and entry forms](https://github.com/moodle/moodle/blob/v4.3.5/mod/quiz/classes/output/renderer.php)
 - [Moodle 4.3.5: SEB access rule](https://github.com/moodle/moodle/blob/v4.3.5/mod/quiz/accessrule/seb/rule.php)
 - [Moodle App: securewindow handler](https://github.com/moodlehq/moodleapp/blob/v4.3.0/src/addons/mod/quiz/accessrules/securewindow/services/handlers/securewindow.ts)

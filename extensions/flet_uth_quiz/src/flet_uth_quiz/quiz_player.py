@@ -68,17 +68,21 @@ class UthQuizPlayer(LayoutControl):
         self._session_channel = self.get_data_channel(event.channel_id)
         self._session_channel_ready.set()
 
-    async def bootstrap_session(self, cookies: list[dict]) -> bool:
+    async def bootstrap_session(
+        self, cookies: list[dict], launch_url: str | None = None
+    ) -> bool:
         """Install a one-shot saved Moodle session without storing its cookies.
 
-        Cookie bytes travel over Flet's DataChannel. The invoke-method arguments
-        contain only the channel ID so Flet's diagnostic logging cannot print
-        cookie values.
+        Cookies and an optional direct attempt URL travel over Flet's DataChannel.
+        Invoke-method arguments contain only the channel ID so Flet diagnostics
+        cannot print cookie values or the attempt URL.
         """
         if (
             not self.require_session
             or not isinstance(cookies, list)
             or not cookies
+            or (launch_url is not None and not isinstance(launch_url, str))
+            or (launch_url is not None and len(launch_url) > 2048)
         ):
             raise RuntimeError("session_unavailable") from None
         try:
@@ -89,7 +93,9 @@ class UthQuizPlayer(LayoutControl):
             ):
                 raise ValueError
             payload = json.dumps(
-                {"cookies": cookies}, separators=(",", ":"), ensure_ascii=True
+                {"cookies": cookies, "launch_url": launch_url},
+                separators=(",", ":"),
+                ensure_ascii=True,
             ).encode("utf-8")
             if len(payload) > _SESSION_PAYLOAD_LIMIT:
                 raise ValueError

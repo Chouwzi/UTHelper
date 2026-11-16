@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from collections.abc import Mapping
 from typing import Optional
 from urllib.parse import parse_qsl, urlsplit
 
@@ -621,6 +622,7 @@ class DetailView(ft.Container):
                 padding=ft.Padding.symmetric(horizontal=16, vertical=13),
             ),
             visible=False,
+            disabled=False,
         )
         self._quiz_runtime_notice = ft.Text(
             "",
@@ -782,6 +784,7 @@ class DetailView(ft.Container):
         quiz_open_btn = getattr(self, "_quiz_open_btn", None)
         if quiz_open_btn is not None:
             quiz_open_btn.visible = False
+            quiz_open_btn.disabled = False
         quiz_runtime_notice = getattr(self, "_quiz_runtime_notice", None)
         if quiz_runtime_notice is not None:
             quiz_runtime_notice.visible = False
@@ -872,6 +875,9 @@ class DetailView(ft.Container):
         self._open_btn.visible = browser_available
         self._header_open_btn.visible = browser_available
         self._quiz_open_btn.visible = False
+        self._quiz_open_btn.disabled = False
+        self._quiz_open_btn.bgcolor = C.ACCENT
+        self._quiz_open_btn.color = C.ON_ACCENT
         self._quiz_auth_btn.visible = False
         self._quiz_runtime_notice.visible = False
         self._quiz_launch_target = None
@@ -881,6 +887,18 @@ class DetailView(ft.Container):
         sub_status = data.get("submission_status", "unknown")
         act_type = data.get("type", "other")
         is_assignment = act_type in ("assignment", "assign")
+        quiz_details = data.get("details", {})
+        if not isinstance(quiz_details, Mapping):
+            quiz_details = {}
+        attempts_remaining = quiz_details.get("quiz_attempts_remaining")
+        has_unfinished_attempt = quiz_details.get(
+            "quiz_has_unfinished_attempt"
+        )
+        quiz_exhausted = (
+            type(attempts_remaining) is int
+            and attempts_remaining == 0
+            and has_unfinished_attempt is False
+        )
 
         # Reset submission UI
         self._selected_files.clear()
@@ -1022,26 +1040,39 @@ class DetailView(ft.Container):
                 target, player_state = None, None
             if target is not None and player_state is None:
                 self._quiz_launch_target = target
-                self._open_btn.visible = False
+                self._open_btn.visible = browser_available and quiz_exhausted
                 status_key = normalize_submission_status(sub_status)
-                self._quiz_open_btn.content = (
-                    "Mở bài"
-                    if status_key
-                    in {
-                        "draft",
-                        "submitted",
-                        "graded",
-                        "in_progress",
-                        "attempted",
-                        "abandoned",
-                    }
-                    else "Làm bài"
-                )
+                if quiz_exhausted:
+                    self._quiz_open_btn.content = "Hết lượt làm bài"
+                    self._quiz_open_btn.disabled = True
+                    self._quiz_open_btn.bgcolor = C.SURFACE
+                    self._quiz_open_btn.color = C.TEXT_SECONDARY
+                elif has_unfinished_attempt is True:
+                    self._quiz_open_btn.content = "Tiếp tục làm bài"
+                else:
+                    self._quiz_open_btn.content = (
+                        "Mở bài"
+                        if status_key
+                        in {
+                            "draft",
+                            "submitted",
+                            "graded",
+                            "in_progress",
+                            "attempted",
+                            "abandoned",
+                        }
+                        else "Làm bài"
+                    )
                 self._quiz_open_btn.tooltip = self._quiz_open_btn.content
                 self._quiz_open_btn.visible = True
             elif target is not None and player_state == "player_unavailable":
                 self._quiz_runtime_notice.value = (
                     "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+                )
+                self._quiz_runtime_notice.visible = True
+            elif player_state == "requires_safe_exam_browser":
+                self._quiz_runtime_notice.value = (
+                    "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt."
                 )
                 self._quiz_runtime_notice.visible = True
             elif player_state == "missing_account":
@@ -1291,6 +1322,8 @@ class DetailView(ft.Container):
         await ft.UrlLauncher().launch_url(self._current_url)
 
     async def _open_quiz(self, _event=None):
+        if self._quiz_open_btn.disabled:
+            return
         target = self._quiz_launch_target
         if target is None or self._quiz_player_view is None:
             return
@@ -1304,12 +1337,18 @@ class DetailView(ft.Container):
             self._quiz_player_view, "open_activity_for_account", None
         )
         if callable(open_for_account):
-            opened = open_for_account(target, self._current_data, account_id)
+            opened = open_for_account(
+                target,
+                self._current_data,
+                account_id,
+                on_entry_unavailable=self._on_quiz_entry_unavailable,
+            )
         else:
             opened = self._quiz_player_view.open_activity(target, self._current_data)
         if not opened and not self._quiz_player_view.visible:
             self._open_btn.visible = True
             self._quiz_open_btn.visible = False
+            self._quiz_open_btn.disabled = False
             self._quiz_runtime_notice.value = (
                 "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
             )
@@ -1319,6 +1358,39 @@ class DetailView(ft.Container):
                 self._page.update()
             except Exception:
                 pass
+
+    async def _on_quiz_entry_unavailable(self, activity, reason: str):
+        """Apply a confirmed attempt state while preserving browser actions."""
+        activity_url = activity.get("url") if isinstance(activity, Mapping) else None
+        if activity_url and activity_url != self._current_url:
+            return
+        if reason == "attempts_exhausted":
+            updated = dict(self._current_data or {})
+            details = updated.get("details")
+            details = dict(details) if isinstance(details, Mapping) else {}
+            details["quiz_attempts_remaining"] = 0
+            details["quiz_has_unfinished_attempt"] = False
+            updated["details"] = details
+            self.update_detail(updated)
+        else:
+            messages = {
+                "quiz_closed": "Bài kiểm tra hiện đã đóng.",
+                "quiz_unavailable": "Bài kiểm tra hiện không thể mở.",
+                "unsupported_action": "Bài kiểm tra hiện không thể mở trong ứng dụng.",
+                "requires_safe_exam_browser": "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt.",
+                "entry_in_progress": "Bài kiểm tra đang được thực hiện.",
+                "entry_not_opened": "Không thể mở lượt làm bài.",
+            }
+            self._quiz_runtime_notice.value = messages.get(
+                reason,
+                "Không thể mở bài trong ứng dụng. Hãy thử bằng trình duyệt.",
+            )
+            self._quiz_runtime_notice.visible = bool(self._quiz_runtime_notice.value)
+        try:
+            self._page.update()
+        except Exception:
+            pass
+        await self.focus_quiz_opener()
 
     async def _login_for_quiz(self, _event=None):
         player_view = self._quiz_player_view
@@ -1340,10 +1412,17 @@ class DetailView(ft.Container):
 
     async def focus_quiz_opener(self) -> None:
         """Restore keyboard focus after the quiz surface closes when possible."""
-        if not self._quiz_open_btn.visible:
+        control = self._quiz_open_btn
+        if self._quiz_open_btn.disabled or not self._quiz_open_btn.visible:
+            control = (
+                self._header_open_btn
+                if self._header_open_btn.visible
+                else self._open_btn
+            )
+        if not getattr(control, "visible", False):
             return
         try:
-            await self._quiz_open_btn.focus()
+            await control.focus()
         except Exception:
             pass
 

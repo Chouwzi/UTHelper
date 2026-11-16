@@ -149,16 +149,15 @@ def _export_moodle_session_cookies(
     return tuple(found)
 
 
-def prepare_quiz_web_session(
+def _authenticated_quiz_client(
     target: QuizLaunchTarget,
     lease: QuizSessionLease,
-) -> QuizWebSession:
-    """Authenticate to the target Moodle site and export its auth cookie.
+):
+    """Open a fresh, account-scoped HTML session and return its temporary hold.
 
-    Uses the stored UTH account through Moodle's normal HTML form on either
-    trusted UTH Moodle site. It never converts WS tokens or carries cookies
-    between sites. The additional lease protects an in-flight login if the UI
-    cancels the native player and releases its own lease.
+    The caller releases the returned hold only after its full operation (for
+    example cookie export or quiz entry) completes. This covers a UI lease
+    being released while a blocking operation is still in flight.
     """
     site = _site_for_target(target)
     if not isinstance(lease, QuizSessionLease) or not lease.is_active:
@@ -194,6 +193,25 @@ def prepare_quiz_web_session(
             quiz_lease=login_lease,
         ):
             raise QuizWebSessionError("login_failed")
+        return client, site, login_lease
+    except Exception:
+        login_lease.release()
+        raise
+
+
+def prepare_quiz_web_session(
+    target: QuizLaunchTarget,
+    lease: QuizSessionLease,
+) -> QuizWebSession:
+    """Authenticate to the target Moodle site and export its auth cookie.
+
+    Uses the stored UTH account through Moodle's normal HTML form on either
+    trusted UTH Moodle site. It never converts WS tokens or carries cookies
+    between sites. The additional lease protects an in-flight login if the UI
+    cancels the native player and releases its own lease.
+    """
+    client, site, operation_lease = _authenticated_quiz_client(target, lease)
+    try:
         cookies = _export_moodle_session_cookies(client, site, target)
         return QuizWebSession(
             site_identity=site.identity,
@@ -201,4 +219,4 @@ def prepare_quiz_web_session(
             cookies=cookies,
         )
     finally:
-        login_lease.release()
+        operation_lease.release()

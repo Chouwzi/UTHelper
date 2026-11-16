@@ -96,7 +96,10 @@ def test_bootstrap_sends_cookies_over_data_channel_not_invoke_arguments(monkeypa
     ]
 
     assert asyncio.run(control.bootstrap_session(cookies)) is True
-    assert json.loads(channel.payload) == {"cookies": cookies}
+    assert json.loads(channel.payload) == {
+        "cookies": cookies,
+        "launch_url": None,
+    }
     assert invocation == {
         "name": "bootstrap_session",
         "arguments": {"channel_id": 17},
@@ -105,6 +108,62 @@ def test_bootstrap_sends_cookies_over_data_channel_not_invoke_arguments(monkeypa
     assert secret_cookie not in repr(invocation)
     assert secret_cookie not in repr(control)
     assert "cookies" not in repr(control)
+
+
+def test_bootstrap_transfers_direct_attempt_url_privately(monkeypatch):
+    from flet_uth_quiz import UthQuizPlayer
+
+    class FakeChannel:
+        payload = None
+
+        def send(self, payload):
+            self.payload = payload
+
+    control = UthQuizPlayer(
+        url="https://courses.ut.edu.vn/mod/quiz/view.php?id=42",
+        session_key="a1" * 32,
+        require_session=True,
+    )
+    channel = FakeChannel()
+    control._session_channel = channel
+    control._session_channel_id = 19
+    control._session_channel_ready.set()
+    invocation = {}
+
+    async def invoke(name, arguments, timeout=None):
+        invocation.update(name=name, arguments=arguments, timeout=timeout)
+        return True
+
+    monkeypatch.setattr(control, "_invoke_method", invoke)
+    launch_url = (
+        "https://courses.ut.edu.vn/mod/quiz/attempt.php"
+        "?attempt=918&page=2&cmid=42#question-7"
+    )
+    cookies = [
+        {
+            "name": "MoodleSession",
+            "value": "private-cookie",
+            "domain": None,
+            "path": "/",
+            "secure": True,
+            "http_only": True,
+            "same_site": "Lax",
+            "expires": None,
+        }
+    ]
+
+    assert asyncio.run(control.bootstrap_session(cookies, launch_url)) is True
+    assert json.loads(channel.payload) == {
+        "cookies": cookies,
+        "launch_url": launch_url,
+    }
+    assert invocation == {
+        "name": "bootstrap_session",
+        "arguments": {"channel_id": 19},
+        "timeout": 15,
+    }
+    assert launch_url not in repr(invocation)
+    assert launch_url not in repr(control)
 
 
 def test_bootstrap_failure_hides_runtime_details(monkeypatch):

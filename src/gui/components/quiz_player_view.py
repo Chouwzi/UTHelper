@@ -1,4 +1,4 @@
-"""Full-window Moodle quiz surface backed by the native quiz extension."""
+"""Direct Moodle quiz attempt surface backed by the native quiz extension."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 _READY_TIMEOUT_SECONDS = 12
 _LOGIN_WAIT_TIMEOUT_SECONDS = 15
-_SESSION_PREPARE_TIMEOUT_SECONDS = 30
+_ENTRY_PREPARE_TIMEOUT_SECONDS = 30
+_ENTRY_ENTER_TIMEOUT_SECONDS = 30
 
 
 def _native_runtime_supported(page=None) -> bool:
@@ -52,10 +53,10 @@ def _default_lease_provider():
     return acquire_quiz_session_lease
 
 
-def _default_session_provider():
-    from core.quiz_web_session import prepare_quiz_web_session
+def _default_entry_provider():
+    from core.quiz_entry import prepare_quiz_entry
 
-    return prepare_quiz_web_session
+    return prepare_quiz_entry
 
 
 class QuizPlayerView(ft.Container):
@@ -69,9 +70,10 @@ class QuizPlayerView(ft.Container):
         player_factory: Callable | None = None,
         target_builder: Callable | None = None,
         lease_provider: Callable | None = None,
-        session_provider: Callable | None = None,
+        entry_provider: Callable | None = None,
         account_id_provider: Callable | None = None,
         on_auth_required: Callable | None = None,
+        on_entry_unavailable: Callable | None = None,
         ready_timeout_seconds: float = _READY_TIMEOUT_SECONDS,
     ):
         self._page = page
@@ -79,15 +81,31 @@ class QuizPlayerView(ft.Container):
         self._player_factory = player_factory
         self._target_builder = target_builder
         self._lease_provider = lease_provider
-        self._session_provider = session_provider
+        self._entry_provider = entry_provider
         self._account_id_provider = account_id_provider
         self._on_auth_required = on_auth_required
+        self._on_entry_unavailable = on_entry_unavailable
         self._ready_timeout_seconds = max(0.1, float(ready_timeout_seconds))
 
         self._player = None
         self._lease = None
         self._target = None
         self._activity: dict[str, Any] | None = None
+        self._launch_url: str | None = None
+        self._prepared_entry = None
+        self._entry_mode = ""
+        self._entry_entering = False
+        self._attempt_may_be_open = False
+        self._entry_unavailable_callback = None
+        self._entry_dialog = None
+        self._entry_password_field = None
+        self._entry_prompt_error = None
+        self._entry_actions: list[Any] = []
+        self._entry_action_label = ""
+        self._entry_prompt_open = False
+        self._entry_prepare_task = None
+        self._entry_operation_task = None
+        self._deferred_close: dict[str, Any] | None = None
         self._account_id = ""
         self._pending_cookies: list[dict[str, Any]] | None = None
         self._bootstrap_started = False
@@ -125,6 +143,7 @@ class QuizPlayerView(ft.Container):
         self._loading = ft.ProgressRing(width=22, height=22, stroke_width=2, color=C.ACCENT)
         self._status_text = ft.Text(
             "",
+            expand=True,
             size=13,
             color=C.TEXT_SECONDARY,
             text_align=ft.TextAlign.CENTER,
@@ -279,7 +298,7 @@ class QuizPlayerView(ft.Container):
     def prepare_activity(
         self, activity: Mapping[str, Any], account_id: str
     ) -> tuple[object | None, str | None]:
-        """Return a trusted target and a UI state for an actual quiz overview."""
+        """Return a trusted quiz target and the current UI availability state."""
         if not isinstance(activity, Mapping) or str(activity.get("type", "")).casefold() != "quiz":
             return None, None
         url = activity.get("url", "")
@@ -313,8 +332,14 @@ class QuizPlayerView(ft.Container):
             return target, "player_unavailable"
         return target, None
 
-    def open_activity(self, target, activity: Mapping[str, Any]) -> bool:
-        """Acquire the per-account session guard and mount one native player."""
+    def open_activity(
+        self,
+        target,
+        activity: Mapping[str, Any],
+        *,
+        on_entry_unavailable: Callable | None = None,
+    ) -> bool:
+        """Prepare an attempt, then mount only Moodle's returned attempt URL."""
         if self.visible or self._player is not None or self._lease is not None:
             return False
         if not self.native_runtime_supported():
@@ -329,7 +354,26 @@ class QuizPlayerView(ft.Container):
         generation = self._generation
         self._target = target
         self._activity = dict(activity) if isinstance(activity, Mapping) else None
-        self._title.value = str(activity.get("title") or "Bài kiểm tra")
+        self._launch_url = None
+        self._title.value = str(
+            self._activity.get("title") if self._activity else ""
+        ) or "Bài kiểm tra"
+        self._prepared_entry = None
+        self._entry_mode = ""
+        self._entry_entering = False
+        self._attempt_may_be_open = False
+        self._entry_unavailable_callback = (
+            on_entry_unavailable or self._on_entry_unavailable
+        )
+        self._entry_dialog = None
+        self._entry_password_field = None
+        self._entry_prompt_error = None
+        self._entry_actions = []
+        self._entry_action_label = ""
+        self._entry_prompt_open = False
+        self._entry_prepare_task = None
+        self._entry_operation_task = None
+        self._deferred_close = None
         self._ready = False
         self._close_pending = False
         self._after_close = None
@@ -340,11 +384,10 @@ class QuizPlayerView(ft.Container):
         self._external_notice_row.visible = False
         self._error_actions.visible = False
         self._browser_button.visible = False
-        self._status_text.value = ""
+        self._status_text.value = "Đang kết nối với Moodle..."
         self._loading.visible = True
         self._status_panel.visible = True
         self.visible = True
-        self._enter_desktop_fullscreen()
 
         try:
             lease_provider = self._lease_provider or _default_lease_provider()
@@ -357,7 +400,7 @@ class QuizPlayerView(ft.Container):
 
         self._safe_update()
         if not self._run_task(
-            self._prepare_session_and_mount, generation, factory
+            self._prepare_entry_and_prompt, generation, factory
         ):
             self._show_mount_error("player_unavailable")
             return False
@@ -368,9 +411,15 @@ class QuizPlayerView(ft.Container):
         target,
         activity: Mapping[str, Any],
         account_id: str,
+        *,
+        on_entry_unavailable: Callable | None = None,
     ) -> bool:
         self._account_id = str(account_id or "")
-        return self.open_activity(target, activity)
+        return self.open_activity(
+            target,
+            activity,
+            on_entry_unavailable=on_entry_unavailable,
+        )
 
     def _run_task(self, coroutine, *args):
         runner = getattr(self._page, "run_task", None)
@@ -389,7 +438,7 @@ class QuizPlayerView(ft.Container):
             logger.debug("Quiz player task could not be scheduled")
             return False
 
-    async def _prepare_session_and_mount(
+    async def _prepare_entry_and_prompt(
         self, generation: int, factory: Callable
     ):
         lease = self._lease
@@ -412,16 +461,17 @@ class QuizPlayerView(ft.Container):
             return
 
         try:
-            provider = self._session_provider or _default_session_provider()
-            session_task = asyncio.create_task(
+            provider = self._entry_provider or _default_entry_provider()
+            prepare_task = asyncio.create_task(
                 asyncio.to_thread(provider, self._target, lease)
             )
+            self._entry_prepare_task = prepare_task
             done, _ = await asyncio.wait(
-                {session_task},
-                timeout=_SESSION_PREPARE_TIMEOUT_SECONDS,
+                {prepare_task},
+                timeout=_ENTRY_PREPARE_TIMEOUT_SECONDS,
             )
             if not done:
-                session_task.add_done_callback(self._clear_late_session_result)
+                prepare_task.add_done_callback(self._close_late_prepared_entry)
                 if (
                     generation == self._generation
                     and self.visible
@@ -429,27 +479,371 @@ class QuizPlayerView(ft.Container):
                 ):
                     self._show_recovery_message("session_timeout")
                 return
-            session = session_task.result()
-            cookies = session.to_native_cookies()
-            del session
+            prepared = prepare_task.result()
             if (
                 generation != self._generation
                 or not self.visible
                 or self._lease is not lease
             ):
-                self._clear_cookies(cookies)
+                self._close_prepared_entry(prepared)
                 return
-            if not cookies:
+            self._prepared_entry = prepared
+            mode = self._entry_mode_value(prepared)
+            self._entry_mode = mode
+            if mode == "unavailable":
+                reason = self._safe_entry_reason(prepared)
+                await self._finish_entry_unavailable(
+                    reason, generation=generation, lease=lease
+                )
+                return
+            if mode not in {"resume", "start"}:
+                await self._finish_entry_unavailable(
+                    "quiz_unavailable", generation=generation, lease=lease
+                )
+                return
+
+            if mode == "start" or bool(
+                getattr(prepared, "password_required", False)
+            ):
+                self._show_entry_prompt(prepared, mode)
+                return
+
+            await self._enter_prepared_entry(
+                generation,
+                factory,
+                password=None,
+                confirmed=False,
+            )
+        except Exception as exc:
+            reason = self._exception_reason(exc)
+            logger.info("Quiz entry preparation failed (%s)", type(exc).__name__)
+            if (
+                generation == self._generation
+                and self.visible
+                and self._lease is lease
+            ):
+                if reason in {
+                    "attempts_exhausted",
+                    "quiz_closed",
+                    "quiz_unavailable",
+                    "unsupported_action",
+                    "entry_in_progress",
+                    "entry_not_opened",
+                }:
+                    await self._finish_entry_unavailable(
+                        reason, generation=generation, lease=lease
+                    )
+                else:
+                    self._show_recovery_message(reason or "session_unavailable")
+        finally:
+            task = locals().get("prepare_task")
+            if task is not None and task.done() and self._entry_prepare_task is task:
+                self._entry_prepare_task = None
+
+    @classmethod
+    def _close_late_prepared_entry(cls, future):
+        try:
+            prepared = future.result()
+            cls._close_prepared_entry_later(prepared)
+        except Exception:
+            # Late worker failures may contain private server response data.
+            return
+
+    @classmethod
+    def _clear_late_entry_result(cls, future, prepared):
+        try:
+            result = future.result()
+            cls._clear_entry_result(result)
+        except Exception:
+            pass
+        finally:
+            cls._close_prepared_entry_later(prepared)
+
+    @classmethod
+    def _close_prepared_entry_later(cls, prepared):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            cls._close_prepared_entry(prepared)
+            return
+        loop.create_task(asyncio.to_thread(cls._close_prepared_entry, prepared))
+
+    @staticmethod
+    def _close_prepared_entry(prepared):
+        close = getattr(prepared, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _clear_entry_result(result):
+        clear = getattr(result, "clear", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _entry_mode_value(entry) -> str:
+        mode = getattr(entry, "mode", "")
+        return str(getattr(mode, "value", mode) or "").casefold()
+
+    @staticmethod
+    def _exception_reason(exc) -> str:
+        reason = getattr(exc, "reason", "")
+        return reason if isinstance(reason, str) else ""
+
+    @classmethod
+    def _safe_entry_reason(cls, entry) -> str:
+        reason = getattr(entry, "reason", "")
+        return reason if isinstance(reason, str) else ""
+
+    def _show_entry_prompt(self, prepared, mode: str):
+        self._loading.visible = False
+        self._status_panel.visible = False
+        password_required = bool(getattr(prepared, "password_required", False))
+        password_field = None
+        prompt_error = ft.Text(
+            "",
+            size=12,
+            color=C.CRITICAL,
+            visible=False,
+        )
+        content_controls = []
+        if mode == "start":
+            content_controls.append(
+                ft.Text("Bắt đầu làm bài?", size=13, color=C.TEXT_PRIMARY)
+            )
+        if password_required:
+            password_field = ft.TextField(
+                label="Mật khẩu bài kiểm tra",
+                password=True,
+                can_reveal_password=True,
+                autofocus=True,
+                text_size=13,
+                border_color=C.BORDER,
+                focused_border_color=C.ACCENT,
+                color=C.TEXT_PRIMARY,
+                label_style=ft.TextStyle(color=C.TEXT_SECONDARY),
+                bgcolor=C.BG,
+                on_submit=self._confirm_entry_prompt,
+                on_change=self._on_entry_password_change,
+            )
+            content_controls.append(password_field)
+        content_controls.append(prompt_error)
+
+        cancel_button = ft.TextButton(
+            "Hủy",
+            on_click=self._cancel_entry_prompt,
+            style=ft.ButtonStyle(color=C.TEXT_SECONDARY),
+        )
+        action_label = "Bắt đầu" if mode == "start" else "Tiếp tục"
+        self._entry_action_label = action_label
+        confirm_button = ft.Button(
+            action_label,
+            on_click=self._confirm_entry_prompt,
+            bgcolor=C.ACCENT,
+            color=C.ON_ACCENT,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+        )
+        dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor=C.SURFACE,
+            title=ft.Text(self._title.value or "Bài kiểm tra", size=16, color=C.TEXT_PRIMARY),
+            content=ft.Column(controls=content_controls, spacing=12, tight=True),
+            actions=[cancel_button, confirm_button],
+            actions_alignment=ft.MainAxisAlignment.END,
+            on_dismiss=self._on_entry_prompt_dismiss,
+        )
+        self._entry_dialog = dialog
+        self._entry_password_field = password_field
+        self._entry_prompt_error = prompt_error
+        self._entry_actions = [cancel_button, confirm_button]
+        self._entry_prompt_open = True
+        try:
+            self._page.show_dialog(dialog)
+        except Exception:
+            dialog.open = True
+        self._safe_update()
+
+    def _on_entry_password_change(self, _event=None):
+        if self._entry_prompt_error is not None:
+            self._entry_prompt_error.value = ""
+            self._entry_prompt_error.visible = False
+            self._safe_update()
+
+    async def _on_entry_prompt_dismiss(self, _event=None):
+        if self._entry_prompt_open and not self._entry_entering:
+            self._entry_prompt_open = False
+            await self._discard_pending_entry(True)
+
+    async def _cancel_entry_prompt(self, _event=None):
+        if self._entry_entering or not self.visible:
+            return
+        self._entry_prompt_open = False
+        if self._entry_dialog is not None:
+            self._entry_dialog.open = False
+        if self._entry_password_field is not None:
+            self._entry_password_field.value = ""
+        try:
+            self._page.pop_dialog()
+        except Exception:
+            pass
+        await self._discard_pending_entry(notify_closed=True)
+
+    async def _confirm_entry_prompt(self, _event=None):
+        if self._entry_entering or not self._entry_prompt_open:
+            return
+        password = None
+        if self._entry_password_field is not None:
+            password = self._entry_password_field.value or None
+        await self._enter_prepared_entry(
+            self._generation,
+            self._resolve_player_factory(),
+            password=password,
+            confirmed=self._entry_mode == "start",
+        )
+
+    def _set_entry_prompt_busy(self, busy: bool):
+        for action in self._entry_actions:
+            action.disabled = busy
+        if len(self._entry_actions) > 1:
+            self._entry_actions[1].content = (
+                "Đang mở bài..." if busy else self._entry_action_label
+            )
+        if self._entry_password_field is not None:
+            self._entry_password_field.disabled = busy
+        if self._entry_prompt_error is not None:
+            if busy:
+                self._entry_prompt_error.value = "Đang mở bài kiểm tra..."
+                self._entry_prompt_error.color = C.TEXT_SECONDARY
+                self._entry_prompt_error.visible = True
+            elif self._entry_prompt_error.value == "Đang mở bài kiểm tra...":
+                self._entry_prompt_error.value = ""
+                self._entry_prompt_error.visible = False
+                self._entry_prompt_error.color = C.CRITICAL
+        self._safe_update()
+
+    async def _enter_prepared_entry(
+        self,
+        generation: int,
+        factory: Callable | None,
+        *,
+        password: str | None,
+        confirmed: bool,
+    ):
+        prepared = self._prepared_entry
+        lease = self._lease
+        if (
+            prepared is None
+            or lease is None
+            or factory is None
+            or self._entry_entering
+            or generation != self._generation
+        ):
+            if factory is None and self.visible:
+                self._close_entry_prompt()
+                self._prepared_entry = None
+                if prepared is not None:
+                    await asyncio.to_thread(self._close_prepared_entry, prepared)
+                self._show_mount_error("player_unavailable")
+            return
+
+        self._entry_entering = True
+        if self._entry_mode == "start":
+            self._attempt_may_be_open = True
+        if not self._entry_prompt_open:
+            self._status_text.value = "Đang mở bài kiểm tra..."
+            self._loading.visible = True
+            self._status_panel.visible = True
+        self._set_entry_prompt_busy(True)
+        enter_task = asyncio.create_task(
+            asyncio.to_thread(
+                prepared.enter,
+                password=password,
+                confirmed=confirmed,
+            )
+        )
+        self._entry_operation_task = enter_task
+        try:
+            done, _ = await asyncio.wait(
+                {enter_task}, timeout=_ENTRY_ENTER_TIMEOUT_SECONDS
+            )
+            if not done:
+                enter_task.add_done_callback(
+                    lambda future: self._clear_late_entry_result(future, prepared)
+                )
                 if (
                     generation == self._generation
                     and self.visible
                     and self._lease is lease
                 ):
-                    self._show_recovery_message("session_cookie_missing")
+                    self._prepared_entry = None
+                    self._entry_entering = False
+                    self._attempt_may_be_open = True
+                    self._close_entry_prompt()
+                    self._show_recovery_message("entry_outcome_uncertain")
                 return
+
+            result = enter_task.result()
+            if (
+                generation != self._generation
+                or not self.visible
+                or self._lease is not lease
+            ):
+                self._clear_entry_result(result)
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+                return
+
+            launch_url = getattr(result, "launch_url", None)
+            if not isinstance(launch_url, str) or not launch_url.strip():
+                self._clear_entry_result(result)
+                self._prepared_entry = None
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+                self._entry_entering = False
+                self._close_entry_prompt()
+                await self._finish_entry_unavailable(
+                    "entry_not_opened", generation=generation, lease=lease
+                )
+                return
+
+            secure_window = bool(
+                getattr(result, "secure_window", False)
+                or getattr(prepared, "secure_window", False)
+            )
+            source_cookies = None
+            try:
+                source_cookies = result.to_native_cookies()
+                cookies = [
+                    dict(cookie)
+                    for cookie in source_cookies
+                    if isinstance(cookie, Mapping)
+                ]
+            finally:
+                self._clear_cookies(source_cookies)
+                self._clear_entry_result(result)
+            self._prepared_entry = None
+            await asyncio.to_thread(self._close_prepared_entry, prepared)
+            if not cookies:
+                self._entry_entering = False
+                self._close_entry_prompt()
+                self._show_recovery_message("session_cookie_missing")
+                return
+
+            self._entry_entering = False
+            self._attempt_may_be_open = True
             self._pending_cookies = cookies
+            self._launch_url = launch_url
             self._bootstrap_started = False
+            self._close_entry_prompt()
+            if secure_window:
+                self._enter_desktop_fullscreen()
             self._player = factory(
+                # The direct attempt URL travels only through the native
+                # player's private session DataChannel in bootstrap_session.
                 url=self._target.url,
                 session_key=self._target.session_key,
                 require_session=True,
@@ -470,31 +864,193 @@ class QuizPlayerView(ft.Container):
             self._player_host.content = self._player
             self._safe_update()
             self._run_task(self._wait_for_ready, generation)
+            deferred_close = self._deferred_close
+            self._deferred_close = None
+            if deferred_close is not None:
+                self.request_close(**deferred_close)
         except Exception as exc:
-            reason = getattr(exc, "reason", "")
-            logger.info("Quiz session preparation failed (%s)", type(exc).__name__)
-            if (
-                generation == self._generation
-                and self.visible
-                and self._lease is lease
-            ):
-                self._clear_pending_cookies()
-                self._show_recovery_message(reason or "session_unavailable")
+            reason = self._exception_reason(exc) or "session_unavailable"
+            logger.info("Quiz entry failed (%s)", type(exc).__name__)
+            if generation != self._generation or self._lease is not lease:
+                self._entry_entering = False
+                return
+            self._entry_entering = False
+            if self._entry_password_field is not None:
+                self._entry_password_field.value = ""
+            if reason in {"wrong_password", "password_required"}:
+                self._attempt_may_be_open = self._entry_mode == "resume"
+                if self._entry_prompt_error is not None:
+                    self._entry_prompt_error.value = (
+                        "Mật khẩu không đúng. Thử lại."
+                        if reason == "wrong_password"
+                        else "Hãy nhập mật khẩu bài kiểm tra."
+                    )
+                    self._entry_prompt_error.color = C.CRITICAL
+                    self._entry_prompt_error.visible = True
+                self._set_entry_prompt_busy(False)
+                if self._entry_password_field is not None:
+                    try:
+                        await self._entry_password_field.focus()
+                    except Exception:
+                        pass
+                deferred_close = self._deferred_close
+                if deferred_close is not None:
+                    self._deferred_close = None
+                    await self._discard_pending_entry(
+                        True, deferred_close.get("after_close")
+                    )
+                return
+            self._close_entry_prompt()
+            if reason in {
+                "attempts_exhausted",
+                "quiz_closed",
+                "quiz_unavailable",
+                "unsupported_action",
+                "entry_in_progress",
+                "entry_not_opened",
+            }:
+                self._prepared_entry = None
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+                await self._finish_entry_unavailable(
+                    reason, generation=generation, lease=lease
+                )
+                return
+            if reason in {
+                "missing_credentials",
+                "account_mismatch",
+                "site_credentials_unavailable",
+                "login_failed",
+                "session_cookie_missing",
+                "session_lease_inactive",
+            }:
+                self._prepared_entry = None
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+            elif reason == "entry_outcome_uncertain":
+                self._attempt_may_be_open = True
+                self._prepared_entry = None
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+            else:
+                self._prepared_entry = None
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+            self._show_recovery_message(reason)
+            deferred_close = self._deferred_close
+            self._deferred_close = None
+            if deferred_close is not None:
+                if self._attempt_may_be_open:
+                    self.request_close(**deferred_close)
+                else:
+                    await self._discard_pending_entry(
+                        True, deferred_close.get("after_close")
+                    )
+        finally:
+            if enter_task.done() and self._entry_operation_task is enter_task:
+                self._entry_operation_task = None
 
-    @classmethod
-    def _clear_late_session_result(cls, future):
-        try:
-            session = future.result()
-            cookies = session.to_native_cookies()
-            cls._clear_cookies(cookies)
-            clear = getattr(session, "clear", None)
-            if callable(clear):
-                clear()
-            del session
-        except Exception:
-            # Never surface an expired worker result or an exception that may
-            # contain a server response or credential detail.
+    def _close_entry_prompt(self):
+        if not self._entry_prompt_open:
             return
+        self._entry_prompt_open = False
+        if self._entry_dialog is not None:
+            self._entry_dialog.open = False
+        if self._entry_password_field is not None:
+            self._entry_password_field.value = ""
+        try:
+            self._page.pop_dialog()
+        except Exception:
+            pass
+
+    async def _discard_pending_entry(
+        self,
+        notify_closed: bool,
+        after_close: Callable | None = None,
+    ):
+        activity = self._activity
+        callback = self.on_closed if notify_closed else None
+        self._generation += 1
+        self.visible = False
+        self._player_host.content = None
+        self._player = None
+        self._target = None
+        self._activity = None
+        self._launch_url = None
+        self._ready = False
+        self._entry_entering = False
+        self._attempt_may_be_open = False
+        if self._entry_password_field is not None:
+            self._entry_password_field.value = ""
+        prepared = self._prepared_entry
+        self._prepared_entry = None
+        self._clear_pending_cookies()
+        if prepared is not None:
+            await asyncio.to_thread(self._close_prepared_entry, prepared)
+        prepare_task = self._entry_prepare_task
+        lease = self._lease
+        if lease is not None and prepare_task is not None and not prepare_task.done():
+            self._lease = None
+            prepare_task.add_done_callback(
+                lambda _future, held_lease=lease: self._release_lease_object(
+                    held_lease
+                )
+            )
+        else:
+            self._release_lease()
+        self._status_panel.visible = False
+        self._error_actions.visible = False
+        self._restore_desktop_window()
+        self._safe_update()
+        if callable(callback):
+            await self._call_maybe_async(callback, activity)
+        if callable(after_close):
+            await self._call_maybe_async(after_close)
+
+    @staticmethod
+    def _release_lease_object(lease):
+        try:
+            lease.release()
+        except Exception:
+            pass
+
+    async def _finish_entry_unavailable(
+        self,
+        reason: str,
+        *,
+        generation: int,
+        lease,
+    ):
+        if (
+            generation != self._generation
+            or not self.visible
+            or self._lease is not lease
+        ):
+            return
+        activity = self._activity
+        callback = self._entry_unavailable_callback
+        self._close_entry_prompt()
+        prepared = self._prepared_entry
+        self._prepared_entry = None
+        self._entry_entering = False
+        self._attempt_may_be_open = False
+        self._generation += 1
+        self.visible = False
+        self._player_host.content = None
+        self._player = None
+        self._target = None
+        self._activity = None
+        self._launch_url = None
+        self._status_panel.visible = False
+        self._error_actions.visible = False
+        self._clear_pending_cookies()
+        self._restore_desktop_window()
+        self._safe_update()
+        if prepared is not None:
+            await asyncio.to_thread(self._close_prepared_entry, prepared)
+        self._release_lease()
+        if callable(callback):
+            await self._call_maybe_async(callback, activity, reason)
+        deferred_close = self._deferred_close
+        self._deferred_close = None
+        if deferred_close is not None and callable(deferred_close.get("after_close")):
+            await self._call_maybe_async(deferred_close["after_close"])
 
     @staticmethod
     def _clear_cookies(cookies):
@@ -537,10 +1093,17 @@ class QuizPlayerView(ft.Container):
         cookies = self._pending_cookies
         if player is None or cookies is None:
             return
+        launch_url = self._launch_url
+        if not isinstance(launch_url, str) or not launch_url:
+            self._show_recovery_message("entry_not_opened")
+            return
         self._bootstrap_started = True
         self._pending_cookies = None
         try:
-            bootstrapped = await player.bootstrap_session(cookies)
+            bootstrapped = await player.bootstrap_session(
+                cookies,
+                launch_url=launch_url,
+            )
             if generation != self._generation or not self.visible:
                 return
             if bootstrapped is False:
@@ -609,6 +1172,7 @@ class QuizPlayerView(ft.Container):
         self._ready = False
         self._clear_pending_cookies()
         self._release_lease()
+        self._restore_desktop_window()
         if player is not None:
             self._generation += 1
         self._safe_update()
@@ -631,6 +1195,8 @@ class QuizPlayerView(ft.Container):
             "login_failed": "Không đăng nhập được Moodle. Kiểm tra tài khoản trong UTHelper.",
             "session_cookie_missing": "Không nhận được phiên Moodle. Đăng nhập lại hoặc mở bằng trình duyệt.",
             "session_expired": "Phiên Moodle hết hạn. Đăng nhập lại sau khi đóng bài.",
+            "entry_outcome_uncertain": "Không xác nhận được trạng thái mở bài. Hãy kiểm tra Moodle trong trình duyệt.",
+            "entry_not_opened": "Không thể mở lượt làm bài. Hãy mở bằng trình duyệt.",
         }
         self._status_text.value = messages.get(
             code,
@@ -654,6 +1220,8 @@ class QuizPlayerView(ft.Container):
             "session_unavailable",
             *auth_reasons,
             "session_expired",
+            "entry_outcome_uncertain",
+            "entry_not_opened",
         }
         self._browser_button.visible = self._error_actions.visible
         self._auth_button.visible = needs_auth and can_offer_auth
@@ -734,15 +1302,19 @@ class QuizPlayerView(ft.Container):
         if factory is None:
             self._show_mount_error("player_unavailable")
             return
-        if not self._run_task(self._prepare_session_and_mount, generation, factory):
+        self._close_prepared_entry(self._prepared_entry)
+        self._prepared_entry = None
+        if not self._run_task(self._prepare_entry_and_prompt, generation, factory):
             self._show_mount_error("player_unavailable")
 
     async def _open_in_browser(self, _event=None):
+        launch_url = self._launch_url
         target = self._target
-        if target is None:
+        url = launch_url or (getattr(target, "url", None) if target is not None else None)
+        if not isinstance(url, str) or not url:
             return
         try:
-            await ft.UrlLauncher().launch_url(target.url)
+            await ft.UrlLauncher().launch_url(url)
         except Exception:
             self._status_text.value = "Không mở được trình duyệt. Hãy quay lại thử lại sau."
             self._status_panel.visible = True
@@ -758,6 +1330,21 @@ class QuizPlayerView(ft.Container):
         """Ask before leaving; a canceled request keeps the WebView mounted."""
         if not self.visible:
             return False
+        if self._entry_entering:
+            self._deferred_close = {
+                "after_close": after_close,
+                "title": title,
+                "action_label": action_label,
+            }
+            return True
+        if self._player is None and not self._attempt_may_be_open:
+            self._close_entry_prompt()
+            self._run_task(
+                self._discard_pending_entry,
+                True,
+                after_close,
+            )
+            return True
         if self._close_dialog.open:
             if after_close is not None:
                 self._after_close = after_close
@@ -830,12 +1417,37 @@ class QuizPlayerView(ft.Container):
         self._player = None
         self._target = None
         self._activity = None
+        self._launch_url = None
         self._ready = False
         self._auth_request_active = False
+        self._entry_entering = False
+        self._attempt_may_be_open = False
         self._status_panel.visible = False
         self._error_actions.visible = False
         self._clear_pending_cookies()
-        self._release_lease()
+        if self._entry_password_field is not None:
+            self._entry_password_field.value = ""
+        prepared = self._prepared_entry
+        self._prepared_entry = None
+        operation_task = self._entry_operation_task
+        lease = self._lease
+        if lease is not None and operation_task is not None and not operation_task.done():
+            self._lease = None
+            if prepared is not None:
+                operation_task.add_done_callback(
+                    lambda _future, pending=prepared: self._close_prepared_entry_later(
+                        pending
+                    )
+                )
+            operation_task.add_done_callback(
+                lambda _future, held_lease=lease: self._release_lease_object(
+                    held_lease
+                )
+            )
+        else:
+            if prepared is not None:
+                await asyncio.to_thread(self._close_prepared_entry, prepared)
+            self._release_lease()
         self._restore_desktop_window()
         self._safe_update()
 
@@ -948,6 +1560,20 @@ class QuizPlayerView(ft.Container):
         )
         self._close_dialog.actions[1].bgcolor = C.CRITICAL
         self._close_dialog.actions[1].color = C.ON_CRITICAL
+        if self._entry_dialog is not None:
+            self._entry_dialog.bgcolor = C.SURFACE
+            self._entry_dialog.title.color = C.TEXT_PRIMARY
+            for action in self._entry_actions:
+                if isinstance(action, ft.TextButton):
+                    action.style = ft.ButtonStyle(color=C.TEXT_SECONDARY)
+                else:
+                    action.bgcolor = C.ACCENT
+                    action.color = C.ON_ACCENT
+            if self._entry_password_field is not None:
+                self._entry_password_field.bgcolor = C.BG
+                self._entry_password_field.color = C.TEXT_PRIMARY
+                self._entry_password_field.border_color = C.BORDER
+                self._entry_password_field.focused_border_color = C.ACCENT
 
     @staticmethod
     async def _call_maybe_async(callback: Callable, *args):

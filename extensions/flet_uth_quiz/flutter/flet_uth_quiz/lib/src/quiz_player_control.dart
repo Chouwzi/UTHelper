@@ -21,6 +21,51 @@ final _sessionKeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
 final _cookieNamePattern = RegExp(r"^[!#\$%&'*+.^_`|~0-9A-Za-z-]+$");
 final _mobileSessionQueue = MobileSessionQueue();
 
+/// Validates a direct Moodle attempt/summary URL against its original site.
+/// The URL is kept on the DataChannel and is never sent in invoke-method args.
+Uri? validateQuizLaunchUrl(String? value, Uri? trustedOrigin) {
+  if (value == null ||
+      value.isEmpty ||
+      value.length > 2048 ||
+      trustedOrigin == null ||
+      trustedOrigin.scheme.toLowerCase() != 'https' ||
+      trustedOrigin.hasPort) {
+    return null;
+  }
+  final target = Uri.tryParse(value);
+  // Uri canonicalizes an explicit default :443 away, so inspect the original
+  // authority too; direct launch URLs must never carry a port or userinfo.
+  final rawAuthority = RegExp(r'^https://([^/?#]+)', caseSensitive: false)
+      .firstMatch(value)
+      ?.group(1);
+  if (target == null ||
+      rawAuthority == null ||
+      rawAuthority.toLowerCase() != trustedOrigin.host.toLowerCase() ||
+      target.scheme.toLowerCase() != 'https' ||
+      target.host.isEmpty ||
+      target.hasPort ||
+      target.userInfo.isNotEmpty ||
+      target.authority.toLowerCase() != trustedOrigin.host.toLowerCase() ||
+      target.scheme.toLowerCase() != trustedOrigin.scheme.toLowerCase() ||
+      target.host.toLowerCase() != trustedOrigin.host.toLowerCase() ||
+      !const {
+        '/mod/quiz/attempt.php',
+        '/mod/quiz/summary.php',
+      }.contains(target.path)) {
+    return null;
+  }
+
+  final query = target.queryParametersAll;
+  if (query.containsKey('action')) return null;
+  final attempts = query['attempt'];
+  if (attempts == null ||
+      attempts.length != 1 ||
+      !RegExp(r'^[1-9][0-9]*$').hasMatch(attempts.single)) {
+    return null;
+  }
+  return target;
+}
+
 class UthQuizPlayerControl extends StatefulWidget {
   const UthQuizPlayerControl({super.key, required this.control});
 
@@ -228,6 +273,15 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     }
   }
 
+  Future<void> _loadLaunchUrl(
+    InAppWebViewController controller,
+    String url,
+  ) async {
+    if (!_disposed) {
+      await controller.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    }
+  }
+
   CookieManager _cookieManager() {
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
       final environment = _environment;
@@ -306,9 +360,20 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       payload = await _takeSessionPayload();
       final decoded = jsonDecode(utf8.decode(payload));
       if (decoded is! Map ||
-          decoded.length != 1 ||
+          (decoded.length != 1 && decoded.length != 2) ||
+          !decoded.containsKey('cookies') ||
+          decoded.keys.any(
+            (key) => key != 'cookies' && key != 'launch_url',
+          ) ||
           decoded['cookies'] is! List) {
         throw const FormatException();
+      }
+      final launchValue = decoded['launch_url'];
+      Uri? launchUri;
+      if (launchValue != null) {
+        if (launchValue is! String) throw const FormatException();
+        launchUri = validateQuizLaunchUrl(launchValue, _trustedOrigin);
+        if (launchUri == null) throw const FormatException();
       }
       final cookies = decoded['cookies'] as List;
       if (cookies.isEmpty || cookies.length > _maxSessionCookies) {
@@ -331,7 +396,11 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       }
       if (_disposed || _controller == null) return false;
       _sessionBootstrapped = true;
-      await _loadInitialUrl(_controller!);
+      if (launchUri != null) {
+        await _loadLaunchUrl(_controller!, launchUri.toString());
+      } else {
+        await _loadInitialUrl(_controller!);
+      }
       return true;
     } catch (_) {
       _sessionBootstrapped = false;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,9 +60,17 @@ class Lease:
         self.released = True
 
 
-class FakeWebSession:
-    def __init__(self):
+class FakeQuizEntryResult:
+    def __init__(self, *, launch_url=None, secure_window=False, mode="resume"):
         self.exported_cookies = None
+        self.launch_url = (
+            "https://courses.ut.edu.vn/mod/quiz/attempt.php?attempt=77&cmid=321&page=0"
+            if launch_url is None
+            else launch_url
+        )
+        self.secure_window = secure_window
+        self.mode = mode
+        self.cleared = False
 
     def to_native_cookies(self):
         self.exported_cookies = [
@@ -78,14 +87,87 @@ class FakeWebSession:
         ]
         return self.exported_cookies
 
+    def clear(self):
+        if isinstance(self.exported_cookies, list):
+            for cookie in self.exported_cookies:
+                cookie.clear()
+            self.exported_cookies.clear()
+        self.cleared = True
+
     def __repr__(self):
-        return "FakeWebSession(cookies=<redacted>)"
+        return "FakeQuizEntryResult(cookies=<redacted>)"
+
+
+class FakePreparedEntry:
+    def __init__(
+        self,
+        *,
+        mode="resume",
+        secure_window=False,
+        password_required=False,
+        reason=None,
+        launch_url=None,
+        enter_results=None,
+        enter_hook=None,
+    ):
+        self.mode = mode
+        self.secure_window = secure_window
+        self.password_required = password_required
+        self.reason = reason
+        self.launch_url = launch_url
+        self.enter_results = list(enter_results or [])
+        self.enter_hook = enter_hook
+        self.enter_calls = []
+        self.results = []
+        self.closed = False
+
+    def enter(self, *, password=None, confirmed=False):
+        self.enter_calls.append((password, confirmed))
+        if self.enter_hook is not None:
+            self.enter_hook(password, confirmed)
+        if self.enter_results:
+            result = self.enter_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            self.results.append(result)
+            return result
+        result = FakeQuizEntryResult(
+            launch_url=self.launch_url,
+            secure_window=self.secure_window,
+            mode=self.mode,
+        )
+        self.results.append(result)
+        return result
+
+    def close(self):
+        self.closed = True
+        for result in self.results:
+            result.clear()
+
+
+def prepared_entry_provider(entries, factory=None):
+    def provide(_target, _lease):
+        entry = factory() if factory is not None else FakePreparedEntry()
+        entries.append(entry)
+        return entry
+
+    return provide
 
 
 class SessionFailure(Exception):
     def __init__(self, reason):
         self.reason = reason
         super().__init__(reason)
+
+
+class EventSession:
+    """Minimal Flet session used by BaseControl's real event dispatcher."""
+
+    def __init__(self):
+        self.index = {}
+
+    async def after_event(self, _control=None):
+        return None
 
 
 def trusted_quiz(**changes):
@@ -114,7 +196,7 @@ def make_quiz_ui(
     ready=True,
     on_closed=None,
     ready_timeout=0.2,
-    session_provider=None,
+    entry_provider=None,
     lease_provider=None,
     account_id_provider=None,
     on_auth_required=None,
@@ -123,24 +205,25 @@ def make_quiz_ui(
     page = HeadlessPage()
     lease = Lease(ready=ready)
     players = []
-    sessions = []
+    prepared_entries = []
 
     def player_factory(**kwargs):
         player = ft.Container(expand=True)
         player.callbacks = kwargs
-        async def bootstrap_session(cookies):
+        async def bootstrap_session(cookies, *, launch_url=None):
             player.native_received_cookies = [dict(cookie) for cookie in cookies]
+            player.native_launch_url = launch_url
             return True
 
         player.bootstrap_session = bootstrap_session
         players.append(player)
         return player
 
-    if session_provider is None:
-        def session_provider(_target, _lease):
-            session = FakeWebSession()
-            sessions.append(session)
-            return session
+    if entry_provider is None:
+        def entry_provider(_target, _lease):
+            prepared = FakePreparedEntry()
+            prepared_entries.append(prepared)
+            return prepared
 
     player_view = QuizPlayerView(
         page,
@@ -148,7 +231,7 @@ def make_quiz_ui(
         player_factory=player_factory,
         target_builder=build_quiz_launch_target,
         lease_provider=lease_provider or (lambda _session_key: lease),
-        session_provider=session_provider,
+        entry_provider=entry_provider,
         account_id_provider=account_id_provider,
         on_auth_required=on_auth_required,
         ready_timeout_seconds=ready_timeout,
@@ -159,7 +242,16 @@ def make_quiz_ui(
         quiz_player_view=player_view,
         get_quiz_account_id=lambda: "student@example.edu",
     )
-    return page, lease, players, sessions, player_view, detail_view
+    return page, lease, players, prepared_entries, player_view, detail_view
+
+
+async def dispatch_control_event(control, event_name: str, event_data=None):
+    """Dispatch through Flet's control event handler, including async callbacks."""
+    session = EventSession()
+    page = ft.Page(sess=session)
+    control._parent = weakref.ref(page)
+    session.index[control._i] = control
+    await control._trigger_event(event_name, event_data)
 
 
 def test_player_view_constructor_accepts_flet_page_like_object():
@@ -171,7 +263,7 @@ def test_player_view_constructor_accepts_flet_page_like_object():
 
 def test_quiz_button_mounts_player_and_close_refreshes_from_moodle(monkeypatch):
     async def scenario():
-        page, lease, players, sessions, player_view, detail_view = make_quiz_ui(monkeypatch)
+        page, lease, players, prepared_entries, player_view, detail_view = make_quiz_ui(monkeypatch)
         activity = trusted_quiz()
         detail_view.update_detail(activity)
 
@@ -185,17 +277,23 @@ def test_quiz_button_mounts_player_and_close_refreshes_from_moodle(monkeypatch):
 
         assert player_view.visible is True
         assert len(players) == 1
+        assert prepared_entries[0].enter_calls == [(None, False)]
+        assert player_view._entry_prompt_open is False
         assert player_view._player_host.content is players[0]
+        # The overview remains the control URL; the server's returned attempt
+        # URL travels separately through bootstrap_session.
         assert players[0].callbacks["url"] == activity["url"]
         assert players[0].callbacks["session_key"]
         assert players[0].callbacks["require_session"] is True
         assert not hasattr(players[0], "cookies")
         assert "ephemeral-test-cookie-value" not in repr(players[0])
-        assert "ephemeral-test-cookie-value" not in repr(sessions[0])
         assert "ephemeral-test-cookie-value" not in repr(player_view)
         await players[0].callbacks["on_ready"](SimpleNamespace(data="ready"))
         assert players[0].native_received_cookies[0]["value"] == "ephemeral-test-cookie-value"
-        assert sessions[0].exported_cookies == []
+        assert players[0].native_launch_url == prepared_entries[0].results[0].launch_url
+        assert prepared_entries[0].results[0].exported_cookies == []
+        assert prepared_entries[0].results[0].cleared is True
+        assert prepared_entries[0].closed is True
         assert player_view._ready is True
         assert lease.released is False
 
@@ -232,6 +330,266 @@ def test_quiz_button_mounts_player_and_close_refreshes_from_moodle(monkeypatch):
         )
         controller._show_detail_async.assert_awaited_once_with(activity)
         controller.detail_view.focus_quiz_opener.assert_awaited_once_with()
+
+    asyncio.run(scenario())
+
+
+def test_new_attempt_requires_confirmation_before_entry_post(monkeypatch):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(mode="start"),
+        )
+        page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        detail_view.update_detail(trusted_quiz())
+
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        entry = prepared_entries[0]
+        assert player_view._entry_prompt_open is True
+        assert player_view._entry_dialog.open is True
+        assert entry.enter_calls == []
+        assert players == []
+
+        await player_view._confirm_entry_prompt()
+
+        assert entry.enter_calls == [(None, True)]
+        assert entry.closed is True
+        assert len(players) == 1
+        assert players[0].callbacks["url"] == trusted_quiz()["url"]
+        assert lease.released is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("dismiss", [False, True], ids=["cancel", "dismiss"])
+def test_cancel_or_dismiss_start_confirmation_discards_without_entry(monkeypatch, dismiss):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(mode="start"),
+        )
+        page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        detail_view.update_detail(trusted_quiz())
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        entry = prepared_entries[0]
+        assert entry.enter_calls == []
+        if dismiss:
+            player_view._entry_dialog.open = False
+            await dispatch_control_event(player_view._entry_dialog, "dismiss")
+        else:
+            cancel_button = player_view._entry_actions[0]
+            await dispatch_control_event(cancel_button, "click")
+
+        assert player_view.visible is False
+        assert player_view._entry_prompt_open is False
+        assert entry.closed is True
+        assert entry.enter_calls == []
+        assert players == []
+        assert lease.released is True
+
+    asyncio.run(scenario())
+
+
+def test_password_retry_clears_rejection_and_enter_submits_through_flet_dispatch(
+    monkeypatch,
+):
+    async def scenario():
+        prepared_entries = []
+        accepted_result = FakeQuizEntryResult(
+            launch_url=(
+                "https://courses.ut.edu.vn/mod/quiz/attempt.php"
+                "?attempt=81&cmid=321&page=0"
+            ),
+            mode="start",
+        )
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(
+                mode="start",
+                password_required=True,
+                enter_results=[
+                    SessionFailure("wrong_password"),
+                    accepted_result,
+                ],
+            ),
+        )
+        _page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        detail_view.update_detail(trusted_quiz())
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        entry = prepared_entries[0]
+        field = player_view._entry_password_field
+        assert field is not None
+        assert player_view._entry_prompt_open is True
+        assert entry.enter_calls == []
+
+        field.value = "wrong-password"
+        await dispatch_control_event(player_view._entry_actions[1], "click")
+        assert entry.enter_calls == [("wrong-password", True)]
+        assert player_view._entry_prompt_open is True
+        assert field.value == ""
+        assert player_view._entry_prompt_error.visible is True
+        assert players == []
+
+        field.value = "correct-password"
+        await dispatch_control_event(field, "change", {"data": "correct-password"})
+        assert player_view._entry_prompt_error.visible is False
+        await dispatch_control_event(field, "submit", {"data": "Enter"})
+
+        assert entry.enter_calls == [
+            ("wrong-password", True),
+            ("correct-password", True),
+        ]
+        assert player_view._entry_password_field.value == ""
+        assert player_view._entry_prompt_open is False
+        assert entry.closed is True
+        assert accepted_result.cleared is True
+        assert len(players) == 1
+        assert players[0].callbacks["url"] == trusted_quiz()["url"]
+        await players[0].callbacks["on_ready"](SimpleNamespace(data="ready"))
+        assert players[0].native_launch_url == accepted_result.launch_url
+        assert player_view._ready is True
+        assert lease.released is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("remaining", "unfinished", "disabled", "label"),
+    [
+        (0, False, True, "Hết lượt làm bài"),
+        (0, True, False, "Tiếp tục làm bài"),
+        (0, None, False, "Làm bài"),
+        (None, False, False, "Làm bài"),
+    ],
+)
+def test_quiz_button_disables_only_authoritative_exhaustion(
+    monkeypatch, remaining, unfinished, disabled, label
+):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(prepared_entries)
+        _page, _lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        activity = trusted_quiz(
+            details={
+                "quiz_attempts_remaining": remaining,
+                "quiz_has_unfinished_attempt": unfinished,
+            }
+        )
+        detail_view.update_detail(activity)
+
+        assert detail_view._quiz_open_btn.visible is True
+        assert detail_view._quiz_open_btn.disabled is disabled
+        assert detail_view._quiz_open_btn.content == label
+        assert detail_view._quiz_open_btn.bgcolor == (
+            C.SURFACE if disabled else C.ACCENT
+        )
+        assert detail_view._quiz_open_btn.color == (
+            C.TEXT_SECONDARY if disabled else C.ON_ACCENT
+        )
+        assert detail_view._open_btn.visible is (disabled is True)
+        assert detail_view._header_open_btn.visible is True
+
+        if unfinished is True:
+            await detail_view._open_quiz(None)
+            await asyncio.sleep(0.02)
+            assert prepared_entries[0].mode == "resume"
+            assert prepared_entries[0].enter_calls == [(None, False)]
+            assert len(players) == 1
+        else:
+            assert prepared_entries == []
+            if disabled:
+                detail_view.update_detail(
+                    trusted_quiz(
+                        details={
+                            "quiz_attempts_remaining": 1,
+                            "quiz_has_unfinished_attempt": False,
+                        }
+                    )
+                )
+                assert detail_view._quiz_open_btn.disabled is False
+                assert detail_view._quiz_open_btn.bgcolor == C.ACCENT
+                assert detail_view._quiz_open_btn.color == C.ON_ACCENT
+
+    asyncio.run(scenario())
+
+
+def test_missing_launch_url_does_not_load_overview_as_attempt(monkeypatch):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(mode="resume", launch_url=""),
+        )
+        _page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        activity = trusted_quiz()
+        detail_view.update_detail(activity)
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        assert prepared_entries[0].enter_calls == [(None, False)]
+        assert prepared_entries[0].closed is True
+        assert players == []
+        assert player_view.visible is False
+        assert player_view._launch_url is None
+        assert detail_view._quiz_runtime_notice.visible is True
+        assert detail_view._open_btn.visible is False
+        assert detail_view._header_open_btn.visible is True
+        assert lease.released is True
+
+    asyncio.run(scenario())
+
+
+def test_live_safe_exam_browser_requirement_preserves_browser_recovery(monkeypatch):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(
+                mode="unavailable",
+                reason="requires_safe_exam_browser",
+            ),
+        )
+        _page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        activity = trusted_quiz()
+        detail_view.update_detail(activity)
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        assert prepared_entries[0].enter_calls == []
+        assert prepared_entries[0].closed is True
+        assert players == []
+        assert player_view.visible is False
+        assert detail_view._quiz_runtime_notice.visible is True
+        assert "safe exam browser" in detail_view._quiz_runtime_notice.value.casefold()
+        assert "trình duyệt" in detail_view._quiz_runtime_notice.value.casefold()
+        assert detail_view._header_open_btn.visible is True
+        assert lease.released is True
 
     asyncio.run(scenario())
 
@@ -406,7 +764,7 @@ def test_flet_web_runtime_on_windows_keeps_browser_fallback(monkeypatch):
     assert player_view.visible is False
 
 
-def test_desktop_window_exit_waits_for_confirmation_and_restores_window(monkeypatch):
+def test_normal_quiz_exit_waits_for_confirmation_without_fullscreen(monkeypatch):
     async def scenario():
         page, _lease, _players, _sessions, player_view, detail_view = make_quiz_ui(monkeypatch)
         page.window = SimpleNamespace(
@@ -429,14 +787,14 @@ def test_desktop_window_exit_waits_for_confirmation_and_restores_window(monkeypa
         controller._destroy_window = AsyncMock()
         await controller._request_window_exit()
 
-        assert page.window.full_screen is True
+        assert page.window.full_screen is False
         assert player_view._close_dialog.open is True
         assert player_view._close_dialog.title.value == "Thoát ứng dụng?"
         controller._destroy_window.assert_not_awaited()
 
         player_view._cancel_close()
         assert player_view._player is _players[0]
-        assert page.window.full_screen is True
+        assert page.window.full_screen is False
         controller._destroy_window.assert_not_awaited()
 
         await controller._request_window_exit()
@@ -446,6 +804,54 @@ def test_desktop_window_exit_waits_for_confirmation_and_restores_window(monkeypa
         assert page.window.full_screen is False
         assert page.window.width == 420
         controller._destroy_window.assert_awaited_once_with()
+
+    asyncio.run(scenario())
+
+
+def test_securewindow_attempt_enters_fullscreen_and_restores_previous_window(
+    monkeypatch,
+):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(secure_window=True),
+        )
+        page, _lease, _players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        page.window = SimpleNamespace(
+            full_screen=False,
+            width=420,
+            height=720,
+            min_width=420,
+            max_width=420,
+            min_height=720,
+            max_height=720,
+            resizable=False,
+            maximizable=False,
+        )
+        detail_view.update_detail(trusted_quiz())
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        assert prepared_entries[0].enter_calls == [(None, False)]
+        assert page.window.full_screen is True
+        assert player_view._player is not None
+
+        player_view.request_close()
+        player_view._cancel_close()
+        assert player_view._player is not None
+        assert page.window.full_screen is True
+
+        player_view.request_close()
+        await player_view._confirm_close()
+        assert player_view.visible is False
+        assert page.window.full_screen is False
+        assert page.window.width == 420
+        assert page.window.height == 720
+        assert page.window.resizable is False
 
     asyncio.run(scenario())
 
@@ -532,24 +938,24 @@ def test_failed_task_scheduler_releases_lease_and_shows_recovery(monkeypatch):
 def test_saved_session_failure_uses_app_login_then_mounts_with_fresh_cookies(monkeypatch):
     async def scenario():
         attempts = []
-        sessions = []
+        prepared_entries = []
         auth_requests = []
 
-        def session_provider(_target, _lease):
+        def entry_provider(_target, _lease):
             attempts.append("attempt")
             if len(attempts) == 1:
                 raise SessionFailure("login_failed")
-            session = FakeWebSession()
-            sessions.append(session)
-            return session
+            prepared = FakePreparedEntry()
+            prepared_entries.append(prepared)
+            return prepared
 
         async def app_auth(retry_callback):
             auth_requests.append("shown")
             await retry_callback()
 
-        page, lease, players, _old_sessions, player_view, detail_view = make_quiz_ui(
+        page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
             monkeypatch,
-            session_provider=session_provider,
+            entry_provider=entry_provider,
             on_auth_required=app_auth,
         )
         detail_view.update_detail(trusted_quiz())
@@ -572,21 +978,16 @@ def test_saved_session_failure_uses_app_login_then_mounts_with_fresh_cookies(mon
         await players[0].callbacks["on_ready"](SimpleNamespace(data="ready"))
         assert player_view._ready is True
         assert player_view._auth_button.visible is False
-        assert sessions[0].exported_cookies == []
+        assert prepared_entries[0].results[0].exported_cookies == []
 
     asyncio.run(scenario())
 
 
 def test_bootstrap_auth_retry_invalidates_old_player_callbacks(monkeypatch):
     async def scenario():
-        sessions = []
+        prepared_entries = []
         auth_requests = []
         mount_count = 0
-
-        def session_provider(_target, _lease):
-            session = FakeWebSession()
-            sessions.append(session)
-            return session
 
         async def app_auth(retry_callback):
             auth_requests.append("shown")
@@ -603,8 +1004,9 @@ def test_bootstrap_auth_retry_invalidates_old_player_callbacks(monkeypatch):
             player = ft.Container(expand=True)
             player.callbacks = kwargs
 
-            async def bootstrap_session(cookies):
+            async def bootstrap_session(cookies, *, launch_url=None):
                 player.native_received_cookies = [dict(cookie) for cookie in cookies]
+                player.native_launch_url = launch_url
                 if mount_count == 1:
                     raise RuntimeError("session_unavailable")
                 return True
@@ -618,7 +1020,7 @@ def test_bootstrap_auth_retry_invalidates_old_player_callbacks(monkeypatch):
             player_factory=player_factory,
             target_builder=build_quiz_launch_target,
             lease_provider=lambda _key: lease,
-            session_provider=session_provider,
+            entry_provider=prepared_entry_provider(prepared_entries),
             on_auth_required=app_auth,
         )
         detail_view = DetailView(
@@ -653,47 +1055,43 @@ def test_bootstrap_auth_retry_invalidates_old_player_callbacks(monkeypatch):
 
         await second_player.callbacks["on_ready"](SimpleNamespace(data="ready"))
         assert player_view._ready is True
-        assert sessions[0].exported_cookies == []
-        assert sessions[1].exported_cookies == []
+        assert [entry.results[0].exported_cookies for entry in prepared_entries] == [[], []]
+        assert [entry.closed for entry in prepared_entries] == [True, True]
 
     asyncio.run(scenario())
 
 
-def test_close_while_saved_session_login_is_pending_discards_late_cookies(monkeypatch):
+def test_close_while_entry_preparation_is_pending_releases_late_result(monkeypatch):
     async def scenario():
         started = threading.Event()
         release = threading.Event()
-        sessions = []
+        prepared_entries = []
 
-        def session_provider(_target, _lease):
+        def entry_provider(_target, _lease):
             started.set()
             assert release.wait(2)
-            session = FakeWebSession()
-            sessions.append(session)
-            return session
+            prepared = FakePreparedEntry()
+            prepared_entries.append(prepared)
+            return prepared
 
-        page, lease, players, _old_sessions, player_view, detail_view = make_quiz_ui(
+        page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
             monkeypatch,
-            session_provider=session_provider,
+            entry_provider=entry_provider,
         )
         detail_view.update_detail(trusted_quiz())
         await detail_view._open_quiz(None)
         assert await asyncio.to_thread(started.wait, 1)
 
         player_view.request_close()
-        player_view._cancel_close()
-        assert player_view.visible is True
-        assert lease.released is False
-
-        player_view.request_close()
-        await player_view._confirm_close()
+        await asyncio.sleep(0.02)
         assert player_view.visible is False
-        assert lease.released is True
+        assert lease.released is False
 
         release.set()
         await asyncio.sleep(0.05)
+        assert lease.released is True
         assert players == []
-        assert sessions[0].exported_cookies == []
+        assert prepared_entries[0].closed is True
         assert player_view.visible is False
         assert player_view._player is None
 
@@ -704,21 +1102,21 @@ def test_late_old_session_error_cannot_clear_new_open_pending_cookies(monkeypatc
     async def scenario():
         import gui.components.quiz_player_view as player_module
 
-        monkeypatch.setattr(player_module, "_SESSION_PREPARE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(player_module, "_ENTRY_PREPARE_TIMEOUT_SECONDS", 0.01)
         first_started = threading.Event()
         release_first = threading.Event()
         calls = []
-        sessions = []
+        prepared_entries = []
 
-        def session_provider(_target, _lease):
+        def entry_provider(_target, _lease):
             calls.append(len(calls) + 1)
             if calls[-1] == 1:
                 first_started.set()
                 assert release_first.wait(2)
                 raise SessionFailure("login_failed")
-            session = FakeWebSession()
-            sessions.append(session)
-            return session
+            prepared = FakePreparedEntry()
+            prepared_entries.append(prepared)
+            return prepared
 
         enable_native_runtime(monkeypatch)
         page = HeadlessPage()
@@ -730,8 +1128,9 @@ def test_late_old_session_error_cannot_clear_new_open_pending_cookies(monkeypatc
             player = ft.Container(expand=True)
             player.callbacks = kwargs
 
-            async def bootstrap_session(cookies):
+            async def bootstrap_session(cookies, *, launch_url=None):
                 player.native_received_cookies = [dict(cookie) for cookie in cookies]
+                player.native_launch_url = launch_url
                 return True
 
             player.bootstrap_session = bootstrap_session
@@ -743,7 +1142,7 @@ def test_late_old_session_error_cannot_clear_new_open_pending_cookies(monkeypatc
             player_factory=player_factory,
             target_builder=build_quiz_launch_target,
             lease_provider=lambda _key: leases[-1],
-            session_provider=session_provider,
+            entry_provider=entry_provider,
             ready_timeout_seconds=0.2,
         )
         first_activity = trusted_quiz()
@@ -758,8 +1157,9 @@ def test_late_old_session_error_cannot_clear_new_open_pending_cookies(monkeypatc
         assert "Chưa lấy được phiên Moodle" in player_view._status_text.value
 
         player_view.request_close()
-        await player_view._confirm_close()
-        assert first_lease.released is True
+        await asyncio.sleep(0.02)
+        assert player_view.visible is False
+        assert first_lease.released is False
 
         second_lease = Lease()
         leases.append(second_lease)
@@ -777,6 +1177,7 @@ def test_late_old_session_error_cannot_clear_new_open_pending_cookies(monkeypatc
 
         release_first.set()
         await asyncio.sleep(0.05)
+        assert first_lease.released is True
         assert player_view.visible is True
         assert player_view._target.course_module_id == 322
         assert player_view._pending_cookies is pending
@@ -784,7 +1185,7 @@ def test_late_old_session_error_cannot_clear_new_open_pending_cookies(monkeypatc
         assert "Chưa lấy được phiên Moodle" not in player_view._status_text.value
 
         await players[0].callbacks["on_ready"](SimpleNamespace(data="ready"))
-        assert sessions[0].exported_cookies == []
+        assert prepared_entries[0].results[0].exported_cookies == []
         assert player_view._ready is True
 
     asyncio.run(scenario())
@@ -804,21 +1205,21 @@ def test_prebootstrap_account_change_releases_old_lease_and_rebuilds_target(
             lease_calls.append(session_key)
             return leases[len(lease_calls) - 1]
 
-        def session_provider(target, lease):
+        def entry_provider(target, lease):
             target_keys.append((target.session_key, lease))
             attempt.append("called")
             if len(attempt) == 1:
                 raise SessionFailure("account_mismatch")
-            return FakeWebSession()
+            return FakePreparedEntry()
 
         async def app_auth(retry_callback):
             username["value"] = "new-student@example.edu"
             await retry_callback()
 
-        page, _lease, players, _sessions, player_view, detail_view = make_quiz_ui(
+        page, _lease, players, _entries, player_view, detail_view = make_quiz_ui(
             monkeypatch,
             lease_provider=get_lease,
-            session_provider=session_provider,
+            entry_provider=entry_provider,
             account_id_provider=lambda: username["value"],
             on_auth_required=app_auth,
         )

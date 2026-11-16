@@ -1142,6 +1142,9 @@ class DataOrchestrator:
             details['attempts_allowed'] = ws_details['attempts_allowed']
         if ws_details.get('time_limit'):
             details['time_limit'] = ws_details['time_limit']
+        for field in ("quiz_attempts_remaining", "quiz_has_unfinished_attempt"):
+            if field in ws_details:
+                details[field] = ws_details[field]
         quiz_security = ws_details.get("quiz_security")
         if isinstance(quiz_security, dict) and quiz_security:
             details["quiz_security"] = dict(quiz_security)

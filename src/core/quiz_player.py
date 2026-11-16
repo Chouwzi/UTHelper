@@ -1,7 +1,7 @@
 """Policy for opening a Moodle quiz in the embedded player.
 
-The player opens Moodle's own quiz overview page. Moodle remains responsible
-for authentication, access rules, and starting an attempt.
+The overview is inspected before entering Moodle's own attempt page. Moodle
+remains responsible for authentication, access rules, and starting an attempt.
 """
 
 from __future__ import annotations
