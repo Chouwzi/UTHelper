@@ -14,6 +14,34 @@ from core.notification_types import (
 )
 
 
+REPEAT_REMINDER_WINDOW_HOURS = 24
+
+
+def expand_milestone_minutes(
+    base_minutes: Iterable[int],
+    *,
+    repeat_enabled: bool = False,
+    repeat_interval_hours: int = 2,
+    window_hours: int = REPEAT_REMINDER_WINDOW_HOURS,
+) -> tuple[int, ...]:
+    """Merge fixed milestones with an optional cadence in the final 24 hours.
+
+    A two-hour cadence produces 24h, 22h, 20h, ... 2h before the deadline.
+    Values are returned in ascending order to preserve the policy's existing
+    nearest-milestone matching behavior.
+    """
+    values = {int(value) for value in base_minutes if int(value) > 0}
+    if repeat_enabled:
+        interval = int(repeat_interval_hours)
+        window = int(window_hours)
+        if interval <= 0 or window <= 0:
+            raise ValueError("repeat reminder interval and window must be positive")
+        interval_minutes = interval * 60
+        window_minutes = window * 60
+        values.update(range(window_minutes, 0, -interval_minutes))
+    return tuple(sorted(values))
+
+
 @dataclass(frozen=True)
 class NotificationPolicyConfig:
     notify_types: tuple[str, ...] = ()
@@ -23,6 +51,8 @@ class NotificationPolicyConfig:
     # Compatibility with settings written before schema v2.
     milestones: tuple[int, ...] = (72, 24, 3)
     minutes_before: int = 0
+    repeat_enabled: bool = False
+    repeat_interval_hours: int = 2
     dnd_enabled: bool = False
     dnd_start: int = 22
     dnd_end: int = 7
@@ -35,20 +65,37 @@ class NotificationPolicyConfig:
             values = tuple(value * 60 for value in self.milestones)
             if self.minutes_before > 0:
                 values += (self.minutes_before,)
-        return tuple(sorted({int(value) for value in values if int(value) > 0}))
+        return expand_milestone_minutes(
+            values,
+            repeat_enabled=self.repeat_enabled,
+            repeat_interval_hours=self.repeat_interval_hours,
+        )
 
     @property
     def milestone_specs(self) -> tuple[tuple[int | str, int], ...]:
         """Return (receipt identifier, minutes) with legacy compatibility."""
         if self.milestone_minutes:
-            return tuple((value, value) for value in self.effective_milestone_minutes)
+            return tuple(
+                (value, value) for value in self.effective_milestone_minutes
+            )
         specs: list[tuple[int | str, int]] = [
             (value, value * 60)
             for value in sorted({int(item) for item in self.milestones if int(item) > 0})
         ]
         if self.minutes_before > 0:
             specs.append((f"_min_{self.minutes_before}", self.minutes_before))
-        return tuple(sorted(specs, key=lambda item: item[1]))
+        if self.repeat_enabled:
+            repeat_minutes = expand_milestone_minutes(
+                (),
+                repeat_enabled=True,
+                repeat_interval_hours=self.repeat_interval_hours,
+            )
+            specs.extend((value, value) for value in repeat_minutes)
+        # Keep the first identifier for equal-minute legacy/cadence collisions.
+        unique: dict[int, tuple[int | str, int]] = {}
+        for identifier, minutes in sorted(specs, key=lambda item: item[1]):
+            unique.setdefault(minutes, (identifier, minutes))
+        return tuple(unique.values())
 
 
 class ActivityNotificationPolicy:

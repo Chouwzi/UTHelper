@@ -619,6 +619,29 @@ class SettingsView(ft.Container):
             self.update()
         return handler
 
+    def _update_repeat_reminder_summary(self) -> None:
+        enabled = bool(self._sw_repeat_deadline.value)
+        interval = int(self._repeat_interval_field.value or 2)
+        self._repeat_interval_field.disabled = not enabled
+        self._repeat_reminder_summary.value = (
+            f"Khi deadline còn 24 giờ, UTHelper sẽ nhắc mỗi {interval} giờ."
+            if enabled
+            else "Tắt để chỉ sử dụng các mốc nhắc deadline đã chọn ở trên."
+        )
+
+    def _handle_repeat_reminder_toggle(self, _event) -> None:
+        self._update_repeat_reminder_summary()
+        self._repeat_interval_field.update()
+        self._repeat_reminder_summary.update()
+        if hasattr(self, "_on_form_field_change"):
+            self._on_form_field_change()
+
+    def _handle_repeat_interval_select(self, _event) -> None:
+        self._update_repeat_reminder_summary()
+        self._repeat_reminder_summary.update()
+        if hasattr(self, "_on_form_field_change"):
+            self._on_form_field_change()
+
     def _handle_milestone_toggle(self, minutes: int):
         def handler(e):
             # Flet's Chip.on_select updates ``selected`` before this callback.
@@ -1077,7 +1100,7 @@ class SettingsView(ft.Container):
                 checkbox.label_style.color = C.TEXT_PRIMARY
 
         # Summary texts (profile, DND, milestone)
-        for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary'):
+        for attr in ('_profile_summary', '_dnd_summary', '_milestone_summary', '_repeat_reminder_summary'):
             txt = getattr(self, attr, None)
             if txt:
                 txt.color = C.TEXT_SECONDARY
@@ -1278,6 +1301,9 @@ class SettingsView(ft.Container):
                 lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         self._milestones_field.value = "4320, 1440, 180, 60, 30, 5"
         self._milestone_summary.value = "Bạn sẽ nhận 6 lần nhắc cho mỗi deadline"
+        self._sw_repeat_deadline.value = False
+        self._repeat_interval_field.value = "2"
+        self._update_repeat_reminder_summary()
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
@@ -2183,6 +2209,8 @@ class SettingsView(ft.Container):
                     if control.value
                 ],
                 "notify_milestones_minutes": self._milestones_field.value,
+                "notify_repeat_enabled": self._sw_repeat_deadline.value,
+                "notify_repeat_interval_hours": self._repeat_interval_field.value,
                 "notify_muted_courses": self._muted_courses_field.value,
             }
         )
@@ -2249,6 +2277,9 @@ class SettingsView(ft.Container):
             if active_count
             else "Không có mốc nhắc nhở nào"
         )
+        self._sw_repeat_deadline.value = snapshot.notify_repeat_enabled
+        self._repeat_interval_field.value = str(snapshot.notify_repeat_interval_hours)
+        SettingsView._update_repeat_reminder_summary(self)
         self._muted_courses_field.value = ", ".join(snapshot.notify_muted_courses)
         for key, card in self._profile_cards.items():
             selected = key == snapshot.notification_profile

@@ -193,13 +193,24 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             }
         }
 
+        // iOS has a finite pending local-notification budget. Retain the next
+        // 64 deadlines ourselves instead of relying on silent system eviction.
+        let scheduledRequests = desired.values
+            .sorted {
+                let left = $0.trigger?.nextTriggerDate() ?? .distantFuture
+                let right = $1.trigger?.nextTriggerDate() ?? .distantFuture
+                return left < right
+            }
+            .prefix(64)
+        let selectedRequests = Array(scheduledRequests)
+
         center.getPendingNotificationRequests { existing in
             let oldIdentifiers = Set(
                 existing
                     .map(\.identifier)
                     .filter { $0.hasPrefix(Self.requestPrefix) }
             )
-            let desiredIdentifiers = Set(desired.keys)
+            let desiredIdentifiers = Set(selectedRequests.map(\.identifier))
             let removed = oldIdentifiers.subtracting(desiredIdentifiers)
             if !removed.isEmpty {
                 self.center.removePendingNotificationRequests(withIdentifiers: Array(removed))
@@ -208,7 +219,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             let group = DispatchGroup()
             let lock = NSLock()
             var failures: [String] = []
-            for request in Array(desired.values) + immediate {
+            for request in selectedRequests + immediate {
                 group.enter()
                 self.center.add(request) { error in
                     if let error {
@@ -226,7 +237,8 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                 result([
                     "imported": activities.count,
                     "authoritative": true,
-                    "scheduled": desired.count,
+                    "scheduled": selectedRequests.count,
+                    "deferred": max(0, desired.count - selectedRequests.count),
                     "cancelled": removed.count,
                     "delivered": failures.isEmpty ? immediate.count : 0,
                     "failed": failures.count,

@@ -211,7 +211,7 @@ class Settings(BaseModel):
         default="steel_light",
         description="Theme preset, including Material Graphite and light variants",
     )
-    SETTINGS_SCHEMA_VERSION: int = Field(default=4, description="Phiên bản schema cài đặt")
+    SETTINGS_SCHEMA_VERSION: int = Field(default=5, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
     # Deprecated compatibility fields. Runtime scheduling uses only
     # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
@@ -294,6 +294,16 @@ class Settings(BaseModel):
     NOTIFY_DND_START: int = Field(default=22, description="Giờ bắt đầu im lặng (0-23)")
     NOTIFY_DND_END: int = Field(default=7, description="Giờ kết thúc im lặng (0-23)")
     NOTIFY_IGNORE_SUBMITTED: bool = Field(default=True, description="Im lặng với các bài đã nộp/có điểm")
+    NOTIFY_REPEAT_ENABLED: bool = Field(
+        default=False,
+        description="Nhắc lặp lại trong 24 giờ cuối trước deadline",
+    )
+    NOTIFY_REPEAT_INTERVAL_HOURS: int = Field(
+        default=2,
+        ge=1,
+        le=24,
+        description="Chu kỳ nhắc lặp lại trong 24 giờ cuối (giờ)",
+    )
 
     # Cài đặt hiệu năng
     PREFETCH_WORKERS: int = Field(default=4, description="Số luồng đồng thời khi prefetch chi tiết (1-10)")
@@ -346,7 +356,9 @@ def migrate_settings_data(raw: dict) -> dict:
             except (TypeError, ValueError):
                 pass
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
-    data["SETTINGS_SCHEMA_VERSION"] = 4
+    data.setdefault("NOTIFY_REPEAT_ENABLED", False)
+    data.setdefault("NOTIFY_REPEAT_INTERVAL_HOURS", 2)
+    data["SETTINGS_SCHEMA_VERSION"] = 5
     return data
 
 

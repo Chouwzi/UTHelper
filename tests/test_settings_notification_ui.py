@@ -49,3 +49,40 @@ def test_save_dialog_stays_open_when_validation_fails():
 
     assert result is False
     close.assert_not_called()
+
+
+def test_repeat_reminder_toggle_enables_interval_and_updates_summary():
+    from unittest.mock import Mock
+
+    view = SimpleNamespace(
+        _sw_repeat_deadline=SimpleNamespace(value=True),
+        _repeat_interval_field=SimpleNamespace(value="2", disabled=True, update=Mock()),
+        _repeat_reminder_summary=SimpleNamespace(value="", update=Mock()),
+        _on_form_field_change=Mock(),
+    )
+    view._update_repeat_reminder_summary = lambda: (
+        SettingsView._update_repeat_reminder_summary(view)
+    )
+
+    SettingsView._handle_repeat_reminder_toggle(view, None)
+
+    assert view._repeat_interval_field.disabled is False
+    assert view._repeat_reminder_summary.value == (
+        "Khi deadline còn 24 giờ, UTHelper sẽ nhắc mỗi 2 giờ."
+    )
+    view._on_form_field_change.assert_called_once_with()
+
+
+def test_repeat_reminder_summary_explains_disabled_state():
+    view = SimpleNamespace(
+        _sw_repeat_deadline=SimpleNamespace(value=False),
+        _repeat_interval_field=SimpleNamespace(value="3", disabled=False),
+        _repeat_reminder_summary=SimpleNamespace(value=""),
+    )
+
+    SettingsView._update_repeat_reminder_summary(view)
+
+    assert view._repeat_interval_field.disabled is True
+    assert view._repeat_reminder_summary.value == (
+        "Tắt để chỉ sử dụng các mốc nhắc deadline đã chọn ở trên."
+    )

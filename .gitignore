@@ -132,3 +132,4 @@ test-results/
 src/assets/cache/
 src/assets/diagnostics-config.json
 src/assets/release-version
+.vs/

@@ -11,6 +11,7 @@ from core.notification_policy import (
     ActivityNotificationPolicy,
     NotificationPolicyConfig,
     stable_notification_id,
+    expand_milestone_minutes,
 )
 from core.notification_types import ActivityNotification, ScheduledReminder
 from notifiers.mobile import MobileNotifier
@@ -278,3 +279,60 @@ def test_generic_mobile_setup_records_granted_permission(tmp_path):
     asyncio.run(notifier.setup(SimpleNamespace()))
 
     assert notifier._notifications_enabled is True
+
+
+def test_repeat_reminder_expands_every_two_hours_inside_final_24_hours():
+    milestones = expand_milestone_minutes(
+        (4320, 1440, 180, 60, 30, 5),
+        repeat_enabled=True,
+        repeat_interval_hours=2,
+    )
+
+    expected_repeat = tuple(range(120, 1441, 120))
+    assert set(expected_repeat).issubset(milestones)
+    assert 4320 in milestones  # Existing fixed milestone is preserved.
+    assert 180 in milestones
+    assert tuple(sorted(set(milestones))) == milestones
+
+
+def test_repeat_reminder_policy_schedules_every_two_hours_and_deduplicates_fixed_milestones():
+    now = datetime(2026, 7, 20, 12)
+    activity = _activity(deadline=now + timedelta(hours=25))
+    policy = ActivityNotificationPolicy(
+        NotificationPolicyConfig(
+            milestone_minutes=(4320, 1440, 180, 60, 30, 5),
+            repeat_enabled=True,
+            repeat_interval_hours=2,
+        )
+    )
+
+    reminders = policy.desired_schedules([activity], now)
+    repeated = [
+        reminder
+        for reminder in reminders
+        if 120 <= int(reminder.milestone) <= 1440
+        and int(reminder.milestone) % 120 == 0
+    ]
+
+    assert [int(item.milestone) for item in repeated] == list(
+        range(120, 1441, 120)
+    )
+    assert len({item.scheduled_at for item in reminders}) == len(reminders)
+
+
+def test_repeat_reminder_dispatches_next_unsent_cadence_milestone():
+    now = datetime(2026, 7, 20, 12)
+    activity = _activity(deadline=now + timedelta(hours=22))
+    policy = ActivityNotificationPolicy(
+        NotificationPolicyConfig(
+            milestone_minutes=(1440, 180, 60, 30, 5),
+            repeat_enabled=True,
+            repeat_interval_hours=2,
+        )
+    )
+
+    assert policy.due_candidate(activity, (), now).milestone == 1320
+    assert policy.due_candidate(activity, (1320,), now) is None
+
+    next_activity = _activity(deadline=now + timedelta(hours=20))
+    assert policy.due_candidate(next_activity, (1320,), now).milestone == 1200

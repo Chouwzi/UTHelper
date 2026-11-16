@@ -26,7 +26,8 @@ EXPECTED_FORM_FIELDS = {
     "urgency_critical_hours", "urgency_warning_hours", "opening_soon_hours",
     "prefetch_workers", "notify_dnd_enable", "notify_dnd_start", "notify_dnd_end",
     "notify_ignore_submitted", "notification_profile", "notify_types",
-    "notify_milestones_minutes", "notify_muted_courses",
+    "notify_milestones_minutes", "notify_repeat_enabled",
+    "notify_repeat_interval_hours", "notify_muted_courses",
 }
 
 
@@ -65,6 +66,7 @@ def test_equivalent_form_representations_produce_equal_snapshots(left, right):
         {"fetch_months": 4, "telegram_bot_token": "private"},
         {"notify_dnd_start": -1, "discord_webhook_url": "private"},
         {"notify_milestones_minutes": "60, nope", "gmail_app_password": "private"},
+        {"notify_repeat_interval_hours": 25, "gmail_app_password": "private"},
     ],
 )
 def test_invalid_numeric_controls_are_field_safe(values):
@@ -180,6 +182,8 @@ SENTINEL_SETTINGS_VALUES = {
     "NOTIFICATION_PROFILE": "exam_week",
     "NOTIFY_TYPES": ["zeta", "alpha"],
     "NOTIFY_MILESTONES_MINUTES": [31, 7],
+    "NOTIFY_REPEAT_ENABLED": True,
+    "NOTIFY_REPEAT_INTERVAL_HOURS": 3,
     "NOTIFY_MUTED_COURSES": ["Zoology", "Algebra"],
 }
 
@@ -227,6 +231,8 @@ EXPECTED_SETTINGS_VALUES = {
     "NOTIFICATION_PROFILE": "exam_week",
     "NOTIFY_TYPES": ["alpha", "zeta"],
     "NOTIFY_MILESTONES_MINUTES": [31, 7],
+    "NOTIFY_REPEAT_ENABLED": True,
+    "NOTIFY_REPEAT_INTERVAL_HOURS": 3,
     "NOTIFY_MUTED_COURSES": ["Algebra", "Zoology"],
 }
 
@@ -302,3 +308,26 @@ def test_boolean_settings_mapping_is_one_hot(snapshot_field, config_key):
     assert {
         key for _, key in BOOLEAN_FIELD_CONFIG_KEYS if mapped_values[key]
     } == {config_key}
+
+
+def test_repeat_reminder_settings_default_to_disabled_and_two_hour_interval():
+    snapshot = SettingsFormSnapshot.from_form_values({})
+
+    assert snapshot.notify_repeat_enabled is False
+    assert snapshot.notify_repeat_interval_hours == 2
+
+
+def test_repeat_reminder_settings_round_trip_and_validate_interval():
+    snapshot = SettingsFormSnapshot.from_form_values(
+        {"notify_repeat_enabled": True, "notify_repeat_interval_hours": "2"}
+    )
+
+    assert snapshot.notify_repeat_enabled is True
+    assert snapshot.notify_repeat_interval_hours == 2
+    assert snapshot.to_settings_values()["NOTIFY_REPEAT_ENABLED"] is True
+    assert snapshot.to_settings_values()["NOTIFY_REPEAT_INTERVAL_HOURS"] == 2
+
+    with pytest.raises(SettingsFormValidationError):
+        SettingsFormSnapshot.from_form_values(
+            {"notify_repeat_interval_hours": 0}
+        )

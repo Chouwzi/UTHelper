@@ -28,8 +28,14 @@ class AndroidBackgroundBridge:
     @staticmethod
     def settings_payload() -> dict[str, Any]:
         from config import get_sync_interval_minutes, settings
+        from core.notification_policy import expand_milestone_minutes
 
         interval_minutes = get_sync_interval_minutes()
+        countdown_minutes = expand_milestone_minutes(
+            settings.NOTIFY_MILESTONES_MINUTES or [],
+            repeat_enabled=bool(settings.NOTIFY_REPEAT_ENABLED),
+            repeat_interval_hours=int(settings.NOTIFY_REPEAT_INTERVAL_HOURS),
+        )
         return {
             "enabled": bool(settings.BACKGROUND_CHECK_ANDROID and interval_minutes > 0),
             "interval_minutes": interval_minutes,
@@ -37,7 +43,7 @@ class AndroidBackgroundBridge:
             "notify_types": list(settings.NOTIFY_TYPES or []),
             "muted_courses": list(settings.NOTIFY_MUTED_COURSES or []),
             "ignore_submitted": bool(settings.NOTIFY_IGNORE_SUBMITTED),
-            "countdown_minutes": list(settings.NOTIFY_MILESTONES_MINUTES or []),
+            "countdown_minutes": list(countdown_minutes),
             "dnd_enabled": bool(settings.NOTIFY_DND_ENABLE),
             "dnd_start": int(settings.NOTIFY_DND_START),
             "dnd_end": int(settings.NOTIFY_DND_END),

@@ -1966,3 +1966,28 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Preserve the existing `v2.4.0` tag and use patch version `2.4.1` (native build
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
+
+
+## Repeating deadline reminders (2026-11-15)
+
+- Added opt-in repeating deadline reminders for the final 24 hours, with a
+  configurable 1, 2, 3, 4, or 6-hour cadence (default: disabled; default cadence: 2h).
+- Extended the pure notification policy so fixed milestones and repeating
+  milestones are merged and deduplicated. Existing notification profiles and
+  fixed milestones remain unchanged when the feature is disabled.
+- Persisted the new settings through schema migration v5 and the canonical
+  `SettingsFormSnapshot`; exposed the switch and cadence selector in Notification
+  Settings.
+- Passed the expanded countdown milestone list to the existing Android/iOS
+  native bridge. Re-imported the current activity snapshot after mobile settings
+  changes and reconciled the Windows tray scheduler immediately.
+- iOS pending local reminders are ordered by next trigger and capped at 64; the
+  bridge reports any deferred count for diagnostics rather than depending on
+  system eviction.
+- Tests added for cadence expansion, deduplication, due selection, native bridge
+  payload, settings migration/validation, form round-tripping, and notification
+  settings UI state.
+- Validation in the build container: 102 targeted policy/config/form/bridge tests
+  passed; `compileall` and `git diff --check` passed. Flet is not installed in this container, so UI/AppController test
+  modules could not be collected. Ruff and native iOS/Android builds were not
+  available and remain to be verified on the developer machine/CI.

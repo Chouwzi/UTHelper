@@ -56,6 +56,9 @@ def _make_state_only_view():
         _dnd_start_field=_control(),
         _dnd_end_field=_control(),
         _sw_ignore_sub=_control(),
+        _sw_repeat_deadline=_control(False),
+        _repeat_interval_field=_control("2", disabled=True, update=Mock()),
+        _repeat_reminder_summary=_control(""),
         _notify_type_checks={
             key: _control(False)
             for key in ("quiz", "assignment", "attendance", "forum", "resource", "choice", "zeta", "alpha")
@@ -80,6 +83,7 @@ def _make_state_only_view():
     view._rebuild_theme_cards = Mock()
     view._update_profile_summary = Mock()
     view._update_dnd_summary = Mock()
+    view._update_repeat_reminder_summary = lambda: SettingsView._update_repeat_reminder_summary(view)
     view._capture_form_snapshot = lambda: SettingsView._capture_form_snapshot(view)
     return view
 

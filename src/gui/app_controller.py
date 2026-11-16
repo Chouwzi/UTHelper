@@ -228,6 +228,10 @@ class AppController:
         self._notification_milestones_snapshot = tuple(
             settings.NOTIFY_MILESTONES_MINUTES or []
         )
+        self._notification_repeat_snapshot = (
+            bool(settings.NOTIFY_REPEAT_ENABLED),
+            int(settings.NOTIFY_REPEAT_INTERVAL_HOURS),
+        )
         self._last_successful_sync_at = None
         self._time_policy = ActivityTimePolicy(
             settings.URGENCY_CRITICAL_HOURS,
@@ -2789,6 +2793,14 @@ class AppController:
         new_milestones = tuple(settings.NOTIFY_MILESTONES_MINUTES or [])
         milestones_changed = new_milestones != self._notification_milestones_snapshot
         self._notification_milestones_snapshot = new_milestones
+        new_repeat_snapshot = (
+            bool(settings.NOTIFY_REPEAT_ENABLED),
+            int(settings.NOTIFY_REPEAT_INTERVAL_HOURS),
+        )
+        repeat_settings_changed = (
+            new_repeat_snapshot != self._notification_repeat_snapshot
+        )
+        self._notification_repeat_snapshot = new_repeat_snapshot
         if credentials_changed:
             # Credentials are the only settings change that requires immediate
             # network reload and an account-specific cache namespace.
@@ -2845,6 +2857,17 @@ class AppController:
                     await self._android_background.configure(
                         token, token_origin=token_origin
                     )
+                    if repeat_settings_changed:
+                        # iOS keeps only the foreground activity snapshot, so
+                        # re-import it after settings change to reconcile local
+                        # notifications immediately. Android also safely refreshes
+                        # its persisted AlarmManager schedules.
+                        with self._data_lock:
+                            schedule_snapshot = list(self.all_data)
+                        if schedule_snapshot:
+                            await self._android_background.import_activities(
+                                schedule_snapshot, authoritative=True
+                            )
                     if milestones_changed and any(
                         int(value) <= 60
                         for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
@@ -2855,6 +2878,16 @@ class AppController:
                             await self._android_background.request_exact_alarm_access()
 
                 self._safe_run_task(_apply_android_settings)
+        elif repeat_settings_changed and self.notifier:
+            # Windows persists reminders in its tray-owned scheduler. Reconcile
+            # from the current snapshot rather than waiting for the next Moodle
+            # polling interval after the user changes the repeat setting.
+            with self._data_lock:
+                schedule_snapshot = list(self.all_data)
+            if schedule_snapshot:
+                self._safe_run_task(
+                    self.notifier.reconcile_schedules, schedule_snapshot
+                )
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
@@ -2904,6 +2937,20 @@ class AppController:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             self._update_footer()
+
+            # A successful/manual submission must cancel every remaining local
+            # deadline reminder immediately instead of waiting for the next sync.
+            mobile_bridge = getattr(self, "_android_background", None)
+            if mobile_bridge is not None and mobile_bridge.available:
+                self._safe_run_task(
+                    mobile_bridge.import_activities,
+                    data_copy,
+                    authoritative=True,
+                )
+            elif getattr(self, "notifier", None) is not None:
+                self._safe_run_task(
+                    self.notifier.reconcile_schedules, data_copy
+                )
 
     def _show_detail(self, data: dict):
         self._dismiss_desktop_filter_menu()

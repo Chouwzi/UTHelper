@@ -219,6 +219,8 @@ class SettingsFormSnapshot:
     notification_profile: str
     notify_types: tuple[str, ...]
     notify_milestones_minutes: tuple[int, ...]
+    notify_repeat_enabled: bool
+    notify_repeat_interval_hours: int
     notify_muted_courses: tuple[str, ...]
 
     @classmethod
@@ -268,6 +270,8 @@ class SettingsFormSnapshot:
                 "notification_profile": getattr(value, "NOTIFICATION_PROFILE", "balanced"),
                 "notify_types": getattr(value, "NOTIFY_TYPES", DEFAULT_NOTIFY_TYPES),
                 "notify_milestones_minutes": getattr(value, "NOTIFY_MILESTONES_MINUTES", DEFAULT_MILESTONES),
+                "notify_repeat_enabled": getattr(value, "NOTIFY_REPEAT_ENABLED", False),
+                "notify_repeat_interval_hours": getattr(value, "NOTIFY_REPEAT_INTERVAL_HOURS", 2),
                 "notify_muted_courses": getattr(value, "NOTIFY_MUTED_COURSES", ()),
             }
         )
@@ -320,6 +324,16 @@ class SettingsFormSnapshot:
             notification_profile=_text(values.get("notification_profile"), "balanced").casefold(),
             notify_types=_normalize_notify_types(values.get("notify_types")),
             notify_milestones_minutes=_normalize_milestones(values.get("notify_milestones_minutes")),
+            notify_repeat_enabled=_parse_bool(
+                "notify_repeat_enabled", values.get("notify_repeat_enabled"), False
+            ),
+            notify_repeat_interval_hours=_parse_int(
+                "notify_repeat_interval_hours",
+                values.get("notify_repeat_interval_hours"),
+                2,
+                1,
+                24,
+            ),
             notify_muted_courses=_normalize_csv_strings(values.get("notify_muted_courses")),
         )
 
@@ -368,5 +382,7 @@ class SettingsFormSnapshot:
             "NOTIFICATION_PROFILE": self.notification_profile,
             "NOTIFY_TYPES": list(self.notify_types),
             "NOTIFY_MILESTONES_MINUTES": list(self.notify_milestones_minutes),
+            "NOTIFY_REPEAT_ENABLED": self.notify_repeat_enabled,
+            "NOTIFY_REPEAT_INTERVAL_HOURS": self.notify_repeat_interval_hours,
             "NOTIFY_MUTED_COURSES": list(self.notify_muted_courses),
         }

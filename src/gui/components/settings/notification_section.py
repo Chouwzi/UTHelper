@@ -164,7 +164,53 @@ def init_notification_controls(view):
         value=", ".join(map(str, _current_milestones)),
         visible=False,
     )
-    
+
+    # Optional repeating reminders during the final 24 hours before a deadline.
+    repeat_enabled = bool(getattr(settings, "NOTIFY_REPEAT_ENABLED", False))
+    repeat_interval = int(getattr(settings, "NOTIFY_REPEAT_INTERVAL_HOURS", 2) or 2)
+    repeat_options = [
+        ft.dropdown.Option("1", "Mỗi 1 giờ"),
+        ft.dropdown.Option("2", "Mỗi 2 giờ"),
+        ft.dropdown.Option("3", "Mỗi 3 giờ"),
+        ft.dropdown.Option("4", "Mỗi 4 giờ"),
+        ft.dropdown.Option("6", "Mỗi 6 giờ"),
+    ]
+    if repeat_interval not in {1, 2, 3, 4, 6}:
+        repeat_options.append(
+            ft.dropdown.Option(
+                str(repeat_interval), f"Tùy chỉnh hiện tại: mỗi {repeat_interval} giờ"
+            )
+        )
+    view._sw_repeat_deadline = ft.Switch(
+        value=repeat_enabled,
+        active_color=C.ACCENT,
+        label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+        label="Nhắc lặp lại trong 24 giờ cuối",
+        on_change=view._handle_repeat_reminder_toggle,
+    )
+    view._repeat_interval_field = ft.Dropdown(
+        value=str(repeat_interval),
+        label="Chu kỳ nhắc lại",
+        options=repeat_options,
+        disabled=not repeat_enabled,
+        border_color=C.BORDER,
+        focused_border_color=C.ACCENT,
+        color=C.TEXT_PRIMARY,
+        bgcolor=C.BG,
+        border_radius=10,
+        on_select=view._handle_repeat_interval_select,
+    )
+    view._repeat_reminder_summary = ft.Text(
+        (
+            f"Khi deadline còn 24 giờ, UTHelper sẽ nhắc mỗi {repeat_interval} giờ."
+            if repeat_enabled
+            else "Tắt để chỉ sử dụng các mốc nhắc deadline đã chọn ở trên."
+        ),
+        size=12,
+        color=C.TEXT_SECONDARY,
+        italic=True,
+    )
+
     # Khu vực cấu hình môn học tắt thông báo (Bỏ qua môn học)
     view._muted_courses_list = ft.Column(spacing=2)
     view._muted_count_text = ft.Text("0 môn", size=12, color=C.TEXT_SECONDARY)
@@ -317,6 +363,10 @@ def build_notification_section(view) -> ft.Control:
             view._milestone_chips_row,
             view._milestone_summary,
             view._milestones_field,
+            ft.Container(height=4),
+            view._sw_repeat_deadline,
+            view._repeat_interval_field,
+            view._repeat_reminder_summary,
             ft.Container(height=4),
             view._sw_ignore_sub,
             ft.Divider(height=16, color=C.BORDER),

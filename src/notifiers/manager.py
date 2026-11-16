@@ -118,6 +118,12 @@ class NotificationManager:
                 minutes_before=max(
                     0, int(getattr(config, "NOTIFY_MINUTES_BEFORE", 0) or 0)
                 ),
+                repeat_enabled=bool(
+                    getattr(config, "NOTIFY_REPEAT_ENABLED", False)
+                ),
+                repeat_interval_hours=int(
+                    getattr(config, "NOTIFY_REPEAT_INTERVAL_HOURS", 2) or 2
+                ),
                 dnd_enabled=bool(getattr(config, "NOTIFY_DND_ENABLE", False)),
                 dnd_start=int(getattr(config, "NOTIFY_DND_START", 22)),
                 dnd_end=int(getattr(config, "NOTIFY_DND_END", 7)),
