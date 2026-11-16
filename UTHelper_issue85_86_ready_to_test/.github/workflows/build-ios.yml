@@ -1,0 +1,75 @@
+name: 🍎 Build iOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build iOS
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 📦 Install project and test tools
+        run: |
+          pip install -e . pytest
+          flet --version
+
+      - name: 🧪 Verify notification contracts
+        env:
+          PYTHONPATH: src:extensions/flet_uth_background_sync/src
+        run: |
+          python -m pytest \
+            tests/test_notification_e2e_contract.py \
+            tests/test_notification_policy.py \
+            tests/test_notification_manager_extended.py \
+            tests/test_windows_notifier.py \
+            tests/test_background_sync_bridge.py \
+            extensions/flet_uth_background_sync/tests/test_package_contract.py \
+            -q
+
+      - name: 🔨 Build unsigned iOS simulator diagnostic
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+        run: |
+          set -euo pipefail
+          PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
+          BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          flet build ios-simulator --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+          find build/ios-simulator -type d -name '*.app' -prune -print | sort > "$RUNNER_TEMP/ios-apps.txt"
+          test "$(wc -l < "$RUNNER_TEMP/ios-apps.txt" | tr -d ' ')" -eq 1
+          APP=$(sed -n '1p' "$RUNNER_TEMP/ios-apps.txt")
+          DIAGNOSTIC="UTHelper-${GITHUB_SHA}-ios-unsigned-diagnostic.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIAGNOSTIC"
+
+      - name: 📤 Upload iOS simulator diagnostic
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-unsigned-diagnostic-${{ github.sha }}
+          path: UTHelper-${{ github.sha }}-ios-unsigned-diagnostic.zip
+          retention-days: 30
+          if-no-files-found: error

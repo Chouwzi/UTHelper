@@ -1,0 +1,14 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>UTHelper-$(Version)</OutputName>
+    <DefineConstants>Version=$(Version);AppBundle=$(AppBundle)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Package.wxs" />
+    <BindPath Include="$(AppBundle)" BindName="AppBundle" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
+  </ItemGroup>
+</Project>

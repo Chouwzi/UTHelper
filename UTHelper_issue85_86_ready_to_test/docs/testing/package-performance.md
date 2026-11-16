@@ -1,0 +1,201 @@
+# Package size and installation benchmark
+
+## Release adoption (2.5.0)
+
+The owner selected the tested smaller Android profile for release. Starting at
+2.5.0, release builds emit a compressed ARM64 APK plus a compressed universal
+compatibility APK under its existing filename. The updater prefers ARM64 on
+64-bit ARM processes and retains universal compatibility for older clients and
+other architectures. Windows uses application cleanup and the tested `.chm`
+removal while retaining high CAB compression. Historical 2.4.1 measurements below
+remain the baseline; new release sizes are verified from the built assets.
+
+## Scope and provenance
+
+The experiment keeps the UTHelper 2.4.1 application, dependencies, native plugins,
+signing checks, notifications and update boundaries intact. No production asset is
+replaced. APKs are debug-signed diagnostics; device IPAs are unsigned and require
+user signing. Neither is a production update.
+
+- Android: [matrix run 40544518112](https://github.com/Chouwzi/UTHelper/actions/runs/40544518112),
+  source `639876cb5cf34f4feb316adba091c03771230ecd`.
+- iOS: [corrected matrix run 40545771860](https://github.com/Chouwzi/UTHelper/actions/runs/40545771860),
+  source `c400ec3c4e3a3a36b4083040f7a628ec4644d778`.
+- Windows: [installation matrix run 40623030510](https://github.com/Chouwzi/UTHelper/actions/runs/40623030510),
+  source `9972a2a5df2f391e1f412a7706c0aed674940606`.
+- Windows help-file cleanup: [run 40624562664](https://github.com/Chouwzi/UTHelper/actions/runs/40624562664),
+  source `f49b1cc` (the full revision is retained in the JSON results).
+- Final source-configuration confirmation: [run 40626799330](https://github.com/Chouwzi/UTHelper/actions/runs/40626799330),
+  source `8b52f459fca2765a63c7002b03bd86a70cec3147`.
+
+The initial matrix runs use identical application source and dependency constraints;
+candidates change packaging options. Baseline and candidate are rebuilt rather
+than comparing different application releases. `pubspec.lock`, source revision, package hash,
+manifest and measurements accompany the diagnostic artifacts. The first macOS
+baseline failed on Bash's empty-array handling; the corrected iOS run replaces
+that measurement. The first Windows measurement stopped before installation
+because the environment-scoped WiX acceptance was unavailable; the corrected run
+receives the already accepted `wix7` marker explicitly.
+
+## Android results
+
+MiB means 1,048,576 bytes. Expanded archive bytes are not an Android storage report.
+
+| Variant | APK MiB | Expanded archive MiB | Reduction from universal |
+|---|---:|---:|---:|
+| Universal, modern native packaging | 155.936 | 174.060 | baseline |
+| Universal, application cleanup | 155.925 | 174.037 | 0.007% |
+| ARM64, modern native packaging, cleanup | 64.228 | 83.309 | 58.81% |
+| ARM64, legacy native compression, cleanup | 34.610 | 83.309 | 77.81% |
+
+The universal APK carries 48.004 MiB of ARM64 native libraries, 40.315 MiB of
+ARM32 libraries and 50.413 MiB of x86-64 libraries. In the ARM64 set alone,
+`libapp.so` is 14.376 MiB, `libflutter.so` is 11.045 MiB and `libpython3.14.so`
+is 5.559 MiB, before Python packages, stdlib and supporting native dependencies.
+Python has a real runtime cost, but shipping three architectures is the largest
+measured opportunity here. A stack rewrite is not required for the 59% reduction.
+Any future Dart-only rewrite needs a feature-parity prototype and the same
+notification, background-sync, authentication and update checks before its size
+or speed can be compared fairly; this experiment does not claim a measured win
+for an unbuilt replacement.
+
+All four builds passed APK signature verification, exact application/version/build
+checks and the five notification/background receiver checks. This is native build
+and package evidence, not a device execution test. The initial experiment used
+host measurements at the owner's request. A subsequently connected Samsung tablet
+is covered in the [Android device report](android-device-performance.md), which
+separates authenticated runtime checks from isolated fresh-install measurements.
+Battery and low-end-phone acceptance remain outside these samples.
+
+The package reader also performs three complete sequential reads with CRC checks.
+These are warm-cache host decompression measurements on separate hosted VMs, not
+Android installation times or a controlled cross-VM speed comparison. They must
+not decide startup or frame-performance acceptance.
+
+ARM64-only packages omit ARM32 and x86-64 support. Keep universal as the default
+and as the compatibility option. Modern packaging is the initial balance choice:
+it cuts the download substantially while preserving direct native-library mapping.
+Legacy packaging is the smaller-download experiment; it extracts native libraries
+at install time and can increase installed storage and loading cost. It is not the
+default without device evidence.
+
+## iOS results
+
+| Variant | IPA MiB | Expanded archive MiB | Entries |
+|---|---:|---:|---:|
+| Baseline | 35.0042 | 85.2821 | 3,471 |
+| Application cleanup | 34.9916 | 85.2600 | 3,467 |
+
+Both device IPAs passed the repository's native bundle identity, ARM64, version,
+build-number and unsigned-sideload-container verification. Cleanup saves about
+13 KiB in this clean CI build; it is not a substantial iOS size optimization.
+The largest compressed components include Dart App.framework (about 7 MiB),
+Python packages (about 5.4 MiB), Python stdlib (about 5.2 MiB), and Flutter.framework
+(about 4.2 MiB). Removing required runtime libraries would change the application
+contract, so no such removal is proposed. iPhone installation/startup/frame timing
+is outside this Windows-host experiment.
+
+## Windows method
+
+Baseline and `--cleanup-app` build on separate disposable Windows runners. Each
+runner creates private MSI candidates with the existing high CAB compression and
+medium CAB compression, then repeats real quiet installation/uninstallation three
+times per candidate. Every installed bundle is verified and runs the existing
+isolated single-instance/autostart/hidden-window/activation smoke matrix before
+uninstall. It never installs over a maintainer's application or uses their profile.
+
+The first sample includes Windows Installer initialization; subsequent samples
+reuse OS/file caches. Compare repeat distributions, not a single best value.
+The EXE bootstrapper is not timed separately. Filesystem bytes and file count are
+measured after install. Build time and ZIP read time are not installer time.
+
+| Bundle | CAB compression | MSI MiB | Median install s | Median uninstall s | Installed MiB / files |
+|---|---|---:|---:|---:|---:|
+| Baseline | high | 47.970 | 12.398 | 18.083 | 147.849 / 3,471 |
+| Baseline | medium | 50.912 | 12.174 | 17.724 | 147.849 / 3,471 |
+| Application cleanup | high | 47.990 | 10.710 | 16.190 | 147.827 / 3,468 |
+| Application cleanup | medium | 50.908 | 14.510 | 19.608 | 147.827 / 3,468 |
+| Application + help-file cleanup | high | 45.693 | 15.713 | 26.716 | 145.306 / 3,467 |
+| Application + help-file cleanup | medium | 48.603 | 13.427 | 21.154 | 145.306 / 3,467 |
+| Source-config confirmation | high | 45.681 | 13.585 | 21.438 | 145.306 / 3,467 |
+| Source-config confirmation | medium | 48.595 | 13.804 | 21.580 | 145.306 / 3,467 |
+
+All 24 installation/uninstallation cycles and their native activation smoke checks
+passed. Application cleanup removes only about 23 KiB from a clean hosted build.
+Its faster high-compression installation on another VM is not evidence that removing those
+23 KiB caused a speedup. Medium compression costs about 2.94 MiB more download and
+does not consistently improve installation. Keep high compression in production;
+do not claim an installer speed improvement from these samples. The help-file trial
+removes one PyWin32 compiled help (`.chm`) file, retaining all runtime modules. It
+saves 2.52 MiB installed and about 2.30 MiB in the high-compression MSI compared
+with application cleanup alone. The high-compression MSI is 4.75% smaller than
+baseline. Its slower install samples also came from another VM; the results do
+not establish a causal speed improvement or regression. Help-file cleanup is
+retained for its measured size reduction and passing native activation checks.
+The final source-config build repeated all six install/activation checks on
+Windows build 26100, an AMD EPYC 7763 host with four logical CPUs allocated to
+the runner. Its staged and authored configurations are semantically identical;
+the selected defaults reproduce the measured profile. Separate builds vary by
+small packaging overhead, so the high-compression result is about 45.68–45.69 MiB.
+
+The [machine-readable results](package-performance-results.json) retain all samples,
+artifact hashes, source commits and run links. Refresh them from the diagnostic
+artifacts after a new workflow run; keep the method and limits in this document
+in sync. Full package/lock/manifest reports remain in the short-lived workflow
+artifacts and the operator's private baseline directory.
+
+## Changes retained
+
+- Enable application cleanup through the supported Flet source configuration;
+  all three platforms built successfully with it. Compilation remains enabled.
+- Remove only Windows package help files with the tested `**.chm` glob in
+  `[tool.flet.windows.cleanup]`; keep all runtime dependencies.
+- Expose explicit Android architecture/legacy/output-directory options in the
+  existing patched build script. The subsequently selected release defaults are
+  described above; diagnostic modern profiles explicitly disable compression.
+- Keep Windows high CAB compression. Do not remove Pillow, lxml, SSL, Pydantic,
+  Python runtime or notification components to manufacture a smaller result.
+- Do not change the production updater or publish benchmark artifacts as releases.
+
+## Reproduce
+
+The benchmark workflow is manual and read-only with respect to repository contents,
+release assets and secrets. It accepts `platform=android|ios|windows|all`; Windows
+also requires the owner's existing WiX EULA acceptance marker. It publishes only
+short-lived diagnostic artifacts, never a GitHub release.
+
+The workflow stages explicit cleanup settings in its disposable checkout with
+`prepare_package_benchmark.py`. Baseline disables application cleanup and retains
+help files; cleanup enables application cleanup only; the Windows
+`documentation-only` profile enables both. Original and staged authored TOML are
+saved as evidence. This avoids inheriting newly adopted defaults into the
+baseline. Flet 0.86.5 does not support `--no-cleanup-app`; source configuration is
+used instead. No generated Dart source is edited.
+
+Local Android candidates use the same required two-pass notification patch path:
+
+```powershell
+./scripts/build_android.ps1 -Architecture arm64-v8a -LegacyPackaging:$false -OutputDir build/apk-arm64-modern
+./scripts/build_android.ps1 -Architecture arm64-v8a -LegacyPackaging -OutputDir build/apk-arm64-legacy
+```
+
+Measure an existing artifact without installing or rewriting it:
+
+```powershell
+python scripts/measure_package.py build/apk-arm64-modern/UTHelper.apk --output build/arm64-report.json
+```
+
+Keep application/package compilation enabled. Cleanup removes redundant cache
+directories after producing adjacent runtime bytecode; never recursively delete
+all `.pyc` files. Do not edit generated Dart code or re-zip a production APK to
+implement these changes: build from the authored configuration and verify again.
+
+The 2.5.0 release adoption coordinates the additional ARM64 asset with inventory,
+runtime selection, native ABI/signature verification and universal compatibility.
+No older published asset is replaced.
+
+## Supporting sources
+
+- [Flet Android ABI and native packaging](https://flet.dev/docs/publish/android/)
+- [Flet compilation and cleanup](https://flet.dev/docs/publish/)
+- [Flutter size analysis and download/install distinction](https://docs.flutter.dev/perf/app-size)

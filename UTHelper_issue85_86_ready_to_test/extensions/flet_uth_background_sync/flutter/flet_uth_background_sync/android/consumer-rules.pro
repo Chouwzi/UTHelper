@@ -1,0 +1,2 @@
+-keep class com.uthelper.backgroundsync.** { *; }
+-keep class * extends androidx.room.RoomDatabase

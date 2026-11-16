@@ -1,0 +1,131 @@
+name: 📱 Build Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: ☕ Setup Java
+        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📦 Install project and Flet CLI
+        run: |
+          pip install -e ".[android-build]"
+          flet --version
+
+      - name: 🔨 Build APK
+        env:
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+        run: |
+          PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
+          BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
+
+          # Install Gradle init script for core library desugaring
+          # This applies to ALL Android subprojects automatically,
+          # without needing to patch any build.gradle.kts file
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/desugaring.gradle << 'INIT_GRADLE'
+          allprojects {
+              afterEvaluate {
+                  if (project.hasProperty('android')) {
+                      android {
+                          compileOptions {
+                              coreLibraryDesugaringEnabled true
+                          }
+                          defaultConfig {
+                              multiDexEnabled true
+                          }
+                      }
+                      dependencies {
+                          coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+                      }
+                  }
+              }
+          }
+          INIT_GRADLE
+          echo "✅ Installed Gradle init script for desugaring"
+
+          # First pass materializes Flet's Flutter project. The notification
+          # extension patcher then registers AlarmManager receivers/services.
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
+          flet-android-notifications-patch --project-root build/flutter
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+
+      - name: 🔎 Verify notification manifest wiring
+        run: |
+          mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
+          test "${#APK_CANDIDATES[@]}" -eq 1
+          APK="${APK_CANDIDATES[0]}"
+          APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          test -x "$APKANALYZER"
+          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
+          "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
+          grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
+          grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml
+          grep -q "ActionBroadcastReceiver" final-android-manifest.xml
+          grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
+          grep -q "RescheduleReceiver" final-android-manifest.xml
+          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
+            build/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.room:room-runtime:2.8.4" \
+            build/flutter-packages/flet_uth_background_sync/android/build.gradle
+          DIAGNOSTIC_APK="UTHelper-${{ github.sha }}-unsigned-diagnostic.apk"
+          mv "$APK" "$DIAGNOSTIC_APK"
+          python - "$DIAGNOSTIC_APK" <<'PY'
+          import sys
+          import zipfile
+          with zipfile.ZipFile(sys.argv[1], "a") as archive:
+              archive.writestr(
+                  "UNSIGNED_DIAGNOSTIC_ONLY.txt",
+                  "Signature intentionally invalidated; never distribute as a release.",
+              )
+          PY
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          test -x "$APKSIGNER"
+          if "$APKSIGNER" verify "$DIAGNOSTIC_APK"; then
+            echo "Diagnostic APK unexpectedly retained a valid install signature"
+            exit 1
+          fi
+
+      - name: 📤 Upload unsigned diagnostic APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-unsigned-diagnostic-${{ github.sha }}
+          path: UTHelper-${{ github.sha }}-unsigned-diagnostic.apk
+          retention-days: 30
+          if-no-files-found: error

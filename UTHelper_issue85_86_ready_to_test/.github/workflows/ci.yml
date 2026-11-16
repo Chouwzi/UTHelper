@@ -1,0 +1,210 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  gitflow-policy:
+    name: 🌿 Gitflow policy
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate pull request direction
+        run: >-
+          python scripts/validate_gitflow_pr.py
+          --event-name "${{ github.event_name }}"
+          --base "${{ github.base_ref }}"
+          --head "${{ github.head_ref }}"
+
+  private_diagnostics:
+    name: Private diagnostics
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src:extensions/flet_uth_background_sync/src
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install diagnostics test dependencies
+        run: pip install -e . pytest pytest-timeout
+
+      - name: Verify private diagnostic boundaries
+        run: >-
+          python -m pytest
+          tests/test_diagnostic_redaction.py
+          tests/test_diagnostic_logging.py
+          tests/test_diagnostic_spool.py
+          tests/test_diagnostic_transport.py
+          tests/test_diagnostic_release_config.py
+          tests/test_diagnostic_runtime.py
+          tests/test_diagnostic_subprocess.py
+          tests/test_windows_crash_evidence.py
+          tests/test_flutter_diagnostics_patch.py
+          -v --timeout=60
+
+  lint:
+    name: 🔍 Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check src/ --output-format=github
+
+  test:
+    name: 🧪 Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install -e extensions/flet_uth_background_sync
+          pip install pytest pytest-cov keyring
+
+      - name: Run tests
+        run: |
+          cd src
+          python -m pytest ../tests/ -q \
+            --tb=short \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml:../coverage.xml \
+            -x
+
+      - name: Compile check (syntax)
+        run: python -m py_compile src/main.py && python -c "import py_compile, pathlib; [py_compile.compile(str(f), doraise=True) for f in pathlib.Path('src').rglob('*.py')]"
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  dependency-review:
+    name: 🔐 Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out pull request source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Reject newly introduced vulnerable dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
+        timeout-minutes: 5
+        with:
+          fail-on-severity: moderate
+
+  security:
+    name: 🔒 Security (${{ matrix.surface }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - surface: core
+            os: ubuntu-latest
+            extras: "."
+          - surface: android
+            os: ubuntu-latest
+            extras: ".[android-build]"
+          - surface: windows
+            os: windows-latest
+            extras: ".[windows]"
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Check for known vulnerabilities
+        shell: bash
+        run: |
+          pip install pip-audit
+          pip install -e "${{ matrix.extras }}"
+          pip freeze --exclude-editable > audit-requirements.txt
+          audit_status=1
+          for attempt in 1 2 3; do
+            if pip-audit --strict --desc --requirement audit-requirements.txt; then
+              audit_status=0
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+          exit "$audit_status"
