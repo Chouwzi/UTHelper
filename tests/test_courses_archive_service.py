@@ -1068,11 +1068,11 @@ def test_archive_service_preserves_dotfiles_nested_archives_and_handles_missing_
     with pytest.raises(FileNotFoundError):
         svc.extract_entry_bytes("dotfiles.zip", raw, "missing.txt")
 
-    unknown = svc.inspect_bytes("archive.7z", b"7z\xbc\xaf\x27\x1c")
+    unknown = svc.inspect_bytes("archive.ace", b"**ACE**")
     assert unknown.supported is False
     assert unknown.format_name == "unknown"
     with pytest.raises(ValueError):
-        svc.extract_entry_bytes("archive.7z", b"7z", "a.txt")
+        svc.extract_entry_bytes("archive.ace", b"ace", "a.txt")
     with pytest.raises(ValueError):
         ArchiveService(max_entries=-1)
 

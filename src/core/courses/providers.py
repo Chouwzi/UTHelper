@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import math
 import posixpath
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -30,7 +31,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ARCHIVE_EXTS = frozenset({".zip", ".rar", ".tar", ".gz", ".tgz"})
+_ARCHIVE_EXTS = frozenset(
+    {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz"}
+)
+_DOC_EXTS = frozenset({".docx", ".doc", ".docm"})
+_XLS_EXTS = frozenset({".xlsx", ".xls", ".xlsm"})
+_PPT_EXTS = frozenset({".pptx", ".ppt", ".pptm"})
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"})
 _TEXT_EXTS = frozenset(
     {
@@ -58,6 +64,27 @@ _TEXT_EXTS = frozenset(
 )
 _PDF_MIMES = frozenset({"application/pdf", "application/x-pdf"})
 _CSV_MIMES = frozenset({"text/csv", "application/csv", "text/tab-separated-values"})
+_DOC_MIMES = frozenset(
+    {
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-word.document.macroenabled.12",
+    }
+)
+_XLS_MIMES = frozenset(
+    {
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
+    }
+)
+_PPT_MIMES = frozenset(
+    {
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+    }
+)
 _ARCHIVE_MIMES = frozenset(
     {
         "application/zip",
@@ -66,14 +93,30 @@ _ARCHIVE_MIMES = frozenset(
         "application/vnd.rar",
         "application/x-rar-compressed",
         "application/x-rar",
+        "application/x-7z-compressed",
         "application/x-tar",
         "application/gzip",
         "application/x-gzip",
+        "application/x-bzip2",
+        "application/x-xz",
         "application/x-compressed",
     }
 )
 _WEBVIEW_ACTIVITY_MODS = frozenset(
-    {"quiz", "attendance", "choice", "feedback", "groupselect", "scorm"}
+    {
+        "quiz",
+        "attendance",
+        "choice",
+        "choicegroup",
+        "feedback",
+        "groupselect",
+        "scorm",
+        "vpl",
+        "lesson",
+        "h5pactivity",
+        "lti",
+        "workshop",
+    }
 )
 _EXTERNAL_LINK_SELECTORS = (
     ".urlworkaround a[href]",
@@ -99,13 +142,13 @@ def classify_preview_kind(filename: str, mimetype: str = "") -> PreviewKind:
     mime = (mimetype or "").split(";", 1)[0].strip().lower()
     if ext == ".pdf" or mime in _PDF_MIMES:
         return "pdf"
-    if ext == ".docx":
+    if ext in _DOC_EXTS or mime in _DOC_MIMES:
         return "docx"
-    if ext == ".xlsx":
+    if ext in _XLS_EXTS or mime in _XLS_MIMES:
         return "xlsx"
     if ext in {".csv", ".tsv"} or mime in _CSV_MIMES:
         return "csv"
-    if ext == ".pptx":
+    if ext in _PPT_EXTS or mime in _PPT_MIMES:
         return "pptx"
     if ext in _IMAGE_EXTS or mime.startswith("image/"):
         return "image"
@@ -439,6 +482,20 @@ class CoursesWsProvider:
             return None
         return self._client.download_file(safe_url)
 
+    def fetch_user_groups(self, course_id: int) -> list[dict[str, Any]]:
+        getter = getattr(self._service, "get_course_user_groups", None)
+        if not callable(getter):
+            return []
+        userid = self._resolve_userid() or 0
+        try:
+            groups = getter(int(course_id), user_id=int(userid))
+        except TypeError:
+            groups = getter(int(course_id))
+        except Exception as exc:
+            logger.warning("Failed to fetch user groups (course=%s): %s", course_id, exc)
+            return []
+        return [dict(g) for g in _as_list(groups) if isinstance(g, dict)]
+
 
 class ThnnCourseProvider:
     """Course catalog and section provider backed by THNN Moodle AJAX/HTML session."""
@@ -524,6 +581,11 @@ class ThnnCourseProvider:
     def fetch_course_sections(self, course_id: int) -> list[CourseSection]:
         res = self._call_ajax_with_relogin("core_courseformat_get_state", courseid=course_id)
         data = res.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                return []
         if not isinstance(data, dict):
             return []
 
@@ -610,8 +672,124 @@ class ThnnCourseProvider:
                 return candidate
         return safe_final or web_url
 
+    def resolve_module_attachments(
+        self, module: CourseModuleItem
+    ) -> tuple[CourseAttachment, ...]:
+        """Extract downloadable ``pluginfile.php`` attachments from a THNN resource/folder page."""
+        if module.attachments:
+            return module.attachments
+        if self._client is None:
+            return ()
+        web_url = _safe_http_url(module.web_url or module.url)
+        base = self._base_url()
+        if not web_url or not _same_origin(web_url, base):
+            return ()
+        try:
+            final_url, html_text, redirected_cross_origin = self._client.open_session_url(web_url)
+        except Exception as exc:
+            logger.warning("THNN attachment resolution failed (%s): %s", web_url, exc)
+            return ()
+        if redirected_cross_origin:
+            return ()
+
+        attachments: list[CourseAttachment] = []
+        seen_urls: set[str] = set()
+
+        def _append_file(file_url: str, preferred_name: str = "") -> None:
+            safe_file = _safe_http_url(urljoin(f"{base}/", file_url))
+            if not safe_file or not _same_origin(safe_file, base) or safe_file in seen_urls:
+                return
+            seen_urls.add(safe_file)
+            path_name = unquote(posixpath.basename(urlsplit(safe_file).path) or "").strip()
+            clean_name = preferred_name.strip() or path_name or module.name or "Tài liệu"
+            if "." not in clean_name and "." in path_name:
+                clean_name = path_name
+            ext = posixpath.splitext(clean_name.lower())[1]
+            kind = classify_preview_kind(clean_name)
+            attachments.append(
+                CourseAttachment(
+                    file_name=clean_name,
+                    file_url=safe_file,
+                    extension=ext,
+                    preview_kind=kind,
+                    is_archive=(kind == "archive"),
+                )
+            )
+
+        if "/pluginfile.php/" in (final_url or ""):
+            _append_file(final_url, module.name)
+
+        soup = BeautifulSoup(html_text or "", BS4_PARSER)
+        for selector in ("a[href*='pluginfile.php']", ".resourceworkaround a[href]"):
+            for anchor in soup.select(selector):
+                href = str(anchor.get("href") or "").strip()
+                if not href or "pluginfile.php" not in href:
+                    continue
+                link_text = " ".join(anchor.get_text(" ", strip=True).split())
+                _append_file(href, link_text)
+        return tuple(attachments)
+
     def fetch_course_grades(self, course_id: int) -> list[CourseGradeItem]:
-        return []
+        """Parse THNN user gradebook HTML from ``/grade/report/user/index.php``."""
+        if self._client is None:
+            return []
+        base = self._base_url()
+        url = f"{base}/grade/report/user/index.php?id={int(course_id)}"
+        try:
+            _final_url, html_text, redirected_cross_origin = self._client.open_session_url(url)
+        except Exception as exc:
+            logger.warning("THNN gradebook fetch failed (course=%s): %s", course_id, exc)
+            return []
+        if redirected_cross_origin or not html_text:
+            return []
+
+        soup = BeautifulSoup(html_text, BS4_PARSER)
+        table = soup.select_one("table.user-grade")
+        if table is None:
+            return []
+
+        def _cell_text(row: Any, selector: str) -> str:
+            cell = row.select_one(selector)
+            if cell is None:
+                return ""
+            return " ".join(cell.get_text(" ", strip=True).split())
+
+        grades: list[CourseGradeItem] = []
+        for idx, row in enumerate(table.select("tbody tr")):
+            classes = {str(cls) for cls in (row.get("class") or [])}
+            name_cell = row.select_one("th.column-itemname, td.column-itemname")
+            if name_cell is None:
+                continue
+            item_name = " ".join(name_cell.get_text(" ", strip=True).split())
+            if not item_name:
+                continue
+            grade_val = _cell_text(row, "td.column-grade")
+            range_val = _cell_text(row, "td.column-range")
+            pct_val = _cell_text(row, "td.column-percentage")
+            weight_val = _cell_text(row, "td.column-weight")
+            feedback_val = _cell_text(row, "td.column-feedback")
+            # Skip pure category header rows that carry neither grade nor range nor percentage
+            is_course_total = "level1" in classes and "baggt" in classes
+            if not any((grade_val, range_val, pct_val, weight_val, feedback_val)) and not is_course_total:
+                continue
+            item_module = (
+                "course"
+                if is_course_total
+                else ("category" if "baggt" in classes else "mod")
+            )
+            grades.append(
+                CourseGradeItem(
+                    id=idx + 1,
+                    item_name=item_name,
+                    item_module=item_module,
+                    grade_formatted=grade_val or "-",
+                    range_formatted=range_val,
+                    percentage=pct_val,
+                    weight=weight_val,
+                    feedback_html=_sanitize_course_html(feedback_val),
+                )
+            )
+        return grades
 
     def download_file(self, url: str) -> Optional[bytes]:
         if self._client is None:

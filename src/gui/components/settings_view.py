@@ -1520,14 +1520,15 @@ class SettingsView(ft.Container):
                 cache_dir=_USER_DATA_DIR / "preview_cache"
             )
             preview_cache.clear()
-            external_dir = preview_cache.cache_dir / "external"
-            if external_dir.is_dir():
-                for item in external_dir.iterdir():
-                    if item.is_file():
-                        try:
-                            item.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+            for subdir_name in ("external", "rendered_pdf"):
+                subdir = preview_cache.cache_dir / subdir_name
+                if subdir.is_dir():
+                    for item in subdir.iterdir():
+                        if item.is_file():
+                            try:
+                                item.unlink(missing_ok=True)
+                            except OSError:
+                                pass
             for pattern in (
                 "courses_catalog_*.json",
                 "course_tree_*.json",

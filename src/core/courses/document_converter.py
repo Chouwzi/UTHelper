@@ -4,19 +4,34 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime as dt
 import html
 import io
 import posixpath
 import re
+import struct
 import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Literal, Optional
 from xml.parsers import expat
 
 from core.courses.models import PreviewKind
+
+try:
+    import olefile as _olefile
+except Exception:  # pragma: no cover
+    _olefile = None  # type: ignore[assignment]
+
+try:
+    import xlrd as _xlrd
+except Exception:  # pragma: no cover
+    _xlrd = None  # type: ignore[assignment]
+
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_MAX_LEGACY_STREAM_BYTES = 32 * 1024 * 1024
 
 _MAX_XML_BYTES = 16 * 1024 * 1024
 _MAX_TOTAL_XML_BYTES = 48 * 1024 * 1024
@@ -92,6 +107,31 @@ class SpreadsheetSheet:
 
 
 @dataclass(frozen=True, slots=True)
+class DocxRichBlock:
+    """Typed structured block preserved for rich in-app Word rendering."""
+
+    kind: Literal["heading", "paragraph", "list_item", "table", "image"]
+    text: str = ""
+    level: int = 0
+    anchor_id: str = ""
+    rows: tuple[tuple[str, ...], ...] = ()
+    image_bytes: bytes = b""
+    image_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PptxSlideRich:
+    """Rich slide payload with text, notes, tables, and embedded raster media."""
+
+    slide_number: int
+    anchor_id: str
+    body_text: str
+    notes_text: str = ""
+    images: tuple[tuple[str, bytes], ...] = ()
+    tables: tuple[tuple[tuple[str, ...], ...], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ConvertedDocument:
     """Normalized preview payload produced from document bytes."""
 
@@ -102,6 +142,8 @@ class ConvertedDocument:
     outline: list[DocumentOutlineItem] = field(default_factory=list)
     sheets: list[SpreadsheetSheet] = field(default_factory=list)
     slides: list[tuple[int, str, str]] = field(default_factory=list)
+    docx_blocks: tuple[DocxRichBlock, ...] = ()
+    rich_slides: tuple[PptxSlideRich, ...] = ()
 
 
 def convert_document_bytes(
@@ -113,14 +155,21 @@ def convert_document_bytes(
 ) -> ConvertedDocument:
     """Convert raw document bytes into escaped HTML, Markdown, and structured metadata."""
     title = file_name or "Tài liệu"
+    is_ole2 = len(data) >= 8 and data[:8] == _OLE2_MAGIC
     try:
         if kind == "docx":
+            if is_ole2:
+                return _convert_legacy_doc(title, data, dark_mode=dark_mode)
             return _convert_docx(title, data, dark_mode=dark_mode)
         if kind == "xlsx":
+            if is_ole2:
+                return _convert_legacy_xls(title, data, dark_mode=dark_mode)
             return _convert_xlsx(title, data, dark_mode=dark_mode)
         if kind == "csv":
             return _convert_csv(title, data, dark_mode=dark_mode)
         if kind == "pptx":
+            if is_ole2:
+                return _convert_legacy_ppt(title, data, dark_mode=dark_mode)
             return _convert_pptx(title, data, dark_mode=dark_mode)
         if kind == "text":
             return _convert_text(title, data, dark_mode=dark_mode)
@@ -622,8 +671,9 @@ def _append_bounded_text_block(
 
 
 def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
-    """Convert DOCX bytes into outline, Markdown, and XSS-safe HTML with raster media."""
+    """Convert DOCX bytes into outline, Markdown, rich blocks, and XSS-safe HTML."""
     outline: list[DocumentOutlineItem] = []
+    docx_blocks: list[DocxRichBlock] = []
     html_blocks: list[str] = []
     md_blocks: list[str] = []
     rendered_media: set[str] = set()
@@ -645,7 +695,7 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             xml_budget=xml_budget,
         )
 
-        def _try_embed_media(zip_path: str) -> Optional[str]:
+        def _try_embed_media(zip_path: str) -> Optional[tuple[str, str, bytes]]:
             if zip_path in rendered_media or zip_path not in zf_names:
                 return None
             if media_state["count"] >= _MAX_MEDIA_COUNT:
@@ -666,12 +716,14 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             media_state["count"] += 1
             media_state["bytes"] += len(raw_img)
             encoded = base64.b64encode(raw_img).decode("ascii")
-            alt = html.escape(posixpath.basename(zip_path))
-            return (
+            img_name = posixpath.basename(zip_path)
+            alt = html.escape(img_name)
+            img_html = (
                 '<figure class="doc-figure">'
                 f'<img class="doc-image" src="data:{mime};base64,{encoded}" alt="{alt}"/>'
                 "</figure>"
             )
+            return (img_html, img_name, raw_img)
 
         body = doc_root.find(f"{{{_W_NS}}}body")
         if body is not None:
@@ -702,6 +754,14 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                     anchor_id=anchor_id, level=level, title=text
                                 )
                             )
+                            docx_blocks.append(
+                                DocxRichBlock(
+                                    kind="heading",
+                                    text=text,
+                                    level=level,
+                                    anchor_id=anchor_id,
+                                )
+                            )
                         if not can_continue:
                             break
                     elif text:
@@ -710,7 +770,7 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                             p_pr is not None
                             and p_pr.find(f"{{{_W_NS}}}numPr") is not None
                         )
-                        _, can_continue = _append_bounded_text_block(
+                        appended, can_continue = _append_bounded_text_block(
                             html_blocks,
                             md_blocks,
                             render_budget,
@@ -720,15 +780,30 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                             ),
                             build_md=lambda t, lst=is_list: f"- {t}" if lst else t,
                         )
+                        if appended:
+                            docx_blocks.append(
+                                DocxRichBlock(
+                                    kind="list_item" if is_list else "paragraph",
+                                    text=text,
+                                )
+                            )
                         if not can_continue:
                             break
 
                     for rid in _docx_paragraph_image_rids(block):
                         target = rels.get(rid)
                         if target:
-                            img_html = _try_embed_media(target)
-                            if img_html:
+                            media_res = _try_embed_media(target)
+                            if media_res is not None:
+                                img_html, img_name, raw_img = media_res
                                 html_blocks.append(img_html)
+                                docx_blocks.append(
+                                    DocxRichBlock(
+                                        kind="image",
+                                        image_bytes=raw_img,
+                                        image_name=img_name,
+                                    )
+                                )
 
                 elif block.tag == f"{{{_W_NS}}}tbl":
                     table_rows: list[list[str]] = []
@@ -748,6 +823,12 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                     )
                     if tbl_html:
                         html_blocks.append(tbl_html)
+                        docx_blocks.append(
+                            DocxRichBlock(
+                                kind="table",
+                                rows=tuple(tuple(r) for r in table_rows),
+                            )
+                        )
                     if tbl_md:
                         md_blocks.append(tbl_md)
                     if render_budget.truncated:
@@ -756,9 +837,17 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         if not render_budget.truncated:
             for name in sorted(zf_names):
                 if name.startswith("word/media/") and name not in rendered_media:
-                    img_html = _try_embed_media(name)
-                    if img_html:
+                    media_res = _try_embed_media(name)
+                    if media_res is not None:
+                        img_html, img_name, raw_img = media_res
                         html_blocks.append(img_html)
+                        docx_blocks.append(
+                            DocxRichBlock(
+                                kind="image",
+                                image_bytes=raw_img,
+                                image_name=img_name,
+                            )
+                        )
 
     if render_budget.truncated:
         _append_render_truncation_notice(html_blocks, md_blocks)
@@ -770,6 +859,7 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         html_document=_base_html_shell(title, "\n".join(html_blocks), dark_mode=dark_mode),
         markdown_text="\n\n".join(md_blocks),
         outline=outline,
+        docx_blocks=tuple(docx_blocks),
     )
 
 
@@ -1161,12 +1251,41 @@ def _render_bounded_pptx_card(
     return card_html, card_md, True
 
 
+def _extract_pptx_tables(slide_root: ET.Element) -> tuple[tuple[tuple[str, ...], ...], ...]:
+    """Extract DrawingML ``<a:tbl>`` grids from a slide XML tree."""
+    tables: list[tuple[tuple[str, ...], ...]] = []
+    for tbl in slide_root.findall(f".//{{{_A_NS}}}tbl"):
+        rows: list[tuple[str, ...]] = []
+        for tr in tbl.findall(f"{{{_A_NS}}}tr")[:_MAX_TABLE_ROWS]:
+            cells: list[str] = []
+            for tc in tr.findall(f"{{{_A_NS}}}tc")[:_MAX_TABLE_COLS]:
+                tx_body = tc.find(f"{{{_A_NS}}}txBody")
+                if tx_body is None:
+                    cells.append("")
+                    continue
+                paras: list[str] = []
+                for p in tx_body.findall(f"{{{_A_NS}}}p"):
+                    runs = [t.text or "" for t in p.findall(f".//{{{_A_NS}}}t")]
+                    joined = "".join(runs).strip()
+                    if joined:
+                        paras.append(joined)
+                cells.append("\n".join(paras))
+            if any(c for c in cells):
+                rows.append(tuple(cells))
+        if rows:
+            tables.append(tuple(rows))
+    return tuple(tables)
+
+
 def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
-    """Convert PPTX bytes into ordered slides, mapped speaker notes, HTML, and Markdown."""
+    """Convert PPTX bytes into ordered slides, mapped speaker notes, rich blocks, HTML, and Markdown."""
     slides: list[tuple[int, str, str]] = []
+    rich_slides: list[PptxSlideRich] = []
     outline: list[DocumentOutlineItem] = []
     html_cards: list[str] = []
     md_sections: list[str] = []
+    media_state = {"count": 0, "bytes": 0}
+    media_cache: dict[str, bytes] = {}
     xml_budget = [_MAX_TOTAL_XML_BYTES]
     render_budget = _RenderBudget.for_title(title)
 
@@ -1178,12 +1297,14 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         # fallback notes so positional notesSlide{idx}.xml never steals another slide's note.
         explicit_notes: list[tuple[bool, Optional[str]]] = []
         claimed_notes: set[str] = set()
+        slide_media_targets: list[list[str]] = []
         for slide_path in slide_paths:
             slide_dir = posixpath.dirname(slide_path)
             slide_name = posixpath.basename(slide_path)
             rels_path = f"{slide_dir}/_rels/{slide_name}.rels"
             has_rels = rels_path in zf_names
             mapped_note: Optional[str] = None
+            media_targets: list[str] = []
             if has_rels:
                 note_rels = _parse_relationships(
                     zf,
@@ -1198,7 +1319,19 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                         mapped_note = candidate
                         claimed_notes.add(candidate)
                         break
+                img_rels = _parse_relationships(
+                    zf,
+                    zf_names,
+                    rels_path,
+                    slide_dir,
+                    type_suffix="/image",
+                    xml_budget=xml_budget,
+                )
+                for target in img_rels.values():
+                    if target in zf_names and target not in media_targets:
+                        media_targets.append(target)
             explicit_notes.append((has_rels, mapped_note))
+            slide_media_targets.append(media_targets)
 
         resolved_notes: list[Optional[str]] = []
         for slide_path, (has_rels, mapped_note) in zip(slide_paths, explicit_notes):
@@ -1212,8 +1345,8 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                         claimed_notes.add(file_note)
             resolved_notes.append(note_path)
 
-        for idx, (slide_path, (has_rels, _), pre_resolved_note) in enumerate(
-            zip(slide_paths, explicit_notes, resolved_notes), start=1
+        for idx, (slide_path, (has_rels, _), pre_resolved_note, media_targets) in enumerate(
+            zip(slide_paths, explicit_notes, resolved_notes, slide_media_targets), start=1
         ):
             if render_budget.truncated:
                 break
@@ -1222,6 +1355,30 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             )
             slide_root = _parse_xml_safe(slide_raw)
             body_text = _extract_drawingml_text(slide_root)
+            slide_tables = _extract_pptx_tables(slide_root)
+
+            slide_images: list[tuple[str, bytes]] = []
+            for target in media_targets:
+                ext = posixpath.splitext(target.lower())[1]
+                if ext not in _SAFE_RASTER_MIMES:
+                    continue
+                if target in media_cache:
+                    slide_images.append((posixpath.basename(target), media_cache[target]))
+                    continue
+                if media_state["count"] >= _MAX_MEDIA_COUNT:
+                    continue
+                try:
+                    raw_img = _read_zip_entry_capped(zf, target, _MAX_MEDIA_BYTES)
+                except _CONVERSION_ERRORS:
+                    continue
+                if not raw_img or not _is_valid_raster_magic(ext, raw_img):
+                    continue
+                if media_state["bytes"] + len(raw_img) > _MAX_TOTAL_MEDIA_BYTES:
+                    continue
+                media_state["count"] += 1
+                media_state["bytes"] += len(raw_img)
+                media_cache[target] = raw_img
+                slide_images.append((posixpath.basename(target), raw_img))
 
             notes_path = pre_resolved_note
             if notes_path is None and not has_rels:
@@ -1252,6 +1409,16 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             card_html, card_md, stop_after = rendered
 
             slides.append((idx, body_text, notes_text))
+            rich_slides.append(
+                PptxSlideRich(
+                    slide_number=idx,
+                    anchor_id=anchor_id,
+                    body_text=body_text,
+                    notes_text=notes_text,
+                    images=tuple(slide_images),
+                    tables=slide_tables,
+                )
+            )
             first_line = next(
                 (ln.strip() for ln in body_text.splitlines() if ln.strip()), ""
             )
@@ -1277,6 +1444,7 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         markdown_text="\n\n".join(md_sections),
         outline=outline,
         slides=slides,
+        rich_slides=tuple(rich_slides),
     )
 
 
@@ -1292,4 +1460,410 @@ def _convert_text(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         title=title,
         html_document=_base_html_shell(title, body_html, dark_mode=dark_mode),
         markdown_text=text,
+    )
+
+
+def _format_xls_cell(sheet: object, row_idx: int, col_idx: int, datemode: int) -> str:
+    assert _xlrd is not None
+    cell = sheet.cell(row_idx, col_idx)  # type: ignore[attr-defined]
+    ctype = cell.ctype
+    val = cell.value
+    if ctype == _xlrd.XL_CELL_EMPTY or val is None:
+        return ""
+    if ctype == _xlrd.XL_CELL_TEXT:
+        return str(val).strip()
+    if ctype == _xlrd.XL_CELL_BOOLEAN:
+        return "TRUE" if val else "FALSE"
+    if ctype == _xlrd.XL_CELL_DATE:
+        try:
+            dval = _xlrd.xldate.xldate_as_datetime(val, datemode)
+            if isinstance(dval, dt.datetime) and dval.hour == 0 and dval.minute == 0 and dval.second == 0:
+                return dval.strftime("%Y-%m-%d")
+            return dval.isoformat(sep=" ", timespec="seconds")
+        except Exception:
+            return str(val)
+    if ctype == _xlrd.XL_CELL_NUMBER:
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
+        return str(val)
+    return ""
+
+
+def _convert_legacy_xls(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
+    """Convert legacy binary ``.xls`` spreadsheets using ``xlrd``."""
+    if _xlrd is None:
+        return _build_notice_document(
+            "xlsx",
+            title,
+            "Thiếu thư viện xlrd để đọc định dạng .xls cũ.",
+            dark_mode=dark_mode,
+        )
+    try:
+        workbook = _xlrd.open_workbook(file_contents=data, on_demand=True)
+    except Exception as exc:
+        err_lower = str(exc).lower()
+        if "encrypt" in err_lower or "password" in err_lower:
+            return _build_notice_document(
+                "xlsx", title, "Bảng tính .xls được bảo vệ bằng mật khẩu.", dark_mode=dark_mode
+            )
+        return _build_notice_document(
+            "xlsx", title, "Không thể đọc tệp Excel .xls cũ.", dark_mode=dark_mode
+        )
+
+    sheets: list[SpreadsheetSheet] = []
+    outline: list[DocumentOutlineItem] = []
+    html_sections: list[str] = []
+    md_sections: list[str] = []
+    render_budget = _RenderBudget.for_title(title)
+
+    try:
+        for sheet_idx, sheet_name in enumerate(workbook.sheet_names()[:_MAX_XLSX_SHEETS], start=1):
+            if render_budget.truncated:
+                break
+            xl_sheet = workbook.sheet_by_name(sheet_name)
+            row_limit = min(xl_sheet.nrows, _MAX_TABLE_ROWS)
+            col_limit = min(xl_sheet.ncols, _MAX_TABLE_COLS)
+            rows: list[list[str]] = []
+            for r_idx in range(row_limit):
+                row_vals = [
+                    _format_xls_cell(xl_sheet, r_idx, c_idx, workbook.datemode)
+                    for c_idx in range(col_limit)
+                ]
+                while row_vals and row_vals[-1] == "":
+                    row_vals.pop()
+                if any(v for v in row_vals):
+                    rows.append(row_vals)
+            sheets.append(SpreadsheetSheet(name=sheet_name, rows=rows))
+            anchor_id = f"sheet-{sheet_idx}"
+            outline.append(DocumentOutlineItem(anchor_id=anchor_id, level=1, title=sheet_name))
+            tbl_html, tbl_md = _render_table_html_and_markdown(
+                rows, sheet_style=True, budget=render_budget
+            )
+            html_sections.append(
+                f'<section id="{anchor_id}"><h2>{html.escape(sheet_name)}</h2>{tbl_html}</section>'
+            )
+            md_sections.append(f"## {sheet_name}\n\n{tbl_md}" if tbl_md else f"## {sheet_name}")
+    finally:
+        try:
+            workbook.release_resources()
+        except Exception:
+            pass
+
+    if not html_sections:
+        html_sections.append('<p class="muted">(Bảng tính trống)</p>')
+    return ConvertedDocument(
+        kind="xlsx",
+        title=title,
+        html_document=_base_html_shell(title, "\n".join(html_sections), dark_mode=dark_mode),
+        markdown_text="\n\n".join(md_sections),
+        outline=outline,
+        sheets=sheets,
+    )
+
+
+def _strip_doc_field_controls(raw_text: str) -> str:
+    """Clean Word binary field markers (\\x13..\\\\x14..\\\\x15) and control chars."""
+    out: list[str] = []
+    field_depth = 0
+    in_result = True
+    for ch in raw_text:
+        code = ord(ch)
+        if code == 0x13:
+            field_depth += 1
+            in_result = False
+            continue
+        if code == 0x14 and field_depth > 0:
+            in_result = True
+            continue
+        if code == 0x15 and field_depth > 0:
+            field_depth = max(0, field_depth - 1)
+            in_result = field_depth == 0
+            continue
+        if field_depth > 0 and not in_result:
+            continue
+        if ch in ("\r", "\x07"):
+            out.append("\n")
+        elif code in (0x0B, 0x0C):
+            out.append("\n")
+        elif code == 0x09 or code >= 32:
+            out.append(ch)
+    return "".join(out)
+
+
+def _extract_doc_clx_text(wd: bytes, tbl: bytes, flags: int) -> Optional[str]:
+    """Decode Word97+ Clx piece table text stream when valid, else return None."""
+    if len(wd) < 426:
+        return None
+    n_fib = struct.unpack_from("<H", wd, 2)[0]
+    if n_fib < 0x00C0:
+        fc_min, fc_mac = struct.unpack_from("<II", wd, 0x18)
+        if 0 <= fc_min < fc_mac <= len(wd):
+            return wd[fc_min:fc_mac].decode("cp1258", errors="replace")
+        return None
+    ccp_text = struct.unpack_from("<I", wd, 76)[0]
+    fc_clx, lcb_clx = struct.unpack_from("<II", wd, 418)
+    if lcb_clx == 0 or fc_clx + lcb_clx > len(tbl):
+        return None
+    clx = tbl[fc_clx : fc_clx + lcb_clx]
+    pos = 0
+    while pos < len(clx):
+        clxt = clx[pos]
+        if clxt == 0x01:
+            if pos + 3 > len(clx):
+                return None
+            cb_grpprl = struct.unpack_from("<H", clx, pos + 1)[0]
+            pos += 3 + cb_grpprl
+            continue
+        if clxt == 0x02:
+            if pos + 5 > len(clx):
+                return None
+            lcb_pcdt = struct.unpack_from("<I", clx, pos + 1)[0]
+            plc = clx[pos + 5 : pos + 5 + lcb_pcdt]
+            if len(plc) < 16 or (len(plc) - 4) % 12 != 0:
+                return None
+            n_pieces = (len(plc) - 4) // 12
+            cps = struct.unpack_from(f"<{n_pieces + 1}I", plc, 0)
+            pcd_offset = (n_pieces + 1) * 4
+            chunks: list[str] = []
+            max_cp = ccp_text if ccp_text > 0 else cps[-1]
+            for idx in range(n_pieces):
+                cp_start, cp_end = cps[idx], min(cps[idx + 1], max_cp)
+                if cp_end <= cp_start:
+                    continue
+                _attr, fc_raw, _prm = struct.unpack_from("<HIH", plc, pcd_offset + idx * 8)
+                is_ansi = bool(fc_raw & 0x40000000)
+                fc_val = fc_raw & 0x3FFFFFFF
+                char_count = cp_end - cp_start
+                if is_ansi:
+                    byte_start = fc_val // 2
+                    raw_slice = wd[byte_start : byte_start + char_count]
+                    chunks.append(raw_slice.decode("cp1252", errors="replace"))
+                else:
+                    byte_start = fc_val
+                    raw_slice = wd[byte_start : byte_start + char_count * 2]
+                    chunks.append(raw_slice.decode("utf-16-le", errors="replace"))
+                if cps[idx + 1] >= max_cp:
+                    break
+            return "".join(chunks)
+        return None
+    return None
+
+
+def _convert_legacy_doc(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
+    """Convert legacy binary ``.doc`` documents via OLE2 ``WordDocument`` parsing."""
+    if _olefile is None:
+        return _build_notice_document(
+            "docx",
+            title,
+            "Thiếu thư viện olefile để đọc định dạng .doc cũ.",
+            dark_mode=dark_mode,
+        )
+    try:
+        with _olefile.OleFileIO(io.BytesIO(data)) as ole:
+            if not ole.exists("WordDocument"):
+                return _build_notice_document(
+                    "docx", title, "Tệp .doc không chứa luồng WordDocument.", dark_mode=dark_mode
+                )
+            wd = ole.openstream("WordDocument").read(_MAX_LEGACY_STREAM_BYTES)
+            if len(wd) < 32:
+                return _build_notice_document(
+                    "docx", title, "Tệp .doc bị hỏng hoặc rỗng.", dark_mode=dark_mode
+                )
+            w_ident, _n_fib = struct.unpack_from("<HH", wd, 0)
+            if w_ident != 0xA5EC:
+                return _build_notice_document(
+                    "docx", title, "Định dạng Word .doc không hợp lệ.", dark_mode=dark_mode
+                )
+            flags = struct.unpack_from("<H", wd, 10)[0]
+            if flags & 0x0100:
+                return _build_notice_document(
+                    "docx",
+                    title,
+                    "Tài liệu .doc được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp.",
+                    dark_mode=dark_mode,
+                )
+            table_stream_name = "1Table" if (flags & 0x0200) else "0Table"
+            tbl = (
+                ole.openstream(table_stream_name).read(_MAX_LEGACY_STREAM_BYTES)
+                if ole.exists(table_stream_name)
+                else b""
+            )
+    except Exception:
+        return _build_notice_document(
+            "docx", title, "Không thể đọc tệp Word .doc cũ.", dark_mode=dark_mode
+        )
+
+    decoded = _extract_doc_clx_text(wd, tbl, flags)
+    if decoded is None:
+        return _build_notice_document(
+            "docx",
+            title,
+            "Không thể giải mã cấu trúc văn bản của tệp .doc này.",
+            dark_mode=dark_mode,
+        )
+
+    cleaned = _strip_doc_field_controls(decoded)
+    paragraphs = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    docx_blocks: list[DocxRichBlock] = []
+    html_blocks: list[str] = []
+    md_blocks: list[str] = []
+    render_budget = _RenderBudget.for_title(title)
+
+    for para in paragraphs:
+        if render_budget.truncated:
+            break
+        appended, can_continue = _append_bounded_text_block(
+            html_blocks,
+            md_blocks,
+            render_budget,
+            raw_text=para,
+            build_html=lambda t: f"<p>{html.escape(t)}</p>",
+            build_md=lambda t: t,
+        )
+        if appended:
+            docx_blocks.append(DocxRichBlock(kind="paragraph", text=para))
+        if not can_continue:
+            break
+
+    if not html_blocks:
+        html_blocks.append('<p class="muted">(Tài liệu .doc trống)</p>')
+    return ConvertedDocument(
+        kind="docx",
+        title=title,
+        html_document=_base_html_shell(title, "\n".join(html_blocks), dark_mode=dark_mode),
+        markdown_text="\n\n".join(md_blocks),
+        docx_blocks=tuple(docx_blocks),
+    )
+
+
+def _collect_ppt_binary_slides(stream: bytes) -> list[str]:
+    """Walk PowerPoint 97-2003 binary record tree and collect text per slide."""
+    slides_text: list[str] = []
+    fallback_texts: list[str] = []
+    limit = len(stream)
+
+    def _collect_atoms_in(start: int, end: int, out_parts: list[str]) -> None:
+        pos = start
+        while pos + 8 <= end:
+            ver_inst, rec_type, rec_len = struct.unpack_from("<HHI", stream, pos)
+            payload_start = pos + 8
+            payload_end = min(end, payload_start + rec_len)
+            if (ver_inst & 0x0F) == 0x0F:
+                _collect_atoms_in(payload_start, payload_end, out_parts)
+            elif rec_type == 0x0FA0:
+                txt = stream[payload_start:payload_end].decode("utf-16-le", errors="replace").strip()
+                if txt:
+                    out_parts.append(txt.replace("\r", "\n"))
+            elif rec_type == 0x0FA8:
+                txt = stream[payload_start:payload_end].decode("cp1252", errors="replace").strip()
+                if txt:
+                    out_parts.append(txt.replace("\r", "\n"))
+            pos = payload_start + max(0, rec_len)
+
+    def _walk(start: int, end: int) -> None:
+        pos = start
+        while pos + 8 <= end:
+            ver_inst, rec_type, rec_len = struct.unpack_from("<HHI", stream, pos)
+            payload_start = pos + 8
+            payload_end = min(end, payload_start + rec_len)
+            is_container = (ver_inst & 0x0F) == 0x0F
+            if is_container:
+                if rec_type == 0x03EE:
+                    parts: list[str] = []
+                    _collect_atoms_in(payload_start, payload_end, parts)
+                    if parts:
+                        slides_text.append("\n".join(parts))
+                elif rec_type == 0x0FF0:
+                    current_parts: list[str] = []
+                    cpos = payload_start
+                    while cpos + 8 <= payload_end:
+                        c_vi, c_rt, c_rl = struct.unpack_from("<HHI", stream, cpos)
+                        cp_start = cpos + 8
+                        cp_end = min(payload_end, cp_start + c_rl)
+                        if c_rt == 0x03F3:
+                            if current_parts:
+                                fallback_texts.append("\n".join(current_parts))
+                                current_parts = []
+                        elif c_rt in (0x0FA0, 0x0FA8) or (c_vi & 0x0F) == 0x0F:
+                            _collect_atoms_in(cpos, cp_end, current_parts)
+                        cpos = cp_start + max(0, c_rl)
+                    if current_parts:
+                        fallback_texts.append("\n".join(current_parts))
+                else:
+                    _walk(payload_start, payload_end)
+            pos = payload_start + max(0, rec_len)
+
+    _walk(0, limit)
+    return slides_text if slides_text else fallback_texts
+
+
+def _convert_legacy_ppt(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
+    """Convert legacy binary ``.ppt`` presentations via OLE2 ``PowerPoint Document``."""
+    if _olefile is None:
+        return _build_notice_document(
+            "pptx",
+            title,
+            "Thiếu thư viện olefile để đọc định dạng .ppt cũ.",
+            dark_mode=dark_mode,
+        )
+    try:
+        with _olefile.OleFileIO(io.BytesIO(data)) as ole:
+            if not ole.exists("PowerPoint Document"):
+                return _build_notice_document(
+                    "pptx",
+                    title,
+                    "Tệp .ppt không chứa luồng PowerPoint Document.",
+                    dark_mode=dark_mode,
+                )
+            ppt_stream = ole.openstream("PowerPoint Document").read(_MAX_LEGACY_STREAM_BYTES)
+    except Exception:
+        return _build_notice_document(
+            "pptx", title, "Không thể đọc tệp PowerPoint .ppt cũ.", dark_mode=dark_mode
+        )
+
+    raw_slides = _collect_ppt_binary_slides(ppt_stream)[:_MAX_PPTX_SLIDES]
+    slides: list[tuple[int, str, str]] = []
+    rich_slides: list[PptxSlideRich] = []
+    outline: list[DocumentOutlineItem] = []
+    html_cards: list[str] = []
+    md_sections: list[str] = []
+    render_budget = _RenderBudget.for_title(title)
+
+    for idx, body_text in enumerate(raw_slides, start=1):
+        if render_budget.truncated:
+            break
+        anchor_id = f"slide-{idx}"
+        rendered = _render_bounded_pptx_card(
+            idx,
+            anchor_id,
+            body_text,
+            "",
+            render_budget,
+            has_prior_cards=bool(html_cards),
+        )
+        if rendered is None:
+            break
+        card_html, card_md, stop_after = rendered
+        slides.append((idx, body_text, ""))
+        rich_slides.append(
+            PptxSlideRich(slide_number=idx, anchor_id=anchor_id, body_text=body_text)
+        )
+        first_line = next((ln.strip() for ln in body_text.splitlines() if ln.strip()), "")
+        outline_label = f"Slide {idx}: {first_line[:60]}" if first_line else f"Slide {idx}"
+        outline.append(DocumentOutlineItem(anchor_id=anchor_id, level=1, title=outline_label))
+        html_cards.append(card_html)
+        md_sections.append(card_md)
+        if stop_after:
+            break
+
+    if not html_cards:
+        html_cards.append('<p class="muted">(Bài trình bày .ppt trống hoặc không chứa văn bản)</p>')
+    return ConvertedDocument(
+        kind="pptx",
+        title=title,
+        html_document=_base_html_shell(title, "\n".join(html_cards), dark_mode=dark_mode),
+        markdown_text="\n\n".join(md_sections),
+        outline=outline,
+        slides=slides,
+        rich_slides=tuple(rich_slides),
     )

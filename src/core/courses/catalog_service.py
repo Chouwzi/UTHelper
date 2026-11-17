@@ -18,6 +18,7 @@ from core.courses.cache_store import (
     CourseDetailSnapshot,
 )
 from core.courses.models import (
+    CourseAttachment,
     CourseGradeItem,
     CourseModuleItem,
     CourseSection,
@@ -776,3 +777,56 @@ class CourseCatalogService:
                     return fallback
                 return _safe_http_url(resolved) or fallback
         return fallback
+
+    def resolve_module_attachments(
+        self, source: CourseSource, module: CourseModuleItem
+    ) -> tuple[CourseAttachment, ...]:
+        """Return existing attachments or resolve them from the provider on demand."""
+        if module.attachments:
+            return module.attachments
+        valid_source = _validate_source(source)
+        provider = self._provider_for(valid_source)
+        resolver = getattr(provider, "resolve_module_attachments", None)
+        if not callable(resolver):
+            return ()
+        try:
+            resolved = self._call_provider(
+                valid_source,
+                lambda: resolver(module),
+                context="resolve_module_attachments",
+            )
+            return tuple(resolved or ())
+        except Exception as exc:
+            logger.warning(
+                "resolve_module_attachments failed (source=%s cmid=%s): %s",
+                valid_source,
+                module.cmid,
+                _format_error(exc),
+            )
+            return ()
+
+    def get_user_course_groups(
+        self, source: CourseSource, course_id: int
+    ) -> list[dict[str, Any]]:
+        """Fetch student group membership for a course when supported by provider."""
+        valid_source = _validate_source(source)
+        valid_course_id = _validate_course_id(course_id)
+        provider = self._provider_for(valid_source)
+        getter = getattr(provider, "fetch_user_groups", None)
+        if not callable(getter):
+            return []
+        try:
+            groups = self._call_provider(
+                valid_source,
+                lambda: getter(valid_course_id),
+                context="fetch_user_groups",
+            )
+            return list(groups or [])
+        except Exception as exc:
+            logger.warning(
+                "get_user_course_groups failed (source=%s course=%s): %s",
+                valid_source,
+                valid_course_id,
+                _format_error(exc),
+            )
+            return []

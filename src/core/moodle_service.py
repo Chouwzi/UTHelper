@@ -267,3 +267,55 @@ class MoodleService:
         return ws_functions.update_activity_completion_manually(
             self.call_ws_api, cmid, completed
         )
+
+    def get_course_user_groups(
+        self, course_id: int, user_id: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Lấy danh sách nhóm của sinh viên trong môn học."""
+        return ws_functions.get_course_user_groups(
+            self.call_ws_api, course_id, user_id=user_id
+        )
+
+    def get_forums_by_courses(self, course_ids: List[int]) -> List[Dict[str, Any]]:
+        """Lấy danh sách diễn đàn theo môn học."""
+        return ws_functions.get_forums_by_courses(self.call_ws_api, course_ids)
+
+    def get_forum_discussions(
+        self, forum_id: int, *, page: int = 0, perpage: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Lấy danh sách chủ đề trong diễn đàn."""
+        return ws_functions.get_forum_discussions(
+            self.call_ws_api, forum_id, page=page, perpage=perpage
+        )
+
+    def get_discussion_posts(self, discussion_id: int) -> List[Dict[str, Any]]:
+        """Lấy bài viết trong chủ đề thảo luận."""
+        return ws_functions.get_discussion_posts(self.call_ws_api, discussion_id)
+
+    def get_choice_options(self, choice_id: int) -> List[Dict[str, Any]]:
+        """Lấy danh sách phương án bình chọn mod_choice."""
+        return ws_functions.get_choice_options(self.call_ws_api, choice_id)
+
+    def submit_choice_response(self, choice_id: int, responses: List[int]) -> bool:
+        """Gửi lựa chọn bình chọn mod_choice."""
+        return ws_functions.submit_choice_response(
+            self.call_ws_api, choice_id, responses
+        )
+
+    def get_quiz_access_information(
+        self, quiz_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Lấy thông tin điều kiện truy cập quiz."""
+        return ws_functions.get_quiz_access_information(self.call_ws_api, quiz_id)
+
+    def get_quiz_attempt_review(
+        self, attempt_id: int, page: int = -1
+    ) -> Optional[Dict[str, Any]]:
+        """Lấy chi tiết xem lại lượt làm quiz."""
+        return ws_functions.get_quiz_attempt_review(
+            self.call_ws_api, attempt_id, page=page
+        )
+
+    def get_books_by_courses(self, course_ids: List[int]) -> List[Dict[str, Any]]:
+        """Lấy danh sách hoạt động Book trong môn học."""
+        return ws_functions.get_books_by_courses(self.call_ws_api, course_ids)

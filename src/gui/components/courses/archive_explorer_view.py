@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 import flet as ft
 
@@ -14,10 +14,12 @@ from core.courses.archive_service import (
 )
 from core.courses.models import PreviewKind
 from gui.components.courses._shared import (
+    build_expand_toggle_button,
     build_offline_banner,
     build_viewer_header,
     refresh_viewer_header,
     safe_control_update,
+    sync_expand_toggle_button,
 )
 from gui.core.theme import C
 from gui.view_models.courses_state import format_file_size
@@ -63,6 +65,9 @@ class ArchiveExplorerView(ft.Container):
         on_close: Callable[[], None],
         on_open_entry: Callable[[str, bytes, PreviewKind], None],
         on_save_raw: Callable[[str, bytes], None],
+        is_expanded: bool = False,
+        show_expand_toggle: bool = False,
+        on_toggle_expand: Optional[Callable[[], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG, **kwargs)
@@ -72,6 +77,9 @@ class ArchiveExplorerView(ft.Container):
         self._on_close = on_close
         self._on_open_entry = on_open_entry
         self._on_save_raw = on_save_raw
+        self._expanded = bool(is_expanded)
+        self._show_expand_toggle = bool(show_expand_toggle)
+        self._on_toggle_expand = on_toggle_expand
 
         self._tree = _inspect_safely(self._svc, self._name, self._bytes)
         self._stack: list[ArchiveNode] = [self._tree.root]
@@ -84,6 +92,11 @@ class ArchiveExplorerView(ft.Container):
             else f"{self._tree.format_name.upper()} · {size_text}"
         )
 
+        self._expand_btn = build_expand_toggle_button(
+            expanded=self._expanded,
+            on_toggle=lambda: self._on_toggle_expand() if callable(self._on_toggle_expand) else None,
+            visible=self._show_expand_toggle,
+        )
         self._save_btn = ft.IconButton(
             icon=ft.Icons.SAVE_ALT_ROUNDED,
             tooltip="Lưu tệp nén gốc",
@@ -100,7 +113,7 @@ class ArchiveExplorerView(ft.Container):
             subtitle=subtitle_text,
             back_tooltip="Quay lại",
             on_back=self._handle_back_btn,
-            trailing_actions=[self._save_btn],
+            trailing_actions=[self._expand_btn, self._save_btn],
         )
 
         self._breadcrumb_row = ft.Row(scroll=ft.ScrollMode.AUTO, spacing=2)
@@ -363,6 +376,15 @@ class ArchiveExplorerView(ft.Container):
             controls=[self._build_node_row(child) for child in current.children],
         )
 
+    def set_expanded(self, expanded: bool, *, visible: bool = True) -> None:
+        self._expanded = bool(expanded)
+        self._show_expand_toggle = bool(visible)
+        sync_expand_toggle_button(
+            self._expand_btn,
+            expanded=self._expanded,
+            visible=self._show_expand_toggle,
+        )
+
     def update_theme(self) -> None:
         """Apply current global theme tokens C and re-render rows."""
         self.bgcolor = C.BG
@@ -371,6 +393,11 @@ class ArchiveExplorerView(ft.Container):
             self._back_btn,
             self._title_text,
             self._subtitle_text,
+        )
+        sync_expand_toggle_button(
+            self._expand_btn,
+            expanded=self._expanded,
+            visible=self._show_expand_toggle,
         )
         self._save_btn.icon_color = C.TEXT_PRIMARY
         self._breadcrumb_bar.bgcolor = C.SURFACE

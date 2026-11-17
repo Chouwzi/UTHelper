@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import logging
 import time
@@ -65,6 +66,7 @@ class CoursesTabView(ft.Container):
         on_download_attachment: Optional[Callable[[CourseSummary, CourseAttachment], Any]] = None,
         on_launch_url: Optional[Callable[[str], Any]] = None,
         on_open_inline_page: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
+        on_open_custom_activity: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, **kwargs)
@@ -76,6 +78,7 @@ class CoursesTabView(ft.Container):
         self._on_download_attachment = on_download_attachment
         self._on_launch_url = on_launch_url
         self._on_open_inline_page = on_open_inline_page
+        self._on_open_custom_activity = on_open_custom_activity
 
         self._state = CoursesState()
         self._current_width: float = 1100.0
@@ -106,6 +109,26 @@ class CoursesTabView(ft.Container):
             on_copy_text=lambda text: self._schedule_task(self._copy_text_async, text),
             on_launch_url=lambda url: self._schedule_task(self._launch_url_safe, url),
             on_subtab_change=lambda idx: self._schedule_task(self._on_subtab_change_async, idx),
+            on_toggle_expand=self.toggle_pane3_expanded,
+        )
+
+        self._workspace_stack = ft.Stack(expand=True, controls=[self._detail_pane])
+        self._list_pane_host = ft.Container(
+            content=self._list_pane,
+            width=320,
+            opacity=1.0,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            animate=ft.Animation(220, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_opacity=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
+        )
+        self._split_divider = ft.VerticalDivider(
+            width=1, thickness=1, color=C.BORDER, visible=True
+        )
+        self._pane3_host = ft.Container(expand=True, content=self._workspace_stack)
+        self._wide_row = ft.Row(
+            expand=True,
+            spacing=0,
+            controls=[self._list_pane_host, self._split_divider, self._pane3_host],
         )
 
         self._tablet_content = ft.Container(expand=True, width=820.0)
@@ -187,25 +210,102 @@ class CoursesTabView(ft.Container):
 
     def _rebuild_layout(self) -> None:
         if self._layout_mode == "wide":
-            self._main_host.content = ft.Row(
-                expand=True,
-                spacing=0,
-                controls=[
-                    ft.Container(content=self._list_pane, width=320),
-                    ft.VerticalDivider(width=1, thickness=1, color=C.BORDER),
-                    ft.Container(content=self._detail_pane, expand=True),
-                ],
-            )
+            expanded = bool(self._state.pane3_expanded)
+            self._tablet_content.content = None
+            self._pane3_host.content = self._workspace_stack
+            self._list_pane_host.width = 0 if expanded else 320
+            self._list_pane_host.opacity = 0.0 if expanded else 1.0
+            self._split_divider.color = C.BORDER
+            self._split_divider.visible = not expanded
+            self._main_host.content = self._wide_row
             return
 
-        show_detail = self._state.in_detail_mobile and self._state.selected_course() is not None
-        active_pane: ft.Control = self._detail_pane if show_detail else self._list_pane
+        self._pane3_host.content = None
+        show_workspace = bool(self._overlays) or (
+            self._state.in_detail_mobile and self._state.selected_course() is not None
+        )
+        active_pane: ft.Control = (
+            self._workspace_stack if show_workspace else self._list_pane
+        )
         if self._layout_mode == "tablet_portrait":
             self._tablet_content.content = active_pane
             self._tablet_content.width = min(820.0, max(320.0, self._current_width))
             self._main_host.content = self._tablet_wrapper
         else:
+            self._tablet_content.content = None
             self._main_host.content = active_pane
+
+    def _compute_pane3_bounds(self) -> tuple[float, float, float, float]:
+        page = self._get_page()
+        page_w = float(getattr(page, "width", 0) or self._current_width or 1100.0)
+        page_h = float(getattr(page, "height", 0) or 760.0)
+        has_rail = page_w >= 720.0
+        rail_w = 73.0 if has_rail else 0.0
+        list_w = (
+            321.0
+            if (self._layout_mode == "wide" and not self._state.pane3_expanded)
+            else 0.0
+        )
+        left = rail_w + list_w
+        top = 56.0
+        width = max(240.0, page_w - left)
+        height = max(240.0, page_h - top - 32.0)
+        return (left, top, width, height)
+
+    def _sync_pane3_bounds(self) -> None:
+        if not self._overlays:
+            return
+        top = self._overlays[-1]
+        sync_fn = getattr(top, "sync_bounds", None)
+        if callable(sync_fn):
+            left, top_px, width, height = self._compute_pane3_bounds()
+            sync_fn(left, top_px, width, height)
+
+    def _sync_overlay_expand_buttons(self) -> None:
+        show_toggle = self._layout_mode == "wide"
+        expanded = bool(self._state.pane3_expanded)
+        for item in self._overlays:
+            setter = getattr(item, "set_expanded", None)
+            if callable(setter):
+                setter(expanded, visible=show_toggle)
+
+    @property
+    def pane3_expanded(self) -> bool:
+        return bool(self._state.pane3_expanded)
+
+    def set_pane3_expanded(self, expanded: bool) -> None:
+        """Expand Pane 3 over Pane 2 (2+3) or collapse back to 3 in wide mode."""
+        target = bool(expanded) if self._layout_mode == "wide" else False
+        if self._state.pane3_expanded == target:
+            return
+        self._state.pane3_expanded = target
+        self._sync_overlay_expand_buttons()
+        self._render()
+        self._sync_pane3_bounds()
+
+    def toggle_pane3_expanded(self) -> None:
+        """Toggle Pane 3 expanded state between default (3) and full-course (2+3)."""
+        self.set_pane3_expanded(not self._state.pane3_expanded)
+
+    def on_tab_hidden(self) -> None:
+        """Suspend active native overlays (e.g. WebView2) when switching away."""
+        for item in self._overlays:
+            suspend_fn = getattr(item, "suspend", None)
+            if callable(suspend_fn):
+                suspend_fn()
+
+    def on_tab_shown(self) -> None:
+        """Resume top active overlay (e.g. WebView2) when returning to Courses tab."""
+        if not self._overlays:
+            return
+        for item in self._overlays[:-1]:
+            suspend_fn = getattr(item, "suspend", None)
+            if callable(suspend_fn):
+                suspend_fn()
+        resume_fn = getattr(self._overlays[-1], "resume", None)
+        if callable(resume_fn):
+            resume_fn()
+        self._sync_pane3_bounds()
 
     def _render(self) -> None:
         self._rebuild_layout()
@@ -214,6 +314,7 @@ class CoursesTabView(ft.Container):
             self._state, show_back=(self._layout_mode != "wide"), update=False
         )
         self._safe_update()
+        self._sync_pane3_bounds()
 
     def set_width(self, width: float) -> None:
         """Apply viewport width and adapt Master-Detail layout breakpoint."""
@@ -223,35 +324,88 @@ class CoursesTabView(ft.Container):
             numeric = 0.0
         self._current_width = numeric if numeric > 0 else 0.0
         self._layout_mode = compute_courses_layout_mode(width)
+        if self._layout_mode != "wide" and self._state.pane3_expanded:
+            self._state.pane3_expanded = False
+        self._sync_overlay_expand_buttons()
         self._render()
 
+    @staticmethod
+    def _dispose_overlay(control: ft.Control) -> None:
+        dispose_fn = getattr(control, "dispose", None)
+        if callable(dispose_fn):
+            try:
+                dispose_fn()
+            except Exception:
+                pass
+
     def push_overlay(self, control: ft.Control, *, tag: str = "") -> None:
-        """Push a modal/reader overlay onto the stack, replacing same-tag/modal overlays."""
+        """Push an in-app viewer/activity pane onto Pane 3, preserving Panes 1 & 2."""
+        for existing in self._overlays:
+            suspend_fn = getattr(existing, "suspend", None)
+            if callable(suspend_fn):
+                suspend_fn()
         if tag:
             control.data = tag
             is_modal = tag.startswith("courses_modal:")
-            self._overlays = [
-                item
-                for item in self._overlays
-                if getattr(item, "data", None) != tag
-                and not (is_modal and str(getattr(item, "data", "")).startswith("courses_modal:"))
-            ]
+            kept: list[ft.Control] = []
+            for item in self._overlays:
+                item_tag = str(getattr(item, "data", "") or "")
+                should_drop = item_tag == tag or (
+                    is_modal and item_tag.startswith("courses_modal:")
+                )
+                if should_drop:
+                    self._dispose_overlay(item)
+                else:
+                    kept.append(item)
+            self._overlays = kept
+        if hasattr(control, "opacity") and getattr(control, "animate_opacity", None) is None:
+            try:
+                control.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
+            except Exception:
+                pass
+        setter = getattr(control, "set_expanded", None)
+        if callable(setter):
+            setter(self._state.pane3_expanded, visible=(self._layout_mode == "wide"))
         self._overlays.append(control)
-        self._root_stack.controls = [self._main_host, *self._overlays]
+        self._workspace_stack.controls = [self._detail_pane, *self._overlays]
+        self._rebuild_layout()
         self._safe_update()
+        self._sync_pane3_bounds()
 
     def pop_overlay(self) -> bool:
-        """Pop the top overlay if present; return True if popped."""
+        """Pop top Pane-3 overlay if present; return True if popped."""
         if not self._overlays:
             return False
-        self._overlays.pop()
-        self._root_stack.controls = [self._main_host, *self._overlays]
+        removed = self._overlays.pop()
+        self._dispose_overlay(removed)
+        self._workspace_stack.controls = [self._detail_pane, *self._overlays]
+        if self._overlays:
+            resume_fn = getattr(self._overlays[-1], "resume", None)
+            if callable(resume_fn):
+                resume_fn()
+        self._rebuild_layout()
         self._safe_update()
+        self._sync_pane3_bounds()
         return True
 
+    def clear_overlays(self, *, update: bool = True) -> None:
+        """Dispose and remove all Pane-3 overlays."""
+        if not self._overlays:
+            return
+        for item in self._overlays:
+            self._dispose_overlay(item)
+        self._overlays.clear()
+        self._workspace_stack.controls = [self._detail_pane]
+        self._rebuild_layout()
+        if update:
+            self._safe_update()
+
     def handle_back(self) -> bool:
-        """Dismiss active overlay or exit mobile detail view; return True if handled."""
+        """Dismiss Pane-3 overlay, collapse 2+3 expand, or exit mobile detail view."""
         if self.pop_overlay():
+            return True
+        if self._layout_mode == "wide" and self._state.pane3_expanded:
+            self.set_pane3_expanded(False)
             return True
         if self._layout_mode != "wide" and self._state.in_detail_mobile:
             self._state.in_detail_mobile = False
@@ -371,7 +525,9 @@ class CoursesTabView(ft.Container):
         if target_key != prev_key:
             self._state.sections = []
             self._state.grades = []
+            self._state.user_groups = []
             self._state.last_synced_at = 0
+            self.clear_overlays(update=False)
         self._state.loading_detail = True
         self._state.offline_notice = ""
         self._render()
@@ -424,6 +580,13 @@ class CoursesTabView(ft.Container):
                 ):
                     return req_id
                 self._state.grades = list(grades)
+
+            if hasattr(self._svc, "get_user_course_groups"):
+                groups = await asyncio.to_thread(
+                    self._svc.get_user_course_groups, course.source, course.id
+                )
+                if self._is_active_detail(req_id, target_key):
+                    self._state.user_groups = list(groups or [])
         except Exception as exc:
             logger.warning("Failed to select course %s: %s", target_key, exc)
             if self._is_active_detail(req_id, target_key):
@@ -865,6 +1028,34 @@ class CoursesTabView(ft.Container):
                 else:
                     await _invoke_callback(self._on_download_attachment, course, att)
                 return
+            if (
+                mod.modname in {"resource", "folder"}
+                and self._svc is not None
+                and hasattr(self._svc, "resolve_module_attachments")
+            ):
+                resolved_atts = await asyncio.to_thread(
+                    self._svc.resolve_module_attachments, course.source, mod
+                )
+                if resolved_atts:
+                    resolved_mod = replace(mod, attachments=resolved_atts)
+                    if len(resolved_atts) > 1 or mod.modname == "folder":
+                        self._push_folder_overlay(course, resolved_mod)
+                        return
+                    att = resolved_atts[0]
+                    await self._record_recent_best_effort(course, resolved_mod, att)
+                    if callable(self._on_open_attachment_viewer):
+                        await _invoke_callback(
+                            self._on_open_attachment_viewer, course, resolved_mod, att
+                        )
+                    else:
+                        await _invoke_callback(self._on_download_attachment, course, att)
+                    return
+            if mod.modname in {"forum", "book", "page"} and callable(
+                self._on_open_custom_activity
+            ):
+                await self._record_recent_best_effort(course, mod)
+                await _invoke_callback(self._on_open_custom_activity, course, mod)
+                return
             fallback_url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
             if fallback_url:
                 await _invoke_callback(self._on_launch_url, fallback_url)
@@ -877,8 +1068,7 @@ class CoursesTabView(ft.Container):
         """Close active overlays, return to list on narrow screens, and focus search."""
         changed = False
         if self._overlays:
-            self._overlays.clear()
-            self._root_stack.controls = [self._main_host]
+            self.clear_overlays(update=False)
             changed = True
         if self._layout_mode != "wide" and self._state.in_detail_mobile:
             self._state.in_detail_mobile = False
@@ -892,9 +1082,14 @@ class CoursesTabView(ft.Container):
         """Apply updated global palette tokens across panes and open overlays once."""
         current = semantic_palette()
         self.bgcolor = C.BG
+        self._split_divider.color = C.BORDER
         self._list_pane.update_theme(update=False, rerender=False)
         self._detail_pane.update_theme(update=False, rerender=False)
         if self._overlays:
             refresh_semantic_control_colors(self._overlays, self._theme_snapshot, current)
+            for item in self._overlays:
+                theme_fn = getattr(item, "update_theme", None)
+                if callable(theme_fn):
+                    theme_fn()
         self._theme_snapshot = current
         self._render()

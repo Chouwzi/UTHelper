@@ -56,6 +56,9 @@ class ViewManager:
 
     def _hide_courses_view(self) -> None:
         if self.courses_view is not None:
+            on_hidden = getattr(self.courses_view, "on_tab_hidden", None)
+            if callable(on_hidden):
+                on_hidden()
             self.courses_view.visible = False
 
     def _clear_detail_layer(self) -> None:
@@ -129,6 +132,9 @@ class ViewManager:
         self.courses_view.visible = True
         self.courses_view.opacity = 1.0
         self.courses_view.offset = ft.Offset(0, 0)
+        on_shown = getattr(self.courses_view, "on_tab_shown", None)
+        if callable(on_shown):
+            on_shown()
         if self.tab_switcher is not None:
             self.tab_switcher.content = self.courses_view
         else:

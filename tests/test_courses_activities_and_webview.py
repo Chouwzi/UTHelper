@@ -1,0 +1,544 @@
+"""Tests for THNN live fixes, CourseActivityService, session bridge, Pane-3 UX & WebView routing."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
+import urllib.error
+import urllib.request
+
+import flet as ft
+import pytest
+
+from core.courses.activity_service import (
+    CourseActivityService,
+    parse_attendance_html,
+    parse_book_html,
+    parse_choicegroup_html,
+    parse_groupselect_html,
+)
+from core.courses.archive_service import ArchiveService
+from core.courses.cache_store import CourseCacheStore
+from core.courses.catalog_service import CourseCatalogService
+from core.courses.local_preview_server import LocalPreviewServer
+from core.courses.models import CourseAttachment, CourseModuleItem, CourseSummary
+from core.courses.preview_cache import PreviewFileCache
+from core.courses.providers import ThnnCourseProvider
+from gui.components.courses.activity_views import (
+    AttendanceActivityView,
+    ForumActivityView,
+    GroupActivityView,
+    PaneAssignmentView,
+    QuizActivityView,
+    RichContentActivityView,
+)
+from gui.components.courses.archive_explorer_view import ArchiveExplorerView
+from gui.components.courses.courses_tab_view import CoursesTabView
+from gui.components.courses.webview_pane import CoursesWebViewPane, is_external_meeting_url
+from gui.controllers.courses_coordinator import CoursesCoordinator
+
+
+def _sample_course(source: str = "courses", cid: int = 101) -> CourseSummary:
+    return CourseSummary(
+        id=cid,
+        source=source,  # type: ignore[arg-type]
+        fullname="Lập trình Python [2025-2026 HK2]",
+        shortname="PY101",
+        display_name="Lập trình Python",
+        semester_label="2025-2026 HK2",
+        semester_sort_key=(2025, 2),
+        web_url=f"https://{source}.ut.edu.vn/course/view.php?id={cid}",
+    )
+
+
+def _sample_module(
+    cmid: int,
+    modname: str,
+    name: str,
+    *,
+    source: str = "courses",
+    instance_id: int = 50,
+    open_strategy: str = "webview_activity",
+) -> CourseModuleItem:
+    return CourseModuleItem(
+        cmid=cmid,
+        instance_id=instance_id,
+        modname=modname,
+        name=name,
+        section_id=1,
+        url=f"https://{source}.ut.edu.vn/mod/{modname}/view.php?id={cmid}",
+        web_url=f"https://{source}.ut.edu.vn/mod/{modname}/view.php?id={cmid}",
+        open_strategy=open_strategy,  # type: ignore[arg-type]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. THNN Live Fixes (JSON-string course state, HTML grades, resource attachments)
+# ---------------------------------------------------------------------------
+
+
+def test_thnn_provider_parses_json_string_state_grades_and_resource_attachments():
+    state_json = json.dumps(
+        {
+            "section": [
+                {"id": 10, "section": 1, "title": "Tuần 1", "cmlist": ["201"], "visible": True}
+            ],
+            "cm": [
+                {
+                    "id": 201,
+                    "module": "resource",
+                    "name": "Slide Chương 1",
+                    "url": "https://thnn.ut.edu.vn/mod/resource/view.php?id=201",
+                    "completionstate": 1,
+                }
+            ],
+        }
+    )
+    grades_html = """
+    <table class="user-grade">
+      <tbody>
+        <tr class="level1 baggt">
+          <th class="column-itemname">Tổng kết môn</th>
+          <td class="column-weight">-</td>
+          <td class="column-grade">8.75</td>
+          <td class="column-range">0–10</td>
+          <td class="column-percentage">87.50 %</td>
+          <td class="column-feedback">Đạt yêu cầu</td>
+        </tr>
+        <tr>
+          <td class="column-itemname">Bài kiểm tra giữa kỳ</td>
+          <td class="column-weight">30 %</td>
+          <td class="column-grade">9.00</td>
+          <td class="column-range">0–10</td>
+          <td class="column-percentage">90.00 %</td>
+          <td class="column-feedback">Tốt</td>
+        </tr>
+      </tbody>
+    </table>
+    """
+    resource_html = """
+    <div class="resourceworkaround">
+      Nhấn vào <a href="https://thnn.ut.edu.vn/pluginfile.php/88/mod_resource/content/1/BaiGiang1.pdf">BaiGiang1.pdf</a> để tải.
+    </div>
+    """
+
+    def _open_session(url: str):
+        if "grade/report/user" in url:
+            return url, grades_html, False
+        if "mod/resource/view.php" in url:
+            return url, resource_html, False
+        return url, "", False
+
+    fake_client = SimpleNamespace(
+        moodle_site_origin="https://thnn.ut.edu.vn",
+        call_ajax_api=lambda fn, **_k: {"data": state_json}
+        if fn == "core_courseformat_get_state"
+        else {},
+        open_session_url=_open_session,
+        login_session=lambda **_k: True,
+        download_session_file=lambda _u: b"%PDF",
+    )
+
+    provider = ThnnCourseProvider(client=fake_client)
+    sections = provider.fetch_course_sections(9)
+    assert len(sections) == 1
+    assert sections[0].modules[0].name == "Slide Chương 1"
+
+    grades = provider.fetch_course_grades(9)
+    assert len(grades) == 2
+    assert grades[0].item_module == "course"
+    assert grades[0].grade_formatted == "8.75"
+    assert grades[1].weight == "30 %"
+
+    atts = provider.resolve_module_attachments(sections[0].modules[0])
+    assert len(atts) == 1
+    assert atts[0].file_name == "BaiGiang1.pdf"
+    assert atts[0].preview_kind == "pdf"
+
+
+# ---------------------------------------------------------------------------
+# 2. CourseActivityService HTML/WS Parsers & Actions
+# ---------------------------------------------------------------------------
+
+
+def test_activity_parsers_attendance_groups_choice_quiz_forum_and_book():
+    att_html = """
+    <h2>Điểm danh Thực hành</h2>
+    <table class="attlist">
+      <tr><th>Taken sessions</th><td>8</td></tr>
+      <tr><th>Points over taken sessions</th><td>7 / 8</td></tr>
+      <tr><th>Percentage</th><td>87.5%</td></tr>
+    </table>
+    <table class="generaltable attwidth">
+      <tbody>
+        <tr>
+          <td>17/11/2026 07:30</td>
+          <td>Buổi 8</td>
+          <td>Present</td>
+          <td>1 / 1</td>
+          <td>Đúng giờ</td>
+        </tr>
+      </tbody>
+    </table>
+    <form action="/mod/attendance/attendance.php" method="post">
+      <input type="hidden" name="sessid" value="44" />
+      <input type="hidden" name="sesskey" value="abc123" />
+      <label for="st1"><input id="st1" type="radio" name="status" value="9" checked /> Present</label>
+      <label for="st2"><input id="st2" type="radio" name="status" value="10" /> Late</label>
+      <input type="text" name="studentpassword" value="" />
+      <input type="submit" value="Lưu" />
+    </form>
+    """
+    att = parse_attendance_html(
+        att_html,
+        base_url="https://courses.ut.edu.vn",
+        page_url="https://courses.ut.edu.vn/mod/attendance/view.php?id=71",
+    )
+    assert att.cmid == 71
+    assert att.taken_sessions == "8"
+    assert att.percentage == "87.5%"
+    assert att.requires_password is True
+    assert len(att.records) == 1
+    assert att.status_options == (("9", "Present"), ("10", "Late"))
+    assert att.submit_action_url == "https://courses.ut.edu.vn/mod/attendance/attendance.php"
+
+    gs_html = """
+    <table class="groupselect-table">
+      <tbody>
+        <tr>
+          <td>Nhóm 01</td>
+          <td>Đề tài AI</td>
+          <td>3/4</td>
+          <td>An, Bình, Chi</td>
+          <td>
+            <form action="/mod/groupselect/view.php" method="post">
+              <input type="hidden" name="id" value="80" />
+              <input type="hidden" name="sesskey" value="abc" />
+              <button type="submit" name="select" value="10">Tham gia</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td>Nhóm 02</td>
+          <td>Đề tài Web</td>
+          <td>4/4</td>
+          <td>Dũng, Hà</td>
+          <td>
+            <form action="/mod/groupselect/view.php" method="post">
+              <input type="hidden" name="id" value="80" />
+              <input type="hidden" name="sesskey" value="abc" />
+              <button type="submit" name="unselect" value="11">Rời nhóm</button>
+            </form>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    """
+    gs = parse_groupselect_html(
+        gs_html,
+        base_url="https://courses.ut.edu.vn",
+        page_url="https://courses.ut.edu.vn/mod/groupselect/view.php?id=80",
+    )
+    assert len(gs.groups) == 2
+    assert gs.groups[0].can_join is True
+    assert gs.groups[1].is_member is True and gs.groups[1].can_leave is True
+
+    cg_html = """
+    <form action="/mod/choicegroup/view.php" method="post">
+      <input type="hidden" name="id" value="85" />
+      <input type="hidden" name="sesskey" value="xyz" />
+      <table class="choicegroups">
+        <tbody>
+          <tr>
+            <td><input type="radio" name="answer" value="5" checked /></td>
+            <td>Nhóm React</td>
+            <td>2/3</td>
+            <td>Minh, Nam</td>
+          </tr>
+        </tbody>
+      </table>
+    </form>
+    """
+    cg = parse_choicegroup_html(
+        cg_html,
+        base_url="https://courses.ut.edu.vn",
+        page_url="https://courses.ut.edu.vn/mod/choicegroup/view.php?id=85",
+    )
+    assert cg.is_radio_choice is True
+    assert len(cg.groups) == 1
+    assert cg.groups[0].is_member is True
+    assert cg.groups[0].name == "Nhóm React"
+
+    book_html = """
+    <div class="book_toc">
+      <ul>
+        <li><a href="view.php?id=99&chapterid=10">Chương 1: Mở đầu</a></li>
+        <li class="subchapter"><a href="view.php?id=99&chapterid=11">1.1 Cài đặt</a></li>
+      </ul>
+    </div>
+    <div class="book_content"><h3>Chương 1: Mở đầu</h3><p>Xin chào UTH.</p></div>
+    """
+    chapters = parse_book_html(book_html, title="Giáo trình")
+    assert len(chapters) == 2
+    assert "Xin chào UTH" in chapters[0].content_markdown
+    assert chapters[1].subchapter is True
+
+    # Service integration for Quiz, Forum & Choice WS
+    fake_service = SimpleNamespace(
+        get_course_user_groups=lambda _cid: [{"id": 5, "name": "Nhóm React"}],
+        get_choice_options=lambda _id: [
+            {"id": 1, "text": "Ca sáng", "checked": False, "disabled": False, "numberofuser": 2, "maxanswers": 10}
+        ],
+        submit_choice_response=lambda _cid, _r: True,
+        get_quizzes_by_courses=lambda _cids: [
+            {"id": 300, "coursemodule": 55, "name": "Quiz 1", "timeopen": 1000, "timeclose": 2000, "timelimit": 900, "attempts": 2, "grademethod": 1, "sumgrades": 10.0}
+        ],
+        get_quiz_access_information=lambda _qid: {"accessrules": ["15 phút"], "preventaccessreasons": []},
+        get_quiz_attempts=lambda _qid: [{"id": 77, "attempt": 1, "state": "finished", "sumgrades": 9.5}],
+        get_quiz_attempt_review=lambda _aid: {"questions": [{"slot": 1, "status": "Correct", "mark": "1.0", "maxmark": "1.0", "html": "<div class='qtext'>2+2=?</div>"}]},
+        get_forums_by_courses=lambda _cids: [{"id": 400, "cmid": 60, "intro": "<p>Thảo luận</p>"}],
+        get_forum_discussions=lambda _fid: [{"discussion": 901, "name": "Hỏi đáp tuần 1", "userfullname": "GV A", "numreplies": 2, "pinned": True, "message": "<p>Nội dung</p>"}],
+        get_discussion_posts=lambda _did: [{"id": 1, "author": {"fullname": "GV A"}, "subject": "Re", "message": "<p>Trả lời chi tiết</p>"}],
+    )
+    svc = CourseActivityService(moodle_service=fake_service)
+    quiz = svc.fetch_quiz_activity("courses", _sample_module(55, "quiz", "Quiz 1"), course_id=101)
+    assert quiz.attempts[0].score_text == "9.5 / 10.0"
+    assert svc.fetch_quiz_review(77)[0]["question_text"] == "2+2=?"
+
+    forum = svc.fetch_forum_activity("courses", _sample_module(60, "forum", "Diễn đàn"), course_id=101)
+    assert forum.discussions[0].pinned is True
+    assert "Trả lời chi tiết" in svc.fetch_discussion_posts("courses", 901)[0].message_text
+
+    choice_mod = _sample_module(61, "choice", "Chọn ca", instance_id=12)
+    grp_choice = svc.fetch_group_activity("courses", choice_mod, course_id=101)
+    assert grp_choice.groups[0].name == "Ca sáng"
+    ok, _msg, _ = svc.submit_group_action("courses", choice_mod, choice_option_id=1, course_id=101)
+    assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# 3. LocalPreviewServer Authenticated Session Bridge (/session/...)
+# ---------------------------------------------------------------------------
+
+
+def test_local_preview_server_authenticated_session_bridge_get_post_and_ssrf_guard():
+    seen_requests: list[tuple[str, str, bytes | None]] = []
+
+    class _FakeSessionClient:
+        moodle_site_origin = "https://courses.ut.edu.vn"
+
+        def open_session_raw(
+            self,
+            url: str,
+            *,
+            method: str = "GET",
+            body: bytes | None = None,
+            **_kwargs,
+        ):
+            seen_requests.append((method, url, body))
+            if "evil.example" in url:
+                raise ValueError("Untrusted origin")
+            if "bounce" in url:
+                return 302, "https://evil.example/steal", "text/plain", b""
+            if method == "POST":
+                return 200, url, "text/html; charset=utf-8", b"<html><body>Saved!</body></html>"
+            html_page = (
+                '<html><head><title>Quiz</title></head>'
+                '<body><a href="https://courses.ut.edu.vn/mod/quiz/attempt.php?id=5">Attempt</a>'
+                '<form action="/mod/quiz/processattempt.php" method="post"></form></body></html>'
+            )
+            return 200, url, "text/html; charset=utf-8", html_page.encode("utf-8")
+
+    server = LocalPreviewServer()
+    try:
+        server.register_session_provider("courses", _FakeSessionClient())
+        bridge_url = server.build_session_bridge_url(
+            "courses", "https://courses.ut.edu.vn/mod/quiz/view.php?id=55"
+        )
+        assert bridge_url is not None
+        # Cross-origin target refused cleanly
+        assert (
+            server.build_session_bridge_url("courses", "https://evil.example/phish")
+            is None
+        )
+
+        with urllib.request.urlopen(bridge_url, timeout=5) as resp:
+            assert resp.status == 200
+            assert resp.headers.get("X-Frame-Options") is None
+            body = resp.read().decode("utf-8")
+            assert "<base " in body
+            assert "/session/" in body
+            assert "https://courses.ut.edu.vn/mod/quiz/attempt.php" not in body
+
+        # POST request passes body through cleanly
+        post_url = server.build_session_bridge_url(
+            "courses", "https://courses.ut.edu.vn/mod/quiz/processattempt.php"
+        )
+        assert post_url is not None
+        req = urllib.request.Request(post_url, data=b"q1=A", method="POST")
+        with urllib.request.urlopen(req, timeout=5) as post_resp:
+            assert b"Saved!" in post_resp.read()
+        assert seen_requests[-1][0] == "POST"
+        assert seen_requests[-1][2] == b"q1=A"
+
+        # Invalid bridge token returns 403
+        tampered = bridge_url.replace(server._bridge_token, "invalidtoken000")
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(tampered, timeout=5)
+        assert exc_info.value.code == 403
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
+# 4. Pane-3 Default Workspace, 2+3 Expand Toggle & Coordinator V2 Routing
+# ---------------------------------------------------------------------------
+
+
+def test_pane3_default_overlay_expand_toggle_and_course_switch_cleanup(tmp_path: Path):
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|u")
+    c1 = _sample_course(cid=1)
+    c2 = _sample_course(cid=2)
+    store.save_catalog([c1, c2], synced_at=100)
+    svc = CourseCatalogService(
+        cache_store=store, preview_cache=PreviewFileCache(tmp_path / "pc")
+    )
+
+    view = CoursesTabView(catalog_service=svc)
+    view.set_width(1200)
+    view.load_initial()
+
+    assert view._list_pane_host.width == 320
+    assert view._split_divider.visible is True
+
+    disposed_flags: list[bool] = []
+
+    class _DummyOverlay(ft.Container):
+        def __init__(self):
+            super().__init__(expand=True)
+            self.expanded_arg = False
+
+        def set_expanded(self, expanded: bool, *, visible: bool = True):
+            self.expanded_arg = expanded
+
+        def dispose(self):
+            disposed_flags.append(True)
+
+    ov = _DummyOverlay()
+    view.push_overlay(ov, tag="doc:1")
+
+    # By default opening in Pane 3 MUST keep Pane 2 visible (width == 320)
+    assert len(view._overlays) == 1
+    assert ov in view._workspace_stack.controls
+    assert view._list_pane_host.width == 320
+    assert view._split_divider.visible is True
+
+    # Expand toggle switches Pane 3 -> 2+3 (Pane 2 collapses cleanly to 0)
+    view.toggle_pane3_expanded()
+    assert view.pane3_expanded is True
+    assert view._list_pane_host.width == 0
+    assert view._split_divider.visible is False
+    assert ov.expanded_arg is True
+
+    # Popping overlay restores Pane 3, Escape collapses 2+3 back to 3
+    assert view.handle_back() is True
+    assert disposed_flags == [True]
+    assert view.handle_back() is True
+    assert view.pane3_expanded is False
+    assert view._list_pane_host.width == 320
+
+    # Switching courses clears/disposes active overlays cleanly
+    ov2 = _DummyOverlay()
+    view.push_overlay(ov2, tag="doc:2")
+    asyncio.run(view._select_course_async(c1.course_key))
+    asyncio.run(view._select_course_async(c2.course_key))
+    assert view._overlays == []
+    assert disposed_flags == [True, True]
+
+
+def test_coordinator_routes_all_v2_activities_and_in_app_webview(tmp_path: Path):
+    assert is_external_meeting_url("https://meet.google.com/abc-defg-hij") is True
+    assert is_external_meeting_url("https://courses.ut.edu.vn/mod/vpl/view.php?id=9") is False
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|u")
+    pcache = PreviewFileCache(tmp_path / "preview")
+    server = LocalPreviewServer()
+    launched_external: list[str] = []
+    act_service = CourseActivityService(moodle_service=SimpleNamespace(
+        get_quizzes_by_courses=lambda _c: [],
+        get_forums_by_courses=lambda _c: [],
+        get_course_user_groups=lambda _c: [],
+    ))
+    fake_client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        get_session_cookies=lambda **_k: [],
+        open_session_url=lambda u: (u, "<html></html>", False),
+    )
+
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        title="UTHelper",
+        width=1200,
+        height=800,
+        update=lambda: None,
+        run_task=lambda fn, *a: asyncio.run(fn(*a)),
+    )
+    coord = CoursesCoordinator(
+        page=fake_page,  # type: ignore[arg-type]
+        catalog_service=CourseCatalogService(cache_store=store, preview_cache=pcache),
+        preview_cache=pcache,
+        archive_service=ArchiveService(),
+        preview_server=server,
+        on_open_assignment_fallback=lambda _m: None,
+        on_launch_url=launched_external.append,
+        activity_service=act_service,
+        courses_client=fake_client,
+        assignment_detail_fetcher=lambda d: d,
+    )
+    try:
+        course = _sample_course()
+
+        coord._handle_open_assignment(course, _sample_module(11, "assign", "BT1", open_strategy="assignment_detail"))
+        assert isinstance(coord.courses_view._overlays[-1], PaneAssignmentView)
+
+        coord._handle_open_webview_activity(course, _sample_module(12, "attendance", "Diem danh"))
+        assert isinstance(coord.courses_view._overlays[-1], AttendanceActivityView)
+
+        coord._handle_open_webview_activity(course, _sample_module(13, "groupselect", "Chon nhom"))
+        assert isinstance(coord.courses_view._overlays[-1], GroupActivityView)
+
+        coord._handle_open_webview_activity(course, _sample_module(14, "quiz", "Quiz 1"))
+        assert isinstance(coord.courses_view._overlays[-1], QuizActivityView)
+
+        coord._handle_open_custom_activity(course, _sample_module(15, "forum", "Dien dan", open_strategy="web_fallback"))
+        assert isinstance(coord.courses_view._overlays[-1], ForumActivityView)
+
+        coord._handle_open_custom_activity(course, _sample_module(16, "book", "Sach", open_strategy="web_fallback"))
+        assert isinstance(coord.courses_view._overlays[-1], RichContentActivityView)
+
+        # Unsupported activity / Moodle web URL opens in Pane-3 WebView, not external browser
+        coord._handle_course_url_action("https://courses.ut.edu.vn/mod/vpl/view.php?id=99")
+        assert isinstance(coord.courses_view._overlays[-1], CoursesWebViewPane)
+        assert launched_external == []
+
+        # External Google Meet opens OS launcher
+        coord._handle_course_url_action("https://meet.google.com/aaa-bbbb-ccc")
+        assert launched_external == ["https://meet.google.com/aaa-bbbb-ccc"]
+
+        # Nested archive opens ArchiveExplorerView directly
+        att = CourseAttachment(
+            file_name="inner.zip",
+            file_url="https://courses.ut.edu.vn/inner.zip",
+            preview_kind="archive",
+            is_archive=True,
+        )
+        coord.open_attachment_bytes_in_overlay(course, _sample_module(20, "resource", "Zip", open_strategy="archive_tree"), att, b"PK\x05\x06" + b"\x00" * 18)
+        assert isinstance(coord.courses_view._overlays[-1], ArchiveExplorerView)
+        coord._open_entry_reader("nested.7z", b"7z", "archive")
+        assert isinstance(coord.courses_view._overlays[-1], ArchiveExplorerView)
+    finally:
+        coord.close()

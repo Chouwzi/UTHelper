@@ -14,9 +14,11 @@ from core.courses.models import (
     CourseSummary,
 )
 from gui.components.courses._shared import (
+    build_expand_toggle_button,
     build_filter_chip,
     build_offline_banner,
     safe_control_update,
+    sync_expand_toggle_button,
 )
 from gui.core.theme import C
 from gui.view_models.courses_state import (
@@ -33,6 +35,7 @@ _MODULE_FILTERS: tuple[tuple[str, str], ...] = (
     ("materials", "Tài liệu"),
     ("tasks", "Bài tập"),
     ("attendance", "Điểm danh"),
+    ("groups", "Nhóm"),
     ("links", "Liên kết"),
 )
 
@@ -105,6 +108,7 @@ class CourseDetailPane(ft.Container):
         on_copy_text: Optional[Callable[[str], None]] = None,
         on_launch_url: Optional[Callable[[str], None]] = None,
         on_subtab_change: Optional[Callable[[int], None]] = None,
+        on_toggle_expand: Optional[Callable[[], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, **kwargs)
@@ -116,6 +120,7 @@ class CourseDetailPane(ft.Container):
         self._on_copy_text = on_copy_text
         self._on_launch_url = on_launch_url
         self._on_subtab_change = on_subtab_change
+        self._on_toggle_expand = on_toggle_expand
         self._last_state: Optional[CoursesState] = None
         self._last_show_back = False
 
@@ -126,6 +131,11 @@ class CourseDetailPane(ft.Container):
             tooltip="Quay lại danh sách",
             visible=False,
             on_click=lambda _e: self._on_back_mobile() if callable(self._on_back_mobile) else None,
+        )
+        self._expand_btn = build_expand_toggle_button(
+            expanded=False,
+            on_toggle=lambda: self._on_toggle_expand() if callable(self._on_toggle_expand) else None,
+            visible=False,
         )
         self._header_slot = ft.Column(spacing=8)
         self._loading_bar = ft.ProgressBar(
@@ -287,6 +297,7 @@ class CourseDetailPane(ft.Container):
                         self._on_refresh_course() if callable(self._on_refresh_course) else None
                     ),
                 ),
+                self._expand_btn,
                 ft.IconButton(
                     icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
                     icon_color=C.TEXT_SECONDARY,
@@ -297,6 +308,12 @@ class CourseDetailPane(ft.Container):
                     ),
                 ),
             ],
+        )
+
+        sync_expand_toggle_button(
+            self._expand_btn,
+            expanded=bool(state.pane3_expanded),
+            visible=(not show_back and callable(self._on_toggle_expand)),
         )
 
         meta_controls: list[ft.Control] = []
@@ -339,6 +356,35 @@ class CourseDetailPane(ft.Container):
                     ),
                 )
             )
+
+        if state.user_groups:
+            group_names = ", ".join(
+                str(g.get("name") or "").strip()
+                for g in state.user_groups
+                if isinstance(g, dict) and str(g.get("name") or "").strip()
+            )
+            if group_names:
+                meta_controls.append(
+                    ft.Container(
+                        bgcolor=C.SURFACE,
+                        border=ft.Border.all(1, C.ACCENT),
+                        border_radius=8,
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                        content=ft.Row(
+                            tight=True,
+                            spacing=4,
+                            controls=[
+                                ft.Icon(ft.Icons.GROUP_OUTLINED, size=14, color=C.ACCENT),
+                                ft.Text(
+                                    f"Nhóm: {group_names}",
+                                    size=11,
+                                    weight=ft.FontWeight.W_600,
+                                    color=C.ACCENT,
+                                ),
+                            ],
+                        ),
+                    )
+                )
 
         safe_meet = safe_http_url(course.meet_url)
         if safe_meet:

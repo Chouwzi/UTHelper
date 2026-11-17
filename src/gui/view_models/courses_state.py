@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup, CData, NavigableString
@@ -29,8 +29,9 @@ _ARCHIVE_EXTS = frozenset({"zip", "rar", "7z", "tar", "gz", "tgz"})
 
 _MODULE_TYPE_MAP: dict[str, frozenset[str]] = {
     "materials": frozenset({"resource", "folder", "page", "book"}),
-    "tasks": frozenset({"assign", "quiz", "scorm"}),
+    "tasks": frozenset({"assign", "quiz", "scorm", "vpl"}),
     "attendance": frozenset({"attendance", "choice", "feedback"}),
+    "groups": frozenset({"groupselect", "choicegroup", "choice"}),
     "links": _LINK_MODNAMES,
 }
 
@@ -230,6 +231,8 @@ class CoursesState:
     loading_detail: bool = False
     offline_notice: str = ""
     in_detail_mobile: bool = False
+    pane3_expanded: bool = False
+    user_groups: list[dict[str, Any]] = field(default_factory=list)
 
     def set_courses(self, courses: list[CourseSummary]) -> None:
         """Replace the catalog course summaries."""

@@ -1996,3 +1996,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
     `tests/test_desktop_window_header.py` and `tests/test_startup_visibility.py`.
   - `python -m pytest tests -q --tb=short`: **1785 passed, 25 skipped**.
   - `ruff check src tests`: all checks passed (0 errors).
+
+## Môn học V2: Native Readers, Authenticated In-App WebView & Pane-3 UX (2026-11-17)
+
+- **Scope & Boundaries (`feature/courses-tab`)**:
+  - **Dependencies (`pyproject.toml`)**: Added `pypdf>=6.9.0`, `xlrd>=2.0.2`, `olefile>=0.47` to base dependencies; `webview2-Microsoft.Web.WebView2.Core==3.2.1` + `pypdfium2>=5.9.0` to `windows` / `[tool.flet.windows]`; `flet-webview==0.86.5` + `pypdfium2>=5.9.0` to `[tool.flet.android]`; `flet-webview==0.86.5` to `[tool.flet.ios]`.
+  - **Native PDF & Document Support (`core/courses/*`)**:
+    - Created `src/core/courses/pdf_renderer.py` (`PdfDocumentSession` with `pypdfium2` + `PIL` primary backend and `pypdf` fallback, YCbCr dark-mode luminance inversion, in-PDF text search, outline extraction, and bounded `96 MiB` PNG LRU cache under `preview_cache/rendered_pdf/`; cleanup wired in `SettingsView._do_clear_data_cache`).
+    - Extended `archive_service.py` with `.7z` inspection & extraction strictly via `7z`/`7za` (`find_windows_7z_cli`).
+    - Extended `document_converter.py` with `DocxRichBlock`, `PptxSlideRich` (inline raster media & tables), and OLE2 `.doc` / `.xls` / `.ppt` support.
+    - Extended `providers.py`, `ws_functions.py`, `moodle_service.py`, `client.py`, and `catalog_service.py` with live THNN fixes (JSON-string `core_courseformat_get_state`, `/grade/report/user/index.php` HTML gradebook parsing, `pluginfile.php` resource resolution), session cookie export, form submission helpers, and `CourseActivityService` (`src/core/courses/activity_service.py`).
+    - Extended `LocalPreviewServer` with SSRF-guarded `/session/{bridge_token}/{source}/...` reverse proxy (`GET`/`HEAD`/`POST`, `X-Frame-Options` stripping, same-origin HTML link/form rewriting).
+  - **Pane-3 Default UX & In-App Views (`gui/components/courses/*`, `CoursesCoordinator`)**:
+    - Refactored `CoursesTabView` so all viewers and activities open inside Pane 3 (`_workspace_stack`) by default with Panes 1 & 2 visible, smooth 220ms `width`/`opacity` expand/collapse toggle (`3` <-> `2+3`, `Ctrl+\` / `F11`, `Esc`), overlay disposal on course switch, and `on_tab_hidden()` / `on_tab_shown()` lifecycle hooks in `ViewManager`.
+    - Upgraded `DocumentReaderView` (native multi-page PDF reader with 5-page progressive hydration, paginated/filterable Excel `120x40` view, rich DOCX/PPTX), added `CoursesWebViewPane` (`WindowsWebView2Dock` + `flet_webview` + HTML fallback), and added native Pane-3 `AttendanceActivityView`, `GroupActivityView`, `QuizActivityView`, `ForumActivityView`, `RichContentActivityView`, and `PaneAssignmentView`.
+- **Verification**:
+  - Added `tests/test_courses_pdf_and_legacy_docs.py` and `tests/test_courses_activities_and_webview.py`.
+  - `python -m pytest tests -q --tb=short`: **1795 passed, 25 skipped**.
+  - `ruff check src tests`: all checks passed (0 errors).

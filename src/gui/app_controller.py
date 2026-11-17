@@ -22,6 +22,7 @@ from pathlib import Path
 from packaging.version import InvalidVersion, Version
 
 from core.data_orchestrator import DataOrchestrator
+from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
 from core.courses.cache_store import CourseCacheStore
 from core.courses.catalog_service import CourseCatalogService
@@ -675,6 +676,11 @@ class AppController:
             and not detail_open
         ):
             ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
+            if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not getattr(e, "alt", False)):
+                toggle_expand = getattr(courses_view, "toggle_pane3_expanded", None)
+                if callable(toggle_expand):
+                    toggle_expand()
+                    return
             if (ctrl and key.lower() == "k") or (
                 not ctrl
                 and not getattr(e, "alt", False)
@@ -1106,6 +1112,11 @@ class AppController:
         )
         self._archive_service = ArchiveService()
         self._preview_server = LocalPreviewServer()
+        self._course_activity_service = CourseActivityService(
+            moodle_service=self.orchestrator.moodle_service,
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+        )
         self._courses_coordinator = CoursesCoordinator(
             page=self.page,
             catalog_service=self._course_catalog_service,
@@ -1114,6 +1125,13 @@ class AppController:
             preview_server=self._preview_server,
             on_open_assignment_fallback=self._open_course_assignment,
             on_launch_url=self._launch_safe_url,
+            activity_service=self._course_activity_service,
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+            assignment_detail_fetcher=self.orchestrator.fetch_full_details,
+            on_assignment_status_changed=self._on_activity_status_changed,
+            submission_workflow_factory=self._submission_workflow_factory,
+            all_assignments_provider=self._snapshot_all_data,
         )
         self.courses_view = self._courses_coordinator.courses_view
         self.courses_view.visible = False
@@ -1307,6 +1325,11 @@ class AppController:
                         await res
 
         self._safe_run_task(_open)
+
+    def _snapshot_all_data(self) -> list[dict]:
+        """Thread-safe shallow copy of all_data dicts for Pane-3 assignment lookup."""
+        with self._data_lock:
+            return [dict(item) for item in (self.all_data or [])]
 
     def _open_course_assignment(self, mod: CourseModuleItem) -> None:
         courses_view = getattr(self, "courses_view", None)

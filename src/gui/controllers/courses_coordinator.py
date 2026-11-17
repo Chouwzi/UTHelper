@@ -13,25 +13,39 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
+from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
 from core.courses.catalog_service import CourseCatalogService
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import (
     CourseAttachment,
     CourseModuleItem,
+    CourseSource,
     CourseSummary,
     PreviewKind,
     RecentMaterialEntry,
 )
 from core.courses.preview_cache import PreviewFileCache
 from gui.components.courses._shared import (
+    build_expand_toggle_button,
     build_viewer_header,
     refresh_viewer_header,
     safe_control_update,
+    sync_expand_toggle_button,
+)
+from gui.components.courses.activity_views import (
+    AttendanceActivityView,
+    ForumActivityView,
+    GroupActivityView,
+    PaneAssignmentView,
+    QuizActivityView,
+    RichContentActivityView,
 )
 from gui.components.courses.archive_explorer_view import ArchiveExplorerView
 from gui.components.courses.courses_tab_view import CoursesTabView
 from gui.components.courses.document_reader_view import DocumentReaderView
+from gui.components.courses.webview_pane import CoursesWebViewPane, is_external_meeting_url
+from gui.components.detail_view import DetailView
 from gui.core.theme import C
 from gui.view_models.courses_state import safe_http_url
 
@@ -66,8 +80,16 @@ class _WebViewActivityOverlay(ft.Container):
         webview: ft.Control,
         on_close: Callable[[], Any],
         on_open_external: Callable[[], Any],
+        on_toggle_expand: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
+        self._expanded = False
+        self._show_expand_toggle = False
+        self._expand_btn = build_expand_toggle_button(
+            expanded=False,
+            on_toggle=lambda: on_toggle_expand() if callable(on_toggle_expand) else None,
+            visible=False,
+        )
         self._ext_btn = ft.IconButton(
             icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
             tooltip="Mở bằng trình duyệt",
@@ -84,12 +106,21 @@ class _WebViewActivityOverlay(ft.Container):
             subtitle=subtitle,
             back_tooltip="Đóng",
             on_back=lambda _e: on_close(),
-            trailing_actions=[self._ext_btn],
+            trailing_actions=[self._expand_btn, self._ext_btn],
         )
         self.content = ft.Column(
             expand=True,
             spacing=0,
             controls=[self._header, webview],
+        )
+
+    def set_expanded(self, expanded: bool, *, visible: bool = True) -> None:
+        self._expanded = bool(expanded)
+        self._show_expand_toggle = bool(visible)
+        sync_expand_toggle_button(
+            self._expand_btn,
+            expanded=self._expanded,
+            visible=self._show_expand_toggle,
         )
 
     def update_theme(self) -> None:
@@ -100,6 +131,11 @@ class _WebViewActivityOverlay(ft.Container):
             self._back_btn,
             self._title_text,
             self._subtitle_text,
+        )
+        sync_expand_toggle_button(
+            self._expand_btn,
+            expanded=self._expanded,
+            visible=self._show_expand_toggle,
         )
         self._ext_btn.icon_color = C.TEXT_PRIMARY
         safe_control_update(self)
@@ -118,6 +154,13 @@ class CoursesCoordinator:
         preview_server: LocalPreviewServer,
         on_open_assignment_fallback: Callable[[CourseModuleItem], Any],
         on_launch_url: Callable[[str], Any],
+        activity_service: Optional[CourseActivityService] = None,
+        courses_client: Any = None,
+        thnn_client: Any = None,
+        assignment_detail_fetcher: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
+        on_assignment_status_changed: Optional[Callable[..., Any]] = None,
+        submission_workflow_factory: Optional[Callable[..., Any]] = None,
+        all_assignments_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
     ) -> None:
         self._page = page
         self.catalog_service = catalog_service
@@ -126,15 +169,26 @@ class CoursesCoordinator:
         self.preview_server = preview_server
         self._on_open_assignment = on_open_assignment_fallback
         self._on_launch_url = on_launch_url
+        self._activity_service = activity_service
+        self._courses_client = courses_client
+        self._thnn_client = thnn_client
+        self._assignment_detail_fetcher = assignment_detail_fetcher
+        self._on_assignment_status_changed = on_assignment_status_changed
+        self._submission_workflow_factory = submission_workflow_factory
+        self._all_assignments_provider = all_assignments_provider
         self._initial_loaded = False
+
+        if hasattr(self.preview_server, "register_session_provider"):
+            if courses_client is not None:
+                self.preview_server.register_session_provider("courses", courses_client)
+            if thnn_client is not None:
+                self.preview_server.register_session_provider("thnn", thnn_client)
 
         self.courses_view = CoursesTabView(
             page=page,
             catalog_service=catalog_service,
-            on_open_assignment=lambda _c, mod: self._dispatch_cb(
-                self._on_open_assignment, mod
-            ),
-            on_open_webview_activity=lambda _c, mod: self._open_webview_activity(mod),
+            on_open_assignment=self._handle_open_assignment,
+            on_open_webview_activity=self._handle_open_webview_activity,
             on_open_attachment_viewer=lambda c, mod, att: self._schedule(
                 self.open_attachment_async, c, mod, att
             ),
@@ -143,7 +197,8 @@ class CoursesCoordinator:
                 att,
                 getattr(c, "source", "courses"),
             ),
-            on_launch_url=self._launch_url_safe,
+            on_launch_url=self._handle_course_url_action,
+            on_open_custom_activity=self._handle_open_custom_activity,
         )
 
     def _schedule(self, coro_fn: Callable[..., Any], *args: Any) -> None:
@@ -195,6 +250,248 @@ class CoursesCoordinator:
             self._initial_loaded = False
             raise
 
+    def _client_for(self, source: CourseSource) -> Any:
+        return self._thnn_client if source == "thnn" else self._courses_client
+
+    def _build_assignment_payload(
+        self, course: CourseSummary, mod: CourseModuleItem
+    ) -> Optional[dict[str, Any]]:
+        url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
+        if not url:
+            return None
+        if callable(self._all_assignments_provider):
+            try:
+                for item in self._all_assignments_provider() or []:
+                    if item.get("url") == url or (
+                        mod.cmid
+                        and item.get("cmid") == mod.cmid
+                        and item.get("course_id") == course.id
+                    ):
+                        return dict(item)
+            except Exception:
+                pass
+        return {
+            "title": mod.name or "Bài tập",
+            "course": course.display_name or course.fullname,
+            "course_id": course.id,
+            "cmid": mod.cmid,
+            "type": "assignment" if mod.modname == "assign" else mod.modname,
+            "url": url,
+            "site_identity": course.source,
+            "submission_status": "unknown",
+            "details": {"description_html": mod.description_html or ""},
+        }
+
+    def _handle_open_assignment(
+        self, course: CourseSummary, mod: CourseModuleItem
+    ) -> None:
+        if self._assignment_detail_fetcher is None:
+            self._dispatch_cb(self._on_open_assignment, mod)
+            return
+        payload = self._build_assignment_payload(course, mod)
+        if payload is None:
+            self._dispatch_cb(self._on_open_assignment, mod)
+            return
+
+        detail_view = DetailView(
+            self._page,
+            on_close=self.courses_view.pop_overlay,
+            get_client=lambda src=course.source: self._client_for(src),
+            on_status_changed=self._on_assignment_status_changed,
+            submission_workflow_factory=self._submission_workflow_factory,
+        )
+        pane_assign = PaneAssignmentView(
+            detail_view=detail_view,
+            title=mod.name or "Bài tập",
+            on_close=self.courses_view.pop_overlay,
+            on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+        )
+        self.courses_view.push_overlay(pane_assign, tag=f"assign:{mod.cmid}")
+        pane_assign.show_loading(payload)
+        self._schedule(self._load_pane_assignment_async, pane_assign, payload)
+
+    async def _load_pane_assignment_async(
+        self, pane_assign: PaneAssignmentView, payload: dict[str, Any]
+    ) -> None:
+        fetcher = self._assignment_detail_fetcher
+        if fetcher is None:
+            return
+        try:
+            full_data = await asyncio.to_thread(fetcher, payload)
+            if full_data and "details" in full_data:
+                desc_html = full_data["details"].get("description_html", "")
+                if desc_html:
+                    from gui.core.utils import pre_cache_description_images
+
+                    cached_html = await asyncio.to_thread(
+                        pre_cache_description_images, desc_html
+                    )
+                    full_data = dict(full_data)
+                    full_data["details"] = dict(full_data["details"])
+                    full_data["details"]["description_html"] = cached_html
+            pane_assign.update_detail(full_data)
+        except Exception:
+            logger.exception("Failed to load Pane-3 assignment details")
+            pane_assign.show_error_banner()
+
+    def open_in_app_webview(
+        self,
+        source: CourseSource,
+        title: str,
+        url: str,
+        *,
+        tag: str = "",
+    ) -> None:
+        """Open a safe HTTP(S) URL inside authenticated Pane-3 CoursesWebViewPane."""
+        safe_url = safe_http_url(url)
+        if not safe_url:
+            return
+        if is_external_meeting_url(safe_url):
+            self._launch_url_safe(safe_url)
+            return
+        pane = CoursesWebViewPane(
+            page=self._page,
+            source=source,
+            title=title or "Nội dung môn học",
+            url=safe_url,
+            preview_server=self.preview_server,
+            session_client=self._client_for(source),
+            on_back=self.courses_view.pop_overlay,
+            on_open_external=self._launch_url_safe,
+            on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            embedded_webview_factory=_try_build_embedded_webview,
+        )
+        self.courses_view.push_overlay(pane, tag=tag or f"webview:{abs(hash(safe_url))}")
+
+    def _handle_course_url_action(self, url: str) -> None:
+        safe_url = safe_http_url(url)
+        if not safe_url:
+            return
+        if is_external_meeting_url(safe_url) or (
+            self._activity_service is None
+            and self._courses_client is None
+            and self._thnn_client is None
+        ):
+            self._launch_url_safe(safe_url)
+            return
+        selected = None
+        if hasattr(self.courses_view, "_state"):
+            selected = self.courses_view._state.selected_course()
+        source: CourseSource = (
+            "thnn"
+            if "thnn.ut.edu.vn" in safe_url.lower()
+            else (selected.source if selected is not None else "courses")
+        )
+        self.open_in_app_webview(
+            source,
+            (selected.display_name or selected.fullname) if selected is not None else "Moodle Web",
+            safe_url,
+        )
+
+    def _handle_open_webview_activity(
+        self, course: CourseSummary, mod: CourseModuleItem
+    ) -> None:
+        if (
+            self._activity_service is None
+            and self._courses_client is None
+            and self._thnn_client is None
+        ):
+            self._open_webview_activity(mod)
+            return
+
+        modname = (mod.modname or "").lower()
+        if modname == "attendance" and self._activity_service is not None:
+            view = AttendanceActivityView(
+                source=course.source,
+                module=mod,
+                activity_service=self._activity_service,
+                on_close=self.courses_view.pop_overlay,
+                on_open_webview=lambda t, u, s=course.source, m=mod: self.open_in_app_webview(
+                    s, t, u, tag=f"webview:att:{m.cmid}"
+                ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            self.courses_view.push_overlay(view, tag=f"activity:attendance:{mod.cmid}")
+            return
+
+        if modname in {"groupselect", "choicegroup", "choice"} and self._activity_service is not None:
+            view = GroupActivityView(
+                source=course.source,
+                course_id=course.id,
+                module=mod,
+                activity_service=self._activity_service,
+                on_close=self.courses_view.pop_overlay,
+                on_open_webview=lambda t, u, s=course.source, m=mod: self.open_in_app_webview(
+                    s, t, u, tag=f"webview:grp:{m.cmid}"
+                ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            self.courses_view.push_overlay(view, tag=f"activity:group:{mod.cmid}")
+            return
+
+        if modname == "quiz" and self._activity_service is not None:
+            view = QuizActivityView(
+                source=course.source,
+                course_id=course.id,
+                module=mod,
+                activity_service=self._activity_service,
+                on_close=self.courses_view.pop_overlay,
+                on_open_webview=lambda t, u, s=course.source, m=mod: self.open_in_app_webview(
+                    s, t, u, tag=f"webview:quiz:{m.cmid}"
+                ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            self.courses_view.push_overlay(view, tag=f"activity:quiz:{mod.cmid}")
+            return
+
+        target_url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
+        if target_url:
+            self.open_in_app_webview(
+                course.source,
+                mod.name or (mod.modname or "Hoạt động").upper(),
+                target_url,
+                tag=f"webview:{mod.cmid}",
+            )
+
+    def _handle_open_custom_activity(
+        self, course: CourseSummary, mod: CourseModuleItem
+    ) -> None:
+        if self._activity_service is None:
+            target = safe_http_url(mod.web_url) or safe_http_url(mod.url)
+            if target:
+                self._handle_course_url_action(target)
+            return
+
+        modname = (mod.modname or "").lower()
+        if modname == "forum":
+            view = ForumActivityView(
+                source=course.source,
+                course_id=course.id,
+                module=mod,
+                activity_service=self._activity_service,
+                on_close=self.courses_view.pop_overlay,
+                on_open_webview=lambda t, u, s=course.source, m=mod: self.open_in_app_webview(
+                    s, t, u, tag=f"webview:forum:{m.cmid}"
+                ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            self.courses_view.push_overlay(view, tag=f"activity:forum:{mod.cmid}")
+            return
+
+        if modname in {"book", "page"}:
+            view = RichContentActivityView(
+                source=course.source,
+                course_id=course.id,
+                module=mod,
+                activity_service=self._activity_service,
+                on_close=self.courses_view.pop_overlay,
+                on_open_webview=lambda t, u, s=course.source, m=mod: self.open_in_app_webview(
+                    s, t, u, tag=f"webview:rich:{m.cmid}"
+                ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            self.courses_view.push_overlay(view, tag=f"activity:rich:{mod.cmid}")
+
     def _open_webview_activity(self, mod: CourseModuleItem) -> None:
         safe_url = safe_http_url(mod.web_url)
         if not safe_url:
@@ -211,6 +508,7 @@ class CoursesCoordinator:
                 webview=wv,
                 on_close=self.courses_view.pop_overlay,
                 on_open_external=lambda u=safe_url: self._launch_url_safe(u),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             )
             self.courses_view.push_overlay(overlay, tag=f"webview:{mod.cmid}")
             return
@@ -289,6 +587,7 @@ class CoursesCoordinator:
                 on_save_raw=lambda name, data: self._schedule(
                     self._save_bytes_async, name, data
                 ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             )
             self.courses_view.push_overlay(
                 explorer, tag=f"archive:{mod.cmid}:{att.file_name}"
@@ -299,6 +598,18 @@ class CoursesCoordinator:
     def _open_entry_reader(
         self, name: str, data: bytes, kind: PreviewKind
     ) -> None:
+        if kind == "archive":
+            nested = ArchiveExplorerView(
+                archive_name=name,
+                archive_bytes=data,
+                archive_service=self.archive_service,
+                on_close=self.courses_view.pop_overlay,
+                on_open_entry=lambda n, d, k: self._open_entry_reader(n, d, k),
+                on_save_raw=lambda n, d: self._schedule(self._save_bytes_async, n, d),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            self.courses_view.push_overlay(nested, tag=f"archive:nested:{name}")
+            return
         reader = DocumentReaderView(
             file_name=name,
             data=data,
@@ -310,6 +621,8 @@ class CoursesCoordinator:
                 self._open_external_async, n, b
             ),
             webview_builder=_try_build_embedded_webview,
+            pdf_cache_dir=getattr(self.preview_cache, "cache_dir", None),
+            on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")
 
@@ -412,7 +725,13 @@ class CoursesCoordinator:
                     logger.debug("Overlay update_theme skipped", exc_info=True)
 
     def close(self) -> None:
-        """Stop the ephemeral preview HTTP server on shutdown."""
+        """Stop the ephemeral preview HTTP server and dispose active overlays on shutdown."""
+        clear_fn = getattr(self.courses_view, "clear_overlays", None)
+        if callable(clear_fn):
+            try:
+                clear_fn(update=False)
+            except Exception:
+                pass
         try:
             self.preview_server.stop()
         except Exception:

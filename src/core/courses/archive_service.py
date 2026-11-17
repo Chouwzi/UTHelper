@@ -115,9 +115,9 @@ def sanitize_archive_member_path(raw_path: str) -> str:
     return "/".join(segments)
 
 
-def find_windows_rar_cli() -> Optional[str]:
-    """Locate 7-Zip or UnRAR CLI in PATH or standard Windows installation directories."""
-    for candidate in ("7z", "7za", "UnRAR", "unrar"):
+def find_windows_7z_cli() -> Optional[str]:
+    """Locate 7-Zip CLI (7z/7za) in PATH or standard Windows directories."""
+    for candidate in ("7z", "7za"):
         found = shutil.which(candidate)
         if found:
             return found
@@ -126,8 +126,27 @@ def find_windows_rar_cli() -> Optional[str]:
         prog_files_x86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
         for fixed in (
             Path(prog_files) / "7-Zip" / "7z.exe",
-            Path(prog_files) / "WinRAR" / "UnRAR.exe",
             Path(prog_files_x86) / "7-Zip" / "7z.exe",
+        ):
+            if fixed.is_file():
+                return str(fixed)
+    return None
+
+
+def find_windows_rar_cli() -> Optional[str]:
+    """Locate 7-Zip or UnRAR CLI in PATH or standard Windows installation directories."""
+    seven_zip = find_windows_7z_cli()
+    if seven_zip:
+        return seven_zip
+    for candidate in ("UnRAR", "unrar"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    if os.name == "nt":
+        prog_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+        prog_files_x86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+        for fixed in (
+            Path(prog_files) / "WinRAR" / "UnRAR.exe",
             Path(prog_files_x86) / "WinRAR" / "UnRAR.exe",
         ):
             if fixed.is_file():
@@ -416,10 +435,10 @@ def _sort_and_count_files(root: ArchiveNode) -> int:
 
 
 @contextmanager
-def _temporary_rar_file(data: bytes) -> Iterator[Path]:
+def _temporary_rar_file(data: bytes, suffix: str = ".rar") -> Iterator[Path]:
     tmp_path: Optional[Path] = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".rar", delete=False) as tf:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
             tmp_path = Path(tf.name)
             tf.write(data)
         yield tmp_path
@@ -745,6 +764,9 @@ class ArchiveService:
         if lower.endswith(".rar"):
             return self._inspect_rar(file_name, data, root)
 
+        if lower.endswith(".7z"):
+            return self._inspect_7z(file_name, data, root)
+
         return ArchiveTreeResult(
             file_name=file_name,
             format_name="unknown",
@@ -857,43 +879,71 @@ class ArchiveService:
         total_files = _sort_and_count_files(root)
         return ArchiveTreeResult(file_name, "tar", True, root, total_files=total_files)
 
+    def _resolve_7z_cli(self) -> Optional[str]:
+        """Return a 7-Zip executable (never UnRAR) for ``.7z`` archives."""
+        candidate = self._rar_finder()
+        if candidate and "7z" in Path(candidate).name.lower():
+            return candidate
+        return find_windows_7z_cli()
+
     def _inspect_rar(self, file_name: str, data: bytes, root: ArchiveNode) -> ArchiveTreeResult:
         cli = self._rar_finder()
+        return self._inspect_cli_archive(
+            file_name, data, root, format_name="rar", suffix=".rar", cli=cli
+        )
+
+    def _inspect_7z(self, file_name: str, data: bytes, root: ArchiveNode) -> ArchiveTreeResult:
+        cli = self._resolve_7z_cli()
+        return self._inspect_cli_archive(
+            file_name, data, root, format_name="7z", suffix=".7z", cli=cli
+        )
+
+    def _inspect_cli_archive(
+        self,
+        file_name: str,
+        data: bytes,
+        root: ArchiveNode,
+        *,
+        format_name: str,
+        suffix: str,
+        cli: Optional[str],
+    ) -> ArchiveTreeResult:
+        label = format_name.upper()
         if not cli:
             return ArchiveTreeResult(
                 file_name=file_name,
-                format_name="rar",
+                format_name=format_name,
                 supported=False,
                 root=root,
                 unsupported_reason=(
-                    "Định dạng RAR không giải nén trực tiếp trên thiết bị di động hoặc thiếu 7-Zip/WinRAR trên Windows. "
-                    "Hãy lưu về máy để mở nhanh bằng ZArchiver / Files / WinRAR."
+                    f"Định dạng {label} không giải nén trực tiếp trên thiết bị di động hoặc thiếu 7-Zip trên Windows. "
+                    "Hãy lưu về máy để mở nhanh bằng ZArchiver / Files / 7-Zip / WinRAR."
                 ),
             )
         try:
-            with _temporary_rar_file(data) as tmp_path:
+            with _temporary_rar_file(data, suffix=suffix) as tmp_path:
                 entries = self._list_rar_cli(cli, tmp_path)
         except ArchiveSecurityError:
             raise
         except _RarEncryptedError:
             return ArchiveTreeResult(
                 file_name=file_name,
-                format_name="rar",
+                format_name=format_name,
                 supported=False,
                 root=root,
                 unsupported_reason=(
-                    "Tệp RAR được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp. "
+                    f"Tệp {label} được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp. "
                     "Hãy lưu về máy để mở bằng WinRAR / 7-Zip / ZArchiver."
                 ),
             )
         except (_RarInspectionError, subprocess.TimeoutExpired, OSError):
             return ArchiveTreeResult(
                 file_name=file_name,
-                format_name="rar",
+                format_name=format_name,
                 supported=False,
                 root=root,
                 unsupported_reason=(
-                    "Không thể đọc tệp RAR bằng công cụ giải nén trên máy (tệp hỏng hoặc quá thời gian xử lý). "
+                    f"Không thể đọc tệp {label} bằng công cụ giải nén trên máy (tệp hỏng hoặc quá thời gian xử lý). "
                     "Hãy lưu về máy để mở bằng WinRAR / 7-Zip / ZArchiver."
                 ),
             )
@@ -901,11 +951,11 @@ class ArchiveService:
         if any(entry.encrypted for entry in entries):
             return ArchiveTreeResult(
                 file_name=file_name,
-                format_name="rar",
+                format_name=format_name,
                 supported=False,
                 root=root,
                 unsupported_reason=(
-                    "Tệp RAR được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp. "
+                    f"Tệp {label} được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp. "
                     "Hãy lưu về máy để mở bằng WinRAR / 7-Zip / ZArchiver."
                 ),
             )
@@ -916,7 +966,7 @@ class ArchiveService:
                 continue
             _insert_entry(root, entry.clean_path, entry.is_dir, entry.size, 0, index=index)
         total_files = _sort_and_count_files(root)
-        return ArchiveTreeResult(file_name, "rar", True, root, total_files=total_files)
+        return ArchiveTreeResult(file_name, format_name, True, root, total_files=total_files)
 
     def extract_entry_bytes(self, file_name: str, data: bytes, member_path: str) -> bytes:
         """Extract a single validated archive entry into memory with strict size caps."""
@@ -930,37 +980,62 @@ class ArchiveService:
             return self._extract_tar_entry(file_name, data, target)
 
         if lower.endswith(".rar"):
-            if target.startswith(("-", "@")) or "*" in target or "?" in target:
-                raise ArchiveSecurityError(f"Unsafe RAR member target: {target!r}")
-            cli = self._rar_finder()
-            if not cli:
-                raise RuntimeError("No RAR extractor CLI available")
-            with _temporary_rar_file(data) as tmp_path:
-                try:
-                    entries = self._list_rar_cli(cli, tmp_path)
-                except _RarEncryptedError as exc:
-                    raise ArchiveSecurityError(
-                        "Encrypted RAR archive cannot be extracted"
-                    ) from exc
-                matches = [entry for entry in entries if entry.clean_path == target]
-                if not matches:
-                    raise FileNotFoundError(target)
-                if any(entry.is_link for entry in matches):
-                    raise ArchiveSecurityError(f"Link entry cannot be extracted: {target}")
-                selected = matches[-1]
-                if selected.is_dir:
-                    raise FileNotFoundError(target)
-                if any(entry.encrypted for entry in matches) or selected.encrypted:
-                    raise ArchiveSecurityError(
-                        f"Encrypted RAR entry cannot be extracted: {target}"
-                    )
-                if selected.size > self._max_entry:
-                    raise ArchiveSecurityError("Selected entry exceeds max single entry size")
-                return self._extract_rar_entry_cli(
-                    cli, tmp_path, selected.raw_path, target_name=target
-                )
+            return self._extract_cli_archive_entry(
+                cli=self._rar_finder(),
+                format_label="RAR",
+                suffix=".rar",
+                data=data,
+                target=target,
+            )
+
+        if lower.endswith(".7z"):
+            return self._extract_cli_archive_entry(
+                cli=self._resolve_7z_cli(),
+                format_label="7z",
+                suffix=".7z",
+                data=data,
+                target=target,
+            )
 
         raise ValueError(f"Unsupported archive format: {file_name}")
+
+    def _extract_cli_archive_entry(
+        self,
+        *,
+        cli: Optional[str],
+        format_label: str,
+        suffix: str,
+        data: bytes,
+        target: str,
+    ) -> bytes:
+        if target.startswith(("-", "@")) or "*" in target or "?" in target:
+            raise ArchiveSecurityError(f"Unsafe {format_label} member target: {target!r}")
+        if not cli:
+            raise RuntimeError(f"No {format_label} extractor CLI available")
+        with _temporary_rar_file(data, suffix=suffix) as tmp_path:
+            try:
+                entries = self._list_rar_cli(cli, tmp_path)
+            except _RarEncryptedError as exc:
+                raise ArchiveSecurityError(
+                    f"Encrypted {format_label} archive cannot be extracted"
+                ) from exc
+            matches = [entry for entry in entries if entry.clean_path == target]
+            if not matches:
+                raise FileNotFoundError(target)
+            if any(entry.is_link for entry in matches):
+                raise ArchiveSecurityError(f"Link entry cannot be extracted: {target}")
+            selected = matches[-1]
+            if selected.is_dir:
+                raise FileNotFoundError(target)
+            if any(entry.encrypted for entry in matches) or selected.encrypted:
+                raise ArchiveSecurityError(
+                    f"Encrypted {format_label} entry cannot be extracted: {target}"
+                )
+            if selected.size > self._max_entry:
+                raise ArchiveSecurityError("Selected entry exceeds max single entry size")
+            return self._extract_rar_entry_cli(
+                cli, tmp_path, selected.raw_path, target_name=target
+            )
 
     def _extract_zip_entry(self, data: bytes, target: str) -> bytes:
         tracker = _PathKindTracker()

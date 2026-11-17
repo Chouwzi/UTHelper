@@ -127,6 +127,51 @@ def build_viewer_header(
     return container, back_btn, title_text, subtitle_text
 
 
+def build_expand_toggle_button(
+    *,
+    expanded: bool = False,
+    on_toggle: Optional[Callable[[], None]] = None,
+    visible: bool = True,
+) -> ft.IconButton:
+    """Create a Pane-3 expand/collapse icon button (`3` <-> `2+3`)."""
+    return ft.IconButton(
+        icon=ft.Icons.CLOSE_FULLSCREEN_ROUNDED
+        if expanded
+        else ft.Icons.OPEN_IN_FULL_ROUNDED,
+        icon_size=18,
+        icon_color=C.TEXT_PRIMARY,
+        tooltip="Thu về khung nội dung (Ctrl+\\)"
+        if expanded
+        else "Mở rộng toàn vùng môn học (Ctrl+\\)",
+        visible=bool(visible),
+        on_click=lambda _e: on_toggle() if callable(on_toggle) else None,
+    )
+
+
+def sync_expand_toggle_button(
+    btn: Optional[ft.IconButton],
+    *,
+    expanded: bool,
+    visible: bool = True,
+) -> None:
+    """Sync icon, tooltip, visibility, and theme color of an expand toggle button."""
+    if btn is None:
+        return
+    btn.icon = (
+        ft.Icons.CLOSE_FULLSCREEN_ROUNDED
+        if expanded
+        else ft.Icons.OPEN_IN_FULL_ROUNDED
+    )
+    btn.tooltip = (
+        "Thu về khung nội dung (Ctrl+\\)"
+        if expanded
+        else "Mở rộng toàn vùng môn học (Ctrl+\\)"
+    )
+    btn.icon_color = C.TEXT_PRIMARY
+    btn.visible = bool(visible)
+    safe_control_update(btn)
+
+
 def refresh_viewer_header(
     header_container: ft.Container,
     back_btn: ft.IconButton,

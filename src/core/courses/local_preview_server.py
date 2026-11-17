@@ -9,8 +9,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from typing import Any, Optional
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 _ITEM_ID_RE = re.compile(r"[0-9a-f]{16}")
 _CSP_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "image/svg+xml"})
@@ -31,6 +31,58 @@ class _PreviewEntry:
     body: bytes
     content_type: str
     token: str
+
+
+_MAX_SESSION_POST_BYTES = 4 * 1024 * 1024
+_SESSION_PATH_RE = re.compile(r"^/session/([^/]+)/([^/]+)/(.*)$")
+_ATTR_URL_RE = re.compile(
+    r"""(?i)\b(href|src|action|data-url)\s*=\s*(["'])([^"']+)\2"""
+)
+
+
+def _rewrite_session_html(
+    raw_html: str,
+    *,
+    origin: str,
+    final_url: str,
+    port: int,
+    bridge_prefix: str,
+) -> str:
+    """Rewrite same-origin Moodle links/forms in HTML through the local session bridge."""
+    origin_lower = origin.rstrip("/").lower()
+    base_dir = "/"
+    final_parts = urlsplit(final_url or "")
+    if final_parts.path:
+        slash_idx = final_parts.path.rfind("/")
+        base_dir = final_parts.path[: slash_idx + 1] if slash_idx >= 0 else "/"
+
+    def _replace_attr(match: re.Match[str]) -> str:
+        attr_name, quote, target = match.group(1), match.group(2), match.group(3)
+        stripped = target.strip()
+        if not stripped or stripped.startswith(("#", "javascript:", "mailto:", "tel:", "data:", "blob:")):
+            return match.group(0)
+        if stripped.startswith(bridge_prefix):
+            return match.group(0)
+        lowered = stripped.lower()
+        if lowered.startswith(origin_lower + "/"):
+            rel = stripped[len(origin_lower) :]
+            return f"{attr_name}={quote}{bridge_prefix}{rel}{quote}"
+        if lowered == origin_lower:
+            return f"{attr_name}={quote}{bridge_prefix}/{quote}"
+        if stripped.startswith("//"):
+            return match.group(0)
+        if stripped.startswith("/"):
+            return f"{attr_name}={quote}{bridge_prefix}{stripped}{quote}"
+        return match.group(0)
+
+    rewritten = _ATTR_URL_RE.sub(_replace_attr, raw_html)
+    base_href = f"http://127.0.0.1:{port}{bridge_prefix}{base_dir}"
+    base_tag = f'<base href="{base_href}">'
+    head_match = re.search(r"<head\b[^>]*>", rewritten, flags=re.IGNORECASE)
+    if head_match is not None and "<base " not in rewritten[: head_match.end() + 200].lower():
+        pos = head_match.end()
+        rewritten = rewritten[:pos] + base_tag + rewritten[pos:]
+    return rewritten
 
 
 def _requires_strict_csp(content_type: str) -> bool:
@@ -115,10 +167,77 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self) -> None:
+        if self.path.startswith("/session/"):
+            self._serve_session(method="GET", send_body=True)
+            return
         self._serve(send_body=True)
 
     def do_HEAD(self) -> None:
+        if self.path.startswith("/session/"):
+            self._serve_session(method="HEAD", send_body=False)
+            return
         self._serve(send_body=False)
+
+    def do_POST(self) -> None:
+        if not self.path.startswith("/session/"):
+            self._send_empty_status(HTTPStatus.METHOD_NOT_ALLOWED)
+            return
+        self._serve_session(method="POST", send_body=True)
+
+    def _serve_session(self, *, method: str, send_body: bool) -> None:
+        parsed = urlsplit(self.path)
+        match = _SESSION_PATH_RE.fullmatch(parsed.path)
+        if match is None:
+            self._send_empty_status(HTTPStatus.NOT_FOUND)
+            return
+        token, source, remote_path = match.group(1), match.group(2), match.group(3)
+        req_body: Optional[bytes] = None
+        req_ct = str(self.headers.get("Content-Type", "") or "")
+        if method == "POST":
+            raw_len = self.headers.get("Content-Length")
+            try:
+                content_len = int(raw_len) if raw_len is not None else 0
+            except ValueError:
+                self._send_empty_status(HTTPStatus.BAD_REQUEST)
+                return
+            if content_len < 0 or content_len > _MAX_SESSION_POST_BYTES:
+                self._send_empty_status(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            req_body = self.rfile.read(content_len) if content_len > 0 else b""
+
+        status_code, resp_ct, resp_body, redirect_url = self.server.owner._proxy_session_request(
+            token=token,
+            source=source,
+            remote_path=remote_path,
+            query=parsed.query,
+            method=method,
+            body=req_body,
+            content_type=req_ct,
+        )
+        if redirect_url:
+            try:
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", redirect_url)
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store, private")
+                self.end_headers()
+            except _DISCONNECT_ERRORS:
+                return
+            return
+        if status_code != HTTPStatus.OK and not resp_body:
+            self._send_empty_status(status_code)
+            return
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", resp_ct or "application/octet-stream")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.send_header("Cache-Control", "no-store, private")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if send_body and resp_body:
+                self.wfile.write(resp_body)
+        except _DISCONNECT_ERRORS:
+            return
 
     def _send_security_headers(self, content_type: Optional[str] = None) -> None:
         self.send_header("Cache-Control", "no-store, private")
@@ -215,6 +334,119 @@ class LocalPreviewServer:
         self._port: int = 0
         self._items: OrderedDict[str, _PreviewEntry] = OrderedDict()
         self._total_bytes: int = 0
+        self._bridge_token: str = secrets.token_urlsafe(24)
+        self._session_providers: dict[str, Any] = {}
+
+    def register_session_provider(self, source: str, client: Any) -> None:
+        """Register or clear a Moodle session client for authenticated session proxying."""
+        if source not in ("courses", "thnn"):
+            return
+        with self._lock:
+            if client is None:
+                self._session_providers.pop(source, None)
+            else:
+                self._session_providers[source] = client
+
+    def build_session_bridge_url(self, source: str, target_url: str) -> Optional[str]:
+        """Return a loopback reverse-proxy URL for a same-origin Moodle web page."""
+        if source not in ("courses", "thnn"):
+            return None
+        with self._lock:
+            client = self._session_providers.get(source)
+            origin = str(getattr(client, "moodle_site_origin", "") or "").rstrip("/")
+        if client is None or not origin:
+            return None
+
+        raw = str(target_url or "").strip()
+        if not raw or any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+            return None
+        parsed = urlsplit(raw)
+        origin_parts = urlsplit(origin)
+        if parsed.scheme or parsed.netloc:
+            if (
+                parsed.scheme.lower() != origin_parts.scheme.lower()
+                or parsed.netloc.lower() != origin_parts.netloc.lower()
+            ):
+                return None
+            rel_path = (parsed.path or "/").lstrip("/")
+            query = parsed.query
+        else:
+            joined = urljoin(f"{origin}/", raw.lstrip("/"))
+            jp = urlsplit(joined)
+            rel_path = (jp.path or "/").lstrip("/")
+            query = jp.query
+
+        with self._lock:
+            port = self._ensure_started_locked()
+            token = self._bridge_token
+        suffix = f"?{query}" if query else ""
+        return f"http://127.0.0.1:{port}/session/{token}/{source}/{rel_path}{suffix}"
+
+    def _proxy_session_request(
+        self,
+        *,
+        token: str,
+        source: str,
+        remote_path: str,
+        query: str,
+        method: str,
+        body: Optional[bytes],
+        content_type: str,
+    ) -> tuple[int, str, bytes, str]:
+        with self._lock:
+            expected_token = self._bridge_token
+            client = self._session_providers.get(source)
+            port = self._port
+
+        if not secrets.compare_digest(
+            token.encode("utf-8"), expected_token.encode("utf-8")
+        ):
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", ""
+        if source not in ("courses", "thnn") or client is None:
+            return HTTPStatus.NOT_FOUND, "text/plain", b"", ""
+
+        origin = str(getattr(client, "moodle_site_origin", "") or "").rstrip("/")
+        if not origin:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "text/plain", b"", ""
+
+        rel_target = "/" + remote_path.lstrip("/")
+        if query:
+            rel_target = f"{rel_target}?{query}"
+        remote_url = urljoin(f"{origin}/", rel_target.lstrip("/"))
+
+        try:
+            status_code, final_url, resp_ct, raw_bytes = client.open_session_raw(
+                remote_url,
+                method=method,
+                body=body,
+                content_type=content_type,
+            )
+        except ValueError:
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", ""
+        except Exception:
+            return HTTPStatus.BAD_GATEWAY, "text/plain", b"", ""
+
+        if 300 <= status_code < 400 and final_url:
+            if final_url.lower().startswith(origin.lower()):
+                proxied = self.build_session_bridge_url(source, final_url)
+                if proxied:
+                    return HTTPStatus.FOUND, "text/plain", b"", proxied
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", ""
+
+        media_type = (resp_ct or "").split(";", 1)[0].strip().lower()
+        if media_type in ("text/html", "application/xhtml+xml"):
+            decoded = raw_bytes.decode("utf-8", errors="replace")
+            bridge_prefix = f"/session/{expected_token}/{source}"
+            rewritten = _rewrite_session_html(
+                decoded,
+                origin=origin,
+                final_url=final_url or remote_url,
+                port=port,
+                bridge_prefix=bridge_prefix,
+            )
+            return status_code, resp_ct or "text/html; charset=utf-8", rewritten.encode("utf-8"), ""
+
+        return status_code, resp_ct or "application/octet-stream", raw_bytes, ""
 
     @property
     def port(self) -> int:
