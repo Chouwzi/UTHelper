@@ -16,9 +16,15 @@ import zipfile
 import zlib
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Literal, Optional
+from urllib.parse import urlsplit
 from xml.parsers import expat
 
 from core.courses.models import PreviewKind
+
+try:
+    from PIL import Image as _PILImage
+except Exception:  # pragma: no cover
+    _PILImage = None  # type: ignore[assignment]
 
 try:
     import olefile as _olefile
@@ -58,6 +64,10 @@ _A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _V_NS = "urn:schemas-microsoft-com:vml"
 _XL_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+_M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+_DGM_NS = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+_C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 
 _HEADING_STYLE_PATTERN = re.compile(r"^(?:heading\s*|tiêu\s*đề\s*)(\d+)$", re.IGNORECASE)
 _HEADING_NEWLINE_PATTERN = re.compile(r"\s*[\r\n]+\s*")
@@ -107,6 +117,33 @@ class SpreadsheetSheet:
 
 
 @dataclass(frozen=True, slots=True)
+class DocxTextRun:
+    """Styled inline text span extracted from WordprocessingML or DrawingML."""
+
+    text: str
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    strike: bool = False
+    code: bool = False
+    superscript: bool = False
+    subscript: bool = False
+    href: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DocxTableCell:
+    """Structured table cell supporting spans, alignment, header styling, and inline images."""
+
+    text: str = ""
+    runs: tuple[DocxTextRun, ...] = ()
+    col_span: int = 1
+    align: str = "left"
+    is_header: bool = False
+    images: tuple[tuple[str, bytes], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class DocxRichBlock:
     """Typed structured block preserved for rich in-app Word rendering."""
 
@@ -117,11 +154,46 @@ class DocxRichBlock:
     rows: tuple[tuple[str, ...], ...] = ()
     image_bytes: bytes = b""
     image_name: str = ""
+    runs: tuple[DocxTextRun, ...] = ()
+    align: str = "left"
+    indent_level: int = 0
+    list_marker: str = ""
+    rich_rows: tuple[tuple[DocxTableCell, ...], ...] = ()
+    has_borders: bool = True
+    section_role: str = "body"
+
+
+@dataclass(frozen=True, slots=True)
+class PptxTextParagraph:
+    """Styled paragraph extracted from a PPTX text body."""
+
+    text: str
+    runs: tuple[DocxTextRun, ...] = ()
+    level: int = 0
+    bullet: str = ""
+    align: str = "left"
+    is_title: bool = False
+    is_subtitle: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PptxPlacedElement:
+    """Visually positioned element inside a presentation slide canvas."""
+
+    kind: Literal["text", "image", "table"]
+    x_ratio: float = 0.0
+    y_ratio: float = 0.0
+    w_ratio: float = 1.0
+    h_ratio: float = 0.2
+    paragraphs: tuple[PptxTextParagraph, ...] = ()
+    image_name: str = ""
+    image_bytes: bytes = b""
+    table_rows: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class PptxSlideRich:
-    """Rich slide payload with text, notes, tables, and embedded raster media."""
+    """Rich slide payload with text, notes, tables, layout elements, and embedded raster media."""
 
     slide_number: int
     anchor_id: str
@@ -129,6 +201,10 @@ class PptxSlideRich:
     notes_text: str = ""
     images: tuple[tuple[str, bytes], ...] = ()
     tables: tuple[tuple[tuple[str, ...], ...], ...] = ()
+    title_text: str = ""
+    subtitle_text: str = ""
+    aspect_ratio: float = 16.0 / 9.0
+    elements: tuple[PptxPlacedElement, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,11 +323,18 @@ def _base_html_shell(title: str, body_html: str, *, dark_mode: bool = False) -> 
         ".table-wrap.sheet .sheet-table th:first-child,.table-wrap.sheet .sheet-table td:first-child{"
         "position: sticky;left:0;z-index:1;background:var(--surface);}"
         ".table-wrap.sheet .sheet-table thead th:first-child{z-index:3;background:var(--th-bg);}"
+        ".table-wrap.borderless,.table-wrap.borderless table,.table-wrap.borderless td,.table-wrap.borderless th{"
+        "border:none!important;background:transparent!important;}"
+        ".doc-list{margin:0.4em 0;padding-left:1.35em;display:flex;gap:0.45em;align-items:baseline;}"
+        ".doc-list-marker{color:var(--accent);font-weight:600;min-width:1.4em;flex-shrink:0;}"
+        ".doc-role-note{font-size:0.84rem;color:var(--muted);padding-bottom:6px;"
+        "border-bottom:1px dashed var(--border);margin-bottom:8px;}"
         ".doc-figure{margin:12px 0;}"
         ".doc-image{max-width:100%;height:auto;border-radius:6px;border:1px solid var(--border);}"
         ".slide-card{background:var(--surface);border:1px solid var(--border);"
         "border-radius:10px;padding:16px;margin:0 0 14px;}"
         ".slide-card h3{margin-top:0;color:var(--accent);}"
+        ".slide-subtitle{color:var(--muted);font-size:0.98rem;margin:-4px 0 10px;font-weight:500;}"
         ".slide-notes{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);"
         "color:var(--muted);font-size:0.92rem;}"
         ".code-view{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;"
@@ -440,6 +523,248 @@ def _parse_relationships(
     return mapping
 
 
+def _safe_external_http_url(raw_url: str) -> str:
+    """Allow only clean http(s) URLs from OOXML external relationships."""
+    cleaned = str(raw_url or "").strip()
+    if not cleaned:
+        return ""
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+        return cleaned
+    return ""
+
+
+def _parse_external_hyperlinks(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    rels_path: str,
+    *,
+    xml_budget: Optional[list[int]] = None,
+) -> dict[str, str]:
+    """Parse external hyperlink relationships into a safe {rId: http_url} map."""
+    if rels_path not in zf_names:
+        return {}
+    raw = _read_zip_entry_capped(
+        zf, rels_path, _MAX_XML_BYTES, xml_budget=xml_budget
+    )
+    root = _parse_xml_safe(raw)
+    links: dict[str, str] = {}
+    for rel in root:
+        if _local_name(rel.tag) != "Relationship":
+            continue
+        if (rel.attrib.get("TargetMode") or "").strip().lower() != "external":
+            continue
+        rel_type = (rel.attrib.get("Type") or "").strip().lower()
+        if not rel_type.endswith("/hyperlink"):
+            continue
+        rel_id = rel.attrib.get("Id") or ""
+        safe_url = _safe_external_http_url(rel.attrib.get("Target", ""))
+        if rel_id and safe_url:
+            links[rel_id] = safe_url
+    return links
+
+
+def _iter_effective_children(parent: ET.Element) -> Iterator[ET.Element]:
+    """Yield children while resolving <mc:AlternateContent> to Choice (or Fallback)."""
+    for child in parent:
+        if child.tag == f"{{{_MC_NS}}}AlternateContent":
+            choice = child.find(f"{{{_MC_NS}}}Choice")
+            branch = choice if choice is not None else child.find(f"{{{_MC_NS}}}Fallback")
+            if branch is not None:
+                yield from _iter_effective_children(branch)
+        else:
+            yield child
+
+
+def _extract_omml_text(node: ET.Element) -> str:
+    """Convert Word/PPTX OMML math XML into readable Unicode mathematical text."""
+    m_t = f"{{{_M_NS}}}t"
+    m_f = f"{{{_M_NS}}}f"
+    m_num = f"{{{_M_NS}}}num"
+    m_den = f"{{{_M_NS}}}den"
+    m_ssup = f"{{{_M_NS}}}sSup"
+    m_ssub = f"{{{_M_NS}}}sSub"
+    m_ssubsup = f"{{{_M_NS}}}sSubSup"
+    m_rad = f"{{{_M_NS}}}rad"
+    m_deg = f"{{{_M_NS}}}deg"
+    m_nary = f"{{{_M_NS}}}nary"
+    m_d = f"{{{_M_NS}}}d"
+    m_e = f"{{{_M_NS}}}e"
+    m_sup = f"{{{_M_NS}}}sup"
+    m_sub = f"{{{_M_NS}}}sub"
+    m_pr = f"{{{_M_NS}}}chr"
+    m_val = f"{{{_M_NS}}}val"
+
+    def _collect(el: ET.Element) -> str:
+        if el.tag == m_t:
+            return el.text or ""
+        if el.tag == m_f:
+            num_el = el.find(m_num)
+            den_el = el.find(m_den)
+            num_s = _collect(num_el) if num_el is not None else ""
+            den_s = _collect(den_el) if den_el is not None else ""
+            return f"({num_s})/({den_s})" if den_s else num_s
+        if el.tag == m_ssup:
+            e_el = el.find(m_e)
+            s_el = el.find(m_sup)
+            base_s = _collect(e_el) if e_el is not None else ""
+            sup_s = _collect(s_el) if s_el is not None else ""
+            return f"{base_s}^({sup_s})" if len(sup_s) > 1 else f"{base_s}^{sup_s}"
+        if el.tag == m_ssub:
+            e_el = el.find(m_e)
+            s_el = el.find(m_sub)
+            base_s = _collect(e_el) if e_el is not None else ""
+            sub_s = _collect(s_el) if s_el is not None else ""
+            return f"{base_s}_({sub_s})" if len(sub_s) > 1 else f"{base_s}_{sub_s}"
+        if el.tag == m_ssubsup:
+            e_el = el.find(m_e)
+            sub_el = el.find(m_sub)
+            sup_el = el.find(m_sup)
+            base_s = _collect(e_el) if e_el is not None else ""
+            sub_s = _collect(sub_el) if sub_el is not None else ""
+            sup_s = _collect(sup_el) if sup_el is not None else ""
+            return f"{base_s}_{sub_s}^{sup_s}"
+        if el.tag == m_rad:
+            deg_el = el.find(m_deg)
+            e_el = el.find(m_e)
+            deg_s = _collect(deg_el).strip() if deg_el is not None else ""
+            base_s = _collect(e_el) if e_el is not None else ""
+            prefix = f"{deg_s}√" if deg_s else "√"
+            return f"{prefix}({base_s})"
+        if el.tag == m_nary:
+            chr_el = el.find(f".//{m_pr}")
+            op = (chr_el.attrib.get(m_val) if chr_el is not None else None) or "∑"
+            sub_el = el.find(m_sub)
+            sup_el = el.find(m_sup)
+            e_el = el.find(m_e)
+            sub_s = _collect(sub_el).strip() if sub_el is not None else ""
+            sup_s = _collect(sup_el).strip() if sup_el is not None else ""
+            base_s = _collect(e_el) if e_el is not None else ""
+            limits = ""
+            if sub_s:
+                limits += f"_{sub_s}"
+            if sup_s:
+                limits += f"^{sup_s}"
+            return f"{op}{limits}({base_s})"
+        if el.tag == m_d:
+            d_pr = el.find(f"{{{_M_NS}}}dPr")
+            beg_el = d_pr.find(f"{{{_M_NS}}}begChr") if d_pr is not None else None
+            end_el = d_pr.find(f"{{{_M_NS}}}endChr") if d_pr is not None else None
+            beg_c = (beg_el.attrib.get(m_val) if beg_el is not None else None) or "("
+            end_c = (end_el.attrib.get(m_val) if end_el is not None else None) or ")"
+            inner = ", ".join(
+                _collect(sub) for sub in el.findall(m_e)
+            )
+            return f"{beg_c}{inner}{end_c}"
+        return "".join(_collect(sub) for sub in _iter_effective_children(el))
+
+    return _collect(node)
+
+
+def _coalesce_runs(runs: list[DocxTextRun]) -> tuple[DocxTextRun, ...]:
+    """Merge adjacent text runs sharing identical style attributes and hyperlink target."""
+    merged: list[DocxTextRun] = []
+    for run in runs:
+        if not run.text:
+            continue
+        if merged:
+            prev = merged[-1]
+            if (
+                prev.bold == run.bold
+                and prev.italic == run.italic
+                and prev.underline == run.underline
+                and prev.strike == run.strike
+                and prev.code == run.code
+                and prev.superscript == run.superscript
+                and prev.subscript == run.subscript
+                and prev.href == run.href
+            ):
+                merged[-1] = DocxTextRun(
+                    text=prev.text + run.text,
+                    bold=prev.bold,
+                    italic=prev.italic,
+                    underline=prev.underline,
+                    strike=prev.strike,
+                    code=prev.code,
+                    superscript=prev.superscript,
+                    subscript=prev.subscript,
+                    href=prev.href,
+                )
+                continue
+        merged.append(run)
+    return tuple(merged)
+
+
+def _render_runs_html(runs: tuple[DocxTextRun, ...], fallback_text: str = "") -> str:
+    """Render styled text runs into XSS-escaped inline HTML."""
+    if not runs:
+        return html.escape(fallback_text).replace("\n", "<br/>")
+    parts: list[str] = []
+    for run in runs:
+        seg = html.escape(run.text).replace("\n", "<br/>")
+        if run.code:
+            seg = f"<code>{seg}</code>"
+        if run.bold:
+            seg = f"<strong>{seg}</strong>"
+        if run.italic:
+            seg = f"<em>{seg}</em>"
+        if run.underline:
+            seg = f"<u>{seg}</u>"
+        if run.strike:
+            seg = f"<s>{seg}</s>"
+        if run.superscript:
+            seg = f"<sup>{seg}</sup>"
+        elif run.subscript:
+            seg = f"<sub>{seg}</sub>"
+        if run.href:
+            safe_href = html.escape(run.href, quote=True)
+            seg = f'<a href="{safe_href}" target="_blank" rel="noopener noreferrer">{seg}</a>'
+        parts.append(seg)
+    return "".join(parts)
+
+
+def _int_to_roman(num: int, *, upper: bool = True) -> str:
+    val_map = (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    )
+    out: list[str] = []
+    rem = max(1, min(3999, num))
+    for arabic, roman in val_map:
+        while rem >= arabic:
+            out.append(roman)
+            rem -= arabic
+    res = "".join(out)
+    return res if upper else res.lower()
+
+
+def _int_to_alpha(num: int, *, upper: bool = False) -> str:
+    base = ord("A" if upper else "a")
+    idx = (max(1, num) - 1) % 26
+    return chr(base + idx)
+
+
+def _format_docx_list_marker(num_fmt: str, count: int) -> str:
+    fmt = (num_fmt or "").strip().lower()
+    if fmt == "bullet":
+        return "•"
+    if fmt == "none":
+        return ""
+    if fmt == "lowerletter":
+        return f"{_int_to_alpha(count, upper=False)})"
+    if fmt == "upperletter":
+        return f"{_int_to_alpha(count, upper=True)}."
+    if fmt == "lowerroman":
+        return f"{_int_to_roman(count, upper=False)}."
+    if fmt == "upperroman":
+        return f"{_int_to_roman(count, upper=True)}."
+    return f"{count}."
+
+
 def _local_name(tag: str) -> str:
     """Return the local element name without Clark-notation namespace."""
     if "}" in tag:
@@ -555,9 +880,31 @@ def _is_valid_raster_magic(ext: str, raw: bytes) -> bool:
     return False
 
 
+_CONVERTIBLE_VECTOR_RASTER_EXTS = frozenset({".tif", ".tiff", ".wmf", ".emf"})
+
+
+def _normalize_image_payload(ext: str, raw: bytes) -> Optional[tuple[str, bytes]]:
+    """Validate raster image bytes or safely convert TIFF/WMF/EMF to PNG via Pillow."""
+    mime = _SAFE_RASTER_MIMES.get(ext)
+    if mime:
+        if _is_valid_raster_magic(ext, raw):
+            return mime, raw
+        return None
+    if ext in _CONVERTIBLE_VECTOR_RASTER_EXTS and _PILImage is not None:
+        try:
+            with _PILImage.open(io.BytesIO(raw)) as img:
+                out = io.BytesIO()
+                converted = img.convert("RGBA") if img.mode not in ("RGB", "RGBA") else img
+                converted.save(out, format="PNG")
+                return "image/png", out.getvalue()
+        except Exception:
+            return None
+    return None
+
+
 def _iter_docx_body_blocks(container: ET.Element) -> Iterator[ET.Element]:
-    """Yield <w:p> and <w:tbl> blocks from a DOCX body, unwrapping SDT containers."""
-    for child in container:
+    """Yield <w:p> and <w:tbl> blocks from a DOCX body, unwrapping SDT and AlternateContent."""
+    for child in _iter_effective_children(container):
         if child.tag == f"{{{_W_NS}}}sdt":
             sdt_content = child.find(f"{{{_W_NS}}}sdtContent")
             if sdt_content is not None:
@@ -593,39 +940,324 @@ def _docx_heading_level(p_el: ET.Element) -> Optional[int]:
     return None
 
 
-def _docx_paragraph_text(p_el: ET.Element) -> str:
-    """Collect visible text from a WordprocessingML <w:p>, ignoring deleted runs."""
-    parts: list[str] = []
+def _docx_paragraph_align(p_el: ET.Element) -> str:
+    """Return normalized paragraph alignment ('left', 'center', 'right', 'justify')."""
+    p_pr = p_el.find(f"{{{_W_NS}}}pPr")
+    if p_pr is None:
+        return "left"
+    jc = p_pr.find(f"{{{_W_NS}}}jc")
+    if jc is None:
+        return "left"
+    val = (jc.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+    if val in {"center", "mediumkashida"}:
+        return "center"
+    if val in {"right", "end"}:
+        return "right"
+    if val in {"both", "distribute", "thaiDistribute".lower()}:
+        return "justify"
+    return "left"
 
-    def _walk(node: ET.Element) -> None:
+
+def _docx_flag_enabled(r_pr: Optional[ET.Element], tag_local: str) -> bool:
+    if r_pr is None:
+        return False
+    el = r_pr.find(f"{{{_W_NS}}}{tag_local}")
+    if el is None:
+        return False
+    val = (el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+    return val not in {"0", "false", "off", "none"}
+
+
+def _docx_run_style(r_el: ET.Element, *, href: str = "") -> dict[str, object]:
+    """Extract inline formatting flags from a WordprocessingML <w:r> element."""
+    r_pr = r_el.find(f"{{{_W_NS}}}rPr")
+    bold = _docx_flag_enabled(r_pr, "b") or _docx_flag_enabled(r_pr, "bCs")
+    italic = _docx_flag_enabled(r_pr, "i") or _docx_flag_enabled(r_pr, "iCs")
+    underline = _docx_flag_enabled(r_pr, "u")
+    strike = _docx_flag_enabled(r_pr, "strike") or _docx_flag_enabled(r_pr, "dstrike")
+    superscript = False
+    subscript = False
+    code = False
+    if r_pr is not None:
+        vert = r_pr.find(f"{{{_W_NS}}}vertAlign")
+        if vert is not None:
+            vval = (vert.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+            superscript = vval == "superscript"
+            subscript = vval == "subscript"
+        rstyle = r_pr.find(f"{{{_W_NS}}}rStyle")
+        if rstyle is not None:
+            rs_val = (rstyle.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+            if "code" in rs_val or "verbatim" in rs_val:
+                code = True
+        rfonts = r_pr.find(f"{{{_W_NS}}}rFonts")
+        if rfonts is not None:
+            joined_fonts = " ".join(rfonts.attrib.values()).lower()
+            if any(m in joined_fonts for m in ("consolas", "courier", "mono", "menlo")):
+                code = True
+    return {
+        "bold": bold,
+        "italic": italic,
+        "underline": underline,
+        "strike": strike,
+        "code": code,
+        "superscript": superscript,
+        "subscript": subscript,
+        "href": href,
+    }
+
+
+def _docx_paragraph_runs_and_text(
+    p_el: ET.Element,
+    hyperlinks: Optional[dict[str, str]] = None,
+) -> tuple[str, tuple[DocxTextRun, ...]]:
+    """Collect visible text and styled runs from a Word <w:p>, resolving AlternateContent & math."""
+    raw_runs: list[DocxTextRun] = []
+    link_map = hyperlinks or {}
+
+    def _emit(text: str, style: dict[str, object]) -> None:
+        if not text:
+            return
+        raw_runs.append(
+            DocxTextRun(
+                text=text,
+                bold=bool(style.get("bold", False)),
+                italic=bool(style.get("italic", False)),
+                underline=bool(style.get("underline", False)),
+                strike=bool(style.get("strike", False)),
+                code=bool(style.get("code", False)),
+                superscript=bool(style.get("superscript", False)),
+                subscript=bool(style.get("subscript", False)),
+                href=str(style.get("href", "")),
+            )
+        )
+
+    default_style: dict[str, object] = {}
+
+    def _walk(node: ET.Element, cur_href: str, cur_style: dict[str, object]) -> None:
         if node.tag in (f"{{{_W_NS}}}del", f"{{{_W_NS}}}delText", f"{{{_W_NS}}}instrText"):
             return
+        if node.tag in (f"{{{_M_NS}}}oMathPara", f"{{{_M_NS}}}oMath"):
+            math_txt = _extract_omml_text(node).strip()
+            if math_txt:
+                _emit(math_txt, cur_style)
+            return
+        if node.tag == f"{{{_W_NS}}}hyperlink":
+            rid = node.attrib.get(f"{{{_R_NS}}}id") or ""
+            next_href = link_map.get(rid, cur_href)
+            for sub in _iter_effective_children(node):
+                _walk(sub, next_href, cur_style)
+            return
+        if node.tag == f"{{{_W_NS}}}r":
+            r_style = _docx_run_style(node, href=cur_href)
+            for sub in _iter_effective_children(node):
+                _walk(sub, cur_href, r_style)
+            return
         if node.tag == f"{{{_W_NS}}}t" and node.text:
-            parts.append(node.text)
-        elif node.tag in (f"{{{_W_NS}}}br", f"{{{_W_NS}}}cr"):
-            parts.append("\n")
-        elif node.tag == f"{{{_W_NS}}}tab":
-            parts.append("\t")
-        for sub in node:
-            _walk(sub)
+            _emit(node.text, cur_style)
+            return
+        if node.tag in (f"{{{_W_NS}}}br", f"{{{_W_NS}}}cr"):
+            _emit("\n", cur_style)
+            return
+        if node.tag == f"{{{_W_NS}}}tab":
+            _emit("\t", cur_style)
+            return
+        if node.tag == f"{{{_W_NS}}}txbxContent":
+            # Separate paragraphs inside embedded drawing textboxes cleanly
+            for idx_tb, tb_child in enumerate(_iter_effective_children(node)):
+                if idx_tb > 0 and raw_runs and not raw_runs[-1].text.endswith("\n"):
+                    _emit("\n", cur_style)
+                _walk(tb_child, cur_href, cur_style)
+            return
+        for sub in _iter_effective_children(node):
+            _walk(sub, cur_href, cur_style)
 
-    _walk(p_el)
-    return "".join(parts)
+    for sub in _iter_effective_children(p_el):
+        _walk(sub, "", default_style)
+
+    coalesced = _coalesce_runs(raw_runs)
+    full_text = "".join(r.text for r in coalesced)
+    return full_text, coalesced
+
+
+def _docx_paragraph_text(p_el: ET.Element) -> str:
+    """Collect visible text from a WordprocessingML <w:p>, ignoring deleted runs."""
+    text, _ = _docx_paragraph_runs_and_text(p_el)
+    return text
 
 
 def _docx_paragraph_image_rids(p_el: ET.Element) -> list[str]:
-    """Extract embedded image relationship IDs from DrawingML or VML nodes inside <w:p>."""
+    """Extract embedded image relationship IDs inside <w:p>, skipping fallback duplicates."""
     rids: list[str] = []
-    for node in p_el.iter():
+    seen: set[str] = set()
+
+    def _walk(node: ET.Element) -> None:
+        if node.tag in (f"{{{_W_NS}}}del", f"{{{_W_NS}}}delText"):
+            return
         if node.tag == f"{{{_A_NS}}}blip":
             rid = node.attrib.get(f"{{{_R_NS}}}embed")
-            if rid:
+            if rid and rid not in seen:
+                seen.add(rid)
                 rids.append(rid)
         elif node.tag == f"{{{_V_NS}}}imagedata":
             rid = node.attrib.get(f"{{{_R_NS}}}id")
-            if rid:
+            if rid and rid not in seen:
+                seen.add(rid)
                 rids.append(rid)
+        for sub in _iter_effective_children(node):
+            _walk(sub)
+
+    _walk(p_el)
     return rids
+
+
+def _parse_docx_numbering(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    *,
+    xml_budget: list[int],
+) -> tuple[dict[str, dict[int, tuple[str, int]]], dict[str, tuple[str, dict[int, int]]]]:
+    """Parse ``word/numbering.xml`` into abstract formats and concrete numId overrides."""
+    if "word/numbering.xml" not in zf_names:
+        return {}, {}
+    try:
+        raw = _read_zip_entry_capped(
+            zf, "word/numbering.xml", _MAX_XML_BYTES, xml_budget=xml_budget
+        )
+        root = _parse_xml_safe(raw)
+    except _CONVERSION_ERRORS:
+        return {}, {}
+
+    abstract_map: dict[str, dict[int, tuple[str, int]]] = {}
+    for abs_el in root.findall(f"{{{_W_NS}}}abstractNum"):
+        abs_id = abs_el.attrib.get(f"{{{_W_NS}}}abstractNumId") or ""
+        if not abs_id:
+            continue
+        levels: dict[int, tuple[str, int]] = {}
+        for lvl in abs_el.findall(f"{{{_W_NS}}}lvl"):
+            raw_ilvl = (lvl.attrib.get(f"{{{_W_NS}}}ilvl") or "").strip()
+            if not (raw_ilvl.isascii() and raw_ilvl.isdigit()):
+                continue
+            ilvl = int(raw_ilvl)
+            num_fmt_el = lvl.find(f"{{{_W_NS}}}numFmt")
+            fmt = (
+                (num_fmt_el.attrib.get(f"{{{_W_NS}}}val") or "bullet")
+                if num_fmt_el is not None
+                else "bullet"
+            )
+            start_el = lvl.find(f"{{{_W_NS}}}start")
+            raw_start = (start_el.attrib.get(f"{{{_W_NS}}}val") or "1") if start_el is not None else "1"
+            start = int(raw_start) if raw_start.isascii() and raw_start.isdigit() else 1
+            levels[ilvl] = (fmt, max(1, start))
+        abstract_map[abs_id] = levels
+
+    num_map: dict[str, tuple[str, dict[int, int]]] = {}
+    for num_el in root.findall(f"{{{_W_NS}}}num"):
+        num_id = num_el.attrib.get(f"{{{_W_NS}}}numId") or ""
+        abs_ref = num_el.find(f"{{{_W_NS}}}abstractNumId")
+        abs_id = abs_ref.attrib.get(f"{{{_W_NS}}}val") if abs_ref is not None else ""
+        if not num_id or not abs_id:
+            continue
+        overrides: dict[int, int] = {}
+        for ov in num_el.findall(f"{{{_W_NS}}}lvlOverride"):
+            raw_ilvl = (ov.attrib.get(f"{{{_W_NS}}}ilvl") or "").strip()
+            so_el = ov.find(f"{{{_W_NS}}}startOverride")
+            if raw_ilvl.isascii() and raw_ilvl.isdigit() and so_el is not None:
+                raw_so = (so_el.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+                if raw_so.isascii() and raw_so.isdigit():
+                    overrides[int(raw_ilvl)] = max(1, int(raw_so))
+        num_map[num_id] = (abs_id, overrides)
+
+    return abstract_map, num_map
+
+
+def _docx_table_has_borders(tbl_el: ET.Element) -> bool:
+    """Detect whether a Word table visually renders borders or acts as borderless grid."""
+    tbl_pr = tbl_el.find(f"{{{_W_NS}}}tblPr")
+    if tbl_pr is None:
+        return True
+    borders = tbl_pr.find(f"{{{_W_NS}}}tblBorders")
+    if borders is None:
+        return True
+    edges = [
+        borders.find(f"{{{_W_NS}}}{edge}")
+        for edge in ("top", "bottom", "left", "right", "insideH", "insideV")
+    ]
+    present = [e for e in edges if e is not None]
+    if not present:
+        return True
+    return any(
+        (e.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower() not in {"none", "nil"}
+        for e in present
+    )
+
+
+def _render_docx_table_html_and_markdown(
+    rich_rows: tuple[tuple[DocxTableCell, ...], ...],
+    *,
+    has_borders: bool,
+    budget: _RenderBudget,
+) -> tuple[str, str]:
+    """Render structured Word table with colspan, formatting, inline links, and border hint."""
+    if not rich_rows:
+        return "", ""
+    max_cols = min(
+        _MAX_TABLE_COLS,
+        max(sum(max(1, c.col_span) for c in row) for row in rich_rows),
+    )
+    if max_cols == 0:
+        return "", ""
+
+    wrap_cls = "table-wrap" if has_borders else "table-wrap borderless"
+    html_rows: list[str] = []
+    md_lines: list[str] = []
+    for r_idx, row in enumerate(rich_rows[:_MAX_TABLE_ROWS]):
+        use_th = r_idx == 0 and has_borders and all(c.is_header or r_idx == 0 for c in row)
+        cell_tag = "th" if use_th else "td"
+        align_css = ""
+        row_cells_html: list[str] = []
+        flat_md_cells: list[str] = []
+        for cell in row[:_MAX_TABLE_COLS]:
+            col_span = max(1, cell.col_span)
+            span_attr = f' colspan="{col_span}"' if col_span > 1 else ""
+            if cell.align != "left":
+                align_css = f' style="text-align:{cell.align}"'
+            else:
+                align_css = ""
+            inner_html = _render_runs_html(cell.runs, _truncate_preview_text(cell.text))
+            for img_name, img_bytes in cell.images:
+                ext = posixpath.splitext(img_name.lower())[1]
+                mime = _SAFE_RASTER_MIMES.get(ext, "image/png")
+                b64 = base64.b64encode(img_bytes).decode("ascii")
+                inner_html += (
+                    f'<br/><img class="doc-image" src="data:{mime};base64,{b64}" '
+                    f'alt="{html.escape(img_name)}"/>'
+                )
+            row_cells_html.append(f"<{cell_tag}{span_attr}{align_css}>{inner_html}</{cell_tag}>")
+            flat_md_cells.append(_escape_md_cell(_truncate_preview_text(cell.text)))
+            for _ in range(col_span - 1):
+                flat_md_cells.append("")
+        while len(flat_md_cells) < max_cols:
+            flat_md_cells.append("")
+        row_html = "<tr>" + "".join(row_cells_html) + "</tr>"
+        row_md = "| " + " | ".join(flat_md_cells[:max_cols]) + " |"
+        if not budget.try_consume(len(row_html), len(row_md) + 1):
+            break
+        html_rows.append(row_html)
+        md_lines.append(row_md)
+        if r_idx == 0:
+            sep_md = "| " + " | ".join("---" for _ in range(max_cols)) + " |"
+            budget.try_consume(0, len(sep_md) + 1)
+            md_lines.append(sep_md)
+
+    if not html_rows:
+        return "", ""
+    head_part = f"<thead>{html_rows[0]}</thead>" if has_borders else f"<tbody>{html_rows[0]}"
+    if has_borders:
+        body_part = f"<tbody>{''.join(html_rows[1:])}</tbody>" if len(html_rows) > 1 else ""
+    else:
+        body_part = f"{''.join(html_rows[1:])}</tbody>"
+    table_html = f'<div class="{wrap_cls}"><table>{head_part}{body_part}</table></div>'
+    return table_html, "\n".join(md_lines)
 
 
 def _append_bounded_text_block(
@@ -671,12 +1303,13 @@ def _append_bounded_text_block(
 
 
 def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
-    """Convert DOCX bytes into outline, Markdown, rich blocks, and XSS-safe HTML."""
+    """Convert DOCX bytes into outline, Markdown, rich formatted blocks, and XSS-safe HTML."""
     outline: list[DocumentOutlineItem] = []
     docx_blocks: list[DocxRichBlock] = []
     html_blocks: list[str] = []
     md_blocks: list[str] = []
     rendered_media: set[str] = set()
+    media_cache: dict[str, tuple[str, str, bytes]] = {}
     media_state = {"count": 0, "bytes": 0}
     xml_budget = [_MAX_TOTAL_XML_BYTES]
     render_budget = _RenderBudget.for_title(title)
@@ -694,28 +1327,42 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             "word",
             xml_budget=xml_budget,
         )
+        hyperlinks = _parse_external_hyperlinks(
+            zf,
+            zf_names,
+            "word/_rels/document.xml.rels",
+            xml_budget=xml_budget,
+        )
+        abs_nums, concrete_nums = _parse_docx_numbering(
+            zf, zf_names, xml_budget=xml_budget
+        )
+        list_counters: dict[tuple[str, int], int] = {}
 
         def _try_embed_media(zip_path: str) -> Optional[tuple[str, str, bytes]]:
-            if zip_path in rendered_media or zip_path not in zf_names:
+            if zip_path in media_cache:
+                rendered_media.add(zip_path)
+                return media_cache[zip_path]
+            if zip_path not in zf_names:
                 return None
             if media_state["count"] >= _MAX_MEDIA_COUNT:
                 return None
             ext = posixpath.splitext(zip_path.lower())[1]
-            mime = _SAFE_RASTER_MIMES.get(ext)
-            if not mime:
+            if ext not in _SAFE_RASTER_MIMES and ext not in _CONVERTIBLE_VECTOR_RASTER_EXTS:
                 return None
             try:
                 raw_img = _read_zip_entry_capped(zf, zip_path, _MAX_MEDIA_BYTES)
             except _CONVERSION_ERRORS:
                 return None
-            if not raw_img or not _is_valid_raster_magic(ext, raw_img):
+            normalized = _normalize_image_payload(ext, raw_img) if raw_img else None
+            if normalized is None:
                 return None
-            if media_state["bytes"] + len(raw_img) > _MAX_TOTAL_MEDIA_BYTES:
+            mime, final_bytes = normalized
+            if media_state["bytes"] + len(final_bytes) > _MAX_TOTAL_MEDIA_BYTES:
                 return None
             rendered_media.add(zip_path)
             media_state["count"] += 1
-            media_state["bytes"] += len(raw_img)
-            encoded = base64.b64encode(raw_img).decode("ascii")
+            media_state["bytes"] += len(final_bytes)
+            encoded = base64.b64encode(final_bytes).decode("ascii")
             img_name = posixpath.basename(zip_path)
             alt = html.escape(img_name)
             img_html = (
@@ -723,25 +1370,70 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                 f'<img class="doc-image" src="data:{mime};base64,{encoded}" alt="{alt}"/>'
                 "</figure>"
             )
-            return (img_html, img_name, raw_img)
+            payload = (img_html, img_name, final_bytes)
+            media_cache[zip_path] = payload
+            return payload
 
-        body = doc_root.find(f"{{{_W_NS}}}body")
-        if body is not None:
-            for block in _iter_docx_body_blocks(body):
+        def _next_list_info(p_el: ET.Element) -> tuple[bool, str, int]:
+            p_pr = p_el.find(f"{{{_W_NS}}}pPr")
+            if p_pr is None:
+                return False, "", 0
+            num_pr = p_pr.find(f"{{{_W_NS}}}numPr")
+            if num_pr is None:
+                return False, "", 0
+            ilvl_el = num_pr.find(f"{{{_W_NS}}}ilvl")
+            num_id_el = num_pr.find(f"{{{_W_NS}}}numId")
+            raw_ilvl = (ilvl_el.attrib.get(f"{{{_W_NS}}}val") or "0") if ilvl_el is not None else "0"
+            ilvl = int(raw_ilvl) if raw_ilvl.isascii() and raw_ilvl.isdigit() else 0
+            num_id = (num_id_el.attrib.get(f"{{{_W_NS}}}val") or "") if num_id_el is not None else ""
+            if not num_id or num_id == "0":
+                return False, "", ilvl
+
+            fmt = "bullet"
+            start_val = 1
+            if num_id in concrete_nums:
+                abs_id, overrides = concrete_nums[num_id]
+                levels = abs_nums.get(abs_id, {})
+                if ilvl in levels:
+                    fmt, start_val = levels[ilvl]
+                if ilvl in overrides:
+                    start_val = overrides[ilvl]
+
+            for existing_key in list(list_counters.keys()):
+                if existing_key[0] == num_id and existing_key[1] > ilvl:
+                    del list_counters[existing_key]
+            ck = (num_id, ilvl)
+            cur = list_counters[ck] + 1 if ck in list_counters else start_val
+            list_counters[ck] = cur
+            marker = _format_docx_list_marker(fmt, cur)
+            return True, marker, min(4, ilvl)
+
+        def _process_block_sequence(
+            container: ET.Element,
+            part_rels: dict[str, str],
+            part_links: dict[str, str],
+            *,
+            section_role: str = "body",
+        ) -> None:
+            for block in _iter_docx_body_blocks(container):
                 if render_budget.truncated:
                     break
                 if block.tag == f"{{{_W_NS}}}p":
-                    level = _docx_heading_level(block)
-                    text = _docx_paragraph_text(block).strip()
+                    level = _docx_heading_level(block) if section_role == "body" else None
+                    align = _docx_paragraph_align(block)
+                    text_raw, runs = _docx_paragraph_runs_and_text(block, part_links)
+                    text = text_raw.strip()
                     if level is not None and text:
                         anchor_id = f"sec-{len(outline) + 1}"
+                        align_attr = f' style="text-align:{align}"' if align != "left" else ""
+                        inner_html = _render_runs_html(runs, text)
                         appended, can_continue = _append_bounded_text_block(
                             html_blocks,
                             md_blocks,
                             render_budget,
                             raw_text=text,
-                            build_html=lambda t, lv=level, aid=anchor_id: (
-                                f'<h{lv} id="{aid}">{html.escape(t)}</h{lv}>'
+                            build_html=lambda _t, lv=level, aid=anchor_id, aa=align_attr, ih=inner_html: (
+                                f'<h{lv} id="{aid}"{aa}>{ih}</h{lv}>'
                             ),
                             build_md=lambda t, lv=level: (
                                 f"{'#' * lv} "
@@ -760,38 +1452,57 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                     text=text,
                                     level=level,
                                     anchor_id=anchor_id,
+                                    runs=runs,
+                                    align=align,
+                                    section_role=section_role,
                                 )
                             )
                         if not can_continue:
                             break
                     elif text:
-                        p_pr = block.find(f"{{{_W_NS}}}pPr")
-                        is_list = (
-                            p_pr is not None
-                            and p_pr.find(f"{{{_W_NS}}}numPr") is not None
-                        )
+                        is_list, list_marker, indent_level = _next_list_info(block)
+                        align_attr = f' style="text-align:{align}"' if align != "left" else ""
+                        inner_html = _render_runs_html(runs, text)
+                        if is_list:
+                            marker_txt = list_marker or "•"
+                            block_html = (
+                                f'<div class="doc-list" style="margin-left:{indent_level * 18}px">'
+                                f'<span class="doc-list-marker">{html.escape(marker_txt)}</span>'
+                                f"<span>{inner_html}</span></div>"
+                            )
+                            md_prefix = f"{'  ' * indent_level}{marker_txt} "
+                        else:
+                            block_html = (
+                                f'<p class="doc-role-note">{inner_html}</p>'
+                                if section_role != "body"
+                                else f"<p{align_attr}>{inner_html}</p>"
+                            )
+                            md_prefix = ""
                         appended, can_continue = _append_bounded_text_block(
                             html_blocks,
                             md_blocks,
                             render_budget,
                             raw_text=text,
-                            build_html=lambda t: (
-                                f"<p>{html.escape(t).replace(chr(10), '<br/>')}</p>"
-                            ),
-                            build_md=lambda t, lst=is_list: f"- {t}" if lst else t,
+                            build_html=lambda _t, bh=block_html: bh,
+                            build_md=lambda t, mp=md_prefix: f"{mp}{t}",
                         )
                         if appended:
                             docx_blocks.append(
                                 DocxRichBlock(
                                     kind="list_item" if is_list else "paragraph",
                                     text=text,
+                                    runs=runs,
+                                    align=align,
+                                    indent_level=indent_level,
+                                    list_marker=list_marker,
+                                    section_role=section_role,
                                 )
                             )
                         if not can_continue:
                             break
 
                     for rid in _docx_paragraph_image_rids(block):
-                        target = rels.get(rid)
+                        target = part_rels.get(rid)
                         if target:
                             media_res = _try_embed_media(target)
                             if media_res is not None:
@@ -802,24 +1513,78 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                         kind="image",
                                         image_bytes=raw_img,
                                         image_name=img_name,
+                                        section_role=section_role,
                                     )
                                 )
 
                 elif block.tag == f"{{{_W_NS}}}tbl":
+                    has_borders = _docx_table_has_borders(block)
                     table_rows: list[list[str]] = []
-                    for tr in block.findall(f"{{{_W_NS}}}tr")[:_MAX_TABLE_ROWS]:
-                        row_cells: list[str] = []
+                    rich_table_rows: list[tuple[DocxTableCell, ...]] = []
+                    for tr_idx, tr in enumerate(block.findall(f"{{{_W_NS}}}tr")[:_MAX_TABLE_ROWS]):
+                        tr_pr = tr.find(f"{{{_W_NS}}}trPr")
+                        is_row_header = (
+                            (tr_pr is not None and tr_pr.find(f"{{{_W_NS}}}tblHeader") is not None)
+                            or (tr_idx == 0 and has_borders)
+                        )
+                        row_cells_text: list[str] = []
+                        row_cells_rich: list[DocxTableCell] = []
                         for tc in tr.findall(f"{{{_W_NS}}}tc")[:_MAX_TABLE_COLS]:
-                            cell_paras = [
-                                _docx_paragraph_text(p).strip()
-                                for p in tc.findall(f".//{{{_W_NS}}}p")
-                            ]
-                            row_cells.append(
-                                "\n".join(p for p in cell_paras if p)
+                            tc_pr = tc.find(f"{{{_W_NS}}}tcPr")
+                            grid_span = 1
+                            is_vmerge_cont = False
+                            if tc_pr is not None:
+                                gs_el = tc_pr.find(f"{{{_W_NS}}}gridSpan")
+                                if gs_el is not None:
+                                    raw_gs = (gs_el.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+                                    if raw_gs.isascii() and raw_gs.isdigit():
+                                        grid_span = max(1, min(int(raw_gs), _MAX_TABLE_COLS))
+                                vm_el = tc_pr.find(f"{{{_W_NS}}}vMerge")
+                                if vm_el is not None:
+                                    vm_val = (vm_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+                                    if vm_val != "restart":
+                                        is_vmerge_cont = True
+
+                            cell_paras_text: list[str] = []
+                            cell_runs_acc: list[DocxTextRun] = []
+                            cell_align = "left"
+                            cell_imgs: list[tuple[str, bytes]] = []
+                            for p_idx_cell, p in enumerate(tc.findall(f".//{{{_W_NS}}}p")):
+                                p_txt_raw, p_runs = _docx_paragraph_runs_and_text(p, part_links)
+                                p_txt = p_txt_raw.strip()
+                                if p_txt:
+                                    if p_idx_cell == 0:
+                                        cell_align = _docx_paragraph_align(p)
+                                    cell_paras_text.append(p_txt)
+                                    if cell_runs_acc:
+                                        cell_runs_acc.append(DocxTextRun(text="\n"))
+                                    cell_runs_acc.extend(p_runs)
+                                for rid in _docx_paragraph_image_rids(p):
+                                    target = part_rels.get(rid)
+                                    if target:
+                                        m_res = _try_embed_media(target)
+                                        if m_res is not None:
+                                            cell_imgs.append((m_res[1], m_res[2]))
+
+                            cell_text = "" if (is_vmerge_cont and not cell_paras_text) else "\n".join(cell_paras_text)
+                            row_cells_text.append(cell_text)
+                            row_cells_rich.append(
+                                DocxTableCell(
+                                    text=cell_text,
+                                    runs=_coalesce_runs(cell_runs_acc),
+                                    col_span=grid_span,
+                                    align=cell_align,
+                                    is_header=is_row_header,
+                                    images=tuple(cell_imgs),
+                                )
                             )
-                        table_rows.append(row_cells)
-                    tbl_html, tbl_md = _render_table_html_and_markdown(
-                        table_rows, sheet_style=False, budget=render_budget
+                        table_rows.append(row_cells_text)
+                        rich_table_rows.append(tuple(row_cells_rich))
+
+                    tbl_html, tbl_md = _render_docx_table_html_and_markdown(
+                        tuple(rich_table_rows),
+                        has_borders=has_borders,
+                        budget=render_budget,
                     )
                     if tbl_html:
                         html_blocks.append(tbl_html)
@@ -827,12 +1592,67 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                             DocxRichBlock(
                                 kind="table",
                                 rows=tuple(tuple(r) for r in table_rows),
+                                rich_rows=tuple(rich_table_rows),
+                                has_borders=has_borders,
+                                section_role=section_role,
                             )
                         )
                     if tbl_md:
                         md_blocks.append(tbl_md)
                     if render_budget.truncated:
                         break
+
+        body = doc_root.find(f"{{{_W_NS}}}body")
+        header_targets: list[str] = []
+        footer_targets: list[str] = []
+        if body is not None:
+            for sect_pr in body.findall(f".//{{{_W_NS}}}sectPr"):
+                for href_el in sect_pr.findall(f"{{{_W_NS}}}headerReference"):
+                    htype = (href_el.attrib.get(f"{{{_W_NS}}}type") or "default").lower()
+                    rid = href_el.attrib.get(f"{{{_R_NS}}}id") or ""
+                    target = rels.get(rid)
+                    if htype == "default" and target and target not in header_targets:
+                        header_targets.append(target)
+                for fref_el in sect_pr.findall(f"{{{_W_NS}}}footerReference"):
+                    ftype = (fref_el.attrib.get(f"{{{_W_NS}}}type") or "default").lower()
+                    rid = fref_el.attrib.get(f"{{{_R_NS}}}id") or ""
+                    target = rels.get(rid)
+                    if ftype == "default" and target and target not in footer_targets:
+                        footer_targets.append(target)
+
+        def _process_hdr_ftr(zip_path: str, role: str) -> None:
+            if zip_path not in zf_names or render_budget.truncated:
+                return
+            try:
+                raw_hf = _read_zip_entry_capped(
+                    zf, zip_path, _MAX_XML_BYTES, xml_budget=xml_budget
+                )
+                hf_root = _parse_xml_safe(raw_hf)
+                part_name = posixpath.basename(zip_path)
+                hf_rels_path = f"word/_rels/{part_name}.rels"
+                hf_rels = _parse_relationships(
+                    zf, zf_names, hf_rels_path, "word", xml_budget=xml_budget
+                )
+                hf_links = _parse_external_hyperlinks(
+                    zf, zf_names, hf_rels_path, xml_budget=xml_budget
+                )
+                _process_block_sequence(
+                    hf_root,
+                    {**rels, **hf_rels},
+                    {**hyperlinks, **hf_links},
+                    section_role=role,
+                )
+            except _CONVERSION_ERRORS:
+                pass
+
+        for ht in header_targets[:2]:
+            _process_hdr_ftr(ht, "header")
+
+        if body is not None and not render_budget.truncated:
+            _process_block_sequence(body, rels, hyperlinks, section_role="body")
+
+        for ft_path in footer_targets[:2]:
+            _process_hdr_ftr(ft_path, "footer")
 
         if not render_budget.truncated:
             for name in sorted(zf_names):
@@ -1089,26 +1909,186 @@ def _convert_csv(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocume
     )
 
 
+def _pptx_align_from_algn(algn: str) -> str:
+    val = (algn or "").strip().lower()
+    if val == "ctr":
+        return "center"
+    if val == "r":
+        return "right"
+    if val in {"just", "dist"}:
+        return "justify"
+    return "left"
+
+
+def _pptx_r_style(r_pr: Optional[ET.Element], *, href: str = "") -> dict[str, object]:
+    bold = False
+    italic = False
+    underline = False
+    strike = False
+    superscript = False
+    subscript = False
+    if r_pr is not None:
+        bold = str(r_pr.attrib.get("b") or "0") not in {"0", "false", ""}
+        italic = str(r_pr.attrib.get("i") or "0") not in {"0", "false", ""}
+        u_val = str(r_pr.attrib.get("u") or "none").lower()
+        underline = u_val not in {"none", "0", "false", ""}
+        st_val = str(r_pr.attrib.get("strike") or "noStrike").lower()
+        strike = st_val not in {"nostrike", "0", "false", ""}
+        raw_base = (r_pr.attrib.get("baseline") or "").strip()
+        if raw_base:
+            try:
+                base_num = int(raw_base)
+                if base_num > 0:
+                    superscript = True
+                elif base_num < 0:
+                    subscript = True
+            except ValueError:
+                pass
+    return {
+        "bold": bold,
+        "italic": italic,
+        "underline": underline,
+        "strike": strike,
+        "superscript": superscript,
+        "subscript": subscript,
+        "href": href,
+    }
+
+
+def _pptx_tx_body_paragraphs(
+    tx_body: ET.Element,
+    hyperlinks: Optional[dict[str, str]] = None,
+    *,
+    is_title: bool = False,
+    is_subtitle: bool = False,
+    is_body_ph: bool = False,
+) -> list[PptxTextParagraph]:
+    """Extract formatted paragraphs, bullets, alignment, and math from DrawingML <p:txBody>."""
+    link_map = hyperlinks or {}
+    out: list[PptxTextParagraph] = []
+    auto_counters: dict[int, int] = {}
+
+    for p_el in tx_body.findall(f"{{{_A_NS}}}p"):
+        p_pr = p_el.find(f"{{{_A_NS}}}pPr")
+        level = 0
+        align = "left"
+        bullet = ""
+        if p_pr is not None:
+            raw_lvl = (p_pr.attrib.get("lvl") or "0").strip()
+            if raw_lvl.isascii() and raw_lvl.isdigit():
+                level = min(5, int(raw_lvl))
+            align = _pptx_align_from_algn(p_pr.attrib.get("algn") or "")
+            if p_pr.find(f"{{{_A_NS}}}buNone") is not None:
+                bullet = ""
+            elif p_pr.find(f"{{{_A_NS}}}buChar") is not None:
+                bu_char = p_pr.find(f"{{{_A_NS}}}buChar")
+                bullet = (bu_char.attrib.get("char") or "•") if bu_char is not None else "•"
+            elif p_pr.find(f"{{{_A_NS}}}buAutoNum") is not None:
+                bu_auto = p_pr.find(f"{{{_A_NS}}}buAutoNum")
+                auto_type = (bu_auto.attrib.get("type") or "").lower() if bu_auto is not None else ""
+                start_raw = (bu_auto.attrib.get("startAt") or "1") if bu_auto is not None else "1"
+                start_at = int(start_raw) if start_raw.isascii() and start_raw.isdigit() else 1
+                for k in list(auto_counters.keys()):
+                    if k > level:
+                        del auto_counters[k]
+                cur = auto_counters[level] + 1 if level in auto_counters else start_at
+                auto_counters[level] = cur
+                if "alpha" in auto_type and "lc" in auto_type:
+                    bullet = f"{_int_to_alpha(cur, upper=False)})"
+                elif "alpha" in auto_type:
+                    bullet = f"{_int_to_alpha(cur, upper=True)}."
+                elif "roman" in auto_type and "lc" in auto_type:
+                    bullet = f"{_int_to_roman(cur, upper=False)}."
+                elif "roman" in auto_type:
+                    bullet = f"{_int_to_roman(cur, upper=True)}."
+                else:
+                    bullet = f"{cur}."
+            elif is_body_ph and not is_title and not is_subtitle:
+                bullet = "•"
+        elif is_body_ph and not is_title and not is_subtitle:
+            bullet = "•"
+
+        raw_runs: list[DocxTextRun] = []
+
+        def _collect_inline(node: ET.Element) -> None:
+            for sub in _iter_effective_children(node):
+                if sub.tag == f"{{{_A_NS}}}r":
+                    r_pr = sub.find(f"{{{_A_NS}}}rPr")
+                    href = ""
+                    if r_pr is not None:
+                        hl = r_pr.find(f"{{{_A_NS}}}hlinkClick")
+                        if hl is not None:
+                            rid = hl.attrib.get(f"{{{_R_NS}}}id") or ""
+                            href = link_map.get(rid, "")
+                    st = _pptx_r_style(r_pr, href=href)
+                    t_el = sub.find(f"{{{_A_NS}}}t")
+                    if t_el is not None and t_el.text:
+                        raw_runs.append(
+                            DocxTextRun(
+                                text=t_el.text,
+                                bold=bool(st["bold"]),
+                                italic=bool(st["italic"]),
+                                underline=bool(st["underline"]),
+                                strike=bool(st["strike"]),
+                                superscript=bool(st["superscript"]),
+                                subscript=bool(st["subscript"]),
+                                href=str(st["href"]),
+                            )
+                        )
+                elif sub.tag == f"{{{_A_NS}}}br":
+                    raw_runs.append(DocxTextRun(text="\n"))
+                elif sub.tag == f"{{{_A_NS}}}fld":
+                    t_el = sub.find(f"{{{_A_NS}}}t")
+                    if t_el is not None and t_el.text:
+                        raw_runs.append(DocxTextRun(text=t_el.text))
+                elif sub.tag in (f"{{{_M_NS}}}oMathPara", f"{{{_M_NS}}}oMath"):
+                    math_txt = _extract_omml_text(sub).strip()
+                    if math_txt:
+                        raw_runs.append(DocxTextRun(text=math_txt))
+                elif sub.tag == f"{{{_A_NS}}}m":
+                    math_txt = _extract_omml_text(sub).strip()
+                    if math_txt:
+                        raw_runs.append(DocxTextRun(text=math_txt))
+                elif sub.tag not in (f"{{{_A_NS}}}pPr", f"{{{_A_NS}}}endParaRPr"):
+                    _collect_inline(sub)
+
+        _collect_inline(p_el)
+        coalesced = _coalesce_runs(raw_runs)
+        joined = "".join(r.text for r in coalesced).strip()
+        if joined:
+            out.append(
+                PptxTextParagraph(
+                    text=joined,
+                    runs=coalesced,
+                    level=level,
+                    bullet=bullet,
+                    align=align,
+                    is_title=is_title,
+                    is_subtitle=is_subtitle,
+                )
+            )
+    return out
+
+
 def _extract_drawingml_text(root: ET.Element, *, skip_slide_num: bool = False) -> str:
     """Extract DrawingML <a:p> paragraph text lines from a PPTX slide or notes XML."""
     paragraphs: list[str] = []
 
     def _collect_from_tx_body(tx_body: ET.Element) -> None:
-        for p_el in tx_body.findall(f".//{{{_A_NS}}}p"):
-            parts: list[str] = []
-            for node in p_el.iter():
-                if node.tag == f"{{{_A_NS}}}t" and node.text:
-                    parts.append(node.text)
-                elif node.tag == f"{{{_A_NS}}}br":
-                    parts.append("\n")
-            line = "".join(parts).strip()
-            if line:
-                paragraphs.append(line)
+        for p_obj in _pptx_tx_body_paragraphs(tx_body):
+            paragraphs.append(p_obj.text)
 
     if not skip_slide_num:
-        for elem in root.iter():
-            if elem.tag in (f"{{{_P_NS}}}txBody", f"{{{_A_NS}}}txBody"):
-                _collect_from_tx_body(elem)
+        def _walk(node: ET.Element) -> None:
+            if node.tag == f"{{{_A_NS}}}tbl":
+                return
+            if node.tag in (f"{{{_P_NS}}}txBody", f"{{{_A_NS}}}txBody"):
+                _collect_from_tx_body(node)
+                return
+            for sub in _iter_effective_children(node):
+                _walk(sub)
+
+        _walk(root)
         return "\n".join(paragraphs)
 
     for sp in root.findall(f".//{{{_P_NS}}}sp"):
@@ -1123,15 +2103,25 @@ def _extract_drawingml_text(root: ET.Element, *, skip_slide_num: bool = False) -
 
 def _resolve_pptx_slide_paths(
     zf: zipfile.ZipFile, zf_names: set[str], *, xml_budget: list[int]
-) -> list[str]:
-    """Resolve PPTX slide archive paths in presentation order, with numeric fallback."""
+) -> tuple[list[str], tuple[int, int]]:
+    """Resolve PPTX slide archive paths and canonical EMU slide dimensions (cx, cy)."""
     ordered: list[str] = []
     seen: set[str] = set()
+    slide_size = (9144000, 5143500)  # Default 16:9 widescreen EMU
     if "ppt/presentation.xml" in zf_names:
         pres_raw = _read_zip_entry_capped(
             zf, "ppt/presentation.xml", _MAX_XML_BYTES, xml_budget=xml_budget
         )
         pres_root = _parse_xml_safe(pres_raw)
+        sld_sz = pres_root.find(f"{{{_P_NS}}}sldSz")
+        if sld_sz is not None:
+            try:
+                cx = int(sld_sz.attrib.get("cx") or "0")
+                cy = int(sld_sz.attrib.get("cy") or "0")
+                if cx > 0 and cy > 0:
+                    slide_size = (cx, cy)
+            except ValueError:
+                pass
         pres_rels = _parse_relationships(
             zf,
             zf_names,
@@ -1146,10 +2136,10 @@ def _resolve_pptx_slide_paths(
                 seen.add(target)
                 ordered.append(target)
                 if len(ordered) >= _MAX_PPTX_SLIDES:
-                    return ordered
+                    return ordered, slide_size
 
     if ordered:
-        return ordered
+        return ordered, slide_size
 
     numbered: list[tuple[int, str]] = []
     for name in zf_names:
@@ -1157,7 +2147,7 @@ def _resolve_pptx_slide_paths(
         if match:
             numbered.append((int(match.group(1)), name))
     numbered.sort(key=lambda item: item[0])
-    return [name for _, name in numbered[:_MAX_PPTX_SLIDES]]
+    return [name for _, name in numbered[:_MAX_PPTX_SLIDES]], slide_size
 
 
 def _format_pptx_notes_markdown(notes_text: str) -> str:
@@ -1172,14 +2162,64 @@ def _format_pptx_notes_markdown(notes_text: str) -> str:
 
 
 def _build_pptx_slide_rendered(
-    idx: int, anchor_id: str, body_text: str, notes_text: str
+    idx: int,
+    anchor_id: str,
+    body_text: str,
+    notes_text: str,
+    *,
+    title_text: str = "",
+    subtitle_text: str = "",
+    elements: tuple[PptxPlacedElement, ...] = (),
 ) -> tuple[str, str]:
     """Render HTML card and Markdown section for a single PPTX slide."""
-    body_html = (
-        "<p>" + html.escape(body_text).replace("\n", "<br/>") + "</p>"
-        if body_text
-        else '<p class="muted">(Slide trống)</p>'
+    heading_label = f"Slide {idx}: {title_text}" if title_text else f"Slide {idx}"
+    sub_html = (
+        f'<div class="slide-subtitle">{html.escape(subtitle_text)}</div>'
+        if subtitle_text
+        else ""
     )
+    elem_html_parts: list[str] = []
+    for el in elements:
+        if el.kind == "text":
+            for p_obj in el.paragraphs:
+                if p_obj.is_title or p_obj.is_subtitle:
+                    continue
+                inner = _render_runs_html(p_obj.runs, p_obj.text)
+                if p_obj.bullet:
+                    elem_html_parts.append(
+                        f'<div class="doc-list" style="margin-left:{p_obj.level * 16}px">'
+                        f'<span class="doc-list-marker">{html.escape(p_obj.bullet)}</span>'
+                        f"<span>{inner}</span></div>"
+                    )
+                else:
+                    align_attr = f' style="text-align:{p_obj.align}"' if p_obj.align != "left" else ""
+                    elem_html_parts.append(f"<p{align_attr}>{inner}</p>")
+        elif el.kind == "table" and el.table_rows:
+            tbl_h, _ = _render_table_html_and_markdown(
+                [list(r) for r in el.table_rows], sheet_style=False
+            )
+            if tbl_h:
+                elem_html_parts.append(tbl_h)
+        elif el.kind == "image" and el.image_bytes:
+            ext = posixpath.splitext(el.image_name.lower())[1]
+            mime = _SAFE_RASTER_MIMES.get(ext, "image/png")
+            b64 = base64.b64encode(el.image_bytes).decode("ascii")
+            elem_html_parts.append(
+                '<figure class="doc-figure">'
+                f'<img class="doc-image" src="data:{mime};base64,{b64}" '
+                f'alt="{html.escape(el.image_name)}"/>'
+                "</figure>"
+            )
+
+    if elem_html_parts:
+        body_html = "".join(elem_html_parts)
+    elif body_text:
+        body_html = "<p>" + html.escape(body_text).replace("\n", "<br/>") + "</p>"
+    elif title_text or subtitle_text:
+        body_html = ""
+    else:
+        body_html = '<p class="muted">(Slide trống)</p>'
+
     notes_html = (
         '<div class="slide-notes"><strong>Ghi chú:</strong> '
         + html.escape(notes_text).replace("\n", "<br/>")
@@ -1189,11 +2229,13 @@ def _build_pptx_slide_rendered(
     )
     card_html = (
         f'<section class="slide-card" id="{anchor_id}">'
-        f"<h3>Slide {idx}</h3>{body_html}{notes_html}"
+        f"<h3>{html.escape(heading_label)}</h3>{sub_html}{body_html}{notes_html}"
         "</section>"
     )
-    md_parts = [f"### Slide {idx}"]
-    if body_text:
+    md_parts = [f"### {heading_label}"]
+    if subtitle_text:
+        md_parts.append(f"*{subtitle_text}*")
+    if body_text and body_text != title_text:
         md_parts.append(body_text)
     if notes_text:
         md_parts.append(_format_pptx_notes_markdown(notes_text))
@@ -1208,12 +2250,16 @@ def _render_bounded_pptx_card(
     render_budget: _RenderBudget,
     *,
     has_prior_cards: bool,
+    title_text: str = "",
+    subtitle_text: str = "",
+    elements: tuple[PptxPlacedElement, ...] = (),
 ) -> Optional[tuple[str, str, bool]]:
     """Build a PPTX slide card within render budget, returning (html, md, did_truncate)."""
     raw_limit = min(render_budget.html_remaining, render_budget.md_remaining)
     pre_truncated = False
     rendered_body = body_text
     rendered_notes = notes_text
+    rendered_elements = elements
     if len(rendered_body) > raw_limit or len(rendered_notes) > raw_limit:
         if has_prior_cards:
             render_budget.truncated = True
@@ -1221,10 +2267,17 @@ def _render_bounded_pptx_card(
         half_limit = max(1, raw_limit // 12)
         rendered_body = _truncate_preview_text(rendered_body, half_limit)
         rendered_notes = _truncate_preview_text(rendered_notes, half_limit)
+        rendered_elements = ()
         pre_truncated = True
 
     card_html, card_md = _build_pptx_slide_rendered(
-        idx, anchor_id, rendered_body, rendered_notes
+        idx,
+        anchor_id,
+        rendered_body,
+        rendered_notes,
+        title_text=title_text,
+        subtitle_text=subtitle_text,
+        elements=rendered_elements,
     )
     if render_budget.try_consume(len(card_html) + 1, len(card_md) + 2):
         if pre_truncated:
@@ -1251,34 +2304,196 @@ def _render_bounded_pptx_card(
     return card_html, card_md, True
 
 
+def _extract_pptx_table_rows(tbl_el: ET.Element) -> tuple[tuple[str, ...], ...]:
+    """Extract cell matrix from one DrawingML ``<a:tbl>`` element."""
+    rows: list[tuple[str, ...]] = []
+    for tr in tbl_el.findall(f"{{{_A_NS}}}tr")[:_MAX_TABLE_ROWS]:
+        cells: list[str] = []
+        for tc in tr.findall(f"{{{_A_NS}}}tc")[:_MAX_TABLE_COLS]:
+            tx_body = tc.find(f"{{{_A_NS}}}txBody")
+            if tx_body is None:
+                cells.append("")
+                continue
+            paras: list[str] = []
+            for p in tx_body.findall(f"{{{_A_NS}}}p"):
+                runs = [t.text or "" for t in p.findall(f".//{{{_A_NS}}}t")]
+                joined = "".join(runs).strip()
+                if joined:
+                    paras.append(joined)
+            cells.append("\n".join(paras))
+        if any(c for c in cells):
+            rows.append(tuple(cells))
+    return tuple(rows)
+
+
 def _extract_pptx_tables(slide_root: ET.Element) -> tuple[tuple[tuple[str, ...], ...], ...]:
     """Extract DrawingML ``<a:tbl>`` grids from a slide XML tree."""
     tables: list[tuple[tuple[str, ...], ...]] = []
     for tbl in slide_root.findall(f".//{{{_A_NS}}}tbl"):
-        rows: list[tuple[str, ...]] = []
-        for tr in tbl.findall(f"{{{_A_NS}}}tr")[:_MAX_TABLE_ROWS]:
-            cells: list[str] = []
-            for tc in tr.findall(f"{{{_A_NS}}}tc")[:_MAX_TABLE_COLS]:
-                tx_body = tc.find(f"{{{_A_NS}}}txBody")
-                if tx_body is None:
-                    cells.append("")
-                    continue
-                paras: list[str] = []
-                for p in tx_body.findall(f"{{{_A_NS}}}p"):
-                    runs = [t.text or "" for t in p.findall(f".//{{{_A_NS}}}t")]
-                    joined = "".join(runs).strip()
-                    if joined:
-                        paras.append(joined)
-                cells.append("\n".join(paras))
-            if any(c for c in cells):
-                rows.append(tuple(cells))
+        rows = _extract_pptx_table_rows(tbl)
         if rows:
-            tables.append(tuple(rows))
+            tables.append(rows)
     return tuple(tables)
 
 
+def _parse_xfrm_emu(
+    xfrm: Optional[ET.Element],
+) -> Optional[tuple[int, int, int, int]]:
+    if xfrm is None:
+        return None
+    off = xfrm.find(f"{{{_A_NS}}}off")
+    ext = xfrm.find(f"{{{_A_NS}}}ext")
+    if off is None or ext is None:
+        return None
+    try:
+        x = int(off.attrib.get("x") or "0")
+        y = int(off.attrib.get("y") or "0")
+        cx = int(ext.attrib.get("cx") or "0")
+        cy = int(ext.attrib.get("cy") or "0")
+        return (x, y, max(1, cx), max(1, cy))
+    except ValueError:
+        return None
+
+
+def _parse_pptx_layout_placeholders(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    layout_path: str,
+    *,
+    xml_budget: list[int],
+) -> dict[tuple[str, str], tuple[int, int, int, int]]:
+    """Parse placeholder geometry overrides from a slideLayout XML file."""
+    if not layout_path or layout_path not in zf_names:
+        return {}
+    try:
+        raw = _read_zip_entry_capped(
+            zf, layout_path, _MAX_XML_BYTES, xml_budget=xml_budget
+        )
+        root = _parse_xml_safe(raw)
+    except _CONVERSION_ERRORS:
+        return {}
+    mapping: dict[tuple[str, str], tuple[int, int, int, int]] = {}
+    for sp in root.findall(f".//{{{_P_NS}}}sp"):
+        ph = sp.find(f".//{{{_P_NS}}}ph")
+        if ph is None:
+            continue
+        ph_type = (ph.attrib.get("type") or "").strip().lower()
+        ph_idx = (ph.attrib.get("idx") or "").strip()
+        sp_pr = sp.find(f"{{{_P_NS}}}spPr")
+        rect = _parse_xfrm_emu(sp_pr.find(f"{{{_A_NS}}}xfrm") if sp_pr is not None else None)
+        if rect is not None:
+            if (ph_type, ph_idx) not in mapping:
+                mapping[(ph_type, ph_idx)] = rect
+            if ph_type and (ph_type, "") not in mapping:
+                mapping[(ph_type, "")] = rect
+    return mapping
+
+
+def _extract_smartart_lines(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    data_path: str,
+    *,
+    xml_budget: list[int],
+) -> list[str]:
+    """Extract logical node text from a SmartArt diagram data XML file."""
+    if not data_path or data_path not in zf_names:
+        return []
+    try:
+        raw = _read_zip_entry_capped(
+            zf, data_path, _MAX_XML_BYTES, xml_budget=xml_budget
+        )
+        root = _parse_xml_safe(raw)
+    except _CONVERSION_ERRORS:
+        return []
+    lines: list[str] = []
+    seen: set[str] = set()
+    for pt in root.findall(f".//{{{_DGM_NS}}}pt"):
+        pt_type = (pt.attrib.get("type") or "").strip().lower()
+        if pt_type in {"pres", "partrans", "sibtrans"}:
+            continue
+        t_el = pt.find(f"{{{_DGM_NS}}}t")
+        if t_el is None:
+            continue
+        parts = ["".join(t.text or "" for t in p.findall(f".//{{{_A_NS}}}t")).strip() for p in t_el.findall(f".//{{{_A_NS}}}p")]
+        txt = " — ".join(p for p in parts if p).strip()
+        if txt and txt not in seen:
+            seen.add(txt)
+            lines.append(txt)
+    return lines
+
+
+def _extract_chart_lines(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    chart_path: str,
+    *,
+    xml_budget: list[int],
+) -> list[str]:
+    """Extract chart title and series/category labels from a DrawingML chart XML file."""
+    if not chart_path or chart_path not in zf_names:
+        return []
+    try:
+        raw = _read_zip_entry_capped(
+            zf, chart_path, _MAX_XML_BYTES, xml_budget=xml_budget
+        )
+        root = _parse_xml_safe(raw)
+    except _CONVERSION_ERRORS:
+        return []
+    lines: list[str] = []
+    title_el = root.find(f".//{{{_C_NS}}}title")
+    if title_el is not None:
+        title_parts = [t.text.strip() for t in title_el.findall(f".//{{{_A_NS}}}t") if t.text and t.text.strip()]
+        if title_parts:
+            lines.append("Biểu đồ: " + " ".join(title_parts))
+    ser_names: list[str] = []
+    for tx in root.findall(f".//{{{_C_NS}}}ser/{{{_C_NS}}}tx"):
+        vals = [v.text.strip() for v in tx.findall(f".//{{{_C_NS}}}v") if v.text and v.text.strip()]
+        if not vals:
+            vals = [t.text.strip() for t in tx.findall(f".//{{{_A_NS}}}t") if t.text and t.text.strip()]
+        if vals:
+            ser_names.extend(vals)
+    if ser_names:
+        lines.append("Chuỗi dữ liệu: " + ", ".join(ser_names[:12]))
+    return lines
+
+
+def _maybe_crop_image_bytes(raw_bytes: bytes, ext: str, blip_fill: Optional[ET.Element]) -> bytes:
+    """Apply DrawingML <a:srcRect> percentages to raster image bytes when present."""
+    if _PILImage is None or blip_fill is None:
+        return raw_bytes
+    src_rect = blip_fill.find(f"{{{_A_NS}}}srcRect")
+    if src_rect is None:
+        return raw_bytes
+    try:
+        left_p = max(0, int(src_rect.attrib.get("l") or "0"))
+        top_p = max(0, int(src_rect.attrib.get("t") or "0"))
+        right_p = max(0, int(src_rect.attrib.get("r") or "0"))
+        bottom_p = max(0, int(src_rect.attrib.get("b") or "0"))
+    except ValueError:
+        return raw_bytes
+    if left_p == top_p == right_p == bottom_p == 0 or (left_p + right_p) >= 98_000 or (top_p + bottom_p) >= 98_000:
+        return raw_bytes
+    try:
+        with _PILImage.open(io.BytesIO(raw_bytes)) as img:
+            w, h = img.size
+            x0 = int(round(w * (left_p / 100_000.0)))
+            y0 = int(round(h * (top_p / 100_000.0)))
+            x1 = max(x0 + 1, int(round(w * (1.0 - right_p / 100_000.0))))
+            y1 = max(y0 + 1, int(round(h * (1.0 - bottom_p / 100_000.0))))
+            cropped = img.crop((x0, y0, x1, y1))
+            out = io.BytesIO()
+            fmt = "JPEG" if ext in {".jpg", ".jpeg"} else "PNG"
+            if fmt == "JPEG" and cropped.mode not in ("RGB", "L"):
+                cropped = cropped.convert("RGB")
+            cropped.save(out, format=fmt)
+            return out.getvalue()
+    except Exception:
+        return raw_bytes
+
+
 def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
-    """Convert PPTX bytes into ordered slides, mapped speaker notes, rich blocks, HTML, and Markdown."""
+    """Convert PPTX bytes into ordered visually-structured slides, speaker notes, HTML, and Markdown."""
     slides: list[tuple[int, str, str]] = []
     rich_slides: list[PptxSlideRich] = []
     outline: list[DocumentOutlineItem] = []
@@ -1286,18 +2501,23 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
     md_sections: list[str] = []
     media_state = {"count": 0, "bytes": 0}
     media_cache: dict[str, bytes] = {}
+    layout_cache: dict[str, dict[tuple[str, str], tuple[int, int, int, int]]] = {}
     xml_budget = [_MAX_TOTAL_XML_BYTES]
     render_budget = _RenderBudget.for_title(title)
 
     with _open_ooxml_zip(data) as zf:
         zf_names = set(zf.namelist())
-        slide_paths = _resolve_pptx_slide_paths(zf, zf_names, xml_budget=xml_budget)
+        slide_paths, (slide_w_emu, slide_h_emu) = _resolve_pptx_slide_paths(
+            zf, zf_names, xml_budget=xml_budget
+        )
+        aspect_ratio = max(0.8, min(3.0, slide_w_emu / max(1, slide_h_emu)))
 
-        # First pass: resolve explicit per-slide .rels notes mappings and filename-matched
-        # fallback notes so positional notesSlide{idx}.xml never steals another slide's note.
         explicit_notes: list[tuple[bool, Optional[str]]] = []
         claimed_notes: set[str] = set()
         slide_media_targets: list[list[str]] = []
+        slide_all_rels: list[dict[str, str]] = []
+        slide_hyperlinks: list[dict[str, str]] = []
+        slide_layout_paths: list[str] = []
         for slide_path in slide_paths:
             slide_dir = posixpath.dirname(slide_path)
             slide_name = posixpath.basename(slide_path)
@@ -1305,7 +2525,16 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             has_rels = rels_path in zf_names
             mapped_note: Optional[str] = None
             media_targets: list[str] = []
+            all_rels: dict[str, str] = {}
+            hlinks: dict[str, str] = {}
+            layout_path = ""
             if has_rels:
+                all_rels = _parse_relationships(
+                    zf, zf_names, rels_path, slide_dir, xml_budget=xml_budget
+                )
+                hlinks = _parse_external_hyperlinks(
+                    zf, zf_names, rels_path, xml_budget=xml_budget
+                )
                 note_rels = _parse_relationships(
                     zf,
                     zf_names,
@@ -1330,8 +2559,23 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                 for target in img_rels.values():
                     if target in zf_names and target not in media_targets:
                         media_targets.append(target)
+                layout_rels = _parse_relationships(
+                    zf,
+                    zf_names,
+                    rels_path,
+                    slide_dir,
+                    type_suffix="/slidelayout",
+                    xml_budget=xml_budget,
+                )
+                for candidate in layout_rels.values():
+                    if candidate in zf_names:
+                        layout_path = candidate
+                        break
             explicit_notes.append((has_rels, mapped_note))
             slide_media_targets.append(media_targets)
+            slide_all_rels.append(all_rels)
+            slide_hyperlinks.append(hlinks)
+            slide_layout_paths.append(layout_path)
 
         resolved_notes: list[Optional[str]] = []
         for slide_path, (has_rels, mapped_note) in zip(slide_paths, explicit_notes):
@@ -1345,40 +2589,308 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                         claimed_notes.add(file_note)
             resolved_notes.append(note_path)
 
-        for idx, (slide_path, (has_rels, _), pre_resolved_note, media_targets) in enumerate(
-            zip(slide_paths, explicit_notes, resolved_notes, slide_media_targets), start=1
+        def _load_slide_image_target(target: str) -> Optional[tuple[str, bytes]]:
+            if not target or target not in zf_names:
+                return None
+            ext = posixpath.splitext(target.lower())[1]
+            if ext not in _SAFE_RASTER_MIMES and ext not in _CONVERTIBLE_VECTOR_RASTER_EXTS:
+                return None
+            if target in media_cache:
+                return (posixpath.basename(target), media_cache[target])
+            if media_state["count"] >= _MAX_MEDIA_COUNT:
+                return None
+            try:
+                raw_img = _read_zip_entry_capped(zf, target, _MAX_MEDIA_BYTES)
+            except _CONVERSION_ERRORS:
+                return None
+            normalized = _normalize_image_payload(ext, raw_img) if raw_img else None
+            if normalized is None:
+                return None
+            _mime, final_bytes = normalized
+            if media_state["bytes"] + len(final_bytes) > _MAX_TOTAL_MEDIA_BYTES:
+                return None
+            media_state["count"] += 1
+            media_state["bytes"] += len(final_bytes)
+            media_cache[target] = final_bytes
+            return (posixpath.basename(target), final_bytes)
+
+        for idx, (
+            _slide_path,
+            (has_rels, _),
+            pre_resolved_note,
+            media_targets,
+            all_rels,
+            hlinks,
+            layout_path,
+        ) in enumerate(
+            zip(
+                slide_paths,
+                explicit_notes,
+                resolved_notes,
+                slide_media_targets,
+                slide_all_rels,
+                slide_hyperlinks,
+                slide_layout_paths,
+            ),
+            start=1,
         ):
             if render_budget.truncated:
                 break
             slide_raw = _read_zip_entry_capped(
-                zf, slide_path, _MAX_XML_BYTES, xml_budget=xml_budget
+                zf, _slide_path, _MAX_XML_BYTES, xml_budget=xml_budget
             )
             slide_root = _parse_xml_safe(slide_raw)
-            body_text = _extract_drawingml_text(slide_root)
-            slide_tables = _extract_pptx_tables(slide_root)
+            if layout_path and layout_path not in layout_cache:
+                layout_cache[layout_path] = _parse_pptx_layout_placeholders(
+                    zf, zf_names, layout_path, xml_budget=xml_budget
+                )
+            layout_map = layout_cache.get(layout_path, {})
 
+            placed_elements: list[PptxPlacedElement] = []
+            placed_targets: set[str] = set()
+            slide_tables_list: list[tuple[tuple[str, ...], ...]] = []
             slide_images: list[tuple[str, bytes]] = []
+
+            def _norm_rect(
+                emu_rect: Optional[tuple[int, int, int, int]],
+                scale_x: float,
+                scale_y: float,
+                off_x: float,
+                off_y: float,
+            ) -> tuple[float, float, float, float]:
+                if emu_rect is None:
+                    return (0.04, 0.15, 0.92, 0.25)
+                rx, ry, rcw, rch = emu_rect
+                gx = off_x + rx * scale_x
+                gy = off_y + ry * scale_y
+                gw = rcw * scale_x
+                gh = rch * scale_y
+                return (
+                    max(0.0, min(0.95, gx / max(1, slide_w_emu))),
+                    max(0.0, min(0.95, gy / max(1, slide_h_emu))),
+                    max(0.04, min(1.0, gw / max(1, slide_w_emu))),
+                    max(0.04, min(1.0, gh / max(1, slide_h_emu))),
+                )
+
+            def _walk_sp_tree(
+                container: ET.Element,
+                *,
+                scale_x: float = 1.0,
+                scale_y: float = 1.0,
+                off_x: float = 0.0,
+                off_y: float = 0.0,
+            ) -> None:
+                for node in _iter_effective_children(container):
+                    if node.tag == f"{{{_P_NS}}}grpSp":
+                        grp_pr = node.find(f"{{{_P_NS}}}grpSpPr")
+                        xfrm = grp_pr.find(f"{{{_A_NS}}}xfrm") if grp_pr is not None else None
+                        outer = _parse_xfrm_emu(xfrm)
+                        ch_off = xfrm.find(f"{{{_A_NS}}}chOff") if xfrm is not None else None
+                        ch_ext = xfrm.find(f"{{{_A_NS}}}chExt") if xfrm is not None else None
+                        next_sx, next_sy, next_ox, next_oy = scale_x, scale_y, off_x, off_y
+                        if outer is not None and ch_off is not None and ch_ext is not None:
+                            try:
+                                cox = int(ch_off.attrib.get("x") or "0")
+                                coy = int(ch_off.attrib.get("y") or "0")
+                                ccx = max(1, int(ch_ext.attrib.get("cx") or "1"))
+                                ccy = max(1, int(ch_ext.attrib.get("cy") or "1"))
+                                sx_local = outer[2] / ccx
+                                sy_local = outer[3] / ccy
+                                next_ox = off_x + (outer[0] - cox * sx_local) * scale_x
+                                next_oy = off_y + (outer[1] - coy * sy_local) * scale_y
+                                next_sx = scale_x * sx_local
+                                next_sy = scale_y * sy_local
+                            except ValueError:
+                                pass
+                        _walk_sp_tree(
+                            node,
+                            scale_x=next_sx,
+                            scale_y=next_sy,
+                            off_x=next_ox,
+                            off_y=next_oy,
+                        )
+                    elif node.tag == f"{{{_P_NS}}}sp":
+                        nv_pr = node.find(f".//{{{_P_NS}}}nvPr")
+                        ph = nv_pr.find(f"{{{_P_NS}}}ph") if nv_pr is not None else None
+                        ph_type = (ph.attrib.get("type") or "").strip().lower() if ph is not None else ""
+                        ph_idx = (ph.attrib.get("idx") or "").strip() if ph is not None else ""
+                        if ph_type == "sldnum":
+                            continue
+                        tx_body = node.find(f"{{{_P_NS}}}txBody")
+                        if tx_body is None:
+                            continue
+                        is_title = ph_type in {"title", "ctrtitle"}
+                        is_sub = ph_type == "subtitle"
+                        is_body_ph = ph_type in {"body", "obj", ""} and ph is not None
+                        paras = _pptx_tx_body_paragraphs(
+                            tx_body,
+                            hlinks,
+                            is_title=is_title,
+                            is_subtitle=is_sub,
+                            is_body_ph=is_body_ph,
+                        )
+                        if not paras:
+                            continue
+                        sp_pr = node.find(f"{{{_P_NS}}}spPr")
+                        rect = _parse_xfrm_emu(
+                            sp_pr.find(f"{{{_A_NS}}}xfrm") if sp_pr is not None else None
+                        )
+                        if rect is None and ph is not None:
+                            rect = layout_map.get((ph_type, ph_idx)) or layout_map.get((ph_type, ""))
+                        xr, yr, wr, hr = _norm_rect(rect, scale_x, scale_y, off_x, off_y)
+                        placed_elements.append(
+                            PptxPlacedElement(
+                                kind="text",
+                                x_ratio=xr,
+                                y_ratio=yr,
+                                w_ratio=wr,
+                                h_ratio=hr,
+                                paragraphs=tuple(paras),
+                            )
+                        )
+                    elif node.tag == f"{{{_P_NS}}}pic":
+                        blip_fill = node.find(f"{{{_P_NS}}}blipFill")
+                        blip = blip_fill.find(f".//{{{_A_NS}}}blip") if blip_fill is not None else None
+                        rid = blip.attrib.get(f"{{{_R_NS}}}embed") if blip is not None else None
+                        target = all_rels.get(rid or "")
+                        if not target:
+                            continue
+                        loaded = _load_slide_image_target(target)
+                        if loaded is None:
+                            continue
+                        placed_targets.add(target)
+                        img_name, img_bytes = loaded
+                        ext = posixpath.splitext(target.lower())[1]
+                        img_bytes = _maybe_crop_image_bytes(img_bytes, ext, blip_fill)
+                        slide_images.append((img_name, img_bytes))
+                        sp_pr = node.find(f"{{{_P_NS}}}spPr")
+                        rect = _parse_xfrm_emu(
+                            sp_pr.find(f"{{{_A_NS}}}xfrm") if sp_pr is not None else None
+                        )
+                        xr, yr, wr, hr = _norm_rect(rect, scale_x, scale_y, off_x, off_y)
+                        placed_elements.append(
+                            PptxPlacedElement(
+                                kind="image",
+                                x_ratio=xr,
+                                y_ratio=yr,
+                                w_ratio=wr,
+                                h_ratio=hr,
+                                image_name=img_name,
+                                image_bytes=img_bytes,
+                            )
+                        )
+                    elif node.tag == f"{{{_P_NS}}}graphicFrame":
+                        xfrm = node.find(f"{{{_P_NS}}}xfrm")
+                        rect = _parse_xfrm_emu(xfrm)
+                        xr, yr, wr, hr = _norm_rect(rect, scale_x, scale_y, off_x, off_y)
+                        tbl_el = node.find(f".//{{{_A_NS}}}tbl")
+                        if tbl_el is not None:
+                            rows = _extract_pptx_table_rows(tbl_el)
+                            if rows:
+                                slide_tables_list.append(rows)
+                                placed_elements.append(
+                                    PptxPlacedElement(
+                                        kind="table",
+                                        x_ratio=xr,
+                                        y_ratio=yr,
+                                        w_ratio=wr,
+                                        h_ratio=hr,
+                                        table_rows=rows,
+                                    )
+                                )
+                            continue
+                        rel_ids = node.find(f".//{{{_DGM_NS}}}relIds")
+                        if rel_ids is not None:
+                            dm_rid = rel_ids.attrib.get(f"{{{_R_NS}}}dm") or ""
+                            dm_target = all_rels.get(dm_rid)
+                            dgm_lines = _extract_smartart_lines(
+                                zf, zf_names, dm_target or "", xml_budget=xml_budget
+                            )
+                            if dgm_lines:
+                                dgm_paras = tuple(
+                                    PptxTextParagraph(
+                                        text=ln,
+                                        runs=(DocxTextRun(text=ln),),
+                                        bullet="•",
+                                    )
+                                    for ln in dgm_lines
+                                )
+                                placed_elements.append(
+                                    PptxPlacedElement(
+                                        kind="text",
+                                        x_ratio=xr,
+                                        y_ratio=yr,
+                                        w_ratio=wr,
+                                        h_ratio=hr,
+                                        paragraphs=dgm_paras,
+                                    )
+                                )
+                            continue
+                        chart_el = node.find(f".//{{{_C_NS}}}chart")
+                        if chart_el is not None:
+                            ch_rid = chart_el.attrib.get(f"{{{_R_NS}}}id") or ""
+                            ch_target = all_rels.get(ch_rid)
+                            ch_lines = _extract_chart_lines(
+                                zf, zf_names, ch_target or "", xml_budget=xml_budget
+                            )
+                            if ch_lines:
+                                ch_paras = tuple(
+                                    PptxTextParagraph(
+                                        text=ln,
+                                        runs=(DocxTextRun(text=ln),),
+                                    )
+                                    for ln in ch_lines
+                                )
+                                placed_elements.append(
+                                    PptxPlacedElement(
+                                        kind="text",
+                                        x_ratio=xr,
+                                        y_ratio=yr,
+                                        w_ratio=wr,
+                                        h_ratio=hr,
+                                        paragraphs=ch_paras,
+                                    )
+                                )
+
+            sp_tree = slide_root.find(f".//{{{_P_NS}}}cSld/{{{_P_NS}}}spTree")
+            if sp_tree is not None:
+                _walk_sp_tree(sp_tree)
+
+            # Visual reading order (top-to-bottom, left-to-right within horizontal bands)
+            placed_elements.sort(key=lambda el: (round(el.y_ratio, 2), round(el.x_ratio, 2)))
+
+            # Include any remaining raster slide rels not referenced inside <p:pic>
             for target in media_targets:
-                ext = posixpath.splitext(target.lower())[1]
-                if ext not in _SAFE_RASTER_MIMES:
+                if target in placed_targets:
                     continue
-                if target in media_cache:
-                    slide_images.append((posixpath.basename(target), media_cache[target]))
-                    continue
-                if media_state["count"] >= _MAX_MEDIA_COUNT:
-                    continue
-                try:
-                    raw_img = _read_zip_entry_capped(zf, target, _MAX_MEDIA_BYTES)
-                except _CONVERSION_ERRORS:
-                    continue
-                if not raw_img or not _is_valid_raster_magic(ext, raw_img):
-                    continue
-                if media_state["bytes"] + len(raw_img) > _MAX_TOTAL_MEDIA_BYTES:
-                    continue
-                media_state["count"] += 1
-                media_state["bytes"] += len(raw_img)
-                media_cache[target] = raw_img
-                slide_images.append((posixpath.basename(target), raw_img))
+                loaded = _load_slide_image_target(target)
+                if loaded is not None:
+                    slide_images.append(loaded)
+
+            title_parts: list[str] = []
+            subtitle_parts: list[str] = []
+            body_lines: list[str] = []
+            plain_slides_lines: list[str] = []
+            for el in placed_elements:
+                if el.kind == "text":
+                    for p_obj in el.paragraphs:
+                        body_lines.append(p_obj.text)
+                        plain_slides_lines.append(p_obj.text)
+                        if p_obj.is_title:
+                            title_parts.append(p_obj.text)
+                        elif p_obj.is_subtitle:
+                            subtitle_parts.append(p_obj.text)
+                elif el.kind == "table":
+                    for row in el.table_rows:
+                        for cell_txt in row:
+                            if cell_txt:
+                                plain_slides_lines.append(cell_txt)
+
+            title_text = " ".join(title_parts).strip()
+            subtitle_text = "\n".join(subtitle_parts).strip()
+            body_text = "\n".join(body_lines)
+            plain_body_text = "\n".join(plain_slides_lines)
+            slide_tables = tuple(slide_tables_list)
 
             notes_path = pre_resolved_note
             if notes_path is None and not has_rels:
@@ -1403,12 +2915,15 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                 notes_text,
                 render_budget,
                 has_prior_cards=bool(html_cards),
+                title_text=title_text,
+                subtitle_text=subtitle_text,
+                elements=tuple(placed_elements),
             )
             if rendered is None:
                 break
             card_html, card_md, stop_after = rendered
 
-            slides.append((idx, body_text, notes_text))
+            slides.append((idx, plain_body_text, notes_text))
             rich_slides.append(
                 PptxSlideRich(
                     slide_number=idx,
@@ -1417,9 +2932,13 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                     notes_text=notes_text,
                     images=tuple(slide_images),
                     tables=slide_tables,
+                    title_text=title_text,
+                    subtitle_text=subtitle_text,
+                    aspect_ratio=aspect_ratio,
+                    elements=tuple(placed_elements),
                 )
             )
-            first_line = next(
+            first_line = title_text or next(
                 (ln.strip() for ln in body_text.splitlines() if ln.strip()), ""
             )
             outline_label = (

@@ -104,6 +104,12 @@ class CourseListPane(ft.Container):
         self._progress_strip = ft.ProgressBar(
             value=None, bar_height=2, color=C.ACCENT, bgcolor=C.BORDER, visible=False
         )
+        self._sync_status_note = ft.Text(
+            "Đang đồng bộ danh sách môn học...",
+            size=11,
+            color=C.ACCENT,
+            visible=False,
+        )
         self._notice_slot = ft.Column(spacing=6, visible=False)
         self._recent_slot = ft.Column(spacing=6, visible=False)
         self._cards_list = ft.Column(expand=True, spacing=8, scroll=ft.ScrollMode.AUTO)
@@ -121,6 +127,7 @@ class CourseListPane(ft.Container):
                 self._search_field,
                 self._chips_row,
                 self._progress_strip,
+                self._sync_status_note,
                 self._notice_slot,
                 self._recent_slot,
                 self._cards_list,
@@ -361,7 +368,8 @@ class CourseListPane(ft.Container):
         self._clear_search_btn.visible = bool(state.search_query)
 
         self._chips_row.controls = self._build_semester_chips(state)
-        self._progress_strip.visible = bool(state.loading_catalog and state.courses)
+        self._progress_strip.visible = bool(state.loading_catalog)
+        self._sync_status_note.visible = bool(state.loading_catalog)
 
         if state.offline_notice:
             self._notice_slot.controls = [build_offline_banner(state.offline_notice)]
@@ -400,6 +408,7 @@ class CourseListPane(ft.Container):
         self._search_field.hint_style = ft.TextStyle(color=C.TEXT_SECONDARY, size=12)
         self._progress_strip.color = C.ACCENT
         self._progress_strip.bgcolor = C.BORDER
+        self._sync_status_note.color = C.ACCENT
         if rerender and self._last_state is not None:
             self.render(self._last_state, update=update)
         elif update:

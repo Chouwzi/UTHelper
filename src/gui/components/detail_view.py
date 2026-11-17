@@ -11,6 +11,7 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import inspect
 import logging
 from collections import Counter
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
@@ -90,18 +91,46 @@ def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None):
+    def __init__(
+        self,
+        page: ft.Page,
+        on_close,
+        get_client=None,
+        on_status_changed=None,
+        submission_workflow_factory=None,
+        *,
+        embedded_in_pane: bool = False,
+        on_open_url=None,
+    ):
         super().__init__()
-        self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
+        self._init_variables(
+            page,
+            get_client,
+            on_status_changed,
+            submission_workflow_factory,
+            embedded_in_pane=embedded_in_pane,
+            on_open_url=on_open_url,
+        )
         self._init_controls()
         self._init_layout(on_close)
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
+    def _init_variables(
+        self,
+        page: ft.Page,
+        get_client,
+        on_status_changed,
+        submission_workflow_factory,
+        *,
+        embedded_in_pane: bool = False,
+        on_open_url=None,
+    ):
         self._page          = page
         self.visible        = False
         self.expand         = True
         self.bgcolor        = C.BG
+        self._embedded_in_pane = bool(embedded_in_pane)
+        self._on_open_url   = on_open_url
         self._current_url   = ""
         self._current_data  = {}
         self._get_client    = get_client   
@@ -581,8 +610,18 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=C.ON_ACCENT)
-        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=C.ON_ACCENT,
+        cta_default_label = (
+            "Mở trang gốc ngay trong ứng dụng"
+            if self._embedded_in_pane
+            else "Xem trong trình duyệt"
+        )
+        cta_default_icon = (
+            ft.Icons.WEB_ASSET_ROUNDED
+            if self._embedded_in_pane
+            else ft.Icons.OPEN_IN_BROWSER_ROUNDED
+        )
+        self._cta_icon = ft.Icon(cta_default_icon, size=16, color=C.ON_ACCENT)
+        self._cta_text = ft.Text(cta_default_label, size=13, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
             content=ft.Row(
@@ -665,13 +704,18 @@ class DetailView(ft.Container):
         )
         self._details_divider = ft.Divider(height=16, color=C.BORDER)
 
+        self._top_bar_container = ft.Container(
+            content=ft.Row(
+                controls=[back_btn, self._header_open_btn],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            ),
+            padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
+            visible=not self._embedded_in_pane,
+        )
+
         self.content = ft.Column(
             controls=[
-                ft.Container(
-                    content=ft.Row(controls=[back_btn, self._header_open_btn],
-                                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
-                ),
+                self._top_bar_container,
                 self._loading_bar,
                 self._error_banner,
                 ft.Container(
@@ -743,9 +787,15 @@ class DetailView(ft.Container):
 
         deadline_str = data.get("deadline", "")
         cd_text, overdue, cd_color, _ = get_card_countdown(data)
-        self._countdown_txt.value = cd_text
-        self._countdown_txt.color = cd_color
-        
+        if deadline_str:
+            self._countdown_txt.value = cd_text or "Không xác định"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+            self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
+        else:
+            self._countdown_txt.value = cd_text or "Không giới hạn thời gian"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+            self._deadline_txt.value = "Không giới hạn"
+
         details = data.get("details", {})
         open_time_str = details.get("open_time", "")
         if open_time_str:
@@ -753,8 +803,6 @@ class DetailView(ft.Container):
             self._opentime_row.visible = True
         else:
             self._opentime_row.visible = False
-            
-        self._deadline_txt.value = format_deadline(deadline_str)
 
         # Cutoff date display
         cutoff_ts = data.get('cutoff_date', 0)
@@ -805,8 +853,26 @@ class DetailView(ft.Container):
         self._current_data         = data
         browser_available = self._is_safe_browser_url(self._current_url)
         self._open_btn.visible = browser_available
-        self._header_open_btn.visible = browser_available
+        self._header_open_btn.visible = browser_available and not self._embedded_in_pane
         self._content_col.controls.clear()
+
+        badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
+        self._badge_ctrl.content = ft.Text(
+            badge_text, size=10, color=badge_color, weight=ft.FontWeight.BOLD
+        )
+        self._badge_ctrl.border = ft.Border.all(1, badge_color)
+        self._badge_ctrl.visible = True
+
+        deadline_str = data.get("deadline", "")
+        cd_text, _, cd_color, _ = get_card_countdown(data)
+        if deadline_str:
+            self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
+            self._countdown_txt.value = cd_text or "Không xác định"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+        else:
+            self._deadline_txt.value = "Không giới hạn"
+            self._countdown_txt.value = cd_text or "Không giới hạn thời gian"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
 
         # UX-8: Dynamic CTA based on submission status and type
         sub_status = data.get("submission_status", "unknown")
@@ -837,10 +903,20 @@ class DetailView(ft.Container):
         self._submitted_files_col.controls.clear()
         self._submitted_area.visible = False
 
+        web_cta_icon = (
+            ft.Icons.WEB_ASSET_ROUNDED
+            if self._embedded_in_pane
+            else ft.Icons.OPEN_IN_BROWSER_ROUNDED
+        )
+        web_cta_label = (
+            "Mở trang gốc ngay trong ứng dụng"
+            if self._embedded_in_pane
+            else "Mở trong trình duyệt"
+        )
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
-            # CTA chính → mở browser (fallback)
-            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            # CTA chính → mở browser (fallback) hoặc trình duyệt trong app
+            self._cta_icon.name = web_cta_icon
+            self._cta_text.value = web_cta_label
             self._open_btn.bgcolor = C.SURFACE
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
@@ -866,7 +942,14 @@ class DetailView(ft.Container):
 
         # Load submitted files in background (for assignments)
         if is_assignment and data.get("site_identity") == "thnn":
-            submission_context_reason = "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. Vui lòng mở trong trình duyệt."
+            submission_context_reason = (
+                "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. "
+                + (
+                    "Vui lòng mở trang gốc trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Vui lòng mở trong trình duyệt."
+                )
+            )
         elif is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
@@ -878,13 +961,15 @@ class DetailView(ft.Container):
                 )
             elif not self._is_native_submission_url(url):
                 submission_context_reason = (
-                    "Đường dẫn này không phải bài tập Moodle. "
-                    "Hãy mở trong trình duyệt."
+                    "Đường dẫn này không phải bài tập Moodle. Hãy mở trực tiếp trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Đường dẫn này không phải bài tập Moodle. Hãy mở trong trình duyệt."
                 )
             elif not course_context_valid:
                 submission_context_reason = (
-                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
-                    "Hãy mở bài tập trong trình duyệt."
+                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trực tiếp trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt."
                 )
             else:
                 try:
@@ -922,16 +1007,16 @@ class DetailView(ft.Container):
                         "Hãy mở bài tập trong trình duyệt."
                     )
             if submission_context_reason:
-                self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._cta_text.value = "Mở trong trình duyệt"
+                self._cta_icon.name = web_cta_icon
+                self._cta_text.value = web_cta_label
                 self._open_btn.bgcolor = C.SURFACE
                 self._open_btn.border = ft.Border.all(1, C.ACCENT)
                 self._cta_text.color = C.ACCENT
                 self._cta_icon.color = C.ACCENT
         else:
             self._submission_area.visible = False
-            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_icon.name = web_cta_icon
+            self._cta_text.value = web_cta_label
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
             self._cta_text.color = C.ON_ACCENT
@@ -1148,9 +1233,19 @@ class DetailView(ft.Container):
 
         # Chỉ thay đổi giao diện, không tự gọi update
 
+    async def _launch_or_open_url(self, url: str) -> None:
+        if not self._is_safe_browser_url(url):
+            return
+        if callable(self._on_open_url):
+            res = self._on_open_url(url)
+            if inspect.isawaitable(res):
+                await res
+            return
+        await ft.UrlLauncher().launch_url(url)
+
     async def _handle_link_tap(self, e):
         try:
-            await ft.UrlLauncher().launch_url(e.data)
+            await self._launch_or_open_url(str(getattr(e, "data", "") or ""))
         except Exception as exc:
             logger.warning(f"Failed to launch url {e.data}: {exc}")
 
@@ -1173,12 +1268,7 @@ class DetailView(ft.Container):
         )
 
     async def _open_browser(self, e):
-        if not self._is_safe_browser_url(self._current_url):
-            return
-
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        await self._launch_or_open_url(self._current_url)
 
     # In-App Submission
 
@@ -1850,12 +1940,10 @@ class DetailView(ft.Container):
         )
 
     async def _on_edit_submitted(self, e):
-        """Mở trình duyệt để chỉnh sửa bài nộp."""
+        """Mở trang bài nộp ngay trong app hoặc trình duyệt để chỉnh sửa."""
         if not self._current_url:
             return
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        await self._launch_or_open_url(self._current_url)
 
     # File Edit Dialog
 

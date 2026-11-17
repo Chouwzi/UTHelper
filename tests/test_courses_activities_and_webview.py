@@ -26,6 +26,7 @@ from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import CourseAttachment, CourseModuleItem, CourseSummary
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.providers import ThnnCourseProvider
+from gui.components.courses._shared import PaneErrorOverlay, PaneLoadingOverlay
 from gui.components.courses.activity_views import (
     AttendanceActivityView,
     ForumActivityView,
@@ -35,9 +36,13 @@ from gui.components.courses.activity_views import (
     RichContentActivityView,
 )
 from gui.components.courses.archive_explorer_view import ArchiveExplorerView
+from gui.components.courses.course_detail_pane import CourseDetailPane
 from gui.components.courses.courses_tab_view import CoursesTabView
+from gui.components.courses.document_reader_view import DocumentReaderView
 from gui.components.courses.webview_pane import CoursesWebViewPane, is_external_meeting_url
+from gui.components.detail_view import DetailView
 from gui.controllers.courses_coordinator import CoursesCoordinator
+from gui.view_models.courses_state import CoursesState
 
 
 def _sample_course(source: str = "courses", cid: int = 101) -> CourseSummary:
@@ -367,6 +372,8 @@ def test_local_preview_server_authenticated_session_bridge_get_post_and_ssrf_gua
         with urllib.request.urlopen(bridge_url, timeout=5) as resp:
             assert resp.status == 200
             assert resp.headers.get("X-Frame-Options") is None
+            assert resp.headers.get("Cross-Origin-Resource-Policy") == "cross-origin"
+            assert resp.headers.get("Cross-Origin-Embedder-Policy") == "credentialless"
             body = resp.read().decode("utf-8")
             assert "<base " in body
             assert "/session/" in body
@@ -520,14 +527,23 @@ def test_coordinator_routes_all_v2_activities_and_in_app_webview(tmp_path: Path)
         coord._handle_open_custom_activity(course, _sample_module(16, "book", "Sach", open_strategy="web_fallback"))
         assert isinstance(coord.courses_view._overlays[-1], RichContentActivityView)
 
-        # Unsupported activity / Moodle web URL opens in Pane-3 WebView, not external browser
+        # Unsupported activity, Moodle web URL, AND external meeting/Zalo links open in Pane-3 WebView by default
         coord._handle_course_url_action("https://courses.ut.edu.vn/mod/vpl/view.php?id=99")
         assert isinstance(coord.courses_view._overlays[-1], CoursesWebViewPane)
         assert launched_external == []
 
-        # External Google Meet opens OS launcher
         coord._handle_course_url_action("https://meet.google.com/aaa-bbbb-ccc")
-        assert launched_external == ["https://meet.google.com/aaa-bbbb-ccc"]
+        assert isinstance(coord.courses_view._overlays[-1], CoursesWebViewPane)
+        assert launched_external == []
+
+        coord._handle_course_url_action("https://zalo.me/g/nhom_lop_a")
+        zalo_pane = coord.courses_view._overlays[-1]
+        assert isinstance(zalo_pane, CoursesWebViewPane)
+        assert launched_external == []
+
+        # External OS browser only launches when user explicitly clicks external button
+        zalo_pane._ext_btn.on_click(None)
+        assert launched_external == ["https://zalo.me/g/nhom_lop_a"]
 
         # Nested archive opens ArchiveExplorerView directly
         att = CourseAttachment(
@@ -540,5 +556,238 @@ def test_coordinator_routes_all_v2_activities_and_in_app_webview(tmp_path: Path)
         assert isinstance(coord.courses_view._overlays[-1], ArchiveExplorerView)
         coord._open_entry_reader("nested.7z", b"7z", "archive")
         assert isinstance(coord.courses_view._overlays[-1], ArchiveExplorerView)
+    finally:
+        coord.close()
+
+
+def _iter_controls(root: ft.Control):
+    yield root
+    for attr in ("content", "leading", "trailing", "title", "subtitle"):
+        child = getattr(root, attr, None)
+        if isinstance(child, ft.Control):
+            yield from _iter_controls(child)
+    for attr in ("controls", "actions", "tabs", "views"):
+        items = getattr(root, attr, None)
+        if isinstance(items, (list, tuple)):
+            for item in items:
+                if isinstance(item, ft.Control):
+                    yield from _iter_controls(item)
+
+
+def test_detail_view_embedded_mode_hides_back_bar_shows_unlimited_and_routes_urls():
+    """Embedded DetailView hides its top back bar, labels empty deadlines, and routes links in-app."""
+    page_launched: list[str] = []
+    in_app_opened: list[str] = []
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        width=1200,
+        height=800,
+        update=lambda: None,
+        launch_url=page_launched.append,
+    )
+    dv = DetailView(
+        fake_page,  # type: ignore[arg-type]
+        on_close=lambda: None,
+        embedded_in_pane=True,
+        on_open_url=in_app_opened.append,
+    )
+    assert dv._top_bar_container.visible is False
+
+    base_data = {
+        "id": "10",
+        "title": "Nop Bai tap nhom",
+        "course": "PY101",
+        "deadline": 0,
+        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=10",
+        "submission_url": "https://courses.ut.edu.vn/mod/assign/view.php?id=10&action=editsubmission",
+    }
+    dv.show_loading(base_data)
+    dv.update_detail(
+        {
+            **base_data,
+            "description": "Xem huong dan tai https://zalo.me/g/nhom_lop_a",
+            "submission_status": "submitted",
+            "allow_submissions_from": 0,
+        }
+    )
+    texts = [c.value for c in _iter_controls(dv) if isinstance(c, ft.Text) and c.value]
+    assert "Không giới hạn" in texts
+    assert "Không giới hạn thời gian" in texts
+
+    async def _trigger_urls() -> None:
+        await dv._open_browser(None)
+        await dv._on_edit_submitted(None)
+        await dv._handle_link_tap(SimpleNamespace(data="https://zalo.me/g/nhom_lop_a"))
+
+    asyncio.run(_trigger_urls())
+    assert in_app_opened == [
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=10",
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=10",
+        "https://zalo.me/g/nhom_lop_a",
+    ]
+    assert page_launched == []
+
+
+def test_pane_assignment_view_skeleton_loading_and_error_recovery():
+    """PaneAssignmentView swaps between skeleton, DetailView, and recoverable error strip with single header."""
+    refreshed: list[bool] = []
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        width=1200,
+        height=800,
+        update=lambda: None,
+        launch_url=lambda _u: None,
+    )
+    dv = DetailView(
+        fake_page,  # type: ignore[arg-type]
+        on_close=lambda: None,
+        embedded_in_pane=True,
+        on_open_url=lambda _u: None,
+    )
+    pav = PaneAssignmentView(
+        detail_view=dv,
+        title="Bai tap nhom",
+        on_close=lambda: None,
+        on_refresh=lambda: refreshed.append(True),
+    )
+
+    data = {"id": "10", "title": "Bai tap nhom", "course": "PY101", "deadline": 0}
+    pav.show_loading(data)
+    assert pav._body_switcher.content is not dv
+    assert pav._error_strip.visible is False
+
+    pav.show_error_banner()
+    assert pav._error_strip.visible is True
+
+    refresh_btn = next(
+        c
+        for c in _iter_controls(pav._header_container)
+        if isinstance(c, ft.IconButton) and c.tooltip == "Tải lại chi tiết bài tập"
+    )
+    refresh_btn.on_click(None)
+    assert refreshed == [True]
+
+    pav.update_detail({**data, "description": "Noi dung day du"})
+    assert pav._body_switcher.content is dv
+    assert pav._error_strip.visible is False
+
+
+def test_course_detail_pane_shows_skeleton_while_loading_detail():
+    """CourseDetailPane renders loading skeletons instead of premature empty messages during detail fetch."""
+    course = _sample_course()
+    pane = CourseDetailPane()
+    state = CoursesState(
+        courses=[course],
+        selected_course_key=course.course_key,
+        loading_detail=True,
+        sections=[],
+        grades=[],
+    )
+    pane.render(state, show_back=False, update=False)
+
+    content_texts = [
+        c.value for c in _iter_controls(pane._content_tab_body) if isinstance(c, ft.Text) and c.value
+    ]
+    grades_texts = [
+        c.value for c in _iter_controls(pane._grades_tab_body) if isinstance(c, ft.Text) and c.value
+    ]
+    assert not any("chưa có nội dung" in t.lower() for t in content_texts)
+    assert not any("chưa có dữ liệu điểm" in t.lower() for t in grades_texts)
+    assert len(list(_iter_controls(pane._content_tab_body))) > 5
+
+
+def test_coordinator_open_and_save_attachment_ux_feedback(tmp_path: Path):
+    """open_attachment_async shows immediate PaneLoadingOverlay, transitions to reader or error retry; save emits SnackBar."""
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|u")
+    pcache = PreviewFileCache(tmp_path / "preview")
+    server = LocalPreviewServer()
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        title="UTHelper",
+        width=1200,
+        height=800,
+        update=lambda: None,
+        run_task=lambda fn, *a: asyncio.run(fn(*a)),
+    )
+    coord = CoursesCoordinator(
+        page=fake_page,  # type: ignore[arg-type]
+        catalog_service=CourseCatalogService(cache_store=store, preview_cache=pcache),
+        preview_cache=pcache,
+        archive_service=ArchiveService(),
+        preview_server=server,
+        on_open_assignment_fallback=lambda _m: None,
+        on_launch_url=lambda _u: None,
+    )
+    try:
+        course = _sample_course()
+        mod = _sample_module(30, "resource", "Ghi chu", open_strategy="document_reader")
+        att = CourseAttachment(
+            file_name="notes.txt",
+            file_url="https://courses.ut.edu.vn/pluginfile.php/1/notes.txt",
+            preview_kind="text",
+            file_size=128,
+        )
+
+        # 1. Verify loading overlay is active while slow download is in progress
+        saw_loading: list[bool] = []
+        should_fail = [False]
+
+        def _fake_fetch(_source: str, _url: str) -> bytes:
+            saw_loading.append(
+                bool(coord.courses_view._overlays)
+                and isinstance(coord.courses_view._overlays[-1], PaneLoadingOverlay)
+            )
+            if should_fail[0]:
+                raise RuntimeError("Moodle timeout")
+            return b"Noi dung tai lieu"
+
+        coord.catalog_service.fetch_attachment_bytes = _fake_fetch  # type: ignore[method-assign]
+        asyncio.run(coord.open_attachment_async(course, mod, att))
+        assert saw_loading == [True]
+        assert isinstance(coord.courses_view._overlays[-1], DocumentReaderView)
+
+        # 2. Verify error path shows PaneErrorOverlay and retry recovers cleanly
+        uncached_att = CourseAttachment(
+            file_name="notes2.txt",
+            file_url="https://courses.ut.edu.vn/pluginfile.php/2/notes2.txt",
+            preview_kind="text",
+            file_size=64,
+        )
+        should_fail[0] = True
+        asyncio.run(coord.open_attachment_async(course, mod, uncached_att))
+        err_overlay = coord.courses_view._overlays[-1]
+        assert isinstance(err_overlay, PaneErrorOverlay)
+
+        should_fail[0] = False
+        retry_btn = next(
+            c
+            for c in _iter_controls(err_overlay)
+            if isinstance(c, ft.FilledButton)
+            and (
+                getattr(c, "content", None) == "Thử tải lại"
+                or getattr(c, "text", None) == "Thử tải lại"
+            )
+        )
+        retry_btn.on_click(None)
+        assert isinstance(coord.courses_view._overlays[-1], DocumentReaderView)
+
+        # 3. Verify save_attachment_async emits immediate download SnackBar feedback
+        saved_files: list[tuple[str, bytes]] = []
+
+        async def _fake_save(name: str, data: bytes) -> None:
+            saved_files.append((name, data))
+
+        coord._save_bytes_async = _fake_save  # type: ignore[method-assign]
+        asyncio.run(coord.save_attachment_async(att, course.source))
+        assert saved_files == [("notes.txt", b"Noi dung tai lieu")]
+        snacks = [item for item in fake_page.overlay if isinstance(item, ft.SnackBar)]
+        assert len(snacks) == 1
+        assert "notes.txt" in (snacks[0].content.value or "")
     finally:
         coord.close()

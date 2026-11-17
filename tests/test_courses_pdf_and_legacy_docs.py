@@ -244,7 +244,34 @@ def test_document_reader_native_pdf_and_excel_pagination(tmp_path: Path):
         )
         images = [c for c in _walk_controls(reader) if isinstance(c, ft.Image)]
         assert len(images) >= 1
+        assert not any(isinstance(c, ft.InteractiveViewer) for c in _walk_controls(reader))
         assert "3 trang" in (reader._subtitle_text.value or "")
+
+        # Zooming in must enlarge Image.width inside horizontal ScrollMode.AUTO Row
+        # without introducing InteractiveViewer (which hijacked scroll-up into zoom).
+        initial_width = images[0].width or 0
+        zoom_in = next(
+            c
+            for c in _walk_controls(reader)
+            if isinstance(c, ft.IconButton) and c.tooltip == "Phóng to"
+        )
+        zoom_reset = next(
+            c
+            for c in _walk_controls(reader)
+            if isinstance(c, ft.TextButton) and c.tooltip == "Đặt lại mức thu phóng 100%"
+        )
+        zoom_in.on_click(None)
+        assert reader._pdf_scale > 1.6
+        zoomed_images = [c for c in _walk_controls(reader) if isinstance(c, ft.Image)]
+        assert (zoomed_images[0].width or 0) > initial_width
+        assert any(
+            isinstance(c, ft.Row) and c.scroll == ft.ScrollMode.AUTO
+            for c in _walk_controls(reader)
+        )
+        assert not any(isinstance(c, ft.InteractiveViewer) for c in _walk_controls(reader))
+
+        zoom_reset.on_click(None)
+        assert reader._pdf_scale == 1.6
         reader.dispose()
 
         # Large Excel > 120 rows & > 40 columns renders paginated DataTable
@@ -484,3 +511,297 @@ def test_legacy_ole2_doc_ppt_and_xls_converters(monkeypatch):
     xls_res = convert_document_bytes("diem.xls", xls_cfb, "xlsx")
     assert len(xls_res.sheets) == 1
     assert xls_res.sheets[0].rows == [["MSSV", "Diem"], ["22511", "9"]]
+
+
+def _png_bytes(width: int = 12, height: int = 8) -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (width, height), (37, 99, 235, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_rich_docx_alternate_content_omath_links_numbering_and_tables(tmp_path: Path):
+    """DOCX parser deduplicates AlternateContent, extracts OMML/links/numbering/merged tables & routes links in-app."""
+    img_bytes = _png_bytes(16, 12)
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document
+    xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <w:body>
+    <mc:AlternateContent>
+      <mc:Choice Requires="w14">
+        <w:p><w:r><w:t>Choice Text Only</w:t></w:r></w:p>
+      </mc:Choice>
+      <mc:Fallback>
+        <w:p><w:r><w:t>Fallback Duplicate</w:t></w:r></w:p>
+      </mc:Fallback>
+    </mc:AlternateContent>
+    <w:p>
+      <w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Dam nghieng</w:t></w:r>
+      <w:r><w:t> </w:t></w:r>
+      <m:oMath><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath>
+      <w:hyperlink r:id="rIdSafe"><w:r><w:t>Mo bai tap</w:t></w:r></w:hyperlink>
+      <w:hyperlink r:id="rIdXss"><w:r><w:t>Link doc hai</w:t></w:r></w:hyperlink>
+    </w:p>
+    <w:p>
+      <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+      <w:r><w:t>Muc thu nhat</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+      <w:r><w:t>Muc thu hai</w:t></w:r>
+    </w:p>
+    <w:tbl>
+      <w:tblPr>
+        <w:tblBorders>
+          <w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/>
+          <w:insideH w:val="none"/><w:insideV w:val="none"/>
+        </w:tblBorders>
+      </w:tblPr>
+      <w:tr>
+        <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Tieu de gop</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Nhom A</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:drawing><a:blip r:embed="rIdImg"/></w:drawing></w:r><w:r><w:t>Hinh cell</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:sectPr>
+      <w:headerReference w:type="default" r:id="rIdHdr"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+
+    header_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>Header Mon Hoc</w:t></w:r></w:p>
+</w:hdr>"""
+
+    numbering_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="10">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>
+</w:numbering>"""
+
+    rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdHdr" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rIdSafe" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://courses.ut.edu.vn/mod/assign/view.php?id=5" TargetMode="External"/>
+  <Relationship Id="rIdXss" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/>
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/cell.png"/>
+</Relationships>"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", document_xml)
+        zf.writestr("word/header1.xml", header_xml)
+        zf.writestr("word/numbering.xml", numbering_xml)
+        zf.writestr("word/_rels/document.xml.rels", rels_xml)
+        zf.writestr("word/media/cell.png", img_bytes)
+
+    res = convert_document_bytes("giao_trinh.docx", buf.getvalue(), "docx")
+    joined_blocks = "\n".join(b.text for b in res.docx_blocks)
+    assert "Choice Text Only" in joined_blocks
+    assert "Fallback Duplicate" not in joined_blocks
+    assert any(b.section_role == "header" and "Header Mon Hoc" in b.text for b in res.docx_blocks)
+
+    styled = next(b for b in res.docx_blocks if "Dam nghieng" in b.text)
+    assert any(r.bold and r.italic and "Dam nghieng" in r.text for r in styled.runs)
+    assert any("(a)/(b)" in r.text for r in styled.runs)
+    safe_run = next(r for r in styled.runs if "Mo bai tap" in r.text)
+    unsafe_run = next(r for r in styled.runs if "Link doc hai" in r.text)
+    assert safe_run.href == "https://courses.ut.edu.vn/mod/assign/view.php?id=5"
+    assert unsafe_run.href == ""
+
+    list_blocks = [b for b in res.docx_blocks if b.kind == "list_item"]
+    assert [b.list_marker for b in list_blocks] == ["1.", "2."]
+
+    table_block = next(b for b in res.docx_blocks if b.kind == "table")
+    assert table_block.has_borders is False
+    assert table_block.rich_rows[0][0].col_span == 2
+    assert len(table_block.rich_rows[1][1].images) == 1
+
+    opened_links: list[str] = []
+    server = LocalPreviewServer()
+    try:
+        reader = DocumentReaderView(
+            file_name="giao_trinh.docx",
+            data=buf.getvalue(),
+            kind="docx",
+            preview_server=server,
+            pdf_cache_dir=tmp_path,
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+            on_open_link=opened_links.append,
+        )
+        link_spans = [
+            sp
+            for c in _walk_controls(reader)
+            if isinstance(c, ft.Text)
+            for sp in (getattr(c, "spans", None) or [])
+            if isinstance(sp, ft.TextSpan) and sp.text == "Mo bai tap"
+        ]
+        assert len(link_spans) >= 1
+        assert callable(link_spans[0].on_click)
+        link_spans[0].on_click(None)
+        assert opened_links == ["https://courses.ut.edu.vn/mod/assign/view.php?id=5"]
+        reader.dispose()
+    finally:
+        server.stop()
+
+
+def test_rich_pptx_layout_group_crop_smartart_chart_and_no_table_dup(tmp_path: Path):
+    """PPTX parser handles layout inheritance, groups, cropped images, SmartArt, charts, and non-duplicated tables."""
+    img_bytes = _png_bytes(40, 20)
+    presentation_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation
+    xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:sldSz cx="12192000" cy="6858000"/>
+  <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+</p:presentation>"""
+    pres_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>"""
+    layout_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title Placeholder"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+      <p:txBody><a:lstStyle><a:lvl1pPr><a:defRPr sz="3600"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody>
+    </p:sp>
+  </p:spTree></p:cSld>
+</p:sldLayout>"""
+    slide1_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld
+    xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+  <p:cSld><p:spTree>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+      <p:txBody><a:p><a:r><a:t>Chuong 1: Gioi thieu</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+    <mc:AlternateContent>
+      <mc:Choice Requires="p14">
+        <p:sp><p:spPr><a:xfrm><a:off x="500000" y="1500000"/><a:ext cx="4000000" cy="800000"/></a:xfrm></p:spPr>
+          <p:txBody><a:p><a:r><a:t>Modern Shape</a:t></a:r></a:p></p:txBody></p:sp>
+      </mc:Choice>
+      <mc:Fallback>
+        <p:sp><p:txBody><a:p><a:r><a:t>Legacy Shape</a:t></a:r></a:p></p:txBody></p:sp>
+      </mc:Fallback>
+    </mc:AlternateContent>
+    <p:grpSp>
+      <p:grpSpPr><a:xfrm><a:off x="500000" y="2500000"/><a:ext cx="3000000" cy="1000000"/><a:chOff x="0" y="0"/><a:chExt cx="3000000" cy="1000000"/></a:xfrm></p:grpSpPr>
+      <p:sp>
+        <p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="2000000" cy="500000"/></a:xfrm></p:spPr>
+        <p:txBody><a:p><a:r><a:t>Trong nhom</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+    </p:grpSp>
+    <p:pic>
+      <p:blipFill><a:blip r:embed="rIdImg"/><a:srcRect l="25000" t="0" r="25000" b="0"/></p:blipFill>
+      <p:spPr><a:xfrm><a:off x="6500000" y="1500000"/><a:ext cx="4000000" cy="2000000"/></a:xfrm></p:spPr>
+    </p:pic>
+    <p:graphicFrame>
+      <p:xfrm><a:off x="500000" y="4000000"/><a:ext cx="5000000" cy="1200000"/></p:xfrm>
+      <a:graphic><a:graphicData><a:tbl>
+        <a:tr><a:tc><a:txBody><a:p><a:r><a:t>Cot A</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>Cot B</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+        <a:tr><a:tc><a:txBody><a:p><a:r><a:t>1</a:t></a:r></a:p></a:txBody></a:tc><a:tc><a:txBody><a:p><a:r><a:t>2</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+      </a:tbl></a:graphicData></a:graphic>
+    </p:graphicFrame>
+    <p:graphicFrame>
+      <p:xfrm><a:off x="500000" y="5400000"/><a:ext cx="3000000" cy="800000"/></p:xfrm>
+      <a:graphic><a:graphicData><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdDgm"/></a:graphicData></a:graphic>
+    </p:graphicFrame>
+    <p:graphicFrame>
+      <p:xfrm><a:off x="4000000" y="5400000"/><a:ext cx="3000000" cy="800000"/></p:xfrm>
+      <a:graphic><a:graphicData><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/></a:graphicData></a:graphic>
+    </p:graphicFrame>
+  </p:spTree></p:cSld>
+</p:sld>"""
+    slide1_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/img1.png"/>
+  <Relationship Id="rIdDgm" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>
+  <Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+</Relationships>"""
+    dgm_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <dgm:ptLst>
+    <dgm:pt><dgm:t><a:p><a:r><a:t>Node A</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt><dgm:t><a:p><a:r><a:t>Node B</a:t></a:r></a:p></dgm:t></dgm:pt>
+  </dgm:ptLst>
+</dgm:dataModel>"""
+    chart_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:title><c:tx><c:rich><a:p><a:r><a:t>Bieu do diem</a:t></a:r></a:p></c:rich></c:tx></c:title>
+    <c:plotArea><c:barChart><c:ser><c:tx><c:v>Kiem tra</c:v></c:tx></c:ser></c:barChart></c:plotArea>
+  </c:chart>
+</c:chartSpace>"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("ppt/presentation.xml", presentation_xml)
+        zf.writestr("ppt/_rels/presentation.xml.rels", pres_rels)
+        zf.writestr("ppt/slideLayouts/slideLayout1.xml", layout_xml)
+        zf.writestr("ppt/slides/slide1.xml", slide1_xml)
+        zf.writestr("ppt/slides/_rels/slide1.xml.rels", slide1_rels)
+        zf.writestr("ppt/media/img1.png", img_bytes)
+        zf.writestr("ppt/diagrams/data1.xml", dgm_xml)
+        zf.writestr("ppt/charts/chart1.xml", chart_xml)
+
+    res = convert_document_bytes("bai_giang.pptx", buf.getvalue(), "pptx")
+    assert len(res.rich_slides) == 1
+    rich = res.rich_slides[0]
+    assert rich.title_text == "Chuong 1: Gioi thieu"
+    assert round(rich.aspect_ratio, 2) == 1.78
+    # Title & table text must not be duplicated into body_text/text elements
+    element_texts = "\n".join(el.paragraphs[0].text for el in rich.elements if el.paragraphs)
+    all_element_text = "\n".join(p.text for el in rich.elements for p in el.paragraphs)
+    assert "Modern Shape" in all_element_text
+    assert "Legacy Shape" not in all_element_text
+    assert "Trong nhom" in all_element_text
+    assert "Node A" in all_element_text and "Node B" in all_element_text
+    assert "Bieu do diem" in all_element_text and "Kiem tra" in all_element_text
+    assert "Cot A" not in element_texts
+    assert rich.tables == ((("Cot A", "Cot B"), ("1", "2")),)
+    # V1 plain slide tuple (num, body, notes) keeps table text for backwards compatibility
+    assert "Cot A" in res.slides[0][1] and "Cot B" in res.slides[0][1]
+    # Cropped 40x20 image (l=25%, r=25%) -> 20x20 PNG
+    from PIL import Image
+
+    cropped = Image.open(io.BytesIO(rich.images[0][1]))
+    assert cropped.size == (20, 20)
+
+    server = LocalPreviewServer()
+    try:
+        reader = DocumentReaderView(
+            file_name="bai_giang.pptx",
+            data=buf.getvalue(),
+            kind="pptx",
+            preview_server=server,
+            pdf_cache_dir=tmp_path,
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+        )
+        texts = [c.value for c in _walk_controls(reader) if isinstance(c, ft.Text) and c.value]
+        assert "Slide 1" in texts
+        assert any("Chuong 1: Gioi thieu" in t for t in texts)
+        assert len([c for c in _walk_controls(reader) if isinstance(c, ft.Image)]) >= 1
+        reader.dispose()
+    finally:
+        server.stop()

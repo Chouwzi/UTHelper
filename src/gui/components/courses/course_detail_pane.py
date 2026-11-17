@@ -14,6 +14,7 @@ from core.courses.models import (
     CourseSummary,
 )
 from gui.components.courses._shared import (
+    build_course_tab_skeleton,
     build_expand_toggle_button,
     build_filter_chip,
     build_offline_banner,
@@ -514,6 +515,8 @@ class CourseDetailPane(ft.Container):
             )
         if tiles:
             controls.extend(tiles)
+        elif state.loading_detail and not state.sections:
+            controls.append(build_course_tab_skeleton("sections"))
         else:
             controls.append(
                 ft.Container(
@@ -531,6 +534,8 @@ class CourseDetailPane(ft.Container):
         items = flatten_course_resources(state.sections, kind_filter=state.resource_kind_filter)
         if items:
             controls.extend(self._module_row(mod, section_label=sec) for sec, mod in items)
+        elif state.loading_detail and not state.sections:
+            controls.append(build_course_tab_skeleton("resources"))
         else:
             controls.append(
                 ft.Container(
@@ -576,6 +581,8 @@ class CourseDetailPane(ft.Container):
     def _build_grades_tab(self, course: CourseSummary, state: CoursesState) -> list[ft.Control]:
         if state.grades:
             return [self._build_grade_card(item) for item in state.grades]
+        if state.loading_detail:
+            return [build_course_tab_skeleton("grades")]
         grades_url = f"{compute_course_origin(course)}/grade/report/user/index.php?id={course.id}"
         return [
             ft.Container(

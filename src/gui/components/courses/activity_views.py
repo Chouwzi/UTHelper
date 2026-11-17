@@ -21,8 +21,10 @@ from core.courses.activity_service import (
 )
 from core.courses.models import CourseModuleItem, CourseSource
 from gui.components.courses._shared import (
+    build_assignment_loading_skeleton,
     build_expand_toggle_button,
     build_offline_banner,
+    build_skeleton_block,
     build_viewer_header,
     refresh_viewer_header,
     safe_control_update,
@@ -134,19 +136,80 @@ class _BasePaneActivityView(ft.Container):
             self._on_open_webview(self._module.name or "Hoạt động", target)
 
     def _set_loading(self, label: str = "Đang tải dữ liệu...") -> None:
-        self._body_host.content = ft.Container(
+        self._body_host.content = ft.Column(
             expand=True,
-            alignment=ft.Alignment.CENTER,
-            padding=24,
-            content=ft.Column(
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=10,
-                controls=[
-                    ft.ProgressRing(width=26, height=26, stroke_width=3),
-                    ft.Text(label, size=13, color=C.TEXT_SECONDARY),
-                ],
-            ),
+            spacing=0,
+            controls=[
+                ft.ProgressBar(value=None, color=C.ACCENT, bgcolor=C.BORDER, bar_height=3),
+                ft.Container(
+                    expand=True,
+                    padding=16,
+                    content=ft.Column(
+                        spacing=12,
+                        controls=[
+                            ft.Container(
+                                bgcolor=C.SURFACE,
+                                border=ft.Border.all(1, C.ACCENT),
+                                border_radius=10,
+                                padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                                content=ft.Row(
+                                    spacing=10,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    controls=[
+                                        ft.ProgressRing(
+                                            width=18,
+                                            height=18,
+                                            stroke_width=2.5,
+                                            color=C.ACCENT,
+                                        ),
+                                        ft.Text(
+                                            label,
+                                            size=13,
+                                            weight=ft.FontWeight.W_600,
+                                            color=C.TEXT_PRIMARY,
+                                            expand=True,
+                                        ),
+                                    ],
+                                ),
+                            ),
+                            ft.Row(
+                                spacing=10,
+                                controls=[
+                                    ft.Container(
+                                        expand=True,
+                                        bgcolor=C.SURFACE,
+                                        border=ft.Border.all(1, C.BORDER),
+                                        border_radius=10,
+                                        padding=14,
+                                        content=ft.Column(
+                                            spacing=8,
+                                            controls=[
+                                                build_skeleton_block(width=90, height=10, subtle=True),
+                                                build_skeleton_block(width=68, height=18),
+                                            ],
+                                        ),
+                                    )
+                                    for _ in range(2)
+                                ],
+                            ),
+                            ft.Container(
+                                bgcolor=C.SURFACE,
+                                border=ft.Border.all(1, C.BORDER),
+                                border_radius=10,
+                                padding=16,
+                                content=ft.Column(
+                                    spacing=10,
+                                    controls=[
+                                        build_skeleton_block(width=180, height=14),
+                                        build_skeleton_block(height=12, subtle=True),
+                                        build_skeleton_block(width=240, height=12, subtle=True),
+                                    ],
+                                ),
+                            ),
+                        ],
+                    ),
+                ),
+            ],
         )
         safe_control_update(self._body_host)
 
@@ -386,15 +449,21 @@ class AttendanceActivityView(_BasePaneActivityView):
             )
         else:
             for rec in summary.records:
-                status_lower = (rec.status or "").lower()
+                status_lower = (rec.status or "").strip().lower()
+                is_present = (
+                    "present" in status_lower
+                    or "có mặt" in status_lower
+                    or status_lower == "p"
+                    or status_lower.startswith(("p ", "p("))
+                )
+                is_absent = (
+                    "absent" in status_lower
+                    or "vắng" in status_lower
+                    or status_lower == "a"
+                    or status_lower.startswith(("a ", "a("))
+                )
                 badge_color = (
-                    C.SAFE
-                    if any(k in status_lower for k in ("present", "có mặt", "p"))
-                    else (
-                        C.CRITICAL
-                        if any(k in status_lower for k in ("absent", "vắng", "a"))
-                        else C.WARNING
-                    )
+                    C.SAFE if is_present else (C.CRITICAL if is_absent else C.WARNING)
                 )
                 controls.append(
                     ft.Container(
@@ -1322,7 +1391,7 @@ class RichContentActivityView(_BasePaneActivityView):
 
 
 class PaneAssignmentView(ft.Container):
-    """Wraps a DetailView instance inside Pane 3 with a 2+3 expand bar."""
+    """Wraps a DetailView instance inside Pane 3 with animated loading, error recovery & 2+3 expand."""
 
     def __init__(
         self,
@@ -1330,17 +1399,31 @@ class PaneAssignmentView(ft.Container):
         detail_view: Any,
         title: str,
         on_close: Callable[[], None],
+        on_refresh: Optional[Callable[[], None]] = None,
+        on_open_webview: Optional[Callable[[], None]] = None,
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
         self._detail_view = detail_view
+        self._title = title or "Bài tập"
         self._on_close = on_close
+        self._on_refresh = on_refresh
+        self._on_open_webview = on_open_webview
         self._expanded = bool(is_expanded)
         self._show_expand_toggle = bool(show_expand_toggle)
         self._on_toggle_expand = on_toggle_expand
+        self._is_loading = True
 
+        self._refresh_btn = ft.IconButton(
+            icon=ft.Icons.REFRESH_ROUNDED,
+            icon_size=18,
+            icon_color=C.TEXT_PRIMARY,
+            tooltip="Tải lại chi tiết bài tập",
+            visible=callable(on_refresh),
+            on_click=lambda _e: self._on_refresh() if callable(self._on_refresh) else None,
+        )
         self._expand_btn = build_expand_toggle_button(
             expanded=self._expanded,
             on_toggle=lambda: self._on_toggle_expand()
@@ -1348,37 +1431,124 @@ class PaneAssignmentView(ft.Container):
             else None,
             visible=self._show_expand_toggle,
         )
+        self._webview_btn = ft.IconButton(
+            icon=ft.Icons.WEB_ROUNDED,
+            icon_size=18,
+            icon_color=C.TEXT_PRIMARY,
+            tooltip="Mở bằng trình duyệt trong ứng dụng",
+            visible=callable(on_open_webview),
+            on_click=lambda _e: self._on_open_webview() if callable(self._on_open_webview) else None,
+        )
         (
             self._header_container,
             self._back_btn,
             self._title_text,
             self._subtitle_text,
         ) = build_viewer_header(
-            title=title or "Bài tập",
-            subtitle="Xem đề bài & nộp bài trực tiếp trong môn học",
+            title=self._title,
+            subtitle="Đang đồng bộ chi tiết bài tập từ Moodle...",
             back_tooltip="Quay lại môn học",
             on_back=lambda _e: self._on_close(),
-            trailing_actions=[self._expand_btn],
+            trailing_actions=[self._refresh_btn, self._expand_btn, self._webview_btn],
+        )
+
+        self._loading_skeleton = build_assignment_loading_skeleton(
+            "Đang tải đề bài, hạn nộp và trạng thái nộp bài từ Moodle...",
+            title=self._title,
         )
         self._detail_view.visible = True
         self._detail_view.opacity = 1.0
+        self._error_strip = ft.Container(
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.WARNING),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            margin=ft.Padding.only(left=16, right=16, top=10),
+            visible=False,
+            content=ft.Row(
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Icon(ft.Icons.ERROR_OUTLINE_ROUNDED, size=18, color=C.WARNING),
+                    ft.Text(
+                        "Không thể tải đầy đủ đề bài hoặc trạng thái nộp bài.",
+                        size=12,
+                        color=C.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                    *(
+                        [
+                            ft.TextButton(
+                                "Thử lại",
+                                on_click=lambda _e: self._on_refresh()
+                                if callable(self._on_refresh)
+                                else None,
+                            )
+                        ]
+                        if callable(on_refresh)
+                        else []
+                    ),
+                    *(
+                        [
+                            ft.OutlinedButton(
+                                "Mở trong app",
+                                on_click=lambda _e: self._on_open_webview()
+                                if callable(self._on_open_webview)
+                                else None,
+                            )
+                        ]
+                        if callable(on_open_webview)
+                        else []
+                    ),
+                ],
+            ),
+        )
+        self._body_switcher = ft.AnimatedSwitcher(
+            content=self._loading_skeleton,
+            expand=True,
+            duration=180,
+            reverse_duration=140,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+        )
         self.content = ft.Column(
             expand=True,
             spacing=0,
             controls=[
                 self._header_container,
-                ft.Container(expand=True, content=self._detail_view),
+                self._error_strip,
+                self._body_switcher,
             ],
         )
 
     def show_loading(self, data: dict[str, Any]) -> None:
+        self._is_loading = True
+        item_title = str(data.get("title") or self._title or "Bài tập")
+        self._title_text.value = item_title
+        self._subtitle_text.value = "Đang tải chi tiết & trạng thái nộp bài từ Moodle..."
+        self._error_strip.visible = False
+        self._loading_skeleton = build_assignment_loading_skeleton(
+            "Đang tải đề bài, hạn nộp và trạng thái nộp bài từ Moodle...",
+            title=item_title,
+        )
+        self._body_switcher.content = self._loading_skeleton
         self._detail_view.show_loading(data)
+        safe_control_update(self)
 
     def update_detail(self, full_data: dict[str, Any]) -> None:
+        self._is_loading = False
+        self._error_strip.visible = False
+        self._subtitle_text.value = "Xem đề bài & nộp bài trực tiếp trong môn học"
         self._detail_view.update_detail(full_data)
+        self._body_switcher.content = self._detail_view
+        safe_control_update(self)
 
     def show_error_banner(self) -> None:
+        self._is_loading = False
+        self._subtitle_text.value = "Không thể đồng bộ đầy đủ dữ liệu"
+        self._error_strip.visible = True
         self._detail_view.show_error_banner()
+        self._body_switcher.content = self._detail_view
+        safe_control_update(self)
 
     def set_expanded(self, expanded: bool, *, visible: bool = True) -> None:
         self._expanded = bool(expanded)
@@ -1405,4 +1575,9 @@ class PaneAssignmentView(ft.Container):
             expanded=self._expanded,
             visible=self._show_expand_toggle,
         )
+        self._refresh_btn.icon_color = C.TEXT_PRIMARY
+        self._webview_btn.icon_color = C.TEXT_PRIMARY
+        updater = getattr(self._detail_view, "update_theme", None)
+        if callable(updater):
+            updater()
         safe_control_update(self)

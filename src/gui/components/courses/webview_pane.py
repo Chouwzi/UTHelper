@@ -82,6 +82,7 @@ class WindowsWebView2Dock:
         cookies: list[dict[str, Any]],
         on_title_changed: Optional[Callable[[str], None]] = None,
         on_url_changed: Optional[Callable[[str], None]] = None,
+        on_loading_changed: Optional[Callable[[bool], None]] = None,
         on_external_url: Optional[Callable[[str], None]] = None,
         on_ready_failed: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -90,6 +91,7 @@ class WindowsWebView2Dock:
         self._cookies = list(cookies or ())
         self._on_title_changed = on_title_changed
         self._on_url_changed = on_url_changed
+        self._on_loading_changed = on_loading_changed
         self._on_external_url = on_external_url
         self._on_ready_failed = on_ready_failed
 
@@ -162,11 +164,52 @@ class WindowsWebView2Dock:
                 pass
 
     @staticmethod
+    def _collect_child_pids(parent_pid: int) -> set[int]:
+        """Collect direct child process IDs on Windows (e.g., flet.exe spawned by python.exe)."""
+        pids: set[int] = {parent_pid}
+        if sys.platform != "win32":
+            return pids
+        try:
+            class _PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260),
+                ]
+
+            k32 = ctypes.windll.kernel32
+            snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)
+            if snap in (0, -1, ctypes.c_void_p(-1).value):
+                return pids
+            try:
+                entry = _PROCESSENTRY32W()
+                entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+                if k32.Process32FirstW(snap, ctypes.byref(entry)):
+                    while True:
+                        if int(entry.th32ParentProcessID) == parent_pid:
+                            pids.add(int(entry.th32ProcessID))
+                        if not k32.Process32NextW(snap, ctypes.byref(entry)):
+                            break
+            finally:
+                k32.CloseHandle(snap)
+        except Exception:
+            pass
+        return pids
+
+    @staticmethod
     def _find_parent_hwnd(expected_title: str) -> int:
         import win32gui
         import win32process
 
         cur_pid = os.getpid()
+        family_pids = WindowsWebView2Dock._collect_child_pids(cur_pid)
         matched: list[tuple[int, int]] = []
 
         def _enum_cb(hwnd: int, _ctx: Any) -> bool:
@@ -174,15 +217,20 @@ class WindowsWebView2Dock:
                 if not win32gui.IsWindowVisible(hwnd):
                     return True
                 title = win32gui.GetWindowText(hwnd) or ""
+                cls_name = win32gui.GetClassName(hwnd) or ""
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)
                 score = 0
                 if pid == cur_pid:
+                    score += 12
+                elif pid in family_pids:
                     score += 10
+                if cls_name == "FLUTTER_RUNNER_WIN32_WINDOW":
+                    score += 6
                 if expected_title and expected_title.lower() in title.lower():
                     score += 5
                 if "uthelper" in title.lower():
                     score += 4
-                if score > 0 and title.strip():
+                if score > 0 and (title.strip() or cls_name == "FLUTTER_RUNNER_WIN32_WINDOW"):
                     matched.append((score, hwnd))
             except Exception:
                 pass
@@ -337,17 +385,24 @@ class WindowsWebView2Dock:
                 else None
             )
 
+            core.add_navigation_starting(
+                lambda _s, _a: self._on_loading_changed(True)
+                if self._on_loading_changed
+                else None
+            )
+            core.add_navigation_completed(
+                lambda _s, _a: self._on_loading_changed(False)
+                if self._on_loading_changed
+                else None
+            )
+
             def _on_new_window(_sender: Any, args: Any) -> None:
                 uri = str(getattr(args, "uri", "") or "")
                 try:
                     args.handled = True
                 except Exception:
                     pass
-                if not uri:
-                    return
-                if is_external_meeting_url(uri) and self._on_external_url is not None:
-                    self._on_external_url(uri)
-                else:
+                if uri:
                     core.navigate(uri)
 
             core.add_new_window_requested(_on_new_window)
@@ -577,11 +632,18 @@ class CoursesWebViewPane(ft.Container):
                 ],
             )
         )
+        self._nav_progress = ft.ProgressBar(
+            value=None,
+            bar_height=2,
+            color=C.ACCENT,
+            bgcolor=C.BORDER,
+            visible=True,
+        )
         self._body_host = ft.Container(expand=True, bgcolor=C.BG)
         self.content = ft.Column(
             expand=True,
             spacing=0,
-            controls=[self._header_container, self._body_host],
+            controls=[self._header_container, self._nav_progress, self._body_host],
         )
         self._mount_engine()
 
@@ -608,6 +670,7 @@ class CoursesWebViewPane(ft.Container):
             )
             custom = self._embedded_factory(load_url)
             if custom is not None:
+                self._nav_progress.visible = False
                 self._body_host.content = ft.Container(expand=True, content=custom)
                 return
 
@@ -619,9 +682,12 @@ class CoursesWebViewPane(ft.Container):
                 wv = fwv.WebView(
                     url=load_url,
                     expand=True,
+                    on_page_started=lambda _e: self._set_nav_loading(True),
+                    on_page_ended=lambda _e: self._set_nav_loading(False),
                     on_url_change=lambda e: self._update_subtitle(str(getattr(e, "data", "") or "")),
-                    on_web_resource_error=lambda e: logger.debug(
-                        "flet_webview resource error: %s", getattr(e, "data", "")
+                    on_web_resource_error=lambda e: (
+                        self._set_nav_loading(False),
+                        logger.debug("flet_webview resource error: %s", getattr(e, "data", "")),
                     ),
                 )
                 self._flet_webview = wv
@@ -632,8 +698,12 @@ class CoursesWebViewPane(ft.Container):
 
         if _webview2_runtime_available():
             cookies: list[dict[str, Any]] = []
-            if self._session_client is not None and hasattr(
-                self._session_client, "get_session_cookies"
+            target_host = (urlsplit(self._url or "").hostname or "").lower()
+            is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
+            if (
+                is_uth_site
+                and self._session_client is not None
+                and hasattr(self._session_client, "get_session_cookies")
             ):
                 cookies = self._session_client.get_session_cookies(ensure_login=True)
             dock = WindowsWebView2Dock(
@@ -642,11 +712,13 @@ class CoursesWebViewPane(ft.Container):
                 cookies=cookies,
                 on_title_changed=self._on_native_title,
                 on_url_changed=self._on_native_url,
+                on_loading_changed=self._on_webview2_loading_changed,
                 on_external_url=self._on_open_external,
                 on_ready_failed=self._on_webview2_failed,
             )
             self._dock = dock
             dock.start()
+            self._nav_progress.visible = True
             self._body_host.content = ft.Container(
                 expand=True,
                 alignment=ft.Alignment.CENTER,
@@ -656,9 +728,9 @@ class CoursesWebViewPane(ft.Container):
                     alignment=ft.MainAxisAlignment.CENTER,
                     spacing=10,
                     controls=[
-                        ft.ProgressRing(width=28, height=28, stroke_width=3),
+                        ft.ProgressRing(width=28, height=28, stroke_width=3, color=C.ACCENT),
                         ft.Text(
-                            "Đang khởi tạo WebView đã đăng nhập ngay trong ứng dụng...",
+                            "Đang khởi tạo trình duyệt ngay trong ứng dụng...",
                             size=13,
                             color=C.TEXT_SECONDARY,
                             text_align=ft.TextAlign.CENTER,
@@ -669,6 +741,22 @@ class CoursesWebViewPane(ft.Container):
             return
 
         self._show_html_fallback_or_card()
+
+    def _set_nav_loading(self, loading: bool) -> None:
+        if self._disposed:
+            return
+        self._nav_progress.visible = bool(loading)
+        safe_control_update(self._nav_progress)
+
+    def _on_webview2_loading_changed(self, loading: bool) -> None:
+        if self._disposed:
+            return
+        self._nav_progress.visible = bool(loading)
+        if not loading and self._dock is not None:
+            self._body_host.content = ft.Container(expand=True, bgcolor=C.BG)
+            safe_control_update(self)
+        else:
+            safe_control_update(self._nav_progress)
 
     def _on_native_title(self, title: str) -> None:
         if title and not self._disposed:
@@ -724,39 +812,62 @@ class CoursesWebViewPane(ft.Container):
         markdown_text = ""
         extracted_links: list[tuple[str, str]] = []
         error_text = ""
-        if self._session_client is not None and hasattr(self._session_client, "open_session_url"):
-            try:
-                final_url, html_text, redirected = self._session_client.open_session_url(
+        target_host = (urlsplit(self._url or "").hostname or "").lower()
+        is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
+        html_text = ""
+        try:
+            if is_uth_site and self._session_client is not None and hasattr(
+                self._session_client, "open_session_url"
+            ):
+                _final_url, html_text, redirected = self._session_client.open_session_url(
                     self._url
                 )
                 if redirected:
                     error_text = "Liên kết điều hướng ra ngoài hệ thống UTH."
-                else:
-                    sanitized = HTMLSanitizer.sanitize(html_text or "")
-                    soup = BeautifulSoup(sanitized, BS4_PARSER)
-                    main = (
-                        soup.select_one("#region-main")
-                        or soup.select_one("main")
-                        or soup.body
-                        or soup
-                    )
-                    lines: list[str] = []
-                    for el in main.find_all(["h1", "h2", "h3", "p", "li"]):
-                        txt = " ".join(el.get_text(" ", strip=True).split())
-                        if txt:
-                            prefix = "## " if el.name in ("h1", "h2", "h3") else ("- " if el.name == "li" else "")
-                            lines.append(f"{prefix}{txt}")
-                    markdown_text = "\n\n".join(lines[:140])
-                    for anchor in main.select("a[href]"):
-                        href = str(anchor.get("href") or "").strip()
-                        label = " ".join(anchor.get_text(" ", strip=True).split())
-                        if label and href.startswith(("http://", "https://")) and len(extracted_links) < 12:
-                            extracted_links.append((label, href))
-            except Exception as exc:
-                error_text = str(exc)
+            elif not is_uth_site and self._url.startswith(("http://", "https://")):
+                import urllib.request
+
+                req = urllib.request.Request(
+                    self._url,
+                    headers={"User-Agent": "UTHelper/2.5"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:  # nosec B310
+                    ctype = str(resp.headers.get("Content-Type") or "").lower()
+                    if "html" in ctype or "text" in ctype or not ctype:
+                        raw_bytes = resp.read(512 * 1024)
+                        html_text = raw_bytes.decode("utf-8", errors="replace")
+                    else:
+                        error_text = "Liên kết trỏ tới nội dung đa phương tiện."
+
+            if html_text and not error_text:
+                sanitized = HTMLSanitizer.sanitize(html_text)
+                soup = BeautifulSoup(sanitized, BS4_PARSER)
+                main = (
+                    soup.select_one("#region-main")
+                    or soup.select_one("main")
+                    or soup.body
+                    or soup
+                )
+                lines: list[str] = []
+                for el in main.find_all(["h1", "h2", "h3", "p", "li"]):
+                    txt = " ".join(el.get_text(" ", strip=True).split())
+                    if txt:
+                        prefix = "## " if el.name in ("h1", "h2", "h3") else ("- " if el.name == "li" else "")
+                        lines.append(f"{prefix}{txt}")
+                markdown_text = "\n\n".join(lines[:140])
+                for anchor in main.select("a[href]"):
+                    href = str(anchor.get("href") or "").strip()
+                    label = " ".join(anchor.get_text(" ", strip=True).split())
+                    if label and href.startswith(("http://", "https://")) and len(extracted_links) < 12:
+                        extracted_links.append((label, href))
+        except Exception as exc:
+            error_text = str(exc)
 
         if self._disposed:
             return
+
+        self._nav_progress.visible = False
+        safe_control_update(self._nav_progress)
 
         if error_text or not markdown_text:
             self._body_host.content = ft.Container(
@@ -837,14 +948,15 @@ class CoursesWebViewPane(ft.Container):
         clean = str(target_url or "").strip()
         if not clean:
             return
-        if is_external_meeting_url(clean):
-            self._on_open_external(clean)
-            return
         self._url = clean
         self._subtitle_text.value = self._short_subtitle(clean)
         safe_control_update(self._subtitle_text)
         if self._dock is not None:
+            self._set_nav_loading(True)
             self._dock.navigate(clean)
+        elif self._flet_webview is not None:
+            self._mount_engine()
+            safe_control_update(self._body_host)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
@@ -891,7 +1003,7 @@ class CoursesWebViewPane(ft.Container):
 
     def sync_bounds(self, left: float, top: float, width: float, height: float) -> None:
         if self._dock is not None and not self._disposed:
-            header_h = 56.0
+            header_h = 58.0
             self._dock.set_bounds(left, top + header_h, width, max(160.0, height - header_h))
 
     def suspend(self) -> None:
@@ -911,6 +1023,8 @@ class CoursesWebViewPane(ft.Container):
     def update_theme(self) -> None:
         self.bgcolor = C.BG
         self._body_host.bgcolor = C.BG
+        self._nav_progress.color = C.ACCENT
+        self._nav_progress.bgcolor = C.BORDER
         refresh_viewer_header(
             self._header_container,
             self._back_btn,

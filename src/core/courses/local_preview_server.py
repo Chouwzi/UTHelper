@@ -233,6 +233,8 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(resp_body)))
             self.send_header("Cache-Control", "no-store, private")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+            self.send_header("Cross-Origin-Embedder-Policy", "credentialless")
             self.end_headers()
             if send_body and resp_body:
                 self.wfile.write(resp_body)

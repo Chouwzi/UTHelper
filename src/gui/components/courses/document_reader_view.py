@@ -14,7 +14,9 @@ import flet as ft
 from core.courses.document_converter import (
     ConvertedDocument,
     DocxRichBlock,
+    DocxTextRun,
     DocumentOutlineItem,
+    PptxPlacedElement,
     PptxSlideRich,
     SpreadsheetSheet,
     convert_document_bytes,
@@ -91,6 +93,7 @@ class DocumentReaderView(ft.Container):
         on_close: Callable[[], None],
         on_save: Callable[[str, bytes], None],
         on_open_external: Callable[[str, bytes], None],
+        on_open_link: Optional[Callable[[str], None]] = None,
         webview_builder: Optional[Callable[[str], Optional[ft.Control]]] = None,
         pdf_cache_dir: Optional[Path] = None,
         is_expanded: bool = False,
@@ -106,6 +109,7 @@ class DocumentReaderView(ft.Container):
         self._on_close = on_close
         self._on_save = on_save
         self._on_open_external = on_open_external
+        self._on_open_link = on_open_link
         self._webview_builder = webview_builder
         self._pdf_cache_dir = pdf_cache_dir
         self._expanded = bool(is_expanded)
@@ -117,6 +121,11 @@ class DocumentReaderView(ft.Container):
         self._sheet_row_page: int = 0
         self._sheet_col_page: int = 0
         self._sheet_filter_query: str = ""
+        self._doc_search_query: str = ""
+        self._pptx_scale: float = 1.0
+        self._pptx_page_index: int = 0
+        self._pptx_search_query: str = ""
+        self._pptx_outline_open: bool = False
         self._pdf_session: Optional[PdfDocumentSession] = None
         self._pdf_session_loaded: bool = False
         self._pdf_page_index: int = 0
@@ -493,7 +502,12 @@ class DocumentReaderView(ft.Container):
                     ),
                 )
             )
-            return ft.Column(expand=True, spacing=0, controls=controls)
+            return ft.Column(
+            expand=True,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            controls=controls,
+        )
 
         raw_header = display_rows[0]
         data_rows = display_rows[1:]
@@ -680,7 +694,272 @@ class DocumentReaderView(ft.Container):
                 controls=list_items,
             )
         )
-        return ft.Column(expand=True, spacing=0, controls=controls)
+        return ft.Column(
+            expand=True,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            controls=controls,
+        )
+
+    def _handle_link_tap(self, url: str) -> None:
+        cleaned = str(url or "").strip()
+        if not cleaned or not callable(self._on_open_link):
+            return
+        self._on_open_link(cleaned)
+
+    @staticmethod
+    def _flet_text_align(align: str) -> ft.TextAlign:
+        val = (align or "").strip().lower()
+        if val == "center":
+            return ft.TextAlign.CENTER
+        if val == "right":
+            return ft.TextAlign.RIGHT
+        if val == "justify":
+            return ft.TextAlign.JUSTIFY
+        return ft.TextAlign.LEFT
+
+    def _build_rich_runs_text(
+        self,
+        *,
+        plain_text: str,
+        runs: tuple[DocxTextRun, ...],
+        size: int = 14,
+        align: str = "left",
+        text_primary: str,
+        accent_color: str,
+        base_bold: bool = False,
+        base_italic: bool = False,
+    ) -> ft.Control:
+        """Build selectable Flet text control honoring inline bold/italic/underline/strike/code/links."""
+        t_align = self._flet_text_align(align)
+        has_special = any(
+            r.bold or r.italic or r.underline or r.strike or r.code or r.superscript or r.subscript or r.href
+            for r in runs
+        )
+        if not runs or not has_special:
+            return ft.Text(
+                plain_text,
+                size=size,
+                weight=ft.FontWeight.W_700 if base_bold else ft.FontWeight.NORMAL,
+                italic=base_italic,
+                color=text_primary,
+                text_align=t_align,
+                selectable=True,
+            )
+
+        spans: list[ft.TextSpan] = []
+        for run in runs:
+            decorations = []
+            if run.underline or run.href:
+                decorations.append(ft.TextDecoration.UNDERLINE)
+            if run.strike:
+                decorations.append(ft.TextDecoration.LINE_THROUGH)
+            deco_val = (
+                ft.TextDecoration.combine(decorations)
+                if len(decorations) > 1
+                else (decorations[0] if decorations else None)
+            )
+            eff_size = (
+                max(10, size - 3)
+                if (run.superscript or run.subscript)
+                else (max(11, size - 1) if run.code else size)
+            )
+            span_style = ft.TextStyle(
+                color=accent_color if run.href else text_primary,
+                size=eff_size,
+                weight=(
+                    ft.FontWeight.W_700
+                    if (run.bold or base_bold)
+                    else ft.FontWeight.NORMAL
+                ),
+                italic=(run.italic or base_italic),
+                font_family=_MONO_FONT if run.code else None,
+                decoration=deco_val,
+            )
+            if run.href and callable(self._on_open_link):
+                spans.append(
+                    ft.TextSpan(
+                        text=run.text,
+                        style=span_style,
+                        on_click=lambda _e, u=run.href: self._handle_link_tap(u),
+                    )
+                )
+            else:
+                spans.append(ft.TextSpan(text=run.text, style=span_style))
+
+        return ft.Text(
+            spans=spans,
+            size=size,
+            color=text_primary,
+            text_align=t_align,
+            selectable=True,
+        )
+
+    def _build_grid_table_control(
+        self,
+        *,
+        rich_rows: tuple[tuple[object, ...], ...] = (),
+        plain_rows: tuple[tuple[str, ...], ...] = (),
+        has_borders: bool = True,
+        bg_color: str,
+        surface_color: str,
+        text_primary: str,
+        border_color: str,
+        accent_color: str,
+    ) -> ft.Control:
+        """Render responsive Word/PPTX tables that wrap long text & honor col_span/borderless layout."""
+        grid_rows: list[ft.Control] = []
+        source_rows = rich_rows if rich_rows else tuple(
+            tuple({"text": c, "runs": (), "col_span": 1, "align": "left", "is_header": r_i == 0 and has_borders, "images": ()} for c in row)
+            for r_i, row in enumerate(plain_rows)
+        )
+        for r_idx, row in enumerate(source_rows):
+            row_cells: list[ft.Control] = []
+            for cell in row:
+                if isinstance(cell, dict):
+                    c_text = str(cell["text"])
+                    c_runs: tuple[DocxTextRun, ...] = ()
+                    c_span = 1
+                    c_align = str(cell["align"])
+                    c_header = bool(cell["is_header"])
+                    c_imgs: tuple[tuple[str, bytes], ...] = ()
+                else:
+                    c_text = str(getattr(cell, "text", ""))
+                    c_runs = tuple(getattr(cell, "runs", ()))
+                    c_span = max(1, int(getattr(cell, "col_span", 1)))
+                    c_align = str(getattr(cell, "align", "left"))
+                    c_header = bool(getattr(cell, "is_header", r_idx == 0 and has_borders))
+                    c_imgs = tuple(getattr(cell, "images", ()))
+
+                cell_children: list[ft.Control] = []
+                if c_text or c_runs:
+                    cell_children.append(
+                        self._build_rich_runs_text(
+                            plain_text=c_text,
+                            runs=c_runs,
+                            size=12,
+                            align=c_align,
+                            text_primary=text_primary,
+                            accent_color=accent_color,
+                            base_bold=(c_header and has_borders),
+                        )
+                    )
+                for _im_name, im_bytes in c_imgs:
+                    if im_bytes:
+                        cell_children.append(
+                            ft.Image(src=im_bytes, width=180, fit=ft.BoxFit.CONTAIN)
+                        )
+                row_cells.append(
+                    ft.Container(
+                        expand=c_span,
+                        padding=ft.Padding.symmetric(
+                            horizontal=8 if has_borders else 6,
+                            vertical=6 if has_borders else 4,
+                        ),
+                        bgcolor=(
+                            bg_color
+                            if (c_header and has_borders)
+                            else (surface_color if has_borders else None)
+                        ),
+                        border=ft.Border.all(0.5, border_color) if has_borders else None,
+                        content=ft.Column(spacing=4, controls=cell_children),
+                    )
+                )
+            if row_cells:
+                grid_rows.append(
+                    ft.Row(
+                        spacing=0 if has_borders else 10,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=row_cells,
+                    )
+                )
+        return ft.Container(
+            border=ft.Border.all(1, border_color) if has_borders else None,
+            border_radius=8 if has_borders else 0,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS if has_borders else ft.ClipBehavior.NONE,
+            content=ft.Column(spacing=0 if has_borders else 4, controls=grid_rows),
+        )
+
+    def _build_pptx_element_control(
+        self,
+        elem: PptxPlacedElement,
+        *,
+        slide_width: int,
+        bg_color: str,
+        surface_color: str,
+        text_primary: str,
+        border_color: str,
+        accent_color: str,
+    ) -> Optional[ft.Control]:
+        if elem.kind == "text":
+            p_controls: list[ft.Control] = []
+            for p_obj in elem.paragraphs:
+                if p_obj.is_title or p_obj.is_subtitle:
+                    continue
+                inner_ctrl = self._build_rich_runs_text(
+                    plain_text=p_obj.text,
+                    runs=p_obj.runs,
+                    size=13,
+                    align=p_obj.align,
+                    text_primary=text_primary,
+                    accent_color=accent_color,
+                )
+                if p_obj.bullet:
+                    p_controls.append(
+                        ft.Container(
+                            padding=ft.Padding.only(left=p_obj.level * 14),
+                            content=ft.Row(
+                                spacing=6,
+                                vertical_alignment=ft.CrossAxisAlignment.START,
+                                controls=[
+                                    ft.Text(
+                                        p_obj.bullet,
+                                        size=13,
+                                        weight=ft.FontWeight.W_600,
+                                        color=accent_color,
+                                    ),
+                                    ft.Container(expand=True, content=inner_ctrl),
+                                ],
+                            ),
+                        )
+                    )
+                else:
+                    p_controls.append(
+                        ft.Container(
+                            padding=ft.Padding.only(left=p_obj.level * 14),
+                            content=inner_ctrl,
+                        )
+                    )
+            if not p_controls:
+                return None
+            return ft.Column(spacing=4, controls=p_controls)
+
+        if elem.kind == "table" and elem.table_rows:
+            return self._build_grid_table_control(
+                plain_rows=elem.table_rows,
+                has_borders=True,
+                bg_color=bg_color,
+                surface_color=surface_color,
+                text_primary=text_primary,
+                border_color=border_color,
+                accent_color=accent_color,
+            )
+
+        if elem.kind == "image" and elem.image_bytes:
+            target_w = max(84, min(slide_width - 36, int(round(slide_width * elem.w_ratio))))
+            return ft.Container(
+                border=ft.Border.all(1, border_color),
+                border_radius=8,
+                padding=4,
+                bgcolor=bg_color,
+                alignment=ft.Alignment.CENTER,
+                content=ft.Image(
+                    src=elem.image_bytes,
+                    width=target_w,
+                    fit=ft.BoxFit.CONTAIN,
+                ),
+            )
+        return None
 
     def _build_pptx_body(self, converted: ConvertedDocument) -> ft.Control:
         (
@@ -696,89 +975,198 @@ class DocumentReaderView(ft.Container):
         rich_map: dict[int, PptxSlideRich] = {
             item.slide_number: item for item in (converted.rich_slides or ())
         }
+        total_slides = len(converted.slides)
+        query_lower = self._pptx_search_query.strip().lower()
+        slide_width = max(480, min(920, int(round(680 * self._pptx_scale))))
+
         cards: list[ft.Control] = []
+        matching_nums: list[int] = []
         for slide_num, body_text, notes_text in converted.slides:
             rich = rich_map.get(slide_num)
-            card_controls: list[ft.Control] = [
-                ft.Text(
-                    f"Slide {slide_num}",
-                    size=14,
-                    weight=ft.FontWeight.W_700,
-                    color=accent_color,
-                ),
-                ft.Text(
-                    body_text or "(Slide không có văn bản)",
-                    size=13,
-                    color=text_primary if body_text else text_secondary,
-                    selectable=True,
-                ),
-            ]
-            if rich is not None and rich.tables:
-                for tbl_rows in rich.tables:
-                    if not tbl_rows:
-                        continue
-                    max_c = max(len(r) for r in tbl_rows)
-                    if max_c <= 0:
-                        continue
-                    head_row = tbl_rows[0]
-                    tbl_ctrl = ft.DataTable(
-                        columns=[
-                            ft.DataColumn(
-                                ft.Text(
-                                    head_row[c] if c < len(head_row) else "",
-                                    size=12,
-                                    weight=ft.FontWeight.W_600,
-                                    color=text_primary,
-                                )
-                            )
-                            for c in range(max_c)
-                        ],
-                        rows=[
-                            ft.DataRow(
-                                cells=[
-                                    ft.DataCell(
-                                        ft.Text(
-                                            r[c] if c < len(r) else "",
-                                            size=12,
-                                            color=text_primary,
-                                            selectable=True,
-                                        )
-                                    )
-                                    for c in range(max_c)
-                                ]
-                            )
-                            for r in tbl_rows[1:]
-                        ],
-                        bgcolor=bg_color,
-                        heading_row_color=surface_color,
-                        border=ft.Border.all(1, border_color),
-                        border_radius=8,
-                    )
+            haystack = "\n".join(
+                p
+                for p in (
+                    rich.title_text if rich else "",
+                    rich.subtitle_text if rich else "",
+                    body_text,
+                    notes_text,
+                )
+                if p
+            ).lower()
+            if query_lower and query_lower not in haystack:
+                continue
+            matching_nums.append(slide_num)
+
+            ratio_label = ""
+            if rich is not None:
+                ratio_label = "4:3" if rich.aspect_ratio < 1.55 else "16:9"
+
+            slide_badge_row = ft.Row(
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text(
+                        f"Slide {slide_num}",
+                        size=13,
+                        weight=ft.FontWeight.W_700,
+                        color=accent_color,
+                    ),
+                    *(
+                        [ft.Text(ratio_label, size=10, color=text_secondary)]
+                        if ratio_label
+                        else []
+                    ),
+                ],
+            )
+            card_controls: list[ft.Control] = [slide_badge_row]
+
+            rendered_rich_body = False
+            if rich is not None:
+                if rich.title_text:
                     card_controls.append(
-                        ft.Row(scroll=ft.ScrollMode.AUTO, controls=[tbl_ctrl])
+                        ft.Text(
+                            rich.title_text,
+                            size=17,
+                            weight=ft.FontWeight.W_700,
+                            color=text_primary,
+                            selectable=True,
+                        )
                     )
-            if rich is not None and rich.images:
-                card_controls.append(
-                    ft.Row(
-                        wrap=True,
-                        spacing=8,
-                        run_spacing=8,
-                        controls=[
-                            ft.Container(
-                                border=ft.Border.all(1, border_color),
-                                border_radius=8,
-                                padding=4,
-                                bgcolor=bg_color,
-                                content=ft.Image(
-                                    src=img_bytes,
-                                    width=360,
-                                    fit=ft.BoxFit.CONTAIN,
-                                ),
+                    rendered_rich_body = True
+                if rich.subtitle_text:
+                    card_controls.append(
+                        ft.Text(
+                            rich.subtitle_text,
+                            size=14,
+                            weight=ft.FontWeight.W_500,
+                            color=text_secondary,
+                            selectable=True,
+                        )
+                    )
+                    rendered_rich_body = True
+
+                placed_img_names: set[str] = set()
+                elem_list = list(rich.elements or ())
+                idx_el = 0
+                while idx_el < len(elem_list):
+                    cur = elem_list[idx_el]
+                    if idx_el + 1 < len(elem_list):
+                        nxt = elem_list[idx_el + 1]
+                        same_band = abs(cur.y_ratio - nxt.y_ratio) <= 0.14
+                        side_by_side = (
+                            (cur.x_ratio + cur.w_ratio <= 0.58 and nxt.x_ratio >= 0.42)
+                            or (nxt.x_ratio + nxt.w_ratio <= 0.58 and cur.x_ratio >= 0.42)
+                        )
+                        if same_band and side_by_side:
+                            left_el, right_el = (cur, nxt) if cur.x_ratio <= nxt.x_ratio else (nxt, cur)
+                            left_ctrl = self._build_pptx_element_control(
+                                left_el,
+                                slide_width=max(260, int(slide_width * 0.48)),
+                                bg_color=bg_color,
+                                surface_color=surface_color,
+                                text_primary=text_primary,
+                                border_color=border_color,
+                                accent_color=accent_color,
                             )
-                            for _img_name, img_bytes in rich.images
-                        ],
+                            right_ctrl = self._build_pptx_element_control(
+                                right_el,
+                                slide_width=max(260, int(slide_width * 0.48)),
+                                bg_color=bg_color,
+                                surface_color=surface_color,
+                                text_primary=text_primary,
+                                border_color=border_color,
+                                accent_color=accent_color,
+                            )
+                            if left_el.kind == "image":
+                                placed_img_names.add(left_el.image_name)
+                            if right_el.kind == "image":
+                                placed_img_names.add(right_el.image_name)
+                            if left_ctrl is not None and right_ctrl is not None:
+                                card_controls.append(
+                                    ft.Row(
+                                        spacing=14,
+                                        vertical_alignment=ft.CrossAxisAlignment.START,
+                                        controls=[
+                                            ft.Container(expand=True, content=left_ctrl),
+                                            ft.Container(expand=True, content=right_ctrl),
+                                        ],
+                                    )
+                                )
+                                rendered_rich_body = True
+                                idx_el += 2
+                                continue
+                            elif left_ctrl is not None or right_ctrl is not None:
+                                card_controls.append(left_ctrl or right_ctrl)  # type: ignore[arg-type]
+                                rendered_rich_body = True
+                                idx_el += 2
+                                continue
+
+                    built_ctrl = self._build_pptx_element_control(
+                        cur,
+                        slide_width=slide_width,
+                        bg_color=bg_color,
+                        surface_color=surface_color,
+                        text_primary=text_primary,
+                        border_color=border_color,
+                        accent_color=accent_color,
+                    )
+                    if cur.kind == "image":
+                        placed_img_names.add(cur.image_name)
+                    if built_ctrl is not None:
+                        card_controls.append(built_ctrl)
+                        rendered_rich_body = True
+                    idx_el += 1
+
+                unplaced_images = [
+                    (nm, bt) for nm, bt in (rich.images or ()) if nm not in placed_img_names and bt
+                ]
+                if unplaced_images:
+                    card_controls.append(
+                        ft.Row(
+                            wrap=True,
+                            spacing=8,
+                            run_spacing=8,
+                            controls=[
+                                ft.Container(
+                                    border=ft.Border.all(1, border_color),
+                                    border_radius=8,
+                                    padding=4,
+                                    bgcolor=bg_color,
+                                    content=ft.Image(
+                                        src=img_bytes,
+                                        width=min(360, slide_width - 40),
+                                        fit=ft.BoxFit.CONTAIN,
+                                    ),
+                                )
+                                for _img_name, img_bytes in unplaced_images
+                            ],
+                        )
+                    )
+                    rendered_rich_body = True
+
+            if not rendered_rich_body:
+                card_controls.append(
+                    ft.Text(
+                        body_text or "(Slide không có văn bản)",
+                        size=13,
+                        color=text_primary if body_text else text_secondary,
+                        selectable=True,
                     )
                 )
+                if rich is not None and rich.tables:
+                    for tbl_rows in rich.tables:
+                        card_controls.append(
+                            self._build_grid_table_control(
+                                plain_rows=tbl_rows,
+                                has_borders=True,
+                                bg_color=bg_color,
+                                surface_color=surface_color,
+                                text_primary=text_primary,
+                                border_color=border_color,
+                                accent_color=accent_color,
+                            )
+                        )
+
             if notes_text:
                 card_controls.extend(
                     [
@@ -792,34 +1180,164 @@ class DocumentReaderView(ft.Container):
                         ),
                     ]
                 )
+
             cards.append(
                 ft.Container(
                     key=ft.ScrollKey(f"slide-{slide_num}"),
+                    width=slide_width,
                     bgcolor=surface_color,
                     border=ft.Border.all(1, border_color),
                     border_radius=12,
-                    padding=14,
-                    content=ft.Column(spacing=8, controls=card_controls),
+                    padding=16,
+                    content=ft.Column(spacing=10, controls=card_controls),
                 )
             )
+
+        if not cards:
+            cards.append(
+                ft.Container(
+                    width=slide_width,
+                    bgcolor=surface_color,
+                    border=ft.Border.all(1, border_color),
+                    border_radius=12,
+                    padding=24,
+                    alignment=ft.Alignment.CENTER,
+                    content=ft.Text(
+                        "Không tìm thấy slide phù hợp từ khóa tìm kiếm.",
+                        size=13,
+                        color=text_secondary,
+                    ),
+                )
+            )
+
         list_view = ft.ListView(
             expand=True,
             build_controls_on_demand=False,
-            padding=12,
-            spacing=12,
-            controls=cards,
+            padding=14,
+            spacing=14,
+            controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    controls=[card],
+                )
+                for card in cards
+            ],
         )
+
+        def _jump_slide(target_idx: int) -> None:
+            if not matching_nums:
+                return
+            self._pptx_page_index = max(0, min(len(matching_nums) - 1, int(target_idx)))
+            target_slide_num = matching_nums[self._pptx_page_index]
+            self._jump_to_anchor(list_view, f"slide-{target_slide_num}")
+
+        def _adjust_pptx_zoom(delta: float) -> None:
+            self._pptx_scale = max(0.7, min(1.5, round(self._pptx_scale + delta, 2)))
+            self._body_host.content = self._build_pptx_body(converted)
+            safe_control_update(self)
+
+        def _reset_pptx_zoom() -> None:
+            self._pptx_scale = 1.0
+            self._body_host.content = self._build_pptx_body(converted)
+            safe_control_update(self)
+
+        def _set_pptx_search(q: str) -> None:
+            self._pptx_search_query = str(q or "")
+            self._pptx_page_index = 0
+            self._body_host.content = self._build_pptx_body(converted)
+            safe_control_update(self)
+
+        toolbar = ft.Container(
+            bgcolor=surface_color,
+            border=ft.Border.only(bottom=ft.BorderSide(1, border_color)),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            content=ft.Row(
+                wrap=True,
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.IconButton(
+                        icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
+                        icon_size=18,
+                        icon_color=text_primary,
+                        tooltip="Slide trước",
+                        disabled=len(matching_nums) <= 1,
+                        on_click=lambda _e: _jump_slide(self._pptx_page_index - 1),
+                    ),
+                    ft.Text(
+                        f"Slide {len(matching_nums)}/{total_slides}"
+                        if query_lower
+                        else f"{total_slides} slide",
+                        size=12,
+                        color=text_secondary,
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                        icon_size=18,
+                        icon_color=text_primary,
+                        tooltip="Slide tiếp",
+                        disabled=len(matching_nums) <= 1,
+                        on_click=lambda _e: _jump_slide(self._pptx_page_index + 1),
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.ZOOM_OUT_ROUNDED,
+                        icon_size=18,
+                        icon_color=text_primary,
+                        tooltip="Thu nhỏ slide",
+                        on_click=lambda _e: _adjust_pptx_zoom(-0.15),
+                    ),
+                    ft.TextButton(
+                        content=ft.Text(
+                            f"{int(round(self._pptx_scale * 100))}%",
+                            size=11,
+                            color=text_primary,
+                        ),
+                        tooltip="Đặt lại 100%",
+                        style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=6, vertical=0)),
+                        on_click=lambda _e: _reset_pptx_zoom(),
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.ZOOM_IN_ROUNDED,
+                        icon_size=18,
+                        icon_color=text_primary,
+                        tooltip="Phóng to slide",
+                        on_click=lambda _e: _adjust_pptx_zoom(0.15),
+                    ),
+                    ft.TextField(
+                        value=self._pptx_search_query,
+                        hint_text="Tìm trong slide...",
+                        width=180,
+                        height=32,
+                        dense=True,
+                        text_size=12,
+                        color=text_primary,
+                        bgcolor=bg_color,
+                        border_color=border_color,
+                        on_submit=lambda e: _set_pptx_search(str(e.control.value or "")),
+                    ),
+                ],
+            ),
+        )
+
+        stack_parts: list[ft.Control] = [toolbar]
         if len(converted.outline) > 1:
-            outline_bar = self._build_outline_bar(
-                converted.outline,
-                list_view,
-                surface_color=surface_color,
-                text_primary=text_primary,
-                text_secondary=text_secondary,
-                border_color=border_color,
+            stack_parts.append(
+                self._build_outline_bar(
+                    converted.outline,
+                    list_view,
+                    surface_color=surface_color,
+                    text_primary=text_primary,
+                    text_secondary=text_secondary,
+                    border_color=border_color,
+                )
             )
-            return ft.Column(expand=True, spacing=0, controls=[outline_bar, list_view])
-        return list_view
+        stack_parts.append(list_view)
+        return ft.Column(
+            expand=True,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            controls=stack_parts,
+        )
 
     def _build_md_style_sheet(
         self,
@@ -881,8 +1399,20 @@ class DocumentReaderView(ft.Container):
             a_text_style=ft.TextStyle(color=accent_color),
         )
 
+    @staticmethod
+    def _block_uses_markdown_plain(block: DocxRichBlock) -> bool:
+        """Keep unstyled body paragraphs & left headings as Markdown so md_style_sheet applies."""
+        if block.section_role != "body" or block.align != "left" or block.indent_level > 0:
+            return False
+        if block.kind == "list_item" and block.list_marker not in {"", "•"}:
+            return False
+        return not any(
+            r.bold or r.italic or r.underline or r.strike or r.code or r.superscript or r.subscript or r.href
+            for r in (block.runs or ())
+        )
+
     def _build_docx_rich_body(self, converted: ConvertedDocument) -> ft.Control:
-        """Render rich DOCX flow (headings, paragraphs, inline images, and tables)."""
+        """Render rich DOCX flow (headers/footers, inline styles, numbered lists, links, grid tables, images)."""
         (
             bg_color,
             surface_color,
@@ -901,6 +1431,7 @@ class DocumentReaderView(ft.Container):
             accent_color=accent_color,
         )
 
+        query_lower = self._doc_search_query.strip().lower()
         controls: list[ft.Control] = []
         pending_md: list[str] = []
         pending_anchor: Optional[str] = None
@@ -914,6 +1445,7 @@ class DocumentReaderView(ft.Container):
                 selectable=True,
                 extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                 md_style_sheet=md_style,
+                on_tap_link=lambda e: self._handle_link_tap(str(getattr(e, "data", "") or "")),
             )
             controls.append(
                 ft.Container(
@@ -924,17 +1456,92 @@ class DocumentReaderView(ft.Container):
             pending_md.clear()
             pending_anchor = None
 
-        block: DocxRichBlock
         for block in converted.docx_blocks:
+            if query_lower:
+                if block.kind == "table":
+                    hay = " ".join(cell for r in block.rows for cell in r).lower()
+                else:
+                    hay = (block.text or "").lower()
+                if block.kind != "image" and query_lower not in hay:
+                    continue
+
             if block.kind == "heading":
                 _flush_md()
-                pending_anchor = block.anchor_id or None
-                pending_md.append(f"{'#' * max(1, block.level)} {block.text}")
-                _flush_md()
+                if self._block_uses_markdown_plain(block):
+                    pending_anchor = block.anchor_id or None
+                    pending_md.append(f"{'#' * max(1, block.level)} {block.text}")
+                    _flush_md()
+                else:
+                    h_size = max(14, 22 - max(1, block.level) * 2)
+                    controls.append(
+                        ft.Container(
+                            key=ft.ScrollKey(block.anchor_id) if block.anchor_id else None,
+                            padding=ft.Padding.only(top=6, bottom=2),
+                            content=self._build_rich_runs_text(
+                                plain_text=block.text,
+                                runs=block.runs,
+                                size=h_size,
+                                align=block.align,
+                                text_primary=text_primary,
+                                accent_color=accent_color,
+                                base_bold=True,
+                            ),
+                        )
+                    )
             elif block.kind == "paragraph":
-                pending_md.append(block.text)
+                if self._block_uses_markdown_plain(block):
+                    pending_md.append(block.text)
+                else:
+                    _flush_md()
+                    role_muted = block.section_role in {"header", "footer"}
+                    para_ctrl = self._build_rich_runs_text(
+                        plain_text=block.text,
+                        runs=block.runs,
+                        size=12 if role_muted else 14,
+                        align=block.align,
+                        text_primary=text_secondary if role_muted else text_primary,
+                        accent_color=accent_color,
+                    )
+                    controls.append(
+                        ft.Container(
+                            padding=ft.Padding.only(left=block.indent_level * 18),
+                            content=para_ctrl,
+                        )
+                    )
             elif block.kind == "list_item":
-                pending_md.append(f"- {block.text}")
+                if self._block_uses_markdown_plain(block):
+                    pending_md.append(f"- {block.text}")
+                else:
+                    _flush_md()
+                    marker = block.list_marker or "•"
+                    controls.append(
+                        ft.Container(
+                            padding=ft.Padding.only(left=block.indent_level * 18),
+                            content=ft.Row(
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.START,
+                                controls=[
+                                    ft.Text(
+                                        marker,
+                                        size=13,
+                                        weight=ft.FontWeight.W_600,
+                                        color=accent_color,
+                                    ),
+                                    ft.Container(
+                                        expand=True,
+                                        content=self._build_rich_runs_text(
+                                            plain_text=block.text,
+                                            runs=block.runs,
+                                            size=14,
+                                            align=block.align,
+                                            text_primary=text_primary,
+                                            accent_color=accent_color,
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        )
+                    )
             elif block.kind == "image" and block.image_bytes:
                 _flush_md()
                 controls.append(
@@ -950,76 +1557,110 @@ class DocumentReaderView(ft.Container):
                         ),
                     )
                 )
-            elif block.kind == "table" and block.rows:
+            elif block.kind == "table" and (block.rich_rows or block.rows):
                 _flush_md()
-                max_c = max(len(r) for r in block.rows)
-                if max_c > 0:
-                    head_row = block.rows[0]
-                    tbl = ft.DataTable(
-                        columns=[
-                            ft.DataColumn(
-                                ft.Text(
-                                    head_row[c] if c < len(head_row) else "",
-                                    size=12,
-                                    weight=ft.FontWeight.W_600,
-                                    color=text_primary,
-                                )
-                            )
-                            for c in range(max_c)
-                        ],
-                        rows=[
-                            ft.DataRow(
-                                cells=[
-                                    ft.DataCell(
-                                        ft.Text(
-                                            r[c] if c < len(r) else "",
-                                            size=12,
-                                            color=text_primary,
-                                            selectable=True,
-                                        )
-                                    )
-                                    for c in range(max_c)
-                                ]
-                            )
-                            for r in block.rows[1:]
-                        ],
-                        bgcolor=bg_color,
-                        heading_row_color=surface_color,
-                        border=ft.Border.all(1, border_color),
-                        border_radius=8,
+                controls.append(
+                    self._build_grid_table_control(
+                        rich_rows=block.rich_rows,
+                        plain_rows=block.rows,
+                        has_borders=block.has_borders,
+                        bg_color=bg_color,
+                        surface_color=surface_color,
+                        text_primary=text_primary,
+                        border_color=border_color,
+                        accent_color=accent_color,
                     )
-                    controls.append(ft.Row(scroll=ft.ScrollMode.AUTO, controls=[tbl]))
+                )
         _flush_md()
 
-        if not controls:
+        if not controls and not query_lower:
             return self._build_text_or_markdown_body(converted)
+        if not controls:
+            controls.append(
+                ft.Text(
+                    "Không tìm thấy đoạn phù hợp từ khóa.",
+                    size=13,
+                    color=text_secondary,
+                )
+            )
 
-        list_view = ft.ListView(
-            expand=True,
-            build_controls_on_demand=False,
-            spacing=10,
-            controls=controls,
-        )
-        surface_card = ft.Container(
-            expand=True,
-            margin=12,
+        page_card = ft.Container(
+            width=840,
             bgcolor=surface_color,
             border=ft.Border.all(1, border_color),
             border_radius=12,
-            padding=14,
-            content=list_view,
+            padding=22,
+            content=ft.Column(spacing=10, controls=controls),
         )
+        list_view = ft.ListView(
+            expand=True,
+            build_controls_on_demand=False,
+            padding=14,
+            spacing=10,
+            controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    controls=[page_card],
+                )
+            ],
+        )
+
+        def _set_doc_search(q: str) -> None:
+            self._doc_search_query = str(q or "")
+            self._body_host.content = self._build_docx_rich_body(converted)
+            safe_control_update(self)
+
+        doc_toolbar = ft.Container(
+            bgcolor=surface_color,
+            border=ft.Border.only(bottom=ft.BorderSide(1, border_color)),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            content=ft.Row(
+                wrap=True,
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    ft.Text(
+                        f"Đề mục: {len(converted.outline)}"
+                        if converted.outline
+                        else "Tài liệu Word",
+                        size=12,
+                        color=text_secondary,
+                    ),
+                    ft.TextField(
+                        value=self._doc_search_query,
+                        hint_text="Tìm trong tài liệu Word...",
+                        width=210,
+                        height=32,
+                        dense=True,
+                        text_size=12,
+                        color=text_primary,
+                        bgcolor=bg_color,
+                        border_color=border_color,
+                        on_submit=lambda e: _set_doc_search(str(e.control.value or "")),
+                    ),
+                ],
+            ),
+        )
+
+        parts: list[ft.Control] = [doc_toolbar]
         if converted.outline:
-            outline_bar = self._build_outline_bar(
-                converted.outline,
-                list_view,
-                surface_color=surface_color,
-                text_primary=text_primary,
-                text_secondary=text_secondary,
-                border_color=border_color,
+            parts.append(
+                self._build_outline_bar(
+                    converted.outline,
+                    list_view,
+                    surface_color=surface_color,
+                    text_primary=text_primary,
+                    text_secondary=text_secondary,
+                    border_color=border_color,
+                )
             )
-            return ft.Column(expand=True, spacing=0, controls=[outline_bar, surface_card])
-        return surface_card
+        parts.append(list_view)
+        return ft.Column(
+            expand=True,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            controls=parts,
+        )
 
     def _ensure_pdf_session(self) -> PdfDocumentSession:
         if self._pdf_session is None and not self._pdf_session_loaded:
@@ -1057,6 +1698,11 @@ class DocumentReaderView(ft.Container):
 
         def _adjust_zoom(delta: float) -> None:
             self._pdf_scale = max(0.8, min(2.8, round(self._pdf_scale + delta, 2)))
+            self._body_host.content = self._build_native_pdf_body(session)
+            safe_control_update(self)
+
+        def _reset_zoom() -> None:
+            self._pdf_scale = 1.6
             self._body_host.content = self._build_native_pdf_body(session)
             safe_control_update(self)
 
@@ -1142,7 +1788,16 @@ class DocumentReaderView(ft.Container):
                     tooltip="Thu nhỏ",
                     on_click=lambda _e: _adjust_zoom(-0.25),
                 ),
-                ft.Text(f"{int(round((self._pdf_scale / 1.6) * 100))}%", size=11, color=text_secondary),
+                ft.TextButton(
+                    content=ft.Text(
+                        f"{int(round((self._pdf_scale / 1.6) * 100))}%",
+                        size=11,
+                        color=text_primary,
+                    ),
+                    tooltip="Đặt lại mức thu phóng 100%",
+                    style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=6, vertical=0)),
+                    on_click=lambda _e: _reset_zoom(),
+                ),
                 ft.IconButton(
                     icon=ft.Icons.ZOOM_IN_ROUNDED,
                     icon_size=18,
@@ -1207,6 +1862,23 @@ class DocumentReaderView(ft.Container):
 
         def _page_control_for(p_idx: int, rendered: Optional[object]) -> ft.Control:
             if rendered is not None and getattr(rendered, "png_bytes", b""):
+                display_w = max(
+                    280, int(round(getattr(rendered, "width", 800) * 0.68))
+                )
+                img_ctrl = ft.Image(
+                    src=rendered.png_bytes,  # type: ignore[attr-defined]
+                    width=display_w,
+                    fit=ft.BoxFit.CONTAIN,
+                )
+                body_item: ft.Control = (
+                    ft.Row(
+                        scroll=ft.ScrollMode.AUTO,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        controls=[img_ctrl],
+                    )
+                    if self._pdf_scale > 1.6
+                    else img_ctrl
+                )
                 return ft.Container(
                     bgcolor=surface_color,
                     border=ft.Border.all(1, border_color),
@@ -1216,10 +1888,7 @@ class DocumentReaderView(ft.Container):
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         spacing=4,
                         controls=[
-                            ft.Image(
-                                src=rendered.png_bytes,  # type: ignore[attr-defined]
-                                fit=ft.BoxFit.CONTAIN,
-                            ),
+                            body_item,
                             ft.Text(f"Trang {p_idx + 1}", size=11, color=text_secondary),
                         ],
                     ),
@@ -1329,16 +1998,12 @@ class DocumentReaderView(ft.Container):
                 )
             )
 
-        pdf_viewer_col = ft.InteractiveViewer(
+        # Direct ListView ensures mouse wheel scrolling up/down never triggers unwanted scale zoom.
+        pdf_viewer_col = ft.ListView(
             expand=True,
-            min_scale=0.6,
-            max_scale=3.0,
-            content=ft.ListView(
-                expand=True,
-                padding=14,
-                spacing=12,
-                controls=page_cards,
-            ),
+            padding=14,
+            spacing=12,
+            controls=page_cards,
         )
 
         content_area: ft.Control = pdf_viewer_col
@@ -1366,7 +2031,12 @@ class DocumentReaderView(ft.Container):
                 controls=[outline_panel, ft.Container(expand=True, content=pdf_viewer_col)],
             )
 
-        return ft.Column(expand=True, spacing=0, controls=[toolbar, content_area])
+        return ft.Column(
+            expand=True,
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            controls=[toolbar, content_area],
+        )
 
     def _build_text_or_markdown_body(self, converted: ConvertedDocument) -> ft.Control:
         (
@@ -1460,6 +2130,7 @@ class DocumentReaderView(ft.Container):
                     selectable=True,
                     extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                     md_style_sheet=md_style,
+                    on_tap_link=lambda e: self._handle_link_tap(str(getattr(e, "data", "") or "")),
                 ),
             )
             for anchor_id, md_chunk in sections
@@ -1584,9 +2255,7 @@ class DocumentReaderView(ft.Container):
                 return self._build_spreadsheet_body(converted)
             if self._kind == "pptx" and converted.slides:
                 return self._build_pptx_body(converted)
-            if self._kind == "docx" and any(
-                b.kind in {"image", "table"} for b in (converted.docx_blocks or ())
-            ):
+            if self._kind == "docx" and converted.docx_blocks:
                 return self._build_docx_rich_body(converted)
             return self._build_text_or_markdown_body(converted)
 

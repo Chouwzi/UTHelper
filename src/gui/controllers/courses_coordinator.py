@@ -27,6 +27,8 @@ from core.courses.models import (
 )
 from core.courses.preview_cache import PreviewFileCache
 from gui.components.courses._shared import (
+    PaneErrorOverlay,
+    PaneLoadingOverlay,
     build_expand_toggle_button,
     build_viewer_header,
     refresh_viewer_header,
@@ -44,10 +46,10 @@ from gui.components.courses.activity_views import (
 from gui.components.courses.archive_explorer_view import ArchiveExplorerView
 from gui.components.courses.courses_tab_view import CoursesTabView
 from gui.components.courses.document_reader_view import DocumentReaderView
-from gui.components.courses.webview_pane import CoursesWebViewPane, is_external_meeting_url
+from gui.components.courses.webview_pane import CoursesWebViewPane
 from gui.components.detail_view import DetailView
 from gui.core.theme import C
-from gui.view_models.courses_state import safe_http_url
+from gui.view_models.courses_state import format_file_size, safe_http_url
 
 logger = logging.getLogger(__name__)
 _SAFE_TMP_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -177,6 +179,7 @@ class CoursesCoordinator:
         self._submission_workflow_factory = submission_workflow_factory
         self._all_assignments_provider = all_assignments_provider
         self._initial_loaded = False
+        self._attachment_load_seq = 0
 
         if hasattr(self.preview_server, "register_session_provider"):
             if courses_client is not None:
@@ -299,13 +302,28 @@ class CoursesCoordinator:
             get_client=lambda src=course.source: self._client_for(src),
             on_status_changed=self._on_assignment_status_changed,
             submission_workflow_factory=self._submission_workflow_factory,
+            embedded_in_pane=True,
+            on_open_url=self._handle_course_url_action,
         )
+        pane_assign_holder: dict[str, PaneAssignmentView] = {}
+
+        def _reload_assign() -> None:
+            pa = pane_assign_holder.get("view")
+            if pa is not None:
+                pa.show_loading(payload)
+                self._schedule(self._load_pane_assignment_async, pa, payload)
+
         pane_assign = PaneAssignmentView(
             detail_view=detail_view,
             title=mod.name or "Bài tập",
             on_close=self.courses_view.pop_overlay,
+            on_refresh=_reload_assign,
+            on_open_webview=lambda t=(mod.name or "Bài tập"), u=payload["url"], s=course.source, m=mod: self.open_in_app_webview(
+                s, t, u, tag=f"webview:assign:{m.cmid}"
+            ),
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
+        pane_assign_holder["view"] = pane_assign
         self.courses_view.push_overlay(pane_assign, tag=f"assign:{mod.cmid}")
         pane_assign.show_loading(payload)
         self._schedule(self._load_pane_assignment_async, pane_assign, payload)
@@ -342,17 +360,14 @@ class CoursesCoordinator:
         *,
         tag: str = "",
     ) -> None:
-        """Open a safe HTTP(S) URL inside authenticated Pane-3 CoursesWebViewPane."""
+        """Open any safe HTTP(S) URL inside authenticated Pane-3 CoursesWebViewPane."""
         safe_url = safe_http_url(url)
         if not safe_url:
-            return
-        if is_external_meeting_url(safe_url):
-            self._launch_url_safe(safe_url)
             return
         pane = CoursesWebViewPane(
             page=self._page,
             source=source,
-            title=title or "Nội dung môn học",
+            title=title or "Trình duyệt trong ứng dụng",
             url=safe_url,
             preview_server=self.preview_server,
             session_client=self._client_for(source),
@@ -367,7 +382,7 @@ class CoursesCoordinator:
         safe_url = safe_http_url(url)
         if not safe_url:
             return
-        if is_external_meeting_url(safe_url) or (
+        if (
             self._activity_service is None
             and self._courses_client is None
             and self._thnn_client is None
@@ -620,33 +635,87 @@ class CoursesCoordinator:
             on_open_external=lambda n, b: self._schedule(
                 self._open_external_async, n, b
             ),
+            on_open_link=self._handle_course_url_action,
             webview_builder=_try_build_embedded_webview,
             pdf_cache_dir=getattr(self.preview_cache, "cache_dir", None),
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")
 
+    def _dismiss_overlay_instance(self, target: ft.Control) -> None:
+        dismiss_fn = getattr(self.courses_view, "_dismiss_overlay_instance", None)
+        if callable(dismiss_fn):
+            dismiss_fn(target)
+            return
+        overlays = getattr(self.courses_view, "_overlays", None)
+        if isinstance(overlays, list) and overlays and overlays[-1] is target:
+            self.courses_view.pop_overlay()
+
     async def open_attachment_async(
         self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
     ) -> None:
-        """Fetch an attachment (using preview cache) and open its in-app viewer."""
+        """Show immediate loading state in Pane 3, fetch attachment (cache-first), and open viewer."""
+        self._attachment_load_seq += 1
+        req_seq = self._attachment_load_seq
+        size_hint = format_file_size(att.file_size)
+        subtitle = f"Đang tải xuống · {size_hint}" if size_hint else "Đang tải tài liệu từ Moodle..."
+        loading_overlay = PaneLoadingOverlay(
+            title=att.file_name or mod.name or "Tài liệu",
+            subtitle=subtitle,
+            status_message=f"Đang tải «{att.file_name}» vào bộ nhớ đệm...",
+            preset="archive" if (att.is_archive or att.preview_kind == "archive") else "document",
+            on_back=self.courses_view.pop_overlay,
+            on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+        )
+        self.courses_view.push_overlay(loading_overlay, tag=f"viewer:load:{req_seq}")
         try:
+            await asyncio.sleep(0)
             raw = await self._fetch_attachment_bytes_async(course.source, att)
+            if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+                return
+            loading_overlay.set_status(
+                f"Đang dựng trình xem cho «{att.file_name}»...",
+                subtitle=f"Hoàn tất tải · {format_file_size(len(raw)) or 'Moodle'}",
+            )
+            await asyncio.sleep(0)
+            if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+                return
+            self._dismiss_overlay_instance(loading_overlay)
             self.open_attachment_bytes_in_overlay(course, mod, att, raw)
         except Exception as exc:
             logger.warning("Open attachment failed for %s: %s", att.file_name, exc)
-            self._show_snack(f"Không thể mở {att.file_name}: {exc}")
+            self._dismiss_overlay_instance(loading_overlay)
+            safe_fallback = safe_http_url(mod.web_url) or safe_http_url(att.file_url)
+            err_holder: dict[str, PaneErrorOverlay] = {}
+            err_overlay = PaneErrorOverlay(
+                title=att.file_name or mod.name or "Tài liệu",
+                message=f"Không thể tải hoặc mở «{att.file_name}».\nChi tiết: {exc}",
+                on_back=self.courses_view.pop_overlay,
+                on_retry=lambda c=course, m=mod, a=att: (
+                    self._dismiss_overlay_instance(err_holder["view"]),
+                    self._schedule(self.open_attachment_async, c, m, a),
+                ),
+                on_open_webview=(
+                    (lambda u=safe_fallback, s=course.source, t=att.file_name: self.open_in_app_webview(s, t, u))
+                    if safe_fallback
+                    else None
+                ),
+                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            )
+            err_holder["view"] = err_overlay
+            self.courses_view.push_overlay(err_overlay, tag=f"viewer:error:{mod.cmid}")
 
     async def save_attachment_async(
         self, att: CourseAttachment, source: str = "courses"
     ) -> None:
-        """Fetch an attachment and prompt the user to save it locally."""
+        """Fetch an attachment with user feedback and prompt to save it locally."""
+        self._show_snack(f"Đang tải xuống «{att.file_name}»...")
         try:
             raw = await self._fetch_attachment_bytes_async(source, att)
             await self._save_bytes_async(att.file_name, raw)
         except Exception as exc:
             logger.warning("Save attachment failed for %s: %s", att.file_name, exc)
-            self._show_snack(f"Lỗi tải file: {exc}")
+            self._show_snack(f"Lỗi tải file «{att.file_name}»: {exc}")
 
     async def _save_bytes_async(self, file_name: str, data: bytes) -> None:
         try:

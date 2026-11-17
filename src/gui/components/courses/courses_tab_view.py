@@ -17,6 +17,8 @@ from core.courses.models import (
     CourseSummary,
     RecentMaterialEntry,
 )
+from gui.components.courses._shared import PaneLoadingOverlay
+from gui.components.courses.adaptive_nav import RAIL_BREAKPOINT, RAIL_WIDTH
 from gui.components.courses.course_detail_pane import CourseDetailPane
 from gui.components.courses.course_list_pane import CourseListPane
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
@@ -88,6 +90,7 @@ class CoursesTabView(ft.Container):
         self._catalog_request_seq = 0
         self._detail_request_seq = 0
         self._grade_request_seq = 0
+        self._module_open_seq = 0
 
         self._list_pane = CourseListPane(
             on_select_course=lambda key: self._schedule_task(self._select_course_async, key),
@@ -239,17 +242,19 @@ class CoursesTabView(ft.Container):
         page = self._get_page()
         page_w = float(getattr(page, "width", 0) or self._current_width or 1100.0)
         page_h = float(getattr(page, "height", 0) or 760.0)
-        has_rail = page_w >= 720.0
-        rail_w = 73.0 if has_rail else 0.0
+        is_web = bool(getattr(page, "web", False))
+        has_rail = page_w >= float(RAIL_BREAKPOINT)
+        rail_w = float(RAIL_WIDTH + 1) if has_rail else 0.0
         list_w = (
             321.0
             if (self._layout_mode == "wide" and not self._state.pane3_expanded)
             else 0.0
         )
         left = rail_w + list_w
-        top = 56.0
+        top = 0.0 if is_web else 35.0
+        bottom_inset = 0.0 if has_rail else 80.0
         width = max(240.0, page_w - left)
-        height = max(240.0, page_h - top - 32.0)
+        height = max(200.0, page_h - top - bottom_inset)
         return (left, top, width, height)
 
     def _sync_pane3_bounds(self) -> None:
@@ -979,11 +984,24 @@ class CoursesTabView(ft.Container):
             content=card,
         )
 
+    def _dismiss_overlay_instance(self, target: ft.Control) -> None:
+        if not any(item is target for item in self._overlays):
+            return
+        self._dispose_overlay(target)
+        self._overlays = [item for item in self._overlays if item is not target]
+        self._workspace_stack.controls = [self._detail_pane, *self._overlays]
+        self._rebuild_layout()
+        self._safe_update()
+        self._sync_pane3_bounds()
+
     async def _handle_open_module_async(self, mod: CourseModuleItem) -> None:
         course = self._state.selected_course()
         if course is None:
             return
+        self._module_open_seq += 1
+        req_seq = self._module_open_seq
         strategy = mod.open_strategy
+        loading_overlay: Optional[PaneLoadingOverlay] = None
         try:
             if strategy == "assignment_detail":
                 await _invoke_callback(self._on_open_assignment, course, mod)
@@ -994,14 +1012,28 @@ class CoursesTabView(ft.Container):
             if strategy == "external_url":
                 resolved = ""
                 if self._svc is not None and hasattr(self._svc, "resolve_module_url"):
+                    loading_overlay = PaneLoadingOverlay(
+                        title=mod.name or "Đang mở liên kết...",
+                        subtitle="Đang phân giải đường dẫn từ Moodle...",
+                        status_message="Đang kết nối tới liên kết, sẽ mở ngay trong ứng dụng...",
+                        preset="activity",
+                        on_back=self.pop_overlay,
+                        on_toggle_expand=self.toggle_pane3_expanded,
+                    )
+                    self.push_overlay(loading_overlay, tag=f"module:resolve:{req_seq}")
                     resolved = await asyncio.to_thread(
                         self._svc.resolve_module_url, course.source, mod
                     )
+                    if req_seq != self._module_open_seq or loading_overlay._disposed:
+                        return
                 safe_url = (
                     safe_http_url(resolved)
                     or safe_http_url(mod.url)
                     or safe_http_url(mod.web_url)
                 )
+                if loading_overlay is not None:
+                    self._dismiss_overlay_instance(loading_overlay)
+                    loading_overlay = None
                 await self._record_recent_best_effort(course, mod)
                 if safe_url:
                     await _invoke_callback(self._on_launch_url, safe_url)
@@ -1033,9 +1065,23 @@ class CoursesTabView(ft.Container):
                 and self._svc is not None
                 and hasattr(self._svc, "resolve_module_attachments")
             ):
+                loading_overlay = PaneLoadingOverlay(
+                    title=mod.name or "Tài liệu",
+                    subtitle="Đang lấy thông tin tệp đính kèm...",
+                    status_message="Đang tải danh sách tài liệu từ Moodle...",
+                    preset="archive" if mod.modname == "folder" else "document",
+                    on_back=self.pop_overlay,
+                    on_toggle_expand=self.toggle_pane3_expanded,
+                )
+                self.push_overlay(loading_overlay, tag=f"module:resolve:{req_seq}")
                 resolved_atts = await asyncio.to_thread(
                     self._svc.resolve_module_attachments, course.source, mod
                 )
+                if req_seq != self._module_open_seq or loading_overlay._disposed:
+                    return
+                if loading_overlay is not None:
+                    self._dismiss_overlay_instance(loading_overlay)
+                    loading_overlay = None
                 if resolved_atts:
                     resolved_mod = replace(mod, attachments=resolved_atts)
                     if len(resolved_atts) > 1 or mod.modname == "folder":
@@ -1060,6 +1106,8 @@ class CoursesTabView(ft.Container):
             if fallback_url:
                 await _invoke_callback(self._on_launch_url, fallback_url)
         except Exception as exc:
+            if loading_overlay is not None:
+                self._dismiss_overlay_instance(loading_overlay)
             logger.warning("Failed to open module %s: %s", mod.cmid, exc)
             self._state.offline_notice = f"Không thể mở mục này: {_format_err(exc)}"
             self._render()
