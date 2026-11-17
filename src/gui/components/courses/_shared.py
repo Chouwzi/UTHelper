@@ -575,6 +575,23 @@ class PaneLoadingOverlay(ft.Container):
             self._subtitle_text.value = subtitle
         safe_control_update(self)
 
+    def set_progress(
+        self,
+        fraction: Optional[float],
+        *,
+        message: Optional[str] = None,
+        subtitle: Optional[str] = None,
+    ) -> None:
+        if fraction is None:
+            self._progress_bar.value = None
+        else:
+            self._progress_bar.value = max(0.03, min(1.0, float(fraction)))
+        if message is not None:
+            self._status_label.value = message
+        if subtitle is not None:
+            self._subtitle_text.value = subtitle
+        safe_control_update(self)
+
     def set_expanded(self, expanded: bool, *, visible: bool = True) -> None:
         self._expanded = bool(expanded)
         self._show_expand_toggle = bool(visible)

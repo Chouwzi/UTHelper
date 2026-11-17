@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import html
 import logging
 import math
@@ -208,6 +209,13 @@ def _mark_new_modules(
     ]
 
 
+@dataclass
+class _InflightDownload:
+    event: threading.Event
+    data: Optional[bytes] = None
+    error: Optional[BaseException] = None
+
+
 class CourseCatalogService:
     """Thread-safe coordinator for cached course catalogs, delta sync, and THNN lock."""
 
@@ -231,6 +239,8 @@ class CourseCatalogService:
         self._thnn_lock = threading.Lock()
         self._catalog_lock = threading.Lock()
         self._error_lock = threading.Lock()
+        self._inflight_lock = threading.Lock()
+        self._inflight_downloads: dict[tuple[str, str], _InflightDownload] = {}
         self._last_delta_check: dict[str, int] = {}
         self._last_thnn_error: str = ""
         self._last_courses_error: str = ""
@@ -322,9 +332,13 @@ class CourseCatalogService:
         return delta >= _safe_max_age_seconds(max_age_hours)
 
     def refresh_catalog(self, include_thnn: bool = False) -> list[CourseSummary]:
-        """Fetch course summaries and merge with cache without losing data on failure."""
+        """Fetch course summaries in parallel across providers and merge with cache safely."""
         fresh_courses: Optional[list[CourseSummary]] = None
-        if self._courses_provider is not None:
+        fresh_thnn: Optional[list[CourseSummary]] = None
+
+        def _fetch_courses_part() -> Optional[list[CourseSummary]]:
+            if self._courses_provider is None:
+                return None
             try:
                 candidate = self._call_provider(
                     "courses",
@@ -332,18 +346,19 @@ class CourseCatalogService:
                     context="fetch_courses",
                 )
                 if candidate:
-                    fresh_courses = list(candidate)
-                else:
-                    logger.warning(
-                        "COURSES provider returned empty catalog; preserving cached courses"
-                    )
+                    return list(candidate)
+                logger.warning(
+                    "COURSES provider returned empty catalog; preserving cached courses"
+                )
             except CourseProviderError:
                 pass
+            return None
 
-        fresh_thnn: Optional[list[CourseSummary]] = None
-        if include_thnn and self._thnn_provider is not None:
+        def _fetch_thnn_part() -> Optional[list[CourseSummary]]:
+            if not include_thnn or self._thnn_provider is None:
+                return None
             try:
-                fresh_thnn = list(
+                return list(
                     self._call_provider(
                         "thnn",
                         self._thnn_provider.fetch_courses,
@@ -351,7 +366,17 @@ class CourseCatalogService:
                     )
                 )
             except CourseProviderError:
-                pass
+                return None
+
+        if self._courses_provider is not None and include_thnn and self._thnn_provider is not None:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="CatalogSync") as pool:
+                fut_c = pool.submit(_fetch_courses_part)
+                fut_t = pool.submit(_fetch_thnn_part)
+                fresh_courses = fut_c.result()
+                fresh_thnn = fut_t.result()
+        else:
+            fresh_courses = _fetch_courses_part()
+            fresh_thnn = _fetch_thnn_part()
 
         with self._catalog_lock:
             snap = self._cache.load_catalog()
@@ -680,7 +705,12 @@ class CourseCatalogService:
         raise exc
 
     def _download_bytes(
-        self, source: CourseSource, file_url: str, *, raise_on_empty: bool = False
+        self,
+        source: CourseSource,
+        file_url: str,
+        *,
+        raise_on_empty: bool = False,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Optional[bytes]:
         valid_source = _validate_source(source)
         safe_url = _safe_http_url(file_url)
@@ -698,8 +728,52 @@ class CourseCatalogService:
                 )
             return None
 
+        inflight_key = (valid_source, safe_url)
+        with self._inflight_lock:
+            existing_flight = self._inflight_downloads.get(inflight_key)
+            if existing_flight is None:
+                flight = _InflightDownload(event=threading.Event())
+                self._inflight_downloads[inflight_key] = flight
+                is_leader = True
+            else:
+                flight = existing_flight
+                is_leader = False
+
+        if not is_leader:
+            flight.event.wait(timeout=65.0)
+            if flight.error is not None:
+                if raise_on_empty or isinstance(flight.error, CourseProviderError):
+                    raise flight.error
+                return None
+            if not flight.data and raise_on_empty:
+                self._raise_download_error(
+                    valid_source, f"Failed to download attachment from {valid_source}"
+                )
+            if flight.data and callable(progress_callback):
+                try:
+                    progress_callback(len(flight.data), len(flight.data))
+                except Exception:
+                    pass
+            return flight.data
+
         def _fetch() -> Optional[bytes]:
-            raw = provider.download_file(safe_url)
+            dl_fn = provider.download_file
+            accepts_progress = False
+            if progress_callback is not None:
+                try:
+                    import inspect
+
+                    sig = inspect.signature(dl_fn)
+                    accepts_progress = "progress_callback" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    accepts_progress = False
+            if accepts_progress and progress_callback is not None:
+                raw = dl_fn(safe_url, progress_callback=progress_callback)  # type: ignore[call-arg]
+            else:
+                raw = dl_fn(safe_url)
             if not raw:
                 if raise_on_empty:
                     raise CourseProviderError(
@@ -708,11 +782,32 @@ class CourseCatalogService:
                 return None
             return raw
 
-        return self._call_provider(valid_source, _fetch, context="download_file")
+        try:
+            data = self._call_provider(valid_source, _fetch, context="download_file")
+            flight.data = data
+            return data
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            flight.event.set()
+            with self._inflight_lock:
+                self._inflight_downloads.pop(inflight_key, None)
 
-    def fetch_attachment_bytes(self, source: CourseSource, file_url: str) -> bytes:
-        """Download raw attachment bytes from the site provider under session guards."""
-        raw = self._download_bytes(source, file_url, raise_on_empty=True)
+    def fetch_attachment_bytes(
+        self,
+        source: CourseSource,
+        file_url: str,
+        *,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bytes:
+        """Download raw attachment bytes from the site provider under SingleFlight & session guards."""
+        raw = self._download_bytes(
+            source,
+            file_url,
+            raise_on_empty=True,
+            progress_callback=progress_callback,
+        )
         if not raw:
             self._raise_download_error(
                 _validate_source(source),

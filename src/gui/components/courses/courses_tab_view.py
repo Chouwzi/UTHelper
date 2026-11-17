@@ -69,6 +69,7 @@ class CoursesTabView(ft.Container):
         on_launch_url: Optional[Callable[[str], Any]] = None,
         on_open_inline_page: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         on_open_custom_activity: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
+        on_course_loaded: Optional[Callable[[CourseSummary, list[Any]], Any]] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, **kwargs)
@@ -81,6 +82,7 @@ class CoursesTabView(ft.Container):
         self._on_launch_url = on_launch_url
         self._on_open_inline_page = on_open_inline_page
         self._on_open_custom_activity = on_open_custom_activity
+        self._on_course_loaded = on_course_loaded
 
         self._state = CoursesState()
         self._current_width: float = 1100.0
@@ -549,6 +551,9 @@ class CoursesTabView(ft.Container):
             self._state.sections = list(cached.sections)
             self._state.grades = list(cached.grades)
             self._state.last_synced_at = cached.last_synced_at
+            if cached.sections:
+                # 0ms instant cached view: clear blocking skeleton immediately while delta sync runs
+                self._state.loading_detail = False
             self._render()
 
             if course.has_unseen_updates:
@@ -557,14 +562,33 @@ class CoursesTabView(ft.Container):
                 if not self._is_active_detail(req_id, target_key):
                     return req_id
 
-            res = await asyncio.to_thread(
-                self._svc.sync_course_delta, course.source, course.id, False
-            )
+            has_groups_api = hasattr(self._svc, "get_user_course_groups")
+            if has_groups_api and course.source == "courses":
+                res, groups = await asyncio.gather(
+                    asyncio.to_thread(
+                        self._svc.sync_course_delta, course.source, course.id, False
+                    ),
+                    asyncio.to_thread(
+                        self._svc.get_user_course_groups, course.source, course.id
+                    ),
+                )
+            else:
+                res = await asyncio.to_thread(
+                    self._svc.sync_course_delta, course.source, course.id, False
+                )
+                groups = (
+                    await asyncio.to_thread(
+                        self._svc.get_user_course_groups, course.source, course.id
+                    )
+                    if has_groups_api
+                    else []
+                )
             if not self._is_active_detail(req_id, target_key):
                 return req_id
             self._state.sections = list(res.sections)
             if res.grades:
                 self._state.grades = list(res.grades)
+            self._state.user_groups = list(groups or [])
             self._state.last_synced_at = res.last_synced_at
             self._state.offline_notice = self._collect_provider_notice(
                 course, explicit_error=res.error
@@ -586,12 +610,10 @@ class CoursesTabView(ft.Container):
                     return req_id
                 self._state.grades = list(grades)
 
-            if hasattr(self._svc, "get_user_course_groups"):
-                groups = await asyncio.to_thread(
-                    self._svc.get_user_course_groups, course.source, course.id
+            if self._state.sections and callable(self._on_course_loaded):
+                self._dispatch_callback(
+                    self._on_course_loaded, course, list(self._state.sections)
                 )
-                if self._is_active_detail(req_id, target_key):
-                    self._state.user_groups = list(groups or [])
         except Exception as exc:
             logger.warning("Failed to select course %s: %s", target_key, exc)
             if self._is_active_detail(req_id, target_key):

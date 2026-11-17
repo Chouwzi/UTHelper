@@ -41,6 +41,7 @@ _MAX_NATIVE_TABLE_ROWS = 120
 _MAX_NATIVE_TABLE_COLS = 40
 _WHITESPACE_RE = re.compile(r"\s+")
 _MONO_FONT = "Consolas, 'Courier New', monospace"
+_SERIF_FONT = "Georgia, 'Times New Roman', Cambria, serif"
 
 
 def _split_markdown_by_outline(
@@ -96,6 +97,8 @@ class DocumentReaderView(ft.Container):
         on_open_link: Optional[Callable[[str], None]] = None,
         webview_builder: Optional[Callable[[str], Optional[ft.Control]]] = None,
         pdf_cache_dir: Optional[Path] = None,
+        preconverted: Optional[ConvertedDocument] = None,
+        preopened_pdf: Optional[PdfDocumentSession] = None,
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
@@ -122,12 +125,13 @@ class DocumentReaderView(ft.Container):
         self._sheet_col_page: int = 0
         self._sheet_filter_query: str = ""
         self._doc_search_query: str = ""
+        self._docx_scale: float = 1.0
         self._pptx_scale: float = 1.0
         self._pptx_page_index: int = 0
         self._pptx_search_query: str = ""
         self._pptx_outline_open: bool = False
-        self._pdf_session: Optional[PdfDocumentSession] = None
-        self._pdf_session_loaded: bool = False
+        self._pdf_session: Optional[PdfDocumentSession] = preopened_pdf
+        self._pdf_session_loaded: bool = preopened_pdf is not None
         self._pdf_page_index: int = 0
         self._pdf_scale: float = 1.6
         self._pdf_outline_open: bool = False
@@ -136,7 +140,9 @@ class DocumentReaderView(ft.Container):
         self._pdf_search_hit_pos: int = 0
         self._pdf_render_seq: int = 0
         self._disposed: bool = False
-        self._converted_cache: dict[bool, ConvertedDocument] = {}
+        self._converted_cache: dict[bool, ConvertedDocument] = (
+            {False: preconverted} if preconverted is not None else {}
+        )
         self._html_urls: dict[bool, str] = {}
         self._pdf_url: Optional[str] = None
         self._active_webview_url: Optional[str] = None
@@ -729,17 +735,39 @@ class DocumentReaderView(ft.Container):
         accent_color: str,
         base_bold: bool = False,
         base_italic: bool = False,
+        scale: float = 1.0,
+        first_line_px: int = 0,
+        line_height: float = 0.0,
     ) -> ft.Control:
-        """Build selectable Flet text control honoring inline bold/italic/underline/strike/code/links."""
+        """Build selectable Flet text control honoring inline styles, OOXML sizes, colors, fonts & indents."""
         t_align = self._flet_text_align(align)
-        has_special = any(
-            r.bold or r.italic or r.underline or r.strike or r.code or r.superscript or r.subscript or r.href
+        scaled_base = max(10, int(round(size * scale)))
+        lead_spaces = (
+            "\u00a0" * max(2, min(14, int(round((first_line_px * scale) / 4.2))))
+            if first_line_px > 0
+            else ""
+        )
+        eff_height = line_height if line_height >= 1.05 else None
+        has_special = bool(lead_spaces) or any(
+            r.bold
+            or r.italic
+            or r.underline
+            or r.strike
+            or r.code
+            or r.superscript
+            or r.subscript
+            or r.href
+            or r.font_size_pt > 0
+            or r.color
+            or r.bg_color
+            or r.font_kind
+            or "\t" in r.text
             for r in runs
         )
         if not runs or not has_special:
             return ft.Text(
                 plain_text,
-                size=size,
+                size=scaled_base,
                 weight=ft.FontWeight.W_700 if base_bold else ft.FontWeight.NORMAL,
                 italic=base_italic,
                 color=text_primary,
@@ -748,6 +776,8 @@ class DocumentReaderView(ft.Container):
             )
 
         spans: list[ft.TextSpan] = []
+        if lead_spaces:
+            spans.append(ft.TextSpan(text=lead_spaces))
         for run in runs:
             decorations = []
             if run.underline or run.href:
@@ -759,37 +789,52 @@ class DocumentReaderView(ft.Container):
                 if len(decorations) > 1
                 else (decorations[0] if decorations else None)
             )
-            eff_size = (
-                max(10, size - 3)
-                if (run.superscript or run.subscript)
-                else (max(11, size - 1) if run.code else size)
+            # Convert OOXML pt -> logical px (~1.28x readability ratio), scaled by zoom
+            run_base_px = (
+                max(10, int(round(run.font_size_pt * 1.28 * scale)))
+                if run.font_size_pt > 0
+                else scaled_base
             )
+            eff_size = (
+                max(9, run_base_px - 3)
+                if (run.superscript or run.subscript)
+                else (max(10, run_base_px - 1) if run.code else run_base_px)
+            )
+            font_fam = (
+                _MONO_FONT
+                if (run.code or run.font_kind == "mono")
+                else (_SERIF_FONT if run.font_kind == "serif" else None)
+            )
+            fg_col = accent_color if run.href else (run.color or text_primary)
             span_style = ft.TextStyle(
-                color=accent_color if run.href else text_primary,
+                color=fg_col,
+                bgcolor=run.bg_color or None,
                 size=eff_size,
+                height=eff_height,
                 weight=(
                     ft.FontWeight.W_700
                     if (run.bold or base_bold)
                     else ft.FontWeight.NORMAL
                 ),
                 italic=(run.italic or base_italic),
-                font_family=_MONO_FONT if run.code else None,
+                font_family=font_fam,
                 decoration=deco_val,
             )
+            disp_text = run.text.replace("\t", "    ")
             if run.href and callable(self._on_open_link):
                 spans.append(
                     ft.TextSpan(
-                        text=run.text,
+                        text=disp_text,
                         style=span_style,
                         on_click=lambda _e, u=run.href: self._handle_link_tap(u),
                     )
                 )
             else:
-                spans.append(ft.TextSpan(text=run.text, style=span_style))
+                spans.append(ft.TextSpan(text=disp_text, style=span_style))
 
         return ft.Text(
             spans=spans,
-            size=size,
+            size=scaled_base,
             color=text_primary,
             text_align=t_align,
             selectable=True,
@@ -800,36 +845,66 @@ class DocumentReaderView(ft.Container):
         *,
         rich_rows: tuple[tuple[object, ...], ...] = (),
         plain_rows: tuple[tuple[str, ...], ...] = (),
+        col_widths: tuple[float, ...] = (),
         has_borders: bool = True,
+        scale: float = 1.0,
         bg_color: str,
         surface_color: str,
         text_primary: str,
         border_color: str,
         accent_color: str,
     ) -> ft.Control:
-        """Render responsive Word/PPTX tables that wrap long text & honor col_span/borderless layout."""
+        """Render responsive Word/PPTX tables honoring column widths, vMerge, shading, and bottom rules."""
         grid_rows: list[ft.Control] = []
         source_rows = rich_rows if rich_rows else tuple(
-            tuple({"text": c, "runs": (), "col_span": 1, "align": "left", "is_header": r_i == 0 and has_borders, "images": ()} for c in row)
+            tuple(
+                {
+                    "text": c,
+                    "runs": (),
+                    "col_span": 1,
+                    "align": "left",
+                    "is_header": r_i == 0 and has_borders,
+                    "images": (),
+                }
+                for c in row
+            )
             for r_i, row in enumerate(plain_rows)
         )
         for r_idx, row in enumerate(source_rows):
             row_cells: list[ft.Control] = []
+            logical_col = 0
             for cell in row:
                 if isinstance(cell, dict):
                     c_text = str(cell["text"])
                     c_runs: tuple[DocxTextRun, ...] = ()
                     c_span = 1
+                    c_vcont = False
                     c_align = str(cell["align"])
+                    c_valign = "top"
                     c_header = bool(cell["is_header"])
+                    c_bg = ""
+                    c_brule = False
                     c_imgs: tuple[tuple[str, bytes], ...] = ()
                 else:
                     c_text = str(getattr(cell, "text", ""))
                     c_runs = tuple(getattr(cell, "runs", ()))
                     c_span = max(1, int(getattr(cell, "col_span", 1)))
+                    c_vcont = bool(getattr(cell, "is_vmerge_cont", False))
                     c_align = str(getattr(cell, "align", "left"))
+                    c_valign = str(getattr(cell, "v_align", "top"))
                     c_header = bool(getattr(cell, "is_header", r_idx == 0 and has_borders))
+                    c_bg = str(getattr(cell, "bg_color", "") or "")
+                    c_brule = bool(getattr(cell, "has_bottom_rule", False))
                     c_imgs = tuple(getattr(cell, "images", ()))
+
+                # Compute proportional flex weight from tblGrid col_widths when available
+                if col_widths and logical_col < len(col_widths):
+                    end_col = min(len(col_widths), logical_col + c_span)
+                    weight_sum = sum(col_widths[logical_col:end_col]) or (0.1 * c_span)
+                    flex_expand = max(1, int(round(weight_sum * 100)))
+                else:
+                    flex_expand = c_span * 10
+                logical_col += c_span
 
                 cell_children: list[ft.Control] = []
                 if c_text or c_runs:
@@ -842,27 +917,73 @@ class DocumentReaderView(ft.Container):
                             text_primary=text_primary,
                             accent_color=accent_color,
                             base_bold=(c_header and has_borders),
+                            scale=scale,
                         )
                     )
                 for _im_name, im_bytes in c_imgs:
                     if im_bytes:
                         cell_children.append(
-                            ft.Image(src=im_bytes, width=180, fit=ft.BoxFit.CONTAIN)
+                            ft.Image(
+                                src=im_bytes,
+                                width=max(80, int(round(180 * scale))),
+                                fit=ft.BoxFit.CONTAIN,
+                            )
                         )
+                if not has_borders and c_brule:
+                    # Iconic bottom rule (e.g., under "Độc lập - Tự do - Hạnh phúc")
+                    cell_children.append(
+                        ft.Container(
+                            alignment=ft.Alignment.CENTER
+                            if c_align == "center"
+                            else ft.Alignment.CENTER_LEFT,
+                            padding=ft.Padding.only(top=2),
+                            content=ft.Container(
+                                width=140 if c_align == "center" else None,
+                                height=1,
+                                bgcolor=text_primary,
+                            ),
+                        )
+                    )
+
+                if has_borders:
+                    cell_border = ft.Border(
+                        top=ft.BorderSide(0.0 if c_vcont else 0.5, border_color),
+                        bottom=ft.BorderSide(0.5, border_color),
+                        left=ft.BorderSide(0.5, border_color),
+                        right=ft.BorderSide(0.5, border_color),
+                    )
+                else:
+                    cell_border = None
+
+                eff_cell_bg = c_bg or (
+                    bg_color
+                    if (c_header and has_borders)
+                    else (surface_color if has_borders else None)
+                )
+                v_alignment = (
+                    ft.MainAxisAlignment.CENTER
+                    if c_valign == "center"
+                    else (
+                        ft.MainAxisAlignment.END
+                        if c_valign == "bottom"
+                        else ft.MainAxisAlignment.START
+                    )
+                )
                 row_cells.append(
                     ft.Container(
-                        expand=c_span,
+                        expand=flex_expand,
                         padding=ft.Padding.symmetric(
                             horizontal=8 if has_borders else 6,
                             vertical=6 if has_borders else 4,
                         ),
-                        bgcolor=(
-                            bg_color
-                            if (c_header and has_borders)
-                            else (surface_color if has_borders else None)
+                        bgcolor=eff_cell_bg,
+                        border=cell_border,
+                        content=ft.Column(
+                            spacing=4,
+                            alignment=v_alignment,
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                            controls=cell_children,
                         ),
-                        border=ft.Border.all(0.5, border_color) if has_borders else None,
-                        content=ft.Column(spacing=4, controls=cell_children),
                     )
                 )
             if row_cells:
@@ -1400,19 +1521,49 @@ class DocumentReaderView(ft.Container):
         )
 
     @staticmethod
-    def _block_uses_markdown_plain(block: DocxRichBlock) -> bool:
-        """Keep unstyled body paragraphs & left headings as Markdown so md_style_sheet applies."""
-        if block.section_role != "body" or block.align != "left" or block.indent_level > 0:
+    def _block_uses_markdown_plain(block: DocxRichBlock, *, scale: float = 1.0) -> bool:
+        """Keep unstyled 100%-zoom body paragraphs & left headings as Markdown so md_style_sheet applies."""
+        if abs(scale - 1.0) > 0.01:
+            return False
+        if (
+            block.section_role != "body"
+            or block.align != "left"
+            or block.indent_level > 0
+            or block.indent_left_px > 0
+            or block.indent_right_px > 0
+            or block.first_line_px > 0
+            or block.bg_color
+            or block.has_bottom_border
+            or block.has_box_border
+        ):
             return False
         if block.kind == "list_item" and block.list_marker not in {"", "•"}:
             return False
         return not any(
-            r.bold or r.italic or r.underline or r.strike or r.code or r.superscript or r.subscript or r.href
+            r.bold
+            or r.italic
+            or r.underline
+            or r.strike
+            or r.code
+            or r.superscript
+            or r.subscript
+            or r.href
+            or r.font_size_pt > 0
+            or r.color
+            or r.bg_color
+            or r.font_kind
             for r in (block.runs or ())
         )
 
+    def _open_print_html_in_webview(self, converted: ConvertedDocument) -> None:
+        if not converted.html_document or not callable(self._on_open_link):
+            return
+        html_url = self._try_register_html_url(bool(self._dark_reader), converted.html_document)
+        if html_url:
+            self._on_open_link(html_url)
+
     def _build_docx_rich_body(self, converted: ConvertedDocument) -> ft.Control:
-        """Render rich DOCX flow (headers/footers, inline styles, numbered lists, links, grid tables, images)."""
+        """Render high-fidelity A4 Word pages (styles, theme colors, indents, tables, footnotes, zoom)."""
         (
             bg_color,
             surface_color,
@@ -1423,6 +1574,7 @@ class DocumentReaderView(ft.Container):
             _on_accent,
         ) = self._reader_palette()
         self._body_host.bgcolor = bg_color
+        scale = self._docx_scale
         md_style = self._build_md_style_sheet(
             surface_color=surface_color,
             text_primary=text_primary,
@@ -1432,9 +1584,13 @@ class DocumentReaderView(ft.Container):
         )
 
         query_lower = self._doc_search_query.strip().lower()
-        controls: list[ft.Control] = []
+        pages_controls: list[list[ft.Control]] = [[]]
         pending_md: list[str] = []
         pending_anchor: Optional[str] = None
+        match_count = 0
+
+        def _cur_page() -> list[ft.Control]:
+            return pages_controls[-1]
 
         def _flush_md() -> None:
             nonlocal pending_anchor
@@ -1447,7 +1603,7 @@ class DocumentReaderView(ft.Container):
                 md_style_sheet=md_style,
                 on_tap_link=lambda e: self._handle_link_tap(str(getattr(e, "data", "") or "")),
             )
-            controls.append(
+            _cur_page().append(
                 ft.Container(
                     key=ft.ScrollKey(pending_anchor) if pending_anchor else None,
                     content=md_widget,
@@ -1456,40 +1612,77 @@ class DocumentReaderView(ft.Container):
             pending_md.clear()
             pending_anchor = None
 
+        def _wrap_para_decoration(block: DocxRichBlock, inner: ft.Control) -> ft.Control:
+            left_pad = int(round((max(block.indent_level * 20, block.indent_left_px)) * scale))
+            right_pad = int(round(block.indent_right_px * scale))
+            top_pad = int(round(block.space_before_px * scale * 0.6))
+            bot_pad = int(round(block.space_after_px * scale * 0.6))
+            bdr = None
+            if block.has_box_border:
+                bdr = ft.Border.all(1, border_color)
+            elif block.has_bottom_border:
+                bdr = ft.Border.only(bottom=ft.BorderSide(1, border_color))
+            has_box_pad = bool(block.bg_color or block.has_box_border)
+            return ft.Container(
+                key=ft.ScrollKey(block.anchor_id) if block.anchor_id else None,
+                margin=ft.Padding.only(top=top_pad, bottom=bot_pad) if (top_pad or bot_pad) else None,
+                padding=ft.Padding(
+                    left=left_pad + (8 if has_box_pad else 0),
+                    right=right_pad + (8 if has_box_pad else 0),
+                    top=6 if has_box_pad else 0,
+                    bottom=6 if (has_box_pad or block.has_bottom_border) else 0,
+                ),
+                bgcolor=block.bg_color or None,
+                border=bdr,
+                border_radius=6 if has_box_pad else 0,
+                content=inner,
+            )
+
         for block in converted.docx_blocks:
+            if block.kind == "page_break":
+                if not query_lower and _cur_page():
+                    _flush_md()
+                    pages_controls.append([])
+                continue
+
             if query_lower:
                 if block.kind == "table":
                     hay = " ".join(cell for r in block.rows for cell in r).lower()
                 else:
                     hay = (block.text or "").lower()
-                if block.kind != "image" and query_lower not in hay:
+                if block.kind in {"image", "hr"} or query_lower not in hay:
                     continue
+                match_count += 1
 
-            if block.kind == "heading":
+            # Soft-paginate very long unpaginated documents (~55 blocks/sheet) for smooth ListView virtualization
+            if not query_lower and len(_cur_page()) >= 55:
                 _flush_md()
-                if self._block_uses_markdown_plain(block):
+                pages_controls.append([])
+
+            if block.kind == "hr":
+                _flush_md()
+                _cur_page().append(ft.Divider(height=10, color=border_color))
+            elif block.kind == "heading":
+                _flush_md()
+                if self._block_uses_markdown_plain(block, scale=scale):
                     pending_anchor = block.anchor_id or None
                     pending_md.append(f"{'#' * max(1, block.level)} {block.text}")
                     _flush_md()
                 else:
                     h_size = max(14, 22 - max(1, block.level) * 2)
-                    controls.append(
-                        ft.Container(
-                            key=ft.ScrollKey(block.anchor_id) if block.anchor_id else None,
-                            padding=ft.Padding.only(top=6, bottom=2),
-                            content=self._build_rich_runs_text(
-                                plain_text=block.text,
-                                runs=block.runs,
-                                size=h_size,
-                                align=block.align,
-                                text_primary=text_primary,
-                                accent_color=accent_color,
-                                base_bold=True,
-                            ),
-                        )
+                    h_txt = self._build_rich_runs_text(
+                        plain_text=block.text,
+                        runs=block.runs,
+                        size=h_size,
+                        align=block.align,
+                        text_primary=text_primary,
+                        accent_color=accent_color,
+                        base_bold=True,
+                        scale=scale,
                     )
+                    _cur_page().append(_wrap_para_decoration(block, h_txt))
             elif block.kind == "paragraph":
-                if self._block_uses_markdown_plain(block):
+                if self._block_uses_markdown_plain(block, scale=scale):
                     pending_md.append(block.text)
                 else:
                     _flush_md()
@@ -1497,73 +1690,102 @@ class DocumentReaderView(ft.Container):
                     para_ctrl = self._build_rich_runs_text(
                         plain_text=block.text,
                         runs=block.runs,
-                        size=12 if role_muted else 14,
+                        size=11 if role_muted else 14,
                         align=block.align,
                         text_primary=text_secondary if role_muted else text_primary,
                         accent_color=accent_color,
+                        scale=scale,
+                        first_line_px=0 if role_muted else block.first_line_px,
+                        line_height=block.line_height,
                     )
-                    controls.append(
-                        ft.Container(
-                            padding=ft.Padding.only(left=block.indent_level * 18),
-                            content=para_ctrl,
+                    if role_muted:
+                        _cur_page().append(
+                            ft.Container(
+                                border=ft.Border.only(
+                                    bottom=ft.BorderSide(0.5, border_color)
+                                    if block.section_role == "header"
+                                    else ft.BorderSide(0, border_color),
+                                    top=ft.BorderSide(0.5, border_color)
+                                    if block.section_role == "footer"
+                                    else ft.BorderSide(0, border_color),
+                                ),
+                                padding=ft.Padding.symmetric(vertical=4),
+                                content=para_ctrl,
+                            )
                         )
-                    )
+                    else:
+                        _cur_page().append(_wrap_para_decoration(block, para_ctrl))
             elif block.kind == "list_item":
-                if self._block_uses_markdown_plain(block):
+                if self._block_uses_markdown_plain(block, scale=scale):
                     pending_md.append(f"- {block.text}")
                 else:
                     _flush_md()
                     marker = block.list_marker or "•"
-                    controls.append(
-                        ft.Container(
-                            padding=ft.Padding.only(left=block.indent_level * 18),
-                            content=ft.Row(
-                                spacing=8,
-                                vertical_alignment=ft.CrossAxisAlignment.START,
-                                controls=[
-                                    ft.Text(
-                                        marker,
-                                        size=13,
-                                        weight=ft.FontWeight.W_600,
-                                        color=accent_color,
-                                    ),
-                                    ft.Container(
-                                        expand=True,
-                                        content=self._build_rich_runs_text(
-                                            plain_text=block.text,
-                                            runs=block.runs,
-                                            size=14,
-                                            align=block.align,
-                                            text_primary=text_primary,
-                                            accent_color=accent_color,
-                                        ),
-                                    ),
-                                ],
+                    row_list = ft.Row(
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Text(
+                                marker,
+                                size=max(11, int(round(13 * scale))),
+                                weight=ft.FontWeight.W_600,
+                                color=accent_color,
                             ),
-                        )
+                            ft.Container(
+                                expand=True,
+                                content=self._build_rich_runs_text(
+                                    plain_text=block.text,
+                                    runs=block.runs,
+                                    size=14,
+                                    align=block.align,
+                                    text_primary=text_primary,
+                                    accent_color=accent_color,
+                                    scale=scale,
+                                    line_height=block.line_height,
+                                ),
+                            ),
+                        ],
                     )
+                    _cur_page().append(_wrap_para_decoration(block, row_list))
             elif block.kind == "image" and block.image_bytes:
                 _flush_md()
-                controls.append(
+                disp_w = (
+                    max(48, min(int(round(720 * scale)), int(round(block.image_width_px * scale))))
+                    if block.image_width_px > 0
+                    else None
+                )
+                img_align = (
+                    ft.Alignment.CENTER
+                    if block.align == "center"
+                    else (
+                        ft.Alignment.CENTER_RIGHT
+                        if block.align == "right"
+                        else ft.Alignment.CENTER
+                    )
+                )
+                _cur_page().append(
                     ft.Container(
                         bgcolor=bg_color,
                         border=ft.Border.all(1, border_color),
                         border_radius=8,
                         padding=8,
-                        alignment=ft.Alignment.CENTER,
+                        alignment=img_align,
                         content=ft.Image(
                             src=block.image_bytes,
+                            width=disp_w,
                             fit=ft.BoxFit.CONTAIN,
                         ),
                     )
                 )
             elif block.kind == "table" and (block.rich_rows or block.rows):
                 _flush_md()
-                controls.append(
+                _cur_page().append(
                     self._build_grid_table_control(
                         rich_rows=block.rich_rows,
                         plain_rows=block.rows,
+                        col_widths=block.col_widths,
                         has_borders=block.has_borders,
+                        scale=scale,
                         bg_color=bg_color,
                         surface_color=surface_color,
                         text_primary=text_primary,
@@ -1573,36 +1795,67 @@ class DocumentReaderView(ft.Container):
                 )
         _flush_md()
 
-        if not controls and not query_lower:
+        non_empty_pages = [p for p in pages_controls if p]
+        if not non_empty_pages and not query_lower:
             return self._build_text_or_markdown_body(converted)
-        if not controls:
-            controls.append(
-                ft.Text(
-                    "Không tìm thấy đoạn phù hợp từ khóa.",
-                    size=13,
-                    color=text_secondary,
-                )
-            )
+        if not non_empty_pages:
+            non_empty_pages = [
+                [
+                    ft.Text(
+                        "Không tìm thấy đoạn phù hợp từ khóa.",
+                        size=13,
+                        color=text_secondary,
+                    )
+                ]
+            ]
 
-        page_card = ft.Container(
-            width=840,
-            bgcolor=surface_color,
-            border=ft.Border.all(1, border_color),
-            border_radius=12,
-            padding=22,
-            content=ft.Column(spacing=10, controls=controls),
-        )
-        list_view = ft.ListView(
-            expand=True,
-            build_controls_on_demand=False,
-            padding=14,
-            spacing=10,
-            controls=[
+        paper_w = max(520, min(1160, int(round(816 * scale))))
+        paper_h_pad = max(18, int(round(36 * scale)))
+        paper_v_pad = max(18, int(round(28 * scale)))
+        total_sheets = len(non_empty_pages)
+        sheet_rows: list[ft.Control] = []
+        for idx_p, p_ctrls in enumerate(non_empty_pages, start=1):
+            sheet_footer = (
+                [
+                    ft.Container(
+                        alignment=ft.Alignment.CENTER_RIGHT,
+                        padding=ft.Padding.only(top=8),
+                        content=ft.Text(
+                            f"Trang {idx_p}/{total_sheets}",
+                            size=10,
+                            color=text_secondary,
+                        ),
+                    )
+                ]
+                if total_sheets > 1
+                else []
+            )
+            page_card = ft.Container(
+                width=paper_w,
+                bgcolor=surface_color,
+                border=ft.Border.all(1, border_color),
+                border_radius=8,
+                padding=ft.Padding.symmetric(horizontal=paper_h_pad, vertical=paper_v_pad),
+                content=ft.Column(
+                    spacing=8,
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    controls=[*p_ctrls, *sheet_footer],
+                ),
+            )
+            sheet_rows.append(
                 ft.Row(
+                    scroll=ft.ScrollMode.AUTO if scale > 1.05 else None,
                     alignment=ft.MainAxisAlignment.CENTER,
                     controls=[page_card],
                 )
-            ],
+            )
+
+        list_view = ft.ListView(
+            expand=True,
+            build_controls_on_demand=not bool(converted.outline),
+            padding=14,
+            spacing=14,
+            controls=sheet_rows,
         )
 
         def _set_doc_search(q: str) -> None:
@@ -1610,35 +1863,83 @@ class DocumentReaderView(ft.Container):
             self._body_host.content = self._build_docx_rich_body(converted)
             safe_control_update(self)
 
+        def _adjust_docx_zoom(delta: float) -> None:
+            self._docx_scale = max(0.75, min(1.85, round(self._docx_scale + delta, 2)))
+            self._body_host.content = self._build_docx_rich_body(converted)
+            safe_control_update(self)
+
+        def _reset_docx_zoom() -> None:
+            self._docx_scale = 1.0
+            self._body_host.content = self._build_docx_rich_body(converted)
+            safe_control_update(self)
+
+        meta_label = (
+            f"Khớp: {match_count}"
+            if query_lower
+            else (
+                f"{total_sheets} trang · {len(converted.outline)} đề mục"
+                if converted.outline
+                else f"Tài liệu Word · {total_sheets} trang"
+            )
+        )
+        toolbar_items: list[ft.Control] = [
+            ft.Text(meta_label, size=12, color=text_secondary),
+            ft.IconButton(
+                icon=ft.Icons.ZOOM_OUT_ROUNDED,
+                icon_size=18,
+                icon_color=text_primary,
+                tooltip="Thu nhỏ trang Word",
+                on_click=lambda _e: _adjust_docx_zoom(-0.15),
+            ),
+            ft.TextButton(
+                content=ft.Text(
+                    f"{int(round(scale * 100))}%",
+                    size=11,
+                    color=text_primary,
+                ),
+                tooltip="Đặt lại 100%",
+                style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=6, vertical=0)),
+                on_click=lambda _e: _reset_docx_zoom(),
+            ),
+            ft.IconButton(
+                icon=ft.Icons.ZOOM_IN_ROUNDED,
+                icon_size=18,
+                icon_color=text_primary,
+                tooltip="Phóng to trang Word",
+                on_click=lambda _e: _adjust_docx_zoom(0.15),
+            ),
+            ft.TextField(
+                value=self._doc_search_query,
+                hint_text="Tìm trong tài liệu Word...",
+                width=200,
+                height=32,
+                dense=True,
+                text_size=12,
+                color=text_primary,
+                bgcolor=bg_color,
+                border_color=border_color,
+                on_submit=lambda e: _set_doc_search(str(e.control.value or "")),
+            ),
+        ]
+        if converted.html_document and callable(self._on_open_link):
+            toolbar_items.append(
+                ft.TextButton(
+                    "Bản in A4 (WebView)",
+                    icon=ft.Icons.PRINT_OUTLINED,
+                    tooltip="Xem bố cục trang in HTML/CSS đầy đủ trong trình duyệt nội bộ",
+                    on_click=lambda _e: self._open_print_html_in_webview(converted),
+                )
+            )
+
         doc_toolbar = ft.Container(
             bgcolor=surface_color,
             border=ft.Border.only(bottom=ft.BorderSide(1, border_color)),
             padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             content=ft.Row(
                 wrap=True,
-                spacing=8,
+                spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                controls=[
-                    ft.Text(
-                        f"Đề mục: {len(converted.outline)}"
-                        if converted.outline
-                        else "Tài liệu Word",
-                        size=12,
-                        color=text_secondary,
-                    ),
-                    ft.TextField(
-                        value=self._doc_search_query,
-                        hint_text="Tìm trong tài liệu Word...",
-                        width=210,
-                        height=32,
-                        dense=True,
-                        text_size=12,
-                        color=text_primary,
-                        bgcolor=bg_color,
-                        border_color=border_color,
-                        on_submit=lambda e: _set_doc_search(str(e.control.value or "")),
-                    ),
-                ],
+                controls=toolbar_items,
             ),
         )
 

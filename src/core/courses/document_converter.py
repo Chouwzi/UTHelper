@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import base64
 import csv
 import datetime as dt
+import hashlib
 import html
 import io
 import posixpath
 import re
 import struct
+import threading
 import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 from urllib.parse import urlsplit
 from xml.parsers import expat
 
@@ -61,6 +64,7 @@ _READ_CHUNK_SIZE = 65536
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 _V_NS = "urn:schemas-microsoft-com:vml"
 _XL_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -129,36 +133,59 @@ class DocxTextRun:
     superscript: bool = False
     subscript: bool = False
     href: str = ""
+    font_size_pt: float = 0.0
+    color: str = ""
+    bg_color: str = ""
+    font_kind: str = ""  # "", "serif", "mono"
+    all_caps: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class DocxTableCell:
-    """Structured table cell supporting spans, alignment, header styling, and inline images."""
+    """Structured table cell supporting spans, widths, shading, borders, alignment, and images."""
 
     text: str = ""
     runs: tuple[DocxTextRun, ...] = ()
     col_span: int = 1
+    row_span: int = 1
+    is_vmerge_cont: bool = False
+    width_weight: float = 0.0
     align: str = "left"
+    v_align: str = "top"
     is_header: bool = False
+    bg_color: str = ""
+    has_bottom_rule: bool = False
     images: tuple[tuple[str, bytes], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class DocxRichBlock:
-    """Typed structured block preserved for rich in-app Word rendering."""
+    """Typed structured block preserved for high-fidelity in-app Word rendering."""
 
-    kind: Literal["heading", "paragraph", "list_item", "table", "image"]
+    kind: Literal["heading", "paragraph", "list_item", "table", "image", "page_break", "hr"]
     text: str = ""
     level: int = 0
     anchor_id: str = ""
     rows: tuple[tuple[str, ...], ...] = ()
     image_bytes: bytes = b""
     image_name: str = ""
+    image_width_px: int = 0
+    image_height_px: int = 0
     runs: tuple[DocxTextRun, ...] = ()
     align: str = "left"
     indent_level: int = 0
+    indent_left_px: int = 0
+    indent_right_px: int = 0
+    first_line_px: int = 0
+    space_before_px: int = 0
+    space_after_px: int = 0
+    line_height: float = 0.0
+    bg_color: str = ""
+    has_bottom_border: bool = False
+    has_box_border: bool = False
     list_marker: str = ""
     rich_rows: tuple[tuple[DocxTableCell, ...], ...] = ()
+    col_widths: tuple[float, ...] = ()
     has_borders: bool = True
     section_role: str = "body"
 
@@ -222,15 +249,26 @@ class ConvertedDocument:
     rich_slides: tuple[PptxSlideRich, ...] = ()
 
 
-def convert_document_bytes(
-    file_name: str,
+_DOC_LRU_LOCK = threading.Lock()
+_DOC_LRU_CACHE: OrderedDict[tuple[str, str, str, bool], tuple[int, ConvertedDocument]] = OrderedDict()
+_DOC_LRU_MAX_ENTRIES = 16
+_DOC_LRU_MAX_BYTES = 48 * 1024 * 1024
+_DOC_LRU_SINGLE_CAP = 12 * 1024 * 1024
+
+
+def clear_converted_document_cache() -> None:
+    """Clear the in-memory converted document LRU cache."""
+    with _DOC_LRU_LOCK:
+        _DOC_LRU_CACHE.clear()
+
+
+def _convert_document_uncached(
+    title: str,
     data: bytes,
     kind: PreviewKind,
     *,
     dark_mode: bool = False,
 ) -> ConvertedDocument:
-    """Convert raw document bytes into escaped HTML, Markdown, and structured metadata."""
-    title = file_name or "Tài liệu"
     is_ole2 = len(data) >= 8 and data[:8] == _OLE2_MAGIC
     try:
         if kind == "docx":
@@ -262,6 +300,42 @@ def convert_document_bytes(
             "Không thể đọc nội dung tệp do tệp bị hỏng, được bảo vệ mật khẩu hoặc vượt quá giới hạn an toàn.",
             dark_mode=dark_mode,
         )
+
+
+def convert_document_bytes(
+    file_name: str,
+    data: bytes,
+    kind: PreviewKind,
+    *,
+    dark_mode: bool = False,
+) -> ConvertedDocument:
+    """Convert raw document bytes into escaped HTML, Markdown, and structured metadata (LRU cached)."""
+    title = file_name or "Tài liệu"
+    raw_len = len(data)
+    use_cache = 0 < raw_len <= _DOC_LRU_SINGLE_CAP
+    cache_key: Optional[tuple[str, str, str, bool]] = None
+    if use_cache:
+        digest = hashlib.sha256(data).hexdigest()
+        cache_key = (digest, title, str(kind), bool(dark_mode))
+        with _DOC_LRU_LOCK:
+            hit = _DOC_LRU_CACHE.get(cache_key)
+            if hit is not None:
+                _DOC_LRU_CACHE.move_to_end(cache_key)
+                return hit[1]
+
+    converted = _convert_document_uncached(title, data, kind, dark_mode=dark_mode)
+    if use_cache and cache_key is not None:
+        with _DOC_LRU_LOCK:
+            _DOC_LRU_CACHE[cache_key] = (raw_len, converted)
+            _DOC_LRU_CACHE.move_to_end(cache_key)
+            total_b = sum(item[0] for item in _DOC_LRU_CACHE.values())
+            while (
+                len(_DOC_LRU_CACHE) > _DOC_LRU_MAX_ENTRIES
+                or total_b > _DOC_LRU_MAX_BYTES
+            ) and len(_DOC_LRU_CACHE) > 1:
+                _, (evicted_len, _) = _DOC_LRU_CACHE.popitem(last=False)
+                total_b -= evicted_len
+    return converted
 
 
 def _build_notice_document(
@@ -325,7 +399,13 @@ def _base_html_shell(title: str, body_html: str, *, dark_mode: bool = False) -> 
         ".table-wrap.sheet .sheet-table thead th:first-child{z-index:3;background:var(--th-bg);}"
         ".table-wrap.borderless,.table-wrap.borderless table,.table-wrap.borderless td,.table-wrap.borderless th{"
         "border:none!important;background:transparent!important;}"
-        ".doc-list{margin:0.4em 0;padding-left:1.35em;display:flex;gap:0.45em;align-items:baseline;}"
+        ".table-wrap.borderless td.cell-b-rule{border-bottom:1px solid var(--fg)!important;}"
+        ".docx-paper{max-width:816px;margin:0 auto;padding:36px 48px;background:var(--bg);"
+        "border:1px solid var(--border);border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.07);}"
+        ".doc-page-break{margin:26px -48px;border:0;border-top:2px dashed var(--border);}"
+        ".doc-p-rule{border-bottom:1px solid var(--border);padding-bottom:4px;}"
+        ".doc-p-box{border:1px solid var(--border);padding:8px 12px;border-radius:4px;}"
+        ".doc-list{margin:0.35em 0;padding-left:1.35em;display:flex;gap:0.45em;align-items:baseline;}"
         ".doc-list-marker{color:var(--accent);font-weight:600;min-width:1.4em;flex-shrink:0;}"
         ".doc-role-note{font-size:0.84rem;color:var(--muted);padding-bottom:6px;"
         "border-bottom:1px dashed var(--border);margin-bottom:8px;}"
@@ -681,6 +761,11 @@ def _coalesce_runs(runs: list[DocxTextRun]) -> tuple[DocxTextRun, ...]:
                 and prev.superscript == run.superscript
                 and prev.subscript == run.subscript
                 and prev.href == run.href
+                and prev.font_size_pt == run.font_size_pt
+                and prev.color == run.color
+                and prev.bg_color == run.bg_color
+                and prev.font_kind == run.font_kind
+                and prev.all_caps == run.all_caps
             ):
                 merged[-1] = DocxTextRun(
                     text=prev.text + run.text,
@@ -692,6 +777,11 @@ def _coalesce_runs(runs: list[DocxTextRun]) -> tuple[DocxTextRun, ...]:
                     superscript=prev.superscript,
                     subscript=prev.subscript,
                     href=prev.href,
+                    font_size_pt=prev.font_size_pt,
+                    color=prev.color,
+                    bg_color=prev.bg_color,
+                    font_kind=prev.font_kind,
+                    all_caps=prev.all_caps,
                 )
                 continue
         merged.append(run)
@@ -699,12 +789,28 @@ def _coalesce_runs(runs: list[DocxTextRun]) -> tuple[DocxTextRun, ...]:
 
 
 def _render_runs_html(runs: tuple[DocxTextRun, ...], fallback_text: str = "") -> str:
-    """Render styled text runs into XSS-escaped inline HTML."""
+    """Render styled text runs into XSS-escaped inline HTML with font, size, and color fidelity."""
     if not runs:
         return html.escape(fallback_text).replace("\n", "<br/>")
     parts: list[str] = []
     for run in runs:
-        seg = html.escape(run.text).replace("\n", "<br/>")
+        raw_txt = run.text.upper() if run.all_caps else run.text
+        seg = html.escape(raw_txt).replace("\t", "&emsp;").replace("\n", "<br/>")
+        css_bits: list[str] = []
+        if run.font_size_pt > 0:
+            css_bits.append(f"font-size:{run.font_size_pt:g}pt")
+        if run.color:
+            css_bits.append(f"color:{html.escape(run.color, quote=True)}")
+        if run.bg_color:
+            css_bits.append(
+                f"background-color:{html.escape(run.bg_color, quote=True)};padding:0 2px;border-radius:2px"
+            )
+        if run.font_kind == "serif":
+            css_bits.append("font-family:'Times New Roman',Georgia,Cambria,serif")
+        elif run.font_kind == "mono" and not run.code:
+            css_bits.append("font-family:Consolas,'Courier New',monospace")
+        if css_bits:
+            seg = f'<span style="{";".join(css_bits)}">{seg}</span>'
         if run.code:
             seg = f"<code>{seg}</code>"
         if run.bold:
@@ -913,8 +1019,534 @@ def _iter_docx_body_blocks(container: ET.Element) -> Iterator[ET.Element]:
             yield child
 
 
-def _docx_heading_level(p_el: ET.Element) -> Optional[int]:
-    """Extract 1..6 heading level from <w:pStyle> or <w:outlineLvl> if present."""
+_WORD_HIGHLIGHT_MAP: dict[str, tuple[str, str]] = {
+    "yellow": ("#fef08a", "#854d0e"),
+    "green": ("#bbf7d0", "#14532d"),
+    "cyan": ("#a5f3fc", "#164e63"),
+    "magenta": ("#f5d0fe", "#701a75"),
+    "blue": ("#bfdbfe", "#1e3a8a"),
+    "red": ("#fecaca", "#7f1d1d"),
+    "lightgray": ("#e2e8f0", "#334155"),
+    "darkgray": ("#cbd5e1", "#475569"),
+}
+_HEX6_RE = re.compile(r"^[0-9a-fA-F]{6}$")
+_VML_DIM_RE = re.compile(r"(width|height)\s*:\s*([0-9.]+)\s*(pt|px|in|cm|mm)", re.IGNORECASE)
+
+
+def _apply_ooxml_tint_shade(hex6: str, *, tint_hex: str = "", shade_hex: str = "") -> str:
+    if not _HEX6_RE.match(hex6):
+        return ""
+    r = int(hex6[0:2], 16)
+    g = int(hex6[2:4], 16)
+    b = int(hex6[4:6], 16)
+    if tint_hex and len(tint_hex) <= 2:
+        try:
+            t = int(tint_hex, 16) / 255.0
+            r = int(round(r * t + 255 * (1.0 - t)))
+            g = int(round(g * t + 255 * (1.0 - t)))
+            b = int(round(b * t + 255 * (1.0 - t)))
+        except ValueError:
+            pass
+    elif shade_hex and len(shade_hex) <= 2:
+        try:
+            s = int(shade_hex, 16) / 255.0
+            r = int(round(r * s))
+            g = int(round(g * s))
+            b = int(round(b * s))
+        except ValueError:
+            pass
+    return f"#{max(0, min(255, r)):02x}{max(0, min(255, g)):02x}{max(0, min(255, b)):02x}"
+
+
+def _adapt_fg_color_for_mode(hex_color: str, *, dark_mode: bool) -> str:
+    """Adapt OOXML text color so near-black becomes empty (uses theme primary) and dark colors lift in dark mode."""
+    if not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+        return ""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    # Pure/near-black default body color -> delegate to reader theme primary
+    if max(r, g, b) < 38 and (max(r, g, b) - min(r, g, b)) < 18:
+        return ""
+    if dark_mode and lum < 95:
+        boost = int(125 - lum)
+        r = min(245, r + boost)
+        g = min(245, g + boost)
+        b = min(245, b + boost)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    if not dark_mode and lum > 235:
+        return "#334155"
+    return hex_color.lower()
+
+
+def _adapt_bg_color_for_mode(hex_color: str, *, dark_mode: bool) -> str:
+    """Adapt OOXML cell/paragraph shading color cleanly for light and dark reader palettes."""
+    if not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+        return ""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    if r > 250 and g > 250 and b > 250:
+        return ""
+    if dark_mode:
+        # Soften bright pastel fills into deep readable surface tints in dark mode
+        r = int(round(r * 0.28 + 20))
+        g = int(round(g * 0.28 + 26))
+        b = int(round(b * 0.30 + 38))
+        return f"#{min(255, r):02x}{min(255, g):02x}{min(255, b):02x}"
+    return hex_color.lower()
+
+
+def _classify_font_family(font_name: str) -> str:
+    low = (font_name or "").strip().lower()
+    if not low:
+        return ""
+    if any(k in low for k in ("consolas", "courier", "mono", "menlo", "fira code", "lucida console")):
+        return "mono"
+    if any(k in low for k in ("times", "georgia", "cambria", "garamond", "palatino", "serif", "book antiqua")):
+        return "serif"
+    return ""
+
+
+def _parse_docx_theme(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    *,
+    xml_budget: list[int],
+) -> tuple[dict[str, str], str, str]:
+    """Parse ``word/theme/theme1.xml`` color palette and major/minor font names."""
+    theme_path = ""
+    if "word/theme/theme1.xml" in zf_names:
+        theme_path = "word/theme/theme1.xml"
+    else:
+        for cand in sorted(zf_names):
+            if cand.startswith("word/theme/") and cand.endswith(".xml"):
+                theme_path = cand
+                break
+    if not theme_path:
+        return {}, "", ""
+    try:
+        raw = _read_zip_entry_capped(zf, theme_path, _MAX_XML_BYTES, xml_budget=xml_budget)
+        root = _parse_xml_safe(raw)
+    except _CONVERSION_ERRORS:
+        return {}, "", ""
+
+    colors: dict[str, str] = {}
+    clr_scheme = root.find(f".//{{{_A_NS}}}clrScheme")
+    if clr_scheme is not None:
+        for child in clr_scheme:
+            slot = _local_name(child.tag).lower()
+            srgb = child.find(f"{{{_A_NS}}}srgbClr")
+            sys_clr = child.find(f"{{{_A_NS}}}sysClr")
+            hex_val = ""
+            if srgb is not None:
+                hex_val = (srgb.attrib.get("val") or "").strip()
+            elif sys_clr is not None:
+                hex_val = (sys_clr.attrib.get("lastClr") or "").strip()
+            if _HEX6_RE.match(hex_val):
+                colors[slot] = hex_val.lower()
+        # OOXML aliases used in w:themeColor
+        if "dk1" in colors:
+            colors.setdefault("dark1", colors["dk1"])
+            colors.setdefault("text1", colors["dk1"])
+        if "lt1" in colors:
+            colors.setdefault("light1", colors["lt1"])
+            colors.setdefault("background1", colors["lt1"])
+        if "dk2" in colors:
+            colors.setdefault("dark2", colors["dk2"])
+            colors.setdefault("text2", colors["dk2"])
+        if "lt2" in colors:
+            colors.setdefault("light2", colors["lt2"])
+            colors.setdefault("background2", colors["lt2"])
+
+    major_font = ""
+    minor_font = ""
+    font_scheme = root.find(f".//{{{_A_NS}}}fontScheme")
+    if font_scheme is not None:
+        maj = font_scheme.find(f"{{{_A_NS}}}majorFont/{{{_A_NS}}}latin")
+        min_f = font_scheme.find(f"{{{_A_NS}}}minorFont/{{{_A_NS}}}latin")
+        if maj is not None:
+            major_font = (maj.attrib.get("typeface") or "").strip()
+        if min_f is not None:
+            minor_font = (min_f.attrib.get("typeface") or "").strip()
+    return colors, major_font, minor_font
+
+
+def _resolve_w_color_hex(
+    el: Optional[ET.Element],
+    theme_colors: dict[str, str],
+    *,
+    attr_name: str = "val",
+) -> str:
+    if el is None:
+        return ""
+    raw_val = (el.attrib.get(f"{{{_W_NS}}}{attr_name}") or "").strip()
+    theme_key = (
+        el.attrib.get(f"{{{_W_NS}}}themeColor")
+        or el.attrib.get(f"{{{_W_NS}}}themeFill")
+        or ""
+    ).strip().lower()
+    tint_hex = (
+        el.attrib.get(f"{{{_W_NS}}}themeTint")
+        or el.attrib.get(f"{{{_W_NS}}}themeFillTint")
+        or ""
+    ).strip()
+    shade_hex = (
+        el.attrib.get(f"{{{_W_NS}}}themeShade")
+        or el.attrib.get(f"{{{_W_NS}}}themeFillShade")
+        or ""
+    ).strip()
+    base6 = ""
+    if theme_key and theme_key in theme_colors:
+        base6 = theme_colors[theme_key]
+    elif _HEX6_RE.match(raw_val):
+        base6 = raw_val.lower()
+    if not base6:
+        return ""
+    return _apply_ooxml_tint_shade(base6, tint_hex=tint_hex, shade_hex=shade_hex)
+
+
+def _twips_to_px(raw_val: Optional[str], *, cap: int = 260) -> int:
+    if not raw_val:
+        return 0
+    s = raw_val.strip()
+    try:
+        val = float(s)
+    except ValueError:
+        return 0
+    # 1440 twips = 1 inch = 96 CSS px -> 15 twips per px
+    return max(0, min(cap, int(round(val / 15.0))))
+
+
+@dataclass
+class _ResolvedDocxStyle:
+    style_id: str
+    style_type: str = "paragraph"
+    heading_level: Optional[int] = None
+    align: str = ""
+    num_id: str = ""
+    ilvl: int = 0
+    indent_left_px: int = 0
+    indent_right_px: int = 0
+    first_line_px: int = 0
+    space_before_px: int = 0
+    space_after_px: int = 0
+    line_height: float = 0.0
+    bg_color: str = ""
+    bold: Optional[bool] = None
+    italic: Optional[bool] = None
+    underline: Optional[bool] = None
+    strike: Optional[bool] = None
+    all_caps: Optional[bool] = None
+    code: bool = False
+    font_size_pt: float = 0.0
+    color: str = ""
+    font_kind: str = ""
+
+
+def _extract_rpr_delta(
+    r_pr: Optional[ET.Element],
+    theme_colors: dict[str, str],
+    major_font: str,
+    minor_font: str,
+    *,
+    dark_mode: bool,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if r_pr is None:
+        return out
+    for tag_n, key_n in (("b", "bold"), ("bCs", "bold"), ("i", "italic"), ("iCs", "italic"), ("strike", "strike"), ("dstrike", "strike")):
+        el = r_pr.find(f"{{{_W_NS}}}{tag_n}")
+        if el is not None:
+            val = (el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+            enabled = val not in {"0", "false", "off", "none"}
+            if key_n not in out or enabled:
+                out[key_n] = enabled
+    u_el = r_pr.find(f"{{{_W_NS}}}u")
+    if u_el is not None:
+        u_val = (u_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+        out["underline"] = u_val not in {"0", "false", "off", "none"}
+    for cap_tag in ("caps", "smallCaps"):
+        c_el = r_pr.find(f"{{{_W_NS}}}{cap_tag}")
+        if c_el is not None:
+            c_val = (c_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+            if c_val not in {"0", "false", "off", "none"}:
+                out["all_caps"] = True
+    vert = r_pr.find(f"{{{_W_NS}}}vertAlign")
+    if vert is not None:
+        vval = (vert.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+        out["superscript"] = vval == "superscript"
+        out["subscript"] = vval == "subscript"
+    sz_el = r_pr.find(f"{{{_W_NS}}}sz")
+    if sz_el is None:
+        sz_el = r_pr.find(f"{{{_W_NS}}}szCs")
+    if sz_el is not None:
+        raw_sz = (sz_el.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+        try:
+            half_pts = float(raw_sz)
+            if 10.0 <= half_pts <= 144.0:
+                out["font_size_pt"] = round(half_pts / 2.0, 1)
+        except ValueError:
+            pass
+    clr_el = r_pr.find(f"{{{_W_NS}}}color")
+    raw_hex = _resolve_w_color_hex(clr_el, theme_colors, attr_name="val")
+    if raw_hex:
+        adapted_fg = _adapt_fg_color_for_mode(raw_hex, dark_mode=dark_mode)
+        if adapted_fg:
+            out["color"] = adapted_fg
+    hl_el = r_pr.find(f"{{{_W_NS}}}highlight")
+    if hl_el is not None:
+        hl_name = (hl_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+        if hl_name in _WORD_HIGHLIGHT_MAP:
+            light_hl, dark_hl = _WORD_HIGHLIGHT_MAP[hl_name]
+            out["bg_color"] = dark_hl if dark_mode else light_hl
+    if "bg_color" not in out:
+        shd_el = r_pr.find(f"{{{_W_NS}}}shd")
+        shd_hex = _resolve_w_color_hex(shd_el, theme_colors, attr_name="fill")
+        adapted_bg = _adapt_bg_color_for_mode(shd_hex, dark_mode=dark_mode)
+        if adapted_bg:
+            out["bg_color"] = adapted_bg
+    rstyle = r_pr.find(f"{{{_W_NS}}}rStyle")
+    if rstyle is not None:
+        rs_val = (rstyle.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+        out["r_style_id"] = rs_val
+        if "code" in rs_val.lower() or "verbatim" in rs_val.lower():
+            out["code"] = True
+            out["font_kind"] = "mono"
+    rfonts = r_pr.find(f"{{{_W_NS}}}rFonts")
+    if rfonts is not None:
+        ascii_f = (
+            rfonts.attrib.get(f"{{{_W_NS}}}ascii")
+            or rfonts.attrib.get(f"{{{_W_NS}}}hAnsi")
+            or rfonts.attrib.get(f"{{{_W_NS}}}cs")
+            or ""
+        )
+        theme_f = (rfonts.attrib.get(f"{{{_W_NS}}}asciiTheme") or "").lower()
+        if not ascii_f and theme_f:
+            ascii_f = major_font if "major" in theme_f else minor_font
+        f_kind = _classify_font_family(ascii_f)
+        if f_kind:
+            out["font_kind"] = f_kind
+            if f_kind == "mono":
+                out["code"] = True
+    return out
+
+
+def _extract_ppr_delta(
+    p_pr: Optional[ET.Element],
+    theme_colors: dict[str, str],
+    *,
+    dark_mode: bool,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if p_pr is None:
+        return out
+    p_style = p_pr.find(f"{{{_W_NS}}}pStyle")
+    if p_style is not None:
+        val = (p_style.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+        if val:
+            out["p_style_id"] = val
+            m = _HEADING_STYLE_PATTERN.match(val)
+            if m:
+                out["heading_level"] = min(max(int(m.group(1)), 1), 6)
+            elif val.lower() == "title":
+                out["heading_level"] = 1
+            elif val.lower() == "subtitle":
+                out["heading_level"] = 2
+    outline_lvl = p_pr.find(f"{{{_W_NS}}}outlineLvl")
+    if outline_lvl is not None:
+        raw_lvl = (outline_lvl.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+        if raw_lvl.isascii() and raw_lvl.isdigit():
+            num = int(raw_lvl)
+            if 0 <= num <= 8:
+                out["heading_level"] = min(num + 1, 6)
+    jc = p_pr.find(f"{{{_W_NS}}}jc")
+    if jc is not None:
+        jval = (jc.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+        if jval in {"center", "mediumkashida"}:
+            out["align"] = "center"
+        elif jval in {"right", "end"}:
+            out["align"] = "right"
+        elif jval in {"both", "distribute", "thaidistribute"}:
+            out["align"] = "justify"
+        elif jval in {"left", "start"}:
+            out["align"] = "left"
+    num_pr = p_pr.find(f"{{{_W_NS}}}numPr")
+    if num_pr is not None:
+        ilvl_el = num_pr.find(f"{{{_W_NS}}}ilvl")
+        num_id_el = num_pr.find(f"{{{_W_NS}}}numId")
+        if num_id_el is not None:
+            out["num_id"] = (num_id_el.attrib.get(f"{{{_W_NS}}}val") or "").strip()
+        if ilvl_el is not None:
+            raw_i = (ilvl_el.attrib.get(f"{{{_W_NS}}}val") or "0").strip()
+            if raw_i.isascii() and raw_i.isdigit():
+                out["ilvl"] = int(raw_i)
+    ind = p_pr.find(f"{{{_W_NS}}}ind")
+    if ind is not None:
+        left_raw = ind.attrib.get(f"{{{_W_NS}}}left") or ind.attrib.get(f"{{{_W_NS}}}start")
+        right_raw = ind.attrib.get(f"{{{_W_NS}}}right") or ind.attrib.get(f"{{{_W_NS}}}end")
+        fl_raw = ind.attrib.get(f"{{{_W_NS}}}firstLine")
+        hang_raw = ind.attrib.get(f"{{{_W_NS}}}hanging")
+        if left_raw is not None:
+            out["indent_left_px"] = _twips_to_px(left_raw, cap=240)
+        if right_raw is not None:
+            out["indent_right_px"] = _twips_to_px(right_raw, cap=180)
+        if fl_raw is not None and not hang_raw:
+            out["first_line_px"] = _twips_to_px(fl_raw, cap=120)
+    spc = p_pr.find(f"{{{_W_NS}}}spacing")
+    if spc is not None:
+        bef = spc.attrib.get(f"{{{_W_NS}}}before")
+        aft = spc.attrib.get(f"{{{_W_NS}}}after")
+        ln = spc.attrib.get(f"{{{_W_NS}}}line")
+        ln_rule = (spc.attrib.get(f"{{{_W_NS}}}lineRule") or "auto").strip().lower()
+        if bef is not None:
+            out["space_before_px"] = _twips_to_px(bef, cap=64)
+        if aft is not None:
+            out["space_after_px"] = _twips_to_px(aft, cap=64)
+        if ln is not None and ln_rule in {"auto", ""}:
+            try:
+                ratio = float(ln) / 240.0
+                if 1.0 <= ratio <= 3.0:
+                    out["line_height"] = round(ratio, 2)
+            except ValueError:
+                pass
+    shd_el = p_pr.find(f"{{{_W_NS}}}shd")
+    shd_hex = _resolve_w_color_hex(shd_el, theme_colors, attr_name="fill")
+    adapted_bg = _adapt_bg_color_for_mode(shd_hex, dark_mode=dark_mode)
+    if adapted_bg:
+        out["bg_color"] = adapted_bg
+    p_bdr = p_pr.find(f"{{{_W_NS}}}pBdr")
+    if p_bdr is not None:
+        active_edges = {
+            edge
+            for edge in ("top", "bottom", "left", "right")
+            if (b_el := p_bdr.find(f"{{{_W_NS}}}{edge}")) is not None
+            and (b_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower() not in {"none", "nil", ""}
+        }
+        if len(active_edges) >= 3:
+            out["has_box_border"] = True
+        elif "bottom" in active_edges:
+            out["has_bottom_border"] = True
+    if p_pr.find(f"{{{_W_NS}}}pageBreakBefore") is not None:
+        pbb = p_pr.find(f"{{{_W_NS}}}pageBreakBefore")
+        if pbb is not None and (pbb.attrib.get(f"{{{_W_NS}}}val") or "1").lower() not in {"0", "false", "off"}:
+            out["page_break_before"] = True
+    return out
+
+
+def _parse_docx_styles(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    theme_colors: dict[str, str],
+    major_font: str,
+    minor_font: str,
+    *,
+    dark_mode: bool,
+    xml_budget: list[int],
+) -> tuple[dict[str, _ResolvedDocxStyle], _ResolvedDocxStyle]:
+    """Parse ``word/styles.xml`` with ``docDefaults`` and recursive ``basedOn`` inheritance."""
+    defaults = _ResolvedDocxStyle(style_id="__default__")
+    if "word/styles.xml" not in zf_names:
+        return {}, defaults
+    try:
+        raw = _read_zip_entry_capped(zf, "word/styles.xml", _MAX_XML_BYTES, xml_budget=xml_budget)
+        root = _parse_xml_safe(raw)
+    except _CONVERSION_ERRORS:
+        return {}, defaults
+
+    doc_def = root.find(f"{{{_W_NS}}}docDefaults")
+    if doc_def is not None:
+        rpr_def = doc_def.find(f"{{{_W_NS}}}rPrDefault/{{{_W_NS}}}rPr")
+        ppr_def = doc_def.find(f"{{{_W_NS}}}pPrDefault/{{{_W_NS}}}pPr")
+        rd = _extract_rpr_delta(rpr_def, theme_colors, major_font, minor_font, dark_mode=dark_mode)
+        pd = _extract_ppr_delta(ppr_def, theme_colors, dark_mode=dark_mode)
+        if rd.get("font_kind"):
+            defaults.font_kind = str(rd["font_kind"])
+        if float(rd.get("font_size_pt") or 0.0) >= 12.5:
+            defaults.font_size_pt = float(rd["font_size_pt"])
+        if pd.get("line_height"):
+            defaults.line_height = float(pd["line_height"])
+
+    raw_nodes: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]] = {}
+    default_para_id = ""
+    for st_el in root.findall(f"{{{_W_NS}}}style"):
+        sid = (st_el.attrib.get(f"{{{_W_NS}}}styleId") or "").strip()
+        if not sid:
+            continue
+        stype = (st_el.attrib.get(f"{{{_W_NS}}}type") or "paragraph").strip().lower()
+        is_def = (st_el.attrib.get(f"{{{_W_NS}}}default") or "").strip().lower() in {"1", "true"}
+        if stype == "paragraph" and is_def and not default_para_id:
+            default_para_id = sid
+        based_el = st_el.find(f"{{{_W_NS}}}basedOn")
+        based_id = (based_el.attrib.get(f"{{{_W_NS}}}val") or "").strip() if based_el is not None else ""
+        name_el = st_el.find(f"{{{_W_NS}}}name")
+        sname = (name_el.attrib.get(f"{{{_W_NS}}}val") or "").strip() if name_el is not None else ""
+        p_delta = _extract_ppr_delta(st_el.find(f"{{{_W_NS}}}pPr"), theme_colors, dark_mode=dark_mode)
+        r_delta = _extract_rpr_delta(
+            st_el.find(f"{{{_W_NS}}}rPr"), theme_colors, major_font, minor_font, dark_mode=dark_mode
+        )
+        for cand_h in (sid, sname):
+            m = _HEADING_STYLE_PATTERN.match(cand_h)
+            if m and "heading_level" not in p_delta:
+                p_delta["heading_level"] = min(max(int(m.group(1)), 1), 6)
+            elif cand_h.lower() == "title" and "heading_level" not in p_delta:
+                p_delta["heading_level"] = 1
+            elif cand_h.lower() == "subtitle" and "heading_level" not in p_delta:
+                p_delta["heading_level"] = 2
+        raw_nodes[sid] = (stype, based_id, p_delta, r_delta)
+
+    resolved: dict[str, _ResolvedDocxStyle] = {}
+    visiting: set[str] = set()
+
+    def _resolve(sid: str) -> _ResolvedDocxStyle:
+        if sid in resolved:
+            return resolved[sid]
+        if sid not in raw_nodes or sid in visiting:
+            return defaults
+        visiting.add(sid)
+        stype, based_id, pd, rd = raw_nodes[sid]
+        parent = _resolve(based_id) if based_id else defaults
+        visiting.discard(sid)
+        cur = _ResolvedDocxStyle(
+            style_id=sid,
+            style_type=stype,
+            heading_level=pd.get("heading_level", parent.heading_level),
+            align=str(pd.get("align") or parent.align),
+            num_id=str(pd.get("num_id") or parent.num_id),
+            ilvl=int(pd.get("ilvl", parent.ilvl)),
+            indent_left_px=int(pd.get("indent_left_px", parent.indent_left_px)),
+            indent_right_px=int(pd.get("indent_right_px", parent.indent_right_px)),
+            first_line_px=int(pd.get("first_line_px", parent.first_line_px)),
+            space_before_px=int(pd.get("space_before_px", parent.space_before_px)),
+            space_after_px=int(pd.get("space_after_px", parent.space_after_px)),
+            line_height=float(pd.get("line_height") or parent.line_height),
+            bg_color=str(pd.get("bg_color") or rd.get("bg_color") or parent.bg_color),
+            bold=rd.get("bold", parent.bold),
+            italic=rd.get("italic", parent.italic),
+            underline=rd.get("underline", parent.underline),
+            strike=rd.get("strike", parent.strike),
+            all_caps=rd.get("all_caps", parent.all_caps),
+            code=bool(rd.get("code") or parent.code),
+            font_size_pt=float(rd.get("font_size_pt") or parent.font_size_pt),
+            color=str(rd.get("color") or parent.color),
+            font_kind=str(rd.get("font_kind") or parent.font_kind),
+        )
+        resolved[sid] = cur
+        return cur
+
+    for sid_k in raw_nodes:
+        _resolve(sid_k)
+    if default_para_id and default_para_id in resolved:
+        defaults = resolved[default_para_id]
+    return resolved, defaults
+
+
+def _docx_heading_level(
+    p_el: ET.Element,
+    styles_map: Optional[dict[str, _ResolvedDocxStyle]] = None,
+) -> Optional[int]:
+    """Extract 1..6 heading level from <w:pStyle>, cascaded style, or <w:outlineLvl>."""
     p_pr = p_el.find(f"{{{_W_NS}}}pPr")
     if p_pr is None:
         return None
@@ -929,6 +1561,8 @@ def _docx_heading_level(p_el: ET.Element) -> Optional[int]:
             return 1
         if lowered == "subtitle":
             return 2
+        if styles_map and val in styles_map and styles_map[val].heading_level is not None:
+            return styles_map[val].heading_level
 
     outline_lvl = p_pr.find(f"{{{_W_NS}}}outlineLvl")
     if outline_lvl is not None:
@@ -940,21 +1574,26 @@ def _docx_heading_level(p_el: ET.Element) -> Optional[int]:
     return None
 
 
-def _docx_paragraph_align(p_el: ET.Element) -> str:
+def _docx_paragraph_align(
+    p_el: ET.Element,
+    base_style: Optional[_ResolvedDocxStyle] = None,
+) -> str:
     """Return normalized paragraph alignment ('left', 'center', 'right', 'justify')."""
     p_pr = p_el.find(f"{{{_W_NS}}}pPr")
-    if p_pr is None:
-        return "left"
-    jc = p_pr.find(f"{{{_W_NS}}}jc")
-    if jc is None:
-        return "left"
-    val = (jc.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
-    if val in {"center", "mediumkashida"}:
-        return "center"
-    if val in {"right", "end"}:
-        return "right"
-    if val in {"both", "distribute", "thaiDistribute".lower()}:
-        return "justify"
+    if p_pr is not None:
+        jc = p_pr.find(f"{{{_W_NS}}}jc")
+        if jc is not None:
+            val = (jc.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+            if val in {"center", "mediumkashida"}:
+                return "center"
+            if val in {"right", "end"}:
+                return "right"
+            if val in {"both", "distribute", "thaidistribute"}:
+                return "justify"
+            if val in {"left", "start"}:
+                return "left"
+    if base_style is not None and base_style.align:
+        return base_style.align
     return "left"
 
 
@@ -968,58 +1607,106 @@ def _docx_flag_enabled(r_pr: Optional[ET.Element], tag_local: str) -> bool:
     return val not in {"0", "false", "off", "none"}
 
 
-def _docx_run_style(r_el: ET.Element, *, href: str = "") -> dict[str, object]:
-    """Extract inline formatting flags from a WordprocessingML <w:r> element."""
+def _docx_run_style(
+    r_el: ET.Element,
+    *,
+    href: str = "",
+    base_style: Optional[_ResolvedDocxStyle] = None,
+    styles_map: Optional[dict[str, _ResolvedDocxStyle]] = None,
+    theme_colors: Optional[dict[str, str]] = None,
+    major_font: str = "",
+    minor_font: str = "",
+    dark_mode: bool = False,
+) -> dict[str, object]:
+    """Extract inline formatting flags from <w:r>, cascading from paragraph & character styles."""
     r_pr = r_el.find(f"{{{_W_NS}}}rPr")
-    bold = _docx_flag_enabled(r_pr, "b") or _docx_flag_enabled(r_pr, "bCs")
-    italic = _docx_flag_enabled(r_pr, "i") or _docx_flag_enabled(r_pr, "iCs")
-    underline = _docx_flag_enabled(r_pr, "u")
-    strike = _docx_flag_enabled(r_pr, "strike") or _docx_flag_enabled(r_pr, "dstrike")
-    superscript = False
-    subscript = False
-    code = False
-    if r_pr is not None:
-        vert = r_pr.find(f"{{{_W_NS}}}vertAlign")
-        if vert is not None:
-            vval = (vert.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
-            superscript = vval == "superscript"
-            subscript = vval == "subscript"
-        rstyle = r_pr.find(f"{{{_W_NS}}}rStyle")
-        if rstyle is not None:
-            rs_val = (rstyle.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
-            if "code" in rs_val or "verbatim" in rs_val:
-                code = True
-        rfonts = r_pr.find(f"{{{_W_NS}}}rFonts")
-        if rfonts is not None:
-            joined_fonts = " ".join(rfonts.attrib.values()).lower()
-            if any(m in joined_fonts for m in ("consolas", "courier", "mono", "menlo")):
-                code = True
+    delta = _extract_rpr_delta(
+        r_pr,
+        theme_colors or {},
+        major_font,
+        minor_font,
+        dark_mode=dark_mode,
+    )
+    char_style: Optional[_ResolvedDocxStyle] = None
+    rs_id = str(delta.get("r_style_id") or "")
+    if rs_id and styles_map and rs_id in styles_map:
+        char_style = styles_map[rs_id]
+
+    def _pick_bool(key: str) -> bool:
+        if key in delta:
+            return bool(delta[key])
+        if char_style is not None and getattr(char_style, key, None) is not None:
+            return bool(getattr(char_style, key))
+        if base_style is not None and getattr(base_style, key, None) is not None:
+            return bool(getattr(base_style, key))
+        return False
+
+    font_size_pt = float(
+        delta.get("font_size_pt")
+        or (char_style.font_size_pt if char_style else 0.0)
+        or (base_style.font_size_pt if base_style else 0.0)
+    )
+    color = str(
+        delta.get("color")
+        or (char_style.color if char_style else "")
+        or (base_style.color if base_style else "")
+    )
+    bg_color = str(
+        delta.get("bg_color")
+        or (char_style.bg_color if (char_style and char_style.style_type == "character") else "")
+    )
+    font_kind = str(
+        delta.get("font_kind")
+        or (char_style.font_kind if char_style else "")
+        or (base_style.font_kind if base_style else "")
+    )
+    code = bool(
+        delta.get("code")
+        or (char_style.code if char_style else False)
+        or (base_style.code if base_style else False)
+    )
     return {
-        "bold": bold,
-        "italic": italic,
-        "underline": underline,
-        "strike": strike,
+        "bold": _pick_bool("bold"),
+        "italic": _pick_bool("italic"),
+        "underline": _pick_bool("underline"),
+        "strike": _pick_bool("strike"),
+        "all_caps": _pick_bool("all_caps"),
         "code": code,
-        "superscript": superscript,
-        "subscript": subscript,
+        "superscript": bool(delta.get("superscript", False)),
+        "subscript": bool(delta.get("subscript", False)),
         "href": href,
+        "font_size_pt": font_size_pt,
+        "color": color,
+        "bg_color": bg_color,
+        "font_kind": font_kind,
     }
 
 
 def _docx_paragraph_runs_and_text(
     p_el: ET.Element,
     hyperlinks: Optional[dict[str, str]] = None,
-) -> tuple[str, tuple[DocxTextRun, ...]]:
-    """Collect visible text and styled runs from a Word <w:p>, resolving AlternateContent & math."""
+    *,
+    base_style: Optional[_ResolvedDocxStyle] = None,
+    styles_map: Optional[dict[str, _ResolvedDocxStyle]] = None,
+    theme_colors: Optional[dict[str, str]] = None,
+    major_font: str = "",
+    minor_font: str = "",
+    dark_mode: bool = False,
+    footnotes_used: Optional[list[str]] = None,
+) -> tuple[str, tuple[DocxTextRun, ...], bool]:
+    """Collect visible text, styled runs, and explicit mid-paragraph page-break flag."""
     raw_runs: list[DocxTextRun] = []
     link_map = hyperlinks or {}
+    saw_page_break = False
 
     def _emit(text: str, style: dict[str, object]) -> None:
         if not text:
             return
+        all_caps = bool(style.get("all_caps", False))
+        final_txt = text.upper() if all_caps else text
         raw_runs.append(
             DocxTextRun(
-                text=text,
+                text=final_txt,
                 bold=bool(style.get("bold", False)),
                 italic=bool(style.get("italic", False)),
                 underline=bool(style.get("underline", False)),
@@ -1028,12 +1715,28 @@ def _docx_paragraph_runs_and_text(
                 superscript=bool(style.get("superscript", False)),
                 subscript=bool(style.get("subscript", False)),
                 href=str(style.get("href", "")),
+                font_size_pt=float(style.get("font_size_pt", 0.0) or 0.0),
+                color=str(style.get("color", "")),
+                bg_color=str(style.get("bg_color", "")),
+                font_kind=str(style.get("font_kind", "")),
+                all_caps=all_caps,
             )
         )
 
-    default_style: dict[str, object] = {}
+    default_style: dict[str, object] = {
+        "bold": bool(base_style and base_style.bold),
+        "italic": bool(base_style and base_style.italic),
+        "underline": bool(base_style and base_style.underline),
+        "strike": bool(base_style and base_style.strike),
+        "all_caps": bool(base_style and base_style.all_caps),
+        "code": bool(base_style and base_style.code),
+        "font_size_pt": float(base_style.font_size_pt if base_style else 0.0),
+        "color": str(base_style.color if base_style else ""),
+        "font_kind": str(base_style.font_kind if base_style else ""),
+    }
 
     def _walk(node: ET.Element, cur_href: str, cur_style: dict[str, object]) -> None:
+        nonlocal saw_page_break
         if node.tag in (f"{{{_W_NS}}}del", f"{{{_W_NS}}}delText", f"{{{_W_NS}}}instrText"):
             return
         if node.tag in (f"{{{_M_NS}}}oMathPara", f"{{{_M_NS}}}oMath"):
@@ -1048,21 +1751,43 @@ def _docx_paragraph_runs_and_text(
                 _walk(sub, next_href, cur_style)
             return
         if node.tag == f"{{{_W_NS}}}r":
-            r_style = _docx_run_style(node, href=cur_href)
+            r_style = _docx_run_style(
+                node,
+                href=cur_href,
+                base_style=base_style,
+                styles_map=styles_map,
+                theme_colors=theme_colors,
+                major_font=major_font,
+                minor_font=minor_font,
+                dark_mode=dark_mode,
+            )
             for sub in _iter_effective_children(node):
                 _walk(sub, cur_href, r_style)
             return
         if node.tag == f"{{{_W_NS}}}t" and node.text:
             _emit(node.text, cur_style)
             return
-        if node.tag in (f"{{{_W_NS}}}br", f"{{{_W_NS}}}cr"):
+        if node.tag == f"{{{_W_NS}}}br":
+            br_type = (node.attrib.get(f"{{{_W_NS}}}type") or "").strip().lower()
+            if br_type == "page":
+                saw_page_break = True
+            else:
+                _emit("\n", cur_style)
+            return
+        if node.tag == f"{{{_W_NS}}}cr":
             _emit("\n", cur_style)
             return
         if node.tag == f"{{{_W_NS}}}tab":
             _emit("\t", cur_style)
             return
+        if node.tag in (f"{{{_W_NS}}}footnoteReference", f"{{{_W_NS}}}endnoteReference"):
+            fn_id = (node.attrib.get(f"{{{_W_NS}}}id") or "").strip()
+            if fn_id and fn_id not in {"0", "-1"}:
+                if footnotes_used is not None and fn_id not in footnotes_used:
+                    footnotes_used.append(fn_id)
+                _emit(f"[{fn_id}]", {**cur_style, "superscript": True})
+            return
         if node.tag == f"{{{_W_NS}}}txbxContent":
-            # Separate paragraphs inside embedded drawing textboxes cleanly
             for idx_tb, tb_child in enumerate(_iter_effective_children(node)):
                 if idx_tb > 0 and raw_runs and not raw_runs[-1].text.endswith("\n"):
                     _emit("\n", cur_style)
@@ -1076,38 +1801,102 @@ def _docx_paragraph_runs_and_text(
 
     coalesced = _coalesce_runs(raw_runs)
     full_text = "".join(r.text for r in coalesced)
-    return full_text, coalesced
+    return full_text, coalesced, saw_page_break
 
 
 def _docx_paragraph_text(p_el: ET.Element) -> str:
     """Collect visible text from a WordprocessingML <w:p>, ignoring deleted runs."""
-    text, _ = _docx_paragraph_runs_and_text(p_el)
+    text, _, _ = _docx_paragraph_runs_and_text(p_el)
     return text
 
 
-def _docx_paragraph_image_rids(p_el: ET.Element) -> list[str]:
-    """Extract embedded image relationship IDs inside <w:p>, skipping fallback duplicates."""
-    rids: list[str] = []
+def _docx_paragraph_image_specs(p_el: ET.Element) -> list[tuple[str, int, int]]:
+    """Extract (rId, width_px, height_px) inside <w:p>, honoring wp:extent & VML CSS dimensions."""
+    specs: list[tuple[str, int, int]] = []
     seen: set[str] = set()
 
-    def _walk(node: ET.Element) -> None:
+    def _vml_dims(style_str: str) -> tuple[int, int]:
+        w_px = 0
+        h_px = 0
+        for prop, num_s, unit in _VML_DIM_RE.findall(style_str or ""):
+            try:
+                val = float(num_s)
+            except ValueError:
+                continue
+            u = unit.lower()
+            px = (
+                val * 96.0 / 72.0
+                if u == "pt"
+                else (
+                    val * 96.0
+                    if u == "in"
+                    else (
+                        val * 96.0 / 2.54
+                        if u == "cm"
+                        else (val * 96.0 / 25.4 if u == "mm" else val)
+                    )
+                )
+            )
+            if prop.lower() == "width":
+                w_px = max(24, min(760, int(round(px))))
+            else:
+                h_px = max(16, min(900, int(round(px))))
+        return w_px, h_px
+
+    def _walk(node: ET.Element, cur_w: int, cur_h: int) -> None:
         if node.tag in (f"{{{_W_NS}}}del", f"{{{_W_NS}}}delText"):
             return
+        next_w, next_h = cur_w, cur_h
+        if node.tag in (f"{{{_WP_NS}}}inline", f"{{{_WP_NS}}}anchor"):
+            ext = node.find(f"{{{_WP_NS}}}extent")
+            if ext is not None:
+                try:
+                    cx = int(ext.attrib.get("cx") or "0")
+                    cy = int(ext.attrib.get("cy") or "0")
+                    if cx > 0:
+                        next_w = max(24, min(760, int(round(cx / 9525.0))))
+                    if cy > 0:
+                        next_h = max(16, min(900, int(round(cy / 9525.0))))
+                except ValueError:
+                    pass
+        elif node.tag == f"{{{_V_NS}}}shape":
+            vw, vh = _vml_dims(node.attrib.get("style") or "")
+            if vw > 0:
+                next_w = vw
+            if vh > 0:
+                next_h = vh
         if node.tag == f"{{{_A_NS}}}blip":
             rid = node.attrib.get(f"{{{_R_NS}}}embed")
             if rid and rid not in seen:
                 seen.add(rid)
-                rids.append(rid)
+                specs.append((rid, next_w, next_h))
         elif node.tag == f"{{{_V_NS}}}imagedata":
             rid = node.attrib.get(f"{{{_R_NS}}}id")
             if rid and rid not in seen:
                 seen.add(rid)
-                rids.append(rid)
+                specs.append((rid, next_w, next_h))
         for sub in _iter_effective_children(node):
-            _walk(sub)
+            _walk(sub, next_w, next_h)
 
-    _walk(p_el)
-    return rids
+    _walk(p_el, 0, 0)
+    return specs
+
+
+def _docx_paragraph_image_rids(p_el: ET.Element) -> list[str]:
+    return [rid for rid, _w, _h in _docx_paragraph_image_specs(p_el)]
+
+
+def _format_single_num_val(num_fmt: str, count: int) -> str:
+    fmt = (num_fmt or "").strip().lower()
+    if fmt == "lowerletter":
+        return _int_to_alpha(count, upper=False)
+    if fmt == "upperletter":
+        return _int_to_alpha(count, upper=True)
+    if fmt == "lowerroman":
+        return _int_to_roman(count, upper=False)
+    if fmt == "upperroman":
+        return _int_to_roman(count, upper=True)
+    return str(count)
 
 
 def _parse_docx_numbering(
@@ -1115,8 +1904,8 @@ def _parse_docx_numbering(
     zf_names: set[str],
     *,
     xml_budget: list[int],
-) -> tuple[dict[str, dict[int, tuple[str, int]]], dict[str, tuple[str, dict[int, int]]]]:
-    """Parse ``word/numbering.xml`` into abstract formats and concrete numId overrides."""
+) -> tuple[dict[str, dict[int, tuple[str, int, str]]], dict[str, tuple[str, dict[int, int]]]]:
+    """Parse ``word/numbering.xml`` into (fmt, start, lvlText) per level and concrete numId overrides."""
     if "word/numbering.xml" not in zf_names:
         return {}, {}
     try:
@@ -1127,12 +1916,12 @@ def _parse_docx_numbering(
     except _CONVERSION_ERRORS:
         return {}, {}
 
-    abstract_map: dict[str, dict[int, tuple[str, int]]] = {}
+    abstract_map: dict[str, dict[int, tuple[str, int, str]]] = {}
     for abs_el in root.findall(f"{{{_W_NS}}}abstractNum"):
         abs_id = abs_el.attrib.get(f"{{{_W_NS}}}abstractNumId") or ""
         if not abs_id:
             continue
-        levels: dict[int, tuple[str, int]] = {}
+        levels: dict[int, tuple[str, int, str]] = {}
         for lvl in abs_el.findall(f"{{{_W_NS}}}lvl"):
             raw_ilvl = (lvl.attrib.get(f"{{{_W_NS}}}ilvl") or "").strip()
             if not (raw_ilvl.isascii() and raw_ilvl.isdigit()):
@@ -1147,7 +1936,9 @@ def _parse_docx_numbering(
             start_el = lvl.find(f"{{{_W_NS}}}start")
             raw_start = (start_el.attrib.get(f"{{{_W_NS}}}val") or "1") if start_el is not None else "1"
             start = int(raw_start) if raw_start.isascii() and raw_start.isdigit() else 1
-            levels[ilvl] = (fmt, max(1, start))
+            lvl_txt_el = lvl.find(f"{{{_W_NS}}}lvlText")
+            lvl_txt = (lvl_txt_el.attrib.get(f"{{{_W_NS}}}val") or "") if lvl_txt_el is not None else ""
+            levels[ilvl] = (fmt, max(1, start), lvl_txt)
         abstract_map[abs_id] = levels
 
     num_map: dict[str, tuple[str, dict[int, int]]] = {}
@@ -1168,6 +1959,37 @@ def _parse_docx_numbering(
         num_map[num_id] = (abs_id, overrides)
 
     return abstract_map, num_map
+
+
+def _parse_docx_notes(
+    zf: zipfile.ZipFile,
+    zf_names: set[str],
+    *,
+    xml_budget: list[int],
+) -> dict[str, str]:
+    """Parse ``word/footnotes.xml`` and ``word/endnotes.xml`` into id -> text lookup."""
+    notes: dict[str, str] = {}
+    for part, tag_local in (("word/footnotes.xml", "footnote"), ("word/endnotes.xml", "endnote")):
+        if part not in zf_names:
+            continue
+        try:
+            raw = _read_zip_entry_capped(zf, part, _MAX_XML_BYTES, xml_budget=xml_budget)
+            root = _parse_xml_safe(raw)
+        except _CONVERSION_ERRORS:
+            continue
+        for item in root.findall(f"{{{_W_NS}}}{tag_local}"):
+            nid = (item.attrib.get(f"{{{_W_NS}}}id") or "").strip()
+            ntype = (item.attrib.get(f"{{{_W_NS}}}type") or "").strip().lower()
+            if not nid or nid in {"0", "-1"} or "separator" in ntype:
+                continue
+            paras = [
+                _docx_paragraph_text(p).strip()
+                for p in item.findall(f".//{{{_W_NS}}}p")
+            ]
+            body_txt = " ".join(p for p in paras if p).strip()
+            if body_txt:
+                notes[nid] = body_txt
+    return notes
 
 
 def _docx_table_has_borders(tbl_el: ET.Element) -> bool:
@@ -1191,13 +2013,35 @@ def _docx_table_has_borders(tbl_el: ET.Element) -> bool:
     )
 
 
+def _extract_table_col_widths(tbl_el: ET.Element, col_count: int) -> tuple[float, ...]:
+    """Extract normalized proportional column widths from ``w:tblGrid``."""
+    if col_count <= 0:
+        return ()
+    grid = tbl_el.find(f"{{{_W_NS}}}tblGrid")
+    raw_w: list[float] = []
+    if grid is not None:
+        for gc in grid.findall(f"{{{_W_NS}}}gridCol")[:col_count]:
+            w_str = (gc.attrib.get(f"{{{_W_NS}}}w") or "").strip()
+            try:
+                val = float(w_str)
+                if val > 0:
+                    raw_w.append(val)
+            except ValueError:
+                pass
+    if len(raw_w) != col_count or sum(raw_w) <= 0:
+        return ()
+    total = sum(raw_w)
+    return tuple(round(max(0.05, v / total), 4) for v in raw_w)
+
+
 def _render_docx_table_html_and_markdown(
     rich_rows: tuple[tuple[DocxTableCell, ...], ...],
     *,
     has_borders: bool,
+    col_widths: tuple[float, ...] = (),
     budget: _RenderBudget,
 ) -> tuple[str, str]:
-    """Render structured Word table with colspan, formatting, inline links, and border hint."""
+    """Render structured Word table with colgroup widths, colspan, rowspan, shading, and bottom rules."""
     if not rich_rows:
         return "", ""
     max_cols = min(
@@ -1208,31 +2052,44 @@ def _render_docx_table_html_and_markdown(
         return "", ""
 
     wrap_cls = "table-wrap" if has_borders else "table-wrap borderless"
+    colgroup_html = ""
+    if col_widths and len(col_widths) == max_cols:
+        cols_html = "".join(f'<col style="width:{w * 100:.1f}%"/>' for w in col_widths)
+        colgroup_html = f"<colgroup>{cols_html}</colgroup>"
+
     html_rows: list[str] = []
     md_lines: list[str] = []
     for r_idx, row in enumerate(rich_rows[:_MAX_TABLE_ROWS]):
         use_th = r_idx == 0 and has_borders and all(c.is_header or r_idx == 0 for c in row)
         cell_tag = "th" if use_th else "td"
-        align_css = ""
         row_cells_html: list[str] = []
         flat_md_cells: list[str] = []
         for cell in row[:_MAX_TABLE_COLS]:
             col_span = max(1, cell.col_span)
-            span_attr = f' colspan="{col_span}"' if col_span > 1 else ""
-            if cell.align != "left":
-                align_css = f' style="text-align:{cell.align}"'
-            else:
-                align_css = ""
-            inner_html = _render_runs_html(cell.runs, _truncate_preview_text(cell.text))
-            for img_name, img_bytes in cell.images:
-                ext = posixpath.splitext(img_name.lower())[1]
-                mime = _SAFE_RASTER_MIMES.get(ext, "image/png")
-                b64 = base64.b64encode(img_bytes).decode("ascii")
-                inner_html += (
-                    f'<br/><img class="doc-image" src="data:{mime};base64,{b64}" '
-                    f'alt="{html.escape(img_name)}"/>'
+            if not cell.is_vmerge_cont:
+                span_attr = f' colspan="{col_span}"' if col_span > 1 else ""
+                rspan_attr = f' rowspan="{cell.row_span}"' if cell.row_span > 1 else ""
+                cls_attr = ' class="cell-b-rule"' if (not has_borders and cell.has_bottom_rule) else ""
+                css_list: list[str] = []
+                if cell.align != "left":
+                    css_list.append(f"text-align:{cell.align}")
+                if cell.v_align != "top":
+                    css_list.append(f"vertical-align:{'middle' if cell.v_align == 'center' else cell.v_align}")
+                if cell.bg_color:
+                    css_list.append(f"background-color:{html.escape(cell.bg_color, quote=True)}")
+                style_attr = f' style="{";".join(css_list)}"' if css_list else ""
+                inner_html = _render_runs_html(cell.runs, _truncate_preview_text(cell.text))
+                for img_name, img_bytes in cell.images:
+                    ext = posixpath.splitext(img_name.lower())[1]
+                    mime = _SAFE_RASTER_MIMES.get(ext, "image/png")
+                    b64 = base64.b64encode(img_bytes).decode("ascii")
+                    inner_html += (
+                        f'<br/><img class="doc-image" src="data:{mime};base64,{b64}" '
+                        f'alt="{html.escape(img_name)}"/>'
+                    )
+                row_cells_html.append(
+                    f"<{cell_tag}{cls_attr}{span_attr}{rspan_attr}{style_attr}>{inner_html}</{cell_tag}>"
                 )
-            row_cells_html.append(f"<{cell_tag}{span_attr}{align_css}>{inner_html}</{cell_tag}>")
             flat_md_cells.append(_escape_md_cell(_truncate_preview_text(cell.text)))
             for _ in range(col_span - 1):
                 flat_md_cells.append("")
@@ -1256,7 +2113,7 @@ def _render_docx_table_html_and_markdown(
         body_part = f"<tbody>{''.join(html_rows[1:])}</tbody>" if len(html_rows) > 1 else ""
     else:
         body_part = f"{''.join(html_rows[1:])}</tbody>"
-    table_html = f'<div class="{wrap_cls}"><table>{head_part}{body_part}</table></div>'
+    table_html = f'<div class="{wrap_cls}"><table>{colgroup_html}{head_part}{body_part}</table></div>'
     return table_html, "\n".join(md_lines)
 
 
@@ -1303,7 +2160,7 @@ def _append_bounded_text_block(
 
 
 def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
-    """Convert DOCX bytes into outline, Markdown, rich formatted blocks, and XSS-safe HTML."""
+    """Convert DOCX bytes into outline, Markdown, high-fidelity blocks, and A4 HTML."""
     outline: list[DocumentOutlineItem] = []
     docx_blocks: list[DocxRichBlock] = []
     html_blocks: list[str] = []
@@ -1333,15 +2190,41 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             "word/_rels/document.xml.rels",
             xml_budget=xml_budget,
         )
+        theme_colors, major_font, minor_font = _parse_docx_theme(
+            zf, zf_names, xml_budget=xml_budget
+        )
+        styles_map, default_p_style = _parse_docx_styles(
+            zf,
+            zf_names,
+            theme_colors,
+            major_font,
+            minor_font,
+            dark_mode=dark_mode,
+            xml_budget=xml_budget,
+        )
         abs_nums, concrete_nums = _parse_docx_numbering(
             zf, zf_names, xml_budget=xml_budget
         )
+        notes_map = _parse_docx_notes(zf, zf_names, xml_budget=xml_budget)
+        footnotes_used: list[str] = []
         list_counters: dict[tuple[str, int], int] = {}
 
-        def _try_embed_media(zip_path: str) -> Optional[tuple[str, str, bytes]]:
+        def _try_embed_media(zip_path: str, w_px: int = 0, h_px: int = 0) -> Optional[tuple[str, str, bytes]]:
             if zip_path in media_cache:
                 rendered_media.add(zip_path)
-                return media_cache[zip_path]
+                base_html, img_name, final_b = media_cache[zip_path]
+                if w_px > 0:
+                    ext_c = posixpath.splitext(zip_path.lower())[1]
+                    mime_c = _SAFE_RASTER_MIMES.get(ext_c, "image/png")
+                    b64_c = base64.b64encode(final_b).decode("ascii")
+                    sized_html = (
+                        '<figure class="doc-figure">'
+                        f'<img class="doc-image" style="width:{w_px}px;max-width:100%" '
+                        f'src="data:{mime_c};base64,{b64_c}" alt="{html.escape(img_name)}"/>'
+                        "</figure>"
+                    )
+                    return sized_html, img_name, final_b
+                return base_html, img_name, final_b
             if zip_path not in zf_names:
                 return None
             if media_state["count"] >= _MAX_MEDIA_COUNT:
@@ -1365,37 +2248,50 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             encoded = base64.b64encode(final_bytes).decode("ascii")
             img_name = posixpath.basename(zip_path)
             alt = html.escape(img_name)
+            w_style = f' style="width:{w_px}px;max-width:100%"' if w_px > 0 else ""
             img_html = (
                 '<figure class="doc-figure">'
-                f'<img class="doc-image" src="data:{mime};base64,{encoded}" alt="{alt}"/>'
+                f'<img class="doc-image"{w_style} src="data:{mime};base64,{encoded}" alt="{alt}"/>'
                 "</figure>"
             )
-            payload = (img_html, img_name, final_bytes)
-            media_cache[zip_path] = payload
-            return payload
+            media_cache[zip_path] = (
+                '<figure class="doc-figure">'
+                f'<img class="doc-image" src="data:{mime};base64,{encoded}" alt="{alt}"/>'
+                "</figure>",
+                img_name,
+                final_bytes,
+            )
+            return (img_html, img_name, final_bytes)
 
-        def _next_list_info(p_el: ET.Element) -> tuple[bool, str, int]:
+        def _next_list_info(
+            p_el: ET.Element, p_style_resolved: _ResolvedDocxStyle
+        ) -> tuple[bool, str, int]:
             p_pr = p_el.find(f"{{{_W_NS}}}pPr")
-            if p_pr is None:
-                return False, "", 0
-            num_pr = p_pr.find(f"{{{_W_NS}}}numPr")
-            if num_pr is None:
-                return False, "", 0
-            ilvl_el = num_pr.find(f"{{{_W_NS}}}ilvl")
-            num_id_el = num_pr.find(f"{{{_W_NS}}}numId")
-            raw_ilvl = (ilvl_el.attrib.get(f"{{{_W_NS}}}val") or "0") if ilvl_el is not None else "0"
-            ilvl = int(raw_ilvl) if raw_ilvl.isascii() and raw_ilvl.isdigit() else 0
-            num_id = (num_id_el.attrib.get(f"{{{_W_NS}}}val") or "") if num_id_el is not None else ""
+            num_id = ""
+            ilvl = 0
+            if p_pr is not None:
+                num_pr = p_pr.find(f"{{{_W_NS}}}numPr")
+                if num_pr is not None:
+                    ilvl_el = num_pr.find(f"{{{_W_NS}}}ilvl")
+                    num_id_el = num_pr.find(f"{{{_W_NS}}}numId")
+                    raw_ilvl = (ilvl_el.attrib.get(f"{{{_W_NS}}}val") or "0") if ilvl_el is not None else "0"
+                    ilvl = int(raw_ilvl) if raw_ilvl.isascii() and raw_ilvl.isdigit() else 0
+                    num_id = (num_id_el.attrib.get(f"{{{_W_NS}}}val") or "") if num_id_el is not None else ""
+            if not num_id and p_style_resolved.num_id:
+                num_id = p_style_resolved.num_id
+                ilvl = p_style_resolved.ilvl
             if not num_id or num_id == "0":
                 return False, "", ilvl
 
             fmt = "bullet"
             start_val = 1
+            lvl_text = ""
+            abs_levels: dict[int, tuple[str, int, str]] = {}
             if num_id in concrete_nums:
                 abs_id, overrides = concrete_nums[num_id]
-                levels = abs_nums.get(abs_id, {})
-                if ilvl in levels:
-                    fmt, start_val = levels[ilvl]
+                abs_levels = abs_nums.get(abs_id, {})
+                if ilvl in abs_levels:
+                    fmt, start_val, lvl_text = abs_levels[ilvl]
                 if ilvl in overrides:
                     start_val = overrides[ilvl]
 
@@ -1405,8 +2301,20 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
             ck = (num_id, ilvl)
             cur = list_counters[ck] + 1 if ck in list_counters else start_val
             list_counters[ck] = cur
-            marker = _format_docx_list_marker(fmt, cur)
-            return True, marker, min(4, ilvl)
+
+            # Render multi-level pattern (%1.%2. etc.) when present and non-bullet
+            if fmt != "bullet" and fmt != "none" and lvl_text and "%" in lvl_text:
+                rendered_marker = lvl_text
+                for lv_i in range(ilvl + 1):
+                    sub_fmt, sub_start, _ = abs_levels.get(lv_i, ("decimal", 1, ""))
+                    sub_val = list_counters.get((num_id, lv_i), sub_start)
+                    rendered_marker = rendered_marker.replace(
+                        f"%{lv_i + 1}", _format_single_num_val(sub_fmt, sub_val)
+                    )
+                marker = rendered_marker.strip()
+            else:
+                marker = _format_docx_list_marker(fmt, cur)
+            return True, marker, min(5, ilvl)
 
         def _process_block_sequence(
             container: ET.Element,
@@ -1419,21 +2327,61 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                 if render_budget.truncated:
                     break
                 if block.tag == f"{{{_W_NS}}}p":
-                    level = _docx_heading_level(block) if section_role == "body" else None
-                    align = _docx_paragraph_align(block)
-                    text_raw, runs = _docx_paragraph_runs_and_text(block, part_links)
+                    p_pr = block.find(f"{{{_W_NS}}}pPr")
+                    p_delta = _extract_ppr_delta(p_pr, theme_colors, dark_mode=dark_mode)
+                    ps_id = str(p_delta.get("p_style_id") or "")
+                    eff_p_style = styles_map.get(ps_id, default_p_style) if ps_id else default_p_style
+
+                    if section_role == "body" and p_delta.get("page_break_before") and docx_blocks:
+                        docx_blocks.append(DocxRichBlock(kind="page_break"))
+                        if render_budget.try_consume(34, 0):
+                            html_blocks.append('<hr class="doc-page-break"/>')
+
+                    level = (
+                        _docx_heading_level(block, styles_map)
+                        if section_role == "body"
+                        else None
+                    )
+                    align = _docx_paragraph_align(block, eff_p_style)
+                    ind_left = int(p_delta.get("indent_left_px", eff_p_style.indent_left_px))
+                    ind_right = int(p_delta.get("indent_right_px", eff_p_style.indent_right_px))
+                    first_line = int(p_delta.get("first_line_px", eff_p_style.first_line_px))
+                    sp_before = int(p_delta.get("space_before_px", eff_p_style.space_before_px))
+                    sp_after = int(p_delta.get("space_after_px", eff_p_style.space_after_px))
+                    ln_height = float(p_delta.get("line_height") or eff_p_style.line_height or 0.0)
+                    p_bg = str(p_delta.get("bg_color") or eff_p_style.bg_color or "")
+                    has_b_bdr = bool(p_delta.get("has_bottom_border", False))
+                    has_box_bdr = bool(p_delta.get("has_box_border", False))
+
+                    text_raw, runs, mid_page_break = _docx_paragraph_runs_and_text(
+                        block,
+                        part_links,
+                        base_style=eff_p_style,
+                        styles_map=styles_map,
+                        theme_colors=theme_colors,
+                        major_font=major_font,
+                        minor_font=minor_font,
+                        dark_mode=dark_mode,
+                        footnotes_used=footnotes_used if section_role == "body" else None,
+                    )
                     text = text_raw.strip()
                     if level is not None and text:
                         anchor_id = f"sec-{len(outline) + 1}"
-                        align_attr = f' style="text-align:{align}"' if align != "left" else ""
+                        h_css: list[str] = []
+                        if align != "left":
+                            h_css.append(f"text-align:{align}")
+                        if p_bg:
+                            h_css.append(f"background:{html.escape(p_bg, quote=True)};padding:4px 8px;border-radius:4px")
+                        h_style_attr = f' style="{";".join(h_css)}"' if h_css else ""
+                        h_cls = ' class="doc-p-rule"' if has_b_bdr else ""
                         inner_html = _render_runs_html(runs, text)
                         appended, can_continue = _append_bounded_text_block(
                             html_blocks,
                             md_blocks,
                             render_budget,
                             raw_text=text,
-                            build_html=lambda _t, lv=level, aid=anchor_id, aa=align_attr, ih=inner_html: (
-                                f'<h{lv} id="{aid}"{aa}>{ih}</h{lv}>'
+                            build_html=lambda _t, lv=level, aid=anchor_id, hc=h_cls, hs=h_style_attr, ih=inner_html: (
+                                f'<h{lv} id="{aid}"{hc}{hs}>{ih}</h{lv}>'
                             ),
                             build_md=lambda t, lv=level: (
                                 f"{'#' * lv} "
@@ -1454,28 +2402,57 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                     anchor_id=anchor_id,
                                     runs=runs,
                                     align=align,
+                                    indent_left_px=ind_left,
+                                    space_before_px=sp_before,
+                                    space_after_px=sp_after,
+                                    bg_color=p_bg,
+                                    has_bottom_border=has_b_bdr,
+                                    has_box_border=has_box_bdr,
                                     section_role=section_role,
                                 )
                             )
                         if not can_continue:
                             break
                     elif text:
-                        is_list, list_marker, indent_level = _next_list_info(block)
-                        align_attr = f' style="text-align:{align}"' if align != "left" else ""
+                        is_list, list_marker, indent_level = _next_list_info(block, eff_p_style)
+                        p_css: list[str] = []
+                        if align != "left":
+                            p_css.append(f"text-align:{align}")
+                        if ind_left > 0 and not is_list:
+                            p_css.append(f"margin-left:{ind_left}px")
+                        if ind_right > 0:
+                            p_css.append(f"margin-right:{ind_right}px")
+                        if first_line > 0 and not is_list:
+                            p_css.append(f"text-indent:{first_line}px")
+                        if sp_before > 0:
+                            p_css.append(f"margin-top:{sp_before}px")
+                        if sp_after > 0:
+                            p_css.append(f"margin-bottom:{sp_after}px")
+                        if ln_height > 0:
+                            p_css.append(f"line-height:{ln_height:g}")
+                        if p_bg:
+                            p_css.append(f"background:{html.escape(p_bg, quote=True)};padding:4px 8px;border-radius:4px")
+                        p_style_attr = f' style="{";".join(p_css)}"' if p_css else ""
+                        p_cls = (
+                            ' class="doc-p-box"'
+                            if has_box_bdr
+                            else (' class="doc-p-rule"' if has_b_bdr else "")
+                        )
                         inner_html = _render_runs_html(runs, text)
                         if is_list:
                             marker_txt = list_marker or "•"
+                            list_left = max(indent_level * 20, ind_left)
                             block_html = (
-                                f'<div class="doc-list" style="margin-left:{indent_level * 18}px">'
+                                f'<div class="doc-list" style="margin-left:{list_left}px">'
                                 f'<span class="doc-list-marker">{html.escape(marker_txt)}</span>'
-                                f"<span>{inner_html}</span></div>"
+                                f"<span{p_style_attr}>{inner_html}</span></div>"
                             )
                             md_prefix = f"{'  ' * indent_level}{marker_txt} "
                         else:
                             block_html = (
                                 f'<p class="doc-role-note">{inner_html}</p>'
                                 if section_role != "body"
-                                else f"<p{align_attr}>{inner_html}</p>"
+                                else f"<p{p_cls}{p_style_attr}>{inner_html}</p>"
                             )
                             md_prefix = ""
                         appended, can_continue = _append_bounded_text_block(
@@ -1494,17 +2471,30 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                     runs=runs,
                                     align=align,
                                     indent_level=indent_level,
+                                    indent_left_px=ind_left,
+                                    indent_right_px=ind_right,
+                                    first_line_px=0 if is_list else first_line,
+                                    space_before_px=sp_before,
+                                    space_after_px=sp_after,
+                                    line_height=ln_height,
+                                    bg_color=p_bg,
+                                    has_bottom_border=has_b_bdr,
+                                    has_box_border=has_box_bdr,
                                     list_marker=list_marker,
                                     section_role=section_role,
                                 )
                             )
                         if not can_continue:
                             break
+                    elif has_b_bdr and section_role == "body":
+                        docx_blocks.append(DocxRichBlock(kind="hr", section_role=section_role))
+                        if render_budget.try_consume(12, 0):
+                            html_blocks.append("<hr/>")
 
-                    for rid in _docx_paragraph_image_rids(block):
+                    for rid, img_w, img_h in _docx_paragraph_image_specs(block):
                         target = part_rels.get(rid)
                         if target:
-                            media_res = _try_embed_media(target)
+                            media_res = _try_embed_media(target, img_w, img_h)
                             if media_res is not None:
                                 img_html, img_name, raw_img = media_res
                                 html_blocks.append(img_html)
@@ -1513,14 +2503,29 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                         kind="image",
                                         image_bytes=raw_img,
                                         image_name=img_name,
+                                        image_width_px=img_w,
+                                        image_height_px=img_h,
+                                        align=align,
                                         section_role=section_role,
                                     )
                                 )
 
+                    # Section break inside pPr or explicit mid-paragraph page break
+                    has_sect_break = (
+                        section_role == "body"
+                        and p_pr is not None
+                        and p_pr.find(f"{{{_W_NS}}}sectPr") is not None
+                    )
+                    if section_role == "body" and (mid_page_break or has_sect_break) and docx_blocks:
+                        docx_blocks.append(DocxRichBlock(kind="page_break"))
+                        if render_budget.try_consume(34, 0):
+                            html_blocks.append('<hr class="doc-page-break"/>')
+
                 elif block.tag == f"{{{_W_NS}}}tbl":
                     has_borders = _docx_table_has_borders(block)
                     table_rows: list[list[str]] = []
-                    rich_table_rows: list[tuple[DocxTableCell, ...]] = []
+                    mutable_grid: list[list[DocxTableCell]] = []
+                    max_logical_cols = 0
                     for tr_idx, tr in enumerate(block.findall(f"{{{_W_NS}}}tr")[:_MAX_TABLE_ROWS]):
                         tr_pr = tr.find(f"{{{_W_NS}}}trPr")
                         is_row_header = (
@@ -1529,10 +2534,15 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                         )
                         row_cells_text: list[str] = []
                         row_cells_rich: list[DocxTableCell] = []
+                        logical_col_sum = 0
                         for tc in tr.findall(f"{{{_W_NS}}}tc")[:_MAX_TABLE_COLS]:
                             tc_pr = tc.find(f"{{{_W_NS}}}tcPr")
                             grid_span = 1
                             is_vmerge_cont = False
+                            cell_bg = ""
+                            cell_valign = "top"
+                            cell_w_weight = 0.0
+                            cell_bottom_rule = False
                             if tc_pr is not None:
                                 gs_el = tc_pr.find(f"{{{_W_NS}}}gridSpan")
                                 if gs_el is not None:
@@ -1544,27 +2554,86 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                     vm_val = (vm_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
                                     if vm_val != "restart":
                                         is_vmerge_cont = True
+                                shd_c = tc_pr.find(f"{{{_W_NS}}}shd")
+                                shd_c_hex = _resolve_w_color_hex(shd_c, theme_colors, attr_name="fill")
+                                cell_bg = _adapt_bg_color_for_mode(shd_c_hex, dark_mode=dark_mode)
+                                va_el = tc_pr.find(f"{{{_W_NS}}}vAlign")
+                                if va_el is not None:
+                                    v_raw = (va_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+                                    if v_raw in {"center", "bottom"}:
+                                        cell_valign = v_raw
+                                tcw_el = tc_pr.find(f"{{{_W_NS}}}tcW")
+                                if tcw_el is not None:
+                                    w_raw = (tcw_el.attrib.get(f"{{{_W_NS}}}w") or "").strip()
+                                    try:
+                                        w_f = float(w_raw)
+                                        if w_f > 0:
+                                            cell_w_weight = w_f
+                                    except ValueError:
+                                        pass
+                                tc_bdr = tc_pr.find(f"{{{_W_NS}}}tcBorders")
+                                if tc_bdr is not None:
+                                    b_el = tc_bdr.find(f"{{{_W_NS}}}bottom")
+                                    if b_el is not None and (
+                                        (b_el.attrib.get(f"{{{_W_NS}}}val") or "").strip().lower()
+                                        not in {"none", "nil", ""}
+                                    ):
+                                        cell_bottom_rule = True
 
+                            logical_col_sum += grid_span
                             cell_paras_text: list[str] = []
                             cell_runs_acc: list[DocxTextRun] = []
                             cell_align = "left"
                             cell_imgs: list[tuple[str, bytes]] = []
-                            for p_idx_cell, p in enumerate(tc.findall(f".//{{{_W_NS}}}p")):
-                                p_txt_raw, p_runs = _docx_paragraph_runs_and_text(p, part_links)
-                                p_txt = p_txt_raw.strip()
-                                if p_txt:
-                                    if p_idx_cell == 0:
-                                        cell_align = _docx_paragraph_align(p)
-                                    cell_paras_text.append(p_txt)
-                                    if cell_runs_acc:
-                                        cell_runs_acc.append(DocxTextRun(text="\n"))
-                                    cell_runs_acc.extend(p_runs)
-                                for rid in _docx_paragraph_image_rids(p):
-                                    target = part_rels.get(rid)
-                                    if target:
-                                        m_res = _try_embed_media(target)
-                                        if m_res is not None:
-                                            cell_imgs.append((m_res[1], m_res[2]))
+                            # Iterate direct paragraphs & nested tables without duplicating nested table text
+                            p_idx_cell = 0
+                            for tc_child in _iter_docx_body_blocks(tc):
+                                if tc_child.tag == f"{{{_W_NS}}}p":
+                                    cp_pr = tc_child.find(f"{{{_W_NS}}}pPr")
+                                    cp_delta = _extract_ppr_delta(cp_pr, theme_colors, dark_mode=dark_mode)
+                                    cps_id = str(cp_delta.get("p_style_id") or "")
+                                    ceff_style = styles_map.get(cps_id, default_p_style) if cps_id else default_p_style
+                                    p_txt_raw, p_runs, _ = _docx_paragraph_runs_and_text(
+                                        tc_child,
+                                        part_links,
+                                        base_style=ceff_style,
+                                        styles_map=styles_map,
+                                        theme_colors=theme_colors,
+                                        major_font=major_font,
+                                        minor_font=minor_font,
+                                        dark_mode=dark_mode,
+                                    )
+                                    p_txt = p_txt_raw.strip()
+                                    if p_txt:
+                                        if p_idx_cell == 0:
+                                            cell_align = _docx_paragraph_align(tc_child, ceff_style)
+                                        p_idx_cell += 1
+                                        cell_paras_text.append(p_txt)
+                                        if cell_runs_acc:
+                                            cell_runs_acc.append(DocxTextRun(text="\n"))
+                                        cell_runs_acc.extend(p_runs)
+                                    for rid, _iw, _ih in _docx_paragraph_image_specs(tc_child):
+                                        target = part_rels.get(rid)
+                                        if target:
+                                            m_res = _try_embed_media(target)
+                                            if m_res is not None:
+                                                cell_imgs.append((m_res[1], m_res[2]))
+                                elif tc_child.tag == f"{{{_W_NS}}}tbl":
+                                    # Flatten nested subtable rows concisely inside parent cell
+                                    for sub_tr in tc_child.findall(f"{{{_W_NS}}}tr")[:25]:
+                                        sub_parts = [
+                                            " ".join(
+                                                _docx_paragraph_text(sp).strip()
+                                                for sp in sub_tc.findall(f"{{{_W_NS}}}p")
+                                            ).strip()
+                                            for sub_tc in sub_tr.findall(f"{{{_W_NS}}}tc")
+                                        ]
+                                        sub_line = " | ".join(s for s in sub_parts if s)
+                                        if sub_line:
+                                            cell_paras_text.append(sub_line)
+                                            if cell_runs_acc:
+                                                cell_runs_acc.append(DocxTextRun(text="\n"))
+                                            cell_runs_acc.append(DocxTextRun(text=sub_line))
 
                             cell_text = "" if (is_vmerge_cont and not cell_paras_text) else "\n".join(cell_paras_text)
                             row_cells_text.append(cell_text)
@@ -1573,17 +2642,70 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                     text=cell_text,
                                     runs=_coalesce_runs(cell_runs_acc),
                                     col_span=grid_span,
+                                    row_span=1,
+                                    is_vmerge_cont=is_vmerge_cont,
+                                    width_weight=cell_w_weight,
                                     align=cell_align,
+                                    v_align=cell_valign,
                                     is_header=is_row_header,
+                                    bg_color=cell_bg,
+                                    has_bottom_rule=cell_bottom_rule,
                                     images=tuple(cell_imgs),
                                 )
                             )
+                        max_logical_cols = max(max_logical_cols, logical_col_sum)
                         table_rows.append(row_cells_text)
-                        rich_table_rows.append(tuple(row_cells_rich))
+                        mutable_grid.append(row_cells_rich)
 
+                    # Compute row_span across vMerge continuation cells sharing the same column offset
+                    for r_i in range(len(mutable_grid)):
+                        col_off = 0
+                        for c_i, cell_obj in enumerate(mutable_grid[r_i]):
+                            if not cell_obj.is_vmerge_cont:
+                                span_count = 1
+                                for next_r in range(r_i + 1, len(mutable_grid)):
+                                    next_off = 0
+                                    matched_cont = False
+                                    for next_c in mutable_grid[next_r]:
+                                        if next_off == col_off and next_c.col_span == cell_obj.col_span and next_c.is_vmerge_cont:
+                                            matched_cont = True
+                                            break
+                                        if next_off >= col_off:
+                                            break
+                                        next_off += next_c.col_span
+                                    if matched_cont:
+                                        span_count += 1
+                                    else:
+                                        break
+                                if span_count > 1:
+                                    mutable_grid[r_i][c_i] = DocxTableCell(
+                                        text=cell_obj.text,
+                                        runs=cell_obj.runs,
+                                        col_span=cell_obj.col_span,
+                                        row_span=span_count,
+                                        is_vmerge_cont=False,
+                                        width_weight=cell_obj.width_weight,
+                                        align=cell_obj.align,
+                                        v_align=cell_obj.v_align,
+                                        is_header=cell_obj.is_header,
+                                        bg_color=cell_obj.bg_color,
+                                        has_bottom_rule=cell_obj.has_bottom_rule,
+                                        images=cell_obj.images,
+                                    )
+                            col_off += cell_obj.col_span
+
+                    col_widths = _extract_table_col_widths(block, max_logical_cols)
+                    if not col_widths and mutable_grid and len(mutable_grid[0]) == max_logical_cols:
+                        first_weights = [c.width_weight for c in mutable_grid[0]]
+                        if all(w > 0 for w in first_weights):
+                            tot_w = sum(first_weights)
+                            col_widths = tuple(round(max(0.05, w / tot_w), 4) for w in first_weights)
+
+                    rich_table_rows = [tuple(r) for r in mutable_grid]
                     tbl_html, tbl_md = _render_docx_table_html_and_markdown(
                         tuple(rich_table_rows),
                         has_borders=has_borders,
+                        col_widths=col_widths,
                         budget=render_budget,
                     )
                     if tbl_html:
@@ -1593,6 +2715,7 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
                                 kind="table",
                                 rows=tuple(tuple(r) for r in table_rows),
                                 rich_rows=tuple(rich_table_rows),
+                                col_widths=col_widths,
                                 has_borders=has_borders,
                                 section_role=section_role,
                             )
@@ -1651,6 +2774,33 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         if body is not None and not render_budget.truncated:
             _process_block_sequence(body, rels, hyperlinks, section_role="body")
 
+        # Append referenced footnotes/endnotes cleanly before footers
+        if footnotes_used and notes_map and not render_budget.truncated:
+            for fn_id in footnotes_used:
+                fn_txt = notes_map.get(fn_id)
+                if not fn_txt:
+                    continue
+                note_line = f"[{fn_id}] {fn_txt}"
+                appended, can_cont = _append_bounded_text_block(
+                    html_blocks,
+                    md_blocks,
+                    render_budget,
+                    raw_text=note_line,
+                    build_html=lambda t: f'<p class="doc-role-note">{html.escape(t)}</p>',
+                    build_md=lambda t: f"_{t}_",
+                )
+                if appended:
+                    docx_blocks.append(
+                        DocxRichBlock(
+                            kind="paragraph",
+                            text=note_line,
+                            runs=(DocxTextRun(text=note_line, font_size_pt=10.5),),
+                            section_role="footer",
+                        )
+                    )
+                if not can_cont:
+                    break
+
         for ft_path in footer_targets[:2]:
             _process_hdr_ftr(ft_path, "footer")
 
@@ -1673,10 +2823,11 @@ def _convert_docx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
         _append_render_truncation_notice(html_blocks, md_blocks)
     if not html_blocks:
         html_blocks.append('<p class="muted">(Tài liệu trống)</p>')
+    wrapped_body = '<article class="docx-paper">\n' + "\n".join(html_blocks) + "\n</article>"
     return ConvertedDocument(
         kind="docx",
         title=title,
-        html_document=_base_html_shell(title, "\n".join(html_blocks), dark_mode=dark_mode),
+        html_document=_base_html_shell(title, wrapped_body, dark_mode=dark_mode),
         markdown_text="\n\n".join(md_blocks),
         outline=outline,
         docx_blocks=tuple(docx_blocks),

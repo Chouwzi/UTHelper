@@ -14,7 +14,10 @@ import pytest
 from core.courses import archive_service as archive_mod
 from core.courses import document_converter as doc_mod
 from core.courses.archive_service import ArchiveService
-from core.courses.document_converter import convert_document_bytes
+from core.courses.document_converter import (
+    clear_converted_document_cache,
+    convert_document_bytes,
+)
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.pdf_renderer import PdfDocumentSession, clear_rendered_pdf_cache
 from core.courses.providers import classify_preview_kind
@@ -802,6 +805,205 @@ def test_rich_pptx_layout_group_crop_smartart_chart_and_no_table_dup(tmp_path: P
         assert "Slide 1" in texts
         assert any("Chuong 1: Gioi thieu" in t for t in texts)
         assert len([c for c in _walk_controls(reader) if isinstance(c, ft.Image)]) >= 1
+        reader.dispose()
+    finally:
+        server.stop()
+
+
+def test_high_fidelity_docx_theme_styles_numbering_footnotes_tables_a4_sheets_and_lru_cache(
+    tmp_path: Path,
+):
+    """DOCX OOXML engine resolves theme colors, cascading styles, %1.%2. lists, footnotes, vMerge tables, A4 sheets, zoom & LRU cache."""
+    clear_converted_document_cache()
+    img_bytes = _png_bytes(60, 30)
+
+    theme_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UTH Theme">
+  <a:themeElements>
+    <a:clrScheme name="UTH">
+      <a:dk1><a:sysClr val="windowText" lastClr="111827"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:accent1><a:srgbClr val="1E5AA8"/></a:accent1>
+    </a:clrScheme>
+    <a:fontScheme name="UTH Fonts">
+      <a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont>
+      <a:minorFont><a:latin typeface="Times New Roman"/></a:minorFont>
+    </a:fontScheme>
+  </a:themeElements>
+</a:theme>"""
+
+    styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi"/><w:sz w:val="26"/></w:rPr></w:rPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:styleId="BaseBody">
+    <w:pPr><w:jc w:val="both"/><w:ind w:firstLine="480"/></w:pPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="AccentCaps">
+    <w:basedOn w:val="BaseBody"/>
+    <w:rPr>
+      <w:caps/>
+      <w:color w:val="1E5AA8" w:themeColor="accent1" w:themeTint="BF"/>
+    </w:rPr>
+  </w:style>
+</w:styles>"""
+
+    numbering_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="7">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+    <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>
+</w:numbering>"""
+
+    footnotes_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:type="separator" w:id="-1"><w:p/></w:footnote>
+  <w:footnote w:id="1">
+    <w:p><w:r><w:t>Nguồn: Giáo trình CNXHKH trang 45.</w:t></w:r></w:p>
+  </w:footnote>
+</w:footnotes>"""
+
+    doc_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/chart.png"/>
+</Relationships>"""
+
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document
+    xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+    xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:tbl>
+      <w:tblPr>
+        <w:tblBorders>
+          <w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/>
+          <w:right w:val="none"/><w:insideH w:val="none"/><w:insideV w:val="none"/>
+        </w:tblBorders>
+      </w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="6000"/></w:tblGrid>
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:vMerge w:val="restart"/><w:shd w:fill="EEF4FF"/></w:tcPr>
+          <w:p><w:r><w:t>TRƯỜNG ĐH GTVT TP.HCM</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:tcBorders><w:bottom w:val="single" w:sz="6"/></w:tcBorders></w:tcPr>
+          <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:b/><w:t>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+        <w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Độc lập - Tự do - Hạnh phúc</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p>
+      <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr>
+      <w:r><w:t>Phần mở đầu</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="3"/></w:numPr></w:pPr>
+      <w:r><w:t>Mục tiêu nghiên cứu</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="3"/></w:numPr></w:pPr>
+      <w:r><w:t>Phạm vi đề tài</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="AccentCaps"/></w:pPr>
+      <w:r><w:t>Nội dung trọng tâm</w:t></w:r>
+      <w:r><w:footnoteReference w:id="1"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:extent cx="2857500" cy="1428750"/>
+            <a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rIdImg1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+    <w:p><w:r><w:t>Nội dung trang thứ hai</w:t></w:r></w:p>
+  </w:body>
+</w:document>"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/theme/theme1.xml", theme_xml)
+        zf.writestr("word/styles.xml", styles_xml)
+        zf.writestr("word/numbering.xml", numbering_xml)
+        zf.writestr("word/footnotes.xml", footnotes_xml)
+        zf.writestr("word/_rels/document.xml.rels", doc_rels)
+        zf.writestr("word/document.xml", document_xml)
+        zf.writestr("word/media/chart.png", img_bytes)
+    docx_bytes = buf.getvalue()
+
+    res1 = convert_document_bytes("tieu_luan.docx", docx_bytes, "docx")
+    res2 = convert_document_bytes("tieu_luan.docx", docx_bytes, "docx")
+    assert res1 is res2  # Thread-safe LRU cache hit!
+
+    tbl_block = next(b for b in res1.docx_blocks if b.kind == "table")
+    assert tbl_block.has_borders is False
+    assert len(tbl_block.col_widths) == 2
+    assert tbl_block.col_widths[1] > tbl_block.col_widths[0]
+    assert tbl_block.rich_rows[0][0].row_span == 2
+    assert tbl_block.rich_rows[0][0].bg_color.upper() == "#EEF4FF"
+    assert tbl_block.rich_rows[0][1].has_bottom_rule is True
+
+    list_prefixes = [b.list_marker for b in res1.docx_blocks if b.list_marker]
+    assert list_prefixes[:3] == ["1.", "1.1.", "1.2."]
+
+    styled_p = next(
+        b
+        for b in res1.docx_blocks
+        if any("nội dung trọng tâm" in r.text.lower() for r in b.runs)
+    )
+    assert styled_p.align == "justify"
+    assert styled_p.first_line_px == 32
+    assert styled_p.runs[0].all_caps is True
+    assert styled_p.runs[0].font_kind == "serif"
+    assert styled_p.runs[0].font_size_pt == 13.0
+    assert styled_p.runs[0].color.startswith("#")
+    assert any(r.superscript and "[1]" in r.text for r in styled_p.runs)
+    assert any(
+        "Nguồn: Giáo trình CNXHKH trang 45." in (b.text or "".join(r.text for r in b.runs))
+        for b in res1.docx_blocks
+    )
+
+    img_block = next(b for b in res1.docx_blocks if b.kind == "image")
+    assert (img_block.image_width_px, img_block.image_height_px) == (300, 150)
+    assert any(b.kind == "page_break" for b in res1.docx_blocks)
+
+    server = LocalPreviewServer()
+    try:
+        reader = DocumentReaderView(
+            file_name="tieu_luan.docx",
+            data=docx_bytes,
+            kind="docx",
+            preview_server=server,
+            preconverted=res1,
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+        )
+        texts = [c.value for c in _walk_controls(reader) if isinstance(c, ft.Text) and c.value]
+        assert any("2 trang" in t for t in texts)
+        initial_zoom = reader._docx_scale
+        zoom_in = next(
+            c
+            for c in _walk_controls(reader)
+            if isinstance(c, ft.IconButton) and c.tooltip == "Phóng to trang Word"
+        )
+        zoom_in.on_click(None)
+        assert reader._docx_scale > initial_zoom
         reader.dispose()
     finally:
         server.stop()

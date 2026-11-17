@@ -199,9 +199,115 @@ class RichActivityPage:
     chapters: tuple[BookChapterEntry, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class QuizReviewChoice:
+    """Single answer option or matching pair inside a Moodle quiz attempt review."""
+
+    label: str
+    text: str
+    is_selected: bool = False
+    state: str = "neutral"  # "correct" | "incorrect" | "partial" | "neutral"
+    feedback: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class QuizReviewQuestion:
+    """Structured question item extracted from Moodle ``mod_quiz`` review HTML/WS."""
+
+    display_number: str
+    slot: str
+    question_code: str = ""
+    qtype: str = ""
+    state_kind: str = "neutral"  # "correct" | "incorrect" | "partial" | "complete" | "unanswered"
+    status_label: str = ""
+    mark: str = ""
+    max_mark: str = ""
+    question_text: str = ""
+    choices: tuple[QuizReviewChoice, ...] = ()
+    student_response_text: str = ""
+    right_answer_text: str = ""
+    specific_feedback: str = ""
+    general_feedback: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class QuizAttemptReviewReport:
+    """Complete parsed quiz attempt review with score metrics and ordered questions."""
+
+    attempt_id: int
+    attempt_number: int = 1
+    state_label: str = ""
+    grade_text: str = ""
+    raw_score_text: str = ""
+    duration_text: str = ""
+    finished_at_text: str = ""
+    correct_count: int = 0
+    incorrect_count: int = 0
+    partial_count: int = 0
+    unanswered_count: int = 0
+    questions: tuple[QuizReviewQuestion, ...] = ()
+
+
+_NON_READABLE_TAGS = (
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "svg",
+    "canvas",
+    "head",
+    "title",
+    "meta",
+    "link",
+    "iframe",
+    "object",
+    "embed",
+)
+_GIFT_PREFIX_RE = re.compile(
+    r"^\s*::([^:\r\n]{1,120})::(?:\s*\[(?:html|markdown|moodle|plain)\])?\s*",
+    re.IGNORECASE,
+)
+_FORMAT_TAG_PREFIX_RE = re.compile(
+    r"^\s*\[(?:html|markdown|moodle|plain)\]\s*",
+    re.IGNORECASE,
+)
+_LONG_UNDERSCORE_RE = re.compile(r"_{4,}")
+_RIGHT_ANSWER_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"the\s+correct\s+answers?\s+(?:is|are)"
+    r"|correct\s+answers?"
+    r"|câu\s+trả\s+lời\s+đúng\s+là"
+    r"|các\s+câu\s+trả\s+lời\s+đúng\s+là"
+    r"|đáp\s+án\s+đúng\s+là"
+    r")\s*[:：\-]?\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_moodle_question_text(raw_text: str) -> tuple[str, str]:
+    """Strip GIFT ``::CODE::[html]`` artifacts and normalize blanks; return ``(text, code)``."""
+    text = html.unescape(str(raw_text or "")).strip()
+    if not text:
+        return "", ""
+    code = ""
+    match = _GIFT_PREFIX_RE.match(text)
+    if match:
+        code = " ".join(match.group(1).split())
+        text = text[match.end() :].lstrip()
+    text = _FORMAT_TAG_PREFIX_RE.sub("", text).strip()
+    text = _LONG_UNDERSCORE_RE.sub(" ______ ", text)
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    cleaned = "\n".join(line for line in lines if line).strip()
+    return cleaned, code
+
+
 def _html_to_readable_markdown(raw_html: str) -> str:
-    sanitized = HTMLSanitizer.sanitize(raw_html or "")
-    soup = BeautifulSoup(sanitized, BS4_PARSER)
+    raw_soup = BeautifulSoup(raw_html or "", BS4_PARSER)
+    for junk in list(raw_soup.find_all(_NON_READABLE_TAGS)):
+        if not getattr(junk, "decomposed", False):
+            junk.decompose()
+    HTMLSanitizer.sanitize_soup(raw_soup)
+    soup = raw_soup
     lines: list[str] = []
     for el in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "pre", "blockquote"]):
         txt = _clean_text(el)
@@ -224,6 +330,527 @@ def _html_to_readable_markdown(raw_html: str) -> str:
         fallback = " ".join(soup.get_text("\n", strip=True).split())
         return fallback
     return "\n\n".join(lines)
+
+
+def _normalize_match_key(text: str) -> str:
+    cleaned, _ = clean_moodle_question_text(text)
+    lowered = " ".join(cleaned.lower().split()).rstrip(".。;；,， ")
+    return lowered
+
+
+def _format_score_num(val: Any) -> str:
+    if val is None or isinstance(val, bool) or val == "":
+        return ""
+    try:
+        num = float(val)
+    except (TypeError, ValueError):
+        return str(val).strip()
+    if abs(num - round(num)) < 1e-6:
+        return str(int(round(num)))
+    return f"{num:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_duration_human(seconds: int) -> str:
+    if seconds <= 0:
+        return ""
+    hours, rem = divmod(int(seconds), 3600)
+    mins, secs = divmod(rem, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} giờ")
+    if mins:
+        parts.append(f"{mins} phút")
+    if secs and not hours:
+        parts.append(f"{secs} giây")
+    return " ".join(parts) or f"{seconds} giây"
+
+
+def _format_epoch_vn(ts: Any) -> str:
+    try:
+        epoch = int(float(ts or 0))
+    except (TypeError, ValueError):
+        return ""
+    if epoch <= 0:
+        return ""
+    import datetime as _dt
+
+    dt = _dt.datetime.fromtimestamp(epoch)
+    return dt.strftime("%H:%M %d/%m/%Y")
+
+
+def _classify_question_state(
+    raw_state: str,
+    raw_status: str,
+    que_classes: set[str],
+    mark_val: str,
+    max_val: str,
+) -> tuple[str, str]:
+    st = (raw_state or "").strip().lower()
+    classes = {c.lower() for c in que_classes}
+    if st in {"gradedright", "mangrright"} or "correct" in classes:
+        return "correct", "Đúng"
+    if st in {"gradedpartial", "mangrpartial"} or "partiallycorrect" in classes:
+        return "partial", "Đúng một phần"
+    if st in {"gradedwrong", "mangrwrong"} or "incorrect" in classes:
+        return "incorrect", "Sai"
+    if st in {"gaveup", "todo"} or "notanswered" in classes:
+        return "unanswered", "Chưa trả lời"
+
+    try:
+        m_f = float(mark_val)
+        mx_f = float(max_val)
+        if mx_f > 0:
+            if m_f >= mx_f - 1e-4:
+                return "correct", "Đúng"
+            if m_f > 0:
+                return "partial", "Đúng một phần"
+            if st in {"complete", "finished"} or raw_status:
+                return "incorrect", "Sai"
+    except (TypeError, ValueError):
+        pass
+
+    status_clean = " ".join((raw_status or "").split())
+    low_status = status_clean.lower()
+    if low_status in {"correct", "đúng"}:
+        return "correct", "Đúng"
+    if low_status in {"incorrect", "sai", "not correct"}:
+        return "incorrect", "Sai"
+    if "partial" in low_status or "một phần" in low_status:
+        return "partial", "Đúng một phần"
+    if "not answered" in low_status or "chưa trả lời" in low_status:
+        return "unanswered", "Chưa trả lời"
+    if "complete" in low_status or st == "complete":
+        return "complete", status_clean or "Đã trả lời"
+    return "neutral", status_clean or "Đã chấm"
+
+
+def _extract_choice_label(raw_num: str, idx: int) -> str:
+    cleaned = raw_num.strip().rstrip(".): ")
+    if cleaned and len(cleaned) <= 4:
+        return cleaned.upper() if len(cleaned) == 1 and cleaned.isalpha() else cleaned
+    return chr(65 + (idx % 26))
+
+
+def _parse_single_quiz_question_dom(
+    que_soup: Any,
+    *,
+    seq_number: int,
+    raw_meta: Optional[dict[str, Any]] = None,
+) -> tuple[QuizReviewQuestion, bool]:
+    """Parse one Moodle ``div.que`` DOM block into a structured ``QuizReviewQuestion``."""
+    meta = raw_meta or {}
+    for junk in list(que_soup.find_all(_NON_READABLE_TAGS)):
+        if not getattr(junk, "decomposed", False):
+            junk.decompose()
+
+    que_root = que_soup.select_one("div.que") or que_soup
+    raw_classes = que_root.get("class") if hasattr(que_root, "get") else None
+    que_classes = {str(c) for c in (raw_classes or []) if c}
+
+    qtype = str(meta.get("type") or "").strip().lower()
+    if not qtype:
+        known_types = {
+            "multichoice",
+            "truefalse",
+            "shortanswer",
+            "match",
+            "numerical",
+            "essay",
+            "multianswer",
+            "description",
+            "gapselect",
+            "ddwtos",
+        }
+        for cls_tok in que_classes:
+            if cls_tok.lower() in known_types:
+                qtype = cls_tok.lower()
+                break
+
+    raw_number = str(meta.get("number") or "").strip()
+    if not raw_number:
+        qno_el = que_root.select_one(".info .qno")
+        if qno_el is not None:
+            raw_number = _clean_text(qno_el)
+
+    is_info_only = qtype == "description" or raw_number.lower() == "i"
+    display_number = "Thông tin" if is_info_only else str(seq_number)
+    slot = str(meta.get("slot") or raw_number or seq_number)
+
+    # Extract grade/mark & state from metadata or .info block
+    mark = _format_score_num(meta.get("mark"))
+    max_mark = _format_score_num(meta.get("maxmark"))
+    if not mark or not max_mark:
+        grade_div = que_root.select_one(".info .grade")
+        if grade_div is not None:
+            grade_txt = _clean_text(grade_div)
+            nums = re.findall(r"\d+(?:[.,]\d+)?", grade_txt)
+            if len(nums) >= 2:
+                mark = mark or _format_score_num(nums[0].replace(",", "."))
+                max_mark = max_mark or _format_score_num(nums[1].replace(",", "."))
+
+    raw_status = str(meta.get("status") or "").strip()
+    if not raw_status:
+        state_div = que_root.select_one(".info .state")
+        if state_div is not None:
+            raw_status = _clean_text(state_div)
+
+    state_kind, status_label = _classify_question_state(
+        str(meta.get("state") or ""),
+        raw_status,
+        que_classes,
+        mark,
+        max_mark,
+    )
+
+    # Remove screen-reader-only labels (.accesshide) before text extraction
+    for hidden in list(que_root.select(".accesshide")):
+        if not getattr(hidden, "decomposed", False):
+            hidden.decompose()
+
+    # Extract outcome blocks (.rightanswer, .specificfeedback, .generalfeedback)
+    right_el = que_root.select_one(".outcome .rightanswer, .rightanswer")
+    raw_right = _clean_text(right_el) if right_el is not None else ""
+    stripped_right = _RIGHT_ANSWER_PREFIX_RE.sub("", raw_right).strip()
+    clean_right, _ = clean_moodle_question_text(stripped_right)
+
+    gen_fb_el = que_root.select_one(".outcome .generalfeedback, .generalfeedback")
+    general_fb, _ = clean_moodle_question_text(_clean_text(gen_fb_el)) if gen_fb_el is not None else ("", "")
+
+    spec_fb_el = que_root.select_one(".outcome > .specificfeedback, .outcome .feedback > .specificfeedback")
+    specific_fb, _ = clean_moodle_question_text(_clean_text(spec_fb_el)) if spec_fb_el is not None else ("", "")
+
+    # Extract question stem (.qtext)
+    qtext_el = que_root.select_one(".qtext")
+    raw_stem = ""
+    if qtext_el is not None:
+        raw_stem = _html_to_readable_markdown(str(qtext_el)) or _clean_text(qtext_el)
+    else:
+        formulation = que_root.select_one(".formulation")
+        raw_stem = _clean_text(formulation or que_root)[:600]
+    stem_text, q_code = clean_moodle_question_text(raw_stem)
+
+    # Parse answer choices / student response inside .ablock / .answer
+    choices: list[QuizReviewChoice] = []
+    student_response_text = ""
+    is_multi_checkbox = False
+
+    answer_container = que_root.select_one(".ablock .answer, .answer")
+    if answer_container is not None:
+        # 1. Matching question table (<select>)
+        select_rows = [
+            tr for tr in answer_container.select("tr") if tr.find("select") is not None
+        ]
+        if select_rows:
+            for idx_m, tr in enumerate(select_rows):
+                stem_td = tr.select_one("td.text") or tr.find("td")
+                sel = tr.find("select")
+                chosen_opt = ""
+                if sel is not None:
+                    sel_opt = sel.find("option", selected=True) or sel.find(
+                        "option", attrs={"selected": True}
+                    )
+                    if sel_opt is not None:
+                        chosen_opt = _clean_text(sel_opt)
+                tr_classes = {str(c).lower() for c in (tr.get("class") or [])}
+                row_state = (
+                    "correct"
+                    if "correct" in tr_classes
+                    else ("incorrect" if "incorrect" in tr_classes else "neutral")
+                )
+                left_txt, _ = clean_moodle_question_text(_clean_text(stem_td))
+                right_txt, _ = clean_moodle_question_text(chosen_opt)
+                pair_txt = f"{left_txt}  →  {right_txt or '(Chưa chọn)'}"
+                choices.append(
+                    QuizReviewChoice(
+                        label=str(idx_m + 1),
+                        text=pair_txt,
+                        is_selected=bool(right_txt),
+                        state=row_state,
+                    )
+                )
+        else:
+            # 2. Multiple choice / True-False option rows
+            option_divs = [
+                div
+                for div in answer_container.find_all("div", recursive=False)
+                if div.find("input", attrs={"type": lambda t: str(t or "").lower() in {"radio", "checkbox"}})
+                is not None
+                or any(str(c).startswith("r") for c in (div.get("class") or []))
+            ]
+            if not option_divs:
+                option_divs = [
+                    div
+                    for div in answer_container.select("div.r0, div.r1")
+                ]
+
+            for idx_c, opt_div in enumerate(option_divs):
+                inp = opt_div.find(
+                    "input",
+                    attrs={"type": lambda t: str(t or "").lower() in {"radio", "checkbox"}},
+                )
+                if inp is not None and str(inp.get("type") or "").lower() == "checkbox":
+                    is_multi_checkbox = True
+                is_checked = bool(
+                    inp is not None
+                    and (inp.has_attr("checked") or str(inp.get("checked") or "").lower() in {"checked", "true", "1"})
+                )
+
+                row_classes = {str(c).lower() for c in (opt_div.get("class") or [])}
+                opt_state = "neutral"
+                if "correct" in row_classes:
+                    opt_state = "correct"
+                elif "partiallycorrect" in row_classes:
+                    opt_state = "partial"
+                elif "incorrect" in row_classes:
+                    opt_state = "incorrect"
+                else:
+                    icon_el = opt_div.select_one(
+                        "i.fa-check, i.fa-check-circle, i.text-success, i.fa-remove, i.fa-times, i.fa-xmark, i.text-danger"
+                    )
+                    if icon_el is not None:
+                        ic_cls = " ".join(icon_el.get("class") or []).lower()
+                        if "check" in ic_cls or "success" in ic_cls:
+                            opt_state = "correct"
+                        elif any(k in ic_cls for k in ("remove", "times", "xmark", "danger")):
+                            opt_state = "incorrect"
+
+                # Clone option HTML to remove answernumber & inline feedback cleanly
+                opt_clone = BeautifulSoup(str(opt_div), BS4_PARSER)
+                ans_num_el = opt_clone.select_one(".answernumber")
+                raw_ans_num = _clean_text(ans_num_el) if ans_num_el is not None else ""
+                if ans_num_el is not None:
+                    ans_num_el.decompose()
+                inline_fb_el = opt_clone.select_one(".specificfeedback")
+                inline_fb = ""
+                if inline_fb_el is not None:
+                    inline_fb, _ = clean_moodle_question_text(_clean_text(inline_fb_el))
+                    inline_fb_el.decompose()
+                for tag_rm in opt_clone.find_all(["input", "script", "style"]):
+                    tag_rm.decompose()
+
+                choice_txt, _ = clean_moodle_question_text(_clean_text(opt_clone))
+                if not choice_txt:
+                    continue
+                if not raw_ans_num:
+                    m_lead = re.match(r"^([A-Ha-h]|[1-8])[.)]\s+(.+)$", choice_txt, flags=re.DOTALL)
+                    if m_lead:
+                        raw_ans_num = m_lead.group(1)
+                        choice_txt = m_lead.group(2).strip()
+                label_str = _extract_choice_label(raw_ans_num, idx_c)
+                if is_checked and opt_state == "neutral":
+                    if state_kind == "correct":
+                        opt_state = "correct"
+                    elif state_kind == "incorrect":
+                        opt_state = "incorrect"
+                    elif state_kind == "partial":
+                        opt_state = "partial"
+
+                choices.append(
+                    QuizReviewChoice(
+                        label=label_str,
+                        text=choice_txt,
+                        is_selected=is_checked,
+                        state=opt_state,
+                        feedback=inline_fb,
+                    )
+                )
+
+            # 3. Short-answer / numerical / essay inputs if no option rows
+            if not choices:
+                text_inp = answer_container.find(
+                    "input",
+                    attrs={"type": lambda t: str(t or "text").lower() in {"text", "number"}},
+                )
+                if text_inp is not None:
+                    student_response_text = str(text_inp.get("value") or "").strip()
+                else:
+                    ta = answer_container.find("textarea")
+                    if ta is not None:
+                        student_response_text = _clean_text(ta)
+                    else:
+                        essay_box = que_root.select_one(".qtype_essay_response, .ablock")
+                        if essay_box is not None and qtype in {"essay", "shortanswer", "numerical"}:
+                            student_response_text, _ = clean_moodle_question_text(_clean_text(essay_box))
+
+    # Cross-highlight the official right answer option when Moodle only put it in .rightanswer
+    if choices and clean_right and not any(c.state == "correct" for c in choices):
+        right_norm = _normalize_match_key(clean_right)
+        candidate_norms = {right_norm}
+        if is_multi_checkbox and ("," in clean_right or ";" in clean_right):
+            for piece in re.split(r"[;,]", clean_right):
+                pn = _normalize_match_key(piece)
+                if pn:
+                    candidate_norms.add(pn)
+        upgraded: list[QuizReviewChoice] = []
+        for ch in choices:
+            ch_norm = _normalize_match_key(ch.text)
+            if ch_norm and ch_norm in candidate_norms and ch.state == "neutral":
+                upgraded.append(
+                    QuizReviewChoice(
+                        label=ch.label,
+                        text=ch.text,
+                        is_selected=ch.is_selected,
+                        state="correct",
+                        feedback=ch.feedback,
+                    )
+                )
+            else:
+                upgraded.append(ch)
+        choices = upgraded
+
+    return (
+        QuizReviewQuestion(
+            display_number=display_number,
+            slot=slot,
+            question_code=q_code,
+            qtype=qtype,
+            state_kind="neutral" if is_info_only else state_kind,
+            status_label="" if is_info_only else status_label,
+            mark="" if is_info_only else mark,
+            max_mark="" if is_info_only else max_mark,
+            question_text=stem_text,
+            choices=tuple(choices),
+            student_response_text=student_response_text,
+            right_answer_text=clean_right,
+            specific_feedback=specific_fb,
+            general_feedback=general_fb,
+        ),
+        not is_info_only,
+    )
+
+
+def parse_quiz_attempt_review_payload(
+    data: dict[str, Any], *, fallback_attempt_id: int = 0
+) -> QuizAttemptReviewReport:
+    """Parse Moodle ``mod_quiz_get_attempt_review`` JSON payload into a rich report."""
+    att_obj = data.get("attempt") if isinstance(data.get("attempt"), dict) else {}
+    attempt_id = int(att_obj.get("id") or fallback_attempt_id or 0)
+    attempt_num = int(att_obj.get("attempt") or 1)
+    raw_state = str(att_obj.get("state") or "finished").lower()
+    state_map = {
+        "finished": "Đã hoàn thành",
+        "inprogress": "Đang làm",
+        "overdue": "Quá hạn",
+        "abandoned": "Đã hủy",
+    }
+    state_label = state_map.get(raw_state, raw_state)
+
+    grade_str = _format_score_num(data.get("grade"))
+    sumgrades_str = _format_score_num(att_obj.get("sumgrades"))
+
+    t_start = int(float(att_obj.get("timestart") or 0))
+    t_finish = int(float(att_obj.get("timefinish") or 0))
+    duration_text = _format_duration_human(t_finish - t_start) if (t_finish > t_start > 0) else ""
+    finished_at_text = _format_epoch_vn(t_finish)
+
+    # Also check additionaldata table rows (Moodle often puts formatted Grade '9.50 out of 10.00 (95%)' here)
+    formatted_grade_banner = ""
+    for extra in data.get("additionaldata") or []:
+        if not isinstance(extra, dict):
+            continue
+        title_l = str(extra.get("title") or "").lower()
+        if "grade" in title_l or "điểm" in title_l:
+            soup_ex = BeautifulSoup(str(extra.get("content") or ""), BS4_PARSER)
+            formatted_grade_banner = _clean_text(soup_ex)
+            break
+
+    questions: list[QuizReviewQuestion] = []
+    seq = 1
+    correct_n = 0
+    incorrect_n = 0
+    partial_n = 0
+    unanswered_n = 0
+
+    for raw_q in data.get("questions") or []:
+        if not isinstance(raw_q, dict):
+            continue
+        q_html = str(raw_q.get("html") or "")
+        q_soup = BeautifulSoup(q_html, BS4_PARSER)
+        parsed_q, counted = _parse_single_quiz_question_dom(
+            q_soup, seq_number=seq, raw_meta=raw_q
+        )
+        questions.append(parsed_q)
+        if counted:
+            seq += 1
+            if parsed_q.state_kind == "correct":
+                correct_n += 1
+            elif parsed_q.state_kind == "incorrect":
+                incorrect_n += 1
+            elif parsed_q.state_kind == "partial":
+                partial_n += 1
+            elif parsed_q.state_kind == "unanswered":
+                unanswered_n += 1
+
+    grade_display = formatted_grade_banner or (f"{grade_str} / 10" if grade_str else sumgrades_str)
+    return QuizAttemptReviewReport(
+        attempt_id=attempt_id,
+        attempt_number=attempt_num,
+        state_label=state_label,
+        grade_text=grade_display,
+        raw_score_text=sumgrades_str,
+        duration_text=duration_text,
+        finished_at_text=finished_at_text,
+        correct_count=correct_n,
+        incorrect_count=incorrect_n,
+        partial_count=partial_n,
+        unanswered_count=unanswered_n,
+        questions=tuple(questions),
+    )
+
+
+def parse_quiz_review_html_page(
+    html_text: str, *, attempt_id: int = 0
+) -> QuizAttemptReviewReport:
+    """Parse ``/mod/quiz/review.php`` HTML directly (for THNN or session fallback)."""
+    soup = BeautifulSoup(html_text or "", BS4_PARSER)
+    grade_text = ""
+    duration_text = ""
+    finished_text = ""
+    for tr in soup.select("table.quizreviewsummary tr"):
+        th = _clean_text(tr.find("th")).lower()
+        td = _clean_text(tr.find("td"))
+        if not td:
+            continue
+        if "grade" in th or "điểm" in th:
+            grade_text = td
+        elif "time taken" in th or "thời gian thực hiện" in th:
+            duration_text = td
+        elif "completed" in th or "kết thúc" in th:
+            finished_text = td
+
+    questions: list[QuizReviewQuestion] = []
+    seq = 1
+    correct_n = 0
+    incorrect_n = 0
+    partial_n = 0
+    unanswered_n = 0
+    for que_div in soup.select("div.que"):
+        parsed_q, counted = _parse_single_quiz_question_dom(que_div, seq_number=seq)
+        questions.append(parsed_q)
+        if counted:
+            seq += 1
+            if parsed_q.state_kind == "correct":
+                correct_n += 1
+            elif parsed_q.state_kind == "incorrect":
+                incorrect_n += 1
+            elif parsed_q.state_kind == "partial":
+                partial_n += 1
+            elif parsed_q.state_kind == "unanswered":
+                unanswered_n += 1
+
+    return QuizAttemptReviewReport(
+        attempt_id=attempt_id,
+        attempt_number=1,
+        state_label="Đã hoàn thành",
+        grade_text=grade_text,
+        duration_text=duration_text,
+        finished_at_text=finished_text,
+        correct_count=correct_n,
+        incorrect_count=incorrect_n,
+        partial_count=partial_n,
+        unanswered_count=unanswered_n,
+        questions=tuple(questions),
+    )
 
 
 def _extract_cmid_from_url(url: str) -> int:
@@ -927,29 +1554,93 @@ class CourseActivityService:
                         access_info = res_acc
                 try:
                     raw_attempts = self._service.get_quiz_attempts(quiz_id) or []
+                    att_state_map = {
+                        "finished": "Đã hoàn thành",
+                        "inprogress": "Đang làm",
+                        "overdue": "Quá hạn",
+                        "abandoned": "Đã hủy",
+                    }
+                    origin_base = "https://courses.ut.edu.vn"
+                    courses_cli = self._client_for("courses")
+                    if courses_cli is not None:
+                        origin_base = (
+                            getattr(courses_cli, "moodle_site_origin", "")
+                            or origin_base
+                        ).rstrip("/")
                     for idx, att in enumerate(raw_attempts, start=1):
                         if not isinstance(att, dict):
                             continue
                         att_id = int(att.get("id") or 0)
                         sumgrades = att.get("sumgrades")
-                        max_grade = quiz_meta.get("sumgrades")
+                        max_sum = quiz_meta.get("sumgrades")
+                        max_grade = quiz_meta.get("grade")
                         score_text = ""
                         if sumgrades is not None:
-                            score_text = (
-                                f"{sumgrades} / {max_grade}"
-                                if max_grade
-                                else str(sumgrades)
-                            )
+                            try:
+                                sg_f = float(sumgrades)
+                                ms_f = float(max_sum) if max_sum is not None else 0.0
+                                mg_f = float(max_grade) if max_grade is not None else 0.0
+                                if ms_f > 0 and mg_f > 0 and abs(ms_f - mg_f) > 1e-6:
+                                    scaled = (sg_f / ms_f) * mg_f
+                                    score_text = f"{_format_score_num(scaled)} / {_format_score_num(mg_f)}"
+                                elif max_sum is not None:
+                                    score_text = f"{sumgrades} / {max_sum}"
+                                else:
+                                    score_text = str(sumgrades)
+                            except (TypeError, ValueError):
+                                score_text = (
+                                    f"{sumgrades} / {max_sum}" if max_sum else str(sumgrades)
+                                )
+                        raw_st = str(att.get("state") or "finished").lower()
+                        fin_str = _format_epoch_vn(att.get("timefinish"))
+                        rev_url = (
+                            f"{origin_base}/mod/quiz/review.php?attempt={att_id}"
+                            if att_id > 0
+                            else ""
+                        )
                         attempts.append(
                             QuizAttemptInfo(
                                 attempt_number=int(att.get("attempt") or idx),
                                 attempt_id=att_id,
-                                state=str(att.get("state") or "finished"),
+                                state=att_state_map.get(raw_st, raw_st),
                                 score_text=score_text,
+                                time_submitted=fin_str,
+                                review_url=rev_url,
                             )
                         )
                 except Exception as exc:
                     logger.warning("get_quiz_attempts failed: %s", exc)
+        elif source == "thnn":
+            client = self._client_for("thnn")
+            if client is not None and web_url:
+                try:
+                    final_u, html_text, redir = client.open_session_url(web_url)
+                    if not redir and html_text:
+                        base = self._origin_for(client, final_u or web_url)
+                        soup_q = BeautifulSoup(html_text, BS4_PARSER)
+                        for idx_r, tr in enumerate(
+                            soup_q.select("table.quizattemptsummary tbody tr"), start=1
+                        ):
+                            rev_a = tr.select_one("a[href*='review.php']")
+                            href = str(rev_a.get("href") or "").strip() if rev_a else ""
+                            full_rev = _safe_http_url(urljoin(f"{base}/", href)) if href else ""
+                            qs_rev = parse_qs(urlsplit(full_rev).query)
+                            raw_aid = (qs_rev.get("attempt") or ["0"])[0]
+                            aid = int(raw_aid) if raw_aid.isdigit() else 0
+                            cells = [_clean_text(td) for td in tr.find_all(["td", "th"])]
+                            st_txt = cells[1] if len(cells) > 1 else "Đã hoàn thành"
+                            sc_txt = cells[2] if len(cells) > 2 else ""
+                            attempts.append(
+                                QuizAttemptInfo(
+                                    attempt_number=idx_r,
+                                    attempt_id=aid,
+                                    state=st_txt,
+                                    score_text=sc_txt,
+                                    review_url=full_rev,
+                                )
+                            )
+                except Exception as exc:
+                    logger.debug("THNN quiz summary HTML parse skipped: %s", exc)
 
         grade_methods = {
             1: "Điểm cao nhất",
@@ -976,29 +1667,71 @@ class CourseActivityService:
             web_url=web_url,
         )
 
-    def fetch_quiz_review(self, attempt_id: int) -> list[dict[str, str]]:
-        if self._service is None or attempt_id <= 0:
-            return []
-        fn = getattr(self._service, "get_quiz_attempt_review", None)
-        if not callable(fn):
-            return []
-        data = fn(int(attempt_id))
-        if not isinstance(data, dict):
-            return []
-        items: list[dict[str, str]] = []
-        for q in data.get("questions") or []:
-            if not isinstance(q, dict):
-                continue
-            q_html = str(q.get("html") or "")
-            soup = BeautifulSoup(HTMLSanitizer.sanitize(q_html), BS4_PARSER)
-            qtext = _clean_text(soup.select_one(".qtext")) or _clean_text(soup)[:320]
+    def fetch_quiz_review_report(
+        self,
+        attempt_id: int,
+        *,
+        source: CourseSource = "courses",
+        review_url: str = "",
+    ) -> QuizAttemptReviewReport:
+        """Fetch and parse structured quiz review questions, options, and feedback."""
+        if source == "courses" and self._service is not None and attempt_id > 0:
+            fn = getattr(self._service, "get_quiz_attempt_review", None)
+            if callable(fn):
+                try:
+                    data = fn(int(attempt_id))
+                    if isinstance(data, dict) and data.get("questions"):
+                        return parse_quiz_attempt_review_payload(
+                            data, fallback_attempt_id=int(attempt_id)
+                        )
+                except Exception as exc:
+                    logger.warning("get_quiz_attempt_review failed: %s", exc)
+
+        # Fallback: session HTML scrape (/mod/quiz/review.php?attempt=ID&showall=1)
+        client = self._client_for(source)
+        if client is not None and (review_url or attempt_id > 0):
+            base = self._origin_for(client, review_url or f"https://{source}.ut.edu.vn")
+            target = _safe_http_url(review_url) or f"{base}/mod/quiz/review.php?attempt={int(attempt_id)}&showall=1"
+            if "showall=" not in target:
+                sep = "&" if "?" in target else "?"
+                target = f"{target}{sep}showall=1"
+            try:
+                _final, html_text, redir = client.open_session_url(target)
+                if not redir and html_text:
+                    report = parse_quiz_review_html_page(html_text, attempt_id=int(attempt_id))
+                    if report.questions:
+                        return report
+            except Exception as exc:
+                logger.debug("Quiz HTML review fallback skipped: %s", exc)
+
+        return QuizAttemptReviewReport(attempt_id=int(attempt_id))
+
+    def fetch_quiz_review(self, attempt_id: int) -> list[dict[str, Any]]:
+        report = self.fetch_quiz_review_report(attempt_id, source="courses")
+        items: list[dict[str, Any]] = []
+        for q in report.questions:
             items.append(
                 {
-                    "slot": str(q.get("slot") or ""),
-                    "status": str(q.get("status") or ""),
-                    "mark": str(q.get("mark") or ""),
-                    "maxmark": str(q.get("maxmark") or ""),
-                    "question_text": qtext,
+                    "number": q.display_number,
+                    "slot": q.slot,
+                    "question_code": q.question_code,
+                    "state_kind": q.state_kind,
+                    "status": q.status_label,
+                    "mark": q.mark,
+                    "maxmark": q.max_mark,
+                    "question_text": q.question_text,
+                    "choices": [
+                        {
+                            "label": c.label,
+                            "text": c.text,
+                            "is_selected": c.is_selected,
+                            "state": c.state,
+                            "feedback": c.feedback,
+                        }
+                        for c in q.choices
+                    ],
+                    "right_answer": q.right_answer_text,
+                    "general_feedback": q.general_feedback,
                 }
             )
         return items

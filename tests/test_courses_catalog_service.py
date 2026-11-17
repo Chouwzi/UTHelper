@@ -1420,3 +1420,146 @@ def test_sync_course_delta_computes_new_cmids_and_grades_against_latest_detail(t
     assert len(res.grades) == 1
     assert res.grades[0].grade_formatted == "9.0"
     assert all(not mod.is_new for mod in res.sections[0].modules)
+
+
+def test_parallel_catalog_refresh_singleflight_download_ram_cache_and_idle_prefetch(tmp_path):
+    """Catalog refreshes providers in parallel, deduplicates concurrent downloads, caches RAM state, and prefetches politely."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from core.courses.archive_service import ArchiveService
+    from core.courses.local_preview_server import LocalPreviewServer
+    from core.courses.models import CourseAttachment
+    from gui.controllers.courses_coordinator import CoursesCoordinator
+
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="perf-suite")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+
+    both_entered = threading.Barrier(2, timeout=2.0)
+
+    class _ParallelCoursesProvider(_FakeCoursesProvider):
+        def fetch_courses(self) -> list[CourseSummary]:
+            both_entered.wait()
+            return super().fetch_courses()
+
+        def download_file(self, url: str, *, progress_callback=None) -> bytes | None:
+            self.download_calls += 1
+            time.sleep(0.06)
+            payload = b"streamed-lecture-bytes"
+            if callable(progress_callback):
+                progress_callback(len(payload) // 2, len(payload))
+                progress_callback(len(payload), len(payload))
+            return payload
+
+    class _ParallelThnnProvider(_FakeThnnProvider):
+        def fetch_courses(self) -> list[CourseSummary]:
+            both_entered.wait()
+            return super().fetch_courses()
+
+    c_prov = _ParallelCoursesProvider()
+    t_prov = _ParallelThnnProvider()
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        thnn_provider=t_prov,
+        time_fn=lambda: 5000,
+    )
+
+    # 1. Parallel refresh_catalog: Barrier(2) only succeeds if both providers run concurrently!
+    merged = svc.refresh_catalog(include_thnn=True)
+    assert {c.course_key for c in merged} == {"courses:10", "thnn:4458"}
+
+    # 2. CourseCacheStore RAM cache hit returns without re-reading JSON, and invalidates on save
+    cat_a = cache.load_catalog()
+    cat_b = cache.load_catalog()
+    assert cat_a is cat_b
+    cache.save_course_detail("courses", 10, c_prov.sections, [], synced_at=5000)
+    det_a = cache.load_course_detail("courses", 10)
+    det_b = cache.load_course_detail("courses", 10)
+    assert det_a is det_b
+
+    # 3. SingleFlight concurrent download deduplication + progress forwarding
+    progress_events: list[tuple[int, int]] = []
+    start_gate = threading.Barrier(4, timeout=2.0)
+    target_url = "https://courses.ut.edu.vn/pluginfile.php/10/mod_resource/slide.pdf"
+
+    def _concurrent_download() -> bytes:
+        start_gate.wait()
+        return svc.fetch_attachment_bytes(
+            "courses",
+            target_url,
+            progress_callback=lambda done, total: progress_events.append((done, total)),
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [pool.submit(_concurrent_download) for _ in range(4)]
+        results = [f.result() for f in futs]
+
+    assert c_prov.download_calls == 1
+    assert results == [b"streamed-lecture-bytes"] * 4
+    assert (22, 22) in progress_events
+
+    # 4. Polite idle attachment prefetch warms small <=1.5MB courses files & skips large files
+    small_att = CourseAttachment(
+        file_name="small.docx",
+        file_url="https://courses.ut.edu.vn/pluginfile.php/10/small.docx",
+        preview_kind="docx",
+        file_size=120_000,
+        time_modified=100,
+    )
+    huge_att = CourseAttachment(
+        file_name="huge_video.mp4",
+        file_url="https://courses.ut.edu.vn/pluginfile.php/10/huge.mp4",
+        preview_kind="unknown",
+        file_size=25_000_000,
+        time_modified=100,
+    )
+    sections_with_atts = [
+        CourseSection(
+            id=1,
+            course_id=10,
+            source="courses",
+            section_num=1,
+            name="Tuần 1",
+            modules=(
+                CourseModuleItem(
+                    cmid=200,
+                    instance_id=1,
+                    modname="resource",
+                    name="Tài liệu nhỏ",
+                    section_id=1,
+                    attachments=(small_att, huge_att),
+                ),
+            ),
+        )
+    ]
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        title="UTHelper",
+        width=1200,
+        height=800,
+        update=lambda: None,
+        run_task=lambda *_a: None,
+    )
+    server = LocalPreviewServer()
+    coord = CoursesCoordinator(
+        page=fake_page,  # type: ignore[arg-type]
+        catalog_service=svc,
+        preview_cache=preview,
+        archive_service=ArchiveService(),
+        preview_server=server,
+        on_open_assignment_fallback=lambda _m: None,
+        on_launch_url=lambda _u: None,
+    )
+    try:
+        coord.courses_view._state.selected_course_key = c_prov.courses[0].course_key
+        c_prov.download_calls = 0
+        asyncio.run(coord._prefetch_course_attachments_async(c_prov.courses[0], sections_with_atts))
+        assert c_prov.download_calls == 1
+        assert preview.get_cached_path(small_att.file_url, 100, small_att.file_name) is not None
+        assert preview.get_cached_path(huge_att.file_url, 100, huge_att.file_name) is None
+    finally:
+        coord.close()

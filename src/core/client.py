@@ -1,6 +1,10 @@
 import gzip
+import http.client
+import io
 import json
 import os
+import queue
+import threading
 import time
 import zlib
 from http.cookiejar import CookieJar
@@ -93,15 +97,73 @@ def _is_same_moodle_origin_url(url: str, origin: str) -> bool:
 
 
 def _read_bounded_response_bytes(
-    response, *, max_bytes: Optional[int] = None
+    response,
+    *,
+    max_bytes: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Optional[bytes]:
-    """Read HTTP response bytes with optional size bound and gzip decompression."""
-    body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
-    if max_bytes is not None and len(body) > max_bytes:
-        logger.warning("Download exceeded max_bytes (%d)", max_bytes)
-        return None
+    """Read HTTP response bytes in 64 KB chunks with size bound, gzip support, and progress callback."""
     info = response.info() if hasattr(response, "info") else None
-    encoding = str(info.get("Content-Encoding") or "").lower() if info else ""
+    total_len = 0
+    if info is not None:
+        try:
+            raw_cl = info.get("Content-Length") if hasattr(info, "get") else None
+            total_len = max(0, int(raw_cl)) if raw_cl else 0
+        except (TypeError, ValueError):
+            total_len = 0
+
+    # Stream in 64 KB chunks on real HTTPResponse / BufferedIOBase; read once on non-advancing test fakes.
+    is_real_stream = isinstance(response, (http.client.HTTPResponse, io.IOBase)) or hasattr(
+        getattr(response, "fp", None), "read"
+    )
+    if is_real_stream:
+        buf = bytearray()
+        chunk_size = 65536
+        last_emit = 0.0
+        while True:
+            to_read = (
+                min(chunk_size, (max_bytes + 1) - len(buf))
+                if max_bytes is not None
+                else chunk_size
+            )
+            if to_read <= 0:
+                extra = response.read(1)
+                if extra:
+                    buf.extend(extra)
+                break
+            chunk = response.read(to_read)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if max_bytes is not None and len(buf) > max_bytes:
+                logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+                return None
+            if callable(progress_callback):
+                now_m = time.monotonic()
+                if (now_m - last_emit) >= 0.065:
+                    last_emit = now_m
+                    try:
+                        progress_callback(len(buf), total_len)
+                    except Exception:
+                        pass
+        body = bytes(buf)
+        if callable(progress_callback):
+            try:
+                progress_callback(len(body), total_len or len(body))
+            except Exception:
+                pass
+    else:
+        body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
+        if max_bytes is not None and len(body) > max_bytes:
+            logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+            return None
+        if callable(progress_callback):
+            try:
+                progress_callback(len(body), total_len or len(body))
+            except Exception:
+                pass
+
+    encoding = str(info.get("Content-Encoding") or "").lower() if info and hasattr(info, "get") else ""
     if encoding == "gzip":
         if max_bytes is None:
             return gzip.decompress(body)
@@ -178,8 +240,174 @@ else:
 # urllib default SSL không bị chặn. Nếu iOS gặp cert error → thêm certifi sau.
 
 
+_STDLIB_URLOPEN = urllib.request.urlopen
+_KA_POOL_LOCK = threading.Lock()
+_KA_POOLS: dict[tuple[str, str, int], queue.LifoQueue[tuple[float, http.client.HTTPConnection]]] = {}
+_KA_IDLE_TTL_SEC = 40.0
+_KA_MAX_PER_ORIGIN = 6
+
+
+class _PooledKeepAliveResponse:
+    """Thin urllib-compatible wrapper returning warm HTTP/1.1 sockets to the origin pool."""
+
+    def __init__(
+        self,
+        raw_resp: http.client.HTTPResponse,
+        conn: http.client.HTTPConnection,
+        pool_key: tuple[str, str, int],
+        url: str,
+    ) -> None:
+        self._resp = raw_resp
+        self._conn: Optional[http.client.HTTPConnection] = conn
+        self._key = pool_key
+        self._url = url
+        self.status = raw_resp.status
+        self.fp = raw_resp
+
+    def geturl(self) -> str:
+        return self._url
+
+    def info(self):
+        return self._resp.headers
+
+    def read(self, amt: Optional[int] = None) -> bytes:
+        data = self._resp.read() if amt is None or amt < 0 else self._resp.read(amt)
+        if amt is None or amt < 0 or not data or self._resp.isclosed():
+            self._release(reusable=not getattr(self._resp, "will_close", True))
+        return data
+
+    def _release(self, *, reusable: bool) -> None:
+        conn = self._conn
+        if conn is None:
+            return
+        self._conn = None
+        if reusable and getattr(conn, "sock", None) is not None:
+            with _KA_POOL_LOCK:
+                q = _KA_POOLS.setdefault(self._key, queue.LifoQueue(maxsize=_KA_MAX_PER_ORIGIN))
+            try:
+                q.put_nowait((time.monotonic(), conn))
+                return
+            except queue.Full:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._release(reusable=False)
+        try:
+            self._resp.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+        return False
+
+
+def _has_proxy_env() -> bool:
+    return any(
+        os.environ.get(k)
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    )
+
+
 def _urlopen(req, timeout=15):
-    """urlopen wrapper - dùng urllib default SSL."""
+    """urlopen wrapper with stdlib TLS Keep-Alive pooling (falls back if monkeypatched or proxied)."""
+    if urllib.request.urlopen is not _STDLIB_URLOPEN or _has_proxy_env() or not isinstance(req, urllib.request.Request):
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    parsed = urllib.parse.urlsplit(req.full_url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname or ""
+    if scheme not in {"http", "https"} or not host:
+        return urllib.request.urlopen(req, timeout=timeout)
+
+    port = parsed.port or (443 if scheme == "https" else 80)
+    pool_key = (scheme, host.lower(), port)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    headers = dict(req.unredirected_hdrs)
+    headers.update(req.headers)
+    headers.setdefault("Connection", "keep-alive")
+    body = req.data
+    method = req.get_method()
+    if body is not None and "Content-length" not in headers and "Content-Length" not in headers:
+        headers["Content-Length"] = str(len(body))
+
+    def _borrow_conn() -> tuple[http.client.HTTPConnection, bool]:
+        with _KA_POOL_LOCK:
+            q = _KA_POOLS.get(pool_key)
+        now_m = time.monotonic()
+        if q is not None:
+            while True:
+                try:
+                    ts, cached = q.get_nowait()
+                except queue.Empty:
+                    break
+                if (now_m - ts) < _KA_IDLE_TTL_SEC and getattr(cached, "sock", None) is not None:
+                    cached.timeout = timeout
+                    return cached, True
+                try:
+                    cached.close()
+                except Exception:
+                    pass
+        if scheme == "https":
+            # Default context=None uses stdlib _create_default_https_context() — Cloudflare-safe.
+            return http.client.HTTPSConnection(host, port, timeout=timeout), False
+        return http.client.HTTPConnection(host, port, timeout=timeout), False
+
+    for retry_warm in range(2):
+        conn, was_warm = _borrow_conn()
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            raw_resp = conn.getresponse()
+        except (
+            http.client.RemoteDisconnected,
+            http.client.CannotSendRequest,
+            ConnectionResetError,
+            BrokenPipeError,
+            OSError,
+        ) as exc:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if was_warm and retry_warm == 0:
+                continue
+            if isinstance(exc, TimeoutError):
+                raise
+            raise urllib.error.URLError(exc) from exc
+
+        # Delegate redirects to stdlib urllib so redirect rules stay identical
+        if raw_resp.status in {301, 302, 303, 307, 308}:
+            try:
+                raw_resp.close()
+                conn.close()
+            except Exception:
+                pass
+            return urllib.request.urlopen(req, timeout=timeout)
+
+        if raw_resp.status >= 400:
+            err_fp = io.BytesIO(raw_resp.read())
+            hdrs = raw_resp.headers
+            status_code = raw_resp.status
+            reason = raw_resp.reason
+            try:
+                raw_resp.close()
+                conn.close()
+            except Exception:
+                pass
+            raise urllib.error.HTTPError(req.full_url, status_code, reason, hdrs, err_fp)
+
+        return _PooledKeepAliveResponse(raw_resp, conn, pool_key, req.full_url)
+
     return urllib.request.urlopen(req, timeout=timeout)
 
 
@@ -1056,7 +1284,12 @@ class MoodleClient:
         record = self.upload_draft_file_record(filename, file_bytes, itemid, "/")
         return record.itemid if record else None
 
-    def download_file(self, url: str) -> Optional[bytes]:
+    def download_file(
+        self,
+        url: str,
+        *,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Optional[bytes]:
         """Tải file từ Moodle server bằng WS token trên đúng origin tin cậy."""
         origin = self.moodle_site_origin
         if not _is_same_moodle_origin_url(url, origin):
@@ -1090,7 +1323,9 @@ class MoodleClient:
                 if status != 200:
                     logger.error("Download failed (HTTP %d): %s", status, url)
                     return None
-                return _read_bounded_response_bytes(response)
+                return _read_bounded_response_bytes(
+                    response, progress_callback=progress_callback
+                )
         except urllib.error.HTTPError as e:
             try:
                 logger.error("Download failed (HTTP %d): %s", e.code, url)
@@ -1101,7 +1336,11 @@ class MoodleClient:
         return None
 
     def download_session_file(
-        self, url: str, *, max_bytes: int = 100 * 1024 * 1024
+        self,
+        url: str,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Optional[bytes]:
         """Download a same-origin Moodle file authenticated by cookie session."""
         origin = self.moodle_site_origin
@@ -1134,7 +1373,11 @@ class MoodleClient:
                     if status != 200:
                         logger.error("Session download failed (HTTP %d): %s", status, url)
                         return None
-                    return _read_bounded_response_bytes(response, max_bytes=max_bytes)
+                    return _read_bounded_response_bytes(
+                        response,
+                        max_bytes=max_bytes,
+                        progress_callback=progress_callback,
+                    )
         except urllib.error.HTTPError as e:
             try:
                 logger.error("Session download failed (HTTP %d): %s", e.code, url)

@@ -62,10 +62,32 @@ def _webview2_runtime_available() -> bool:
         import win32con  # noqa: F401
         import win32gui  # noqa: F401
 
-        ver = wv2.CoreWebView2Environment.get_available_browser_version_string("")
+        try:
+            ver = wv2.CoreWebView2Environment.get_available_browser_version_string()
+        except TypeError:
+            ver = wv2.CoreWebView2Environment.get_available_browser_version_string_with_options(
+                "", None
+            )
         return bool(ver)
     except Exception:
         return False
+
+
+_NON_READABLE_HTML_TAGS = (
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "svg",
+    "canvas",
+    "head",
+    "title",
+    "meta",
+    "link",
+    "iframe",
+    "object",
+    "embed",
+)
 
 
 class WindowsWebView2Dock:
@@ -80,6 +102,7 @@ class WindowsWebView2Dock:
         page_title: str,
         url: str,
         cookies: list[dict[str, Any]],
+        cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_title_changed: Optional[Callable[[str], None]] = None,
         on_url_changed: Optional[Callable[[str], None]] = None,
         on_loading_changed: Optional[Callable[[bool], None]] = None,
@@ -89,6 +112,7 @@ class WindowsWebView2Dock:
         self._page_title = page_title or "UTHelper"
         self._url = url
         self._cookies = list(cookies or ())
+        self._cookie_provider = cookie_provider
         self._on_title_changed = on_title_changed
         self._on_url_changed = on_url_changed
         self._on_loading_changed = on_loading_changed
@@ -264,12 +288,21 @@ class WindowsWebView2Dock:
                 pass
 
     def _init_window_and_webview2(self) -> None:
+        import time as _time
         import win32api
         import win32con
         import win32gui
         from webview2.microsoft.web.webview2 import core as wv2
 
-        self._parent_hwnd = self._find_parent_hwnd(self._page_title)
+        for _ in range(5):
+            self._parent_hwnd = self._find_parent_hwnd(self._page_title)
+            if self._parent_hwnd:
+                break
+            _time.sleep(0.04)
+        if not self._parent_hwnd:
+            self._fail("Không tìm thấy cửa sổ chính để gắn WebView2.")
+            return
+
         hinst = win32api.GetModuleHandle(None)
         if not WindowsWebView2Dock._class_registered:
             wc = win32gui.WNDCLASS()
@@ -293,7 +326,7 @@ class WindowsWebView2Dock:
             100,
             640,
             480,
-            self._parent_hwnd or 0,
+            self._parent_hwnd,
             0,
             hinst,
             None,
@@ -336,6 +369,17 @@ class WindowsWebView2Dock:
             self._controller = ctrl
             self._core = core
             self._ready = True
+            try:
+                settings_obj = getattr(core, "settings", None)
+                if settings_obj is not None:
+                    settings_obj.is_status_bar_enabled = False
+            except Exception:
+                pass
+            if not self._cookies and callable(self._cookie_provider):
+                try:
+                    self._cookies = list(self._cookie_provider() or ())
+                except Exception as exc:
+                    logger.debug("WebView2 async cookie provider failed: %s", exc)
             self._inject_cookies(core)
             self._bind_events(core)
             self._apply_window_bounds()
@@ -409,7 +453,7 @@ class WindowsWebView2Dock:
         except Exception:
             pass
 
-    def _apply_window_bounds(self) -> None:
+    def _apply_window_bounds(self, *, preserve_zorder: bool = False) -> None:
         if not self._hwnd or sys.platform != "win32":
             return
         import win32con
@@ -436,14 +480,17 @@ class WindowsWebView2Dock:
             top_px = max(0, int(round(self._bounds_dip[1] * scale)))
             w_px = min(max_w - left_px, max(160, int(round(self._bounds_dip[2] * scale))))
             h_px = min(max_h - top_px, max(160, int(round(self._bounds_dip[3] * scale))))
+            flags = win32con.SWP_NOACTIVATE | (
+                win32con.SWP_NOZORDER if preserve_zorder else 0
+            )
             win32gui.SetWindowPos(
                 self._hwnd,
-                win32con.HWND_TOP,
+                0 if preserve_zorder else win32con.HWND_TOP,
                 origin_x + left_px,
                 origin_y + top_px,
                 w_px,
                 h_px,
-                win32con.SWP_NOACTIVATE,
+                flags,
             )
             if self._visible:
                 win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNOACTIVATE)
@@ -464,15 +511,17 @@ class WindowsWebView2Dock:
         import win32gui
 
         msg = wintypes.MSG()
-        last_parent_rect: tuple[int, int, int, int] = (0, 0, 0, 0)
+        last_parent_state: tuple[int, int, int, int, bool] = (0, 0, 0, 0, False)
         while not self._stop_event.is_set():
             self._drain_commands()
             if self._parent_hwnd and win32gui.IsWindow(self._parent_hwnd):
                 try:
                     cur_rect = win32gui.GetWindowRect(self._parent_hwnd)
-                    if cur_rect != last_parent_rect:
-                        last_parent_rect = cur_rect
-                        self._apply_window_bounds()
+                    is_min = bool(win32gui.IsIconic(self._parent_hwnd))
+                    cur_state = (cur_rect[0], cur_rect[1], cur_rect[2], cur_rect[3], is_min)
+                    if cur_state != last_parent_state:
+                        last_parent_state = cur_state
+                        self._apply_window_bounds(preserve_zorder=True)
                 except Exception:
                     pass
             while ctypes.windll.user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, win32con.PM_REMOVE):
@@ -480,7 +529,7 @@ class WindowsWebView2Dock:
                     return
                 ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
                 ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
-            ctypes.windll.user32.MsgWaitForMultipleObjects(0, None, False, 80, 0x04FF)
+            ctypes.windll.user32.MsgWaitForMultipleObjects(0, None, False, 16, 0x04FF)
 
     def _drain_commands(self) -> None:
         import win32con
@@ -696,20 +745,26 @@ class CoursesWebViewPane(ft.Container):
             except Exception as exc:
                 logger.debug("flet_webview unavailable, falling back: %s", exc)
 
-        if _webview2_runtime_available():
-            cookies: list[dict[str, Any]] = []
+        if isinstance(self._page, ft.Page) and _webview2_runtime_available():
             target_host = (urlsplit(self._url or "").hostname or "").lower()
             is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
+            cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
             if (
                 is_uth_site
                 and self._session_client is not None
                 and hasattr(self._session_client, "get_session_cookies")
             ):
-                cookies = self._session_client.get_session_cookies(ensure_login=True)
+                client_ref = self._session_client
+
+                def _provide_cookies() -> list[dict[str, Any]]:
+                    return client_ref.get_session_cookies(ensure_login=True)
+
+                cookie_provider = _provide_cookies
             dock = WindowsWebView2Dock(
                 page_title=str(getattr(self._page, "title", "") or "UTHelper"),
                 url=self._url,
-                cookies=cookies,
+                cookies=[],
+                cookie_provider=cookie_provider,
                 on_title_changed=self._on_native_title,
                 on_url_changed=self._on_native_url,
                 on_loading_changed=self._on_webview2_loading_changed,
@@ -814,6 +869,7 @@ class CoursesWebViewPane(ft.Container):
         error_text = ""
         target_host = (urlsplit(self._url or "").hostname or "").lower()
         is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
+        is_local_preview = target_host in {"127.0.0.1", "localhost"}
         html_text = ""
         try:
             if is_uth_site and self._session_client is not None and hasattr(
@@ -824,29 +880,32 @@ class CoursesWebViewPane(ft.Container):
                 )
                 if redirected:
                     error_text = "Liên kết điều hướng ra ngoài hệ thống UTH."
-            elif not is_uth_site and self._url.startswith(("http://", "https://")):
+            elif is_local_preview and self._url.startswith(("http://", "https://")):
                 import urllib.request
 
                 req = urllib.request.Request(
                     self._url,
                     headers={"User-Agent": "UTHelper/2.5"},
                 )
-                with urllib.request.urlopen(req, timeout=8) as resp:  # nosec B310
-                    ctype = str(resp.headers.get("Content-Type") or "").lower()
-                    if "html" in ctype or "text" in ctype or not ctype:
-                        raw_bytes = resp.read(512 * 1024)
-                        html_text = raw_bytes.decode("utf-8", errors="replace")
-                    else:
-                        error_text = "Liên kết trỏ tới nội dung đa phương tiện."
+                with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
+                    raw_bytes = resp.read(512 * 1024)
+                    html_text = raw_bytes.decode("utf-8", errors="replace")
+            elif not is_uth_site:
+                error_text = (
+                    "Liên kết ngoài hệ thống yêu cầu trình duyệt tương tác trực tiếp (WebView2 / trình duyệt)."
+                )
 
             if html_text and not error_text:
-                sanitized = HTMLSanitizer.sanitize(html_text)
-                soup = BeautifulSoup(sanitized, BS4_PARSER)
+                raw_soup = BeautifulSoup(html_text, BS4_PARSER)
+                for junk_tag in list(raw_soup.find_all(_NON_READABLE_HTML_TAGS)):
+                    if not getattr(junk_tag, "decomposed", False):
+                        junk_tag.decompose()
+                HTMLSanitizer.sanitize_soup(raw_soup)
                 main = (
-                    soup.select_one("#region-main")
-                    or soup.select_one("main")
-                    or soup.body
-                    or soup
+                    raw_soup.select_one("#region-main")
+                    or raw_soup.select_one("main")
+                    or raw_soup.body
+                    or raw_soup
                 )
                 lines: list[str] = []
                 for el in main.find_all(["h1", "h2", "h3", "p", "li"]):

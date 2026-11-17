@@ -299,16 +299,22 @@ class CoursesWsProvider:
         self._client = client
         self._origin = origin.rstrip("/")
         self._userid_resolver = userid_resolver
+        self._cached_userid: Optional[int] = None
 
     def _resolve_userid(self) -> Optional[int]:
         if self._userid_resolver:
             uid = _as_int(self._userid_resolver())
             return uid if uid > 0 else None
+        if self._cached_userid and self._cached_userid > 0:
+            return self._cached_userid
         info = self._service.get_site_info()
         if not isinstance(info, dict):
             return None
         uid = _as_int(info.get("userid"))
-        return uid if uid > 0 else None
+        if uid > 0:
+            self._cached_userid = uid
+            return uid
+        return None
 
     def fetch_courses(self) -> list[CourseSummary]:
         userid = self._resolve_userid()
@@ -401,7 +407,13 @@ class CoursesWsProvider:
         raw_sections = _as_list(self._service.get_course_contents(course_id))
         if not raw_sections:
             return []
-        pages = _as_list(self._service.get_pages_by_courses(course_id))
+        has_page_mod = any(
+            isinstance(mod, dict) and str(mod.get("modname") or "").lower() == "page"
+            for sec in raw_sections
+            if isinstance(sec, dict)
+            for mod in _as_list(sec.get("modules"))
+        )
+        pages = _as_list(self._service.get_pages_by_courses(course_id)) if has_page_mod else []
         pages_by_cmid: dict[int, str] = {}
         for p in pages:
             if not isinstance(p, dict):
@@ -474,12 +486,23 @@ class CoursesWsProvider:
     def set_manual_completion(self, cmid: int, completed: bool) -> bool:
         return bool(self._service.set_activity_completion_manually(cmid, completed))
 
-    def download_file(self, url: str) -> Optional[bytes]:
+    def download_file(
+        self,
+        url: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Optional[bytes]:
         if self._client is None:
             return None
         safe_url = _safe_http_url(url)
         if not safe_url or not _same_origin(safe_url, self._origin):
             return None
+        if progress_callback is not None:
+            try:
+                return self._client.download_file(
+                    safe_url, progress_callback=progress_callback
+                )
+            except TypeError:
+                pass
         return self._client.download_file(safe_url)
 
     def fetch_user_groups(self, course_id: int) -> list[dict[str, Any]]:
@@ -791,11 +814,22 @@ class ThnnCourseProvider:
             )
         return grades
 
-    def download_file(self, url: str) -> Optional[bytes]:
+    def download_file(
+        self,
+        url: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Optional[bytes]:
         if self._client is None:
             return None
         safe_url = _safe_http_url(url)
         base = self._base_url()
         if not safe_url or not _same_origin(safe_url, base):
             return None
+        if progress_callback is not None:
+            try:
+                return self._client.download_session_file(
+                    safe_url, progress_callback=progress_callback
+                )
+            except TypeError:
+                pass
         return self._client.download_session_file(safe_url)

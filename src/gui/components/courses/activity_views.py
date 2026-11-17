@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+import inspect
 import threading
 from typing import Any, Callable, Optional
 
@@ -17,12 +19,16 @@ from core.courses.activity_service import (
     ForumPostEntry,
     GroupActivitySummary,
     QuizActivitySummary,
+    QuizAttemptInfo,
+    QuizAttemptReviewReport,
+    QuizReviewQuestion,
     RichActivityPage,
 )
 from core.courses.models import CourseModuleItem, CourseSource
 from gui.components.courses._shared import (
     build_assignment_loading_skeleton,
     build_expand_toggle_button,
+    build_filter_chip,
     build_offline_banner,
     build_skeleton_block,
     build_viewer_header,
@@ -811,6 +817,9 @@ class QuizActivityView(_BasePaneActivityView):
             on_toggle_expand=on_toggle_expand,
         )
         self._course_id = course_id
+        self._review_cache: dict[int, QuizAttemptReviewReport] = {}
+        self._review_filter: str = "all"
+        self._review_search: str = ""
         self._load_async()
 
     def _load_async(self) -> None:
@@ -826,69 +835,628 @@ class QuizActivityView(_BasePaneActivityView):
 
         threading.Thread(target=_worker, name="CourseQuizFetch", daemon=True).start()
 
-    def _open_attempt_review(self, summary: QuizActivitySummary, attempt_id: int) -> None:
-        self._set_loading("Đang tải chi tiết bài đã làm...")
+    def _scroll_review_to_question(self, list_view: ft.ListView, q_num: str) -> None:
+        async def _do_scroll() -> None:
+            try:
+                res = list_view.scroll_to(scroll_key=f"quiz-q-{q_num}", duration=220)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:
+                pass
 
-        def _worker() -> None:
-            questions = self._svc.fetch_quiz_review(attempt_id)
-            if self._disposed:
-                return
-            if not questions:
-                self._render_quiz(summary, notice="Bài làm này chưa cho phép xem lại chi tiết qua API; hãy mở WebView.")
-                return
-            q_controls: list[ft.Control] = [
-                ft.Row(
-                    controls=[
-                        ft.OutlinedButton(
-                            "← Quay lại tổng quan Quiz",
-                            on_click=lambda _e: self._render_quiz(summary),
-                        )
-                    ]
+        try:
+            page = self.page
+        except Exception:
+            page = None
+        run_task = getattr(page, "run_task", None) if page is not None else None
+        if callable(run_task):
+            run_task(_do_scroll)
+            return
+        try:
+            asyncio.get_running_loop().create_task(_do_scroll())
+        except RuntimeError:
+            pass
+
+    @staticmethod
+    def _question_semantic_color(state_kind: str) -> str:
+        if state_kind == "correct":
+            return C.SAFE
+        if state_kind in {"incorrect", "unanswered"}:
+            return C.CRITICAL
+        if state_kind == "partial":
+            return C.WARNING
+        return C.ACCENT
+
+    def _build_review_question_card(self, q: QuizReviewQuestion) -> ft.Control:
+        accent = self._question_semantic_color(q.state_kind)
+        is_info = q.display_number == "Thông tin"
+        title_label = "Nội dung dẫn đề" if is_info else f"Câu {q.display_number}"
+        score_part = f" · {q.mark}/{q.max_mark}" if (q.mark and q.max_mark) else ""
+        status_icon = (
+            ft.Icons.CHECK_CIRCLE_ROUNDED
+            if q.state_kind == "correct"
+            else (
+                ft.Icons.CANCEL_ROUNDED
+                if q.state_kind in {"incorrect", "unanswered"}
+                else (
+                    ft.Icons.TIMELAPSE_ROUNDED
+                    if q.state_kind == "partial"
+                    else ft.Icons.INFO_OUTLINE_ROUNDED
                 )
-            ]
-            for q in questions:
-                q_controls.append(
-                    ft.Container(
-                        bgcolor=C.SURFACE,
-                        border=ft.Border.all(1, C.BORDER),
-                        border_radius=10,
-                        padding=12,
-                        content=ft.Column(
-                            spacing=4,
-                            controls=[
-                                ft.Row(
-                                    controls=[
-                                        ft.Text(
-                                            f"Câu {q.get('slot') or '?'}",
-                                            size=13,
+            )
+        )
+
+        header_items: list[ft.Control] = [
+            ft.Text(
+                title_label,
+                size=14,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+            ),
+        ]
+        if q.question_code:
+            header_items.append(
+                ft.Container(
+                    bgcolor=C.BG,
+                    border=ft.Border.all(1, C.BORDER),
+                    border_radius=5,
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                    content=ft.Text(
+                        q.question_code,
+                        size=10,
+                        color=C.TEXT_SECONDARY,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                )
+            )
+        header_items.append(ft.Container(expand=True))
+        if not is_info and (q.status_label or score_part):
+            header_items.append(
+                ft.Container(
+                    bgcolor=ft.Colors.with_opacity(0.12, accent),
+                    border=ft.Border.all(1, accent),
+                    border_radius=999,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+                    content=ft.Row(
+                        tight=True,
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Icon(status_icon, size=13, color=accent),
+                            ft.Text(
+                                f"{q.status_label or 'Đã chấm'}{score_part}",
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                                color=accent,
+                            ),
+                        ],
+                    ),
+                )
+            )
+
+        body_controls: list[ft.Control] = [
+            ft.Row(
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=header_items,
+            ),
+            ft.Text(
+                q.question_text or "(Không có văn bản câu hỏi)",
+                size=14,
+                color=C.TEXT_PRIMARY,
+                selectable=True,
+            ),
+        ]
+
+        # Render structured choices (A, B, C, D / True-False / Matching)
+        if q.choices:
+            choice_rows: list[ft.Control] = []
+            for ch in q.choices:
+                if ch.state == "correct":
+                    ch_bg = ft.Colors.with_opacity(0.12, C.SAFE)
+                    ch_border = C.SAFE
+                    ch_icon = ft.Icons.CHECK_CIRCLE_ROUNDED
+                    ch_icon_color = C.SAFE
+                    tag_text = "Bạn chọn · Đúng" if ch.is_selected else "Đáp án đúng"
+                    tag_color = C.SAFE
+                elif ch.state == "incorrect":
+                    ch_bg = ft.Colors.with_opacity(0.12, C.CRITICAL)
+                    ch_border = C.CRITICAL
+                    ch_icon = ft.Icons.CANCEL_ROUNDED
+                    ch_icon_color = C.CRITICAL
+                    tag_text = "Bạn chọn · Sai" if ch.is_selected else "Sai"
+                    tag_color = C.CRITICAL
+                elif ch.state == "partial":
+                    ch_bg = ft.Colors.with_opacity(0.12, C.WARNING)
+                    ch_border = C.WARNING
+                    ch_icon = ft.Icons.ERROR_OUTLINE_ROUNDED
+                    ch_icon_color = C.WARNING
+                    tag_text = "Bạn chọn · Một phần" if ch.is_selected else ""
+                    tag_color = C.WARNING
+                elif ch.is_selected:
+                    ch_bg = ft.Colors.with_opacity(0.10, C.ACCENT)
+                    ch_border = C.ACCENT
+                    ch_icon = ft.Icons.RADIO_BUTTON_CHECKED_ROUNDED
+                    ch_icon_color = C.ACCENT
+                    tag_text = "Bạn chọn"
+                    tag_color = C.ACCENT
+                else:
+                    ch_bg = C.BG
+                    ch_border = C.BORDER
+                    ch_icon = ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED
+                    ch_icon_color = C.TEXT_SECONDARY
+                    tag_text = ""
+                    tag_color = C.TEXT_SECONDARY
+
+                option_children: list[ft.Control] = [
+                    ft.Row(
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Icon(ch_icon, size=17, color=ch_icon_color),
+                            *(
+                                [
+                                    ft.Text(
+                                        f"{ch.label}.",
+                                        size=13,
+                                        weight=ft.FontWeight.W_700,
+                                        color=ch_icon_color
+                                        if ch.state != "neutral" or ch.is_selected
+                                        else C.TEXT_SECONDARY,
+                                    )
+                                ]
+                                if ch.label
+                                else []
+                            ),
+                            ft.Text(
+                                ch.text,
+                                size=13,
+                                weight=ft.FontWeight.W_600
+                                if (ch.is_selected or ch.state == "correct")
+                                else ft.FontWeight.W_400,
+                                color=C.TEXT_PRIMARY,
+                                selectable=True,
+                                expand=True,
+                            ),
+                            *(
+                                [
+                                    ft.Container(
+                                        bgcolor=ft.Colors.with_opacity(0.14, tag_color),
+                                        border_radius=6,
+                                        padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                                        content=ft.Text(
+                                            tag_text,
+                                            size=10,
                                             weight=ft.FontWeight.W_600,
-                                            color=C.ACCENT,
-                                            expand=True,
+                                            color=tag_color,
                                         ),
-                                        ft.Text(
-                                            f"{q.get('status')} · {q.get('mark')}/{q.get('maxmark')}",
-                                            size=11,
-                                            color=C.TEXT_SECONDARY,
-                                        ),
-                                    ]
-                                ),
-                                ft.Text(
-                                    q.get("question_text") or "(Không có văn bản câu hỏi)",
-                                    size=13,
-                                    color=C.TEXT_PRIMARY,
-                                    selectable=True,
-                                ),
-                            ],
-                        ),
+                                    )
+                                ]
+                                if tag_text
+                                else []
+                            ),
+                        ],
+                    )
+                ]
+                if ch.feedback:
+                    option_children.append(
+                        ft.Text(
+                            f"↳ {ch.feedback}",
+                            size=11,
+                            italic=True,
+                            color=C.TEXT_SECONDARY,
+                            selectable=True,
+                        )
+                    )
+                choice_rows.append(
+                    ft.Container(
+                        bgcolor=ch_bg,
+                        border=ft.Border.all(1, ch_border),
+                        border_radius=8,
+                        padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                        content=ft.Column(spacing=4, controls=option_children),
                     )
                 )
-            self._body_host.content = ft.ListView(
-                expand=True,
-                padding=14,
-                spacing=10,
-                controls=q_controls,
+            body_controls.append(ft.Column(spacing=6, controls=choice_rows))
+        elif q.student_response_text:
+            body_controls.append(
+                ft.Container(
+                    bgcolor=C.BG,
+                    border=ft.Border.all(1, accent),
+                    border_radius=8,
+                    padding=10,
+                    content=ft.Column(
+                        spacing=3,
+                        controls=[
+                            ft.Text(
+                                "Câu trả lời đã nộp:",
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_SECONDARY,
+                            ),
+                            ft.Text(
+                                q.student_response_text,
+                                size=13,
+                                color=C.TEXT_PRIMARY,
+                                selectable=True,
+                            ),
+                        ],
+                    ),
+                )
             )
-            safe_control_update(self)
+
+        # Official right answer / teacher explanation box
+        already_highlighted_right = any(c.state == "correct" for c in q.choices)
+        show_right_line = bool(
+            q.right_answer_text
+            and (q.state_kind != "correct" or not already_highlighted_right)
+        )
+        feedback_lines: list[ft.Control] = []
+        if show_right_line:
+            feedback_lines.append(
+                ft.Row(
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                    controls=[
+                        ft.Icon(ft.Icons.LIGHTBULB_OUTLINE_ROUNDED, size=15, color=C.SAFE),
+                        ft.Text(
+                            f"Đáp án đúng: {q.right_answer_text}",
+                            size=12,
+                            weight=ft.FontWeight.W_600,
+                            color=C.TEXT_PRIMARY,
+                            selectable=True,
+                            expand=True,
+                        ),
+                    ],
+                )
+            )
+        if q.specific_feedback:
+            feedback_lines.append(
+                ft.Text(
+                    q.specific_feedback,
+                    size=12,
+                    color=C.TEXT_SECONDARY,
+                    selectable=True,
+                )
+            )
+        if q.general_feedback:
+            feedback_lines.append(
+                ft.Text(
+                    f"Giải thích: {q.general_feedback}",
+                    size=12,
+                    color=C.TEXT_PRIMARY,
+                    selectable=True,
+                )
+            )
+        if feedback_lines:
+            body_controls.append(
+                ft.Container(
+                    bgcolor=ft.Colors.with_opacity(0.08, C.ACCENT),
+                    border=ft.Border.only(left=ft.BorderSide(3, C.ACCENT)),
+                    border_radius=8,
+                    padding=10,
+                    content=ft.Column(spacing=4, controls=feedback_lines),
+                )
+            )
+
+        return ft.Container(
+            key=ft.ScrollKey(f"quiz-q-{q.display_number}"),
+            bgcolor=C.SURFACE,
+            border=ft.Border(
+                left=ft.BorderSide(4, C.BORDER if is_info else accent),
+                top=ft.BorderSide(1, C.BORDER),
+                right=ft.BorderSide(1, C.BORDER),
+                bottom=ft.BorderSide(1, C.BORDER),
+            ),
+            border_radius=10,
+            padding=14,
+            content=ft.Column(spacing=10, controls=body_controls),
+        )
+
+    def _render_attempt_review(
+        self,
+        summary: QuizActivitySummary,
+        att_info: Optional[QuizAttemptInfo],
+        report: QuizAttemptReviewReport,
+    ) -> None:
+        all_questions = list(report.questions)
+        graded_questions = [q for q in all_questions if q.display_number != "Thông tin"]
+        total_q = len(graded_questions)
+        wrong_total = report.incorrect_count + report.unanswered_count
+        accuracy = (report.correct_count / total_q) if total_q > 0 else 0.0
+
+        query_l = self._review_search.strip().lower()
+        filtered: list[QuizReviewQuestion] = []
+        for q in all_questions:
+            if self._review_filter == "wrong" and q.state_kind not in {"incorrect", "unanswered"}:
+                continue
+            if self._review_filter == "correct" and q.state_kind != "correct":
+                continue
+            if self._review_filter == "partial" and q.state_kind != "partial":
+                continue
+            if query_l:
+                hay = " ".join(
+                    [
+                        q.question_text,
+                        q.right_answer_text,
+                        q.general_feedback,
+                        *(c.text for c in q.choices),
+                    ]
+                ).lower()
+                if query_l not in hay:
+                    continue
+            filtered.append(q)
+
+        def _set_filter(flt: str) -> None:
+            self._review_filter = flt
+            self._render_attempt_review(summary, att_info, report)
+
+        def _set_search(val: str) -> None:
+            self._review_search = str(val or "")
+            self._render_attempt_review(summary, att_info, report)
+
+        review_list_view = ft.ListView(
+            expand=True,
+            padding=14,
+            spacing=12,
+        )
+
+        # 1. Top back + WebView action row
+        review_web_url = (att_info.review_url if att_info is not None else "") or summary.web_url
+        top_bar = ft.Row(
+            wrap=True,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.OutlinedButton(
+                    "← Quay lại tổng quan Quiz",
+                    on_click=lambda _e: self._render_quiz(summary),
+                ),
+                *(
+                    [
+                        ft.TextButton(
+                            "Xem bản gốc trên WebView",
+                            icon=ft.Icons.WEB_ROUNDED,
+                            on_click=lambda _e, u=review_web_url: self._on_open_webview(
+                                summary.title, u
+                            ),
+                        )
+                    ]
+                    if review_web_url and self._on_open_webview is not None
+                    else []
+                ),
+            ],
+        )
+
+        # 2. Score & Accuracy Hero Card
+        score_headline = (
+            report.grade_text
+            or (att_info.score_text if att_info is not None else "")
+            or f"{report.correct_count}/{total_q} câu đúng"
+        )
+        meta_bits = [f"Lần {att_info.attempt_number if att_info else report.attempt_number}"]
+        if report.duration_text:
+            meta_bits.append(f"Thời gian làm: {report.duration_text}")
+        if report.finished_at_text or (att_info and att_info.time_submitted):
+            meta_bits.append(
+                f"Nộp lúc: {report.finished_at_text or (att_info.time_submitted if att_info else '')}"
+            )
+
+        filter_chips: list[ft.Control] = [
+            build_filter_chip(
+                f"Tất cả ({total_q})",
+                selected=self._review_filter == "all",
+                bold_selected=True,
+                on_select=lambda _e: _set_filter("all"),
+            ),
+            build_filter_chip(
+                f"Câu sai ({wrong_total})",
+                selected=self._review_filter == "wrong",
+                bold_selected=True,
+                selected_color=C.CRITICAL,
+                selected_text_color=C.ON_CRITICAL,
+                on_select=lambda _e: _set_filter("wrong"),
+            ),
+            build_filter_chip(
+                f"Câu đúng ({report.correct_count})",
+                selected=self._review_filter == "correct",
+                bold_selected=True,
+                selected_color=C.SAFE,
+                selected_text_color=C.ON_SAFE,
+                on_select=lambda _e: _set_filter("correct"),
+            ),
+        ]
+        if report.partial_count > 0:
+            filter_chips.append(
+                build_filter_chip(
+                    f"Một phần ({report.partial_count})",
+                    selected=self._review_filter == "partial",
+                    bold_selected=True,
+                    selected_color=C.WARNING,
+                    selected_text_color=C.ON_WARNING,
+                    on_select=lambda _e: _set_filter("partial"),
+                )
+            )
+
+        jump_badges: list[ft.Control] = []
+        for gq in graded_questions[:120]:
+            q_col = self._question_semantic_color(gq.state_kind)
+            is_colored = gq.state_kind in {"correct", "incorrect", "unanswered", "partial"}
+            jump_badges.append(
+                ft.Container(
+                    width=34,
+                    height=28,
+                    alignment=ft.Alignment.CENTER,
+                    bgcolor=ft.Colors.with_opacity(0.14, q_col) if is_colored else C.BG,
+                    border=ft.Border.all(1, q_col if is_colored else C.BORDER),
+                    border_radius=6,
+                    ink=True,
+                    tooltip=f"Nhảy tới Câu {gq.display_number} ({gq.status_label or 'Đã chấm'})",
+                    on_click=lambda _e, qn=gq.display_number: self._scroll_review_to_question(
+                        review_list_view, qn
+                    ),
+                    content=ft.Text(
+                        gq.display_number,
+                        size=11,
+                        weight=ft.FontWeight.W_700,
+                        color=q_col if is_colored else C.TEXT_PRIMARY,
+                    ),
+                )
+            )
+
+        summary_card = ft.Container(
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=12,
+            padding=14,
+            content=ft.Column(
+                spacing=10,
+                controls=[
+                    ft.Row(
+                        wrap=True,
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            ft.Column(
+                                spacing=2,
+                                controls=[
+                                    ft.Text(
+                                        f"Kết quả: {score_headline}",
+                                        size=16,
+                                        weight=ft.FontWeight.W_700,
+                                        color=C.TEXT_PRIMARY,
+                                    ),
+                                    ft.Text(
+                                        " · ".join(meta_bits),
+                                        size=12,
+                                        color=C.TEXT_SECONDARY,
+                                    ),
+                                ],
+                            ),
+                            ft.Text(
+                                f"Đúng {report.correct_count}/{total_q} ({int(round(accuracy * 100))}%)",
+                                size=13,
+                                weight=ft.FontWeight.W_700,
+                                color=C.SAFE if accuracy >= 0.5 else C.WARNING,
+                            ),
+                        ],
+                    ),
+                    ft.ProgressBar(
+                        value=accuracy,
+                        color=C.SAFE if accuracy >= 0.5 else C.WARNING,
+                        bgcolor=C.BORDER,
+                        bar_height=6,
+                        border_radius=3,
+                    ),
+                    ft.Row(
+                        wrap=True,
+                        spacing=8,
+                        run_spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            *filter_chips,
+                            ft.TextField(
+                                value=self._review_search,
+                                hint_text="Tìm câu hỏi / đáp án...",
+                                width=210,
+                                height=32,
+                                dense=True,
+                                text_size=12,
+                                color=C.TEXT_PRIMARY,
+                                bgcolor=C.BG,
+                                border_color=C.BORDER,
+                                on_submit=lambda e: _set_search(str(e.control.value or "")),
+                            ),
+                        ],
+                    ),
+                    *(
+                        [
+                            ft.Divider(height=4, color=C.BORDER),
+                            ft.Row(
+                                wrap=True,
+                                spacing=5,
+                                run_spacing=5,
+                                controls=jump_badges,
+                            ),
+                        ]
+                        if len(jump_badges) > 1
+                        else []
+                    ),
+                ],
+            ),
+        )
+
+        question_cards: list[ft.Control] = [
+            self._build_review_question_card(q) for q in filtered
+        ]
+        if not question_cards:
+            question_cards.append(
+                ft.Container(
+                    bgcolor=C.SURFACE,
+                    border=ft.Border.all(1, C.BORDER),
+                    border_radius=10,
+                    padding=20,
+                    alignment=ft.Alignment.CENTER,
+                    content=ft.Text(
+                        "Không có câu hỏi nào khớp bộ lọc hiện tại.",
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                    ),
+                )
+            )
+
+        review_list_view.controls = [top_bar, summary_card, *question_cards]
+        self._body_host.content = review_list_view
+        safe_control_update(self)
+
+    def _open_attempt_review(
+        self,
+        summary: QuizActivitySummary,
+        attempt_id: int,
+        att_info: Optional[QuizAttemptInfo] = None,
+    ) -> None:
+        self._review_filter = "all"
+        self._review_search = ""
+        cached_report = self._review_cache.get(attempt_id)
+        if cached_report is not None and cached_report.questions:
+            self._render_attempt_review(summary, att_info, cached_report)
+            return
+
+        self._set_loading("Đang tải chi tiết bài đã làm, lựa chọn & đáp án...")
+
+        def _worker() -> None:
+            rev_url = att_info.review_url if att_info is not None else ""
+            if hasattr(self._svc, "fetch_quiz_review_report"):
+                report = self._svc.fetch_quiz_review_report(
+                    attempt_id, source=self._source, review_url=rev_url
+                )
+            else:
+                legacy_items = self._svc.fetch_quiz_review(attempt_id)
+                report = QuizAttemptReviewReport(
+                    attempt_id=attempt_id,
+                    questions=tuple(
+                        QuizReviewQuestion(
+                            display_number=str(item.get("number") or idx),
+                            slot=str(item.get("slot") or idx),
+                            status_label=str(item.get("status") or ""),
+                            mark=str(item.get("mark") or ""),
+                            max_mark=str(item.get("maxmark") or ""),
+                            question_text=str(item.get("question_text") or ""),
+                        )
+                        for idx, item in enumerate(legacy_items, start=1)
+                    ),
+                )
+            if self._disposed:
+                return
+            if not report.questions:
+                self._render_quiz(
+                    summary,
+                    notice="Bài làm này chưa cho phép xem lại chi tiết qua API; hãy mở WebView ngay bên dưới.",
+                )
+                return
+            self._review_cache[attempt_id] = report
+            self._render_attempt_review(summary, att_info, report)
 
         threading.Thread(target=_worker, name="CourseQuizReview", daemon=True).start()
 
@@ -995,7 +1563,12 @@ class QuizActivityView(_BasePaneActivityView):
                                             color=C.TEXT_PRIMARY,
                                         ),
                                         ft.Text(
-                                            f"Điểm: {att.score_text or '--'}",
+                                            f"Điểm: {att.score_text or '--'}"
+                                            + (
+                                                f" · Nộp lúc {att.time_submitted}"
+                                                if att.time_submitted
+                                                else ""
+                                            ),
                                             size=12,
                                             color=C.TEXT_SECONDARY,
                                         ),
@@ -1003,8 +1576,9 @@ class QuizActivityView(_BasePaneActivityView):
                                 ),
                                 ft.OutlinedButton(
                                     "Xem lại",
-                                    on_click=lambda _e, aid=att.attempt_id: self._open_attempt_review(
-                                        summary, aid
+                                    icon=ft.Icons.FACT_CHECK_OUTLINED,
+                                    on_click=lambda _e, aid=att.attempt_id, a_obj=att: self._open_attempt_review(
+                                        summary, aid, a_obj
                                     ),
                                 ),
                             ],

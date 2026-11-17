@@ -16,15 +16,18 @@ import flet as ft
 from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
 from core.courses.catalog_service import CourseCatalogService
+from core.courses.document_converter import ConvertedDocument, convert_document_bytes
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import (
     CourseAttachment,
     CourseModuleItem,
+    CourseSection,
     CourseSource,
     CourseSummary,
     PreviewKind,
     RecentMaterialEntry,
 )
+from core.courses.pdf_renderer import PdfDocumentSession
 from core.courses.preview_cache import PreviewFileCache
 from gui.components.courses._shared import (
     PaneErrorOverlay,
@@ -202,6 +205,9 @@ class CoursesCoordinator:
             ),
             on_launch_url=self._handle_course_url_action,
             on_open_custom_activity=self._handle_open_custom_activity,
+            on_course_loaded=lambda c, secs: self._schedule(
+                self._prefetch_course_attachments_async, c, secs
+            ),
         )
 
     def _schedule(self, coro_fn: Callable[..., Any], *args: Any) -> None:
@@ -529,8 +535,63 @@ class CoursesCoordinator:
             return
         self._launch_url_safe(safe_url)
 
+    async def _prefetch_course_attachments_async(
+        self, course: CourseSummary, sections: list[CourseSection]
+    ) -> None:
+        """Politely prefetch up to 2 small uncached previewable documents in idle background."""
+        if course.source != "courses":
+            return
+        fetch_cache_fn = getattr(self.catalog_service, "fetch_or_cache_preview_file", None)
+        if not callable(fetch_cache_fn):
+            return
+        candidates: list[tuple[int, CourseAttachment]] = []
+        for sec in sections:
+            for mod in sec.modules:
+                for att in mod.attachments:
+                    if (
+                        att.preview_kind in {"pdf", "docx", "pptx", "xlsx", "csv", "text"}
+                        and 0 < int(att.file_size or 0) <= 1_572_864
+                        and att.file_url
+                    ):
+                        prio = 0 if mod.is_new else 1
+                        candidates.append((prio, att))
+        if not candidates:
+            return
+        candidates.sort(key=lambda item: (item[0], item[1].file_size))
+        prefetched = 0
+        for _, att in candidates:
+            if prefetched >= 2:
+                break
+            if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
+                return
+            try:
+                existing = await asyncio.to_thread(
+                    self.preview_cache.get_cached_path,
+                    att.file_url,
+                    att.time_modified,
+                    att.file_name,
+                )
+                if existing is not None:
+                    continue
+                await asyncio.sleep(0.15)
+                if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
+                    return
+                await asyncio.to_thread(
+                    fetch_cache_fn,
+                    "courses",
+                    att.file_url,
+                    att.time_modified,
+                    att.file_name,
+                )
+                prefetched += 1
+            except Exception:
+                logger.debug("Idle attachment prefetch skipped for %s", att.file_name)
+
     async def _fetch_attachment_bytes_async(
-        self, source: str, att: CourseAttachment
+        self,
+        source: str,
+        att: CourseAttachment,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> bytes:
         try:
             cached_path = await asyncio.to_thread(
@@ -540,13 +601,32 @@ class CoursesCoordinator:
                 att.file_name,
             )
             if cached_path is not None and cached_path.is_file():
-                return await asyncio.to_thread(cached_path.read_bytes)
+                data_cached = await asyncio.to_thread(cached_path.read_bytes)
+                if callable(progress_callback):
+                    try:
+                        progress_callback(len(data_cached), len(data_cached))
+                    except Exception:
+                        pass
+                return data_cached
         except OSError as exc:
             logger.debug("Preview cache read failed for %s: %s", att.file_name, exc)
 
-        raw = await asyncio.to_thread(
-            self.catalog_service.fetch_attachment_bytes, source, att.file_url
-        )
+        def _invoke_fetch() -> bytes:
+            if progress_callback is not None:
+                try:
+                    return self.catalog_service.fetch_attachment_bytes(
+                        source,  # type: ignore[arg-type]
+                        att.file_url,
+                        progress_callback=progress_callback,
+                    )
+                except TypeError:
+                    pass
+            return self.catalog_service.fetch_attachment_bytes(
+                source,  # type: ignore[arg-type]
+                att.file_url,
+            )
+
+        raw = await asyncio.to_thread(_invoke_fetch)
         try:
             await asyncio.to_thread(
                 self.preview_cache.put_bytes,
@@ -567,6 +647,9 @@ class CoursesCoordinator:
         mod: CourseModuleItem,
         att: CourseAttachment,
         raw_bytes: bytes,
+        *,
+        preconverted: Optional[ConvertedDocument] = None,
+        preopened_pdf: Optional[PdfDocumentSession] = None,
     ) -> None:
         """Record recent access and open ArchiveExplorerView or DocumentReaderView overlay."""
         try:
@@ -608,10 +691,22 @@ class CoursesCoordinator:
                 explorer, tag=f"archive:{mod.cmid}:{att.file_name}"
             )
             return
-        self._open_entry_reader(att.file_name, raw_bytes, att.preview_kind)
+        self._open_entry_reader(
+            att.file_name,
+            raw_bytes,
+            att.preview_kind,
+            preconverted=preconverted,
+            preopened_pdf=preopened_pdf,
+        )
 
     def _open_entry_reader(
-        self, name: str, data: bytes, kind: PreviewKind
+        self,
+        name: str,
+        data: bytes,
+        kind: PreviewKind,
+        *,
+        preconverted: Optional[ConvertedDocument] = None,
+        preopened_pdf: Optional[PdfDocumentSession] = None,
     ) -> None:
         if kind == "archive":
             nested = ArchiveExplorerView(
@@ -638,6 +733,8 @@ class CoursesCoordinator:
             on_open_link=self._handle_course_url_action,
             webview_builder=_try_build_embedded_webview,
             pdf_cache_dir=getattr(self.preview_cache, "cache_dir", None),
+            preconverted=preconverted,
+            preopened_pdf=preopened_pdf,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")
@@ -654,10 +751,11 @@ class CoursesCoordinator:
     async def open_attachment_async(
         self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
     ) -> None:
-        """Show immediate loading state in Pane 3, fetch attachment (cache-first), and open viewer."""
+        """Show live progress in Pane 3, fetch attachment, pre-render off-thread, and open viewer."""
         self._attachment_load_seq += 1
         req_seq = self._attachment_load_seq
-        size_hint = format_file_size(att.file_size)
+        expected_total = max(0, int(att.file_size or 0))
+        size_hint = format_file_size(expected_total)
         subtitle = f"Đang tải xuống · {size_hint}" if size_hint else "Đang tải tài liệu từ Moodle..."
         loading_overlay = PaneLoadingOverlay(
             title=att.file_name or mod.name or "Tài liệu",
@@ -668,21 +766,84 @@ class CoursesCoordinator:
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
         self.courses_view.push_overlay(loading_overlay, tag=f"viewer:load:{req_seq}")
+        preopened_pdf: Optional[PdfDocumentSession] = None
         try:
             await asyncio.sleep(0)
-            raw = await self._fetch_attachment_bytes_async(course.source, att)
+            t0 = time.monotonic()
+
+            def _on_dl_progress(done_b: int, total_b: int) -> None:
+                if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+                    return
+                eff_total = total_b if total_b > 0 else expected_total
+                elapsed = max(0.001, time.monotonic() - t0)
+                speed_bps = done_b / elapsed if elapsed >= 0.08 else 0.0
+                speed_txt = f" · {format_file_size(int(speed_bps))}/s" if speed_bps >= 32768 else ""
+                done_txt = format_file_size(done_b) or f"{done_b} B"
+                if eff_total > 0 and done_b <= eff_total:
+                    frac = done_b / eff_total
+                    pct = int(round(frac * 100))
+                    tot_txt = format_file_size(eff_total)
+                    loading_overlay.set_progress(
+                        frac,
+                        message=f"Đang tải «{att.file_name}» ({pct}%)...",
+                        subtitle=f"{done_txt} / {tot_txt}{speed_txt}",
+                    )
+                else:
+                    loading_overlay.set_progress(
+                        None,
+                        message=f"Đang tải «{att.file_name}» ({done_txt})...",
+                        subtitle=f"Đã nhận {done_txt}{speed_txt}",
+                    )
+
+            raw = await self._fetch_attachment_bytes_async(
+                course.source, att, progress_callback=_on_dl_progress
+            )
             if req_seq != self._attachment_load_seq or loading_overlay._disposed:
                 return
-            loading_overlay.set_status(
-                f"Đang dựng trình xem cho «{att.file_name}»...",
+            loading_overlay.set_progress(
+                1.0,
+                message=f"Đang dựng bố cục hiển thị cho «{att.file_name}»...",
                 subtitle=f"Hoàn tất tải · {format_file_size(len(raw)) or 'Moodle'}",
             )
-            await asyncio.sleep(0)
+
+            preconverted: Optional[ConvertedDocument] = None
+            if not (att.is_archive or att.preview_kind == "archive"):
+                if att.preview_kind in {"docx", "xlsx", "csv", "pptx", "text"}:
+                    preconverted = await asyncio.to_thread(
+                        convert_document_bytes,
+                        att.file_name,
+                        raw,
+                        att.preview_kind,
+                        dark_mode=False,
+                    )
+                elif att.preview_kind == "pdf":
+                    pdf_dir = getattr(self.preview_cache, "cache_dir", None)
+
+                    def _warm_pdf() -> PdfDocumentSession:
+                        sess = PdfDocumentSession(raw, cache_dir=pdf_dir)
+                        if sess.supported and sess.can_render_images and sess.page_count > 0:
+                            sess.render_page_png(0, scale=1.6, dark_mode=False)
+                        return sess
+
+                    preopened_pdf = await asyncio.to_thread(_warm_pdf)
+
             if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+                if preopened_pdf is not None:
+                    preopened_pdf.close()
                 return
             self._dismiss_overlay_instance(loading_overlay)
-            self.open_attachment_bytes_in_overlay(course, mod, att, raw)
+            self.open_attachment_bytes_in_overlay(
+                course,
+                mod,
+                att,
+                raw,
+                preconverted=preconverted,
+                preopened_pdf=preopened_pdf,
+            )
+            preopened_pdf = None
         except Exception as exc:
+            if preopened_pdf is not None:
+                preopened_pdf.close()
             logger.warning("Open attachment failed for %s: %s", att.file_name, exc)
             self._dismiss_overlay_instance(loading_overlay)
             safe_fallback = safe_http_url(mod.web_url) or safe_http_url(att.file_url)

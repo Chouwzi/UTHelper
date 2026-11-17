@@ -14,10 +14,13 @@ import pytest
 
 from core.courses.activity_service import (
     CourseActivityService,
+    QuizActivitySummary,
+    clean_moodle_question_text,
     parse_attendance_html,
     parse_book_html,
     parse_choicegroup_html,
     parse_groupselect_html,
+    parse_quiz_attempt_review_payload,
 )
 from core.courses.archive_service import ArchiveService
 from core.courses.cache_store import CourseCacheStore
@@ -39,7 +42,11 @@ from gui.components.courses.archive_explorer_view import ArchiveExplorerView
 from gui.components.courses.course_detail_pane import CourseDetailPane
 from gui.components.courses.courses_tab_view import CoursesTabView
 from gui.components.courses.document_reader_view import DocumentReaderView
-from gui.components.courses.webview_pane import CoursesWebViewPane, is_external_meeting_url
+from gui.components.courses.webview_pane import (
+    CoursesWebViewPane,
+    _webview2_runtime_available,
+    is_external_meeting_url,
+)
 from gui.components.detail_view import DetailView
 from gui.controllers.courses_coordinator import CoursesCoordinator
 from gui.view_models.courses_state import CoursesState
@@ -791,3 +798,308 @@ def test_coordinator_open_and_save_attachment_ux_feedback(tmp_path: Path):
         assert "notes.txt" in (snacks[0].content.value or "")
     finally:
         coord.close()
+
+
+def test_webview2_runtime_probe_and_zero_js_leakage_in_fallback(monkeypatch: pytest.MonkeyPatch):
+    """WebView2 probe calls 0-arg version check; fallback never leaks raw SPA/Moodle JS or CSS."""
+    import sys
+    import types
+
+    calls: list[str] = []
+
+    class _FakeEnv:
+        @staticmethod
+        def get_available_browser_version_string(*args):
+            if args:
+                raise TypeError("Invalid parameter count")
+            calls.append("zero_arg")
+            return "157.0.4341.46"
+
+    fake_wv2 = types.ModuleType("webview2.microsoft.web.webview2.core")
+    fake_wv2.CoreWebView2Environment = _FakeEnv  # type: ignore[attr-defined]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "webview2", types.ModuleType("webview2"))
+    monkeypatch.setitem(sys.modules, "webview2.microsoft", types.ModuleType("webview2.microsoft"))
+    monkeypatch.setitem(sys.modules, "webview2.microsoft.web", types.ModuleType("webview2.microsoft.web"))
+    monkeypatch.setitem(sys.modules, "webview2.microsoft.web.webview2", types.ModuleType("webview2.microsoft.web.webview2"))
+    monkeypatch.setitem(sys.modules, "webview2.microsoft.web.webview2.core", fake_wv2)
+    fake_winrt_foundation = types.ModuleType("winrt.windows.foundation")
+    fake_winrt_foundation.Rect = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "winrt", types.ModuleType("winrt"))
+    monkeypatch.setitem(sys.modules, "winrt.windows", types.ModuleType("winrt.windows"))
+    monkeypatch.setitem(sys.modules, "winrt.windows.foundation", fake_winrt_foundation)
+    monkeypatch.setitem(sys.modules, "win32con", types.ModuleType("win32con"))
+    monkeypatch.setitem(sys.modules, "win32gui", types.ModuleType("win32gui"))
+
+    assert _webview2_runtime_available() is True
+    assert calls == ["zero_arg"]
+
+    # Force fallback mode (no embedded webview) and verify Zalo / Google Meet never leak raw JS
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        title="UTHelper",
+        width=1200,
+        height=800,
+        update=lambda: None,
+    )
+    server = LocalPreviewServer()
+    try:
+        for spa_url in (
+            "https://zalo.me/g/4galccv0l49afuffmqnq",
+            "https://meet.google.com/fsy-iqay-rgs",
+        ):
+            pane = CoursesWebViewPane(
+                page=fake_page,  # type: ignore[arg-type]
+                source="courses",
+                title="Link lop hoc",
+                url=spa_url,
+                preview_server=server,
+                session_client=None,
+                on_back=lambda: None,
+                on_open_external=lambda _u: None,
+                embedded_webview_factory=lambda _u: None,
+            )
+            # Wait briefly for background fallback thread if any
+            import time
+
+            for _ in range(30):
+                if not any(
+                    isinstance(c, ft.ProgressRing) for c in _iter_controls(pane._body_host)
+                ):
+                    break
+                time.sleep(0.02)
+            all_text = " ".join(
+                str(getattr(c, "value", "") or "")
+                for c in _iter_controls(pane)
+                if isinstance(c, (ft.Text, ft.Markdown))
+            )
+            assert "window.AppConfig" not in all_text
+            assert "MeetingsUnsupportedUi" not in all_text
+            assert "JSON.parse(atob" not in all_text
+            pane.dispose()
+
+        # Authenticated UTH Moodle HTML decomposes <script> and <style> before sanitization
+        uth_html = """
+        <html>
+          <head>
+            <title>VPL Lab</title>
+            <style>.secret-css { display: none; }</style>
+            <script>window.M = {cfg: "SECRET_JS_CONFIG"};</script>
+          </head>
+          <body>
+            <div role="main">
+              <h3>Bài thực hành tuần 4</h3>
+              <p>Sinh viên nộp mã nguồn Python đúng hạn.</p>
+              <script>console.log("inline_tracker_leak");</script>
+            </div>
+          </body>
+        </html>
+        """
+        fake_client = SimpleNamespace(
+            get_session_cookies=lambda **_k: {"MoodleSession": "abc"},
+            open_session_url=lambda u: (u, uth_html, False),
+            login_session=lambda **_k: True,
+        )
+        uth_pane = CoursesWebViewPane(
+            page=fake_page,  # type: ignore[arg-type]
+            source="courses",
+            title="VPL Lab",
+            url="https://courses.ut.edu.vn/mod/vpl/view.php?id=99",
+            preview_server=server,
+            session_client=fake_client,
+            on_back=lambda: None,
+            on_open_external=lambda _u: None,
+            embedded_webview_factory=lambda _u: None,
+        )
+        import time
+
+        for _ in range(40):
+            if not any(
+                isinstance(c, ft.ProgressRing) for c in _iter_controls(uth_pane._body_host)
+            ):
+                break
+            time.sleep(0.02)
+        rendered_md = " ".join(
+            str(getattr(c, "value", "") or "")
+            for c in _iter_controls(uth_pane)
+            if isinstance(c, (ft.Text, ft.Markdown))
+        )
+        assert "Bài thực hành tuần 4" in rendered_md
+        assert "Sinh viên nộp mã nguồn Python đúng hạn." in rendered_md
+        assert "SECRET_JS_CONFIG" not in rendered_md
+        assert "inline_tracker_leak" not in rendered_md
+        assert "secret-css" not in rendered_md
+        uth_pane.dispose()
+    finally:
+        server.stop()
+
+
+def test_quiz_attempt_review_report_sequential_numbering_gift_strip_choices_and_filters():
+    """Quiz review strips GIFT codes, numbers shuffled slots 1..N, highlights student & right choices, and filters."""
+    cleaned, code = clean_moodle_question_text(
+        "::C2-GCCN VN-CLO2.1-VD-C.067::[html] Trong một nhà máy, công nhân cần gì? _______"
+    )
+    assert code == "C2-GCCN VN-CLO2.1-VD-C.067"
+    assert "::" not in cleaned and "[html]" not in cleaned
+    assert "Trong một nhà máy, công nhân cần gì?" in cleaned
+
+    ws_payload = {
+        "grade": "6.67",
+        "attempt": {
+            "id": 501,
+            "attempt": 1,
+            "state": "finished",
+            "timestart": 1700000000,
+            "timefinish": 1700000900,
+            "sumgrades": 2.0,
+        },
+        "questions": [
+            {
+                "slot": 30,
+                "number": 1,
+                "type": "multichoice",
+                "status": "Incorrect",
+                "state": "gradedwrong",
+                "mark": "0.00",
+                "maxmark": 1.0,
+                "html": """
+                <div class="que multichoice deferredfeedback incorrect">
+                  <div class="info"><h3 class="no">Question <span class="qno">1</span></h3></div>
+                  <div class="content">
+                    <div class="formulation clearfix">
+                      <div class="qtext">::C2-GCCN VN-CLO2.1-VD-C.067::[html] Trong một nhà máy, công nhân ít hiểu biết về quyền lao động. Vấn đề nào cần nhận diện? _____</div>
+                      <div class="ablock">
+                        <div class="answer">
+                          <div class="r0"><input type="radio" name="q1:30_answer" value="0" /><div class="d-flex">a. Kỹ năng ngoại ngữ</div></div>
+                          <div class="r1 incorrect"><input type="radio" name="q1:30_answer" value="1" checked="checked" /><div class="d-flex">b. Thiếu máy móc hiện đại</div><div class="specificfeedback">Chưa chính xác</div></div>
+                          <div class="r0"><input type="radio" name="q1:30_answer" value="2" /><div class="d-flex">c. Quyền lao động và cơ chế đại diện tập thể</div></div>
+                          <div class="r1"><input type="radio" name="q1:30_answer" value="3" /><div class="d-flex">d. Thiếu nguyên vật liệu</div></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="outcome clearfix">
+                      <div class="feedback">
+                        <div class="specificfeedback">Câu trả lời của bạn chưa đúng.</div>
+                        <div class="generalfeedback">Xem mục 2.1 giáo trình CNXHKH.</div>
+                        <div class="rightanswer">The correct answer is: Quyền lao động và cơ chế đại diện tập thể</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                """,
+            },
+            {
+                "slot": 22,
+                "number": 2,
+                "type": "multichoice",
+                "status": "Correct",
+                "state": "gradedright",
+                "mark": "1.00",
+                "maxmark": 1.0,
+                "html": """
+                <div class="que multichoice deferredfeedback correct">
+                  <div class="content">
+                    <div class="formulation clearfix">
+                      <div class="qtext">::C2-GCCN VN-CLO2.1-VD-C.059::[html] Đặc điểm xuất thân từ nông dân tạo ra tác động gì?</div>
+                      <div class="answer">
+                        <div class="r0 correct"><input type="radio" checked="checked" /><label>a. Tác phong công nghiệp còn hạn chế ở một bộ phận</label></div>
+                        <div class="r1"><input type="radio" /><label>b. Không có tinh thần đoàn kết</label></div>
+                      </div>
+                    </div>
+                    <div class="outcome"><div class="rightanswer">Đáp án đúng là: Tác phong công nghiệp còn hạn chế ở một bộ phận</div></div>
+                  </div>
+                </div>
+                """,
+            },
+            {
+                "slot": 115,
+                "number": 3,
+                "type": "multichoice",
+                "status": "Correct",
+                "state": "gradedright",
+                "mark": "1.00",
+                "maxmark": 1.0,
+                "html": """
+                <div class="que multichoice deferredfeedback correct">
+                  <div class="content">
+                    <div class="formulation clearfix">
+                      <div class="qtext">::C2-DK-SMLS-040::[html] Địa vị kinh tế - xã hội của GCCN là gì?</div>
+                      <div class="answer">
+                        <div class="r0 correct"><input type="radio" checked="checked" /><label>a. Đại diện lực lượng sản xuất tiên tiến</label></div>
+                        <div class="r1"><input type="radio" /><label>b. Sở hữu tư liệu sản xuất tư nhân</label></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                """,
+            },
+        ],
+    }
+
+    report = parse_quiz_attempt_review_payload(ws_payload, fallback_attempt_id=501)
+    assert [q.display_number for q in report.questions] == ["1", "2", "3"]
+    assert [q.slot for q in report.questions] == ["30", "22", "115"]
+    assert report.correct_count == 2
+    assert report.incorrect_count == 1
+    assert report.questions[0].question_code == "C2-GCCN VN-CLO2.1-VD-C.067"
+    assert "::C2-GCCN" not in report.questions[0].question_text
+    assert len(report.questions[0].choices) == 4
+    # Picked choice B is marked selected + incorrect; Choice C is cross-matched from .rightanswer as correct!
+    ch_b = report.questions[0].choices[1]
+    ch_c = report.questions[0].choices[2]
+    assert ch_b.label == "B" and ch_b.is_selected is True and ch_b.state == "incorrect"
+    assert ch_c.label == "C" and ch_c.is_selected is False and ch_c.state == "correct"
+    assert "2.1 giáo trình" in report.questions[0].general_feedback
+
+    # Verify QuizActivityView renders sequential Câu 1..3, hero stats, and interactive wrong-only filter
+    quiz_mod = _sample_module(55, "quiz", "Bài tập tự học Chương 2", instance_id=77)
+    summary_obj = QuizActivitySummary(
+        cmid=55,
+        quiz_id=77,
+        title="Bài tập tự học Chương 2",
+        intro="",
+        attempts=(),
+    )
+    fake_act_svc = SimpleNamespace(
+        fetch_quiz_activity=lambda *_a, **_k: summary_obj,
+        fetch_quiz_review_report=lambda *_a, **_k: report,
+    )
+    view = QuizActivityView(
+        source="courses",
+        course_id=101,
+        module=quiz_mod,
+        activity_service=fake_act_svc,  # type: ignore[arg-type]
+        on_close=lambda: None,
+        on_open_webview=lambda _t, _u: None,
+    )
+    import time
+
+    for _ in range(25):
+        if not any(isinstance(c, ft.ProgressRing) for c in _iter_controls(view._body_host)):
+            break
+        time.sleep(0.01)
+    view._render_attempt_review(summary_obj, None, report)
+
+    texts = [c.value for c in _iter_controls(view) if isinstance(c, ft.Text) and c.value]
+    assert "Câu 1" in texts and "Câu 2" in texts and "Câu 3" in texts
+    assert "Câu 30" not in texts and "Câu 22" not in texts and "Câu 115" not in texts
+    assert not any("::C2-GCCN" in t for t in texts)
+    assert any("Bạn chọn · Sai" in t for t in texts)
+    assert any("Đáp án đúng" in t for t in texts)
+    assert any(isinstance(c, ft.ProgressBar) for c in _iter_controls(view))
+
+    # Filter to "Câu sai" via actual UI filter chip on_select -> only Câu 1 card remains
+    wrong_chip = next(
+        c
+        for c in _iter_controls(view)
+        if isinstance(c, ft.Chip)
+        and "Câu sai" in str(getattr(c.label, "value", "") or "")
+    )
+    wrong_chip.on_select(None)
+    wrong_texts = [c.value for c in _iter_controls(view) if isinstance(c, ft.Text) and c.value]
+    assert "Câu 1" in wrong_texts
+    assert "Câu 2" not in wrong_texts
+    assert "Câu 3" not in wrong_texts
+    view.dispose()
