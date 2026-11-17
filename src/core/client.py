@@ -3,8 +3,6 @@ import http.client
 import io
 import json
 import os
-import queue
-import threading
 import time
 import zlib
 from http.cookiejar import CookieJar
@@ -236,178 +234,12 @@ else:
     _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 # SSL: dùng urllib default trên MỌI platform
-# Custom ssl.create_default_context() bị Cloudflare chặn (403).
-# urllib default SSL không bị chặn. Nếu iOS gặp cert error → thêm certifi sau.
-
-
-_STDLIB_URLOPEN = urllib.request.urlopen
-_KA_POOL_LOCK = threading.Lock()
-_KA_POOLS: dict[tuple[str, str, int], queue.LifoQueue[tuple[float, http.client.HTTPConnection]]] = {}
-_KA_IDLE_TTL_SEC = 40.0
-_KA_MAX_PER_ORIGIN = 6
-
-
-class _PooledKeepAliveResponse:
-    """Thin urllib-compatible wrapper returning warm HTTP/1.1 sockets to the origin pool."""
-
-    def __init__(
-        self,
-        raw_resp: http.client.HTTPResponse,
-        conn: http.client.HTTPConnection,
-        pool_key: tuple[str, str, int],
-        url: str,
-    ) -> None:
-        self._resp = raw_resp
-        self._conn: Optional[http.client.HTTPConnection] = conn
-        self._key = pool_key
-        self._url = url
-        self.status = raw_resp.status
-        self.fp = raw_resp
-
-    def geturl(self) -> str:
-        return self._url
-
-    def info(self):
-        return self._resp.headers
-
-    def read(self, amt: Optional[int] = None) -> bytes:
-        data = self._resp.read() if amt is None or amt < 0 else self._resp.read(amt)
-        if amt is None or amt < 0 or not data or self._resp.isclosed():
-            self._release(reusable=not getattr(self._resp, "will_close", True))
-        return data
-
-    def _release(self, *, reusable: bool) -> None:
-        conn = self._conn
-        if conn is None:
-            return
-        self._conn = None
-        if reusable and getattr(conn, "sock", None) is not None:
-            with _KA_POOL_LOCK:
-                q = _KA_POOLS.setdefault(self._key, queue.LifoQueue(maxsize=_KA_MAX_PER_ORIGIN))
-            try:
-                q.put_nowait((time.monotonic(), conn))
-                return
-            except queue.Full:
-                pass
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-    def close(self) -> None:
-        self._release(reusable=False)
-        try:
-            self._resp.close()
-        except Exception:
-            pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
-        return False
-
-
-def _has_proxy_env() -> bool:
-    return any(
-        os.environ.get(k)
-        for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
-    )
+# Custom ssl.create_default_context() và raw http.client.HTTPSConnection bị Cloudflare chặn (403).
+# urllib.request.urlopen giữ nguyên header/TLS chuẩn, tương thích 100% Cloudflare & Moodle.
 
 
 def _urlopen(req, timeout=15):
-    """urlopen wrapper with stdlib TLS Keep-Alive pooling (falls back if monkeypatched or proxied)."""
-    if urllib.request.urlopen is not _STDLIB_URLOPEN or _has_proxy_env() or not isinstance(req, urllib.request.Request):
-        return urllib.request.urlopen(req, timeout=timeout)
-
-    parsed = urllib.parse.urlsplit(req.full_url)
-    scheme = parsed.scheme.lower()
-    host = parsed.hostname or ""
-    if scheme not in {"http", "https"} or not host:
-        return urllib.request.urlopen(req, timeout=timeout)
-
-    port = parsed.port or (443 if scheme == "https" else 80)
-    pool_key = (scheme, host.lower(), port)
-    path = parsed.path or "/"
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-
-    headers = dict(req.unredirected_hdrs)
-    headers.update(req.headers)
-    headers.setdefault("Connection", "keep-alive")
-    body = req.data
-    method = req.get_method()
-    if body is not None and "Content-length" not in headers and "Content-Length" not in headers:
-        headers["Content-Length"] = str(len(body))
-
-    def _borrow_conn() -> tuple[http.client.HTTPConnection, bool]:
-        with _KA_POOL_LOCK:
-            q = _KA_POOLS.get(pool_key)
-        now_m = time.monotonic()
-        if q is not None:
-            while True:
-                try:
-                    ts, cached = q.get_nowait()
-                except queue.Empty:
-                    break
-                if (now_m - ts) < _KA_IDLE_TTL_SEC and getattr(cached, "sock", None) is not None:
-                    cached.timeout = timeout
-                    return cached, True
-                try:
-                    cached.close()
-                except Exception:
-                    pass
-        if scheme == "https":
-            # Default context=None uses stdlib _create_default_https_context() — Cloudflare-safe.
-            return http.client.HTTPSConnection(host, port, timeout=timeout), False
-        return http.client.HTTPConnection(host, port, timeout=timeout), False
-
-    for retry_warm in range(2):
-        conn, was_warm = _borrow_conn()
-        try:
-            conn.request(method, path, body=body, headers=headers)
-            raw_resp = conn.getresponse()
-        except (
-            http.client.RemoteDisconnected,
-            http.client.CannotSendRequest,
-            ConnectionResetError,
-            BrokenPipeError,
-            OSError,
-        ) as exc:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            if was_warm and retry_warm == 0:
-                continue
-            if isinstance(exc, TimeoutError):
-                raise
-            raise urllib.error.URLError(exc) from exc
-
-        # Delegate redirects to stdlib urllib so redirect rules stay identical
-        if raw_resp.status in {301, 302, 303, 307, 308}:
-            try:
-                raw_resp.close()
-                conn.close()
-            except Exception:
-                pass
-            return urllib.request.urlopen(req, timeout=timeout)
-
-        if raw_resp.status >= 400:
-            err_fp = io.BytesIO(raw_resp.read())
-            hdrs = raw_resp.headers
-            status_code = raw_resp.status
-            reason = raw_resp.reason
-            try:
-                raw_resp.close()
-                conn.close()
-            except Exception:
-                pass
-            raise urllib.error.HTTPError(req.full_url, status_code, reason, hdrs, err_fp)
-
-        return _PooledKeepAliveResponse(raw_resp, conn, pool_key, req.full_url)
-
+    """Thin wrapper around urllib.request.urlopen for uniform timeout & test monkeypatching."""
     return urllib.request.urlopen(req, timeout=timeout)
 
 

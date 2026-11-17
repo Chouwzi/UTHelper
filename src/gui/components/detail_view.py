@@ -1862,6 +1862,7 @@ class DetailView(ft.Container):
             if result.ok and result.snapshot is not None:
                 self._apply_submission_snapshot(result.snapshot)
             elif result.issue is not None:
+                self._resolve_pending_submission_status_on_error()
                 failed = SubmissionMutationResult.failure(result.issue, None)
                 self._show_upload_status(mutation_message(failed), C.CRITICAL)
             self._page.update()
@@ -1874,10 +1875,29 @@ class DetailView(ft.Container):
                 course_id,
             ):
                 return
+            self._resolve_pending_submission_status_on_error()
             self._show_upload_status(
                 "Không thể kiểm tra trạng thái bài nộp mới nhất.", C.CRITICAL
             )
             self._page.update()
+
+    def _resolve_pending_submission_status_on_error(self) -> None:
+        """Clear stuck 'Đang đồng bộ với Moodle...' label when snapshot fetch fails."""
+        if getattr(self._submission_status_value, "value", "") != "Đang đồng bộ với Moodle...":
+            return
+        fallback_raw = str(
+            getattr(self, "_last_server_status", "")
+            or (self._current_data or {}).get("submission_status")
+            or ""
+        ).strip()
+        if fallback_raw and fallback_raw.lower() not in {"unknown", "none", "-"}:
+            mapped = DetailView._map_submission_status(fallback_raw)
+            is_ok = any(k in mapped.lower() for k in ("đã nộp", "đã chấm", "hoàn thành"))
+            self._submission_status_value.value = mapped
+            self._submission_status_value.color = C.SAFE if is_ok else C.WARNING
+            return
+        self._submission_status_value.value = "Chưa thể đồng bộ trực tuyến"
+        self._submission_status_value.color = C.WARNING
 
     def _is_current_snapshot_load(
         self,

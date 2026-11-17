@@ -720,6 +720,13 @@ class CoursesCoordinator:
             )
             self.courses_view.push_overlay(nested, tag=f"archive:nested:{name}")
             return
+        initial_pane_w = 700.0
+        bounds_fn = getattr(self.courses_view, "_compute_pane3_bounds", None)
+        if callable(bounds_fn):
+            try:
+                initial_pane_w = float(bounds_fn()[2])
+            except Exception:
+                initial_pane_w = 700.0
         reader = DocumentReaderView(
             file_name=name,
             data=data,
@@ -735,6 +742,7 @@ class CoursesCoordinator:
             pdf_cache_dir=getattr(self.preview_cache, "cache_dir", None),
             preconverted=preconverted,
             preopened_pdf=preopened_pdf,
+            pane_width=initial_pane_w,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")

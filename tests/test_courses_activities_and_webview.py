@@ -1103,3 +1103,80 @@ def test_quiz_attempt_review_report_sequential_numbering_gift_strip_choices_and_
     assert "Câu 2" not in wrong_texts
     assert "Câu 3" not in wrong_texts
     view.dispose()
+
+
+def test_detail_view_never_hangs_on_syncing_status_and_courses_pane_bounds(tmp_path: Path):
+    """DetailView resolves stuck 'Đang đồng bộ với Moodle...' on error, and CoursesTabView bounds/tap behave cleanly."""
+    fake_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform="windows",
+        width=1120,
+        height=760,
+        update=lambda: None,
+        run_task=lambda *_a: None,
+    )
+    fake_client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+    )
+
+    class _FailingWorkflow:
+        def load_snapshot(self, **_k):
+            raise RuntimeError("HTTP 403 / Offline")
+
+    dv = DetailView(
+        fake_page,  # type: ignore[arg-type]
+        on_close=lambda: None,
+        get_client=lambda: fake_client,
+        submission_workflow_factory=lambda _c: _FailingWorkflow(),
+        embedded_in_pane=True,
+        on_open_url=lambda _u: None,
+    )
+    payload = {
+        "id": "10",
+        "title": "Nộp Bài tập nhóm thuyết trình",
+        "course": "Chủ nghĩa xã hội khoa học",
+        "course_id": 101,
+        "type": "assignment",
+        "deadline": 0,
+        "submission_status": "unknown",
+        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=10",
+        "details": {"description_html": "<p>Hướng dẫn</p>"},
+    }
+    dv.update_detail(payload)
+    assert dv._submission_status_value.value == "Đang đồng bộ với Moodle..."
+
+    asyncio.run(
+        dv._async_load_submitted_files(
+            fake_client,
+            payload["url"],
+            101,
+            None,
+            dv._snapshot_load_generation,
+            dv._view_generation,
+        )
+    )
+    assert dv._submission_status_value.value != "Đang đồng bộ với Moodle..."
+    assert "đồng bộ" in dv._submission_status_value.value.lower()
+
+    # Verify CoursesTabView._compute_pane3_bounds and tapping active course clears Pane-3 overlay
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|u2")
+    pcache = PreviewFileCache(tmp_path / "preview2")
+    c_svc = CourseCatalogService(cache_store=store, preview_cache=pcache)
+    c1 = _sample_course("courses", 101)
+    store.save_catalog([c1], synced_at=1000)
+
+    tab_view = CoursesTabView(catalog_service=c_svc)
+    tab_view.set_width(1048.0)  # content_width (1120 - 72 rail)
+    left, top, width, height = tab_view._compute_pane3_bounds()
+    assert left == 410.0
+    assert top == 36.0
+    assert width == 727.0
+
+    asyncio.run(tab_view.load_initial_async())
+    asyncio.run(tab_view._select_course_async(c1.course_key))
+    tab_view.push_overlay(ft.Container(), tag="webview:test")
+    assert len(tab_view._overlays) == 1
+    # Clicking the already-selected course card in Pane 1 dismisses the overlay cleanly
+    asyncio.run(tab_view._on_user_select_course_async(c1.course_key))
+    assert len(tab_view._overlays) == 0

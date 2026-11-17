@@ -124,7 +124,8 @@ class WindowsWebView2Dock:
         self._ready = False
         self._failed = False
         self._visible = True
-        self._bounds_dip: tuple[float, float, float, float] = (380.0, 120.0, 640.0, 480.0)
+        self._bounds_dip: tuple[float, float, float, float] = (410.0, 90.0, 640.0, 480.0)
+        self._bottom_inset_dip: float = 0.0
         self._hwnd: int = 0
         self._parent_hwnd: int = 0
         self._controller: Any = None
@@ -159,13 +160,22 @@ class WindowsWebView2Dock:
         self._visible = bool(visible)
         self._enqueue("visible", self._visible)
 
-    def set_bounds(self, left: float, top: float, width: float, height: float) -> None:
+    def set_bounds(
+        self,
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+        *,
+        bottom_inset: float = 0.0,
+    ) -> None:
         self._bounds_dip = (
             max(0.0, float(left)),
             max(0.0, float(top)),
             max(120.0, float(width)),
             max(120.0, float(height)),
         )
+        self._bottom_inset_dip = max(0.0, float(bottom_inset))
         self._enqueue("bounds", self._bounds_dip)
 
     def dispose(self) -> None:
@@ -189,7 +199,7 @@ class WindowsWebView2Dock:
 
     @staticmethod
     def _collect_child_pids(parent_pid: int) -> set[int]:
-        """Collect direct child process IDs on Windows (e.g., flet.exe spawned by python.exe)."""
+        """Collect parent + all descendant process IDs on Windows (python.exe <-> flet.exe)."""
         pids: set[int] = {parent_pid}
         if sys.platform != "win32":
             return pids
@@ -212,17 +222,30 @@ class WindowsWebView2Dock:
             snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)
             if snap in (0, -1, ctypes.c_void_p(-1).value):
                 return pids
+            parent_map: dict[int, int] = {}
+            children_map: dict[int, list[int]] = {}
             try:
                 entry = _PROCESSENTRY32W()
                 entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
                 if k32.Process32FirstW(snap, ctypes.byref(entry)):
                     while True:
-                        if int(entry.th32ParentProcessID) == parent_pid:
-                            pids.add(int(entry.th32ProcessID))
+                        pid = int(entry.th32ProcessID)
+                        ppid = int(entry.th32ParentProcessID)
+                        parent_map[pid] = ppid
+                        children_map.setdefault(ppid, []).append(pid)
                         if not k32.Process32NextW(snap, ctypes.byref(entry)):
                             break
             finally:
                 k32.CloseHandle(snap)
+            if parent_pid in parent_map and parent_map[parent_pid] > 0:
+                pids.add(parent_map[parent_pid])
+            frontier = [parent_pid]
+            while frontier:
+                cur = frontier.pop()
+                for child in children_map.get(cur, ()):
+                    if child not in pids:
+                        pids.add(child)
+                        frontier.append(child)
         except Exception:
             pass
         return pids
@@ -294,7 +317,7 @@ class WindowsWebView2Dock:
         import win32gui
         from webview2.microsoft.web.webview2 import core as wv2
 
-        for _ in range(5):
+        for _ in range(15):
             self._parent_hwnd = self._find_parent_hwnd(self._page_title)
             if self._parent_hwnd:
                 break
@@ -331,6 +354,12 @@ class WindowsWebView2Dock:
             hinst,
             None,
         )
+        try:
+            ctypes.windll.user32.SetWindowLongPtrW(
+                int(hwnd), -8, ctypes.c_void_p(int(self._parent_hwnd))
+            )
+        except Exception:
+            pass
         self._hwnd = hwnd
         self._apply_window_bounds()
 
@@ -478,14 +507,22 @@ class WindowsWebView2Dock:
             max_h = max(160, crect[3] - crect[1])
             left_px = max(0, int(round(self._bounds_dip[0] * scale)))
             top_px = max(0, int(round(self._bounds_dip[1] * scale)))
-            w_px = min(max_w - left_px, max(160, int(round(self._bounds_dip[2] * scale))))
-            h_px = min(max_h - top_px, max(160, int(round(self._bounds_dip[3] * scale))))
+            bot_px = max(0, int(round(self._bottom_inset_dip * scale)))
+            w_px = max(160, max_w - left_px)
+            h_px = max(160, max_h - top_px - bot_px)
+            fg_hwnd = 0
+            try:
+                fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+            except Exception:
+                fg_hwnd = 0
+            app_is_fg = fg_hwnd in (int(parent), int(self._hwnd))
+            keep_z = preserve_zorder or not app_is_fg
             flags = win32con.SWP_NOACTIVATE | (
-                win32con.SWP_NOZORDER if preserve_zorder else 0
+                win32con.SWP_NOZORDER if keep_z else 0
             )
             win32gui.SetWindowPos(
                 self._hwnd,
-                0 if preserve_zorder else win32con.HWND_TOP,
+                0 if keep_z else win32con.HWND_TOP,
                 origin_x + left_px,
                 origin_y + top_px,
                 w_px,
@@ -1062,8 +1099,15 @@ class CoursesWebViewPane(ft.Container):
 
     def sync_bounds(self, left: float, top: float, width: float, height: float) -> None:
         if self._dock is not None and not self._disposed:
-            header_h = 58.0
-            self._dock.set_bounds(left, top + header_h, width, max(160.0, height - header_h))
+            header_h = 55.0
+            bottom_inset = 80.0 if left <= 1.0 and width < 600.0 else 0.0
+            self._dock.set_bounds(
+                left,
+                top + header_h,
+                width,
+                max(160.0, height - header_h),
+                bottom_inset=bottom_inset,
+            )
 
     def suspend(self) -> None:
         if self._dock is not None:

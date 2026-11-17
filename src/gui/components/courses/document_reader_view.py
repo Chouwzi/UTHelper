@@ -99,6 +99,7 @@ class DocumentReaderView(ft.Container):
         pdf_cache_dir: Optional[Path] = None,
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
+        pane_width: float = 700.0,
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
@@ -115,6 +116,7 @@ class DocumentReaderView(ft.Container):
         self._on_open_link = on_open_link
         self._webview_builder = webview_builder
         self._pdf_cache_dir = pdf_cache_dir
+        self._pane_width: float = max(320.0, float(pane_width or 700.0))
         self._expanded = bool(is_expanded)
         self._show_expand_toggle = bool(show_expand_toggle)
         self._on_toggle_expand = on_toggle_expand
@@ -312,6 +314,21 @@ class DocumentReaderView(ft.Container):
             expanded=self._expanded,
             visible=self._show_expand_toggle,
         )
+
+    def sync_bounds(self, _left: float, _top: float, width: float, _height: float) -> None:
+        """Adapt document page width proportionally when Pane 3 resizes or expands."""
+        if self._disposed:
+            return
+        try:
+            new_w = max(320.0, float(width))
+        except (TypeError, ValueError):
+            return
+        if abs(new_w - self._pane_width) < 12.0:
+            return
+        self._pane_width = new_w
+        if self._kind in {"docx", "doc", "pptx", "ppt", "pdf"} and not self._active_webview_url:
+            self._body_host.content = self._build_body()
+            safe_control_update(self)
 
     def _jump_to_anchor(self, list_view: ft.ListView, anchor_id: str) -> None:
         async def _do_scroll() -> None:
@@ -969,12 +986,14 @@ class DocumentReaderView(ft.Container):
                         else ft.MainAxisAlignment.START
                     )
                 )
+                h_cell_pad = max(4, int(round((8 if has_borders else 6) * scale)))
+                v_cell_pad = max(3, int(round((6 if has_borders else 4) * scale)))
                 row_cells.append(
                     ft.Container(
                         expand=flex_expand,
                         padding=ft.Padding.symmetric(
-                            horizontal=8 if has_borders else 6,
-                            vertical=6 if has_borders else 4,
+                            horizontal=h_cell_pad,
+                            vertical=v_cell_pad,
                         ),
                         bgcolor=eff_cell_bg,
                         border=cell_border,
@@ -1098,7 +1117,11 @@ class DocumentReaderView(ft.Container):
         }
         total_slides = len(converted.slides)
         query_lower = self._pptx_search_query.strip().lower()
-        slide_width = max(480, min(920, int(round(680 * self._pptx_scale))))
+        avail_slide_w = max(300, int(self._pane_width) - 40)
+        if self._pptx_scale <= 1.0:
+            slide_width = max(280, min(avail_slide_w, int(round(min(avail_slide_w, 680) * self._pptx_scale))))
+        else:
+            slide_width = max(320, int(round(max(avail_slide_w, 680) * self._pptx_scale)))
 
         cards: list[ft.Control] = []
         matching_nums: list[int] = []
@@ -1338,9 +1361,12 @@ class DocumentReaderView(ft.Container):
             spacing=14,
             controls=[
                 ft.Row(
+                    scroll=ft.ScrollMode.AUTO,
                     alignment=ft.MainAxisAlignment.CENTER,
                     controls=[card],
                 )
+                if self._pptx_scale > 1.0
+                else ft.Container(alignment=ft.Alignment.TOP_CENTER, content=card)
                 for card in cards
             ],
         )
@@ -1468,37 +1494,41 @@ class DocumentReaderView(ft.Container):
         text_secondary: str,
         border_color: str,
         accent_color: str,
+        scale: float = 1.0,
     ) -> ft.MarkdownStyleSheet:
+        def _sz(pt: int) -> int:
+            return max(10, int(round(pt * scale)))
+
         return ft.MarkdownStyleSheet(
-            p_text_style=ft.TextStyle(color=text_primary, size=14),
+            p_text_style=ft.TextStyle(color=text_primary, size=_sz(14)),
             h1_text_style=ft.TextStyle(
-                color=text_primary, size=20, weight=ft.FontWeight.W_700
+                color=text_primary, size=_sz(20), weight=ft.FontWeight.W_700
             ),
             h2_text_style=ft.TextStyle(
-                color=text_primary, size=18, weight=ft.FontWeight.W_700
+                color=text_primary, size=_sz(18), weight=ft.FontWeight.W_700
             ),
             h3_text_style=ft.TextStyle(
-                color=text_primary, size=16, weight=ft.FontWeight.W_600
+                color=text_primary, size=_sz(16), weight=ft.FontWeight.W_600
             ),
             h4_text_style=ft.TextStyle(
-                color=text_primary, size=15, weight=ft.FontWeight.W_600
+                color=text_primary, size=_sz(15), weight=ft.FontWeight.W_600
             ),
             h5_text_style=ft.TextStyle(
-                color=text_primary, size=14, weight=ft.FontWeight.W_600
+                color=text_primary, size=_sz(14), weight=ft.FontWeight.W_600
             ),
             h6_text_style=ft.TextStyle(
-                color=text_secondary, size=13, weight=ft.FontWeight.W_600
+                color=text_secondary, size=_sz(13), weight=ft.FontWeight.W_600
             ),
-            list_bullet_text_style=ft.TextStyle(color=text_primary, size=14),
+            list_bullet_text_style=ft.TextStyle(color=text_primary, size=_sz(14)),
             table_head_text_style=ft.TextStyle(
-                color=text_primary, size=13, weight=ft.FontWeight.W_600
+                color=text_primary, size=_sz(13), weight=ft.FontWeight.W_600
             ),
-            table_body_text_style=ft.TextStyle(color=text_primary, size=13),
+            table_body_text_style=ft.TextStyle(color=text_primary, size=_sz(13)),
             table_cells_decoration=ft.BoxDecoration(
                 border=ft.Border.all(1, border_color)
             ),
             blockquote_text_style=ft.TextStyle(
-                color=text_secondary, size=13, italic=True
+                color=text_secondary, size=_sz(13), italic=True
             ),
             blockquote_decoration=ft.BoxDecoration(
                 bgcolor=surface_color,
@@ -1506,7 +1536,7 @@ class DocumentReaderView(ft.Container):
             ),
             blockquote_padding=10,
             code_text_style=ft.TextStyle(
-                color=text_primary, size=12, font_family=_MONO_FONT
+                color=text_primary, size=_sz(12), font_family=_MONO_FONT
             ),
             codeblock_decoration=ft.BoxDecoration(
                 bgcolor=surface_color,
@@ -1522,9 +1552,8 @@ class DocumentReaderView(ft.Container):
 
     @staticmethod
     def _block_uses_markdown_plain(block: DocxRichBlock, *, scale: float = 1.0) -> bool:
-        """Keep unstyled 100%-zoom body paragraphs & left headings as Markdown so md_style_sheet applies."""
-        if abs(scale - 1.0) > 0.01:
-            return False
+        """Keep unstyled body paragraphs & left headings as Markdown scaled via md_style_sheet."""
+        _ = scale
         if (
             block.section_role != "body"
             or block.align != "left"
@@ -1574,13 +1603,25 @@ class DocumentReaderView(ft.Container):
             _on_accent,
         ) = self._reader_palette()
         self._body_host.bgcolor = bg_color
-        scale = self._docx_scale
+        user_zoom = self._docx_scale
+        avail_w = max(300, int(self._pane_width) - 40)
+        fit_ratio = min(1.0, avail_w / 794.0)
+        scale = max(0.68, round(fit_ratio * user_zoom, 3))
+        paper_h_pad = max(12, int(round(32 * scale)))
+        paper_v_pad = max(14, int(round(24 * scale)))
+        effective_card_w = (
+            min(avail_w, int(round(min(avail_w, 794) * user_zoom)))
+            if user_zoom <= 1.0
+            else int(round(max(avail_w, 794) * user_zoom))
+        )
+        max_inner_img_w = max(140, effective_card_w - 2 * paper_h_pad - 20)
         md_style = self._build_md_style_sheet(
             surface_color=surface_color,
             text_primary=text_primary,
             text_secondary=text_secondary,
             border_color=border_color,
             accent_color=accent_color,
+            scale=scale,
         )
 
         query_lower = self._doc_search_query.strip().lower()
@@ -1750,9 +1791,9 @@ class DocumentReaderView(ft.Container):
             elif block.kind == "image" and block.image_bytes:
                 _flush_md()
                 disp_w = (
-                    max(48, min(int(round(720 * scale)), int(round(block.image_width_px * scale))))
+                    max(48, min(max_inner_img_w, int(round(block.image_width_px * scale))))
                     if block.image_width_px > 0
-                    else None
+                    else max_inner_img_w
                 )
                 img_align = (
                     ft.Alignment.CENTER
@@ -1809,9 +1850,7 @@ class DocumentReaderView(ft.Container):
                 ]
             ]
 
-        paper_w = max(520, min(1160, int(round(816 * scale))))
-        paper_h_pad = max(18, int(round(36 * scale)))
-        paper_v_pad = max(18, int(round(28 * scale)))
+        stretch_fluid = user_zoom <= 1.0 and avail_w <= 794 and abs(user_zoom - 1.0) < 0.01
         total_sheets = len(non_empty_pages)
         sheet_rows: list[ft.Control] = []
         for idx_p, p_ctrls in enumerate(non_empty_pages, start=1):
@@ -1831,7 +1870,7 @@ class DocumentReaderView(ft.Container):
                 else []
             )
             page_card = ft.Container(
-                width=paper_w,
+                width=None if stretch_fluid else effective_card_w,
                 bgcolor=surface_color,
                 border=ft.Border.all(1, border_color),
                 border_radius=8,
@@ -1842,13 +1881,20 @@ class DocumentReaderView(ft.Container):
                     controls=[*p_ctrls, *sheet_footer],
                 ),
             )
-            sheet_rows.append(
-                ft.Row(
-                    scroll=ft.ScrollMode.AUTO if scale > 1.05 else None,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    controls=[page_card],
+            if stretch_fluid:
+                sheet_rows.append(page_card)
+            elif user_zoom > 1.0:
+                sheet_rows.append(
+                    ft.Row(
+                        scroll=ft.ScrollMode.AUTO,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        controls=[page_card],
+                    )
                 )
-            )
+            else:
+                sheet_rows.append(
+                    ft.Container(alignment=ft.Alignment.TOP_CENTER, content=page_card)
+                )
 
         list_view = ft.ListView(
             expand=True,
@@ -1893,7 +1939,7 @@ class DocumentReaderView(ft.Container):
             ),
             ft.TextButton(
                 content=ft.Text(
-                    f"{int(round(scale * 100))}%",
+                    f"{int(round(user_zoom * 100))}%",
                     size=11,
                     color=text_primary,
                 ),
@@ -2163,8 +2209,14 @@ class DocumentReaderView(ft.Container):
 
         def _page_control_for(p_idx: int, rendered: Optional[object]) -> ft.Control:
             if rendered is not None and getattr(rendered, "png_bytes", b""):
-                display_w = max(
+                raw_disp_w = max(
                     280, int(round(getattr(rendered, "width", 800) * 0.68))
+                )
+                max_fit_pdf_w = max(280, int(self._pane_width) - 52)
+                display_w = (
+                    min(max_fit_pdf_w, raw_disp_w)
+                    if self._pdf_scale <= 1.6
+                    else raw_disp_w
                 )
                 img_ctrl = ft.Image(
                     src=rendered.png_bytes,  # type: ignore[attr-defined]

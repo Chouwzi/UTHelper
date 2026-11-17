@@ -990,12 +990,25 @@ def test_high_fidelity_docx_theme_styles_numbering_footnotes_tables_a4_sheets_an
             kind="docx",
             preview_server=server,
             preconverted=res1,
+            pane_width=680.0,
             on_close=lambda: None,
             on_save=lambda _n, _b: None,
             on_open_external=lambda _n, _b: None,
         )
         texts = [c.value for c in _walk_controls(reader) if isinstance(c, ft.Text) and c.value]
         assert any("2 trang" in t for t in texts)
+        # In narrow 680px Pane 3 at 100% zoom, sheet stretches fluidly (width=None) without right-edge overflow!
+        lv = next(c for c in _walk_controls(reader) if isinstance(c, ft.ListView))
+        assert isinstance(lv.controls[0], ft.Container)
+        assert lv.controls[0].width is None
+
+        # Expanding Pane 3 via sync_bounds (>= 850px) centers A4 paper at 794px max width
+        reader.sync_bounds(73.0, 36.0, 1047.0, 720.0)
+        lv_expanded = next(c for c in _walk_controls(reader) if isinstance(c, ft.ListView))
+        assert isinstance(lv_expanded.controls[0], ft.Container)
+        assert getattr(lv_expanded.controls[0].content, "width", None) == 794
+
+        # Zooming in (> 100%) enables horizontal ScrollMode.AUTO so nothing is clipped
         initial_zoom = reader._docx_scale
         zoom_in = next(
             c
@@ -1004,6 +1017,9 @@ def test_high_fidelity_docx_theme_styles_numbering_footnotes_tables_a4_sheets_an
         )
         zoom_in.on_click(None)
         assert reader._docx_scale > initial_zoom
+        lv_zoomed = next(c for c in _walk_controls(reader) if isinstance(c, ft.ListView))
+        assert isinstance(lv_zoomed.controls[0], ft.Row)
+        assert lv_zoomed.controls[0].scroll == ft.ScrollMode.AUTO
         reader.dispose()
     finally:
         server.stop()

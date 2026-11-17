@@ -95,7 +95,9 @@ class CoursesTabView(ft.Container):
         self._module_open_seq = 0
 
         self._list_pane = CourseListPane(
-            on_select_course=lambda key: self._schedule_task(self._select_course_async, key),
+            on_select_course=lambda key: self._schedule_task(
+                self._on_user_select_course_async, key
+            ),
             on_toggle_pin=lambda key: self._schedule_task(self._toggle_pin_async, key),
             on_open_recent=lambda entry: self._schedule_task(self._open_recent_async, entry),
             on_filter_change=self._handle_filter_change,
@@ -242,20 +244,38 @@ class CoursesTabView(ft.Container):
 
     def _compute_pane3_bounds(self) -> tuple[float, float, float, float]:
         page = self._get_page()
-        page_w = float(getattr(page, "width", 0) or self._current_width or 1100.0)
-        page_h = float(getattr(page, "height", 0) or 760.0)
+        raw_page_w = float(
+            getattr(page, "width", 0)
+            or getattr(getattr(page, "window", None), "width", 0)
+            or 0.0
+        )
+        page_h = float(
+            getattr(page, "height", 0)
+            or getattr(getattr(page, "window", None), "height", 0)
+            or 760.0
+        )
         is_web = bool(getattr(page, "web", False))
-        has_rail = page_w >= float(RAIL_BREAKPOINT)
-        rail_w = float(RAIL_WIDTH + 1) if has_rail else 0.0
+        if raw_page_w > 0:
+            has_rail = raw_page_w >= float(RAIL_BREAKPOINT)
+            rail_w = float(RAIL_WIDTH + 1) if has_rail else 0.0
+            content_w = max(240.0, raw_page_w - rail_w)
+        elif self._current_width > 0:
+            content_w = self._current_width
+            has_rail = (content_w + float(RAIL_WIDTH)) >= float(RAIL_BREAKPOINT)
+            rail_w = float(RAIL_WIDTH + 1) if has_rail else 0.0
+        else:
+            has_rail = True
+            rail_w = float(RAIL_WIDTH + 1)
+            content_w = 1120.0 - rail_w
         list_w = (
             321.0
             if (self._layout_mode == "wide" and not self._state.pane3_expanded)
             else 0.0
         )
         left = rail_w + list_w
-        top = 0.0 if is_web else 35.0
+        top = 0.0 if is_web else 36.0
         bottom_inset = 0.0 if has_rail else 80.0
-        width = max(240.0, page_w - left)
+        width = max(240.0, content_w - list_w)
         height = max(200.0, page_h - top - bottom_inset)
         return (left, top, width, height)
 
@@ -517,6 +537,12 @@ class CoursesTabView(ft.Container):
 
     def _is_active_detail(self, req_id: int, target_key: str) -> bool:
         return req_id == self._detail_request_seq and self._state.selected_course_key == target_key
+
+    async def _on_user_select_course_async(self, course_key: str) -> Optional[int]:
+        """Handle explicit tap on a course card in Pane 1 (dismisses any open Pane-3 overlay)."""
+        if self._overlays:
+            self.clear_overlays(update=False)
+        return await self._select_course_async(course_key)
 
     async def _select_course_async(self, course_key: str) -> Optional[int]:
         course = next((c for c in self._state.courses if c.course_key == course_key), None)
