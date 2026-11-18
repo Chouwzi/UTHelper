@@ -173,14 +173,13 @@ def _show_startup_screen(
     from gui.core.theme import C, set_page_theme
 
     if compact_desktop:
-        page.window.width = 420
-        page.window.height = 720
+        # PC: cửa sổ co giãn được (bố cục 2 cột khi đủ rộng).
+        page.window.width = 1120
+        page.window.height = 760
         page.window.min_width = 420
-        page.window.max_width = 420
-        page.window.min_height = 720
-        page.window.max_height = 720
-        page.window.resizable = False
-        page.window.maximizable = False
+        page.window.min_height = 560
+        page.window.resizable = True
+        page.window.maximizable = True
         page.window.minimizable = True
         page.window.title_bar_hidden = True
         page.window.title_bar_buttons_hidden = True

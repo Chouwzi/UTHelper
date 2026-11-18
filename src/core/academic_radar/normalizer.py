@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from core.academic_radar.eligibility_resolver import CourseEligibilityResolver
-from core.academic_radar.models import CourseGradeItem, SemesterGradeData
+from core.academic_radar.models import ComponentScore, CourseGradeItem, SemesterGradeData
 
 
 def _parse_float(val: Any) -> float | None:
@@ -12,6 +12,53 @@ def _parse_float(val: Any) -> float | None:
         return float(val)
     except (ValueError, TypeError):
         return None
+
+
+_COMPONENT_LIST_KEYS = (
+    "diemThanhPhan", "dsDiemThanhPhan", "thanhPhan", "dsThanhPhan",
+    "chiTietDiem", "diemChiTiet", "dsDiemChiTiet", "cotDiem", "dsCotDiem",
+    "components", "details",
+)
+_COMPONENT_NAME_KEYS = (
+    "tenThanhPhan", "tenDiem", "tenCotDiem", "tenLoaiDiem", "loaiDiem", "ten", "name",
+)
+_COMPONENT_SCORE_KEYS = ("diem", "diemSo", "giaTri", "score", "value")
+_COMPONENT_WEIGHT_KEYS = ("trongSo", "tyLe", "tiLe", "heSo", "phanTram", "weight", "percent")
+
+
+def _first(raw: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for k in keys:
+        v = raw.get(k)
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _extract_components(raw: dict[str, Any]) -> tuple[ComponentScore, ...]:
+    """Trích danh sách điểm thành phần từ payload Portal (chấp nhận nhiều tên khóa)."""
+    items: Any = None
+    for key in _COMPONENT_LIST_KEYS:
+        if isinstance(raw.get(key), list) and raw[key]:
+            items = raw[key]
+            break
+    if not items:
+        return ()
+    result: list[ComponentScore] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = str(_first(it, _COMPONENT_NAME_KEYS) or "").strip()
+        if not name:
+            continue
+        weight = _parse_float(_first(it, _COMPONENT_WEIGHT_KEYS))
+        if weight is not None and 0 < weight <= 1:
+            weight *= 100  # 0.3 -> 30%
+        result.append(ComponentScore(
+            name=name,
+            score=_parse_float(_first(it, _COMPONENT_SCORE_KEYS)),
+            weight=weight,
+        ))
+    return tuple(result)
 
 
 class SemesterNormalizer:
@@ -37,6 +84,7 @@ class SemesterNormalizer:
             is_passed=bool(raw.get("isDat", True)),
             is_transferred=bool(raw.get("isChuyenDiem", False)),
             eligibility=eligibility,
+            components=_extract_components(raw),
         )
 
     def normalize_semester(self, raw_semester: dict[str, Any]) -> SemesterGradeData:

@@ -438,6 +438,18 @@ def calculate_radar_profile(
     gpa_10 = summary.get("diemTBHocLuc")
     gpa_4 = summary.get("diemTBTinChi")
     credits_earned = summary.get("stcdatHocKy") or summary.get("soTCDat")
+    # Tín chỉ đăng ký = tín chỉ đạt + không đạt; thiếu dữ liệu thì cộng từ các học phần trong kỳ.
+    credits_failed = summary.get("soTCKhongDat")
+    course_credits = sum(c.credits for c in courses if c.credits > 0 and not c.is_transferred)
+    if credits_earned is not None:
+        credits_registered = max(
+            float(credits_earned) + float(credits_failed or 0.0), float(course_credits)
+        )
+    else:
+        credits_registered = float(course_credits) if course_credits > 0 else None
+    cumulative_gpa_10 = summary.get("diemTBHocLucTichLuy")
+    cumulative_gpa_4 = summary.get("diemTBTinChiTichLuy")
+    credits_cumulative = summary.get("soTCTichLuy")
     classification = summary.get("xepLoaiHocLuc") or summary.get("xepLoai")
     training_point = summary.get("soDiemRenLuyen") or summary.get("diemRenLuyen")
 
@@ -455,6 +467,10 @@ def calculate_radar_profile(
         gpa_10=float(gpa_10) if gpa_10 is not None else None,
         gpa_4=float(gpa_4) if gpa_4 is not None else None,
         credits_earned=float(credits_earned) if credits_earned is not None else None,
+        credits_registered=credits_registered,
+        cumulative_gpa_10=float(cumulative_gpa_10) if cumulative_gpa_10 is not None else None,
+        cumulative_gpa_4=float(cumulative_gpa_4) if cumulative_gpa_4 is not None else None,
+        credits_cumulative=float(credits_cumulative) if credits_cumulative is not None else None,
         classification=str(classification) if classification else None,
         training_point=float(training_point) if training_point is not None else None,
         insight_text=insight,

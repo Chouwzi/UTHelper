@@ -145,6 +145,24 @@ class PortalClient:
         except ValueError as exc:
             raise PortalProtocolError("Portal schedule contract was invalid") from exc
 
+    def fetch_credit_progress(
+        self, username: str, password: str
+    ) -> dict[str, Any] | None:
+        """Fetches graduation credit progress (``canDat`` / ``hienTai``) from Portal."""
+        token = self._token or self._login(username, password)
+        try:
+            payload = self._request_json("GET", "hoctap/tiendo", token=token)
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password)
+            payload = self._request_json("GET", "hoctap/tiendo", token=token)
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._token = refreshed_token
+        body = payload.get("body")
+        return body if isinstance(body, dict) else None
+
     def fetch_full_transcript(
         self, username: str, password: str
     ) -> list[dict[str, Any]]:

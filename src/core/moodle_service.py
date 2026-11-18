@@ -49,9 +49,9 @@ class MoodleService:
             **params,
         )
 
-    def get_enrolled_courses(self) -> Optional[List[Dict[str, Any]]]:
+    def get_enrolled_courses(self, classification: str = "all") -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách các môn học mà sinh viên đang đăng ký học."""
-        return ws_functions.get_enrolled_courses(self.call_ws_api)
+        return ws_functions.get_enrolled_courses(self.call_ws_api, classification)
 
     def get_user_courses(self, userid: int) -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách môn học của một user cụ thể."""
