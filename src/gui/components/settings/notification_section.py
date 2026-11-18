@@ -5,9 +5,9 @@ from config import settings
 
 # Selection chips use a consistent high-contrast appearance in every theme:
 # selected = blue background / white text; unselected = white background / dark text.
-_CHIP_SELECTED_TEXT = "#FFFFFF"
-_CHIP_UNSELECTED_BG = "#FFFFFF"
-_CHIP_UNSELECTED_TEXT = "#111827"
+_CHIP_SELECTED_TEXT = C.ON_ACCENT
+_CHIP_UNSELECTED_BG = C.SURFACE
+_CHIP_UNSELECTED_TEXT = C.TEXT_PRIMARY
 
 
 def init_notification_controls(view):

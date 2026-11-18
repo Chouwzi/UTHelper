@@ -599,11 +599,11 @@ class SettingsView(ft.Container):
             for h, chip in self._milestone_chips.items():
                 chip.selected = h in prof["milestones"]
                 chip.selected_color = C.ACCENT
-                chip.bgcolor = "#FFFFFF"
-                chip.check_color = "#FFFFFF"
+                chip.bgcolor = C.SURFACE
+                chip.check_color = C.ON_ACCENT
                 lbl = getattr(chip, "label", None)
                 if lbl and hasattr(lbl, "color"):
-                    lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
+                    lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
             self._milestones_field.value = ", ".join(str(h) for h in sorted(prof["milestones"], reverse=True))
             active_count = sum(1 for h in prof["milestones"] if h in self._milestone_chips)
             self._milestone_summary.value = (
@@ -637,12 +637,12 @@ class SettingsView(ft.Container):
                 chip.selected = bool(
                     getattr(getattr(event, "control", None), "selected", chip.selected)
                 )
-            chip.check_color = "#FFFFFF"
+            chip.check_color = C.ON_ACCENT
             chip.selected_color = C.ACCENT
-            chip.bgcolor = "#FFFFFF"
+            chip.bgcolor = C.SURFACE
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = "#FFFFFF" if chip.selected else "#111827"
+                label.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
             update_chip = getattr(chip, "update", None)
             if callable(update_chip):
                 update_chip()
@@ -663,12 +663,12 @@ class SettingsView(ft.Container):
             chip = self._milestone_chips[minutes]
             if getattr(e, "control", None) is not chip:
                 chip.selected = bool(getattr(getattr(e, "control", None), "selected", chip.selected))
-            chip.check_color = "#FFFFFF"
+            chip.check_color = C.ON_ACCENT
             chip.selected_color = C.ACCENT
-            chip.bgcolor = "#FFFFFF"
+            chip.bgcolor = C.SURFACE
             lbl = getattr(chip, "label", None)
             if lbl and hasattr(lbl, "color"):
-                lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
             update_chip = getattr(chip, "update", None)
             if callable(update_chip):
                 update_chip()
@@ -1114,11 +1114,11 @@ class SettingsView(ft.Container):
         ):
             for chip in chip_group.values():
                 chip.selected_color = C.ACCENT
-                chip.check_color = "#FFFFFF"
-                chip.bgcolor = "#FFFFFF"
+                chip.check_color = C.ON_ACCENT
+                chip.bgcolor = C.SURFACE
                 lbl = getattr(chip, "label", None)
                 if lbl and hasattr(lbl, "color"):
-                    lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
+                    lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
 
         for checkbox in getattr(self, '_notify_type_checks', {}).values():
             checkbox.fill_color = {ft.ControlState.SELECTED: C.ACCENT}
@@ -1323,22 +1323,22 @@ class SettingsView(ft.Container):
         for h, chip in self._milestone_chips.items():
             chip.selected = h in _default_milestones
             chip.selected_color = C.ACCENT
-            chip.bgcolor = "#FFFFFF"
-            chip.check_color = "#FFFFFF"
+            chip.bgcolor = C.SURFACE
+            chip.check_color = C.ON_ACCENT
             lbl = getattr(chip, "label", None)
             if lbl and hasattr(lbl, "color"):
-                lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         self._milestones_field.value = "4320, 1440, 180, 60, 30, 5"
         self._milestone_summary.value = "Bạn sẽ nhận 6 lần nhắc cho mỗi deadline"
         self._sw_class_schedule.value = False
         for hours, chip in self._class_schedule_lead_chips.items():
             chip.selected = True
             chip.selected_color = C.ACCENT
-            chip.bgcolor = "#FFFFFF"
-            chip.check_color = "#FFFFFF"
+            chip.bgcolor = C.SURFACE
+            chip.check_color = C.ON_ACCENT
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = "#FFFFFF"
+                label.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
@@ -2300,11 +2300,11 @@ class SettingsView(ft.Container):
         for minutes, chip in self._milestone_chips.items():
             chip.selected = minutes in snapshot.notify_milestones_minutes
             chip.selected_color = C.ACCENT
-            chip.bgcolor = "#FFFFFF"
-            chip.check_color = "#FFFFFF"
+            chip.bgcolor = C.SURFACE
+            chip.check_color = C.ON_ACCENT
             lbl = getattr(chip, "label", None)
             if lbl and hasattr(lbl, "color"):
-                lbl.color = "#FFFFFF" if getattr(chip, "selected", False) else "#111827"
+                lbl.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         active_count = sum(
             minutes in snapshot.notify_milestones_minutes
             for minutes in self._milestone_chips
@@ -2317,11 +2317,11 @@ class SettingsView(ft.Container):
         for hours, chip in self._class_schedule_lead_chips.items():
             chip.selected = hours in snapshot.notify_class_schedule_lead_hours
             chip.selected_color = C.ACCENT
-            chip.bgcolor = "#FFFFFF"
-            chip.check_color = "#FFFFFF"
+            chip.bgcolor = C.SURFACE
+            chip.check_color = C.ON_ACCENT
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = "#FFFFFF" if chip.selected else "#111827"
+                label.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
         self._muted_courses_field.value = ", ".join(snapshot.notify_muted_courses)
         for key, card in self._profile_cards.items():
             selected = key == snapshot.notification_profile

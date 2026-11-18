@@ -206,8 +206,8 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         // 64 deadlines ourselves instead of relying on silent system eviction.
         let scheduledRequests = desired.values
             .sorted {
-                let left = $0.trigger?.nextTriggerDate() ?? .distantFuture
-                let right = $1.trigger?.nextTriggerDate() ?? .distantFuture
+                let left = ($0.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() ?? .distantFuture
+                let right = ($1.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() ?? .distantFuture
                 return left < right
             }
             .prefix(64)
