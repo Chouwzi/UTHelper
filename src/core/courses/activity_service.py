@@ -1834,7 +1834,7 @@ class CourseActivityService:
         return posts
 
     # ------------------------------------------------------------------
-    # Book / Page
+    # Book / Page / Label
     # ------------------------------------------------------------------
     def fetch_rich_content(
         self,
@@ -1846,6 +1846,7 @@ class CourseActivityService:
         modname = (module.modname or "").lower()
         title = module.name or "Nội dung"
         intro_md = _html_to_readable_markdown(module.description_html or "")
+        inline_md = _html_to_readable_markdown(module.inline_html or "")
 
         if modname == "page" and source == "courses" and self._service is not None:
             try:
@@ -1856,56 +1857,112 @@ class CourseActivityService:
                         or (module.instance_id and int(p.get("id") or 0) == int(module.instance_id))
                     ):
                         body_md = _html_to_readable_markdown(str(p.get("content") or ""))
+                        page_title = html.unescape(str(p.get("name") or title))
+                        final_md = body_md or inline_md or intro_md
                         return RichActivityPage(
                             cmid=module.cmid,
                             modname="page",
-                            title=html.unescape(str(p.get("name") or title)),
-                            intro_markdown=intro_md,
+                            title=page_title,
+                            intro_markdown=intro_md or "Trang này hiện chưa có nội dung văn bản.",
                             chapters=(
-                                BookChapterEntry(
-                                    chapter_id="1",
-                                    title=html.unescape(str(p.get("name") or title)),
-                                    content_markdown=body_md or intro_md,
-                                ),
+                                (
+                                    BookChapterEntry(
+                                        chapter_id="1",
+                                        title=page_title,
+                                        content_markdown=final_md,
+                                    ),
+                                )
+                                if final_md
+                                else ()
                             ),
                         )
             except Exception:
                 pass
 
+        if modname in {"page", "label"} and (inline_md or intro_md):
+            content_md = inline_md or intro_md
+            return RichActivityPage(
+                cmid=module.cmid,
+                modname=modname,
+                title=title,
+                intro_markdown=intro_md,
+                chapters=(
+                    BookChapterEntry(
+                        chapter_id="1",
+                        title=title,
+                        content_markdown=content_md,
+                    ),
+                ),
+            )
+
         client = self._client_for(source)
+        if client is not None and module.attachments:
+            for att in module.attachments:
+                if att.file_name.strip().lower() in {"index.html", "index.htm"} and att.file_url:
+                    try:
+                        raw_bytes = client.download_file(att.file_url)
+                        if raw_bytes:
+                            decoded = raw_bytes.decode("utf-8", errors="replace")
+                            att_md = _html_to_readable_markdown(decoded)
+                            return RichActivityPage(
+                                cmid=module.cmid,
+                                modname=modname,
+                                title=title,
+                                intro_markdown=intro_md or "Mục này hiện chưa có nội dung văn bản.",
+                                chapters=(
+                                    (
+                                        BookChapterEntry(
+                                            chapter_id="1",
+                                            title=title,
+                                            content_markdown=att_md,
+                                        ),
+                                    )
+                                    if att_md
+                                    else ()
+                                ),
+                            )
+                    except Exception:
+                        pass
+
         target_url = _safe_http_url(module.web_url or module.url)
-        if client is not None and target_url:
+        if client is not None and target_url and modname != "label":
             try:
                 _final, html_text, redir = client.open_session_url(target_url)
                 if not redir and html_text:
                     if modname == "book":
                         chapters = parse_book_html(html_text, title=title)
                     else:
+                        parsed_md = parse_page_html(html_text, title=title)
                         chapters = (
-                            BookChapterEntry(
-                                chapter_id="1",
-                                title=title,
-                                content_markdown=parse_page_html(html_text, title=title),
-                            ),
+                            (
+                                BookChapterEntry(
+                                    chapter_id="1",
+                                    title=title,
+                                    content_markdown=parsed_md,
+                                ),
+                            )
+                            if parsed_md
+                            else ()
                         )
                     return RichActivityPage(
                         cmid=module.cmid,
                         modname=modname,
                         title=title,
-                        intro_markdown=intro_md,
+                        intro_markdown=intro_md or "Mục này hiện chưa có nội dung văn bản.",
                         chapters=chapters,
                     )
             except Exception:
                 pass
 
+        fallback_md = inline_md or intro_md
         return RichActivityPage(
             cmid=module.cmid,
             modname=modname,
             title=title,
-            intro_markdown=intro_md,
+            intro_markdown=fallback_md or "Mục này hiện chưa có nội dung văn bản.",
             chapters=(
-                BookChapterEntry(chapter_id="1", title=title, content_markdown=intro_md)
-                if intro_md
+                (BookChapterEntry(chapter_id="1", title=title, content_markdown=fallback_md),)
+                if fallback_md
                 else ()
             ),
         )

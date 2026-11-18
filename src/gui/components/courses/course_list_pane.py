@@ -212,7 +212,10 @@ class CourseListPane(ft.Container):
         if not state.recent_items:
             return None
         recent = state.recent_items[0]
-        subtitle = recent.file_name or recent.title or "Tài liệu vừa xem"
+        fname = (recent.file_name or "").strip()
+        if fname.lower() in {"index.html", "index.htm", "structure"}:
+            fname = ""
+        subtitle = fname or recent.title or "Tài liệu vừa xem"
         return ft.Container(
             bgcolor=C.SURFACE_ELEVATED,
             border=ft.Border.all(1, C.BORDER),

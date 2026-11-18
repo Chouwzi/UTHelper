@@ -28,6 +28,7 @@ from gui.view_models.courses_state import (
     compute_courses_layout_mode,
     extract_readable_html_and_links,
     format_file_size,
+    real_module_attachments,
     safe_http_url,
 )
 
@@ -1105,9 +1106,10 @@ class CoursesTabView(ft.Container):
                 if safe_url:
                     await _invoke_callback(self._on_launch_url, safe_url)
                 return
+            real_atts = real_module_attachments(mod)
             if (
                 strategy == "inline_page"
-                and not mod.attachments
+                and not real_atts
                 and (mod.inline_html or mod.description_html)
             ):
                 await self._record_recent_best_effort(course, mod)
@@ -1116,11 +1118,23 @@ class CoursesTabView(ft.Container):
                 else:
                     self._push_inline_reader_overlay(mod)
                 return
-            if strategy == "folder_files" and len(mod.attachments) > 1:
-                self._push_folder_overlay(course, mod)
+            if mod.modname in {"forum", "book", "page", "label"} and not real_atts:
+                if callable(self._on_open_custom_activity):
+                    await self._record_recent_best_effort(course, mod)
+                    await _invoke_callback(self._on_open_custom_activity, course, mod)
+                    return
+                if strategy == "inline_page":
+                    await self._record_recent_best_effort(course, mod)
+                    if callable(self._on_open_inline_page):
+                        await _invoke_callback(self._on_open_inline_page, course, mod)
+                    else:
+                        self._push_inline_reader_overlay(mod)
+                    return
+            if strategy == "folder_files" and len(real_atts) > 1:
+                self._push_folder_overlay(course, replace(mod, attachments=real_atts))
                 return
-            if mod.attachments:
-                att = mod.attachments[0]
+            if real_atts:
+                att = real_atts[0]
                 await self._record_recent_best_effort(course, mod, att)
                 if callable(self._on_open_attachment_viewer):
                     await _invoke_callback(self._on_open_attachment_viewer, course, mod, att)

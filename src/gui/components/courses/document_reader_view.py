@@ -174,6 +174,11 @@ class DocumentReaderView(ft.Container):
             icon_color=C.TEXT_PRIMARY,
             on_click=lambda _e: self._on_open_external(self._file_name, self._data),
         )
+        kind_badge = (
+            "HTML"
+            if self._kind == "text" and self._file_name.lower().endswith((".html", ".htm"))
+            else self._kind.upper()
+        )
         (
             self._header_container,
             self._back_btn,
@@ -181,7 +186,7 @@ class DocumentReaderView(ft.Container):
             self._subtitle_text,
         ) = build_viewer_header(
             title=self._file_name,
-            subtitle=f"{self._kind.upper()} · {size_text}",
+            subtitle=f"{kind_badge} · {size_text}",
             back_tooltip="Đóng trình đọc",
             on_back=lambda _e: self._handle_close(),
             trailing_actions=[self._night_btn, self._expand_btn, self._save_btn, self._ext_btn],
@@ -2503,7 +2508,7 @@ class DocumentReaderView(ft.Container):
         ) = self._reader_palette()
         self._body_host.bgcolor = bg_color
         is_plain_text = self._kind == "text" and not self._file_name.lower().endswith(
-            (".md", ".markdown")
+            (".md", ".markdown", ".html", ".htm")
         )
         if is_plain_text:
             code_box = ft.Container(

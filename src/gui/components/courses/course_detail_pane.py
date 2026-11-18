@@ -31,9 +31,11 @@ from gui.core.theme import C
 from gui.view_models.courses_state import (
     CoursesState,
     compute_course_origin,
+    extract_readable_html_and_links,
     flatten_course_resources,
     format_file_size,
     module_matches_type_filter,
+    real_module_attachments,
     safe_http_url,
 )
 
@@ -232,20 +234,22 @@ def _module_icon_and_tint(mod: CourseModuleItem) -> tuple[ft.IconData, str]:
         return ft.Icons.FOLDER_OUTLINED, C.ACCENT
     if mod.modname in {"page", "book", "label"}:
         return ft.Icons.MENU_BOOK_OUTLINED, C.ACCENT
-    if mod.attachments:
-        kind = mod.attachments[0].preview_kind
+    atts = real_module_attachments(mod)
+    if atts:
+        kind = atts[0].preview_kind
         if kind == "pdf":
             return ft.Icons.PICTURE_AS_PDF_OUTLINED, C.CRITICAL
-        if kind == "archive" or mod.attachments[0].is_archive:
+        if kind == "archive" or atts[0].is_archive:
             return ft.Icons.ARCHIVE_OUTLINED, C.WARNING
     return ft.Icons.INSERT_DRIVE_FILE_OUTLINED, C.ACCENT
 
 
 def _module_summary_text(mod: CourseModuleItem) -> str:
-    if len(mod.attachments) > 1:
-        return f"{len(mod.attachments)} tệp"
-    if len(mod.attachments) == 1:
-        att = mod.attachments[0]
+    atts = real_module_attachments(mod)
+    if len(atts) > 1:
+        return f"{len(atts)} tệp"
+    if len(atts) == 1:
+        att = atts[0]
         size_text = format_file_size(att.file_size)
         return f"{att.file_name} • {size_text}" if size_text else att.file_name
     if mod.modname in {"url", "googlemeet"}:
@@ -664,8 +668,9 @@ class CourseDetailPane(ft.Container):
                     content=ft.Text("Mới", size=10, weight=ft.FontWeight.W_700, color=C.ON_UPDATE),
                 )
             )
-        if len(mod.attachments) == 1:
-            first_att = mod.attachments[0]
+        real_atts = real_module_attachments(mod)
+        if len(real_atts) == 1:
+            first_att = real_atts[0]
             trailing.append(
                 ft.IconButton(
                     icon=ft.Icons.DOWNLOAD_ROUNDED,
@@ -755,6 +760,80 @@ class CourseDetailPane(ft.Container):
             ),
         )
 
+    def _label_inline_card(self, mod: CourseModuleItem) -> ft.Control:
+        raw_html = mod.inline_html or mod.description_html
+        body_text, links = extract_readable_html_and_links(raw_html)
+        display_text = body_text or (mod.name or "").strip()
+        needs_remote_open = not raw_html and bool(mod.attachments)
+
+        card_items: list[ft.Control] = []
+        if display_text:
+            card_items.append(
+                ft.Text(
+                    display_text,
+                    size=12.5,
+                    color=C.TEXT_PRIMARY,
+                    selectable=not needs_remote_open,
+                )
+            )
+        if links:
+            link_pills: list[ft.Control] = []
+            for label, href in links:
+                is_meet = "meet.google.com" in href.lower()
+                short_label = label if len(label) <= 56 else f"{label[:53]}..."
+                link_pills.append(
+                    ft.OutlinedButton(
+                        content=short_label,
+                        icon=(
+                            ft.Icons.VIDEO_CALL_ROUNDED
+                            if is_meet
+                            else ft.Icons.OPEN_IN_NEW_ROUNDED
+                        ),
+                        tooltip=href,
+                        on_click=lambda _e, u=href: (
+                            self._on_launch_url(u)
+                            if callable(self._on_launch_url)
+                            else None
+                        ),
+                    )
+                )
+            card_items.append(
+                ft.Row(wrap=True, spacing=6, run_spacing=6, controls=link_pills)
+            )
+
+        return ft.Container(
+            bgcolor=C.BG,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+            ink=needs_remote_open,
+            on_click=(
+                (lambda _e, item=mod: self._on_open_module(item))
+                if (needs_remote_open and callable(self._on_open_module))
+                else None
+            ),
+            content=ft.Row(
+                spacing=9,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+                controls=[
+                    ft.Container(
+                        padding=ft.Padding.only(top=2),
+                        content=ft.Icon(
+                            ft.Icons.INFO_OUTLINE_ROUNDED,
+                            size=16,
+                            color=C.TEXT_SECONDARY,
+                        ),
+                    ),
+                    ft.Column(expand=True, spacing=6, controls=card_items),
+                ],
+            ),
+        )
+
+    def _build_section_item(self, mod: CourseModuleItem) -> ft.Control:
+        if mod.modname == "label" and not real_module_attachments(mod):
+            return self._label_inline_card(mod)
+        return self._module_row(mod)
+
     def _build_content_tab(self, state: CoursesState) -> list[ft.Control]:
         controls: list[ft.Control] = [
             self._build_filter_chips(_MODULE_FILTERS, state.module_filter, "module_filter")
@@ -794,7 +873,7 @@ class CourseDetailPane(ft.Container):
                             side=ft.BorderSide(0, C.SURFACE, style=ft.BorderStyle.NONE),
                         ),
                         controls_padding=ft.Padding.only(left=10, right=10, bottom=10, top=2),
-                        controls=[ft.Column(spacing=6, controls=[self._module_row(m) for m in mods])],
+                        controls=[ft.Column(spacing=6, controls=[self._build_section_item(m) for m in mods])],
                     ),
                 )
             )

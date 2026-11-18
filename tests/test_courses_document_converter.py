@@ -975,3 +975,26 @@ def test_convert_pptx_render_budget_and_cumulative_xml_budget():
 
     xml_doc = convert_document_bytes("xml_bomb.pptx", xml_buf.getvalue(), "pptx")
     assert "Không thể đọc nội dung tệp" in xml_doc.html_document
+
+
+def test_convert_html_strips_moodle_wrappers_formats_links_and_handles_empty_spacer():
+    empty_moodle = b'<div class="no-overflow"><p>   </p></div>'
+    empty_doc = convert_document_bytes("index.html", empty_moodle, "text")
+    assert "<div" not in empty_doc.markdown_text
+    assert "không có nội dung văn bản" in empty_doc.markdown_text
+
+    meet_moodle = (
+        '<div class="no-overflow"><div class="contentafterlink">'
+        '<div class="no-overflow"><p>Link: '
+        '<a href="https://meet.google.com/zry-mvjo-dpe" class="_blanktarget">'
+        "https://meet.google.com/zry-mvjo-dpe</a></p>"
+        "<p>Thời gian: theo thời khóa biểu</p>"
+        "<script>evil()</script></div></div></div>"
+    ).encode("utf-8")
+    meet_doc = convert_document_bytes("index.html", meet_moodle, "text")
+    assert "<div" not in meet_doc.markdown_text
+    assert "evil()" not in meet_doc.markdown_text
+    assert "evil()" not in meet_doc.html_document
+    assert "[https://meet.google.com/zry-mvjo-dpe](https://meet.google.com/zry-mvjo-dpe)" in meet_doc.markdown_text
+    assert "Thời gian: theo thời khóa biểu" in meet_doc.markdown_text
+
