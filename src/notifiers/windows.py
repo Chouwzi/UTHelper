@@ -125,6 +125,22 @@ class WindowsNotifier(BaseNotifier):
         if not assignments:
             return True
 
+        # Thông báo đổi điểm: hiển thị điểm cũ -> mới thay vì định dạng deadline.
+        if all(getattr(a, "is_grade_alert", False) for a in assignments):
+            if len(assignments) == 1:
+                title = str(_get(assignments[0], "title", "📊 Điểm mới"))
+                msg = str(_get(assignments[0], "body", ""))
+            else:
+                title = f"📊 UTHelper · {len(assignments)} thay đổi điểm"
+                lines = [
+                    f"{_get(a, 'item_name', '')} ({_get(a, 'old_grade', '-')} → {_get(a, 'new_grade', '-')})"
+                    for a in assignments[:3]
+                ]
+                if len(assignments) > 3:
+                    lines.append(f"+{len(assignments) - 3} thay đổi khác")
+                msg = "\n".join(lines)
+            return self._show_toast(title, msg, None)
+
         # Build concise, scannable notification text
         if len(assignments) == 1:
             a = assignments[0]
@@ -157,17 +173,21 @@ class WindowsNotifier(BaseNotifier):
                 parts.append(f"🟢 {other} khác")
             msg = " · ".join(parts)
 
+        launch_url = None
+        if len(assignments) == 1:
+            launch_url = str(_get(assignments[0], "url", "") or "")
+        return self._show_toast(title, msg, launch_url)
+
+    def _show_toast(self, title: str, msg: str, launch_url) -> bool:
         try:
             from windows_toasts import InteractableWindowsToaster, Toast
-            
+
             toaster = InteractableWindowsToaster(self.app_id, notifierAUMID=self.aumid)
             toast = Toast()
             toast.text_fields = [title, msg]
-            if len(assignments) == 1:
-                activity_url = str(_get(assignments[0], "url", "") or "")
-                if activity_url.startswith(("https://", "http://")):
-                    toast.launch_action = activity_url
-            
+            if launch_url and launch_url.startswith(("https://", "http://")):
+                toast.launch_action = launch_url
+
             toaster.show_toast(toast)
             logger.info(f"[Windows] Đã gửi thông báo: {msg}")
             self.last_error = ""

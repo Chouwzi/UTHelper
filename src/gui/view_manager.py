@@ -15,6 +15,7 @@ class ViewManager:
         calendar_view,
         grade_overview_view,
         controller,
+        courses_view=None,
         view_host=None,
         overlays=None,
         tab_switcher=None,
@@ -27,6 +28,7 @@ class ViewManager:
         self.settings_view = settings_view
         self.calendar_view = calendar_view
         self.grade_overview_view = grade_overview_view
+        self.courses_view = courses_view
         self.controller = controller
         self.view_host = view_host
         self.overlays = tuple(overlays or ())
@@ -54,6 +56,10 @@ class ViewManager:
             host.ignore_interactions = not active
         except Exception:
             pass
+
+    def _hide_courses(self) -> None:
+        if self.courses_view is not None:
+            self.courses_view.visible = False
 
     def _dismiss_menu_if_open(self) -> None:
         dismiss = getattr(self.controller, "_dismiss_desktop_filter_menu", None)
@@ -86,6 +92,7 @@ class ViewManager:
         self.detail_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
         self.dashboard.visible = True
         self.dashboard.opacity = 1.0
         self.dashboard.offset = ft.Offset(0, 0)
@@ -98,6 +105,7 @@ class ViewManager:
         # Đặt lại màu sắc của các nút trên thanh điều hướng về trạng thái không active
         self.controller.calendar_btn.icon_color = C.TEXT_SECONDARY
         self.controller.grades_btn.icon_color = C.TEXT_SECONDARY
+        self.controller.courses_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     def show_calendar(self, data_snapshot):
@@ -107,6 +115,7 @@ class ViewManager:
         self.detail_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
         
         self.calendar_view.show(data_snapshot)
         self.calendar_view.visible = True
@@ -150,6 +159,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.detail_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
         self.settings_view.visible = True
         self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
@@ -172,6 +182,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.detail_view.visible = False
         self.settings_view.visible = False
+        self._hide_courses()
         self.grade_overview_view.visible = True
         self.grade_overview_view.opacity = 1.0
         self.grade_overview_view.offset = ft.Offset(0, 0)
@@ -182,6 +193,52 @@ class ViewManager:
             self._show_only(self.grade_overview_view)
         self._sync_detail_host()
         self.controller.grades_btn.icon_color = C.ACCENT
+        self.page.update()
+
+    def show_courses_loading(self):
+        self._dismiss_menu_if_open()
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.detail_view.visible = False
+        self.settings_view.visible = False
+        self.grade_overview_view.visible = False
+        self.courses_view.visible = True
+        self.courses_view.opacity = 1.0
+        self.courses_view.offset = ft.Offset(0, 0)
+        self.courses_view.show_loading()
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.courses_view
+        else:
+            self._show_only(self.courses_view)
+        self._sync_detail_host()
+        self.controller.courses_btn.icon_color = C.ACCENT
+        self.page.update()
+
+    def show_courses_data(self, courses):
+        self.courses_view.update_courses(courses)
+        self.page.update()
+
+    def show_courses_error(self):
+        self.courses_view.show_error()
+        self.page.update()
+
+    async def close_courses(self):
+        self.courses_view.hide()
+        if self.tab_switcher is not None:
+            self.courses_view.visible = False
+            self.dashboard.visible = True
+            self.dashboard.opacity = 1.0
+            self.tab_switcher.content = self.dashboard
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+            self._show_only(self.dashboard, self.courses_view)
+            self.courses_view.opacity = 0.0
+            self.page.update()
+            await asyncio.sleep(0.18)
+            self.courses_view.visible = False
+            self._show_only(self.dashboard)
+        self.controller.courses_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     def show_grades_data(self, courses_grades, grade_items):
@@ -228,6 +285,7 @@ class ViewManager:
         self.calendar_view.visible = origin is self.calendar_view
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
 
         self.detail_view.offset = ft.Offset(0, 0)
         self.detail_view.opacity = 1.0

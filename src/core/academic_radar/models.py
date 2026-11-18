@@ -16,6 +16,15 @@ class CourseEligibility:
 
 
 @dataclass(frozen=True)
+class ComponentScore:
+    """Một cột điểm thành phần của học phần (chuyên cần, giữa kỳ, ...)."""
+
+    name: str
+    score: float | None = None
+    weight: float | None = None  # phần trăm (0..100)
+
+
+@dataclass(frozen=True)
 class CourseGradeItem:
     """Normalized grade item for a single course in a semester."""
 
@@ -33,6 +42,7 @@ class CourseGradeItem:
     eligibility: CourseEligibility = field(
         default_factory=lambda: CourseEligibility(status="academic")
     )
+    components: tuple[ComponentScore, ...] = ()
 
 
 @dataclass(frozen=True)

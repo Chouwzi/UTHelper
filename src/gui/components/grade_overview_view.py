@@ -20,7 +20,9 @@ from core.academic_radar.calculator import calculate_radar_profile
 from core.academic_radar.gpa_planner import CreditProgress
 from core.academic_radar.models import RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
+from gui.components.academic_radar.course_components_dialog import show_course_components_dialog
 from gui.components.academic_radar.grade_list_view import AcademicGradeListView
+from gui.components.course_grade_table import find_moodle_course
 from gui.components.academic_radar.gpa_target_card import GpaTargetCard
 from gui.components.academic_radar.graduation_gpa_card import GraduationGpaCard
 from gui.components.academic_radar.radar_card import AcademicRadarCard
@@ -37,9 +39,11 @@ class GradeOverviewView(ft.Container):
         on_close: Optional[Callable] = None,
         on_refresh: Optional[Callable] = None,
         page: Optional[ft.Page] = None,
+        moodle_courses_provider: Optional[Callable[[], list]] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self._moodle_courses_provider = moodle_courses_provider
         self._on_close = on_close
         self._on_refresh = on_refresh
         self._page_ref = page
@@ -127,7 +131,7 @@ class GradeOverviewView(ft.Container):
         self._graduation_card = GraduationGpaCard()
         self._progress: Optional[CreditProgress] = None
         self._planner_dialog: Optional[ft.AlertDialog] = None
-        self._grade_list_view = AcademicGradeListView(courses=[], visible=False)
+        self._grade_list_view = AcademicGradeListView(courses=[], on_course_click=self._on_course_clicked, visible=False)
 
         # Main scrollable body
         self._scrollable_content = ft.Column(
@@ -356,6 +360,22 @@ class GradeOverviewView(ft.Container):
                 page.update()
             except Exception:
                 pass
+
+    def _on_course_clicked(self, e: ft.ControlEvent | None, course) -> None:
+        """Bấm vào môn -> popup bảng điểm thành phần (ưu tiên báo cáo điểm Moodle)."""
+        page = self._get_page()
+        if page is None and e is not None:
+            try:
+                page = e.control.page
+            except Exception:
+                page = None
+        moodle_course = None
+        if self._moodle_courses_provider is not None:
+            try:
+                moodle_course = find_moodle_course(course, self._moodle_courses_provider() or [])
+            except Exception:
+                logger.debug("Moodle course lookup failed", exc_info=True)
+        show_course_components_dialog(page, course, moodle_course)
 
     def _on_semester_changed(self, index: int) -> None:
         self._selected_semester_idx = index

@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
@@ -162,6 +163,8 @@ class MoodleClient:
         self._cookie_jar = CookieJar()
         self._sesskey = ""
         self._html_opener = None
+        self._session_lock = threading.RLock()
+        self.last_grade_report_error = ""
 
     @property
     def moodle_site_origin(self) -> str:
@@ -352,6 +355,39 @@ class MoodleClient:
             logger.error(f"Lỗi call_ajax_api: {e}")
             return None
 
+
+    def fetch_grade_report_html(self, course_id: int) -> Optional[str]:
+        """Tải HTML /grade/report/user/index.php?id=<course_id> bằng session đăng nhập.
+
+        Trả None nếu lỗi; lý do nằm ở ``last_grade_report_error``.
+        """
+        path = f"/grade/report/user/index.php?id={int(course_id)}"
+        self.last_grade_report_error = ""
+        for attempt in range(2):
+            with self._session_lock:  # tránh nhiều luồng cùng đăng nhập/xóa cookie
+                if not self._sesskey and not self.login_session():
+                    self.last_grade_report_error = (
+                        f"login_session:{self._last_login_error or 'failed'}"
+                    )
+                    logger.warning("Grade report: đăng nhập session thất bại (%s)",
+                                   self._last_login_error)
+                    return None
+            try:
+                final_url, body = self._open_html(path)
+            except Exception as exc:
+                self.last_grade_report_error = f"http:{type(exc).__name__}:{exc}"
+                logger.warning("Không tải được grade report môn %s: %s", course_id, exc)
+                return None
+            if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                # Session hết hạn -> đăng nhập lại một lần
+                with self._session_lock:
+                    self._sesskey = ""
+                    if attempt == 0 and self.login_session(force=True):
+                        continue
+                self.last_grade_report_error = "session_expired"
+                return None
+            return body
+        return None
 
     def close(self):
         """Không cần cleanup - urllib không dùng connection pool."""

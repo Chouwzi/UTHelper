@@ -49,6 +49,7 @@ from gui.components.detail_view import DetailView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
 from gui.components.desktop_window_header import build_desktop_window_header
@@ -724,6 +725,8 @@ class AppController:
                     ft.Container(height=14),
                     item("home", ft.Icons.DASHBOARD_ROUNDED, "Tổng quan",
                          lambda: self._rail_navigate("home")),
+                    item("courses", ft.Icons.MENU_BOOK_ROUNDED, "Môn học",
+                         lambda: self._rail_navigate("courses")),
                     item("calendar", ft.Icons.CALENDAR_MONTH_ROUNDED, "Lịch",
                          lambda: self._rail_navigate("calendar")),
                     item("grades", ft.Icons.INSIGHTS_ROUNDED, "Bảng điểm",
@@ -768,6 +771,8 @@ class AppController:
             return "calendar"
         if self.grade_overview_view.visible:
             return "grades"
+        if self.courses_view.visible:
+            return "courses"
         return "home"
 
     def _sync_rail_active(self, force_home: bool = False) -> None:
@@ -801,11 +806,15 @@ class AppController:
             await self._close_calendar()
         elif current == "grades":
             await self._close_grades()
+        elif current == "courses":
+            await self._close_courses()
         if target != current:
             if target == "calendar":
                 await self._show_calendar()
             elif target == "grades":
                 await self._show_grades()
+            elif target == "courses":
+                await self._show_courses()
             elif target == "settings":
                 await self._show_settings()
         self._sync_rail_active()
@@ -837,7 +846,7 @@ class AppController:
         # Cài đặt giữ lề hai bên; Lịch và Bảng điểm dùng toàn bộ chiều rộng (100%).
         single_gutter = max(0.0, (width - _SINGLE_VIEW_MAX_WIDTH) / 2)
         self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
-        for view in (self.grade_overview_view, self.calendar_view):
+        for view in (self.grade_overview_view, self.calendar_view, self.courses_view):
             view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
 
         # Panel chi tiết bên phải khi rộng, toàn màn hình khi hẹp.
@@ -940,6 +949,9 @@ class AppController:
             handled = True
         elif self.grade_overview_view.visible:
             await self._close_grades()
+            handled = True
+        elif self.courses_view.visible:
+            await self._close_courses()
             handled = True
         self._sync_rail_active()
         return handled
@@ -1046,6 +1058,15 @@ class AppController:
             tooltip="Bảng điểm",
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_grades
+            ),
+        )
+
+        self.courses_btn = ft.IconButton(
+            ft.Icons.MENU_BOOK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
+            tooltip="Môn học",
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._toggle_courses
             ),
         )
 
@@ -1293,9 +1314,16 @@ class AppController:
             on_close=lambda: self._safe_run_task(self._close_grades),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
             page=self.page,
+            moodle_courses_provider=self._get_moodle_course_grades,
         )
 
-        for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
+        self.courses_view = CoursesView(
+            on_close=lambda: self._safe_run_task(self._close_courses),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_courses(force_refresh=True)),
+        )
+
+        for _view in (self.detail_view, self.settings_view, self.calendar_view,
+                      self.grade_overview_view, self.courses_view):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
             _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
@@ -1396,6 +1424,7 @@ class AppController:
             self.calendar_view,
             self.grade_overview_view,
             self,
+            courses_view=self.courses_view,
             view_host=main_stack,
             overlays=overlays,
             tab_switcher=self.tab_switcher,
@@ -1445,6 +1474,7 @@ class AppController:
         action_buttons = ft.Row(
             controls=[
                 self.calendar_btn,
+                self.courses_btn,
                 self.grades_btn,
                 self.refresh_btn,
                 self.settings_btn,
@@ -1989,25 +2019,56 @@ class AppController:
             self._render_cards_only()
         self._search_task = self._safe_run_task(_delayed_render)
 
-    async def _check_grades_background(self):
-        """PERF-OPT: Check grade changes in background (non-blocking)."""
+    def _get_moodle_course_grades(self) -> list:
+        """Danh sách môn Moodle kèm báo cáo điểm (đã lưu) để popup Bảng điểm dùng."""
         try:
-            grade_changes = await asyncio.to_thread(self.orchestrator.check_grade_changes)
-            if grade_changes and hasattr(self, 'notifier') and self.notifier:
-                await self.notifier.dispatch_grade_alert(grade_changes)
-                msg = f"\U0001f4ca {len(grade_changes)} \u0111i\u1ec3m m\u1edbi: "
-                msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
-                if len(grade_changes) > 3:
-                    msg += f" +{len(grade_changes) - 3} kh\u00e1c"
-                self.page.snack_bar = ft.SnackBar(
-                    content=ft.Text(msg, color=C.ON_SAFE),
-                    bgcolor=C.SAFE,
-                    duration=5000,
-                )
-                self.page.snack_bar.open = True
-                self.page.update()
+            return list(
+                getattr(self.orchestrator, "latest_course_grades", None)
+                or self.orchestrator.course_grade_monitor.load_cached()
+                or []
+            )
+        except Exception:
+            return []
+
+    async def _check_grades_background(self):
+        """Chạy cùng chu kỳ cập nhật Tổng quan: điểm tổng kết + điểm theo môn.
+
+        Điểm theo môn (tab Môn học) được lưu snapshot; nếu lần sau có thay đổi
+        (kể cả giá trị "-") thì gộp vào cùng một thông báo.
+        """
+        grade_changes = []
+        try:
+            grade_changes = list(await asyncio.to_thread(self.orchestrator.check_grade_changes) or [])
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
+        try:
+            courses, course_changes = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+            grade_changes.extend(course_changes or [])
+            if self.courses_view.visible and courses:
+                self.view_manager.show_courses_data(courses)
+        except Exception as e:
+            logger.debug("Course grades background failed (non-critical): %s", e)
+        await self._notify_grade_changes(grade_changes)
+
+    async def _notify_grade_changes(self, grade_changes: list) -> None:
+        if not grade_changes:
+            return
+        try:
+            if hasattr(self, 'notifier') and self.notifier:
+                await self.notifier.dispatch_grade_alert(grade_changes)
+            msg = f"\U0001f4ca {len(grade_changes)} thay \u0111\u1ed5i \u0111i\u1ec3m: "
+            msg += ", ".join(f"{c.item_name} ({c.old_grade or '-'} \u2192 {c.new_grade})" for c in grade_changes[:3])
+            if len(grade_changes) > 3:
+                msg += f" +{len(grade_changes) - 3} kh\u00e1c"
+            self.page.snack_bar = ft.SnackBar(
+                content=ft.Text(msg, color=C.ON_SAFE),
+                bgcolor=C.SAFE,
+                duration=5000,
+            )
+            self.page.snack_bar.open = True
+            self.page.update()
+        except Exception as e:
+            logger.debug("Grade notification failed (non-critical): %s", e)
 
     def _set_sync_status(self, state: str, message: str) -> None:
         component = getattr(self, "_sync_status", None)
@@ -2667,6 +2728,37 @@ class AppController:
             logger.error("Academic grades fetch failed: %s", e)
             self.view_manager.show_academic_radar_data([], [])
 
+    async def _toggle_courses(self):
+        if self.courses_view.visible:
+            await self._close_courses()
+        else:
+            await self._show_courses()
+
+    async def _show_courses(self, force_refresh: bool = False):
+        """Hiện tab Môn học: các môn đang học + điểm/% tham gia cào từ grade report."""
+        self._diag_screen("courses")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="courses")
+        self.view_manager.show_courses_loading()
+        self._sync_rail_active()
+        # Hiện ngay dữ liệu đã lưu (nếu có) trong lúc tải mới.
+        cached = getattr(self.orchestrator, "latest_course_grades", None) or \
+            self.orchestrator.course_grade_monitor.load_cached()
+        if cached and not force_refresh:
+            self.view_manager.show_courses_data(cached)
+        try:
+            courses, changes = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+            self.view_manager.show_courses_data(courses)
+            await self._notify_grade_changes(changes)
+        except Exception as e:
+            logger.error("Courses fetch failed: %s", e, exc_info=True)
+            if not cached:
+                self.view_manager.show_courses_error()
+
+    async def _close_courses(self):
+        await self.view_manager.close_courses()
+        self._diag_screen("home")
+        self._sync_rail_active()
+
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
         await self.view_manager.close_grades()
@@ -2779,7 +2871,7 @@ class AppController:
             component.refresh_theme()
 
         # Icon buttons
-        buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
+        buttons_to_update = [self.calendar_btn, self.courses_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
 
         for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
@@ -2799,7 +2891,7 @@ class AppController:
         self.settings_view.bgcolor = _C.BG
 
         # Sub-views theme update propagation
-        for view_attr in ('calendar_view', 'detail_view', 'grade_overview_view'):
+        for view_attr in ('calendar_view', 'detail_view', 'grade_overview_view', 'courses_view'):
             view_obj = getattr(self, view_attr, None)
             if view_obj and hasattr(view_obj, 'update_theme'):
                 try:
