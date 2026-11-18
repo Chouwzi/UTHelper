@@ -253,6 +253,29 @@ def _resolve_thnn_completion_mode(cm: dict[str, Any]) -> int:
     return 2
 
 
+_SYNTHETIC_HTML_MODS = frozenset({"page", "label", "book"})
+_SYNTHETIC_MOODLE_FILENAMES = frozenset({"index.html", "index.htm", "structure"})
+_SYNTHETIC_MOODLE_URL_PARTS = (
+    "/mod_page/content/",
+    "/mod_book/chapter/",
+    "/mod_label/intro/",
+)
+
+
+def is_synthetic_moodle_attachment(
+    modname: str, file_name: str, file_url: str = ""
+) -> bool:
+    """Return True for Moodle's internal HTML/structure blobs on Page/Label/Book/URL modules."""
+    mod_l = (modname or "").strip().lower()
+    if mod_l not in _SYNTHETIC_HTML_MODS:
+        return False
+    fname_l = (file_name or "").strip().lower()
+    if fname_l in _SYNTHETIC_MOODLE_FILENAMES:
+        return True
+    url_l = (file_url or "").strip().lower()
+    return any(seg in url_l for seg in _SYNTHETIC_MOODLE_URL_PARTS)
+
+
 def _build_attachment(raw: dict[str, Any]) -> CourseAttachment:
     file_name = _unescape_text(raw.get("filename") or raw.get("file_name")) or "file"
     file_url = _safe_http_url(raw.get("fileurl") or raw.get("file_url"), fallback="")
@@ -368,17 +391,22 @@ class CoursesWsProvider:
         cmid = _as_int(mod.get("id"))
         modname = str(mod.get("modname") or "unknown").lower()
         attachments: list[CourseAttachment] = []
+        external_url = ""
         for raw_att in _as_list(mod.get("contents")):
             if not isinstance(raw_att, dict):
                 continue
             att = _build_attachment(raw_att)
-            if att.file_url:
-                attachments.append(att)
+            if not att.file_url:
+                continue
+            if modname == "url" and not external_url:
+                external_url = att.file_url
+            if is_synthetic_moodle_attachment(modname, att.file_name, att.file_url):
+                continue
+            attachments.append(att)
         contents = tuple(attachments)
 
         desc_html = _sanitize_course_html(mod.get("description"))
         inline_html = pages_by_cmid.get(cmid, "") or desc_html
-        external_url = contents[0].file_url if modname == "url" and contents else ""
         fallback_web_url = _safe_http_url(f"{self._origin}/mod/{modname}/view.php?id={cmid}")
         web_url = _safe_http_url(mod.get("url"), fallback=fallback_web_url)
         completion_data = mod.get("completiondata")

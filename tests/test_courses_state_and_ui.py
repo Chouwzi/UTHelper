@@ -1696,3 +1696,152 @@ def test_all_courses_controls_match_flet_mro_field_types():
     assert mismatches == []
 
 
+def test_moodle_synthetic_index_html_stripped_empty_label_hidden_and_inline_label_rendered():
+    from core.courses.providers import CoursesWsProvider
+
+    ws_prov = CoursesWsProvider(service=Mock(), client=None)
+    parsed_page = ws_prov._parse_ws_module(
+        {
+            "id": 91,
+            "instance": 11,
+            "modname": "page",
+            "name": "Hướng dẫn đồ án",
+            "contents": [
+                {
+                    "type": "file",
+                    "filename": "index.html",
+                    "fileurl": "https://courses.ut.edu.vn/webservice/pluginfile.php/1/mod_page/content/index.html",
+                    "filesize": 301,
+                    "mimetype": "text/html",
+                }
+            ],
+        },
+        sec_id=1,
+        pages_by_cmid={91: "<p>Nội dung hướng dẫn</p>"},
+    )
+    assert parsed_page.attachments == ()
+
+    parsed_url = ws_prov._parse_ws_module(
+        {
+            "id": 92,
+            "instance": 12,
+            "modname": "url",
+            "name": "Phòng học Meet",
+            "contents": [
+                {
+                    "type": "url",
+                    "filename": "URL",
+                    "fileurl": "https://meet.google.com/zry-mvjo-dpe",
+                }
+            ],
+        },
+        sec_id=1,
+        pages_by_cmid={},
+    )
+    from gui.view_models.courses_state import real_module_attachments
+
+    assert parsed_url.url == "https://meet.google.com/zry-mvjo-dpe"
+    assert real_module_attachments(parsed_url) == ()
+
+    # Already-cached section containing:
+    # 1) Empty spacer label with synthetic index.html (43B) -> hidden completely
+    # 2) Meet notice label with synthetic index.html (301B) -> rendered inline with Meet button, no index.html
+    # 3) Cached page with synthetic index.html -> routes to inline/custom page reader, NEVER attachment viewer!
+    syn_att = _make_attachment(
+        "index.html",
+        "https://courses.ut.edu.vn/webservice/pluginfile.php/1/mod_page/content/index.html",
+        size=301,
+        extension="html",
+        preview_kind="text",
+    )
+    empty_lbl = CourseModuleItem(
+        cmid=201,
+        instance_id=201,
+        modname="label",
+        name="...",
+        section_id=1,
+        inline_html='<div class="no-overflow"><p>   </p></div>',
+        attachments=(syn_att,),
+        open_strategy="inline_page",
+    )
+    meet_lbl = CourseModuleItem(
+        cmid=202,
+        instance_id=202,
+        modname="label",
+        name="Link học trực tuyến",
+        section_id=1,
+        inline_html=(
+            '<div class="no-overflow"><div class="contentafterlink">'
+            '<p>Link: <a href="https://meet.google.com/zry-mvjo-dpe">'
+            "https://meet.google.com/zry-mvjo-dpe</a></p>"
+            "<p>Thời gian: theo thời khóa biểu</p></div></div>"
+        ),
+        attachments=(syn_att,),
+        open_strategy="inline_page",
+    )
+    cached_page = CourseModuleItem(
+        cmid=203,
+        instance_id=203,
+        modname="page",
+        name="Đề tài đồ án",
+        section_id=1,
+        inline_html="<p>Danh sách đề tài đồ án môn học</p>",
+        attachments=(syn_att,),
+        open_strategy="inline_page",
+    )
+    sec = CourseSection(
+        id=1,
+        course_id=1,
+        source="courses",
+        section_num=1,
+        name="Thông tin chung",
+        modules=(empty_lbl, meet_lbl, cached_page),
+    )
+    c1 = _make_course(1, display_name="Đồ án thực tế công nghệ phần mềm")
+    launched: list[str] = []
+    pane = CourseDetailPane(on_launch_url=lambda u: launched.append(u))
+    pane.render(
+        CoursesState(courses=[c1], selected_course_key="courses:1", sections=[sec]),
+        show_back=False,
+    )
+
+    content_texts = [
+        c.value
+        for c in _walk_controls(pane._content_tab_body)
+        if isinstance(c, ft.Text) and isinstance(c.value, str)
+    ]
+    # Empty spacer hidden -> only 2 items in section!
+    assert "2 mục" in content_texts
+    assert not any("index.html" in t for t in content_texts)
+    assert not any("<div" in t for t in content_texts)
+    assert any("Thời gian: theo thời khóa biểu" in t for t in content_texts)
+
+    meet_btns = [
+        c
+        for c in _walk_controls(pane._content_tab_body)
+        if isinstance(c, ft.OutlinedButton) and "meet.google.com" in str(c.content)
+    ]
+    assert len(meet_btns) == 1
+    meet_btns[0].on_click(None)
+    assert launched == ["https://meet.google.com/zry-mvjo-dpe"]
+
+    # Clicking cached_page must open inline/rich page, NOT attachment viewer for index.html!
+    att_viewer = Mock()
+    inline_viewer = Mock()
+    view = CoursesTabView(
+        page=None,
+        catalog_service=FakeCatalogService(
+            courses=[c1],
+            detail_map={("courses", 1): CourseDetailSnapshot(sections=[sec], grades=[])},
+        ),
+        on_open_attachment_viewer=att_viewer,
+        on_open_inline_page=inline_viewer,
+    )
+    view.load_initial()
+    asyncio.run(view._select_course_async("courses:1"))
+    asyncio.run(view._handle_open_module_async(cached_page))
+    att_viewer.assert_not_called()
+    inline_viewer.assert_called_once()
+
+
+

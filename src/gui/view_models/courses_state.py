@@ -18,6 +18,7 @@ from core.courses.models import (
     CourseSummary,
     RecentMaterialEntry,
 )
+from core.courses.providers import is_synthetic_moodle_attachment
 from core.html_compat import BS4_PARSER
 
 CoursesLayoutMode = Literal["mobile", "tablet_portrait", "wide"]
@@ -203,8 +204,37 @@ def flatten_course_resources(
     return results
 
 
+def real_module_attachments(mod: CourseModuleItem) -> tuple[CourseAttachment, ...]:
+    """Return user-downloadable attachments, stripping Moodle synthetic index.html & URL blobs."""
+    if not mod.attachments or (mod.modname or "").strip().lower() in _LINK_MODNAMES:
+        return ()
+    return tuple(
+        att
+        for att in mod.attachments
+        if not is_synthetic_moodle_attachment(mod.modname, att.file_name, att.file_url)
+    )
+
+
+def is_empty_spacer_label(mod: CourseModuleItem) -> bool:
+    """Return True when a Moodle mod_label is an empty whitespace/HTML layout spacer."""
+    if (mod.modname or "").strip().lower() != "label":
+        return False
+    if real_module_attachments(mod):
+        return False
+    raw_html = (mod.inline_html or mod.description_html or "").strip()
+    if raw_html:
+        if "<img" in raw_html.lower():
+            return False
+        text, links = extract_readable_html_and_links(raw_html)
+        return not text.strip() and not links
+    name_clean = (mod.name or "").strip()
+    return name_clean.lower() in {"", "label", "...", "…"}
+
+
 def module_matches_type_filter(mod: CourseModuleItem, type_filter: str) -> bool:
     """Return True if a course module matches the selected content filter chip."""
+    if is_empty_spacer_label(mod):
+        return False
     key = (type_filter or "all").strip().lower()
     allowed = _MODULE_TYPE_MAP.get(key)
     if allowed is None:

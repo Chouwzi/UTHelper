@@ -22,7 +22,10 @@ from typing import Any, Callable, Iterator, Literal, Optional
 from urllib.parse import urlsplit
 from xml.parsers import expat
 
+from bs4 import BeautifulSoup, NavigableString, Tag
+
 from core.courses.models import PreviewKind
+from core.html_compat import BS4_PARSER
 
 try:
     from PIL import Image as _PILImage
@@ -4118,12 +4121,175 @@ def _convert_pptx(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocum
     )
 
 
+def _safe_html_href(raw_href: object) -> str:
+    if not isinstance(raw_href, str):
+        return ""
+    cleaned = raw_href.strip()
+    if not cleaned or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        return ""
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return cleaned
+
+
+def _convert_html_document(title: str, raw_html: str, *, dark_mode: bool) -> ConvertedDocument:
+    """Convert raw HTML (.html/.htm) into clean readable Markdown + XSS-safe HTML preview."""
+    soup = BeautifulSoup(raw_html or "", BS4_PARSER)
+    for junk in soup.find_all(
+        ("script", "style", "noscript", "template", "head", "iframe", "object", "embed", "svg")
+    ):
+        junk.decompose()
+
+    outline: list[DocumentOutlineItem] = []
+    md_blocks: list[str] = []
+    html_blocks: list[str] = []
+
+    def _inline_parts(node: Tag | NavigableString) -> tuple[str, str]:
+        if isinstance(node, NavigableString):
+            txt = re.sub(r"\s+", " ", str(node))
+            return txt, html.escape(txt)
+        tag_name = (node.name or "").lower()
+        if tag_name == "br":
+            return "\n", "<br>"
+        if tag_name == "a":
+            href = _safe_html_href(node.get("href"))
+            label = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip() or href
+            if href:
+                esc_href = html.escape(href, quote=True)
+                esc_lbl = html.escape(label)
+                return f"[{label}]({href})", f'<a href="{esc_href}">{esc_lbl}</a>'
+            return label, html.escape(label)
+        md_acc: list[str] = []
+        h_acc: list[str] = []
+        for child in node.children:
+            if isinstance(child, (Tag, NavigableString)):
+                m_part, h_part = _inline_parts(child)
+                if m_part:
+                    md_acc.append(m_part)
+                if h_part:
+                    h_acc.append(h_part)
+        m_str = "".join(md_acc)
+        h_str = "".join(h_acc)
+        if tag_name in {"strong", "b"} and m_str.strip():
+            return f"**{m_str.strip()}**", f"<strong>{h_str.strip()}</strong>"
+        if tag_name in {"em", "i"} and m_str.strip():
+            return f"*{m_str.strip()}*", f"<em>{h_str.strip()}</em>"
+        if tag_name == "code" and m_str.strip():
+            return f"`{m_str.strip()}`", f"<code>{h_str.strip()}</code>"
+        return m_str, h_str
+
+    def _walk_blocks(parent: Tag) -> None:
+        for child in parent.children:
+            if isinstance(child, NavigableString):
+                plain = re.sub(r"\s+", " ", str(child)).strip()
+                if plain:
+                    md_blocks.append(plain)
+                    html_blocks.append(f"<p>{html.escape(plain)}</p>")
+                continue
+            if not isinstance(child, Tag):
+                continue
+            name = (child.name or "").lower()
+            if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                lvl = int(name[1])
+                heading_txt = re.sub(r"\s+", " ", child.get_text(" ", strip=True)).strip()
+                if heading_txt:
+                    anchor_id = f"sec-{len(outline) + 1}"
+                    outline.append(DocumentOutlineItem(anchor_id=anchor_id, level=lvl, title=heading_txt))
+                    md_blocks.append(f"{'#' * lvl} {heading_txt}")
+                    html_blocks.append(f'<h{lvl} id="{anchor_id}">{html.escape(heading_txt)}</h{lvl}>')
+            elif name in {"ul", "ol"}:
+                items_md: list[str] = []
+                items_html: list[str] = []
+                for idx, li in enumerate(child.find_all("li", recursive=False), start=1):
+                    m_li, h_li = _inline_parts(li)
+                    m_li = m_li.strip()
+                    if m_li:
+                        prefix = f"{idx}. " if name == "ol" else "- "
+                        items_md.append(f"{prefix}{m_li}")
+                        items_html.append(f"<li>{h_li.strip()}</li>")
+                if items_md:
+                    md_blocks.append("\n".join(items_md))
+                    html_blocks.append(f"<{name}>{''.join(items_html)}</{name}>")
+            elif name == "table":
+                rows_data: list[list[str]] = []
+                for tr in child.find_all("tr"):
+                    cells = [
+                        re.sub(r"\s+", " ", td.get_text(" ", strip=True)).strip()
+                        for td in tr.find_all(["th", "td"])
+                    ]
+                    if any(cells):
+                        rows_data.append(cells)
+                if rows_data:
+                    tbl_h, tbl_md = _render_table_html_and_markdown(rows_data, sheet_style=False)
+                    if tbl_md:
+                        md_blocks.append(tbl_md)
+                    if tbl_h:
+                        html_blocks.append(tbl_h)
+            elif name == "hr":
+                md_blocks.append("---")
+                html_blocks.append("<hr>")
+            elif name in {"p", "blockquote", "pre"}:
+                if name == "pre":
+                    code_txt = child.get_text("\n", strip=True)
+                    if code_txt:
+                        md_blocks.append(f"```\n{code_txt}\n```")
+                        html_blocks.append(f'<pre class="code-view"><code>{html.escape(code_txt)}</code></pre>')
+                else:
+                    m_p, h_p = _inline_parts(child)
+                    m_clean = re.sub(r"[ \t]+\n", "\n", m_p).strip()
+                    if m_clean:
+                        if name == "blockquote":
+                            md_blocks.append("> " + m_clean.replace("\n", "\n> "))
+                            html_blocks.append(f"<blockquote>{h_p.strip()}</blockquote>")
+                        else:
+                            md_blocks.append(m_clean)
+                            html_blocks.append(f"<p>{h_p.strip()}</p>")
+            elif child.find(("p", "div", "ul", "ol", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre")):
+                _walk_blocks(child)
+            else:
+                m_div, h_div = _inline_parts(child)
+                m_clean = re.sub(r"[ \t]+\n", "\n", m_div).strip()
+                if m_clean:
+                    md_blocks.append(m_clean)
+                    html_blocks.append(f"<p>{h_div.strip()}</p>")
+
+    root = soup.body if soup.body is not None else soup
+    _walk_blocks(root)
+
+    if not md_blocks:
+        return ConvertedDocument(
+            kind="text",
+            title=title,
+            html_document=_base_html_shell(
+                title,
+                '<p class="muted">(Trang này không có nội dung văn bản)</p>',
+                dark_mode=dark_mode,
+            ),
+            markdown_text="_(Trang này không có nội dung văn bản)_",
+            outline=[],
+        )
+
+    return ConvertedDocument(
+        kind="text",
+        title=title,
+        html_document=_base_html_shell(title, "\n".join(html_blocks), dark_mode=dark_mode),
+        markdown_text="\n\n".join(md_blocks),
+        outline=outline,
+    )
+
+
 def _convert_text(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
-    """Convert plain-text or source-code bytes while escaping HTML output."""
+    """Convert plain-text, HTML, or source-code bytes while escaping HTML output."""
     truncated = len(data) > _MAX_TEXT_BYTES
     text = _decode_text_bytes(data[:_MAX_TEXT_BYTES], truncated=truncated)
     if truncated:
         text += "\n\n... [Nội dung đã được rút gọn do vượt quá 2 MiB]"
+    if title.strip().lower().endswith((".html", ".htm")):
+        return _convert_html_document(title, text, dark_mode=dark_mode)
     body_html = f'<pre class="code-view"><code>{html.escape(text)}</code></pre>'
     return ConvertedDocument(
         kind="text",

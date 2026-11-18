@@ -499,7 +499,7 @@ class CoursesCoordinator:
             self.courses_view.push_overlay(view, tag=f"activity:forum:{mod.cmid}")
             return
 
-        if modname in {"book", "page"}:
+        if modname in {"book", "page", "label"}:
             view = RichContentActivityView(
                 source=course.source,
                 course_id=course.id,
@@ -548,6 +548,8 @@ class CoursesCoordinator:
         for sec in sections:
             for mod in sec.modules:
                 for att in mod.attachments:
+                    if att.file_name.strip().lower() in {"index.html", "index.htm", "structure"}:
+                        continue
                     if (
                         att.preview_kind in {"pdf", "docx", "pptx", "xlsx", "csv", "text"}
                         and 0 < int(att.file_size or 0) <= 1_572_864
