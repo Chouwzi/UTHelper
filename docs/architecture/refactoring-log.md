@@ -1967,3 +1967,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Preserve the existing `v2.4.0` tag and use patch version `2.4.1` (native build
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
+
+## Theme preview mode synchronization (2026-11-16)
+
+- Theme previews already applied draft colors globally, but `set_page_theme`
+  still read the persisted theme name to choose Flet's light/dark mode. When a
+  user previewed a light theme before saving, desktop controls could render
+  against dark-mode defaults, including a black grade screen.
+- `set_page_theme` now accepts an optional theme name. Theme selection, reset,
+  and discard pass the active draft/baseline theme so Flet brightness matches
+  the semantic palette. Startup and committed-settings flows continue to read
+  the persisted theme.
+- The cached grade radar card and course list now rebuild their root surfaces
+  even while detached, preventing a stale dark card from surviving a light
+  theme preview or discard.
+- Reopening the cached grade screen now refreshes its theme after it has been
+  attached to the desktop page, so Flet sends the updated surface colors.
+- Tests and lint were not run. The Python app packaged successfully, but the
+  Windows Flutter build stopped because this machine does not currently allow
+  the symlinks Flutter requires for plugin builds (Developer Mode is disabled).
