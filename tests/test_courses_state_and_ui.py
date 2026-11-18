@@ -72,6 +72,8 @@ def _make_course(
     last_synced_at: int = 1_770_000_000,
     has_unseen_updates: bool = False,
     is_pinned: bool = False,
+    is_current_term: bool = False,
+    credits: int = 0,
 ) -> CourseSummary:
     return CourseSummary(
         id=course_id,
@@ -93,6 +95,8 @@ def _make_course(
         last_synced_at=last_synced_at,
         has_unseen_updates=has_unseen_updates,
         is_pinned=is_pinned,
+        is_current_term=is_current_term,
+        credits=credits,
     )
 
 
@@ -1394,3 +1398,301 @@ def test_edge_helpers_first_visible_section_expansion_and_stale_error_guard():
     asyncio.run(run_stale_err())
     assert view._state.selected_course_key == "courses:2"
     assert view._state.offline_notice == ""
+
+
+def test_smart_current_term_default_manual_override_and_o1_card_selection():
+    c_cur1 = _make_course(
+        1,
+        display_name="Chủ nghĩa xã hội khoa học",
+        semester_label="HKI 2026-2027",
+        semester_sort_key=(2026, 3),
+        is_current_term=True,
+        credits=2,
+    )
+    c_cur2 = _make_course(
+        2,
+        display_name="Quản trị doanh nghiệp CNTT",
+        semester_label="HKI 2026-2027",
+        semester_sort_key=(2026, 3),
+        is_current_term=True,
+        credits=3,
+    )
+    c_old = _make_course(
+        3,
+        display_name="Hệ điều hành",
+        semester_label="HKII 2025-2026",
+        semester_sort_key=(2025, 2),
+        is_current_term=False,
+        credits=3,
+    )
+    svc = FakeCatalogService(courses=[c_cur1, c_cur2, c_old])
+    svc.has_portal_current_term = True  # type: ignore[attr-defined]
+
+    view = CoursesTabView(page=None, catalog_service=svc)
+    view.load_initial()
+
+    # Smart default activates "current" ("Kỳ hiện tại (2)") automatically
+    assert view._state.semester_filter == "current"
+    assert [c.id for c in view._state.filtered_courses()] == [1, 2]
+
+    chip_texts = [
+        c.label.value
+        for c in _walk_controls(view._list_pane._chips_row)
+        if isinstance(c, ft.Chip) and isinstance(c.label, ft.Text)
+    ]
+    assert "Kỳ hiện tại (2)" in chip_texts
+    assert "Tất cả" in chip_texts
+    assert "HKII 2025-2026" in chip_texts
+
+    # Credits badge ("2 TC" / "3 TC") renders cleanly on sidebar cards
+    card_texts = [
+        c.value
+        for c in _walk_controls(view._list_pane._cards_list)
+        if isinstance(c, ft.Text) and isinstance(c.value, str)
+    ]
+    assert "2 TC" in card_texts
+    assert "3 TC" in card_texts
+
+    # O(1) selection swap reuses existing ft.Container card instances in-place
+    card1_before = view._list_pane._card_map["courses:1"]
+    card2_before = view._list_pane._card_map["courses:2"]
+    asyncio.run(view._select_course_async("courses:2"))
+    assert view._list_pane._card_map["courses:1"] is card1_before
+    assert view._list_pane._card_map["courses:2"] is card2_before
+
+    # Manual switch to "Tất cả" shows all 3 courses and persists across refresh_catalog_async
+    view._handle_filter_change("all", "")
+    assert view._state.semester_filter == "all"
+    assert [c.id for c in view._state.filtered_courses()] == [1, 2, 3]
+    asyncio.run(view.refresh_catalog_async())
+    assert view._state.semester_filter == "all"
+
+
+def test_apple_grades_bento_hero_zero_weight_strip_collapsible_pending_and_segmented_pill():
+    pane = CourseDetailPane()
+    course = _make_course(88, display_name="Chủ nghĩa xã hội khoa học")
+    grades = [
+        CourseGradeItem(
+            id=1,
+            item_name="Bài tập tự học Chương 6 (Vấn đề dân tộc - CLO1.1)",
+            grade_formatted="-",
+            range_formatted="0–10",
+            percentage="-",
+            weight="0.00 %",
+        ),
+        CourseGradeItem(
+            id=2,
+            item_name="Bài tập tự học Chương 6 (Vấn đề tôn giáo - CLO1.2)",
+            grade_formatted="-",
+            range_formatted="0–10",
+            percentage="-",
+            weight="0.00 %",
+        ),
+        CourseGradeItem(
+            id=3,
+            item_name="Điểm danh (20% điểm quá trình)",
+            grade_formatted="9.7",
+            range_formatted="0–10",
+            percentage="96.7 %",
+            weight="0.00 %",
+        ),
+        CourseGradeItem(
+            id=4,
+            item_name="Nộp Bài tập nhóm thuyết trình (40% điểm quá trình)",
+            grade_formatted="8.8",
+            range_formatted="0–10",
+            percentage="87.5 %",
+            weight="0.00 %",
+            feedback_html="<p>Thuyết trình mạch lạc, dẫn chứng tốt.</p>",
+        ),
+        CourseGradeItem(
+            id=5,
+            item_name="Bài tập tự học Chương 2",
+            grade_formatted="9.8",
+            range_formatted="0–10",
+            percentage="98.4 %",
+            weight="0.00 %",
+        ),
+    ]
+    state = CoursesState(
+        courses=[course],
+        selected_course_key=course.course_key,
+        grades=grades,
+        active_subtab=2,
+    )
+    pane.render(state, show_back=False)
+
+    grade_texts = [
+        c.value
+        for c in _walk_controls(pane._grades_tab_body)
+        if isinstance(c, ft.Text) and isinstance(c.value, str)
+    ]
+    # Cluttered "0.00 %" weight noise is completely stripped!
+    assert not any("0.00" in t for t in grade_texts)
+    # Weighted average of (9.7 * 20 + 8.8 * 40) / 60 = 9.1 -> "Xuất sắc"
+    assert "9.1" in grade_texts
+    assert "Xuất sắc" in grade_texts
+    assert "3/5 mục" in grade_texts
+    assert "ĐIỂM ĐÃ CẬP NHẬT" in grade_texts
+    assert any("Thuyết trình mạch lạc" in t for t in grade_texts)
+    # Restraint guard: zero decorative ProgressBars or 4px vertical stripes inside grades tab
+    assert not any(isinstance(c, ft.ProgressBar) for c in _walk_controls(pane._grades_tab_body))
+    assert not any(
+        isinstance(c, ft.Container) and getattr(c, "width", None) == 4
+        for c in _walk_controls(pane._grades_tab_body)
+    )
+
+    # Pending items are collapsed inside ExpansionTile by default
+    pending_tiles = [
+        c for c in _walk_controls(pane._grades_tab_body) if isinstance(c, ft.ExpansionTile)
+    ]
+    assert len(pending_tiles) == 1
+    assert pending_tiles[0].expanded is False
+
+    # Filtering by "graded" hides pending ExpansionTile; filtering by "pending" shows pending rows directly
+    state.grade_filter = "graded"
+    pane.render(state, show_back=False)
+    assert [c for c in _walk_controls(pane._grades_tab_body) if isinstance(c, ft.ExpansionTile)] == []
+
+    state.grade_filter = "pending"
+    pane.render(state, show_back=False)
+    pending_only_texts = [
+        c.value
+        for c in _walk_controls(pane._grades_tab_body)
+        if isinstance(c, ft.Text) and isinstance(c.value, str)
+    ]
+    assert any("Chương 6" in t for t in pending_only_texts)
+    assert "Chưa chấm" in pending_only_texts
+
+    # Apple Segmented Pill Control switches subtab cleanly
+    subtab_calls: list[int] = []
+    pane._on_subtab_change = lambda idx: subtab_calls.append(idx)
+    pane._segment_pills[1].on_click(None)
+    assert subtab_calls == [1]
+    assert state.active_subtab == 1
+
+
+def test_all_courses_controls_match_flet_mro_field_types():
+    """Guard against Dart MsgPack deserialization crashes (e.g. Border vs OutlinedBorder, Padding vs Margin)."""
+    import dataclasses
+    import types as py_types
+    import typing
+
+    def _walk_all(obj, path="root"):
+        if isinstance(obj, ft.BaseControl):
+            yield path, obj
+            for f in dataclasses.fields(obj):
+                if f.name.startswith("_"):
+                    continue
+                val = getattr(obj, f.name, None)
+                if val is not None:
+                    yield from _walk_all(val, f"{path}.{type(obj).__name__}.{f.name}")
+        elif isinstance(obj, (list, tuple)):
+            for idx, item in enumerate(obj):
+                yield from _walk_all(item, f"{path}[{idx}]")
+        elif isinstance(obj, dict):
+            for k, item in obj.items():
+                yield from _walk_all(item, f"{path}[{k!r}]")
+
+    def _matches_type(val, tp) -> bool:
+        if tp is typing.Any or val is None or isinstance(tp, (str, typing.ForwardRef)):
+            return True
+        origin = typing.get_origin(tp)
+        if origin is typing.Annotated:
+            return _matches_type(val, typing.get_args(tp)[0])
+        if origin in (typing.Union, py_types.UnionType):
+            return any(_matches_type(val, arg) for arg in typing.get_args(tp))
+        if origin in (list, tuple, dict, set):
+            return True
+        if str(origin).endswith("Callable") or tp is callable:
+            return callable(val)
+        if isinstance(tp, type):
+            return isinstance(val, tp)
+        return True
+
+    def _mro_anns(cls) -> dict:
+        anns: dict = {}
+        for base in reversed(cls.__mro__):
+            anns.update(getattr(base, "__annotations__", {}))
+        return anns
+
+    c1 = _make_course(1, is_current_term=True, credits=2)
+    m1 = CourseModuleItem(
+        cmid=1,
+        instance_id=1,
+        modname="resource",
+        name="Đề cương",
+        section_id=1,
+        attachments=(_make_attachment("de_cuong.pdf"),),
+        is_new=True,
+        open_strategy="preview_file",
+    )
+    m2 = CourseModuleItem(
+        cmid=2,
+        instance_id=2,
+        modname="assign",
+        name="Bài tập",
+        section_id=1,
+        completion_mode=1,
+        completion_state=1,
+        open_strategy="assignment_detail",
+    )
+    sec = CourseSection(
+        id=1, course_id=1, source="courses", section_num=1, name="Chương 1", modules=(m1, m2)
+    )
+    g1 = CourseGradeItem(
+        id=1,
+        item_name="Điểm danh (20%)",
+        grade_formatted="9.7",
+        range_formatted="0–10",
+        percentage="97%",
+        weight="0.00 %",
+        feedback_html="<p>Tốt</p>",
+    )
+    g2 = CourseGradeItem(
+        id=2,
+        item_name="Bài tự học",
+        grade_formatted="-",
+        range_formatted="0–10",
+        percentage="-",
+        weight="0.00 %",
+    )
+    rec = RecentMaterialEntry(
+        course_key="courses:1",
+        course_name="CNXHKH",
+        cmid=1,
+        title="Đề cương",
+        attachment_url="https://courses.ut.edu.vn/a.pdf",
+        file_name="de_cuong.pdf",
+        opened_at=1_770_000_000,
+    )
+    state = CoursesState(
+        courses=[c1],
+        selected_course_key="courses:1",
+        sections=[sec],
+        grades=[g1, g2],
+        recent_items=[rec],
+        semester_filter="current",
+        active_subtab=2,
+        offline_notice="Test notice",
+        user_groups=["Nhóm 4"],
+    )
+    lp = CourseListPane()
+    lp.render(state, update=False)
+    dp = CourseDetailPane()
+    dp.render(state, show_back=True, update=False)
+
+    mismatches = []
+    for root_name, root_ctrl in [("ListPane", lp), ("DetailPane", dp)]:
+        for path, ctrl in _walk_all(root_ctrl, root_name):
+            hints = _mro_anns(type(ctrl))
+            for f in dataclasses.fields(ctrl):
+                if f.name.startswith("_") or f.name not in hints:
+                    continue
+                val = getattr(ctrl, f.name, None)
+                if val is not None and not _matches_type(val, hints[f.name]):
+                    mismatches.append((f"{path}.{type(ctrl).__name__}.{f.name}", type(val), hints[f.name]))
+
+    assert mismatches == []
+
+

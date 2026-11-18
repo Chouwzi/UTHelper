@@ -1563,3 +1563,114 @@ def test_parallel_catalog_refresh_singleflight_download_ram_cache_and_idle_prefe
         assert preview.get_cached_path(huge_att.file_url, 100, huge_att.file_name) is None
     finally:
         coord.close()
+
+
+def test_portal_current_semester_enrichment_retake_guard_and_cache_persistence(tmp_path):
+    from core.courses.shortname_parser import parse_portal_semester_label
+
+    assert parse_portal_semester_label("Học kỳ 1 năm học 2026-2027") == (
+        "HKI 2026-2027",
+        (2026, 3),
+    )
+    assert parse_portal_semester_label("Học kỳ hè năm học 2025-2026") == (
+        "HK Hè 2025-2026",
+        (2025, 1),
+    )
+
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="portal-cur")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    c_prov = _FakeCoursesProvider()
+    c_prov.courses = [
+        CourseSummary(
+            id=101,
+            source="courses",
+            fullname="[012000510704] - Chủ nghĩa xã hội khoa học",
+            shortname="TT_HK1-2026-2027_012000510704",
+            display_name="Chủ nghĩa xã hội khoa học",
+            course_code="012000510704",
+            semester_label="HKI 2026-2027",
+            semester_sort_key=(2026, 3),
+            program_tag="TT",
+        ),
+        # Older retake of the SAME 10-digit maHocPhan in HKII 2025-2026 -> must NOT be marked current!
+        CourseSummary(
+            id=102,
+            source="courses",
+            fullname="[012000510701] - Chủ nghĩa xã hội khoa học",
+            shortname="TT_HK2-2025-2026_012000510701",
+            display_name="Chủ nghĩa xã hội khoa học",
+            course_code="012000510701",
+            semester_label="HKII 2025-2026",
+            semester_sort_key=(2025, 2),
+            program_tag="TT",
+        ),
+        # Unregistered HKI 2026-2027 course -> must NOT be marked current when Portal specs exist!
+        CourseSummary(
+            id=103,
+            source="courses",
+            fullname="[012099999901] - Môn tự chọn cũ",
+            shortname="TT_HK1-2026-2027_012099999901",
+            display_name="Môn tự chọn cũ",
+            course_code="012099999901",
+            semester_label="HKI 2026-2027",
+            semester_sort_key=(2026, 3),
+            program_tag="TT",
+        ),
+    ]
+    t_prov = _FakeThnnProvider()
+    t_prov.courses = [
+        CourseSummary(
+            id=4458,
+            source="thnn",
+            fullname="[TT04] Anh văn chuyên ngành",
+            shortname="TT04",
+            display_name="Anh văn chuyên ngành",
+            semester_label="Khác",
+            semester_sort_key=(0, 0),
+        )
+    ]
+
+    portal_specs = [
+        {
+            "maHocPhan": "0120005107",
+            "tenMonHoc": "Chủ nghĩa xã hội khoa học",
+            "soTinChi": 2,
+        },
+        {
+            "maHocPhan": "TT04",
+            "tenMonHoc": "Anh văn chuyên ngành",
+            "soTinChi": 3,
+        },
+    ]
+
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=c_prov,
+        thnn_provider=t_prov,
+        portal_courses_fetcher=lambda: ("Học kỳ 1 năm học 2026-2027", portal_specs),
+        time_fn=lambda: 12345,
+    )
+    catalog = svc.refresh_catalog(include_thnn=True)
+    by_key = {c.course_key: c for c in catalog}
+
+    assert svc.has_portal_current_term is True
+    assert by_key["courses:101"].is_current_term is True
+    assert by_key["courses:101"].credits == 2
+    assert by_key["courses:102"].is_current_term is False
+    assert by_key["courses:103"].is_current_term is False
+    assert by_key["thnn:4458"].is_current_term is True
+    assert by_key["thnn:4458"].credits == 3
+
+    # Fresh service instance loading from disk cache restores Portal current-term metadata
+    svc_reloaded = CourseCatalogService(
+        cache_store=CourseCacheStore(cache_dir=tmp_path, namespace="portal-cur"),
+        preview_cache=preview,
+    )
+    cached_courses, _, _ = svc_reloaded.load_cached_catalog()
+    reloaded_by_key = {c.course_key: c for c in cached_courses}
+    assert svc_reloaded.has_portal_current_term is True
+    assert reloaded_by_key["courses:101"].is_current_term is True
+    assert reloaded_by_key["courses:101"].credits == 2
+    assert reloaded_by_key["courses:102"].is_current_term is False
+

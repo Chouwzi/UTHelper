@@ -187,13 +187,55 @@ class DocumentReaderView(ft.Container):
             trailing_actions=[self._night_btn, self._expand_btn, self._save_btn, self._ext_btn],
         )
 
-        self._body_host = ft.Container(expand=True)
-        self._body_host.content = self._build_body()
+        self._body_switcher = ft.AnimatedSwitcher(
+            content=ft.Container(),
+            duration=150,
+            reverse_duration=110,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            switch_in_curve=ft.AnimationCurve.EASE_OUT,
+            switch_out_curve=ft.AnimationCurve.EASE_IN,
+            expand=True,
+        )
+        self._body_host = ft.Container(expand=True, content=self._body_switcher)
+        self._set_body_content(self._build_body())
         self.content = ft.Column(
             expand=True,
             spacing=0,
             controls=[self._header_container, self._body_host],
         )
+
+    def did_mount(self) -> None:
+        self._schedule_alternate_theme_prewarm(force=True)
+
+    def _set_body_content(self, ctrl: ft.Control) -> None:
+        self._body_switcher.content = ctrl
+
+    def _schedule_alternate_theme_prewarm(self, *, force: bool = False) -> None:
+        """Warm the opposite dark/light conversion in a background thread so toggling is 0ms."""
+        if not force and self._get_page() is None:
+            return
+        if self._kind not in _NIGHT_MODE_KINDS or self._kind == "pdf":
+            return
+        alt_dark = not bool(self._dark_reader)
+        if alt_dark in self._converted_cache:
+            return
+
+        def _warm() -> None:
+            if self._disposed or alt_dark in self._converted_cache:
+                return
+            try:
+                conv = convert_document_bytes(
+                    self._file_name,
+                    self._data,
+                    self._kind,
+                    dark_mode=alt_dark,
+                )
+                if not self._disposed:
+                    self._converted_cache[alt_dark] = conv
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm, name="DocAltThemeWarm", daemon=True).start()
 
     def _get_page(self):
         try:
@@ -283,15 +325,42 @@ class DocumentReaderView(ft.Container):
     def _toggle_reader_mode(self, _e=None) -> None:
         self._dark_reader = not self._dark_reader
         self._sync_night_button()
-        self._body_host.content = self._build_body()
+        target_mode = bool(self._dark_reader)
+        # Offload uncached non-PDF conversion when mounted on a live page so UI never stutters
+        if (
+            self._kind != "pdf"
+            and target_mode not in self._converted_cache
+            and self._get_page() is not None
+        ):
+            safe_control_update(self._night_btn)
+
+            def _convert_async() -> None:
+                if self._disposed:
+                    return
+                conv = convert_document_bytes(
+                    self._file_name,
+                    self._data,
+                    self._kind,
+                    dark_mode=target_mode,
+                )
+                self._converted_cache[target_mode] = conv
+                if not self._disposed and bool(self._dark_reader) == target_mode:
+                    self._set_body_content(self._build_body())
+                    safe_control_update(self)
+
+            threading.Thread(target=_convert_async, name="DocThemeToggle", daemon=True).start()
+            return
+
+        self._set_body_content(self._build_body())
         safe_control_update(self)
+        self._schedule_alternate_theme_prewarm()
 
     def _select_sheet(self, index: int) -> None:
         self._sheet_index = max(0, index)
         self._sheet_row_page = 0
         self._sheet_col_page = 0
         self._sheet_filter_query = ""
-        self._body_host.content = self._build_body()
+        self._set_body_content(self._build_body())
         safe_control_update(self)
 
     def _handle_close(self) -> None:
@@ -327,7 +396,7 @@ class DocumentReaderView(ft.Container):
             return
         self._pane_width = new_w
         if self._kind in {"docx", "doc", "pptx", "ppt", "pdf"} and not self._active_webview_url:
-            self._body_host.content = self._build_body()
+            self._set_body_content(self._build_body())
             safe_control_update(self)
 
     def _jump_to_anchor(self, list_view: ft.ListView, anchor_id: str) -> None:
@@ -559,17 +628,17 @@ class DocumentReaderView(ft.Container):
         def _set_sheet_filter(val: str) -> None:
             self._sheet_filter_query = val
             self._sheet_row_page = 0
-            self._body_host.content = self._build_body()
+            self._set_body_content(self._build_body())
             safe_control_update(self)
 
         def _step_row_page(delta: int) -> None:
             self._sheet_row_page = max(0, min(total_row_pages - 1, self._sheet_row_page + delta))
-            self._body_host.content = self._build_body()
+            self._set_body_content(self._build_body())
             safe_control_update(self)
 
         def _step_col_page(delta: int) -> None:
             self._sheet_col_page = max(0, min(total_col_pages - 1, self._sheet_col_page + delta))
-            self._body_host.content = self._build_body()
+            self._set_body_content(self._build_body())
             safe_control_update(self)
 
         toolbar_controls: list[ft.Control] = [
@@ -1380,18 +1449,18 @@ class DocumentReaderView(ft.Container):
 
         def _adjust_pptx_zoom(delta: float) -> None:
             self._pptx_scale = max(0.7, min(1.5, round(self._pptx_scale + delta, 2)))
-            self._body_host.content = self._build_pptx_body(converted)
+            self._set_body_content(self._build_pptx_body(converted))
             safe_control_update(self)
 
         def _reset_pptx_zoom() -> None:
             self._pptx_scale = 1.0
-            self._body_host.content = self._build_pptx_body(converted)
+            self._set_body_content(self._build_pptx_body(converted))
             safe_control_update(self)
 
         def _set_pptx_search(q: str) -> None:
             self._pptx_search_query = str(q or "")
             self._pptx_page_index = 0
-            self._body_host.content = self._build_pptx_body(converted)
+            self._set_body_content(self._build_pptx_body(converted))
             safe_control_update(self)
 
         toolbar = ft.Container(
@@ -1666,7 +1735,7 @@ class DocumentReaderView(ft.Container):
             has_box_pad = bool(block.bg_color or block.has_box_border)
             return ft.Container(
                 key=ft.ScrollKey(block.anchor_id) if block.anchor_id else None,
-                margin=ft.Padding.only(top=top_pad, bottom=bot_pad) if (top_pad or bot_pad) else None,
+                margin=ft.Margin.only(top=top_pad, bottom=bot_pad) if (top_pad or bot_pad) else None,
                 padding=ft.Padding(
                     left=left_pad + (8 if has_box_pad else 0),
                     right=right_pad + (8 if has_box_pad else 0),
@@ -1906,17 +1975,17 @@ class DocumentReaderView(ft.Container):
 
         def _set_doc_search(q: str) -> None:
             self._doc_search_query = str(q or "")
-            self._body_host.content = self._build_docx_rich_body(converted)
+            self._set_body_content(self._build_docx_rich_body(converted))
             safe_control_update(self)
 
         def _adjust_docx_zoom(delta: float) -> None:
             self._docx_scale = max(0.75, min(1.85, round(self._docx_scale + delta, 2)))
-            self._body_host.content = self._build_docx_rich_body(converted)
+            self._set_body_content(self._build_docx_rich_body(converted))
             safe_control_update(self)
 
         def _reset_docx_zoom() -> None:
             self._docx_scale = 1.0
-            self._body_host.content = self._build_docx_rich_body(converted)
+            self._set_body_content(self._build_docx_rich_body(converted))
             safe_control_update(self)
 
         meta_label = (
@@ -2040,22 +2109,22 @@ class DocumentReaderView(ft.Container):
             if clamped == self._pdf_page_index:
                 return
             self._pdf_page_index = clamped
-            self._body_host.content = self._build_native_pdf_body(session)
+            self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
 
         def _adjust_zoom(delta: float) -> None:
             self._pdf_scale = max(0.8, min(2.8, round(self._pdf_scale + delta, 2)))
-            self._body_host.content = self._build_native_pdf_body(session)
+            self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
 
         def _reset_zoom() -> None:
             self._pdf_scale = 1.6
-            self._body_host.content = self._build_native_pdf_body(session)
+            self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
 
         def _toggle_outline() -> None:
             self._pdf_outline_open = not self._pdf_outline_open
-            self._body_host.content = self._build_native_pdf_body(session)
+            self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
 
         def _run_search(query_str: str) -> None:
@@ -2064,7 +2133,7 @@ class DocumentReaderView(ft.Container):
             self._pdf_search_hit_pos = 0
             if self._pdf_search_hits:
                 self._pdf_page_index = self._pdf_search_hits[0].page_index
-            self._body_host.content = self._build_native_pdf_body(session)
+            self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
 
         def _step_hit(delta: int) -> None:
@@ -2074,7 +2143,7 @@ class DocumentReaderView(ft.Container):
                 self._pdf_search_hits
             )
             self._pdf_page_index = self._pdf_search_hits[self._pdf_search_hit_pos].page_index
-            self._body_host.content = self._build_native_pdf_body(session)
+            self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
 
         hit_badge = (
@@ -2271,48 +2340,68 @@ class DocumentReaderView(ft.Container):
                 ),
             )
 
+        remaining_indices: list[int] = []
+        is_mounted_live = self._get_page() is not None
+        cur_scale = self._pdf_scale
+        cur_dark = bool(self._dark_reader)
+
         for p_idx in range(batch_start, batch_end):
             slot = ft.Container(
                 key=ft.ScrollKey(f"pdf-page-{p_idx}"),
                 alignment=ft.Alignment.CENTER,
             )
-            if p_idx == self._pdf_page_index or not session.can_render_images:
-                rendered = (
-                    session.render_page_png(
-                        p_idx, scale=self._pdf_scale, dark_mode=self._dark_reader
-                    )
-                    if session.can_render_images
-                    else None
-                )
-                slot.content = _page_control_for(p_idx, rendered)
+            if not session.can_render_images:
+                slot.content = _page_control_for(p_idx, None)
             else:
-                slot.content = ft.Container(
-                    bgcolor=surface_color,
-                    border=ft.Border.all(1, border_color),
-                    border_radius=10,
-                    padding=24,
-                    alignment=ft.Alignment.CENTER,
-                    content=ft.Row(
-                        tight=True,
-                        spacing=8,
-                        controls=[
-                            ft.ProgressRing(width=18, height=18, stroke_width=2),
-                            ft.Text(f"Đang tải trang {p_idx + 1}...", size=12, color=text_secondary),
-                        ],
-                    ),
+                cached_now = session.peek_cached_page_png(
+                    p_idx, scale=cur_scale, dark_mode=cur_dark
                 )
+                if cached_now is not None:
+                    slot.content = _page_control_for(p_idx, cached_now)
+                elif p_idx == self._pdf_page_index and not is_mounted_live:
+                    rendered_sync = session.render_page_png(
+                        p_idx, scale=cur_scale, dark_mode=cur_dark
+                    )
+                    slot.content = _page_control_for(p_idx, rendered_sync)
+                else:
+                    if p_idx == self._pdf_page_index:
+                        remaining_indices.insert(0, p_idx)
+                    else:
+                        remaining_indices.append(p_idx)
+                    slot.content = ft.Container(
+                        bgcolor=surface_color,
+                        border=ft.Border.all(1, border_color),
+                        border_radius=10,
+                        padding=24,
+                        alignment=ft.Alignment.CENTER,
+                        content=ft.Row(
+                            tight=True,
+                            spacing=8,
+                            controls=[
+                                ft.ProgressRing(width=18, height=18, stroke_width=2),
+                                ft.Text(
+                                    f"Đang kết xuất trang {p_idx + 1}...",
+                                    size=12,
+                                    color=text_secondary,
+                                ),
+                            ],
+                        ),
+                    )
             page_slots[p_idx] = slot
             page_cards.append(slot)
 
-        if session.can_render_images and (batch_end - batch_start > 1):
-            remaining_indices = [i for i in range(batch_start, batch_end) if i != self._pdf_page_index]
+        if session.can_render_images:
+            all_batch_indices = [
+                self._pdf_page_index,
+                *[i for i in range(batch_start, batch_end) if i != self._pdf_page_index],
+            ]
 
             def _hydrate_batch() -> None:
                 for p_idx in remaining_indices:
                     if self._disposed or self._pdf_render_seq != render_seq:
                         return
                     rendered = session.render_page_png(
-                        p_idx, scale=self._pdf_scale, dark_mode=self._dark_reader
+                        p_idx, scale=cur_scale, dark_mode=cur_dark
                     )
                     if self._disposed or self._pdf_render_seq != render_seq:
                         return
@@ -2320,6 +2409,17 @@ class DocumentReaderView(ft.Container):
                     if slot is not None:
                         slot.content = _page_control_for(p_idx, rendered)
                         safe_control_update(slot)
+                # Pre-warm opposite dark/light mode in RAM so clicking Dark/Light is 0ms
+                alt_dark = not cur_dark
+                for p_idx in all_batch_indices:
+                    if self._disposed or self._pdf_render_seq != render_seq:
+                        return
+                    if session.peek_cached_page_png(
+                        p_idx, scale=cur_scale, dark_mode=alt_dark
+                    ) is None:
+                        session.render_page_png(
+                            p_idx, scale=cur_scale, dark_mode=alt_dark
+                        )
 
             threading.Thread(
                 target=_hydrate_batch,
@@ -2644,5 +2744,5 @@ class DocumentReaderView(ft.Container):
             and (self._kind == "pdf" or self._dark_reader)
         )
         if not preserve_webview:
-            self._body_host.content = self._build_body()
+            self._set_body_content(self._build_body())
         safe_control_update(self)

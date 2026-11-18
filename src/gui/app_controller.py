@@ -1104,11 +1104,19 @@ class AppController:
         self._thnn_course_provider = ThnnCourseProvider(
             client=self.orchestrator.thnn_client,
         )
+        def _fetch_portal_current_courses() -> tuple[str, list[dict[str, object]]]:
+            u_name = settings.UTH_USERNAME or settings.MOODLE_USERNAME
+            u_pass = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+            if not u_name or not u_pass:
+                return ("", [])
+            return self._portal_client.fetch_current_semester_courses(u_name, u_pass)
+
         self._course_catalog_service = CourseCatalogService(
             cache_store=self._course_cache_store,
             preview_cache=self._preview_cache,
             courses_provider=self._courses_ws_provider,
             thnn_provider=self._thnn_course_provider,
+            portal_courses_fetcher=_fetch_portal_current_courses,
         )
         self._archive_service = ArchiveService()
         self._preview_server = LocalPreviewServer()

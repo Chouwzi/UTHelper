@@ -1088,7 +1088,7 @@ def test_quiz_attempt_review_report_sequential_numbering_gift_strip_choices_and_
     assert not any("::C2-GCCN" in t for t in texts)
     assert any("Bạn chọn · Sai" in t for t in texts)
     assert any("Đáp án đúng" in t for t in texts)
-    assert any(isinstance(c, ft.ProgressBar) for c in _iter_controls(view))
+    assert not any(isinstance(c, ft.ProgressBar) for c in _iter_controls(view))
 
     # Filter to "Câu sai" via actual UI filter chip on_select -> only Câu 1 card remains
     wrong_chip = next(

@@ -32,13 +32,15 @@ _T = TypeVar("_T")
 
 @dataclass(frozen=True)
 class CatalogCacheSnapshot:
-    """Persisted course catalog, pin/unseen markers, and recent materials."""
+    """Persisted course catalog, pin/unseen markers, recent materials, and Portal current-term metadata."""
 
     courses: list[CourseSummary] = field(default_factory=list)
     pinned_keys: list[str] = field(default_factory=list)
     unseen_keys: list[str] = field(default_factory=list)
     recent_items: list[RecentMaterialEntry] = field(default_factory=list)
     catalog_synced_at: int = 0
+    current_term_label: str = ""
+    portal_course_specs: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,8 @@ def _summary_from_dict(raw: dict[str, Any]) -> Optional[CourseSummary]:
         last_synced_at=_safe_int(raw.get("last_synced_at"), 0),
         has_unseen_updates=bool(raw.get("has_unseen_updates", False)),
         is_pinned=bool(raw.get("is_pinned", False)),
+        is_current_term=bool(raw.get("is_current_term", False)),
+        credits=max(0, _safe_int(raw.get("credits"), 0)),
     )
 
 
@@ -323,26 +327,49 @@ class CourseCacheStore:
                 self._mem_catalog = None
                 return CatalogCacheSnapshot()
 
+            raw_specs = payload.get("portal_course_specs")
+            portal_specs = [
+                {
+                    "maHocPhan": str(item.get("maHocPhan") or ""),
+                    "tenMonHoc": str(item.get("tenMonHoc") or ""),
+                    "soTinChi": max(0, _safe_int(item.get("soTinChi"), 0)),
+                }
+                for item in (raw_specs if isinstance(raw_specs, list) else ())
+                if isinstance(item, dict)
+            ]
             snap = CatalogCacheSnapshot(
                 courses=_parse_dict_items(payload.get("courses"), _summary_from_dict),
                 pinned_keys=_string_list(payload.get("pinned_keys")),
                 unseen_keys=_string_list(payload.get("unseen_keys")),
                 recent_items=_parse_dict_items(payload.get("recent_items"), _recent_from_dict),
                 catalog_synced_at=_safe_int(payload.get("catalog_synced_at"), 0),
+                current_term_label=str(payload.get("current_term_label") or ""),
+                portal_course_specs=portal_specs,
             )
             post_sig = self._stat_sig(self._catalog_path)
             if post_sig is not None:
                 self._mem_catalog = (post_sig, snap)
             return snap
 
-    def save_catalog(self, courses: list[CourseSummary], *, synced_at: int) -> None:
-        """Persist the latest course catalog while preserving pins/unseen/recent metadata."""
+    def save_catalog(
+        self,
+        courses: list[CourseSummary],
+        *,
+        synced_at: int,
+        current_term_label: Optional[str] = None,
+        portal_course_specs: Optional[list[dict[str, Any]]] = None,
+    ) -> None:
+        """Persist the latest course catalog while preserving pins/unseen/recent/Portal metadata."""
         with get_memory_lock(self._catalog_path):
             self._dir.mkdir(parents=True, exist_ok=True)
             with SafeFileIO.transaction(self._catalog_path):
                 existing = self._read_catalog_dict()
                 existing["courses"] = [asdict(course) for course in courses]
                 existing["catalog_synced_at"] = int(synced_at)
+                if current_term_label is not None:
+                    existing["current_term_label"] = str(current_term_label)
+                if portal_course_specs is not None:
+                    existing["portal_course_specs"] = list(portal_course_specs)
                 self._write_catalog_payload(existing)
 
     def _update_catalog_string_list(

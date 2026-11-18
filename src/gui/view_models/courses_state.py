@@ -223,6 +223,7 @@ class CoursesState:
     search_query: str = ""
     module_filter: str = "all"
     resource_kind_filter: str = "all"
+    grade_filter: str = "all"
     active_subtab: int = 0
     sections: list[CourseSection] = field(default_factory=list)
     grades: list[CourseGradeItem] = field(default_factory=list)
@@ -264,16 +265,33 @@ class CoursesState:
         self.selected_course_key = course_key
         self.in_detail_mobile = True
 
+    def current_term_courses(self) -> list[CourseSummary]:
+        """Return registered courses for the current term (Portal-matched, or newest semester fallback)."""
+        explicit = [c for c in self.courses if c.is_current_term]
+        if explicit:
+            return explicit
+        semesters = [s for s in self.available_semesters() if s != "Khác"]
+        if semesters:
+            top_sem = semesters[0]
+            return [c for c in self.courses if c.semester_label == top_sem]
+        return list(self.courses)
+
     def filtered_courses(self) -> list[CourseSummary]:
         """Filter catalog courses by active semester chip and search query."""
         sem = (self.semester_filter or "all").strip()
         sem_lower = sem.lower()
         query = (self.search_query or "").strip().casefold()
+        current_keys: Optional[set[str]] = None
+        if sem_lower == "current":
+            current_keys = {c.course_key for c in self.current_term_courses()}
 
         matched: list[CourseSummary] = []
         for course in self.courses:
             if sem_lower and sem_lower != "all":
-                if sem_lower == "thnn":
+                if sem_lower == "current":
+                    if current_keys is not None and course.course_key not in current_keys:
+                        continue
+                elif sem_lower == "thnn":
                     if course.source != "thnn" and course.semester_label.lower() != "thnn":
                         continue
                 elif course.semester_label != sem:

@@ -103,6 +103,8 @@ class CourseSummary:
     last_synced_at: int = 0
     has_unseen_updates: bool = False
     is_pinned: bool = False
+    is_current_term: bool = False
+    credits: int = 0
 
     @property
     def course_key(self) -> str:

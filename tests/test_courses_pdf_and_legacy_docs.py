@@ -191,16 +191,20 @@ def test_pdf_document_session_renders_caches_searches_and_fails_closed(tmp_path:
     with PdfDocumentSession(pdf_bytes, cache_dir=cache_dir) as session:
         assert session.supported is True
         assert session.page_count == 3
+        can_bitmap = session.can_render_images
 
-        page0 = session.render_page_png(0, scale=1.2, dark_mode=False)
-        assert page0 is not None
-        assert page0.from_cache is False
-        assert page0.png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        if can_bitmap:
+            page0 = session.render_page_png(0, scale=1.2, dark_mode=False)
+            assert page0 is not None
+            assert page0.from_cache is False
+            assert page0.png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
 
-        # Separate dark-mode cache entry + disk cache hit on fresh session
-        page0_dark = session.render_page_png(0, scale=1.2, dark_mode=True)
-        assert page0_dark is not None
-        assert page0_dark.png_bytes != page0.png_bytes
+            # Separate dark-mode cache entry + disk cache hit on fresh session
+            page0_dark = session.render_page_png(0, scale=1.2, dark_mode=True)
+            assert page0_dark is not None
+            assert page0_dark.png_bytes != page0.png_bytes
+        else:
+            assert session.render_page_png(0, scale=1.2, dark_mode=False) is None
 
         text_p2 = session.extract_page_text(1)
         assert "Midterm" in text_p2
@@ -208,18 +212,19 @@ def test_pdf_document_session_renders_caches_searches_and_fails_closed(tmp_path:
         assert len(hits) == 1
         assert hits[0].page_index == 1
 
-    # Fresh session hits disk cache cleanly
-    with PdfDocumentSession(pdf_bytes, cache_dir=cache_dir) as session2:
-        cached = session2.render_page_png(0, scale=1.2, dark_mode=False)
-        assert cached is not None
-        assert cached.from_cache is True
+    if can_bitmap:
+        # Fresh session hits disk cache cleanly
+        with PdfDocumentSession(pdf_bytes, cache_dir=cache_dir) as session2:
+            cached = session2.render_page_png(0, scale=1.2, dark_mode=False)
+            assert cached is not None
+            assert cached.from_cache is True
 
-    # LRU cache eviction respects tiny byte cap
-    with PdfDocumentSession(pdf_bytes, cache_dir=cache_dir, cache_max_bytes=1024) as session3:
-        for i in range(3):
-            session3.render_page_png(i, scale=1.6, dark_mode=False)
-        rendered_files = list((cache_dir / "rendered_pdf").glob("*.png"))
-        assert len(rendered_files) <= 2
+        # LRU cache eviction respects tiny byte cap
+        with PdfDocumentSession(pdf_bytes, cache_dir=cache_dir, cache_max_bytes=1024) as session3:
+            for i in range(3):
+                session3.render_page_png(i, scale=1.6, dark_mode=False)
+            rendered_files = list((cache_dir / "rendered_pdf").glob("*.png"))
+            assert len(rendered_files) <= 2
 
     removed = clear_rendered_pdf_cache(cache_dir)
     assert removed >= 0
@@ -246,35 +251,36 @@ def test_document_reader_native_pdf_and_excel_pagination(tmp_path: Path):
             on_open_external=lambda _n, _b: None,
         )
         images = [c for c in _walk_controls(reader) if isinstance(c, ft.Image)]
-        assert len(images) >= 1
         assert not any(isinstance(c, ft.InteractiveViewer) for c in _walk_controls(reader))
         assert "3 trang" in (reader._subtitle_text.value or "")
 
-        # Zooming in must enlarge Image.width inside horizontal ScrollMode.AUTO Row
-        # without introducing InteractiveViewer (which hijacked scroll-up into zoom).
-        initial_width = images[0].width or 0
-        zoom_in = next(
-            c
-            for c in _walk_controls(reader)
-            if isinstance(c, ft.IconButton) and c.tooltip == "Phóng to"
-        )
-        zoom_reset = next(
-            c
-            for c in _walk_controls(reader)
-            if isinstance(c, ft.TextButton) and c.tooltip == "Đặt lại mức thu phóng 100%"
-        )
-        zoom_in.on_click(None)
-        assert reader._pdf_scale > 1.6
-        zoomed_images = [c for c in _walk_controls(reader) if isinstance(c, ft.Image)]
-        assert (zoomed_images[0].width or 0) > initial_width
-        assert any(
-            isinstance(c, ft.Row) and c.scroll == ft.ScrollMode.AUTO
-            for c in _walk_controls(reader)
-        )
-        assert not any(isinstance(c, ft.InteractiveViewer) for c in _walk_controls(reader))
+        if reader._pdf_session is not None and reader._pdf_session.can_render_images:
+            assert len(images) >= 1
+            # Zooming in must enlarge Image.width inside horizontal ScrollMode.AUTO Row
+            # without introducing InteractiveViewer (which hijacked scroll-up into zoom).
+            initial_width = images[0].width or 0
+            zoom_in = next(
+                c
+                for c in _walk_controls(reader)
+                if isinstance(c, ft.IconButton) and c.tooltip == "Phóng to"
+            )
+            zoom_reset = next(
+                c
+                for c in _walk_controls(reader)
+                if isinstance(c, ft.TextButton) and c.tooltip == "Đặt lại mức thu phóng 100%"
+            )
+            zoom_in.on_click(None)
+            assert reader._pdf_scale > 1.6
+            zoomed_images = [c for c in _walk_controls(reader) if isinstance(c, ft.Image)]
+            assert (zoomed_images[0].width or 0) > initial_width
+            assert any(
+                isinstance(c, ft.Row) and c.scroll == ft.ScrollMode.AUTO
+                for c in _walk_controls(reader)
+            )
+            assert not any(isinstance(c, ft.InteractiveViewer) for c in _walk_controls(reader))
 
-        zoom_reset.on_click(None)
-        assert reader._pdf_scale == 1.6
+            zoom_reset.on_click(None)
+            assert reader._pdf_scale == 1.6
         reader.dispose()
 
         # Large Excel > 120 rows & > 40 columns renders paginated DataTable
@@ -1023,3 +1029,58 @@ def test_high_fidelity_docx_theme_styles_numbering_footnotes_tables_a4_sheets_an
         reader.dispose()
     finally:
         server.stop()
+
+
+def test_pdf_peek_ram_cache_luma_lut_and_zero_latency_theme_prewarm(tmp_path: Path):
+    import time
+
+    pdf_bytes = _build_minimal_pdf(["Page 1 Fast Luma", "Page 2 Smooth Toggle"])
+    with PdfDocumentSession(pdf_bytes, cache_dir=tmp_path / "pdf_fast") as session:
+        assert session.peek_cached_page_png(0, scale=1.6, dark_mode=False) is None
+        if not session.can_render_images:
+            pytest.skip("pypdfium2 + Pillow optional on minimal CI runtimes")
+        rendered_light = session.render_page_png(0, scale=1.6, dark_mode=False)
+        assert rendered_light is not None
+        peek_light = session.peek_cached_page_png(0, scale=1.6, dark_mode=False)
+        assert peek_light is not None
+        assert peek_light.from_cache is True
+        assert peek_light.png_bytes == rendered_light.png_bytes
+
+        rendered_dark = session.render_page_png(0, scale=1.6, dark_mode=True)
+        assert rendered_dark is not None
+        assert rendered_dark.png_bytes != rendered_light.png_bytes
+        assert session.peek_cached_page_png(0, scale=1.6, dark_mode=True) is not None
+
+    server = LocalPreviewServer()
+    try:
+        pdf_reader = DocumentReaderView(
+            file_name="fast_toggle.pdf",
+            data=pdf_bytes,
+            kind="pdf",
+            preview_server=server,
+            pdf_cache_dir=tmp_path / "pdf_reader_fast",
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+        )
+        # Wait briefly for background PDF pre-render + opposite dark_mode pre-warm
+        deadline = time.monotonic() + 2.0
+        while (
+            pdf_reader._pdf_session is not None
+            and pdf_reader._pdf_session.peek_cached_page_png(0, scale=1.6, dark_mode=True) is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+
+        assert pdf_reader._pdf_session is not None
+        assert pdf_reader._pdf_session.peek_cached_page_png(0, scale=1.6, dark_mode=True) is not None
+
+        # Toggling dark mode hits RAM immediately with actual PNG bytes (not None placeholder)
+        pdf_reader._toggle_reader_mode()
+        assert pdf_reader._dark_reader is True
+        dark_imgs = [c for c in _walk_controls(pdf_reader) if isinstance(c, ft.Image)]
+        assert dark_imgs and isinstance(dark_imgs[0].src, (bytes, bytearray))
+        pdf_reader.dispose()
+    finally:
+        server.stop()
+

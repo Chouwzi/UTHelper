@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import html
 import logging
 import math
+import re
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -29,7 +30,10 @@ from core.courses.models import (
 )
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.providers import CourseCatalogProvider, CourseProviderError
-from core.courses.shortname_parser import extract_teacher_and_meet_info
+from core.courses.shortname_parser import (
+    extract_teacher_and_meet_info,
+    parse_portal_semester_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +103,90 @@ def _safe_http_url(url: Any) -> str:
     return cleaned
 
 
+def _normalize_subject_name(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+
+
+def _apply_portal_enrichment(
+    courses: list[CourseSummary],
+    current_term_label: str,
+    portal_specs: list[dict[str, Any]],
+) -> list[CourseSummary]:
+    norm_sem_label, _ = parse_portal_semester_label(current_term_label)
+    effective_sem = norm_sem_label or current_term_label.strip()
+    if not portal_specs and not effective_sem:
+        return courses
+
+    enriched: list[CourseSummary] = []
+    for course in courses:
+        c_sem = (course.semester_label or "").strip()
+        sem_conflicts = bool(
+            effective_sem
+            and c_sem
+            and c_sem != "Khác"
+            and c_sem.lower() != "thnn"
+            and c_sem != effective_sem
+        )
+        matched_spec: Optional[dict[str, Any]] = None
+        if not sem_conflicts and portal_specs:
+            c_code = (course.course_code or "").strip()
+            c_hay = f"{course.shortname} {course.fullname}"
+            c_disp_norm = _normalize_subject_name(course.display_name)
+            for spec in portal_specs:
+                p_code = str(spec.get("maHocPhan") or "").strip()
+                p_name = _normalize_subject_name(str(spec.get("tenMonHoc") or ""))
+                if len(p_code) >= 6 and (
+                    c_code.startswith(p_code) or p_code in c_hay
+                ):
+                    matched_spec = spec
+                    break
+                if len(p_code) >= 3 and re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(p_code)}(?![A-Za-z0-9])",
+                    c_hay,
+                    re.IGNORECASE,
+                ):
+                    matched_spec = spec
+                    break
+                if len(p_name) >= 5 and c_disp_norm and p_name == c_disp_norm:
+                    matched_spec = spec
+                    break
+
+        if matched_spec is not None:
+            raw_tc = matched_spec.get("soTinChi") or 0
+            try:
+                tc_val = max(0, int(raw_tc))
+            except (TypeError, ValueError):
+                tc_val = 0
+            enriched.append(
+                replace(
+                    course,
+                    is_current_term=True,
+                    credits=tc_val or course.credits,
+                )
+            )
+        elif not portal_specs and effective_sem and c_sem == effective_sem:
+            enriched.append(replace(course, is_current_term=True))
+        else:
+            enriched.append(
+                replace(
+                    course,
+                    is_current_term=False if (portal_specs or effective_sem) else course.is_current_term,
+                )
+            )
+    return enriched
+
+
 def _apply_course_flags(
     courses: list[CourseSummary],
     pinned_keys: list[str],
     unseen_keys: list[str],
+    *,
+    current_term_label: str = "",
+    portal_specs: Optional[list[dict[str, Any]]] = None,
 ) -> list[CourseSummary]:
+    portal_applied = _apply_portal_enrichment(
+        courses, current_term_label, list(portal_specs or ())
+    )
     pin_rank = {key: idx for idx, key in enumerate(pinned_keys)}
     unseen = set(unseen_keys)
     default_rank = len(pinned_keys)
@@ -113,7 +196,7 @@ def _apply_course_flags(
             is_pinned=(course.course_key in pin_rank),
             has_unseen_updates=(course.course_key in unseen) or course.has_unseen_updates,
         )
-        for course in courses
+        for course in portal_applied
     ]
     enriched.sort(
         key=lambda course: (
@@ -144,6 +227,8 @@ def _merge_course_with_cached(
         progress=fresh.progress if fresh.progress is not None else prev.progress,
         last_synced_at=prev.last_synced_at,
         has_unseen_updates=(fresh.has_unseen_updates or prev.has_unseen_updates),
+        is_current_term=(fresh.is_current_term or prev.is_current_term),
+        credits=fresh.credits or prev.credits,
     )
 
 
@@ -229,12 +314,14 @@ class CourseCatalogService:
         preview_cache: PreviewFileCache,
         courses_provider: Optional[CourseCatalogProvider] = None,
         thnn_provider: Optional[CourseCatalogProvider] = None,
+        portal_courses_fetcher: Optional[Callable[[], tuple[str, list[dict[str, Any]]]]] = None,
         time_fn: Callable[[], int] = lambda: int(time.time()),
     ) -> None:
         self._cache = cache_store
         self._preview_cache = preview_cache
         self._courses_provider = courses_provider
         self._thnn_provider = thnn_provider
+        self._portal_courses_fetcher = portal_courses_fetcher
         self._time_fn = time_fn
         self._thnn_lock = threading.Lock()
         self._catalog_lock = threading.Lock()
@@ -315,10 +402,24 @@ class CourseCatalogService:
             else:
                 self._last_courses_error = ""
 
+    @property
+    def has_portal_current_term(self) -> bool:
+        """True when Portal current-semester registration sync is wired or cached."""
+        if callable(self._portal_courses_fetcher):
+            return True
+        snap = self._cache.load_catalog()
+        return bool(snap.current_term_label or snap.portal_course_specs)
+
     def load_cached_catalog(self) -> tuple[list[CourseSummary], list[RecentMaterialEntry], int]:
-        """Return cached courses with pin/unseen flags, recent items, and last sync time."""
+        """Return cached courses with pin/unseen/Portal flags, recent items, and last sync time."""
         snap: CatalogCacheSnapshot = self._cache.load_catalog()
-        courses = _apply_course_flags(snap.courses, snap.pinned_keys, snap.unseen_keys)
+        courses = _apply_course_flags(
+            snap.courses,
+            snap.pinned_keys,
+            snap.unseen_keys,
+            current_term_label=snap.current_term_label,
+            portal_specs=snap.portal_course_specs,
+        )
         return courses, snap.recent_items, snap.catalog_synced_at
 
     def is_catalog_stale(self, max_age_hours: int) -> bool:
@@ -368,15 +469,40 @@ class CourseCatalogService:
             except CourseProviderError:
                 return None
 
-        if self._courses_provider is not None and include_thnn and self._thnn_provider is not None:
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="CatalogSync") as pool:
+        def _fetch_portal_part() -> Optional[tuple[str, list[dict[str, Any]]]]:
+            if not callable(self._portal_courses_fetcher):
+                return None
+            try:
+                res = self._portal_courses_fetcher()
+                if isinstance(res, tuple) and len(res) == 2:
+                    t_lbl, specs = res
+                    if t_lbl or specs:
+                        return (str(t_lbl or ""), list(specs or ()))
+            except Exception as exc:
+                logger.debug("Portal current-semester course sync skipped: %s", _format_error(exc))
+            return None
+
+        portal_result: Optional[tuple[str, list[dict[str, Any]]]] = None
+        active_tasks = sum(
+            bool(x)
+            for x in (
+                self._courses_provider is not None,
+                include_thnn and self._thnn_provider is not None,
+                callable(self._portal_courses_fetcher),
+            )
+        )
+        if active_tasks >= 2:
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="CatalogSync") as pool:
                 fut_c = pool.submit(_fetch_courses_part)
                 fut_t = pool.submit(_fetch_thnn_part)
+                fut_p = pool.submit(_fetch_portal_part)
                 fresh_courses = fut_c.result()
                 fresh_thnn = fut_t.result()
+                portal_result = fut_p.result()
         else:
             fresh_courses = _fetch_courses_part()
             fresh_thnn = _fetch_thnn_part()
+            portal_result = _fetch_portal_part()
 
         with self._catalog_lock:
             snap = self._cache.load_catalog()
@@ -397,15 +523,30 @@ class CourseCatalogService:
                         course for course in snap.courses if course.source == source
                     )
 
-            if fresh_courses is not None or fresh_thnn is not None:
+            eff_term = portal_result[0] if portal_result is not None else snap.current_term_label
+            eff_specs = portal_result[1] if portal_result is not None else snap.portal_course_specs
+            merged = _apply_portal_enrichment(merged, eff_term, eff_specs)
+
+            if fresh_courses is not None or fresh_thnn is not None or portal_result is not None:
                 should_advance = fresh_courses is not None or (
                     self._courses_provider is None and fresh_thnn is not None
                 )
                 synced_at = (
                     self._now_seconds() if should_advance else snap.catalog_synced_at
                 )
-                self._cache.save_catalog(merged, synced_at=synced_at)
-            return _apply_course_flags(merged, snap.pinned_keys, snap.unseen_keys)
+                self._cache.save_catalog(
+                    merged,
+                    synced_at=synced_at,
+                    current_term_label=eff_term if portal_result is not None else None,
+                    portal_course_specs=eff_specs if portal_result is not None else None,
+                )
+            return _apply_course_flags(
+                merged,
+                snap.pinned_keys,
+                snap.unseen_keys,
+                current_term_label=eff_term,
+                portal_specs=eff_specs,
+            )
 
     def open_course_cached(self, source: CourseSource, course_id: int) -> CourseDetailSnapshot:
         """Load cached sections, grades, and known module IDs for immediate rendering."""
@@ -615,7 +756,13 @@ class CourseCatalogService:
             snap = self._cache.load_catalog()
             currently_pinned = course_key in snap.pinned_keys
             pins = self._cache.set_pinned(course_key, not currently_pinned)
-            return _apply_course_flags(snap.courses, pins, snap.unseen_keys)
+            return _apply_course_flags(
+                snap.courses,
+                pins,
+                snap.unseen_keys,
+                current_term_label=snap.current_term_label,
+                portal_specs=snap.portal_course_specs,
+            )
 
     def mark_course_seen(self, course_key: str) -> list[CourseSummary]:
         """Clear the unseen-updates indicator for a course and return sorted summaries."""
@@ -632,7 +779,13 @@ class CourseCatalogService:
                 self._cache.save_catalog(
                     updated_courses, synced_at=snap.catalog_synced_at
                 )
-            return _apply_course_flags(updated_courses, snap.pinned_keys, unseen)
+            return _apply_course_flags(
+                updated_courses,
+                snap.pinned_keys,
+                unseen,
+                current_term_label=snap.current_term_label,
+                portal_specs=snap.portal_course_specs,
+            )
 
     def record_recent(self, entry: RecentMaterialEntry) -> list[RecentMaterialEntry]:
         """Record a recently opened course material for quick access."""

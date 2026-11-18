@@ -1132,8 +1132,8 @@ class QuizActivityView(_BasePaneActivityView):
         if feedback_lines:
             body_controls.append(
                 ft.Container(
-                    bgcolor=ft.Colors.with_opacity(0.08, C.ACCENT),
-                    border=ft.Border.only(left=ft.BorderSide(3, C.ACCENT)),
+                    bgcolor=C.BG,
+                    border=ft.Border.all(1, C.BORDER),
                     border_radius=8,
                     padding=10,
                     content=ft.Column(spacing=4, controls=feedback_lines),
@@ -1143,13 +1143,8 @@ class QuizActivityView(_BasePaneActivityView):
         return ft.Container(
             key=ft.ScrollKey(f"quiz-q-{q.display_number}"),
             bgcolor=C.SURFACE,
-            border=ft.Border(
-                left=ft.BorderSide(4, C.BORDER if is_info else accent),
-                top=ft.BorderSide(1, C.BORDER),
-                right=ft.BorderSide(1, C.BORDER),
-                bottom=ft.BorderSide(1, C.BORDER),
-            ),
-            border_radius=10,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=12,
             padding=14,
             content=ft.Column(spacing=10, controls=body_controls),
         )
@@ -1334,21 +1329,21 @@ class QuizActivityView(_BasePaneActivityView):
                                     ),
                                 ],
                             ),
-                            ft.Text(
-                                f"Đúng {report.correct_count}/{total_q} ({int(round(accuracy * 100))}%)",
-                                size=13,
-                                weight=ft.FontWeight.W_700,
-                                color=C.SAFE if accuracy >= 0.5 else C.WARNING,
+                            ft.Container(
+                                bgcolor=C.SURFACE_ELEVATED,
+                                border=ft.Border.all(1, C.BORDER),
+                                border_radius=8,
+                                padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                                content=ft.Text(
+                                    f"Đúng {report.correct_count}/{total_q} ({int(round(accuracy * 100))}%)",
+                                    size=12,
+                                    weight=ft.FontWeight.W_600,
+                                    color=C.TEXT_PRIMARY,
+                                ),
                             ),
                         ],
                     ),
-                    ft.ProgressBar(
-                        value=accuracy,
-                        color=C.SAFE if accuracy >= 0.5 else C.WARNING,
-                        bgcolor=C.BORDER,
-                        bar_height=6,
-                        border_radius=3,
-                    ),
+                    ft.Divider(height=1, thickness=0.6, color=C.BORDER),
                     ft.Row(
                         wrap=True,
                         spacing=8,
@@ -2037,7 +2032,7 @@ class PaneAssignmentView(ft.Container):
             border=ft.Border.all(1, C.WARNING),
             border_radius=10,
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            margin=ft.Padding.only(left=16, right=16, top=10),
+            margin=ft.Margin.only(left=16, right=16, top=10),
             visible=False,
             content=ft.Row(
                 spacing=8,

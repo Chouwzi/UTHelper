@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import io
 import os
@@ -30,9 +30,12 @@ except Exception:  # pragma: no cover
 
 
 _DEFAULT_RENDERED_PDF_MAX_BYTES = 96 * 1024 * 1024
-_DEFAULT_MEMORY_CACHE_PAGES = 10
+_DEFAULT_MEMORY_CACHE_PAGES = 28
 _MIN_SCALE = 0.5
 _MAX_SCALE = 3.5
+_DARK_LUMA_LUT: list[int] = [
+    max(22, min(234, 244 - int(val * 0.87))) for val in range(256)
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,16 +88,16 @@ def clear_rendered_pdf_cache(cache_dir: Optional[Path]) -> int:
 
 
 def _invert_image_luminance(image: Any) -> Any:
-    """Invert luminance smoothly for dark reading while preserving color hues."""
+    """Invert luminance smoothly for dark reading using a C-speed lookup table."""
     rgb = image.convert("RGB")
     y_chan, cb_chan, cr_chan = rgb.convert("YCbCr").split()
-    mapped_y = y_chan.point(lambda val: max(22, min(234, 244 - int(val * 0.87))))
+    mapped_y = y_chan.point(_DARK_LUMA_LUT)
     return _PilImage.merge("YCbCr", (mapped_y, cb_chan, cr_chan)).convert("RGB")
 
 
 def _encode_pil_png(image: Any) -> bytes:
     buf = io.BytesIO()
-    image.save(buf, format="PNG", compress_level=3)
+    image.save(buf, format="PNG", compress_level=1)
     return buf.getvalue()
 
 
@@ -346,6 +349,24 @@ class PdfDocumentSession:
                 box = self._pypdf_reader.pages[page_index].mediabox
                 return (float(box.width), float(box.height))
             return (595.0, 842.0)
+
+    def peek_cached_page_png(
+        self,
+        page_index: int,
+        *,
+        scale: float = 1.6,
+        dark_mode: bool = False,
+    ) -> Optional[RenderedPdfPage]:
+        """Return an already-rendered page from in-RAM LRU cache in O(1) without I/O."""
+        with self._lock:
+            if not self.supported or not self.can_render_images or self._closed:
+                return None
+            key = self._cache_key_parts(page_index, scale, dark_mode)
+            cached = self._memory_cache.get(key)
+            if cached is not None:
+                self._memory_cache.move_to_end(key)
+                return replace(cached, from_cache=True)
+            return None
 
     def render_page_png(
         self,

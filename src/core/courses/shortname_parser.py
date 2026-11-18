@@ -197,6 +197,35 @@ def _soup_to_lines(soup: BeautifulSoup) -> str:
     return "\n".join(line for line in lines if line)
 
 
+_PORTAL_SEM_RE = re.compile(
+    r"(?:học\s*kỳ|hoc\s*ky|hk)\s*(?P<term>1|2|3|i{1,2}|hè|he|h)\D*(?P<y1>20\d{2})\s*[-–/]\s*(?P<y2>20\d{2})",
+    re.IGNORECASE,
+)
+
+
+def parse_portal_semester_label(ten_dot: str) -> tuple[str, tuple[int, int]]:
+    """Convert a UTH Portal semester string (e.g. 'Học kỳ 1 năm học 2026-2027') to ('HKI 2026-2027', (2026, 3))."""
+    raw = html.unescape(str(ten_dot or "")).strip()
+    if not raw:
+        return ("", (0, 0))
+    m = _PORTAL_SEM_RE.search(raw)
+    if m:
+        y1 = int(m.group("y1"))
+        y2 = int(m.group("y2"))
+        t = m.group("term").strip().upper()
+        if t in {"1", "I"}:
+            norm_t = "HKI"
+        elif t in {"2", "II"}:
+            norm_t = "HKII"
+        else:
+            norm_t = "HKH"
+        return _normalize_term(norm_t, y1, y2)
+    direct = _find_valid_semester_match(_SEMESTER_LONG_RE, raw, year_offset=0)
+    if direct:
+        return (direct[1], direct[2])
+    return ("", (0, 0))
+
+
 def extract_teacher_and_meet_info(html_fragments: Iterable[str]) -> TeacherContactInfo:
     """Scan Moodle HTML fragments for teacher name, email, phone, and meeting URL."""
     teacher_name = ""

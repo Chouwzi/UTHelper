@@ -93,6 +93,7 @@ class CoursesTabView(ft.Container):
         self._detail_request_seq = 0
         self._grade_request_seq = 0
         self._module_open_seq = 0
+        self._user_chose_semester = False
 
         self._list_pane = CourseListPane(
             on_select_course=lambda key: self._schedule_task(
@@ -440,6 +441,15 @@ class CoursesTabView(ft.Container):
             return True
         return False
 
+    def _apply_smart_default_semester(self, courses: list[CourseSummary]) -> None:
+        """Default to current-semester courses when Portal registration or current-term flags exist."""
+        if self._user_chose_semester or not courses:
+            return
+        has_portal = bool(getattr(self._svc, "has_portal_current_term", False))
+        has_explicit_current = any(c.is_current_term for c in courses)
+        if (has_portal or has_explicit_current) and self._state.semester_filter == "all":
+            self._state.semester_filter = "current"
+
     def load_initial(self) -> None:
         """Schedule initial 0ms cached catalog load and background staleness check."""
         if self._schedule_task(self.load_initial_async):
@@ -448,6 +458,7 @@ class CoursesTabView(ft.Container):
             try:
                 courses, recent, synced_at = self._svc.load_cached_catalog()
                 self._state.set_courses(courses)
+                self._apply_smart_default_semester(courses)
                 self._state.recent_items = list(recent)
                 if self._state.selected_course() is None:
                     self._state.last_synced_at = synced_at
@@ -467,6 +478,7 @@ class CoursesTabView(ft.Container):
             if cat_seq != self._catalog_request_seq:
                 return
             self._state.set_courses(courses)
+            self._apply_smart_default_semester(courses)
             self._state.recent_items = list(recent)
             if self._state.selected_course() is None:
                 self._state.last_synced_at = synced_at
@@ -474,9 +486,13 @@ class CoursesTabView(ft.Container):
             self._render()
 
             stale = await asyncio.to_thread(self._svc.is_catalog_stale, self.CATALOG_STALE_HOURS)
+            has_portal = bool(getattr(self._svc, "has_portal_current_term", False))
+            missing_portal_flags = has_portal and bool(courses) and not any(
+                c.is_current_term for c in courses
+            )
             if cat_seq != self._catalog_request_seq:
                 return
-            if stale or not courses:
+            if stale or not courses or missing_portal_flags:
                 await self.refresh_catalog_async(include_thnn=True)
         except Exception as exc:
             logger.warning("Initial catalog load failed: %s", exc)
@@ -505,6 +521,7 @@ class CoursesTabView(ft.Container):
             if req_id != self._catalog_request_seq:
                 return
             self._state.set_courses(courses)
+            self._apply_smart_default_semester(courses)
             self._state.recent_items = list(recent)
             if self._state.selected_course() is None:
                 self._state.last_synced_at = synced_at
@@ -520,6 +537,8 @@ class CoursesTabView(ft.Container):
                 self._render()
 
     def _handle_filter_change(self, semester: str, query: str) -> None:
+        if semester != self._state.semester_filter:
+            self._user_chose_semester = True
         self._state.semester_filter = semester
         self._state.search_query = query
         self._render()
