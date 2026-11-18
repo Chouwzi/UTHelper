@@ -157,6 +157,10 @@ class ViewManager:
             self.tab_switcher.content = self.grade_overview_view
         else:
             self._show_only(self.grade_overview_view)
+        # The cached grade view may have been detached while Settings previewed
+        # another theme. Refresh after attaching it so Flet sends the new
+        # surface colors with the next page update.
+        self.grade_overview_view.update_theme()
         self.controller.grades_btn.icon_color = C.ACCENT
         self.page.update()
 
