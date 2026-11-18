@@ -53,6 +53,10 @@ def _make_state_only_view():
         _opening_soon_hours_field=_control(),
         _workers_field=_control(),
         _sw_dnd_enable=_control(),
+        _class_schedule_summary=_control(""),
+        _sw_class_schedule=_control(),
+        _class_schedule_lead_chips={1: _control(selected=False), 2: _control(selected=False), 3: _control(selected=False)},
+        _class_schedule_lead_field=_control(),
         _dnd_start_field=_control(),
         _dnd_end_field=_control(),
         _sw_ignore_sub=_control(),
@@ -80,6 +84,7 @@ def _make_state_only_view():
     view._rebuild_theme_cards = Mock()
     view._update_profile_summary = Mock()
     view._update_dnd_summary = Mock()
+    view._update_class_schedule_summary = Mock()
     view._capture_form_snapshot = lambda: SettingsView._capture_form_snapshot(view)
     return view
 
