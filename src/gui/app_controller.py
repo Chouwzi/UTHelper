@@ -16,9 +16,11 @@ from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 from core.data_orchestrator import DataOrchestrator
+from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
 from core.portal_client import PortalClient
@@ -202,6 +204,7 @@ class AppController:
         self._scroll_to_top_in_progress = False
 
         self._init_window()
+        self._distribution_profile = resolve_distribution_channel()
         self._update_candidate = None
         self._manual_update_check_requested = False
         self._update_coordinator = self._create_update_coordinator()
@@ -241,7 +244,8 @@ class AppController:
             self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
 
-        self._update_coordinator.start()
+        if self._update_coordinator is not None:
+            self._update_coordinator.start()
 
         if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
             self._safe_run_task(self._show_login_dialog)
@@ -339,7 +343,15 @@ class AppController:
 
         return self.page.run_task(guarded_task)
 
-    def _create_update_coordinator(self) -> UpdateCoordinator:
+    def _get_distribution_profile(self) -> DistributionProfile:
+        profile = getattr(self, "_distribution_profile", None)
+        if profile is not None:
+            return profile
+        return resolve_distribution_channel()
+
+    def _create_update_coordinator(self) -> UpdateCoordinator | None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return None
         target = detect_runtime_target()
         downloader = VerifiedDownloader()
         if target.platform == "windows":
@@ -384,10 +396,70 @@ class AppController:
 
         return self._safe_run_task(_open) is not None
 
+    def _open_store_url(
+        self,
+        url: str,
+        fallback_url: str | None = None,
+    ) -> bool:
+        allowed_schemes = {"market", "ms-windows-store", "https"}
+        if urlsplit(url).scheme.lower() not in allowed_schemes:
+            return False
+        safe_fallback = (
+            fallback_url
+            if fallback_url and urlsplit(fallback_url).scheme.lower() == "https"
+            else None
+        )
+
+        async def _launch_single(target: str) -> None:
+            try:
+                await ft.UrlLauncher().launch_url(
+                    target,
+                    mode=ft.LaunchMode.EXTERNAL_APPLICATION,
+                )
+                return
+            except RuntimeError as exc:
+                if "must be added to the page first" not in str(exc):
+                    raise
+                launch_fn = getattr(self.page, "launch_url", None)
+                if (
+                    not callable(launch_fn)
+                    or getattr(launch_fn, "__func__", None) is ft.Page.launch_url
+                ):
+                    raise
+                await launch_fn(target)
+
+        async def _open() -> None:
+            try:
+                await _launch_single(url)
+            except Exception:
+                if safe_fallback:
+                    try:
+                        await _launch_single(safe_fallback)
+                        return
+                    except Exception:
+                        logger.warning(
+                            "Failed to open store fallback URL",
+                            exc_info=True,
+                        )
+                        return
+                logger.warning("Failed to open store URL", exc_info=True)
+
+        return self._safe_run_task(_open) is not None
+
+    def _cancel_update_download(self) -> None:
+        coordinator = getattr(self, "_update_coordinator", None)
+        if coordinator is not None:
+            coordinator.cancel_download()
+
     def _check_updates_now(self) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        coordinator = getattr(self, "_update_coordinator", None)
+        if coordinator is None:
+            return
         self._diag_breadcrumb("update_check", "started", "github")
         self._manual_update_check_requested = True
-        self._update_coordinator.check_now()
+        coordinator.check_now()
 
     def _submission_workflow_factory(self, client):
         """Build a fresh workflow only for the orchestrator's current client."""
@@ -750,7 +822,7 @@ class AppController:
             style=ft.ButtonStyle(
                 color=C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
             ),
-            on_click=lambda _event: self._update_coordinator.cancel_download(),
+            on_click=lambda _event: self._cancel_update_download(),
         )
         self._update_banner = ft.Container(
             content=ft.Column([
@@ -923,6 +995,7 @@ class AppController:
             on_close=lambda: self._safe_run_task(self._close_calendar),
             on_open_detail=lambda data: self._safe_run_task(self._show_detail_async, data),
         )
+        supports_self_update = self._get_distribution_profile().supports_github_self_update
         self.settings_view = SettingsView(
             self.page,
             self.orchestrator,
@@ -934,9 +1007,15 @@ class AppController:
             on_test_discord=self._on_test_discord,
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
-            on_check_update=self._check_updates_now,
-            on_update_action=self._request_update_download,
-            on_cancel_update=lambda: self._update_coordinator.cancel_download(),
+            on_check_update=self._check_updates_now if supports_self_update else None,
+            on_update_action=(
+                self._request_update_download if supports_self_update else None
+            ),
+            on_cancel_update=(
+                self._cancel_update_download if supports_self_update else None
+            ),
+            distribution_profile=self._get_distribution_profile(),
+            on_open_store_url=self._open_store_url,
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
@@ -2559,6 +2638,8 @@ class AppController:
         EmailNotifier().notify([dummy])
 
     def _on_update_event(self, event: UpdateEvent) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
         if event.candidate is not None:
             if event.candidate != self._update_candidate:
                 self._update_ready = False
@@ -2566,6 +2647,8 @@ class AppController:
         self._safe_run_task(self._apply_update_event, event)
 
     def _request_update_download(self, _event=None) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
         candidate = getattr(self, "_update_candidate", None)
         if candidate is not None:
             if getattr(self, "_update_open_release_page", False):
@@ -2573,9 +2656,16 @@ class AppController:
             elif getattr(self, "_update_ready", False):
                 self._show_update_confirmation()
             else:
-                self._update_coordinator.request_download(candidate)
+                coordinator = getattr(self, "_update_coordinator", None)
+                if coordinator is not None:
+                    coordinator.request_download(candidate)
 
     async def _apply_update_event(self, event: UpdateEvent) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            banner = getattr(self, "_update_banner", None)
+            if banner is not None:
+                banner.visible = False
+            return
         candidate = event.candidate
         if candidate is not None:
             self._update_candidate = candidate
@@ -2758,6 +2848,8 @@ class AppController:
             await self.page.window.destroy()
 
     def _show_update_confirmation(self) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
         if platform_utils.IS_WINDOWS:
             affirmative = "Cài đặt và thoát"
             content = "Ứng dụng sẽ đóng để cài bản cập nhật."
@@ -2777,7 +2869,9 @@ class AppController:
 
         def confirm(_event):
             self.page.pop_dialog()
-            self._update_coordinator.confirm_install()
+            coordinator = getattr(self, "_update_coordinator", None)
+            if coordinator is not None:
+                coordinator.confirm_install()
 
         dialog = ft.AlertDialog(
             modal=False,

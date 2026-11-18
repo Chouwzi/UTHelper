@@ -13,6 +13,11 @@ import subprocess
 import threading
 from typing import Callable, Protocol
 
+from core.distribution import (
+    DistributionChannel,
+    DistributionProfile,
+    resolve_distribution_channel,
+)
 from core.update_manifest import normalize_fingerprint
 from core.update_models import (
     LaunchResult,
@@ -253,8 +258,22 @@ def _architecture() -> str:
     return "unknown"
 
 
-def detect_windows_runtime_target() -> RuntimeTarget:
-    if has_package_identity():
+def detect_windows_runtime_target(
+    distribution: DistributionProfile | None = None,
+) -> RuntimeTarget:
+    try:
+        has_identity = has_package_identity()
+    except OSError:
+        has_identity = False
+    if has_identity:
+        return RuntimeTarget("windows", _architecture(), "msix")
+    profile = distribution or resolve_distribution_channel(
+        is_windows=True,
+        is_android=False,
+        is_ios=False,
+        has_package_identity_fn=has_package_identity,
+    )
+    if profile.channel is DistributionChannel.MSSTORE:
         return RuntimeTarget("windows", _architecture(), "msix")
     return RuntimeTarget(
         "windows",

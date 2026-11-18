@@ -34,7 +34,13 @@ else:
 
 # Platform-aware data directory
 def is_android():
-    return hasattr(sys, '_ANDROID_') or 'android' in sys.platform.lower() or hasattr(sys, '_IOS_')
+    return (
+        hasattr(sys, "_ANDROID_")
+        or hasattr(sys, "getandroidapilevel")
+        or "android" in sys.platform.lower()
+        or hasattr(sys, "_IOS_")
+        or sys.platform == "ios"
+    )
 
 def is_windows():
     return sys.platform == 'win32'
@@ -43,10 +49,11 @@ def _get_windows_data_dir() -> Path:
     return Path(os.getenv('APPDATA', BASE_DIR)) / "UTHelper"
 
 def _get_android_data_dir() -> Path:
-    flet_data = os.getenv("FLET_APP_DATA")
-    if flet_data:
-        return Path(flet_data) / "UTHelper"
-    return Path(BASE_DIR) / "UTHelper"
+    for env_var in ("FLET_APP_STORAGE_DATA", "FLET_APP_DATA"):
+        flet_data = os.getenv(env_var, "").strip()
+        if flet_data:
+            return Path(flet_data) / "UTHelper"
+    return Path.home() / ".uthelper"
 
 def _get_linux_data_dir() -> Path:
     return Path(tempfile.gettempdir()) / "UTHelper"

@@ -708,3 +708,123 @@ def test_download_state_remains_available_in_settings():
     assert statuses[0][0] == ("Đang tải v2.3.0 · 42%",)
     assert statuses[0][1]["progress"] == 0.42
     assert statuses[0][1]["action_label"] is None
+
+
+def test_store_channel_suppresses_update_coordinator_and_github_client(monkeypatch):
+    import pytest
+    from core.distribution import DistributionChannel, build_distribution_profile
+
+    for channel in (DistributionChannel.CHPLAY, DistributionChannel.MSSTORE):
+        monkeypatch.setattr(
+            app_controller_module,
+            "resolve_distribution_channel",
+            lambda c=channel: build_distribution_profile(c),
+        )
+        monkeypatch.setattr(
+            app_controller_module,
+            "GitHubReleaseClient",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("GitHubReleaseClient must not be instantiated on Store channels")
+            ),
+        )
+        monkeypatch.setattr(
+            app_controller_module,
+            "UpdateCoordinator",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("UpdateCoordinator must not be instantiated on Store channels")
+            ),
+        )
+        monkeypatch.setattr(
+            app_controller_module,
+            "detect_runtime_target",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("detect_runtime_target should not be called when self-update is disabled")
+            ),
+        )
+
+        controller = _update_event_controller()
+        controller._distribution_profile = build_distribution_profile(channel)
+        controller._update_coordinator = controller._create_update_coordinator()
+        assert controller._update_coordinator is None
+
+        controller._check_updates_now()
+        controller._cancel_update_download()
+        controller._request_update_download()
+        controller._show_update_confirmation()
+        controller._on_update_event(
+            UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+        )
+        asyncio.run(
+            controller._apply_update_event(
+                UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+            )
+        )
+        assert controller._update_banner.visible is False
+
+        controller.activation_broker = None
+        controller.settings_view = SimpleNamespace(cancel_pending_load=lambda: None)
+        controller._prefetch_cancel_event = SimpleNamespace(set=lambda: None)
+        controller._page_alive = SimpleNamespace(clear=lambda: None)
+        controller.orchestrator = SimpleNamespace(client=SimpleNamespace(close=lambda: None))
+        controller._on_disconnect(None)
+
+
+def test_lts_and_source_channels_keep_update_coordinator_active(monkeypatch):
+    from core.distribution import DistributionChannel, build_distribution_profile
+    from core.update_models import RuntimeTarget
+
+    for channel in (
+        DistributionChannel.APK_LTS,
+        DistributionChannel.EXE_LTS,
+        DistributionChannel.SOURCE,
+    ):
+        controller = AppController.__new__(AppController)
+        controller._distribution_profile = build_distribution_profile(channel)
+        controller._android_background = None
+        controller._update_candidate = None
+        monkeypatch.setattr(
+            app_controller_module,
+            "detect_runtime_target",
+            lambda: RuntimeTarget("other", "unknown", "source"),
+        )
+        coordinator = controller._create_update_coordinator()
+        assert coordinator is not None
+
+
+def test_open_store_url_uses_external_launch_and_https_fallback(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class FakeUrlLauncher:
+        async def launch_url(self, url, *, mode=None, **_kwargs):
+            calls.append((url, mode))
+            if url.startswith("market://"):
+                raise RuntimeError("no market handler")
+
+    monkeypatch.setattr(app_controller_module.ft, "UrlLauncher", FakeUrlLauncher)
+
+    controller = AppController.__new__(AppController)
+
+    def run_task(handler, *args):
+        asyncio.run(handler(*args))
+        return object()
+
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=run_task,
+    )
+
+    ok = controller._open_store_url(
+        "market://details?id=com.uthelper.uthelper",
+        "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+    )
+    assert ok is True
+    assert calls == [
+        ("market://details?id=com.uthelper.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
+        (
+            "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+            ft.LaunchMode.EXTERNAL_APPLICATION,
+        ),
+    ]
+
+    assert controller._open_store_url("javascript:alert(1)") is False
+
