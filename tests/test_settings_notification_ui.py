@@ -42,7 +42,7 @@ def test_class_schedule_chip_handler_uses_contrasting_selected_colors():
     )
     view = SimpleNamespace(
         _class_schedule_lead_chips={1: selected_chip},
-        _class_schedule_lead_field=SimpleNamespace(value=""),
+        _class_schedule_lead_field=SimpleNamespace(value="", update=Mock()),
         _on_form_field_change=lambda: None,
     )
 
