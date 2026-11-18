@@ -297,8 +297,8 @@ def test_reset_defaults_syncs_class_schedule_lead_field(monkeypatch):
     import gui.components.settings_view as settings_view_module
     import gui.core.theme as theme_module
 
-    monkeypatch.setattr(settings_view_module, "apply_theme", lambda _key: None)
-    monkeypatch.setattr(theme_module, "set_page_theme", lambda _page: None)
+    monkeypatch.setattr(settings_view_module, "apply_theme", lambda *_a, **_k: None)
+    monkeypatch.setattr(theme_module, "set_page_theme", lambda *_a, **_k: None)
 
     view = _make_state_only_view()
     view._apply_theme_colors = Mock()
