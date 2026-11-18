@@ -200,6 +200,7 @@ def _label_mode(labels: list[str]) -> str | None:
         "bắt đầu",
         "làm bài",
         "thực hiện bài",
+        "thực hiện lại đề thi",
     )
     resume = any(any(phrase in label for phrase in resume_phrases) for label in normalized)
     start = any(any(phrase in label for phrase in start_phrases) for label in normalized)

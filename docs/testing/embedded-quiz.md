@@ -76,7 +76,7 @@ worktree at `89c3b3d` and its uncommitted edits were preserved. Baseline source
 suite: **1,631 passed, 25 skipped**. Skipped tests require their declared live or
 platform conditions.
 
-Direct-entry source verification: **1,744 passed, 25 skipped** (six existing
+Direct-entry source verification: **1,745 passed, 25 skipped** (six existing
 Sentry deprecation warnings), including both native extension packages. Ruff and
 the Gitflow direction check passed. The extension's Dart analyzer reported no
 issues and all six Flutter extension tests passed. These are source checks,
@@ -139,16 +139,45 @@ could not establish answer/save/submit interactions. No answer was changed or
 submitted by these checks. The owner's narrow-window error screenshot also
 exposed clipped status text; the status row now constrains and wraps it.
 
-Before release, record each result independently:
+### Provider and Windows acceptance, 2026-11-18
+
+The native Windows client was operated directly with mouse input against the
+owner-approved Courses quiz. The private acceptance harness mounts the production
+`DetailView` and `QuizPlayerView` with the compiled WebView extension and saved
+account. It does not mock Moodle or question interactions. This establishes the
+native quiz component path; it is separate from a packaged app startup test.
+
+| Check | Observed result |
+| --- | --- |
+| Open/resume | Saved-account login opened the unfinished attempt directly, with no overview/course screen; securewindow entered fullscreen. |
+| Save/read back | Changed one existing selection, navigated to another page, closed the player, opened a fresh session, and read back the changed selection. Restored the original selection before submission. |
+| Cancel close | The confirmation was dismissed through Continue; the same question and selection remained mounted. |
+| Confirm close | Returned to details and restored the original narrow window; reopening resumed the last page. |
+| Cancel submission | Moodle's final confirmation was cancelled; a separate WS read still reported the original attempt as inprogress. |
+| Submit | Clicked Moodle's final submit once; the review page showed completion and a separate WS read reported that same attempt as finished. Attempt count and identifiers were unchanged. |
+| New attempt/cancel | After submission, the remaining-attempt action displayed the app confirmation in the original window. Cancelling left both existing attempts unchanged and created no new attempt. |
+
+This run exposed a real localization defect: the deployed reattempt button is
+`Thực hiện lại đề thi`, which the entry classifier previously treated as an
+unsupported action. The classifier now recognizes that label as a new attempt,
+retaining the explicit confirmation requirement. A regression exercises both
+the English label and this observed Vietnamese label. The repaired confirmation
+and cancellation path was rerun against the live provider; the remaining attempt
+was preserved. No questions, choices, grades, credentials or provider identifiers
+are included in this evidence document or PR.
+
+Remaining release checks, distinct from the accepted path above:
 
 - Source: URL/site/account isolation, real quiz positive cases, SEB exclusions,
   deferred HTML login, lease release, duplicate-open prevention, cancel/close,
   status refresh and browser fallback.
-- Windows native: real control registration, Moodle login, popup creation and
-  close, keyboard/focus, narrow layout, missing runtime and load errors.
-- Provider live: resume the approved attempt, change/save then read back the
-  same answer, close/cancel/reopen without losing it, summary, cancel submission,
-  submit once and read `finished` from Moodle before claiming success.
+- Windows native: packaged app startup, other Moodle-created popup cases,
+  keyboard/focus coverage, missing runtime and load errors. Normal-window quizzes
+  and exhausted-attempt controls have source coverage; this live sample uses
+  securewindow and still has an unused attempt.
+- Provider live: a password-protected quiz and accepting creation of a fresh
+  attempt. Password preflight and one-shot creation have source coverage; this
+  run resumed and submitted the already-started permitted attempt.
 - Android/iOS: compile each target, then verify login, popup/session sharing,
   audio, background/resume and close on an actual device or simulator. A build
   alone does not establish working quiz submission.

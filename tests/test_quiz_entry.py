@@ -109,9 +109,12 @@ def _release(prepared, lease):
     lease.release()
 
 
-def test_prepare_only_inspects_and_start_requires_explicit_confirmation(monkeypatch):
+@pytest.mark.parametrize("start_label", ["Start attempt", "Thực hiện lại đề thi"])
+def test_prepare_only_inspects_and_start_requires_explicit_confirmation(
+    monkeypatch, start_label
+):
     prepared, lease, operation_lease, calls, _ = _prepared(
-        monkeypatch, _overview("Start attempt", secure=True)
+        monkeypatch, _overview(start_label, secure=True)
     )
     try:
         assert prepared.mode == "start"
