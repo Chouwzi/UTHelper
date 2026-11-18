@@ -539,7 +539,10 @@ def test_discard_restores_entire_baseline_and_theme_without_logging_secrets(
     assert view._capture_form_snapshot() == baseline
     assert SettingsView.has_changes(view) is False
     applied_theme.assert_called_once_with(baseline.theme)
-    applied_page_theme.assert_called_once_with(view._page)
+    applied_page_theme.assert_called_once_with(
+        view._page,
+        theme_name=baseline.theme,
+    )
     view._on_theme_preview.assert_called_once_with()
     for secret in (
         baseline.uth_password,
