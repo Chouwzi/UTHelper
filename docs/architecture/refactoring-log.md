@@ -1966,3 +1966,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Preserve the existing `v2.4.0` tag and use patch version `2.4.1` (native build
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
+
+## Settings custom color picker review fixes (2026-11-18)
+
+- Keep the dialog on Flet's `show_dialog()` / `pop_dialog()` lifecycle and only
+  pop it when it is open.
+- Normalize accepted values to uppercase `#RRGGBB`; invalid values show an
+  inline error and leave the dialog open.
+- Applying a color invokes the settings field's `on_change` handler so the
+  color preview and unsaved-changes state update together.
+- Tests and lint were not run.
