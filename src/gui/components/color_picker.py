@@ -72,7 +72,7 @@ class ColorPicker:
         self.prv.bgcolor = hex_val
         self.prv.update()
         self.hex_inp.value = hex_val
-        self.hex_inp.error_text = None
+        self.hex_inp.error = None
         self.hex_inp.update()
 
     def _update_from_hex(self, e):
@@ -88,17 +88,19 @@ class ColorPicker:
         self.b_sl.update()
         self.prv.bgcolor = normalized
         self.prv.update()
-        self.hex_inp.error_text = None
+        self.hex_inp.error = None
+        self.hex_inp.update()
 
     def _apply(self, e):
         normalized = self._normalize_hex(self.hex_inp.value)
         if normalized is None:
-            self.hex_inp.error_text = "Nhập mã màu hợp lệ theo dạng #RRGGBB."
+            self.hex_inp.error = "Mã màu không hợp lệ. Nhập theo dạng #RRGGBB."
             self.hex_inp.update()
             return
 
         self.hex_inp.value = normalized
-        self.hex_inp.error_text = None
+        self.hex_inp.error = None
+        self.hex_inp.update()
         self.container_box.bgcolor = normalized
         self.tb_field.value = normalized
         on_change = self.tb_field.on_change

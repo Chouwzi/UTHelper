@@ -1975,4 +1975,7 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   inline error and leave the dialog open.
 - Applying a color invokes the settings field's `on_change` handler so the
   color preview and unsaved-changes state update together.
-- Tests and lint were not run.
+- Added focused tests for invalid values, normalized Apply and change callback,
+  clearing the field error, and avoiding dismissal of a closed dialog.
+- `pytest tests/test_color_picker.py -q`: 4 passed. Full suite and lint were not
+  run; Ruff is not installed in the local environment.
