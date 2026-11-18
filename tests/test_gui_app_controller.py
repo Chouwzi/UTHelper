@@ -295,6 +295,27 @@ def test_today_schedule_state_updates_component_and_page_once():
     assert calls == [("state", state), ("update",)]
 
 
+def test_auth_required_schedule_state_clears_class_reminders():
+    """A logged-out Portal session must drop the previous account's reminders."""
+    controller = AppController.__new__(AppController)
+    calls = []
+    controller._safe_run_task = lambda handler, *args: calls.append((handler, args))
+    controller._diag_breadcrumb = lambda *args: None
+    controller._today_schedule_component = SimpleNamespace(set_state=lambda _s: None)
+    controller.page = SimpleNamespace(update=lambda: None)
+
+    controller._on_today_schedule_state(
+        TodayScheduleViewState(ScheduleLoadStatus.AUTH_REQUIRED)
+    )
+
+    reconciliations = [
+        args[0]
+        for handler, args in calls
+        if handler == controller._reconcile_class_schedule_notifications
+    ]
+    assert reconciliations == [()]
+
+
 def test_safe_run_task_reports_unhandled_background_exception(caplog):
     scheduled = []
     reported = []

@@ -1645,35 +1645,37 @@ class AppController:
                 )
 
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
-    self._today_schedule_state = state
-    if state.status is ScheduleLoadStatus.READY and state.snapshot is not None:
-        # Reconcile from the Portal snapshot already fetched for the dashboard.
-        # The platform receives only the scheduled reminder payload, never credentials.
-        self._safe_run_task(
-            self._reconcile_class_schedule_notifications, state.snapshot.sessions
-        )
-    elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
-        self._safe_run_task(self._reconcile_class_schedule_notifications, ())
+        self._today_schedule_state = state
+        if state.status is ScheduleLoadStatus.READY and state.snapshot is not None:
+            # Reconcile from the Portal snapshot already fetched for the dashboard.
+            # The platform receives only the scheduled reminder payload, never credentials.
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, state.snapshot.sessions
+            )
+        elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
+            # Logged out / session expired: drop reminders owned by the previous
+            # account so Windows never fires them again.
+            self._safe_run_task(self._reconcile_class_schedule_notifications, ())
 
-    if state.status is ScheduleLoadStatus.LOADING:
-        self._diag_breadcrumb("schedule_load", "started", "portal")
-    elif state.status is ScheduleLoadStatus.READY:
-        self._diag_breadcrumb("schedule_load", "succeeded", "portal")
-    elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
-        self._diag_breadcrumb(
-            "schedule_load", "permission_denied", "portal"
-        )
-    elif state.status is ScheduleLoadStatus.ERROR:
-        self._diag_breadcrumb("schedule_load", "failed", "portal")
-        
-    component = getattr(self, "_today_schedule_component", None)
-    if component is None:
-        return
-    component.set_state(state)
-    try:
-        self.page.update()
-    except Exception:
-        logger.debug("Today schedule UI update skipped", exc_info=True)
+        if state.status is ScheduleLoadStatus.LOADING:
+            self._diag_breadcrumb("schedule_load", "started", "portal")
+        elif state.status is ScheduleLoadStatus.READY:
+            self._diag_breadcrumb("schedule_load", "succeeded", "portal")
+        elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
+            self._diag_breadcrumb(
+                "schedule_load", "permission_denied", "portal"
+            )
+        elif state.status is ScheduleLoadStatus.ERROR:
+            self._diag_breadcrumb("schedule_load", "failed", "portal")
+
+        component = getattr(self, "_today_schedule_component", None)
+        if component is None:
+            return
+        component.set_state(state)
+        try:
+            self.page.update()
+        except Exception:
+            logger.debug("Today schedule UI update skipped", exc_info=True)
 
     def _update_footer(self):
         self._refresh_ui()

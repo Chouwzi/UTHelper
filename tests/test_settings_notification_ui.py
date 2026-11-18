@@ -30,7 +30,7 @@ def test_milestone_handler_keeps_flet_updated_chip_state():
 
     assert selected_chip.selected is False
     assert view._milestones_field.value == "4320"
-    assert selected_chip.label.color == "#111827"
+    assert selected_chip.label.color == C.TEXT_PRIMARY
     assert view._milestone_summary.value == "Bạn sẽ nhận 1 lần nhắc cho mỗi deadline"
 
 
@@ -49,9 +49,9 @@ def test_class_schedule_chip_handler_uses_contrasting_selected_colors():
     handler = SettingsView._handle_class_schedule_lead_toggle(view, 1)
     handler(SimpleNamespace(control=selected_chip))
 
-    assert selected_chip.label.color == "#FFFFFF"
+    assert selected_chip.label.color == C.ON_ACCENT
     assert selected_chip.selected_color == C.ACCENT
-    assert selected_chip.bgcolor == "#FFFFFF"
+    assert selected_chip.bgcolor == C.SURFACE
     assert view._class_schedule_lead_field.value == "1"
 
 

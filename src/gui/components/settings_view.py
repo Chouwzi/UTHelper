@@ -642,7 +642,7 @@ class SettingsView(ft.Container):
             chip.bgcolor = C.SURFACE
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
             update_chip = getattr(chip, "update", None)
             if callable(update_chip):
                 update_chip()
@@ -1338,7 +1338,7 @@ class SettingsView(ft.Container):
             chip.check_color = C.ON_ACCENT
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
@@ -2321,7 +2321,7 @@ class SettingsView(ft.Container):
             chip.check_color = C.ON_ACCENT
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
-                label.color = C.ON_ACCENT if getattr(chip, "selected", False) else C.TEXT_PRIMARY
+                label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
         self._muted_courses_field.value = ", ".join(snapshot.notify_muted_courses)
         for key, card in self._profile_cards.items():
             selected = key == snapshot.notification_profile
