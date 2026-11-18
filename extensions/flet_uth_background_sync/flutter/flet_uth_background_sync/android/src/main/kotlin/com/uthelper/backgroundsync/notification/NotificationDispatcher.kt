@@ -1,6 +1,7 @@
 package com.uthelper.backgroundsync.notification
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -95,6 +96,7 @@ class NotificationDispatcher(private val context: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setContentIntent(contentIntent)
             .build()
         return runCatching {

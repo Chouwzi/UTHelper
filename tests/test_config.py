@@ -230,8 +230,8 @@ def test_class_schedule_reminder_settings_have_safe_defaults_and_migrate():
     migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 4})
 
     assert migrated["NOTIFY_CLASS_SCHEDULE_ENABLED"] is False
-    assert migrated["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1, 2, 3]
+    assert migrated["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1]
     assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
     settings = Settings(**migrated)
     assert settings.NOTIFY_CLASS_SCHEDULE_ENABLED is False
-    assert settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS == [1, 2, 3]
+    assert settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS == [1]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,9 +53,27 @@ class PortalClient:
         self._timeout = max(1.0, float(timeout))
         self._opener = opener
         self._token = ""
+        # The cached token belongs to exactly one account: after an account
+        # switch a stale token must never be replayed for the new username.
+        self._token_owner = ""
+        self._token_lock = threading.Lock()
 
     def clear_token(self) -> None:
-        self._token = ""
+        with self._token_lock:
+            self._token = ""
+            self._token_owner = ""
+
+    def _cached_token(self, username: str) -> str:
+        """Return the cached token only when it was issued for ``username``."""
+        with self._token_lock:
+            if self._token and self._token_owner == username:
+                return self._token
+            return ""
+
+    def _store_token(self, token: str, username: str) -> None:
+        with self._token_lock:
+            self._token = token
+            self._token_owner = username
 
     def _request_json(
         self,
@@ -113,13 +132,13 @@ class PortalClient:
         if not isinstance(token, str) or not token:
             self.clear_token()
             raise PortalAuthenticationError("Portal login was rejected")
-        self._token = token
+        self._store_token(token, username)
         return token
 
     def fetch_day(
         self, target_date: date, username: str, password: str
     ) -> tuple[ClassSession, ...]:
-        token = self._token or self._login(username, password)
+        token = self._cached_token(username) or self._login(username, password)
         try:
             payload = self._request_json(
                 "GET",
@@ -139,7 +158,7 @@ class PortalClient:
             )
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            self._store_token(refreshed_token, username)
         try:
             return parse_portal_day(payload, target_date)
         except ValueError as exc:
@@ -149,7 +168,7 @@ class PortalClient:
         self, username: str, password: str
     ) -> list[dict[str, Any]]:
         """Fetches full academic transcript containing all semester grades from Portal."""
-        token = self._token or self._login(username, password)
+        token = self._cached_token(username) or self._login(username, password)
         try:
             payload = self._request_json(
                 "GET",
@@ -167,7 +186,7 @@ class PortalClient:
             )
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            self._store_token(refreshed_token, username)
 
         body = payload.get("body")
         if isinstance(body, list) and body:

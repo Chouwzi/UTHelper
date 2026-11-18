@@ -19,7 +19,6 @@ from core.today_schedule import ClassSession
 SUPPORTED_LEAD_HOURS = (1, 2, 3)
 
 _ONLINE_MARKERS = (
-    "online",
     "truc tuyen",
     "zoom",
     "google meet",
@@ -30,14 +29,13 @@ _ONLINE_MARKERS = (
     "google classroom",
     "classroom.google.com",
     "webex",
-    "e-learning",
-    "elearning",
-    "hoc online",
-    "hoc truc tuyen",
-    "lop truc tuyen",
     "hinh thuc online",
-    "hinh thuc truc tuyen",
 )
+
+# The location fields may say "Online" outright, so they accept the broad
+# words as well. Notes deliberately do not: "nộp bài trên elearning" or
+# "không học online" describe homework, not the delivery mode of a class.
+_LOCATION_ONLINE_MARKERS = _ONLINE_MARKERS + ("online", "elearning", "e-learning")
 
 
 def _normalize(value: str) -> str:
@@ -47,15 +45,25 @@ def _normalize(value: str) -> str:
 
 
 def detect_delivery_mode(session: ClassSession) -> str | None:
-    """Return ``online``, ``in_person`` or None for ambiguous Portal rows."""
-    room = (session.room or "").strip()
-    campus = (session.campus or "").strip()
-    note = (session.note or "").strip()
-    description = _normalize(" ".join((room, campus, note)))
-    if any(marker in description for marker in _ONLINE_MARKERS):
-        return "online"
-    if room or campus:
+    """Return ``online``, ``in_person`` or None for ambiguous Portal rows.
+
+    A physical room/campus wins any conflict: the note may mention an online
+    platform without the class itself being remote. Only an explicit online
+    marker inside the location fields, or — when no location exists at all —
+    inside the note, makes a session online. Broad words such as bare
+    "online"/"elearning" are not note markers because they appear in negated
+    or unrelated notes; ambiguous rows are skipped instead of guessed.
+    """
+    room = _normalize((session.room or "").strip())
+    campus = _normalize((session.campus or "").strip())
+    note = _normalize((session.note or "").strip())
+    location = " ".join(part for part in (room, campus) if part)
+    if location:
+        if any(marker in location for marker in _LOCATION_ONLINE_MARKERS):
+            return "online"
         return "in_person"
+    if note and any(marker in note for marker in _ONLINE_MARKERS):
+        return "online"
     return None
 
 
@@ -133,7 +141,13 @@ def _move_out_of_dnd(
     return next_allowed
 
 
-def _stable_reminder_id(session: ClassSession, lead_hours: int) -> str:
+def _stable_reminder_id(session: ClassSession, scheduled_at: datetime) -> str:
+    """Identify one reminder slot: session identity plus the fire time.
+
+    The DND shift can collapse several lead times onto the same instant, so
+    the id derives from ``scheduled_at`` (not the original lead) and lets the
+    caller merge duplicates by id.
+    """
     identity = session.session_id.strip() or "|".join(
         (
             session.course_code,
@@ -144,9 +158,20 @@ def _stable_reminder_id(session: ClassSession, lead_hours: int) -> str:
             session.note,
         )
     )
-    raw = f"{identity}|{session.start_at.isoformat()}|{lead_hours}h|class-schedule"
+    raw = f"{identity}|{session.start_at.isoformat()}|{scheduled_at.isoformat()}|class-schedule"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
     return f"class:{digest}"
+
+
+def _effective_lead_hours(class_start: datetime, scheduled_at: datetime) -> int:
+    """Label a reminder with the lead that is true when it actually fires.
+
+    DND moves a reminder later, so the original 1/2/3-hour label can be stale
+    ("Còn 3 giờ nữa" thirty minutes before class). The payload contract only
+    accepts integers 1..3, hence the half-up rounding and clamping.
+    """
+    actual = (class_start - scheduled_at).total_seconds() / 3600.0
+    return max(1, min(3, int(actual + 0.5)))
 
 
 def build_class_schedule_reminders(
@@ -194,7 +219,10 @@ def build_class_schedule_reminders(
             )
             if scheduled_at is None or scheduled_at <= current or scheduled_at >= session.start_at:
                 continue
-            reminder_id = _stable_reminder_id(session, lead)
+            # Several leads can collapse onto one instant after the DND shift;
+            # the slot-derived id merges them and the label follows the real
+            # remaining time instead of the original lead.
+            reminder_id = _stable_reminder_id(session, scheduled_at)
             if reminder_id in seen:
                 continue
             seen.add(reminder_id)
@@ -203,7 +231,7 @@ def build_class_schedule_reminders(
                     reminder_id=reminder_id,
                     session=session,
                     scheduled_at=scheduled_at,
-                    lead_hours=lead,
+                    lead_hours=_effective_lead_hours(session.start_at, scheduled_at),
                     delivery_mode=mode,
                 )
             )

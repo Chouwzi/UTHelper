@@ -10,6 +10,7 @@ from core.notification_policy import (
     ActivityNotificationPolicy,
     NotificationPolicyConfig,
 )
+from core.class_schedule_notifications import build_class_schedule_reminders
 from core.notification_types import (
     ActivityNotification,
     DispatchResult,
@@ -389,6 +390,123 @@ class NotificationManager:
         diagnostics.scheduled += aggregate.scheduled
         diagnostics.cancelled += aggregate.cancelled
         return aggregate
+
+    async def reconcile_class_schedule_notifications(
+        self,
+        sessions,
+        *,
+        clear_only: bool = False,
+        fetch_day=None,
+        identity_getter=None,
+        android_bridge=None,
+    ) -> None:
+        """Replace class-schedule reminders from the latest Portal snapshot.
+
+        The whole workflow runs under one lock so a slow ``fetch_day`` can
+        never race a newer reconcile (account switch/logout), and the account
+        identity is re-checked after every await: a task that started under
+        old credentials aborts instead of overwriting a ``clear_only`` run.
+
+        ``clear_only=True`` drops every class reminder without any network
+        call. ``fetch_day`` is an optional async callable returning tomorrow's
+        sessions, ``identity_getter`` the current account identity, and
+        ``android_bridge`` the optional native scheduler.
+        """
+        lock = getattr(self, "_class_schedule_reconcile_lock", None)
+        if lock is None:
+            lock = self._class_schedule_reconcile_lock = asyncio.Lock()
+        async with lock:
+            identity_before = identity_getter() if identity_getter else None
+
+            def identity_changed() -> bool:
+                return (
+                    identity_getter is not None
+                    and identity_getter() != identity_before
+                )
+
+            enabled = bool(
+                getattr(config, "NOTIFY_CLASS_SCHEDULE_ENABLED", False)
+            )
+            session_snapshot = list(sessions)
+            credentials_available = bool(
+                getattr(config, "UTH_USERNAME", "")
+            ) and bool(getattr(config, "UTH_PASSWORD", ""))
+            if (
+                enabled
+                and not clear_only
+                and credentials_available
+                and fetch_day is not None
+            ):
+                # TodayScheduleCoordinator owns today's dashboard snapshot.
+                # Fetch tomorrow once during foreground scheduling as well, so
+                # a class beginning tomorrow can still have its alarm persisted
+                # before the app is suspended or the user leaves the device.
+                try:
+                    tomorrow_sessions = await fetch_day()
+                    if identity_changed():
+                        logger.info(
+                            "Skipping class-schedule reconcile: account changed during fetch"
+                        )
+                        return
+                    session_snapshot.extend(tomorrow_sessions)
+                except Exception:
+                    logger.warning(
+                        "Could not fetch tomorrow's Portal timetable for reminders",
+                        exc_info=True,
+                    )
+            if identity_changed():
+                logger.info(
+                    "Skipping class-schedule reconcile: account changed before applying"
+                )
+                return
+
+            reminders = build_class_schedule_reminders(
+                session_snapshot,
+                enabled=enabled,
+                lead_hours=getattr(
+                    config, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", (1,)
+                ),
+                dnd_enabled=bool(getattr(config, "NOTIFY_DND_ENABLE", False)),
+                dnd_start=int(getattr(config, "NOTIFY_DND_START", 22)),
+                dnd_end=int(getattr(config, "NOTIFY_DND_END", 7)),
+            )
+            payload = [reminder.to_platform_payload() for reminder in reminders]
+
+            if android_bridge is not None and getattr(
+                android_bridge, "available", False
+            ):
+                try:
+                    result = await android_bridge.schedule_class_sessions(
+                        payload, enabled=enabled
+                    )
+                    logger.info(
+                        "Class-schedule reminders reconciled on mobile: desired=%s scheduled=%s cancelled=%s",
+                        len(payload),
+                        result.get("scheduled", 0) if isinstance(result, dict) else 0,
+                        result.get("cancelled", 0) if isinstance(result, dict) else 0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Cannot reconcile native class-schedule reminders",
+                        exc_info=True,
+                    )
+                return
+
+            # Windows uses the tray-owned durable scheduler; it remains
+            # available while the application is minimized to the tray.
+            for notifier in self.notifiers:
+                reconcile = getattr(
+                    notifier, "reconcile_class_schedule_reminders", None
+                )
+                if not callable(reconcile):
+                    continue
+                try:
+                    await asyncio.to_thread(reconcile, reminders)
+                except Exception:
+                    logger.warning(
+                        "Cannot reconcile Windows class-schedule reminders",
+                        exc_info=True,
+                    )
 
     async def cancel_activity(self, activity_id: str) -> int:
         """Cancel all native reminders associated with a Moodle activity ID."""

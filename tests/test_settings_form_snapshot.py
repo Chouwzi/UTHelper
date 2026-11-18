@@ -318,12 +318,13 @@ def test_class_schedule_reminder_defaults_to_disabled():
     assert snapshot.to_settings_values()["NOTIFY_CLASS_SCHEDULE_ENABLED"] is False
 
 
-def test_class_schedule_lead_hours_default_to_one_two_and_three_hours():
+def test_class_schedule_lead_hours_default_to_one_hour():
     snapshot = SettingsFormSnapshot.from_form_values({})
 
     assert snapshot.notify_class_schedule_enabled is False
-    assert snapshot.notify_class_schedule_lead_hours == (1, 2, 3)
-    assert snapshot.to_settings_values()["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1, 2, 3]
+    # Issue #86: a single reminder, one hour before class, by default.
+    assert snapshot.notify_class_schedule_lead_hours == (1,)
+    assert snapshot.to_settings_values()["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1]
 
 
 def test_class_schedule_lead_hours_round_trip_and_validate_supported_values():

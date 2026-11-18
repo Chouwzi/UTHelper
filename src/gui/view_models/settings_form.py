@@ -33,7 +33,7 @@ DEFAULT_COLORS = {
 }
 DEFAULT_NOTIFY_TYPES = ("assignment", "attendance", "quiz")
 DEFAULT_MILESTONES = (4320, 1440, 180, 60, 30, 5)
-DEFAULT_CLASS_SCHEDULE_LEAD_HOURS = (1, 2, 3)
+DEFAULT_CLASS_SCHEDULE_LEAD_HOURS = (1,)
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 
@@ -307,7 +307,7 @@ class SettingsFormSnapshot:
     @classmethod
     def from_form_values(cls, values: Mapping[str, object]) -> SettingsFormSnapshot:
         """Parse controls into the canonical state, with value-safe errors."""
-        return cls(
+        snapshot = cls(
             theme=_text(values.get("theme"), DEFAULT_THEME),
             color_critical=_normalize_color(values.get("color_critical"), DEFAULT_COLORS["color_critical"]),
             color_warning=_normalize_color(values.get("color_warning"), DEFAULT_COLORS["color_warning"]),
@@ -362,6 +362,13 @@ class SettingsFormSnapshot:
             ),
             notify_muted_courses=_normalize_csv_strings(values.get("notify_muted_courses")),
         )
+        if snapshot.notify_class_schedule_enabled and not snapshot.notify_class_schedule_lead_hours:
+            # Enabling reminders with every lead chip deselected would
+            # silently schedule nothing; reject it so the UI can explain.
+            raise SettingsFormValidationError(
+                "notify_class_schedule_lead_hours must contain at least one of 1, 2 or 3"
+            )
+        return snapshot
 
     def to_settings_values(self) -> dict[str, object]:
         """Return an explicit config-field mapping; no implicit name conversion."""

@@ -299,8 +299,10 @@ class Settings(BaseModel):
         description="Bật thông báo nhắc lịch học từ UTH Portal",
     )
     NOTIFY_CLASS_SCHEDULE_LEAD_HOURS: list[int] = Field(
-        default_factory=lambda: [1, 2, 3],
-        description="Các mốc nhắc trước giờ học (giờ): 1, 2, 3",
+        # Issue #86: one reminder, one hour before class. Users may opt into
+        # the 2/3-hour marks from Settings, but never get them by default.
+        default_factory=lambda: [1],
+        description="Các mốc nhắc trước giờ học (giờ): 1, 2, 3 (mặc định chỉ 1)",
     )
 
     # Cài đặt hiệu năng
@@ -355,7 +357,7 @@ def migrate_settings_data(raw: dict) -> dict:
                 pass
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_ENABLED", False)
-    data.setdefault("NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1, 2, 3])
+    data.setdefault("NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1])
     data["SETTINGS_SCHEMA_VERSION"] = 5
     return data
 

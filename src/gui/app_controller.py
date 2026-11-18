@@ -29,7 +29,6 @@ from core.today_schedule import (
     TodayScheduleCoordinator,
     TodayScheduleViewState,
 )
-from core.class_schedule_notifications import build_class_schedule_reminders
 from core.use_cases.submission_workflow import SubmissionWorkflow
 from core.activity_time_policy import ActivityTimePolicy
 from core.activity_status import normalize_submission_status
@@ -1574,83 +1573,42 @@ class AppController:
         else:
             self._safe_run_task(coordinator.ensure_today)
 
+    def _fetch_tomorrow_sessions(self):
+        """Async callable: tomorrow's Portal classes for reminder scheduling."""
+        from datetime import timedelta
+
+        tomorrow = datetime.now().date() + timedelta(days=1)
+        return asyncio.to_thread(
+            self._portal_client.fetch_day,
+            tomorrow,
+            settings.UTH_USERNAME,
+            settings.UTH_PASSWORD,
+        )
+
     async def _reconcile_class_schedule_notifications(
         self, sessions, *, clear_only: bool = False
     ) -> None:
-        """Replace scheduled reminders derived from the latest Portal snapshot.
+        """Delegate the class-schedule reconcile use case to NotificationManager.
 
         ``clear_only=True`` drops reminders owned by a previous account without
         any network call: used on logout/credentials change where fetching a
         day's timetable would use stale credentials and race the new account's
-        schedule.
+        schedule. The manager serializes concurrent runs and re-checks the
+        account identity after every await.
         """
-        enabled = bool(getattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", False))
-        session_snapshot = list(sessions)
-        if enabled and not clear_only and settings.UTH_USERNAME and settings.UTH_PASSWORD:
-            # TodayScheduleCoordinator owns today's dashboard snapshot. Fetch
-            # tomorrow once during foreground scheduling as well, so a class
-            # beginning tomorrow can still have its 60-minute alarm persisted
-            # before the app is suspended or the user leaves the device.
-            try:
-                from datetime import timedelta
-
-                tomorrow = datetime.now().date() + timedelta(days=1)
-                tomorrow_sessions = await asyncio.to_thread(
-                    self._portal_client.fetch_day,
-                    tomorrow,
-                    settings.UTH_USERNAME,
-                    settings.UTH_PASSWORD,
-                )
-                session_snapshot.extend(tomorrow_sessions)
-            except Exception:
-                logger.warning(
-                    "Could not fetch tomorrow's Portal timetable for reminders",
-                    exc_info=True,
-                )
-
-        reminders = build_class_schedule_reminders(
-            session_snapshot,
-            enabled=enabled,
-            lead_hours=settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS,
-            dnd_enabled=bool(settings.NOTIFY_DND_ENABLE),
-            dnd_start=int(settings.NOTIFY_DND_START),
-            dnd_end=int(settings.NOTIFY_DND_END),
+        manager = getattr(self, "notifier", None)
+        reconcile = getattr(
+            manager, "reconcile_class_schedule_notifications", None
         )
-        payload = [reminder.to_platform_payload() for reminder in reminders]
-
-        bridge = getattr(self, "_android_background", None)
-        if bridge is not None and bridge.available:
-            try:
-                result = await bridge.schedule_class_sessions(
-                    payload, enabled=enabled
-                )
-                logger.info(
-                    "Class-schedule reminders reconciled on mobile: desired=%s scheduled=%s cancelled=%s",
-                    len(payload),
-                    result.get("scheduled", 0) if isinstance(result, dict) else 0,
-                    result.get("cancelled", 0) if isinstance(result, dict) else 0,
-                )
-            except Exception:
-                logger.warning(
-                    "Cannot reconcile native class-schedule reminders", exc_info=True
-                )
+        if not callable(reconcile):
             return
-
-        # Windows uses the tray-owned durable scheduler; it remains available
-        # while the application is minimized to the system tray.
-        notifiers = getattr(getattr(self, "notifier", None), "notifiers", ())
-        for notifier in notifiers:
-            reconcile = getattr(
-                notifier, "reconcile_class_schedule_reminders", None
-            )
-            if not callable(reconcile):
-                continue
-            try:
-                await asyncio.to_thread(reconcile, reminders)
-            except Exception:
-                logger.warning(
-                    "Cannot reconcile Windows class-schedule reminders", exc_info=True
-                )
+        await reconcile(
+            sessions,
+            clear_only=clear_only,
+            fetch_day=self._fetch_tomorrow_sessions,
+            identity_getter=lambda: getattr(self, "_settings_identity", None),
+            android_bridge=getattr(self, "_android_background", None),
+        )
 
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
         self._today_schedule_state = state
@@ -2976,7 +2934,11 @@ class AppController:
                             await self._android_background.request_exact_alarm_access()
 
                 self._safe_run_task(_apply_android_settings)
-        if class_schedule_settings_changed:
+        # A credentials change already scheduled a clear_only reconcile above
+        # and ensure_today will rebuild the new account's reminders from its
+        # own snapshot; a non-clear run here would fetch tomorrow with the old
+        # generation and could overwrite the fresh account's schedule.
+        if class_schedule_settings_changed and not credentials_changed:
             schedule_state = getattr(self, "_today_schedule_state", None)
             schedule_snapshot = (
                 schedule_state.snapshot.sessions

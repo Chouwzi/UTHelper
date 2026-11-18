@@ -134,3 +134,59 @@ def test_no_reminder_is_moved_to_or_after_class_start():
         dnd_enabled=True, dnd_start=22, dnd_end=7,
     )
     assert reminders == ()
+
+
+def test_dnd_shift_collapses_leads_into_one_reminder_with_true_label():
+    """All three leads shift into 07:00 → one reminder, labelled honestly."""
+    now = datetime(2026, 11, 16, 6, 0)
+    session = _session(now, start_at=datetime(2026, 11, 16, 8, 0))
+    reminders = build_class_schedule_reminders(
+        [session], now=now, enabled=True, lead_hours=(1, 2, 3),
+        dnd_enabled=True, dnd_start=22, dnd_end=7,
+    )
+    # 05:00, 06:00 and 07:00 all sit inside/among the quiet hours, so the
+    # shift moves them to the single 07:00 boundary instant.
+    assert len(reminders) == 1
+    assert reminders[0].scheduled_at == datetime(2026, 11, 16, 7, 0)
+    # The label follows the real remaining time (one hour), not the stale
+    # three-hour lead the user originally selected.
+    assert reminders[0].lead_hours == 1
+    # The dedupe key is stable across rebuilds so no duplicate fires.
+    again = build_class_schedule_reminders(
+        [session], now=now, enabled=True, lead_hours=(1, 2, 3),
+        dnd_enabled=True, dnd_start=22, dnd_end=7,
+    )
+    assert [item.reminder_id for item in again] == [
+        item.reminder_id for item in reminders
+    ]
+
+
+def test_physical_room_wins_over_note_mentioning_an_online_platform():
+    """A room number in the note/photo of an in-person class stays in-person."""
+    now = datetime(2026, 11, 16, 8, 0)
+    session = _session(
+        now,
+        room="F.302",
+        campus="Cơ sở Võ Oanh",
+        note="Nộp bài tập qua Google Classroom trước giờ học",
+    )
+    assert detect_delivery_mode(session) == "in_person"
+
+
+def test_broad_online_words_in_note_without_location_are_skipped():
+    """'online'/'elearning' alone in a note is ambiguous → not scheduled."""
+    now = datetime(2026, 11, 16, 8, 0)
+    for note in ("Học online", "Nộp bài trên elearning", "E-learning mở bài"):
+        session = _session(now, room="", campus="", note=note)
+        assert detect_delivery_mode(session) is None
+    # An explicit platform marker in the note still counts as online.
+    explicit = _session(
+        now, room="", campus="", note="Vào lớp qua Zoom: https://zoom.us/j/1"
+    )
+    assert detect_delivery_mode(explicit) == "online"
+
+
+def test_location_online_word_still_marks_online():
+    now = datetime(2026, 11, 16, 8, 0)
+    session = _session(now, room="Online", campus="", note="Bài tập elearning")
+    assert detect_delivery_mode(session) == "online"

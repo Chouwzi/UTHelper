@@ -59,6 +59,9 @@ class WindowsNotifier(BaseNotifier):
         self.scheduled_delivered = 0
         self._schedule_state_path = Path(_USER_DATA_DIR) / "windows_notification_schedules.json"
         self._receipt_path = Path(_USER_DATA_DIR) / "windows_notification_receipts.json"
+        # Class-schedule receipts live apart from deadline receipts so they
+        # never enter the activity delivery cache keyed by activity URL.
+        self._class_receipt_path = Path(_USER_DATA_DIR) / "windows_class_schedule_receipts.json"
         self._schedule_condition = threading.Condition(threading.RLock())
         self._schedule_state: dict[str, dict] = SafeFileIO.read_json_safe(
             self._schedule_state_path, dict
@@ -176,11 +179,14 @@ class WindowsNotifier(BaseNotifier):
             self.last_error = str(e)
             logger.warning(f"windows-toasts lỗi, dùng tray mặc định: {e}")
             if self.tray_app:
-                self.tray_app.notify(title, msg)
-                return True
-            else:
-                logger.info(f"THÔNG BÁO (Log): {title} - {msg}")
-                return False
+                try:
+                    if self.tray_app.notify(title, msg):
+                        self.last_error = ""
+                        return True
+                except Exception:
+                    logger.warning("Windows tray notification failed", exc_info=True)
+            logger.info("THÔNG BÁO (Log): %s", title)
+            return False
 
     def notify_class_schedule_reminder(self, value: dict) -> bool:
         """Deliver an online or in-person class reminder as a Windows toast."""
@@ -222,8 +228,9 @@ class WindowsNotifier(BaseNotifier):
             logger.warning("Windows class reminder toast failed: %s", exc)
             if self.tray_app:
                 try:
-                    self.tray_app.notify(title, body)
-                    return True
+                    if self.tray_app.notify(title, body):
+                        self.last_error = ""
+                        return True
                 except Exception:
                     logger.warning("Windows tray class reminder failed", exc_info=True)
             return False
@@ -410,6 +417,7 @@ class WindowsNotifier(BaseNotifier):
         self.scheduled_delivered = 0
         self._schedule_state_path = Path(_USER_DATA_DIR) / "windows_notification_schedules.json"
         self._receipt_path = Path(_USER_DATA_DIR) / "windows_notification_receipts.json"
+        self._class_receipt_path = Path(_USER_DATA_DIR) / "windows_class_schedule_receipts.json"
         self._schedule_condition = threading.Condition(threading.RLock())
         self._schedule_state = SafeFileIO.read_json_safe(
             self._schedule_state_path, dict
@@ -506,7 +514,13 @@ class WindowsNotifier(BaseNotifier):
                 self.scheduled_delivered += 1
                 self.last_scheduled_delivery_at = now.isoformat()
                 self.last_schedule_error = ""
-                receipts = SafeFileIO.read_json_safe(self._receipt_path, list)
+                receipt_path = self._receipt_path
+                if is_class:
+                    receipt_path = (
+                        getattr(self, "_class_receipt_path", None)
+                        or self._receipt_path
+                    )
+                receipts = SafeFileIO.read_json_safe(receipt_path, list)
                 receipts.append(
                     {
                         "activity_key": value.get("activity_key", value.get("reminder_id", "")),
@@ -519,7 +533,7 @@ class WindowsNotifier(BaseNotifier):
                         "delivered_at": now.isoformat(),
                     }
                 )
-                SafeFileIO.write_json_atomic(self._receipt_path, receipts[-500:])
+                SafeFileIO.write_json_atomic(receipt_path, receipts[-500:])
             else:
                 retry_at = now + timedelta(minutes=self._SCHEDULE_RETRY_MINUTES)
                 if deadline is not None and retry_at >= deadline:

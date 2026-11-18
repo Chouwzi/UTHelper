@@ -202,18 +202,27 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             }
         }
 
-        // iOS has a finite pending local-notification budget. Retain the next
-        // 64 deadlines ourselves instead of relying on silent system eviction.
-        let scheduledRequests = desired.values
-            .sorted {
-                let left = ($0.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() ?? .distantFuture
-                let right = ($1.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() ?? .distantFuture
-                return left < right
-            }
-            .prefix(64)
-        let selectedRequests = Array(scheduledRequests)
-
         center.getPendingNotificationRequests { existing in
+            // iOS has a finite 64-slot pending local-notification budget. Share
+            // it with class-schedule requests, keeping the nearest triggers
+            // overall instead of relying on silent system eviction.
+            var combined: [(Date, UNNotificationRequest, Bool)] = []
+            for request in desired.values {
+                combined.append((self.triggerDate(of: request), request, true))
+            }
+            for request in existing where request.identifier.hasPrefix(Self.classSchedulePrefix) {
+                combined.append((self.triggerDate(of: request), request, false))
+            }
+            let kept = self.nearest(combined, limit: 64)
+            let selectedRequests = kept.filter { $0.2 }.map { $0.1 }
+            let keptIdentifiers = Set(kept.map { $0.1.identifier })
+            let droppedClassIdentifiers = combined
+                .filter { !$0.2 && !keptIdentifiers.contains($0.1.identifier) }
+                .map { $0.1.identifier }
+            if !droppedClassIdentifiers.isEmpty {
+                self.center.removePendingNotificationRequests(withIdentifiers: droppedClassIdentifiers)
+            }
+
             let oldIdentifiers = Set(
                 existing
                     .map(\.identifier)
@@ -266,20 +275,20 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             let oldIdentifiers = existing.map(\.identifier).filter {
                 $0.hasPrefix(Self.classSchedulePrefix)
             }
-            let existingOtherCount = existing.filter {
-                !$0.identifier.hasPrefix(Self.classSchedulePrefix)
-            }.count
             if !oldIdentifiers.isEmpty {
                 self.center.removePendingNotificationRequests(withIdentifiers: oldIdentifiers)
-                self.center.removeDeliveredNotifications(withIdentifiers: oldIdentifiers)
             }
 
             guard enabled else {
-                self.finish(result, [
-                    "desired": 0,
-                    "scheduled": 0,
-                    "cancelled": oldIdentifiers.count,
-                ])
+                // Pending class requests are all cancelled; delivered history is
+                // only cleared for classes whose start time has already passed.
+                self.removeStaleDeliveredClassNotifications(desiredIdentifiers: []) {
+                    self.finish(result, [
+                        "desired": 0,
+                        "scheduled": 0,
+                        "cancelled": oldIdentifiers.count,
+                    ])
+                }
                 return
             }
 
@@ -314,28 +323,51 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                 content.userInfo = [
                     "reminder_id": reminderID,
                     "session_id": self.text(session["session_id"]),
+                    "start_at": NSNumber(value: startEpoch),
                 ]
                 return (reminderID, scheduled, content)
             }.sorted { $0.1 < $1.1 }
 
-            // Keep class reminders bounded and reserve the remaining slots after
-            // existing deadline requests, because iOS limits pending local requests.
-            let availableSlots = max(0, 64 - existingOtherCount)
-            let bounded = Array(candidates.prefix(availableSlots))
-            let group = DispatchGroup()
-            let lock = NSLock()
-            var failures: [String] = []
-            for (reminderID, scheduled, content) in bounded {
+            // Build the class requests up front so they can compete with
+            // deadline requests for the single 64-slot pending budget by
+            // nearest trigger, instead of reserving whatever is left over.
+            var classRequests: [UNNotificationRequest] = []
+            for (reminderID, scheduled, content) in candidates {
                 let identifier = Self.classSchedulePrefix + self.stableIdentifier(reminderID)
                 let components = Calendar.current.dateComponents(
                     [.year, .month, .day, .hour, .minute, .second],
                     from: scheduled
                 )
-                let request = UNNotificationRequest(
-                    identifier: identifier,
-                    content: content,
-                    trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                classRequests.append(
+                    UNNotificationRequest(
+                        identifier: identifier,
+                        content: content,
+                        trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                    )
                 )
+            }
+
+            var combined: [(Date, UNNotificationRequest, Bool)] = []
+            for request in classRequests {
+                combined.append((self.triggerDate(of: request), request, true))
+            }
+            for request in existing where request.identifier.hasPrefix(Self.requestPrefix) {
+                combined.append((self.triggerDate(of: request), request, false))
+            }
+            let kept = self.nearest(combined, limit: 64)
+            let selectedRequests = kept.filter { $0.2 }.map { $0.1 }
+            let keptIdentifiers = Set(kept.map { $0.1.identifier })
+            let droppedDeadlineIdentifiers = combined
+                .filter { !$0.2 && !keptIdentifiers.contains($0.1.identifier) }
+                .map { $0.1.identifier }
+            if !droppedDeadlineIdentifiers.isEmpty {
+                self.center.removePendingNotificationRequests(withIdentifiers: droppedDeadlineIdentifiers)
+            }
+
+            let group = DispatchGroup()
+            let lock = NSLock()
+            var failures: [String] = []
+            for request in selectedRequests {
                 group.enter()
                 self.center.add(request) { error in
                     if let error {
@@ -347,13 +379,16 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                 }
             }
             group.notify(queue: .main) {
-                self.finish(result, [
-                    "desired": candidates.count,
-                    "scheduled": bounded.count - failures.count,
-                    "cancelled": oldIdentifiers.count,
-                    "failed": failures.count,
-                    "errors": failures,
-                ])
+                let desiredIdentifiers = Set(classRequests.map(\.identifier))
+                self.removeStaleDeliveredClassNotifications(desiredIdentifiers: desiredIdentifiers) {
+                    self.finish(result, [
+                        "desired": candidates.count,
+                        "scheduled": selectedRequests.count - failures.count,
+                        "cancelled": oldIdentifiers.count,
+                        "failed": failures.count,
+                        "errors": failures,
+                    ])
+                }
             }
         }
     }
@@ -451,6 +486,46 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    private func triggerDate(of request: UNNotificationRequest) -> Date {
+        (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() ?? .distantFuture
+    }
+
+    /// Picks the nearest `limit` entries by trigger date, breaking ties on the
+    /// notification identifier so the shared 64-slot budget is deterministic.
+    private func nearest(
+        _ entries: [(Date, UNNotificationRequest, Bool)],
+        limit: Int
+    ) -> [(Date, UNNotificationRequest, Bool)] {
+        let sorted = entries.sorted { left, right in
+            if left.0 != right.0 { return left.0 < right.0 }
+            return left.1.identifier < right.1.identifier
+        }
+        return Array(sorted.prefix(limit))
+    }
+
+    /// Removes delivered class-schedule notifications that are no longer desired
+    /// and whose class has already started (a missing/zero `start_at` counts as
+    /// started). Pending identifiers can never remove delivered notifications.
+    private func removeStaleDeliveredClassNotifications(
+        desiredIdentifiers: Set<String>,
+        completion: @escaping () -> Void
+    ) {
+        center.getDeliveredNotifications { delivered in
+            let now = Date().timeIntervalSince1970
+            let stale = delivered.compactMap { item -> String? in
+                let identifier = item.request.identifier
+                guard identifier.hasPrefix(Self.classSchedulePrefix),
+                      !desiredIdentifiers.contains(identifier) else { return nil }
+                let start = (item.request.content.userInfo["start_at"] as? NSNumber)?.doubleValue ?? 0
+                return start <= now ? identifier : nil
+            }
+            if !stale.isEmpty {
+                self.center.removeDeliveredNotifications(withIdentifiers: stale)
+            }
+            completion()
+        }
+    }
+
     private func diagnostics(result: @escaping FlutterResult) {
         center.getNotificationSettings { settings in
             self.center.getPendingNotificationRequests { requests in
@@ -468,13 +543,22 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
 
     private func clearNotifications() {
         center.getPendingNotificationRequests { requests in
-            let identifiers = requests.map(\.identifier).filter {
+            let pendingIds = requests.map(\.identifier).filter {
                 $0.hasPrefix(Self.requestPrefix)
                     || $0.hasPrefix(Self.immediatePrefix)
                     || $0.hasPrefix(Self.classSchedulePrefix)
             }
-            self.center.removePendingNotificationRequests(withIdentifiers: identifiers)
-            self.center.removeDeliveredNotifications(withIdentifiers: identifiers)
+            self.center.removePendingNotificationRequests(withIdentifiers: pendingIds)
+            self.center.getDeliveredNotifications { delivered in
+                let deliveredIds = delivered.map(\.request.identifier).filter {
+                    $0.hasPrefix(Self.requestPrefix)
+                        || $0.hasPrefix(Self.immediatePrefix)
+                        || $0.hasPrefix(Self.classSchedulePrefix)
+                }
+                if !deliveredIds.isEmpty {
+                    self.center.removeDeliveredNotifications(withIdentifiers: deliveredIds)
+                }
+            }
         }
     }
 

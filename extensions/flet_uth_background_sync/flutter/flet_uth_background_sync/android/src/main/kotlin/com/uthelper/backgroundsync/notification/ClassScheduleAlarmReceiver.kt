@@ -9,7 +9,9 @@ class ClassScheduleAlarmReceiver : BroadcastReceiver() {
         if (intent.action != ClassScheduleAlarmScheduler.ACTION_CLASS_SCHEDULE) return
         val reminderId = intent.getStringExtra(ClassScheduleAlarmScheduler.KEY_REMINDER_ID).orEmpty()
         val startAt = intent.getLongExtra(ClassScheduleAlarmScheduler.KEY_START_AT, 0L)
-        if (startAt > System.currentTimeMillis() / 1000L) {
+        val scheduler = ClassScheduleAlarmScheduler(context)
+        val stillScheduled = scheduler.contains(reminderId)
+        if (stillScheduled && startAt > System.currentTimeMillis() / 1000L) {
             NotificationDispatcher(context).showClassSchedule(
                 notificationId = reminderId.hashCode() and 0x7fffffff,
                 subject = intent.getStringExtra("subject").orEmpty(),
@@ -22,6 +24,6 @@ class ClassScheduleAlarmReceiver : BroadcastReceiver() {
                 startAtEpochSeconds = startAt,
             )
         }
-        ClassScheduleAlarmScheduler(context).remove(reminderId)
+        scheduler.remove(reminderId)
     }
 }

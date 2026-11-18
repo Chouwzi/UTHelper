@@ -313,10 +313,10 @@ def test_reset_defaults_syncs_class_schedule_lead_field(monkeypatch):
 
     asyncio.run(SettingsView._handle_reset_defaults(view, None))
 
-    assert view._class_schedule_lead_field.value == "1, 2, 3"
-    assert all(
-        chip.selected for chip in view._class_schedule_lead_chips.values()
-    )
+    assert view._class_schedule_lead_field.value == "1"
+    assert view._class_schedule_lead_chips[1].selected is True
+    assert view._class_schedule_lead_chips[2].selected is False
+    assert view._class_schedule_lead_chips[3].selected is False
     assert view._sw_class_schedule.value is False
 
 

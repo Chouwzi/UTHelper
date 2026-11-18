@@ -34,6 +34,7 @@ def _scheduler_notifier(tmp_path):
     notifier = WindowsNotifier(start_scheduler=False)
     notifier._schedule_state_path = tmp_path / "windows-schedules.json"
     notifier._receipt_path = tmp_path / "windows-receipts.json"
+    notifier._class_receipt_path = tmp_path / "windows-class-receipts.json"
     notifier._schedule_state = {}
     return notifier
 

@@ -1010,6 +1010,7 @@ class SettingsView(ft.Container):
             '_sw_auto_update', '_sw_bg_check',
             '_sw_email', '_sw_discord', '_sw_telegram',
             '_sw_dnd_enable', '_sw_ignore_sub', '_sw_debug',
+            '_sw_class_schedule',
         ]
         for sname in _all_switches:
             sw = getattr(self, sname, None)
@@ -1332,14 +1333,14 @@ class SettingsView(ft.Container):
         self._milestone_summary.value = "Bạn sẽ nhận 6 lần nhắc cho mỗi deadline"
         self._sw_class_schedule.value = False
         for hours, chip in self._class_schedule_lead_chips.items():
-            chip.selected = True
+            chip.selected = hours == 1
             chip.selected_color = C.ACCENT
             chip.bgcolor = C.SURFACE
             chip.check_color = C.ON_ACCENT
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
                 label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
-        self._class_schedule_lead_field.value = "1, 2, 3"
+        self._class_schedule_lead_field.value = "1"
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"

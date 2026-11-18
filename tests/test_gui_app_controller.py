@@ -320,24 +320,44 @@ def test_auth_required_schedule_state_clears_class_reminders():
 
 def test_reconcile_clear_only_never_calls_portal_fetch(monkeypatch):
     """Logout/account-switch clearing must not fetch tomorrow's timetable."""
+    from unittest.mock import Mock
+
     from config import settings
+    from notifiers.manager import NotificationManager
 
     monkeypatch.setattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", True)
     monkeypatch.setattr(settings, "UTH_USERNAME", "student-01")
     monkeypatch.setattr(settings, "UTH_PASSWORD", "secret")
 
+    # The manager owns the use case now: a clear_only run must never reach
+    # the network, so the fetch callable stays untouched.
+    fetch_day = Mock()
+    manager = NotificationManager(tray_app=None)
+    asyncio.run(
+        manager.reconcile_class_schedule_notifications(
+            (), clear_only=True, fetch_day=fetch_day
+        )
+    )
+    fetch_day.assert_not_called()
+
+    # The controller forwards the flag unchanged to the manager.
     controller = AppController.__new__(AppController)
+    forwarded = {}
 
-    def _fail_fetch(*_args, **_kwargs):
-        raise AssertionError("clear_only reconcile must not touch the network")
+    async def _reconcile(sessions, **kwargs):
+        forwarded["sessions"] = sessions
+        forwarded.update(kwargs)
 
-    controller._portal_client = SimpleNamespace(fetch_day=_fail_fetch)
-
+    controller.notifier = SimpleNamespace(
+        reconcile_class_schedule_notifications=_reconcile
+    )
     asyncio.run(
         AppController._reconcile_class_schedule_notifications(
             controller, (), clear_only=True
         )
     )
+    assert forwarded["sessions"] == ()
+    assert forwarded.get("clear_only") is True
 
 
 def test_safe_run_task_reports_unhandled_background_exception(caplog):

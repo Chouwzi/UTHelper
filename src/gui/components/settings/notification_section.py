@@ -182,7 +182,7 @@ def init_notification_controls(view):
     )
     _current_class_leads = tuple(
         int(value)
-        for value in getattr(settings, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1, 2, 3])
+        for value in getattr(settings, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1])
         if int(value) in {1, 2, 3}
     )
     view._sw_class_schedule = ft.Switch(
