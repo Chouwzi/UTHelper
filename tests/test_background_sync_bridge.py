@@ -147,6 +147,32 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
     ]
 
 
+def test_durable_update_download_bridge_preserves_pinned_identity_and_void_cancel():
+    calls = []
+
+    class Service:
+        async def start_update_download(self, *identity):
+            calls.append(("start", identity))
+            return {"status": "running"}
+
+        async def get_update_download_status(self, *identity):
+            calls.append(("query", identity))
+            return {"status": "completed", "local_path": "/private/update.apk"}
+
+        async def cancel_update_download(self, *identity):
+            calls.append(("cancel", identity))
+            return None  # The native command deliberately has no response body.
+
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = Service()
+    identity = ("https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/app.apk",
+                "a" * 64, 100, "com.uthelper.uthelper", 2_005_001, "b" * 64)
+    assert asyncio.run(bridge.start_update_download(*identity)) == {"status": "running"}
+    assert asyncio.run(bridge.get_update_download_status(*identity))["status"] == "completed"
+    assert asyncio.run(bridge.cancel_update_download(*identity)) == {"status": "cancelled"}
+    assert calls == [("start", identity), ("query", identity), ("cancel", identity)]
+
+
 @pytest.mark.parametrize(
     ("base_url", "client_origin", "token_origin", "expected"),
     (

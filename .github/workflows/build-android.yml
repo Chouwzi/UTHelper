@@ -85,6 +85,19 @@ jobs:
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
           flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
 
+      - name: Test native update and background sync contracts
+        timeout-minutes: 15
+        working-directory: build/flutter/android
+        run: |
+          # Test the source library independently: configuring the full app here
+          # would require Flet's transient serious_python packaging environment.
+          UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
+          UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
+          test -f "$UTH_EMBEDDING_JAR"
+          ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
+            testDebugUnitTest -Pandroid.useAndroidX=true \
+            -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
+
       - name: 🔎 Verify notification manifest wiring
         run: |
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)

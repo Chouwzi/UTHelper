@@ -41,14 +41,14 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update)
         self._init_controls()
         self._init_layout()
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -60,6 +60,8 @@ class SettingsView(ft.Container):
         self._on_test_mail = on_test_mail
         self._on_theme_preview = on_theme_preview
         self._on_check_update = on_check_update
+        self._on_update_action = on_update_action
+        self._on_cancel_update = on_cancel_update
         self.visible  = False
         self.expand   = True
         self.bgcolor  = C.BG
@@ -154,6 +156,45 @@ class SettingsView(ft.Container):
         init_account_controls(self)
         init_display_controls(self)
         init_system_controls(self)
+        self._update_status_text = ft.Text(
+            "",
+            size=11,
+            color=C.TEXT_SECONDARY,
+            visible=False,
+        )
+        self._update_progress = ft.ProgressBar(
+            value=0,
+            width=260,
+            height=3,
+            color=C.UPDATE,
+            bgcolor=C.BORDER,
+            visible=False,
+        )
+        self._update_action_btn = ft.Button(
+            "",
+            visible=False,
+            bgcolor=C.SURFACE,
+            color=C.TEXT_PRIMARY,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+            on_click=self._handle_update_action,
+        )
+        self._update_cancel_btn = ft.TextButton(
+            "Hủy tải",
+            visible=False,
+            style=ft.ButtonStyle(color=C.TEXT_SECONDARY),
+            on_click=self._handle_cancel_update,
+        )
+        self._update_action_row = ft.Row(
+            [self._update_action_btn, self._update_cancel_btn],
+            spacing=8,
+            visible=False,
+        )
+        self._update_status_group = ft.Column(
+            [self._update_status_text, self._update_progress, self._update_action_row],
+            spacing=4,
+            tight=True,
+            visible=False,
+        )
         init_privacy_controls(self)
         init_urgency_controls(self)
         init_theme_controls(self)
@@ -484,6 +525,46 @@ class SettingsView(ft.Container):
         self._save_status.value = ""
         self._update_save_button_state()
         self.update()
+
+    def _handle_update_action(self, _event=None) -> None:
+        if self._on_update_action:
+            self._on_update_action()
+
+    def _handle_cancel_update(self, _event=None) -> None:
+        if self._on_cancel_update:
+            self._on_cancel_update()
+
+    def set_update_status(
+        self,
+        message: str,
+        *,
+        progress: float | None = None,
+        show_progress: bool = False,
+        action_label: str | None = None,
+        can_cancel: bool = False,
+        color=None,
+    ) -> None:
+        """Show update progress and actions while the settings page is open."""
+        self._update_status_text.value = message
+        self._update_status_text.visible = bool(message)
+        self._update_status_text.color = color or C.TEXT_SECONDARY
+        self._update_progress.visible = bool(show_progress)
+        self._update_progress.value = (
+            min(1.0, max(0.0, progress)) if progress is not None else None
+        )
+        self._update_action_btn.content = action_label or ""
+        self._update_action_btn.visible = bool(action_label)
+        self._update_cancel_btn.visible = bool(can_cancel)
+        self._update_action_row.visible = bool(action_label or can_cancel)
+        self._update_status_group.visible = bool(
+            message or show_progress or action_label or can_cancel
+        )
+        try:
+            self.update()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Update status UI refresh skipped", exc_info=True
+            )
 
     def _navigate_to_hub(self):
         self._active_category_id = None
