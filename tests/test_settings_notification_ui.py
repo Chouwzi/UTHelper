@@ -92,3 +92,33 @@ def test_class_schedule_helper_lines_removed_but_deadline_summary_kept():
     assert "view._class_schedule_summary" not in section_source
     assert "view._class_schedule_hint" not in section_source
     assert "view._milestone_summary = ft.Text(" in section_source
+
+
+def test_notification_section_chips_follow_theme_colors_after_reinit(monkeypatch):
+    """Chip colors must be read at init time, not frozen when the module was imported."""
+    import flet as ft
+
+    import gui.components.settings.notification_section as section
+    from config import settings as app_settings
+    from gui.components.settings.notification_section import init_notification_controls
+
+    assert not hasattr(section, "_CHIP_SELECTED_TEXT")
+    assert not hasattr(section, "_CHIP_UNSELECTED_BG")
+    assert not hasattr(section, "_CHIP_UNSELECTED_TEXT")
+
+    page = Mock(spec=ft.Page, window=Mock(), theme_mode="dark", on_route_change=None)
+    view = SettingsView(page=page, orchestrator=None, on_close=Mock())
+
+    monkeypatch.setattr(app_settings, "NOTIFY_MILESTONES_MINUTES", [60])
+    monkeypatch.setattr(C, "ON_ACCENT", "#112233")
+    monkeypatch.setattr(C, "TEXT_PRIMARY", "#445566")
+    monkeypatch.setattr(C, "SURFACE", "#778899")
+
+    init_notification_controls(view)
+
+    selected_chip = view._milestone_chips[60]
+    unselected_chip = view._milestone_chips[4320]
+    assert selected_chip.label.color == "#112233"
+    assert selected_chip.check_color == "#112233"
+    assert selected_chip.bgcolor == "#778899"
+    assert unselected_chip.label.color == "#445566"

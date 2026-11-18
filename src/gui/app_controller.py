@@ -1574,11 +1574,19 @@ class AppController:
         else:
             self._safe_run_task(coordinator.ensure_today)
 
-    async def _reconcile_class_schedule_notifications(self, sessions) -> None:
-        """Replace scheduled reminders derived from the latest Portal snapshot."""
+    async def _reconcile_class_schedule_notifications(
+        self, sessions, *, clear_only: bool = False
+    ) -> None:
+        """Replace scheduled reminders derived from the latest Portal snapshot.
+
+        ``clear_only=True`` drops reminders owned by a previous account without
+        any network call: used on logout/credentials change where fetching a
+        day's timetable would use stale credentials and race the new account's
+        schedule.
+        """
         enabled = bool(getattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", False))
         session_snapshot = list(sessions)
-        if enabled and settings.UTH_USERNAME and settings.UTH_PASSWORD:
+        if enabled and not clear_only and settings.UTH_USERNAME and settings.UTH_PASSWORD:
             # TodayScheduleCoordinator owns today's dashboard snapshot. Fetch
             # tomorrow once during foreground scheduling as well, so a class
             # beginning tomorrow can still have its 60-minute alarm persisted
@@ -1654,8 +1662,10 @@ class AppController:
             )
         elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
             # Logged out / session expired: drop reminders owned by the previous
-            # account so Windows never fires them again.
-            self._safe_run_task(self._reconcile_class_schedule_notifications, ())
+            # account so Windows never fires them again. No network call here.
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, (), clear_only=True
+            )
 
         if state.status is ScheduleLoadStatus.LOADING:
             self._diag_breadcrumb("schedule_load", "started", "portal")
@@ -2922,7 +2932,9 @@ class AppController:
                 ScheduleLoadStatus.IDLE
             )
             self._today_schedule_component.set_state(self._today_schedule_state)
-            self._safe_run_task(self._reconcile_class_schedule_notifications, ())
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, (), clear_only=True
+            )
             self._safe_run_task(self._today_schedule_coordinator.ensure_today)
             self._settings_identity = new_identity
 

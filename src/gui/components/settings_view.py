@@ -1339,6 +1339,7 @@ class SettingsView(ft.Container):
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
                 label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
+        self._class_schedule_lead_field.value = "1, 2, 3"
         # Reset DND
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
@@ -2322,6 +2323,9 @@ class SettingsView(ft.Container):
             label = getattr(chip, "label", None)
             if label is not None and hasattr(label, "color"):
                 label.color = C.ON_ACCENT if chip.selected else C.TEXT_PRIMARY
+        self._class_schedule_lead_field.value = ", ".join(
+            str(hours) for hours in snapshot.notify_class_schedule_lead_hours
+        )
         self._muted_courses_field.value = ", ".join(snapshot.notify_muted_courses)
         for key, card in self._profile_cards.items():
             selected = key == snapshot.notification_profile

@@ -299,7 +299,9 @@ def test_auth_required_schedule_state_clears_class_reminders():
     """A logged-out Portal session must drop the previous account's reminders."""
     controller = AppController.__new__(AppController)
     calls = []
-    controller._safe_run_task = lambda handler, *args: calls.append((handler, args))
+    controller._safe_run_task = (
+        lambda handler, *args, **kwargs: calls.append((handler, args, kwargs))
+    )
     controller._diag_breadcrumb = lambda *args: None
     controller._today_schedule_component = SimpleNamespace(set_state=lambda _s: None)
     controller.page = SimpleNamespace(update=lambda: None)
@@ -309,11 +311,33 @@ def test_auth_required_schedule_state_clears_class_reminders():
     )
 
     reconciliations = [
-        args[0]
-        for handler, args in calls
+        (args[0], kwargs)
+        for handler, args, kwargs in calls
         if handler == controller._reconcile_class_schedule_notifications
     ]
-    assert reconciliations == [()]
+    assert reconciliations == [((), {"clear_only": True})]
+
+
+def test_reconcile_clear_only_never_calls_portal_fetch(monkeypatch):
+    """Logout/account-switch clearing must not fetch tomorrow's timetable."""
+    from config import settings
+
+    monkeypatch.setattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", True)
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-01")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "secret")
+
+    controller = AppController.__new__(AppController)
+
+    def _fail_fetch(*_args, **_kwargs):
+        raise AssertionError("clear_only reconcile must not touch the network")
+
+    controller._portal_client = SimpleNamespace(fetch_day=_fail_fetch)
+
+    asyncio.run(
+        AppController._reconcile_class_schedule_notifications(
+            controller, (), clear_only=True
+        )
+    )
 
 
 def test_safe_run_task_reports_unhandled_background_exception(caplog):

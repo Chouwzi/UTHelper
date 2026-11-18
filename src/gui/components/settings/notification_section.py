@@ -3,15 +3,14 @@ from gui.core.theme import C
 from config import settings
 
 
-# Selection chips use a consistent high-contrast appearance in every theme:
-# selected = blue background / white text; unselected = white background / dark text.
-_CHIP_SELECTED_TEXT = C.ON_ACCENT
-_CHIP_UNSELECTED_BG = C.SURFACE
-_CHIP_UNSELECTED_TEXT = C.TEXT_PRIMARY
-
-
 def init_notification_controls(view):
     """Khởi tạo các control thiết lập cấu hình thông báo và chế độ Do Not Disturb (DND)."""
+    # Selection chips use a consistent high-contrast appearance in every theme:
+    # selected = blue background / white text; unselected = white background / dark text.
+    # Read the colors lazily so a theme change applied after import is respected.
+    _chip_selected_text = C.ON_ACCENT
+    _chip_unselected_bg = C.SURFACE
+    _chip_unselected_text = C.TEXT_PRIMARY
     # Định nghĩa cấu hình có sẵn của các Notification Profile
     _PROFILES = {
         "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [1440, 60], "dnd": True, "dnd_start": 22, "dnd_end": 8},
@@ -152,13 +151,13 @@ def init_notification_controls(view):
             label=ft.Text(
                 label,
                 size=12,
-                color=_CHIP_SELECTED_TEXT if is_sel else _CHIP_UNSELECTED_TEXT,
+                color=_chip_selected_text if is_sel else _chip_unselected_text,
             ),
             selected=is_sel,
             show_checkmark=True,
-            check_color=_CHIP_SELECTED_TEXT,
+            check_color=_chip_selected_text,
             selected_color=C.ACCENT,
-            bgcolor=_CHIP_UNSELECTED_BG,
+            bgcolor=_chip_unselected_bg,
             on_select=view._handle_milestone_toggle(minutes),
         )
     view._milestone_chips_row = ft.Row(
@@ -200,13 +199,13 @@ def init_notification_controls(view):
             label=ft.Text(
                 f"{hours} giờ trước",
                 size=12,
-                color=_CHIP_SELECTED_TEXT if selected else _CHIP_UNSELECTED_TEXT,
+                color=_chip_selected_text if selected else _chip_unselected_text,
             ),
             selected=selected,
             show_checkmark=True,
-            check_color=_CHIP_SELECTED_TEXT,
+            check_color=_chip_selected_text,
             selected_color=C.ACCENT,
-            bgcolor=_CHIP_UNSELECTED_BG,
+            bgcolor=_chip_unselected_bg,
             on_select=view._handle_class_schedule_lead_toggle(hours),
         )
     view._class_schedule_lead_chips_row = ft.Row(
