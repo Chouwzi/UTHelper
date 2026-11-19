@@ -23,6 +23,14 @@ class AcademicGradeListView(ft.Column):
         except Exception:
             pass
 
+    def update_theme(self) -> None:
+        """Rebuild course grade rows using the active semantic palette."""
+        self._build_list()
+        try:
+            self.update()
+        except Exception:
+            pass
+
     def _letter_grade_color(self, letter: str) -> str:
         letter = (letter or "").strip().upper()
         if letter.startswith("A"):

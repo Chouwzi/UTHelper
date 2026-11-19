@@ -411,10 +411,11 @@ class GradeOverviewView(ft.Container):
         self._empty_text.color = C.TEXT_SECONDARY
         self._planner_btn.icon_color = C.TEXT_SECONDARY
 
-        if self._radar_card.visible:
-            self._radar_card._build_ui()
-        if self._grade_list_view.visible:
-            self._grade_list_view._build_list()
+        # These views are cached while detached from the desktop page. Rebuild
+        # them unconditionally so their root surfaces cannot retain the theme
+        # from the previous settings preview when they are shown again.
+        self._radar_card.update_theme()
+        self._grade_list_view.update_theme()
 
         try:
             self.update()

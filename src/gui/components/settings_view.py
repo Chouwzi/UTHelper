@@ -840,7 +840,7 @@ class SettingsView(ft.Container):
             log.info(f"[THEME] After apply_theme: TEXT_PRIMARY={C.TEXT_PRIMARY}, TEXT_SECONDARY={C.TEXT_SECONDARY}")
             # Sync Flet's page.theme ColorScheme
             from gui.core.theme import set_page_theme
-            set_page_theme(self._page)
+            set_page_theme(self._page, theme_name=theme_key)
             # Update settings view own colors
             self.bgcolor = C.BG
             # Refresh all section containers with new theme colors
@@ -1244,7 +1244,7 @@ class SettingsView(ft.Container):
         # Apply theme live preview
         apply_theme("midnight_blue")
         from gui.core.theme import set_page_theme
-        set_page_theme(self._page)
+        set_page_theme(self._page, theme_name="midnight_blue")
         self.bgcolor = C.BG
         self._refresh_section_colors()
         if self._on_theme_preview:
@@ -2405,7 +2405,7 @@ class SettingsView(ft.Container):
             apply_theme(baseline.theme)
             from gui.core.theme import set_page_theme
 
-            set_page_theme(self._page)
+            set_page_theme(self._page, theme_name=baseline.theme)
             if self._on_theme_preview:
                 self._on_theme_preview()
             if hasattr(self, "_unsaved_dot"):
