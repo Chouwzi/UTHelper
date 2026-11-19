@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import flet as ft
 
@@ -57,6 +58,7 @@ def test_view_manager_preserves_persistent_overlays_after_navigation():
         visible=False,
         show_loading=lambda: None,
         hide=lambda: None,
+        update_theme=Mock(),
     )
     dismiss_called = []
     controller = SimpleNamespace(
@@ -109,6 +111,7 @@ def test_view_manager_preserves_persistent_overlays_after_navigation():
 
     # 5. Open Grades then Close Grades
     manager.show_grades_loading()
+    grades.update_theme.assert_called_once_with()
     assert host.controls == [grades, overlay1, overlay2, overlay3, overlay4]
     asyncio.run(manager.close_grades())
     assert host.controls == [dashboard, overlay1, overlay2, overlay3, overlay4]
@@ -148,6 +151,7 @@ def test_app_controller_filter_overlay_available_after_navigating_tabs_and_detai
     settings.cancel_pending_load = lambda: None
     grades.show_loading = lambda: None
     grades.hide = lambda: None
+    grades.update_theme = Mock()
 
     controller.calendar_btn = ft.IconButton(icon_color=None)
     controller.grades_btn = ft.IconButton(icon_color=None)
@@ -240,6 +244,7 @@ def test_view_manager_with_tab_and_detail_switchers():
         visible=False,
         show_loading=lambda: None,
         hide=lambda: None,
+        update_theme=Mock(),
     )
     controller = SimpleNamespace(
         calendar_btn=SimpleNamespace(icon_color=None),
@@ -290,6 +295,7 @@ def test_view_manager_with_tab_and_detail_switchers():
 
     # 4. Open and Close Grades via tab_switcher
     manager.show_grades_loading()
+    grades.update_theme.assert_called_once_with()
     assert tab_switcher.content is grades
     asyncio.run(manager.close_grades())
     assert tab_switcher.content is dashboard
