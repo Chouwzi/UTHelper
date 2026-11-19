@@ -360,6 +360,175 @@ def test_reconcile_clear_only_never_calls_portal_fetch(monkeypatch):
     assert forwarded.get("clear_only") is True
 
 
+def test_reconcile_clear_only_never_schedules_even_when_enabled(monkeypatch):
+    """clear_only is a teardown: it must drop reminders, never rebuild them."""
+    from unittest.mock import Mock
+
+    from config import settings
+    from core.today_schedule import ClassSession
+    from notifiers.manager import NotificationManager
+
+    monkeypatch.setattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", True)
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-01")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "secret")
+
+    now = datetime.now()
+    session = ClassSession(
+        session_id="session-1",
+        subject="Mạng máy tính",
+        course_code="CN123",
+        start_at=now + timedelta(hours=5),
+        end_at=now + timedelta(hours=7),
+        room="F.302",
+        campus="Cơ sở Võ Oanh",
+        period_start=1,
+        period_end=3,
+        cancelled=False,
+        note="",
+    )
+    applied = []
+    manager = NotificationManager(tray_app=None)
+    manager.notifiers.append(
+        SimpleNamespace(reconcile_class_schedule_reminders=lambda r: applied.append(r))
+    )
+    fetch_day = Mock()
+
+    asyncio.run(
+        manager.reconcile_class_schedule_notifications(
+            (session,), clear_only=True, fetch_day=fetch_day
+        )
+    )
+
+    fetch_day.assert_not_called()
+    assert applied == [()]
+
+
+def test_reconcile_identity_is_captured_at_task_creation_not_after_lock(monkeypatch):
+    """A task queued by the old account must abort even if it gets the lock later.
+
+    Regression for the race where ``identity_before`` was read *after*
+    ``async with lock``: a stale task waiting behind an in-flight one would
+    capture the NEW identity, pass its own check, and rebuild the previous
+    account's sessions under the new account's name.
+    """
+    from config import settings
+    from notifiers.manager import NotificationManager
+
+    monkeypatch.setattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", True)
+    monkeypatch.setattr(settings, "UTH_USERNAME", "old-user")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "old-pass")
+
+    identity = {"value": ("old-user", "old-pass")}
+    applied = []
+    fetch_log = []
+    # fetch_day is awaited directly on the event loop, so the gate must be a
+    # cooperative asyncio primitive (blocking here would freeze the scenario).
+    first_fetch_started = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def fetch_day(credentials):
+        fetch_log.append(credentials)
+        if len(fetch_log) == 1:
+            first_fetch_started.set()
+            await gate.wait()
+        return ()
+
+    manager = NotificationManager(tray_app=None)
+    manager.notifiers.append(
+        SimpleNamespace(reconcile_class_schedule_reminders=lambda r: applied.append(r))
+    )
+
+    async def run_reconcile():
+        return await manager.reconcile_class_schedule_notifications(
+            (),
+            fetch_day=fetch_day,
+            identity_getter=lambda: identity["value"],
+        )
+
+    async def scenario():
+        # 1. A task of the current account takes the lock and suspends in fetch.
+        blocker = asyncio.create_task(run_reconcile())
+        await first_fetch_started.wait()
+        # 2. A second task of the SAME (soon stale) account queues behind it.
+        stale = asyncio.create_task(run_reconcile())
+        await asyncio.sleep(0)  # stale now waits on the reconcile lock
+        # 3. The user switches accounts while both are in flight.
+        identity["value"] = ("new-user", "new-pass")
+        monkeypatch.setattr(settings, "UTH_USERNAME", "new-user")
+        monkeypatch.setattr(settings, "UTH_PASSWORD", "new-pass")
+        # 4. Let the blocker finish; the queued stale task gets the lock next.
+        gate.set()
+        await asyncio.gather(blocker, stale)
+        # 5. A task created AFTER the switch must still reconcile normally.
+        await run_reconcile()
+
+    asyncio.run(scenario())
+
+    # Both old-account tasks abort; only the new-account task applies.
+    assert applied == [()]
+    assert fetch_log[0] == ("old-user", "old-pass")
+    assert fetch_log[-1] == ("new-user", "new-pass")
+    assert len(fetch_log) == 2  # blocker fetched; stale aborted before fetch
+
+
+def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch):
+    """_settings_identity must flip before clear_only/refresh tasks are queued.
+
+    Otherwise the first reconcile after login/switch compares against the old
+    identity and is mistaken for an account change (or misses one).
+    """
+    from unittest.mock import Mock
+
+    from config import settings
+
+    controller = AppController.__new__(AppController)
+    controller._settings_identity = ("old-user", "old-pass")
+    controller._notification_milestones_snapshot = tuple(
+        settings.NOTIFY_MILESTONES_MINUTES or []
+    )
+    controller._notification_class_schedule_snapshot = (
+        bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED),
+        tuple(settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS),
+        bool(settings.NOTIFY_DND_ENABLE),
+        int(settings.NOTIFY_DND_START),
+        int(settings.NOTIFY_DND_END),
+    )
+    controller.orchestrator = None
+    controller._data_cache = None
+    controller._portal_client = SimpleNamespace(clear_token=Mock())
+    coordinator = SimpleNamespace(replace_cache=Mock(), ensure_today=Mock())
+    controller._today_schedule_coordinator = coordinator
+    controller._today_schedule_component = SimpleNamespace(set_state=Mock())
+    controller._today_schedule_state = TodayScheduleViewState(ScheduleLoadStatus.READY)
+    controller.page = SimpleNamespace()
+    controller._rebuild_colors = Mock()
+    controller._show_snackbar = Mock()
+    controller._android_background = None
+    controller._sync_coordinator = None
+    controller._update_coordinator = None
+
+    scheduled = []
+
+    def _safe_run_task(handler, *args, **kwargs):
+        # Snapshot the identity at the moment the task is queued.
+        scheduled.append((handler, kwargs, controller._settings_identity))
+
+    controller._safe_run_task = _safe_run_task
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "new-user")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "new-pass")
+
+    AppController._on_settings_saved(controller)
+
+    assert controller._settings_identity == ("new-user", "new-pass")
+    assert scheduled, "expected at least the clear_only reconcile to be queued"
+    for handler, kwargs, identity_at_schedule in scheduled:
+        assert identity_at_schedule == ("new-user", "new-pass"), handler
+    # The credentials path queues the clear_only teardown first.
+    assert scheduled[0][1].get("clear_only") is True
+    coordinator.replace_cache.assert_called_once()
+
+
 def test_safe_run_task_reports_unhandled_background_exception(caplog):
     scheduled = []
     reported = []

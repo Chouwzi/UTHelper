@@ -53,7 +53,6 @@ def _make_state_only_view():
         _opening_soon_hours_field=_control(),
         _workers_field=_control(),
         _sw_dnd_enable=_control(),
-        _class_schedule_summary=_control(""),
         _sw_class_schedule=_control(),
         _class_schedule_lead_chips={1: _control(selected=False), 2: _control(selected=False), 3: _control(selected=False)},
         _class_schedule_lead_field=_control(),
@@ -84,7 +83,6 @@ def _make_state_only_view():
     view._rebuild_theme_cards = Mock()
     view._update_profile_summary = Mock()
     view._update_dnd_summary = Mock()
-    view._update_class_schedule_summary = Mock()
     view._capture_form_snapshot = lambda: SettingsView._capture_form_snapshot(view)
     return view
 
@@ -318,6 +316,28 @@ def test_reset_defaults_syncs_class_schedule_lead_field(monkeypatch):
     assert view._class_schedule_lead_chips[2].selected is False
     assert view._class_schedule_lead_chips[3].selected is False
     assert view._sw_class_schedule.value is False
+
+
+def test_save_explains_empty_class_schedule_lead_hours():
+    """The lead-hours error must not be swallowed by the generic number error."""
+    from gui.view_models.settings_form import ClassScheduleLeadHoursError
+
+    baseline = SettingsFormSnapshot.from_form_values({})
+    view = SimpleNamespace(
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=Mock(
+            side_effect=ClassScheduleLeadHoursError(
+                "notify_class_schedule_lead_hours must contain at least one of 1, 2 or 3"
+            )
+        ),
+        _save_status=SimpleNamespace(value="", color=None),
+        _saving=False,
+        update=lambda: None,
+    )
+
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    assert "ít nhất 1 mốc" in view._save_status.value
+    assert "Vui lòng nhập số hợp lệ" not in view._save_status.value
 
 
 def test_has_changes_compares_against_transactional_load_baseline():

@@ -38,7 +38,7 @@ from gui.controllers.autostart_settings import (
     AutostartSettingsCoordinator,
     AutostartUiState,
 )
-from gui.view_models.settings_form import SettingsFormSnapshot
+from gui.view_models.settings_form import ClassScheduleLeadHoursError, SettingsFormSnapshot
 
 class SettingsView(ft.Container):
     def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None):
@@ -2802,6 +2802,15 @@ class SettingsView(ft.Container):
             if self._on_saved:
                 self._on_saved()
             return autostart_ok
+        except ClassScheduleLeadHoursError:
+            # Distinct from numeric input errors: the user enabled class
+            # reminders but deselected every lead-hour chip.
+            self._save_status.value = (
+                "Lỗi: Vui lòng chọn ít nhất 1 mốc nhắc trước giờ học (1, 2 hoặc 3 giờ)!"
+            )
+            self._save_status.color = C.CRITICAL
+            self.update()
+            return False
         except ValueError:
             self._save_status.value = "Lỗi: Vui lòng nhập số hợp lệ!"
             self._save_status.color = C.CRITICAL

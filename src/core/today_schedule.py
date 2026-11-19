@@ -278,6 +278,10 @@ class TodayScheduleCoordinator:
         self._guard = asyncio.Lock()
         self._wake_event = asyncio.Event()
         self._closed = False
+        # Bumped by replace_cache(): an in-flight refresh started under a
+        # previous account must discard its result instead of publishing a
+        # stale READY into the new account's view.
+        self._generation = 0
         self.state = TodayScheduleViewState(ScheduleLoadStatus.IDLE)
 
     def _publish(self, state: TodayScheduleViewState) -> None:
@@ -308,6 +312,7 @@ class TodayScheduleCoordinator:
 
     async def refresh(self, trigger: str = "manual") -> TodayScheduleViewState:
         async with self._guard:
+            generation = self._generation
             target_date = self._now_provider().date()
             existing = self._cache.load_for(target_date)
             # Startup and a fast first expansion can race before either task
@@ -344,6 +349,15 @@ class TodayScheduleCoordinator:
                     username,
                     password,
                 )
+                if self._generation != generation:
+                    # The account/cache changed while fetching (login or
+                    # settings save): this snapshot belongs to the old
+                    # account, so drop it without touching the new cache.
+                    logger.info(
+                        "Discarding stale schedule refresh (%s): account changed mid-flight",
+                        trigger,
+                    )
+                    return self.state
                 snapshot = TodayScheduleSnapshot(
                     target_date,
                     tuple(sessions),
@@ -355,6 +369,12 @@ class TodayScheduleCoordinator:
                     snapshot=snapshot,
                 )
             except Exception as exc:
+                if self._generation != generation:
+                    logger.info(
+                        "Discarding stale schedule failure (%s): account changed mid-flight",
+                        trigger,
+                    )
+                    return self.state
                 auth_failure = isinstance(exc, ScheduleAuthenticationError)
                 logger.warning(
                     "Portal schedule refresh failed (%s)",
@@ -371,6 +391,7 @@ class TodayScheduleCoordinator:
 
     def replace_cache(self, cache: TodayScheduleCache) -> None:
         self._cache = cache
+        self._generation += 1
         self._wake_event.set()
 
     def close(self) -> None:

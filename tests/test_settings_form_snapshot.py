@@ -327,6 +327,31 @@ def test_class_schedule_lead_hours_default_to_one_hour():
     assert snapshot.to_settings_values()["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1]
 
 
+def test_from_settings_falls_back_when_persisted_lead_hours_are_empty():
+    """Opening Settings with a legacy empty list must never raise."""
+    persisted = SimpleNamespace(
+        NOTIFY_CLASS_SCHEDULE_ENABLED=True,
+        NOTIFY_CLASS_SCHEDULE_LEAD_HOURS=[],
+    )
+
+    snapshot = SettingsFormSnapshot.from_settings(persisted)
+
+    assert snapshot.notify_class_schedule_enabled is True
+    assert snapshot.notify_class_schedule_lead_hours == (1,)
+
+
+def test_enabled_schedule_without_lead_hours_raises_dedicated_error():
+    from gui.view_models.settings_form import ClassScheduleLeadHoursError
+
+    with pytest.raises(ClassScheduleLeadHoursError):
+        SettingsFormSnapshot.from_form_values(
+            {
+                "notify_class_schedule_enabled": True,
+                "notify_class_schedule_lead_hours": [],
+            }
+        )
+
+
 def test_class_schedule_lead_hours_round_trip_and_validate_supported_values():
     snapshot = SettingsFormSnapshot.from_form_values(
         {"notify_class_schedule_enabled": True, "notify_class_schedule_lead_hours": "1, 3"}

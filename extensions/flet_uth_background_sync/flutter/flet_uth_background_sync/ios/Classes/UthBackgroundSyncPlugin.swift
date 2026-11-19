@@ -124,7 +124,10 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     ) {
         let settings = defaults.dictionary(forKey: Self.settingsKey) ?? [:]
         guard bool(settings["enabled"], default: true) else {
-            clearNotifications()
+            // Countdown alerts are off: drop only the deadline reminders.
+            // Class-schedule notifications have their own switch and must
+            // survive here (clearNotifications() would wipe them too).
+            clearDeadlineNotifications()
             result(["imported": activities.count, "scheduled": 0, "cancelled": 0, "delivered": 0])
             return
         }
@@ -554,6 +557,27 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                     $0.hasPrefix(Self.requestPrefix)
                         || $0.hasPrefix(Self.immediatePrefix)
                         || $0.hasPrefix(Self.classSchedulePrefix)
+                }
+                if !deliveredIds.isEmpty {
+                    self.center.removeDeliveredNotifications(withIdentifiers: deliveredIds)
+                }
+            }
+        }
+    }
+
+    /// Clears only countdown/deadline notifications, preserving class-schedule
+    /// history when the deadline switch is turned off (used on logout).
+    private func clearDeadlineNotifications() {
+        center.getPendingNotificationRequests { requests in
+            let pendingIds = requests.map(\.identifier).filter {
+                $0.hasPrefix(Self.requestPrefix) || $0.hasPrefix(Self.immediatePrefix)
+            }
+            if !pendingIds.isEmpty {
+                self.center.removePendingNotificationRequests(withIdentifiers: pendingIds)
+            }
+            self.center.getDeliveredNotifications { delivered in
+                let deliveredIds = delivered.map(\.request.identifier).filter {
+                    $0.hasPrefix(Self.requestPrefix) || $0.hasPrefix(Self.immediatePrefix)
                 }
                 if !deliveredIds.isEmpty {
                     self.center.removeDeliveredNotifications(withIdentifiers: deliveredIds)

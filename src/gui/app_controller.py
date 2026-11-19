@@ -351,6 +351,18 @@ class AppController:
             # UX-5: Show success snackbar after dialog closes
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
             self._portal_client.clear_token()
+            # Flip identity and the schedule cache BEFORE any task is queued:
+            # otherwise the first reminder reconcile after login compares
+            # against the old identity and is mistaken for an account change.
+            self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+            schedule_namespace = (
+                f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
+                if settings.UTH_USERNAME
+                else f"{settings.PORTAL_API_BASE}|anonymous"
+            )
+            self._today_schedule_coordinator.replace_cache(
+                TodayScheduleCache(namespace=schedule_namespace)
+            )
             self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
@@ -1573,16 +1585,25 @@ class AppController:
         else:
             self._safe_run_task(coordinator.ensure_today)
 
-    def _fetch_tomorrow_sessions(self):
-        """Async callable: tomorrow's Portal classes for reminder scheduling."""
+    def _fetch_tomorrow_sessions(self, credentials=None):
+        """Async callable: tomorrow's Portal classes for reminder scheduling.
+
+        The reconcile task passes the ``(username, password)`` pair captured
+        when it was created, so an in-flight task of the previous account keeps
+        fetching with its own credentials instead of reading the global
+        settings after a switch.
+        """
         from datetime import timedelta
 
+        if credentials is None:
+            credentials = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        username, password = credentials
         tomorrow = datetime.now().date() + timedelta(days=1)
         return asyncio.to_thread(
             self._portal_client.fetch_day,
             tomorrow,
-            settings.UTH_USERNAME,
-            settings.UTH_PASSWORD,
+            username,
+            password,
         )
 
     async def _reconcile_class_schedule_notifications(
@@ -2861,6 +2882,10 @@ class AppController:
         if credentials_changed:
             # Credentials are the only settings change that requires immediate
             # network reload and an account-specific cache namespace.
+            # The identity flips FIRST: every reconcile/refresh task queued
+            # below (and any in-flight one) compares against it, so no stale
+            # task can mistake the new account for its own.
+            self._settings_identity = new_identity
             try:
                 self.orchestrator.moodle_service.clear_all_caches()
                 self.orchestrator.clear_detail_cache()
@@ -2894,7 +2919,6 @@ class AppController:
                 self._reconcile_class_schedule_notifications, (), clear_only=True
             )
             self._safe_run_task(self._today_schedule_coordinator.ensure_today)
-            self._settings_identity = new_identity
 
         load_theme_from_settings()
         set_page_theme(self.page)

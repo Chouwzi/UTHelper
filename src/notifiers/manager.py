@@ -408,32 +408,50 @@ class NotificationManager:
         old credentials aborts instead of overwriting a ``clear_only`` run.
 
         ``clear_only=True`` drops every class reminder without any network
-        call. ``fetch_day`` is an optional async callable returning tomorrow's
-        sessions, ``identity_getter`` the current account identity, and
+        call. ``fetch_day`` is an optional async callable receiving a
+        ``(username, password)`` snapshot and returning tomorrow's sessions,
+        ``identity_getter`` the current account identity, and
         ``android_bridge`` the optional native scheduler.
         """
+        # Snapshot the account at TASK CREATION — before waiting for the lock.
+        # A stale task queued by the previous account must notice the change
+        # and abort; capturing after the lock would let it read the NEW
+        # identity, pass its own check, and rebuild the old session list under
+        # the new account's name.
+        identity_before = identity_getter() if identity_getter else None
+        credentials_before = (
+            str(getattr(config, "UTH_USERNAME", "") or ""),
+            str(getattr(config, "UTH_PASSWORD", "") or ""),
+        )
+
+        def identity_changed() -> bool:
+            return (
+                identity_getter is not None
+                and identity_getter() != identity_before
+            )
+
         lock = getattr(self, "_class_schedule_reconcile_lock", None)
         if lock is None:
             lock = self._class_schedule_reconcile_lock = asyncio.Lock()
         async with lock:
-            identity_before = identity_getter() if identity_getter else None
-
-            def identity_changed() -> bool:
-                return (
-                    identity_getter is not None
-                    and identity_getter() != identity_before
+            if identity_changed():
+                # A stale task spent its whole wait behind the lock; by now
+                # the account has moved on, so it must not even fetch.
+                logger.info(
+                    "Skipping class-schedule reconcile: account changed while queued"
                 )
+                return
 
-            enabled = bool(
+            # clear_only is a pure teardown: it must never schedule, even if
+            # the enabled switch is still on in the freshly written settings.
+            enabled = (not clear_only) and bool(
                 getattr(config, "NOTIFY_CLASS_SCHEDULE_ENABLED", False)
             )
             session_snapshot = list(sessions)
-            credentials_available = bool(
-                getattr(config, "UTH_USERNAME", "")
-            ) and bool(getattr(config, "UTH_PASSWORD", ""))
+            username, password = credentials_before
+            credentials_available = bool(username) and bool(password)
             if (
                 enabled
-                and not clear_only
                 and credentials_available
                 and fetch_day is not None
             ):
@@ -442,7 +460,7 @@ class NotificationManager:
                 # a class beginning tomorrow can still have its alarm persisted
                 # before the app is suspended or the user leaves the device.
                 try:
-                    tomorrow_sessions = await fetch_day()
+                    tomorrow_sessions = await fetch_day(credentials_before)
                     if identity_changed():
                         logger.info(
                             "Skipping class-schedule reconcile: account changed during fetch"

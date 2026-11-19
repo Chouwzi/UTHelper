@@ -20,6 +20,14 @@ class SettingsFormValidationError(ValueError):
     """A validation error which identifies a control but never echoes its value."""
 
 
+class ClassScheduleLeadHoursError(SettingsFormValidationError):
+    """Schedule reminders were enabled without any selected lead hour.
+
+    A dedicated type lets ``SettingsView._save`` explain this exact problem
+    instead of falling back to the generic "enter a valid number" message.
+    """
+
+
 DEFAULT_THEME = "midnight_blue"
 DEFAULT_COLORS = {
     "color_critical": "#EF4444",
@@ -297,8 +305,11 @@ class SettingsFormSnapshot:
                 "notify_class_schedule_enabled": getattr(
                     value, "NOTIFY_CLASS_SCHEDULE_ENABLED", False
                 ),
-                "notify_class_schedule_lead_hours": getattr(
-                    value, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", DEFAULT_CLASS_SCHEDULE_LEAD_HOURS
+                "notify_class_schedule_lead_hours": (
+                    # A persisted empty list (older builds saved one) must not
+                    # crash Settings on open: fall back to the default hour.
+                    getattr(value, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", None)
+                    or DEFAULT_CLASS_SCHEDULE_LEAD_HOURS
                 ),
                 "notify_muted_courses": getattr(value, "NOTIFY_MUTED_COURSES", ()),
             }
@@ -365,7 +376,7 @@ class SettingsFormSnapshot:
         if snapshot.notify_class_schedule_enabled and not snapshot.notify_class_schedule_lead_hours:
             # Enabling reminders with every lead chip deselected would
             # silently schedule nothing; reject it so the UI can explain.
-            raise SettingsFormValidationError(
+            raise ClassScheduleLeadHoursError(
                 "notify_class_schedule_lead_hours must contain at least one of 1, 2 or 3"
             )
         return snapshot
