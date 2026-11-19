@@ -354,30 +354,41 @@ class TestTrayMinimize(unittest.IsolatedAsyncioTestCase):
         page = MagicMock()
         
         # Ensure MINIMIZE_TO_TRAY is True
+        previous_minimize = settings.MINIMIZE_TO_TRAY
+        previous_auto_update = settings.AUTO_UPDATE_ENABLED
         settings.MINIMIZE_TO_TRAY = True
-        
+        settings.AUTO_UPDATE_ENABLED = False
+
         # Initialize controller
         controller = AppController(page)
-        controller.tray = MagicMock()
-        
-        # Create a mock close event
-        # In Flet 0.22+, event can be data="close" or type=WindowEventType.CLOSE
-        class MockEvent:
-            def __init__(self):
-                self.data = "close"
-                self.type = "close"
-                
-        event = MockEvent()
-        
-        # Trigger window event
-        await controller._on_window_event(event)
-        
-        # Verify page window is hidden
-        self.assertFalse(page.window.visible)
-        page.update.assert_called()
-        
-        # Verify tray balloon was shown if it's the first time
-        controller.tray._icon.notify.assert_called_once()
+        real_tray = getattr(controller, "tray", None)
+        try:
+            controller.tray = MagicMock()
+
+            # Create a mock close event
+            # In Flet 0.22+, event can be data="close" or type=WindowEventType.CLOSE
+            class MockEvent:
+                def __init__(self):
+                    self.data = "close"
+                    self.type = "close"
+
+            event = MockEvent()
+
+            # Trigger window event
+            await controller._on_window_event(event)
+
+            # Verify page window is hidden
+            self.assertFalse(page.window.visible)
+            page.update.assert_called()
+
+            # Verify tray balloon was shown if it's the first time
+            controller.tray._icon.notify.assert_called_once()
+        finally:
+            settings.MINIMIZE_TO_TRAY = previous_minimize
+            settings.AUTO_UPDATE_ENABLED = previous_auto_update
+            if real_tray is not None:
+                real_tray.close(timeout_seconds=1.0)
+            controller._on_disconnect(None)
 
 if __name__ == "__main__":
     unittest.main()

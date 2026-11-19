@@ -667,6 +667,10 @@ class SettingsView(ft.Container):
         self._update_status_group.visible = bool(
             message or show_progress or action_label or can_cancel
         )
+        debug_text = getattr(self, "_debug_update_text", None)
+        if debug_text is not None:
+            debug_text.value = message
+            debug_text.color = color or C.TEXT_SECONDARY
         try:
             self.update()
         except Exception:
@@ -2018,13 +2022,20 @@ class SettingsView(ft.Container):
         """Force check for app updates."""
         if not self._get_distribution_profile().supports_github_self_update:
             return
+        debug_text = getattr(self, "_debug_update_text", None)
+        if debug_text is not None:
+            debug_text.value = "Đang kiểm tra cập nhật..."
+            debug_text.color = C.TEXT_SECONDARY
+            try:
+                debug_text.update()
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "Debug update text refresh skipped", exc_info=True
+                )
         if self._on_check_update:
             self._on_check_update()
             return
         import threading
-        self._debug_update_text.value = "Đang kiểm tra cập nhật..."
-        self._debug_update_text.color = C.TEXT_SECONDARY
-        self._debug_update_text.update()
 
         def _worker():
             try:

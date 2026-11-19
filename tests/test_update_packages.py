@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import hashlib
+import json
 from pathlib import Path
 import subprocess
+import sys
+import threading
+import time
 
 import pytest
 
@@ -26,8 +30,10 @@ from platform_utils.windows_update import (
     MsiDetails,
     SignatureDetails,
     TRUSTED_WINDOWS_SIGNER_SHA256,
+    TransientVerificationResult,
     WindowsPackageLauncher,
     WindowsPackageVerifier,
+    resolve_relaunch_executable,
 )
 
 
@@ -384,3 +390,272 @@ def test_portable_verifier_rechecks_size_hash_and_extension(tmp_path):
     assert verifier.verify(path, candidate).verified
     path.write_bytes(payload + b"tampered")
     assert not verifier.verify(path, candidate).verified
+
+
+def test_windows_verifier_default_timeout_is_30_and_timeout_is_retryable(tmp_path):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"signed-msi")
+    candidate = _candidate(path)
+
+    default_verifier = WindowsPackageVerifier()
+    assert default_verifier.timeout_seconds == 30.0
+
+    def slow_probe(_path, timeout):
+        raise subprocess.TimeoutExpired("powershell.exe", timeout)
+
+    timeout_verifier = WindowsPackageVerifier(
+        signature_probe=slow_probe,
+        trusted_fingerprints=frozenset({"AB" * 32}),
+    )
+    timeout_result = timeout_verifier.verify(path, candidate)
+    assert isinstance(timeout_result, TransientVerificationResult)
+    assert timeout_result.verified is False
+    assert timeout_result.retryable is True
+
+    tampered = tmp_path / "UTHelper-2.2.0.msi"
+    tampered.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"tampered")
+    tamper_result = timeout_verifier.verify(tampered, candidate)
+    assert tamper_result.verified is False
+    assert getattr(tamper_result, "retryable", False) is False
+
+
+def test_windows_verifier_cancels_active_popen_probe_promptly(tmp_path, monkeypatch):
+    from platform_utils import windows_update
+
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"signed-msi")
+    candidate = _candidate(path)
+
+    class SlowFakePopen:
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = None
+            self._killed = threading.Event()
+
+        def communicate(self, timeout=None):
+            if self._killed.wait(timeout):
+                self.returncode = 1
+                return ("", "")
+            raise subprocess.TimeoutExpired("powershell.exe", timeout)
+
+        def terminate(self):
+            self._killed.set()
+
+        def wait(self, timeout=None):
+            self._killed.wait(timeout)
+            return 1
+
+        def kill(self):
+            self._killed.set()
+
+    monkeypatch.setattr(windows_update.subprocess, "Popen", SlowFakePopen)
+    verifier = WindowsPackageVerifier(trusted_fingerprints=frozenset({"AB" * 32}))
+    timer = threading.Timer(0.05, verifier.cancel)
+    timer.start()
+    started = time.monotonic()
+    try:
+        result = verifier.verify(path, candidate)
+    finally:
+        timer.cancel()
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.5
+    assert result.verified is False
+    assert getattr(result, "retryable", False) is True
+
+
+@pytest.mark.parametrize(
+    "exit_code,expected_ack,expected_status",
+    [
+        (0, True, "installer_launched"),
+        (3010, True, "installer_launched"),
+        (1223, False, "uac_cancelled"),
+        (1602, False, "uac_cancelled"),
+        (1603, False, "file_in_use"),
+        (1618, False, "installer_busy"),
+        (1, False, "installer_rejected"),
+    ],
+)
+def test_windows_launcher_process_factory_maps_exit_codes(
+    tmp_path,
+    exit_code,
+    expected_ack,
+    expected_status,
+):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+
+    class ExitingProcess:
+        def __init__(self, code):
+            self.returncode = code
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    launcher = WindowsPackageLauncher(process_factory=lambda _argv: ExitingProcess(exit_code))
+    assert launcher.acknowledgement_seconds == 8.0
+    result = launcher.launch(path, _candidate(path).package)
+    assert result.acknowledged is expected_ack
+    assert result.status == expected_status
+
+
+def test_windows_launcher_uac_denial_cleans_handoff_dir(tmp_path, monkeypatch):
+    from platform_utils import windows_update
+
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(windows_update.sys, "platform", "win32")
+    monkeypatch.setattr(windows_update, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(windows_update, "_shell_execute_runas", lambda *_args: 1223)
+
+    launcher = WindowsPackageLauncher(relaunch_executable=tmp_path / "UTHelper.exe")
+    result = launcher.launch(path, _candidate(path).package)
+
+    assert result.acknowledged is False
+    assert result.status == "uac_cancelled"
+    handoff_root = local_app_data / "UTHelper" / "update_handoff"
+    assert list(handoff_root.glob("handoff-*")) == []
+
+
+def test_windows_launcher_uac_accept_writes_json_and_spawns_detached_relaunch(
+    tmp_path,
+    monkeypatch,
+):
+    from platform_utils import windows_update
+
+    pkg_dir = tmp_path / "dir $name; 'test'"
+    pkg_dir.mkdir()
+    path = pkg_dir / "UTHelper 2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    local_app_data = tmp_path / "LocalAppData"
+    relaunch_exe = tmp_path / "UTHelper.exe"
+    relaunch_exe.write_bytes(b"MZ")
+
+    captured = {}
+    popen_calls = []
+
+    def fake_runas(file_path, params, cwd):
+        captured["runas"] = (file_path, params, cwd)
+        return 0
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((argv, kwargs))
+        return object()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(windows_update.sys, "platform", "win32")
+    monkeypatch.setattr(windows_update, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(windows_update, "_shell_execute_runas", fake_runas)
+    monkeypatch.setattr(windows_update.subprocess, "Popen", fake_popen)
+
+    launcher = WindowsPackageLauncher(relaunch_executable=relaunch_exe)
+    result = launcher.launch(path, _candidate(path).package)
+
+    assert result.acknowledged is True
+    assert result.status == "installer_launched"
+    handoff_dirs = list((local_app_data / "UTHelper" / "update_handoff").glob("handoff-*"))
+    assert len(handoff_dirs) == 1
+    handoff_dir = handoff_dirs[0]
+    config = json.loads((handoff_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["package_path"] == str(path.resolve())
+    assert config["kind"] == "launch_msi"
+    assert config["relaunch_path"] == str(relaunch_exe)
+    install_script = (handoff_dir / "install_helper.ps1").read_text(encoding="utf-8")
+    relaunch_script = (handoff_dir / "relaunch_helper.ps1").read_text(encoding="utf-8")
+    assert "Get-FileHash" in install_script
+    assert "System.Diagnostics.ProcessStartInfo" in install_script
+    assert "3010" in relaunch_script
+    assert len(popen_calls) == 1
+    relaunch_argv, relaunch_kwargs = popen_calls[0]
+    assert str(handoff_dir / "relaunch_helper.ps1") in relaunch_argv
+    assert relaunch_kwargs["cwd"] != str(handoff_dir)
+    assert "WindowsPowerShell" in relaunch_kwargs["env"]["PSModulePath"]
+
+
+def test_windows_launcher_elevated_handoff_runner_receives_relaunch_path(tmp_path):
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    seen = []
+
+    def runner(pkg_path, pkg, relaunch_path):
+        seen.append((pkg_path, pkg.package_type, relaunch_path))
+        return windows_update_result()
+
+    def windows_update_result():
+        from core.update_models import LaunchResult
+
+        return LaunchResult(True, "installer acknowledged", status="installer_launched")
+
+    relaunch = tmp_path / "UTHelper.exe"
+    launcher = WindowsPackageLauncher(
+        elevated_handoff_runner=runner,
+        relaunch_executable=relaunch,
+    )
+    res = launcher.launch(path, _candidate(path).package)
+    assert res.acknowledged is True
+    assert seen == [(path.resolve(), "msi", relaunch)]
+
+
+def test_resolve_relaunch_executable_normalizes_autostart_and_ignores_python(tmp_path):
+    autostart = tmp_path / "UTHelperAutostart.exe"
+    main_exe = tmp_path / "UTHelper.exe"
+    autostart.write_bytes(b"MZ")
+    main_exe.write_bytes(b"MZ")
+
+    primary, fallback = resolve_relaunch_executable(autostart)
+    assert primary == main_exe
+    assert fallback is not None and fallback.name == "UTHelper.exe"
+
+    assert resolve_relaunch_executable(Path(sys.executable)) == (None, None)
+    assert resolve_relaunch_executable(tmp_path / "pythonw.exe") == (None, None)
+    assert resolve_relaunch_executable(tmp_path / "pytest.exe") == (None, None)
+
+
+def test_shell_execute_runas_configures_closehandle_types(monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+    from platform_utils import windows_update
+
+    closed_handles = []
+
+    class FakeCloseHandle:
+        def __init__(self):
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, handle):
+            closed_handles.append(handle)
+            return 1
+
+    fake_close = FakeCloseHandle()
+
+    class FakeShell32:
+        def ShellExecuteExW(self, sei_ref):
+            sei = sei_ref._obj
+            sei.hProcess = 0x1234
+            return 1
+
+    monkeypatch.setattr(
+        windows_update.ctypes,
+        "WinDLL",
+        lambda name, **_kw: FakeShell32() if name == "shell32" else None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        windows_update.ctypes,
+        "windll",
+        SimpleNamespace(kernel32=SimpleNamespace(CloseHandle=fake_close)),
+        raising=False,
+    )
+
+    rc = windows_update._shell_execute_runas("powershell.exe", "-File x.ps1", "C:\\Temp")
+    assert rc == 0
+    assert fake_close.argtypes == [wintypes.HANDLE]
+    assert fake_close.restype == wintypes.BOOL
+    assert closed_handles == [0x1234]
+    assert ctypes is not None

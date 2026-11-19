@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import inspect
 import logging
 import math
 from pathlib import Path
@@ -129,6 +130,10 @@ class UpdateCoordinator:
         self._install_handed_off = False
         self._detached_downloader = False
 
+    def current_candidate(self) -> UpdateCandidate | None:
+        with self._lock:
+            return self._candidate
+
     def start(self) -> None:
         with self._lock:
             self._ensure_open_locked()
@@ -225,6 +230,10 @@ class UpdateCoordinator:
             self._detach_downloader()
             with self._lock:
                 self._cancel_download.set()
+            self._cancel_client()
+            self._cancel_verifier()
+            self._cancel_active_downloader()
+            with self._lock:
                 self._enqueue_locked(self._SHUTDOWN)
         if thread is None or thread is threading.current_thread():
             return True
@@ -323,11 +332,25 @@ class UpdateCoordinator:
             return
         self._emit(UpdateEventKind.CHECKING)
         try:
-            candidate = self._client.fetch_candidate(
-                self._current_version,
-                self._target,
-            )
+            fetch = self._client.fetch_candidate
+            try:
+                accepts_cancel = "cancel" in inspect.signature(fetch).parameters
+            except (TypeError, ValueError):
+                accepts_cancel = False
+            if accepts_cancel:
+                candidate = fetch(
+                    self._current_version,
+                    self._target,
+                    cancel=self._stop,
+                )
+            else:
+                candidate = fetch(
+                    self._current_version,
+                    self._target,
+                )
         except Exception as exc:
+            if self._stop.is_set():
+                return
             logger.warning("Update discovery failed", exc_info=True)
             self._emit(UpdateEventKind.FAILED, message=str(exc))
             return
@@ -449,10 +472,15 @@ class UpdateCoordinator:
             self._emit(UpdateEventKind.VERIFYING, candidate=candidate)
             result = self._verifier.verify(downloaded_path, candidate)
             if not result.verified:
-                downloaded_path.unlink(missing_ok=True)
+                retryable = getattr(result, "retryable", False) or self._stop.is_set()
+                if not retryable:
+                    self._remove_downloaded_path(downloaded_path)
                 downloaded_path = None
                 self._finish_download()
-                self._emit(UpdateEventKind.FAILED, candidate=candidate, message=result.reason)
+                if self._stop.is_set():
+                    self._emit(UpdateEventKind.CANCELLED, candidate=candidate)
+                else:
+                    self._emit(UpdateEventKind.FAILED, candidate=candidate, message=result.reason)
                 return
             with self._lock:
                 self._ready_path = downloaded_path
@@ -465,7 +493,7 @@ class UpdateCoordinator:
         except Exception as exc:
             self._remove_downloaded_path(downloaded_path)
             self._finish_download()
-            if self._cancel_download.is_set():
+            if self._cancel_download.is_set() or self._stop.is_set():
                 self._emit(UpdateEventKind.CANCELLED, candidate=candidate)
             else:
                 logger.warning("Update download or verification failed", exc_info=True)
@@ -499,22 +527,29 @@ class UpdateCoordinator:
                 acknowledged = bool(self._external_opener(external_url))
                 reason = ""
             elif path is not None:
-                try:
-                    verification = self._verifier.verify(path, candidate)
-                except Exception as exc:
-                    logger.warning("Update package re-verification failed", exc_info=True)
-                    self._emit(UpdateEventKind.FAILED, candidate=candidate, message=str(exc))
-                    return
-                if not verification.verified:
-                    self._remove_downloaded_path(path)
-                    with self._lock:
-                        self._ready_path = None
-                    self._emit(
-                        UpdateEventKind.FAILED,
-                        candidate=candidate,
-                        message=verification.reason,
-                    )
-                    return
+                skip_verify = (
+                    not path.exists()
+                    and getattr(self._launcher, "supports_cached_package_retry", False)
+                )
+                if not skip_verify:
+                    try:
+                        verification = self._verifier.verify(path, candidate)
+                    except Exception as exc:
+                        logger.warning("Update package re-verification failed", exc_info=True)
+                        self._emit(UpdateEventKind.FAILED, candidate=candidate, message=str(exc))
+                        return
+                    if not verification.verified:
+                        retryable = getattr(verification, "retryable", False) or self._stop.is_set()
+                        if not retryable:
+                            self._remove_downloaded_path(path)
+                            with self._lock:
+                                self._ready_path = None
+                        self._emit(
+                            UpdateEventKind.FAILED,
+                            candidate=candidate,
+                            message=verification.reason,
+                        )
+                        return
                 self._emit(UpdateEventKind.INSTALLING, candidate=candidate)
                 try:
                     result = self._launcher.launch(path, candidate.package)
@@ -528,11 +563,31 @@ class UpdateCoordinator:
                     return
                 if result.status == "permission_required":
                     event_kind = UpdateEventKind.INSTALL_PERMISSION_REQUIRED
+                    reason = result.reason or result.status
                 elif result.acknowledged:
                     event_kind = UpdateEventKind.INSTALL_LAUNCHED
+                    reason = result.reason or result.status
                 else:
                     event_kind = UpdateEventKind.INSTALL_FAILED
-                reason = result.reason or result.status
+                    if result.status and result.status not in {"failed", "error"}:
+                        reason = result.status
+                    else:
+                        reason = result.reason or result.status
+                    if (
+                        result.reason == "source_unavailable"
+                        or result.status == "installer_unavailable"
+                        or (
+                            not path.exists()
+                            and not getattr(
+                                self._launcher,
+                                "supports_cached_package_retry",
+                                False,
+                            )
+                        )
+                    ):
+                        with self._lock:
+                            if self._ready_path == path:
+                                self._ready_path = None
             else:
                 return
             if external_url is not None:
@@ -552,6 +607,33 @@ class UpdateCoordinator:
                 candidate=candidate,
                 message=str(exc),
             )
+
+    def _cancel_client(self) -> None:
+        cancel = getattr(self._client, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            cancel()
+        except Exception:
+            logger.debug("Update client cancellation failed", exc_info=True)
+
+    def _cancel_verifier(self) -> None:
+        cancel = getattr(self._verifier, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            cancel()
+        except Exception:
+            logger.debug("Update verifier cancellation failed", exc_info=True)
+
+    def _cancel_active_downloader(self) -> None:
+        cancel_active = getattr(self._downloader, "cancel_active", None)
+        if not callable(cancel_active):
+            return
+        try:
+            cancel_active()
+        except Exception:
+            logger.debug("Update downloader socket cancellation failed", exc_info=True)
 
     def _detach_downloader(self) -> None:
         detach = getattr(self._downloader, "detach", None)

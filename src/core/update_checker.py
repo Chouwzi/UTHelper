@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import http.client
 import json
 import logging
 import math
 import os
 from pathlib import Path
 import re
+import socket
+import sys
 import tempfile
 import threading
 import time
@@ -99,6 +102,53 @@ def _get_update_temp_dir() -> Path:
     return directory
 
 
+_ORIGINAL_TIME_SLEEP = time.sleep
+
+
+def _close_response_quietly(response: object) -> None:
+    stream = getattr(response, "fp", None)
+    raw = getattr(stream, "raw", None)
+    sock = getattr(raw, "_sock", None) or getattr(stream, "_sock", None)
+    if sock is not None:
+        shutdown = getattr(sock, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            except Exception:
+                pass
+        if stream is None:
+            close = getattr(sock, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except OSError:
+                    pass
+                except Exception:
+                    pass
+        elif sys.platform == "win32" and isinstance(sock, socket.socket):
+            # On Windows, shutdown(SHUT_RDWR) does not unblock a blocking recv()
+            # while SocketIO holds _io_refs >= 1. Close the underlying Winsock
+            # descriptor directly without mutating response.fp or SSLSocket._sslobj.
+            try:
+                socket.socket._real_close(sock)
+            except OSError:
+                pass
+            except Exception:
+                pass
+        return
+    if stream is None:
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except OSError:
+                pass
+            except Exception:
+                pass
+
+
 def _request_json(url: str, timeout: int = _SOCKET_TIMEOUT_SECONDS) -> dict:
     request = urllib.request.Request(
         url,
@@ -115,6 +165,9 @@ def _request_json(url: str, timeout: int = _SOCKET_TIMEOUT_SECONDS) -> dict:
     if not isinstance(value, dict):
         raise ValueError("update response must be an object")
     return value
+
+
+_DEFAULT_REQUEST_JSON = _request_json
 
 
 def _is_newer(latest: str, current: str) -> bool:
@@ -158,14 +211,29 @@ class GitHubReleaseClient:
         self.socket_timeout_seconds = int(socket_timeout_seconds)
         if self.socket_timeout_seconds <= 0 or self.socket_timeout_seconds > 60:
             raise ValueError("update socket timeout is invalid")
+        self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._active_responses: set[object] = set()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+        with self._lock:
+            responses = list(self._active_responses)
+        for response in responses:
+            _close_response_quietly(response)
+
+    def _is_cancelled(self, cancel: threading.Event | None) -> bool:
+        return self._cancel.is_set() or (cancel is not None and cancel.is_set())
 
     def fetch_candidate(
         self,
         current_version: str,
         target: RuntimeTarget,
+        *,
+        cancel: threading.Event | None = None,
     ) -> UpdateCandidate | None:
         try:
-            release = self._request_json_with_retry(self.releases_url)
+            release = self._request_json_with_retry(self.releases_url, cancel=cancel)
             if release.get("draft") is True or release.get("prerelease") is True:
                 return None
             tag = release.get("tag_name")
@@ -191,7 +259,7 @@ class GitHubReleaseClient:
             manifest_url = _approved_github_url(
                 manifest_assets[0].get("browser_download_url")
             )
-            document = self._request_json_with_retry(manifest_url)
+            document = self._request_json_with_retry(manifest_url, cancel=cancel)
             manifest = parse_manifest(
                 document,
                 expected_release_version=release_version,
@@ -212,24 +280,87 @@ class GitHubReleaseClient:
             logger.warning("Update check rejected an invalid release")
             raise UpdateDiscoveryError("update release metadata is invalid") from exc
 
-    def _request_json_with_retry(self, url: str) -> dict:
-        for attempt in range(3):
+    def _fetch_json_once(
+        self,
+        url: str,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> dict:
+        if self._is_cancelled(cancel):
+            raise UpdateDiscoveryError("update check cancelled")
+        if _request_json is not _DEFAULT_REQUEST_JSON:
+            return _request_json(url, timeout=self.socket_timeout_seconds)
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": _UA,
+            },
+        )
+        with urllib.request.urlopen(
+            request,
+            timeout=self.socket_timeout_seconds,
+        ) as response:
+            with self._lock:
+                self._active_responses.add(response)
             try:
-                return _request_json(url, timeout=self.socket_timeout_seconds)
+                if self._is_cancelled(cancel):
+                    raise UpdateDiscoveryError("update check cancelled")
+                payload = response.read(_MAX_JSON_BYTES + 1)
+            finally:
+                with self._lock:
+                    self._active_responses.discard(response)
+        if self._is_cancelled(cancel):
+            raise UpdateDiscoveryError("update check cancelled")
+        if len(payload) > _MAX_JSON_BYTES:
+            raise ValueError("update response exceeds size limit")
+        value = json.loads(payload.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("update response must be an object")
+        return value
+
+    def _request_json_with_retry(
+        self,
+        url: str,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> dict:
+        for attempt in range(3):
+            if self._is_cancelled(cancel):
+                raise UpdateDiscoveryError("update check cancelled")
+            try:
+                return self._fetch_json_once(url, cancel=cancel)
+            except UpdateDiscoveryError:
+                raise
             except urllib.error.HTTPError as exc:
+                if self._is_cancelled(cancel):
+                    raise UpdateDiscoveryError("update check cancelled") from exc
                 transient = exc.code in {408, 429} or 500 <= exc.code <= 599
                 if not transient:
                     raise UpdateDiscoveryError(
                         f"update service returned HTTP {exc.code}"
                     ) from exc
                 error: BaseException = exc
-            except (OSError, urllib.error.URLError) as exc:
+            except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+                if self._is_cancelled(cancel):
+                    raise UpdateDiscoveryError("update check cancelled") from exc
                 error = exc
             if attempt == 2:
                 raise UpdateDiscoveryError(
                     "update service is temporarily unavailable"
                 ) from error
-            time.sleep(0.25 * (2**attempt))
+            delay = 0.25 * (2**attempt)
+            if cancel is not None:
+                if self._cancel.is_set() or cancel.wait(delay):
+                    raise UpdateDiscoveryError("update check cancelled")
+            elif time.sleep is not _ORIGINAL_TIME_SLEEP:
+                if self._cancel.is_set():
+                    raise UpdateDiscoveryError("update check cancelled")
+                time.sleep(delay)
+            elif self._cancel.wait(delay):
+                raise UpdateDiscoveryError("update check cancelled")
+            if self._is_cancelled(cancel):
+                raise UpdateDiscoveryError("update check cancelled")
         raise AssertionError("unreachable update discovery retry state")
 
 
@@ -287,6 +418,14 @@ class VerifiedDownloader:
         ):
             raise ValueError("update total timeout must be within 600 seconds")
         self.total_timeout_seconds = timeout
+        self._lock = threading.Lock()
+        self._active_responses: set[object] = set()
+
+    def cancel_active(self) -> None:
+        with self._lock:
+            responses = list(self._active_responses)
+        for response in responses:
+            _close_response_quietly(response)
 
     @staticmethod
     def _filename(package: ReleasePackage) -> str:
@@ -372,7 +511,12 @@ class VerifiedDownloader:
                         progress=throttled_progress,
                     )
                     break
-                except (OSError, urllib.error.URLError, TimeoutError) as exc:
+                except (
+                    OSError,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    http.client.HTTPException,
+                ) as exc:
                     if cancel.is_set():
                         raise DownloadCancelled("download cancelled")
                     remaining = self._remaining_seconds(deadline)
@@ -494,61 +638,67 @@ class VerifiedDownloader:
             request,
             timeout=request_timeout,
         ) as response:
-            self._remaining_seconds(deadline)
-            status = int(getattr(response, "status", 200))
-            response_end: int | None = None
-            if offset and status == 206:
-                response_end = self._validate_content_range(
-                    response,
-                    offset,
-                    package.size,
-                )
-                mode = "ab"
-                downloaded = offset
-            elif offset and status == 200:
-                mode = "wb"
-                downloaded = 0
-            elif not offset and status == 200:
-                mode = "wb"
-                downloaded = 0
-            else:
-                raise PackageIntegrityError("update range response is invalid")
-            with partial.open(mode) as output:
-                received = 0
-                while True:
-                    if cancel.is_set():
-                        raise DownloadCancelled("download cancelled")
-                    remaining = self._remaining_seconds(deadline)
-                    self._set_response_timeout(
+            with self._lock:
+                self._active_responses.add(response)
+            try:
+                self._remaining_seconds(deadline)
+                status = int(getattr(response, "status", 200))
+                response_end: int | None = None
+                if offset and status == 206:
+                    response_end = self._validate_content_range(
                         response,
-                        min(float(_SOCKET_TIMEOUT_SECONDS), remaining),
+                        offset,
+                        package.size,
                     )
-                    # Avoid waiting for a full buffer before checking progress/deadline.
-                    chunk = response.read1(_DOWNLOAD_CHUNK_SIZE)
-                    self._remaining_seconds(deadline)
-                    if cancel.is_set():
-                        raise DownloadCancelled("download cancelled")
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                    downloaded += len(chunk)
-                    received += len(chunk)
-                    if downloaded > package.size:
-                        raise PackageIntegrityError("download exceeds manifest size")
-                    if progress is not None:
-                        progress(downloaded)
-                if response_end is not None:
-                    expected_response_size = response_end - offset + 1
-                    if received != expected_response_size:
-                        raise _IncompleteDownloadError(
-                            "update range response ended before its declared size"
+                    mode = "ab"
+                    downloaded = offset
+                elif offset and status == 200:
+                    mode = "wb"
+                    downloaded = 0
+                elif not offset and status == 200:
+                    mode = "wb"
+                    downloaded = 0
+                else:
+                    raise PackageIntegrityError("update range response is invalid")
+                with partial.open(mode) as output:
+                    received = 0
+                    while True:
+                        if cancel.is_set():
+                            raise DownloadCancelled("download cancelled")
+                        remaining = self._remaining_seconds(deadline)
+                        self._set_response_timeout(
+                            response,
+                            min(float(_SOCKET_TIMEOUT_SECONDS), remaining),
                         )
-                if downloaded < package.size:
-                    raise _IncompleteDownloadError(
-                        "update response ended before the package was complete"
-                    )
-                output.flush()
-                os.fsync(output.fileno())
+                        # Avoid waiting for a full buffer before checking progress/deadline.
+                        chunk = response.read1(_DOWNLOAD_CHUNK_SIZE)
+                        self._remaining_seconds(deadline)
+                        if cancel.is_set():
+                            raise DownloadCancelled("download cancelled")
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        downloaded += len(chunk)
+                        received += len(chunk)
+                        if downloaded > package.size:
+                            raise PackageIntegrityError("download exceeds manifest size")
+                        if progress is not None:
+                            progress(downloaded)
+                    if response_end is not None:
+                        expected_response_size = response_end - offset + 1
+                        if received != expected_response_size:
+                            raise _IncompleteDownloadError(
+                                "update range response ended before its declared size"
+                            )
+                    if downloaded < package.size:
+                        raise _IncompleteDownloadError(
+                            "update response ended before the package was complete"
+                        )
+                    output.flush()
+                    os.fsync(output.fileno())
+            finally:
+                with self._lock:
+                    self._active_responses.discard(response)
 
     @staticmethod
     def _set_response_timeout(response, timeout: float) -> None:

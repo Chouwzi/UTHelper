@@ -16,6 +16,7 @@ import java.io.File
 import java.security.MessageDigest
 import com.uthelper.backgroundsync.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,6 +56,11 @@ class ApkUpdateInstallerFlowTest {
         assertEquals("installer_handoff", result.stage)
         assertEquals(archiveBytes.size.toLong(), result.bytes)
         assertEquals(identity.sha256, result.sha256)
+        val stagedPartial = File(
+            File(context.cacheDir, "verified_updates"),
+            "update-${identity.sha256}.apk.part",
+        )
+        assertFalse(stagedPartial.exists())
         val launch = Shadows.shadowOf(app).getNextStartedActivity()
         assertNotNull(launch)
         assertEquals(Intent.ACTION_VIEW, launch!!.action)
@@ -119,6 +125,41 @@ class ApkUpdateInstallerFlowTest {
         assertNotNull(installerIntent)
         assertEquals(Intent.ACTION_VIEW, installerIntent!!.action)
         assertEquals("application/vnd.android.package-archive", installerIntent.type)
+    }
+
+    @Test
+    fun rejectsInvalidArchiveMetadataAndDeletesStagedApk() {
+        val app = RuntimeEnvironment.getApplication()
+        val context: Context = app
+        val packageFile = fixturePackage(context)
+        val identity = installIdentity(context, packageFile)
+        registerInstallerProvider(context)
+        val cache = File(context.cacheDir, "verified_updates")
+        val stagedApk = File(cache, "update-${identity.sha256}.apk")
+        val stagedPartial = File(cache, "update-${identity.sha256}.apk.part")
+        val wrongArchive = PackageInfo().apply {
+            packageName = "com.example.wrong"
+            versionCode = identity.versionCode.toInt()
+            signatures = arrayOf(Signature(signerBytes))
+        }
+        Shadows.shadowOf(context.packageManager)
+            .setPackageArchiveInfo(stagedApk.canonicalPath, wrongArchive)
+
+        val installer = ApkUpdateInstaller(context)
+        val result = installer.verifyLocalAndOpen(
+            localPath = packageFile.absolutePath,
+            expectedSha256 = identity.sha256,
+            expectedSize = archiveBytes.size.toLong(),
+            expectedPackageId = context.packageName,
+            expectedVersionCode = identity.versionCode,
+            expectedCertificateSha256 = identity.certificateSha256,
+        )
+
+        assertEquals("failed", result.status)
+        assertEquals("archive_metadata_validation", result.stage)
+        assertEquals("package_mismatch", result.reason)
+        assertFalse(stagedApk.exists())
+        assertFalse(stagedPartial.exists())
     }
 
     private fun fixturePackage(context: Context): File =
@@ -192,13 +233,8 @@ class ApkUpdateInstallerFlowTest {
         }
         val packageManager = Shadows.shadowOf(context.packageManager)
         packageManager.installPackage(installed)
-        packageManager.setPackageArchiveInfo(packageFile.absolutePath, archive)
         val cache = File(context.cacheDir, "verified_updates")
         val releaseKey = sha256(archiveBytes)
-        packageManager.setPackageArchiveInfo(
-            File(cache, "update-$releaseKey.apk.part").canonicalPath,
-            archive,
-        )
         packageManager.setPackageArchiveInfo(
             File(cache, "update-$releaseKey.apk").canonicalPath,
             archive,

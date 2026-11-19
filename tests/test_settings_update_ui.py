@@ -303,3 +303,26 @@ def test_settings_view_store_url_falls_back_to_https_when_url_launcher_fails(
     ]
     assert page.launch_url.await_count == 0
 
+
+def test_debug_force_check_update_updates_debug_text_when_wired_to_controller():
+    from unittest.mock import Mock
+    from core.distribution import DistributionChannel, build_distribution_profile
+
+    checked = []
+    page = Mock(spec=ft.Page, window=Mock(), theme_mode="dark", on_route_change=None)
+    view = SettingsView(
+        page=page,
+        orchestrator=None,
+        on_close=lambda: None,
+        on_check_update=lambda: checked.append("check"),
+        distribution_profile=build_distribution_profile(DistributionChannel.EXE_LTS),
+    )
+
+    view._do_force_check_update()
+
+    assert checked == ["check"]
+    assert view._debug_update_text.value == "Đang kiểm tra cập nhật..."
+
+    view.set_update_status("Bạn đang dùng phiên bản mới nhất")
+    assert view._debug_update_text.value == "Bạn đang dùng phiên bản mới nhất"
+

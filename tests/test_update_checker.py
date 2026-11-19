@@ -794,6 +794,67 @@ def test_download_update_verifies_checksum_and_uses_atomic_destination(tmp_path)
     assert not (Path(tmp_path) / "UTHelper.apk.part").exists()
 
 
+def test_release_client_cancel_interrupts_retry_backoff_promptly(monkeypatch):
+    import time
+
+    client = update_checker.GitHubReleaseClient()
+    cancel = threading.Event()
+    attempts = []
+
+    def fail_once(*_args, **_kwargs):
+        attempts.append("attempt")
+        cancel.set()
+        raise TimeoutError("simulated timeout")
+
+    monkeypatch.setattr(update_checker, "_request_json", fail_once)
+    started = time.monotonic()
+    with pytest.raises(update_checker.UpdateDiscoveryError, match="cancelled"):
+        client.fetch_candidate(
+            "2.1.0",
+            RuntimeTarget("windows", "x64", "msi"),
+            cancel=cancel,
+        )
+    assert time.monotonic() - started < 0.5
+    assert attempts == ["attempt"]
+
+
+def test_verified_downloader_cancel_active_unblocks_stalled_read(tmp_path, monkeypatch):
+    cancel = threading.Event()
+    entered_read = threading.Event()
+    closed = threading.Event()
+
+    class StalledResponse(_Response):
+        def __init__(self):
+            super().__init__(b"")
+
+        def read1(self, _size=-1):
+            entered_read.set()
+            closed.wait(5.0)
+            raise OSError("socket closed")
+
+        def close(self):
+            closed.set()
+
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: StalledResponse(),
+    )
+    downloader = update_checker.VerifiedDownloader(cache_dir=tmp_path)
+
+    def canceller():
+        assert entered_read.wait(1.0)
+        cancel.set()
+        downloader.cancel_active()
+
+    thread = threading.Thread(target=canceller, daemon=True)
+    thread.start()
+    with pytest.raises(update_checker.DownloadCancelled):
+        downloader.download(_release_package(b"expected"), cancel=cancel)
+    thread.join(1.0)
+    assert closed.is_set()
+
+
 def test_download_update_rejects_bad_checksum(tmp_path):
     with (
         patch.object(update_checker, "_get_update_temp_dir", return_value=tmp_path),
@@ -812,3 +873,144 @@ def test_download_update_rejects_bad_checksum(tmp_path):
             expected_size=len(b"tampered"),
         ) is None
     assert not (Path(tmp_path) / "UTHelper.apk.part").exists()
+
+
+def _start_stalling_http_server(
+    *,
+    body_prefix: bytes,
+    content_length: int,
+    entered: threading.Event,
+    release: threading.Event,
+):
+    import http.server
+
+    class StallingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(content_length))
+            self.end_headers()
+            self.wfile.write(body_prefix)
+            self.wfile.flush()
+            entered.set()
+            release.wait(5.0)
+
+        def log_message(self, *_args):
+            return None
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StallingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_release_client_cancel_unblocks_real_stalled_http_read():
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    server, server_thread = _start_stalling_http_server(
+        body_prefix=b'{"tag_name":',
+        content_length=4096,
+        entered=entered,
+        release=release,
+    )
+    port = server.server_address[1]
+    client = update_checker.GitHubReleaseClient(
+        releases_url=f"http://127.0.0.1:{port}/latest"
+    )
+    outcomes: list[BaseException] = []
+
+    def worker():
+        try:
+            client.fetch_candidate(
+                "2.1.0",
+                RuntimeTarget("windows", "x64", "msi"),
+            )
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+    try:
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with client._lock:
+                if client._active_responses:
+                    break
+            threading.Event().wait(0.01)
+        started = time.monotonic()
+        client.cancel()
+        worker_thread.join(2.0)
+        elapsed = time.monotonic() - started
+        assert not worker_thread.is_alive()
+        assert elapsed < 0.5
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], update_checker.UpdateDiscoveryError)
+        assert "cancelled" in str(outcomes[0]).lower()
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1.0)
+
+
+def test_verified_downloader_cancel_active_unblocks_real_stalled_http_read(tmp_path):
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    server, server_thread = _start_stalling_http_server(
+        body_prefix=b"partial-chunk",
+        content_length=4096,
+        entered=entered,
+        release=release,
+    )
+    port = server.server_address[1]
+    package = ReleasePackage(
+        platform="windows",
+        architecture="x64",
+        package_type="msi",
+        install_channel="bootstrapper",
+        url=f"http://127.0.0.1:{port}/UTHelper.msi",
+        sha256="a" * 64,
+        size=4096,
+        signer_identity="CN=UTHelper",
+        certificate_fingerprint="b" * 64,
+        install_strategy={"kind": "launch_msi"},
+    )
+    downloader = update_checker.VerifiedDownloader(cache_dir=tmp_path)
+    cancel = threading.Event()
+    outcomes: list[BaseException] = []
+
+    def worker():
+        try:
+            downloader.download(package, cancel=cancel)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+    try:
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with downloader._lock:
+                if downloader._active_responses:
+                    break
+            threading.Event().wait(0.01)
+        started = time.monotonic()
+        cancel.set()
+        downloader.cancel_active()
+        worker_thread.join(2.0)
+        elapsed = time.monotonic() - started
+        assert not worker_thread.is_alive()
+        assert elapsed < 0.5
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], update_checker.DownloadCancelled)
+        assert list(tmp_path.glob("*.part")) == []
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1.0)

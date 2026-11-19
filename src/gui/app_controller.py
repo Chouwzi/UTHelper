@@ -7,6 +7,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import flet as ft
+from concurrent.futures import Future
 from datetime import datetime
 from core.time_utils import parse_datetime
 import asyncio
@@ -40,6 +41,7 @@ from core.update_models import LaunchResult, ReleasePackage
 from platform_utils.android_updates import (
     AndroidPackageDownloader,
     AndroidPackageLauncher,
+    AndroidPackageVerifier,
 )
 from config import get_sync_interval_minutes, save_settings, settings
 from platform_utils.update_packages import (
@@ -105,6 +107,7 @@ class _UnavailablePackageLauncher:
 
 
 def _update_install_error_message(status: str) -> str:
+    normalized = str(status or "").strip()
     messages = {
         "invalid_apk": "Không đọc được gói cập nhật. Hãy tải lại.",
         "package_mismatch": "Gói cập nhật không dành cho ứng dụng này.",
@@ -124,8 +127,49 @@ def _update_install_error_message(status: str) -> str:
         "package_installer_unavailable": "Không tìm thấy trình cài đặt trên thiết bị.",
         "file_provider_unavailable": "Không chuyển được gói tới trình cài đặt. Hãy thử lại.",
         "permission_settings_unavailable": "Không mở được quyền cài ứng dụng. Hãy kiểm tra Cài đặt Android.",
+        # Windows / cross-platform launcher tokens and reasons
+        "installer_unavailable": "Không tìm thấy tệp cài đặt. Hãy tải lại.",
+        "Windows installer is unavailable": "Không tìm thấy tệp cài đặt. Hãy tải lại.",
+        "platform_unavailable": "Nền tảng hiện tại chưa hỗ trợ cài đặt tự động.",
+        "installer is unavailable on this platform": "Nền tảng hiện tại chưa hỗ trợ cài đặt tự động.",
+        "strategy_not_allowed": "Phương thức cài đặt không hợp lệ. Hãy tải từ trang phát hành.",
+        "installer_strategy_not_allowed": "Phương thức cài đặt không hợp lệ. Hãy tải từ trang phát hành.",
+        "installer strategy is not allowed": "Phương thức cài đặt không hợp lệ. Hãy tải từ trang phát hành.",
+        "uac_cancelled": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "uac_denied": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_cancelled": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer cancelled by user": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_exit_1223": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_exit_1602": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_busy": "Đang có một trình cài đặt Windows khác chạy. Hãy đợi hoàn tất rồi thử lại.",
+        "another Windows installation is in progress": "Đang có một trình cài đặt Windows khác chạy. Hãy đợi hoàn tất rồi thử lại.",
+        "installer_exit_1618": "Đang có một trình cài đặt Windows khác chạy. Hãy đợi hoàn tất rồi thử lại.",
+        "installer_already_running": "Trình cài đặt đang chạy. Vui lòng hoàn tất quá trình hiện tại.",
+        "an installer is already running": "Trình cài đặt đang chạy. Vui lòng hoàn tất quá trình hiện tại.",
+        "file_in_use": "Tệp ứng dụng đang được sử dụng. Hãy đóng tiến trình khác rồi thử lại.",
+        "installer_file_in_use": "Tệp ứng dụng đang được sử dụng. Hãy đóng tiến trình khác rồi thử lại.",
+        "installer_exit_1603": "Tệp ứng dụng đang được sử dụng. Hãy đóng tiến trình khác rồi thử lại.",
+        "launch_failed": "Không thể khởi chạy trình cài đặt Windows. Hãy thử lại.",
+        "installer_launch_failed": "Không thể khởi chạy trình cài đặt Windows. Hãy thử lại.",
+        "installer launch failed": "Không thể khởi chạy trình cài đặt Windows. Hãy thử lại.",
+        "bridge_failed": "Không kết nối được dịch vụ cài đặt cập nhật. Hãy thử lại.",
+        "installer_rejected": "Trình cài đặt Windows đã thoát với mã lỗi. Hãy thử lại.",
+        "installer rejected": "Trình cài đặt Windows đã thoát với mã lỗi. Hãy thử lại.",
+        "install_timeout": "Trình cài đặt phản hồi quá lâu. Hãy thử lại.",
+        "launch_timeout": "Trình cài đặt phản hồi quá lâu. Hãy thử lại.",
+        "installer_timeout": "Trình cài đặt phản hồi quá lâu. Hãy thử lại.",
+        "relaunch_failed": "Cập nhật hoàn tất nhưng không tự mở lại được ứng dụng.",
     }
-    return messages.get(status, "Không mở được trình cài đặt. Hãy thử lại.")
+    if normalized in messages:
+        return messages[normalized]
+    lowered = normalized.lower()
+    if "1223" in lowered or "1602" in lowered or "uac" in lowered or "cancel" in lowered:
+        return messages["uac_cancelled"]
+    if "1618" in lowered:
+        return messages["installer_busy"]
+    if "1603" in lowered:
+        return messages["file_in_use"]
+    return "Không mở được trình cài đặt. Hãy thử lại."
 
 
 class AppController:
@@ -145,6 +189,8 @@ class AppController:
         self._diagnostic_recorder = diagnostic_recorder
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
+        self._exit_cleanup_lock = threading.Lock()
+        self._exit_cleanup_done = False
         self._page_alive = threading.Event()
         self._page_alive.set()
         
@@ -343,6 +389,75 @@ class AppController:
 
         return self.page.run_task(guarded_task)
 
+    def _run_page_task(self, handler, *args, **kwargs) -> Future | None:
+        if not hasattr(self.page, "session") or self.page.session is None:
+            return None
+        if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
+            return None
+
+        result_future: Future = Future()
+
+        async def _runner():
+            try:
+                value = await handler(*args, **kwargs)
+            except asyncio.CancelledError:
+                if not result_future.done():
+                    result_future.cancel()
+                raise
+            except BaseException as exc:
+                if not result_future.done():
+                    result_future.set_exception(exc)
+                return None
+            if not result_future.done():
+                result_future.set_result(value)
+            return value
+
+        task_future = self.page.run_task(_runner)
+        if task_future is None:
+            return None
+        cancel_task = getattr(task_future, "cancel", None)
+        add_done_callback = getattr(task_future, "add_done_callback", None)
+        if callable(cancel_task):
+            def _propagate_cancel(done_future):
+                if done_future.cancelled():
+                    try:
+                        cancel_task()
+                    except Exception:
+                        pass
+
+            result_future.add_done_callback(_propagate_cancel)
+        if callable(add_done_callback):
+            def _sync_task_done(done_task):
+                if result_future.done():
+                    return
+                try:
+                    if done_task.cancelled():
+                        result_future.cancel()
+                        return
+                    exc = done_task.exception()
+                    if exc is not None:
+                        result_future.set_exception(exc)
+                    else:
+                        result_future.set_result(done_task.result())
+                except BaseException:
+                    pass
+
+            add_done_callback(_sync_task_done)
+        return result_future
+
+    def _current_update_release_version(self) -> str | None:
+        coordinator = getattr(self, "_update_coordinator", None)
+        candidate = None
+        if coordinator is not None and callable(
+            getattr(coordinator, "current_candidate", None)
+        ):
+            candidate = coordinator.current_candidate()
+        if candidate is None:
+            candidate = getattr(self, "_update_candidate", None)
+        manifest = getattr(candidate, "manifest", None)
+        version = getattr(manifest, "release_version", None)
+        return str(version) if version else None
+
     def _get_distribution_profile(self) -> DistributionProfile:
         profile = getattr(self, "_distribution_profile", None)
         if profile is not None:
@@ -363,16 +478,16 @@ class AppController:
             verifier = WindowsPackageVerifier()
             launcher = WindowsPackageLauncher()
         elif target.platform == "android":
-            verifier = DownloadedPackageVerifier()
+            verifier = AndroidPackageVerifier()
             launcher = AndroidPackageLauncher(
                 self._android_background,
-                self._safe_run_task,
-                lambda: self._update_candidate.manifest.release_version,
+                self._run_page_task,
+                self._current_update_release_version,
             )
             downloader = AndroidPackageDownloader(
                 self._android_background,
-                self._safe_run_task,
-                lambda: self._update_candidate.manifest.release_version,
+                self._run_page_task,
+                self._current_update_release_version,
             )
         else:
             verifier = DownloadedPackageVerifier()
@@ -2763,7 +2878,11 @@ class AppController:
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_FAILED:
             self._diag_breadcrumb("update_install", "failed", "os")
-            self._update_ready = True
+            self._update_ready = event.message not in {
+                "source_unavailable",
+                "Windows installer is unavailable",
+                "installer_unavailable",
+            }
             self._update_banner.visible = True
             self._update_text.value = _update_install_error_message(event.message)
             self._update_btn.content = "Thử lại"
@@ -2771,6 +2890,11 @@ class AppController:
                 "installed_signer_mismatch", "manifest_signer_mismatch",
                 "apk_signature_invalid", "release_metadata_invalid",
                 "package_mismatch", "release_version_mismatch", "invalid_apk",
+                "installer strategy is not allowed",
+                "strategy_not_allowed",
+                "installer_strategy_not_allowed",
+                "installer is unavailable on this platform",
+                "platform_unavailable",
             }
             if self._update_open_release_page:
                 self._update_btn.content = "Bản phát hành"
@@ -2810,6 +2934,11 @@ class AppController:
                     self._update_text.value = "Không đủ dung lượng. Hãy giải phóng bộ nhớ rồi thử lại."
                 elif "storage_unavailable" in event.message:
                     self._update_text.value = "Không truy cập được bộ nhớ tải về. Hãy thử lại."
+                elif (
+                    "timed out" in event.message.lower()
+                    or "verification_timeout" in event.message.lower()
+                ):
+                    self._update_text.value = "Xác minh bản cập nhật bị quá thời gian. Hãy thử lại."
                 if should_notify:
                     self._show_snackbar(
                         "Không thể tải hoặc xác minh bản cập nhật",
@@ -2839,13 +2968,20 @@ class AppController:
                 can_cancel=bool(cancel_button and cancel_button.visible),
             )
         elif callable(status_setter):
-            if event.kind is UpdateEventKind.UP_TO_DATE:
+            if event.kind is UpdateEventKind.CHECKING:
+                status_setter("Đang kiểm tra cập nhật...")
+            elif event.kind is UpdateEventKind.UP_TO_DATE:
                 status_setter("Bạn đang dùng phiên bản mới nhất")
             elif event.kind is UpdateEventKind.FAILED:
                 status_setter("Không thể kiểm tra cập nhật. Hãy kiểm tra mạng và thử lại.")
         self.page.update()
         if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
-            await self.page.window.destroy()
+            await asyncio.to_thread(self._shutdown_for_exit)
+            try:
+                await self.page.window.destroy()
+            except RuntimeError as exc:
+                if "Session closed" not in str(exc):
+                    raise
 
     def _show_update_confirmation(self) -> None:
         if not self._get_distribution_profile().supports_github_self_update:
@@ -3153,22 +3289,37 @@ class AppController:
             except Exception:
                 logger.warning("Countdown refresh failed", exc_info=True)
 
-    def _on_disconnect(self, e):
+    def _shutdown_for_exit(self) -> None:
+        lock = getattr(self, "_exit_cleanup_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._exit_cleanup_lock = lock
+        with lock:
+            if getattr(self, "_exit_cleanup_done", False):
+                return
+            self._exit_cleanup_done = True
+
         view_manager = getattr(self, "view_manager", None)
         if view_manager is not None:
             view_manager.cancel_pending_settings_navigation()
         else:
             settings_view = getattr(self, "settings_view", None)
-            if settings_view is not None:
-                settings_view.cancel_pending_load()
-        if self.activation_broker is not None:
-            self.activation_broker.close(timeout_seconds=1.0)
+            cancel_load = getattr(settings_view, "cancel_pending_load", None)
+            if callable(cancel_load):
+                cancel_load()
+        activation_broker = getattr(self, "activation_broker", None)
+        if activation_broker is not None:
+            activation_broker.close(timeout_seconds=1.0)
         tray = getattr(self, "tray", None)
         if tray is not None:
             tray.close(timeout_seconds=1.0)
-        self._page_alive.clear()
+        page_alive = getattr(self, "_page_alive", None)
+        if page_alive is not None:
+            page_alive.clear()
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
-        self._prefetch_cancel_event.set()
+        prefetch_cancel = getattr(self, "_prefetch_cancel_event", None)
+        if prefetch_cancel is not None:
+            prefetch_cancel.set()
         detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
             detail_warm_cancel.set()
@@ -3180,12 +3331,18 @@ class AppController:
             schedule_coordinator.close()
         update_coordinator = getattr(self, "_update_coordinator", None)
         if update_coordinator is not None:
-            update_coordinator.shutdown(timeout_seconds=5.0)
-        try:
-            self.orchestrator.client.close()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            update_coordinator.shutdown(timeout_seconds=1.0)
+        orchestrator = getattr(self, "orchestrator", None)
+        client = getattr(orchestrator, "client", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+    def _on_disconnect(self, e):
+        self._shutdown_for_exit()
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""

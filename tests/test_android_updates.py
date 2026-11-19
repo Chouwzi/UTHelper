@@ -7,8 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from core.update_checker import DownloadCancelled, PackageIntegrityError
-from core.update_models import ReleasePackage
-from platform_utils.android_updates import AndroidPackageDownloader, AndroidPackageLauncher
+from core.update_models import ReleaseManifest, ReleasePackage, UpdateCandidate
+from platform_utils.android_updates import (
+    AndroidPackageDownloader,
+    AndroidPackageLauncher,
+    AndroidPackageVerifier,
+)
 
 
 @pytest.fixture
@@ -207,3 +211,130 @@ def test_rejects_unexpected_completion_path(package):
     bridge = DownloadBridge([{"status": "completed", "local_path": "relative.apk"}])
     with pytest.raises(PackageIntegrityError):
         downloader(bridge).download(package, cancel=threading.Event())
+
+
+@pytest.mark.parametrize("bad_version", [None, ""])
+def test_release_version_provider_none_or_empty_is_guarded(package, bad_version):
+    bridge = SimpleNamespace(
+        available=True,
+        install_update=lambda *_args: None,
+        start_update_download=lambda *_args: None,
+    )
+    launcher = AndroidPackageLauncher(bridge, run_task, lambda: bad_version)
+    result = launcher.launch(Path("UTHelper.apk"), package)
+    assert result.acknowledged is False
+    assert result.status == "bridge_failed"
+
+    dl = AndroidPackageDownloader(bridge, run_task, lambda: bad_version)
+    with pytest.raises(RuntimeError, match="release version is unavailable"):
+        dl.download(package, cancel=threading.Event())
+
+
+def test_android_launcher_cancel_consumes_future_exception():
+    async def fail_cancel():
+        raise RuntimeError("Session closed")
+
+    bridge = SimpleNamespace(available=True, cancel_update=fail_cancel)
+    launcher = AndroidPackageLauncher(bridge, run_task, lambda: "2.5.1")
+    launcher.cancel()
+    assert launcher.supports_cached_package_retry is True
+
+
+def test_android_package_verifier_checks_metadata_without_full_sha256_pass(tmp_path):
+    from datetime import UTC, datetime
+
+    payload = b"PK\x03\x04" + b"x" * 96
+    apk = tmp_path / "UTHelper.apk"
+    apk.write_bytes(payload)
+    # Package sha256 intentionally differs to confirm AndroidPackageVerifier does
+    # O(1) pre-flight validation and delegates SHA-256 to ApkUpdateInstaller.
+    package = ReleasePackage(
+        "android",
+        "arm64",
+        "apk",
+        "sideload",
+        "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
+        "f" * 64,
+        len(payload),
+        "com.uthelper.uthelper",
+        "b" * 64,
+        {"kind": "android_package_installer"},
+    )
+    manifest = ReleaseManifest(
+        schema_version=2,
+        release_version="2.5.1",
+        minimum_supported_version="2.0.0",
+        published_at=datetime(2026, 8, 8, tzinfo=UTC),
+        release_notes_url="https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        packages=(package,),
+    )
+    candidate = UpdateCandidate(manifest, package, True, False)
+    verifier = AndroidPackageVerifier()
+
+    assert verifier.verify(apk, candidate).verified is True
+
+    bad_magic = tmp_path / "bad_magic.apk"
+    bad_magic.write_bytes(b"NOPE" + b"x" * 96)
+    assert verifier.verify(bad_magic, candidate).verified is False
+
+    bad_size = tmp_path / "bad_size.apk"
+    bad_size.write_bytes(b"PK\x03\x04" + b"x" * 10)
+    assert verifier.verify(bad_size, candidate).verified is False
+
+    part_file = tmp_path / "UTHelper.apk.part"
+    part_file.write_bytes(payload)
+    assert verifier.verify(part_file, candidate).verified is False
+    assert verifier.verify(tmp_path / "missing.apk", candidate).verified is False
+
+
+def test_launcher_catches_flet_exception_and_returns_bridge_failed(package):
+    import flet as ft
+
+    async def disconnected(*_args):
+        raise ft.FletException("flet disconnected")
+
+    bridge = SimpleNamespace(available=True, install_update=disconnected)
+    launcher = AndroidPackageLauncher(bridge, run_task, lambda: "2.5.1")
+    result = launcher.launch(Path("UTHelper.apk"), package)
+
+    assert result.acknowledged is False
+    assert result.status == "bridge_failed"
+
+
+def test_downloader_translates_cancelled_error_without_leaking_base_exception(package):
+    from concurrent.futures import CancelledError
+
+    def cancelled_task_runner(_handler):
+        future = Future()
+        future.cancel()
+        return future
+
+    bridge = SimpleNamespace(
+        available=True,
+        start_update_download=lambda *_args: None,
+        get_update_download_status=lambda *_args: None,
+        cancel_update_download=lambda *_args: None,
+    )
+    observer = AndroidPackageDownloader(
+        bridge,
+        cancelled_task_runner,
+        lambda: "2.5.1",
+        poll_interval_seconds=0.001,
+    )
+    observer.detach()
+    # Force past initial detached check by simulating mid-call detach:
+    observer._detached.clear()
+    observer._native.stopped.set()
+    with pytest.raises(DownloadCancelled):
+        observer.download(package, cancel=threading.Event())
+
+    # Even without detached/cancel flags set, CancelledError must not leak as BaseException.
+    fresh = AndroidPackageDownloader(
+        bridge,
+        cancelled_task_runner,
+        lambda: "2.5.1",
+        poll_interval_seconds=0.001,
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        fresh.download(package, cancel=threading.Event())
+    assert not isinstance(exc_info.value, CancelledError)

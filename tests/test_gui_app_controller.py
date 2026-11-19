@@ -828,3 +828,238 @@ def test_open_store_url_uses_external_launch_and_https_fallback(monkeypatch):
 
     assert controller._open_store_url("javascript:alert(1)") is False
 
+
+def test_run_page_task_propagates_exceptions_and_handles_missing_session():
+    controller = AppController.__new__(AppController)
+    reported = []
+    controller._unhandled_error_reporter = reported.append
+
+    controller.page = SimpleNamespace(session=None)
+    assert controller._run_page_task(lambda: None) is None
+
+    def run_task(handler):
+        from concurrent.futures import Future
+
+        fut = Future()
+        try:
+            fut.set_result(asyncio.run(handler()))
+        except BaseException as exc:
+            fut.set_exception(exc)
+        return fut
+
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=run_task,
+    )
+
+    async def boom():
+        raise TimeoutError("bridge timeout")
+
+    future = controller._run_page_task(boom)
+    assert future is not None
+    import pytest
+
+    with pytest.raises(TimeoutError, match="bridge timeout"):
+        future.result(timeout=1.0)
+    assert reported == []
+
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=lambda _handler: None,
+    )
+    assert controller._run_page_task(boom) is None
+
+
+def test_create_update_coordinator_android_uses_run_page_task_verifier_and_safe_version(
+    monkeypatch,
+):
+    from core.distribution import DistributionChannel, build_distribution_profile
+    from core.update_models import RuntimeTarget
+    from platform_utils.android_updates import AndroidPackageVerifier
+
+    controller = AppController.__new__(AppController)
+    controller._distribution_profile = build_distribution_profile(
+        DistributionChannel.APK_LTS
+    )
+    controller._android_background = SimpleNamespace(available=True)
+    controller._update_candidate = None
+    controller.page = SimpleNamespace(session=None)
+
+    monkeypatch.setattr(
+        app_controller_module,
+        "detect_runtime_target",
+        lambda: RuntimeTarget("android", "arm64", "sideload"),
+    )
+
+    coordinator = controller._create_update_coordinator()
+    assert coordinator is not None
+    assert isinstance(coordinator._verifier, AndroidPackageVerifier)
+    assert coordinator._launcher._native.task_runner == controller._run_page_task
+    assert coordinator._downloader._native.task_runner == controller._run_page_task
+    # Must return None safely without AttributeError when candidate is None.
+    assert controller._current_update_release_version() is None
+    pkg = ReleasePackage(
+        "android",
+        "arm64",
+        "apk",
+        "sideload",
+        "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
+        "a" * 64,
+        10,
+        "com.uthelper.uthelper",
+        "b" * 64,
+        {"kind": "android_package_installer"},
+    )
+    launch_res = coordinator._launcher.launch(Path("UTHelper.apk"), pkg)
+    assert launch_res.acknowledged is False
+    assert launch_res.status == "bridge_failed"
+
+
+def test_install_failed_source_unavailable_resets_ready_to_redownload():
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    requested = []
+    controller._update_coordinator = SimpleNamespace(
+        request_download=lambda candidate: requested.append(candidate)
+    )
+    controller._show_update_confirmation = lambda: requested.append("confirm")
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.INSTALL_FAILED,
+                controller._update_candidate,
+                message="source_unavailable",
+            )
+        )
+    )
+
+    assert controller._update_ready is False
+    controller._request_update_download()
+    assert requested == [controller._update_candidate]
+
+
+def test_update_install_error_message_maps_windows_tokens_and_reasons():
+    from gui.app_controller import _update_install_error_message
+
+    generic = "Không mở được trình cài đặt. Hãy thử lại."
+    for key in (
+        "uac_cancelled",
+        "installer cancelled by user",
+        "installer_busy",
+        "another Windows installation is in progress",
+        "installer_unavailable",
+        "Windows installer is unavailable",
+        "strategy_not_allowed",
+        "installer strategy is not allowed",
+        "installer_already_running",
+        "an installer is already running",
+        "launch_failed",
+        "installer launch failed",
+        "installer_rejected",
+        "installer rejected",
+        "file_in_use",
+        "install_timeout",
+        "relaunch_failed",
+    ):
+        assert _update_install_error_message(key) != generic
+
+
+def test_windows_install_failed_strategy_and_timeout_ui_states():
+    controller = _update_event_controller()
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.INSTALL_FAILED,
+                controller._update_candidate,
+                message="installer strategy is not allowed",
+            )
+        )
+    )
+    assert controller._update_open_release_page is True
+    assert controller._update_btn.content == "Bản phát hành"
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.FAILED,
+                controller._update_candidate,
+                message="Windows package verification timed out",
+            )
+        )
+    )
+    assert "quá thời gian" in controller._update_text.value
+
+
+def test_windows_install_launched_runs_idempotent_shutdown_before_window_destroy(
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    order = []
+    controller = _update_event_controller()
+    controller._exit_cleanup_lock = __import__("threading").Lock()
+    controller._exit_cleanup_done = False
+    controller.activation_broker = SimpleNamespace(
+        close=lambda timeout_seconds=1.0: order.append(("broker", timeout_seconds))
+    )
+    controller.tray = SimpleNamespace(
+        close=lambda timeout_seconds=1.0: order.append(("tray", timeout_seconds))
+    )
+    controller._sync_coordinator = SimpleNamespace(close=lambda: order.append("sync"))
+    controller._today_schedule_coordinator = SimpleNamespace(
+        close=lambda: order.append("schedule")
+    )
+    controller._update_coordinator = SimpleNamespace(
+        shutdown=lambda timeout_seconds=1.0: order.append(("update", timeout_seconds))
+    )
+    controller.orchestrator = SimpleNamespace(
+        client=SimpleNamespace(close=lambda: order.append("client"))
+    )
+    controller.settings_view = SimpleNamespace(
+        _check_update_btn=None,
+        cancel_pending_load=lambda: order.append("settings"),
+    )
+    controller._page_alive = SimpleNamespace(clear=lambda: order.append("page_alive"))
+    controller._prefetch_cancel_event = SimpleNamespace(
+        set=lambda: order.append("prefetch")
+    )
+
+    async def destroy():
+        order.append("destroy")
+
+    controller.page = SimpleNamespace(
+        update=lambda: None,
+        window=SimpleNamespace(destroy=AsyncMock(side_effect=destroy)),
+    )
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", False)
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+        )
+    )
+
+    assert "destroy" in order
+    destroy_idx = order.index("destroy")
+    assert order.index(("broker", 1.0)) < destroy_idx
+    assert order.index(("tray", 1.0)) < destroy_idx
+    assert order.index(("update", 1.0)) < destroy_idx
+    assert order.index("client") < destroy_idx
+
+    before_disconnect = list(order)
+    controller._on_disconnect(None)
+    assert order == before_disconnect
+
+
+def test_checking_event_forwards_status_to_settings_view():
+    controller = _update_event_controller()
+    statuses = []
+    controller.settings_view.set_update_status = lambda msg, **_kw: statuses.append(msg)
+
+    asyncio.run(controller._apply_update_event(UpdateEvent(UpdateEventKind.CHECKING)))
+
+    assert statuses == ["Đang kiểm tra cập nhật..."]
+

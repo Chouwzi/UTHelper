@@ -253,10 +253,14 @@ class ApkUpdateInstaller(private val context: Context) {
                 cancelled = cancelled,
             )
             val verified = prepared.verification
-            val archivePath = prepared.file
+            if (!prepared.reusedCache) {
+                checkNotCancelled(cancelled)
+                stagedApk.delete()
+                check(stagedPartial.renameTo(stagedApk)) { "Cannot finalize verified APK" }
+            }
 
             stage = "archive_metadata_validation"
-            val archive = readArchiveMetadata(archivePath)
+            val archive = readArchiveMetadata(stagedApk)
             val installed = readInstalledMetadata()
             validateArchiveMetadata(
                 archive,
@@ -266,13 +270,9 @@ class ApkUpdateInstaller(private val context: Context) {
                 installed,
             )
             checkNotCancelled(cancelled)
-            if (archivePath == stagedPartial) {
-                stagedApk.delete()
-                check(stagedPartial.renameTo(stagedApk)) { "Cannot finalize verified APK" }
-            }
             keepCachedApk = true
-            val packageBytes = requireNotNull(verified).bytes
-            val packageSha256 = requireNotNull(verified).sha256
+            val packageBytes = verified.bytes
+            val packageSha256 = verified.sha256
 
             stage = "install_permission"
             if (
@@ -406,6 +406,9 @@ class ApkUpdateInstaller(private val context: Context) {
     }
 
     private fun packageArchiveInfo(path: File): PackageInfo {
+        require(path.name.endsWith(".apk", ignoreCase = true)) {
+            "Archive path must end with .apk"
+        }
         val manager = context.packageManager
         val info = if (Build.VERSION.SDK_INT >= 33) {
             manager.getPackageArchiveInfo(
