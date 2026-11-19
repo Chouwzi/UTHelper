@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,9 +53,56 @@ class PortalClient:
         self._timeout = max(1.0, float(timeout))
         self._opener = opener
         self._token = ""
+        # The cached token belongs to exactly one account: after an account
+        # switch a stale token must never be replayed for the new username.
+        self._token_owner = ""
+        # Invalidations are versioned: a fetch that started before
+        # clear_token() must not re-store the token it obtained moments
+        # earlier and resurrect the credential the caller just dropped.
+        self._token_generation = 0
+        self._token_lock = threading.Lock()
 
     def clear_token(self) -> None:
-        self._token = ""
+        """Drop the cached token and invalidate any login still in flight.
+
+        Bumping the generation is what makes the invalidation stick: a fetch
+        that started before this call holds a token from the rejected session,
+        and without the bump ``_store_token`` would resurrect the credential
+        the caller just cleared.
+        """
+        self._discard_token()
+
+    def _current_generation(self) -> int:
+        """Generation observed when a fetch starts; pass it back when storing."""
+        with self._token_lock:
+            return self._token_generation
+
+    def _discard_token(self, generation: int | None = None) -> None:
+        """Clear the token, unless ``generation`` already went stale."""
+        with self._token_lock:
+            if generation is not None and generation != self._token_generation:
+                return
+            self._token = ""
+            self._token_owner = ""
+            self._token_generation += 1
+
+    def _cached_token(self, username: str) -> str:
+        """Return the cached token only when it was issued for ``username``."""
+        with self._token_lock:
+            if self._token and self._token_owner == username:
+                return self._token
+            return ""
+
+    def _store_token(
+        self, token: str, username: str, generation: int | None = None
+    ) -> None:
+        with self._token_lock:
+            if generation is not None and generation != self._token_generation:
+                # clear_token() ran while this request was in flight: the
+                # caller no longer wants this session to exist.
+                return
+            self._token = token
+            self._token_owner = username
 
     def _request_json(
         self,
@@ -101,7 +149,9 @@ class PortalClient:
             raise PortalProtocolError("Portal response envelope was not an object")
         return payload
 
-    def _login(self, username: str, password: str) -> str:
+    def _login(
+        self, username: str, password: str, generation: int | None = None
+    ) -> str:
         if not username or not password:
             raise PortalAuthenticationError("Portal credentials are unavailable")
         payload = self._request_json(
@@ -111,15 +161,18 @@ class PortalClient:
         )
         token = payload.get("token") if payload.get("success") else ""
         if not isinstance(token, str) or not token:
-            self.clear_token()
+            self._discard_token(generation)
             raise PortalAuthenticationError("Portal login was rejected")
-        self._token = token
+        self._store_token(token, username, generation)
         return token
 
     def fetch_day(
         self, target_date: date, username: str, password: str
     ) -> tuple[ClassSession, ...]:
-        token = self._token or self._login(username, password)
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
         try:
             payload = self._request_json(
                 "GET",
@@ -130,7 +183,7 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password)
+            token = self._login(username, password, generation)
             payload = self._request_json(
                 "GET",
                 "lichhoc/ngay",
@@ -139,7 +192,7 @@ class PortalClient:
             )
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            self._store_token(refreshed_token, username, generation)
         try:
             return parse_portal_day(payload, target_date)
         except ValueError as exc:
@@ -149,7 +202,10 @@ class PortalClient:
         self, username: str, password: str
     ) -> list[dict[str, Any]]:
         """Fetches full academic transcript containing all semester grades from Portal."""
-        token = self._token or self._login(username, password)
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
         try:
             payload = self._request_json(
                 "GET",
@@ -159,7 +215,7 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password)
+            token = self._login(username, password, generation)
             payload = self._request_json(
                 "GET",
                 "hoctap/bangdiem2",
@@ -167,7 +223,7 @@ class PortalClient:
             )
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            self._store_token(refreshed_token, username, generation)
 
         body = payload.get("body")
         if isinstance(body, list) and body:

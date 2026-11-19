@@ -2,8 +2,15 @@ import flet as ft
 from gui.core.theme import C
 from config import settings
 
+
 def init_notification_controls(view):
     """Khởi tạo các control thiết lập cấu hình thông báo và chế độ Do Not Disturb (DND)."""
+    # Selection chips use a consistent high-contrast appearance in every theme:
+    # selected = blue background / white text; unselected = white background / dark text.
+    # Read the colors lazily so a theme change applied after import is respected.
+    _chip_selected_text = C.ON_ACCENT
+    _chip_unselected_bg = C.SURFACE
+    _chip_unselected_text = C.TEXT_PRIMARY
     # Định nghĩa cấu hình có sẵn của các Notification Profile
     _PROFILES = {
         "quiet": {"icon": ft.Icons.NOTIFICATIONS_OFF_OUTLINED, "label": "Yên tĩnh", "desc": "Chỉ deadline gấp", "milestones": [1440, 60], "dnd": True, "dnd_start": 22, "dnd_end": 8},
@@ -141,12 +148,16 @@ def init_notification_controls(view):
     for minutes, label in _milestone_options:
         is_sel = minutes in _current_milestones
         view._milestone_chips[minutes] = ft.Chip(
-            label=ft.Text(label, size=12, color=C.ON_ACCENT if is_sel else C.TEXT_PRIMARY),
+            label=ft.Text(
+                label,
+                size=12,
+                color=_chip_selected_text if is_sel else _chip_unselected_text,
+            ),
             selected=is_sel,
             show_checkmark=True,
-            check_color=C.ON_ACCENT,
+            check_color=_chip_selected_text,
             selected_color=C.ACCENT,
-            bgcolor=C.SURFACE,
+            bgcolor=_chip_unselected_bg,
             on_select=view._handle_milestone_toggle(minutes),
         )
     view._milestone_chips_row = ft.Row(
@@ -164,7 +175,50 @@ def init_notification_controls(view):
         value=", ".join(map(str, _current_milestones)),
         visible=False,
     )
-    
+
+    # Class schedule reminders: both online and in-person sessions.
+    class_schedule_enabled = bool(
+        getattr(settings, "NOTIFY_CLASS_SCHEDULE_ENABLED", False)
+    )
+    _current_class_leads = tuple(
+        int(value)
+        for value in getattr(settings, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1])
+        if int(value) in {1, 2, 3}
+    )
+    view._sw_class_schedule = ft.Switch(
+        value=class_schedule_enabled,
+        active_color=C.ACCENT,
+        label_text_style=ft.TextStyle(color=C.TEXT_PRIMARY, size=13),
+        label="Nhắc lịch học trực tiếp và trực tuyến",
+        on_change=view._handle_class_schedule_toggle,
+    )
+    view._class_schedule_lead_chips = {}
+    for hours in (1, 2, 3):
+        selected = hours in _current_class_leads
+        view._class_schedule_lead_chips[hours] = ft.Chip(
+            label=ft.Text(
+                f"{hours} giờ trước",
+                size=12,
+                color=_chip_selected_text if selected else _chip_unselected_text,
+            ),
+            selected=selected,
+            show_checkmark=True,
+            check_color=_chip_selected_text,
+            selected_color=C.ACCENT,
+            bgcolor=_chip_unselected_bg,
+            on_select=view._handle_class_schedule_lead_toggle(hours),
+        )
+    view._class_schedule_lead_chips_row = ft.Row(
+        controls=list(view._class_schedule_lead_chips.values()),
+        wrap=True,
+        spacing=6,
+        run_spacing=4,
+    )
+    view._class_schedule_lead_field = ft.TextField(
+        value=", ".join(str(value) for value in _current_class_leads),
+        visible=False,
+    )
+
     # Khu vực cấu hình môn học tắt thông báo (Bỏ qua môn học)
     view._muted_courses_list = ft.Column(spacing=2)
     view._muted_count_text = ft.Text("0 môn", size=12, color=C.TEXT_SECONDARY)
@@ -317,6 +371,13 @@ def build_notification_section(view) -> ft.Control:
             view._milestone_chips_row,
             view._milestone_summary,
             view._milestones_field,
+            ft.Container(height=4),
+            ft.Container(height=8),
+            view._make_themed_label("Nhắc lịch học"),
+            view._sw_class_schedule,
+            ft.Text("Chọn một hoặc nhiều mốc nhắc trước giờ học:" , size=11, color=C.TEXT_SECONDARY),
+            view._class_schedule_lead_chips_row,
+            view._class_schedule_lead_field,
             ft.Container(height=4),
             view._sw_ignore_sub,
             ft.Divider(height=16, color=C.BORDER),

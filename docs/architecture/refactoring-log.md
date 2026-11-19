@@ -69,6 +69,8 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
 | 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
 | 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
+| 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
 
 
 ---
@@ -1967,6 +1969,25 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
 
+## Theme preview mode synchronization (2026-11-16)
+
+- Theme previews already applied draft colors globally, but `set_page_theme`
+  still read the persisted theme name to choose Flet's light/dark mode. When a
+  user previewed a light theme before saving, desktop controls could render
+  against dark-mode defaults, including a black grade screen.
+- `set_page_theme` now accepts an optional theme name. Theme selection, reset,
+  and discard pass the active draft/baseline theme so Flet brightness matches
+  the semantic palette. Startup and committed-settings flows continue to read
+  the persisted theme.
+- The cached grade radar card and course list now rebuild their root surfaces
+  even while detached, preventing a stale dark card from surviving a light
+  theme preview or discard.
+- Reopening the cached grade screen now refreshes its theme after it has been
+  attached to the desktop page, so Flet sends the updated surface colors.
+- Tests and lint were not run. The Python app packaged successfully, but the
+  Windows Flutter build stopped because this machine does not currently allow
+  the symlinks Flutter requires for plugin builds (Developer Mode is disabled).
+
 ## Settings custom color picker review fixes (2026-11-18)
 
 - Keep the dialog on Flet's `show_dialog()` / `pop_dialog()` lifecycle and only
@@ -1977,5 +1998,7 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   color preview and unsaved-changes state update together.
 - Added focused tests for invalid values, normalized Apply and change callback,
   clearing the field error, and avoiding dismissal of a closed dialog.
-- `pytest tests/test_color_picker.py -q`: 4 passed. Full suite and lint were not
-  run; Ruff is not installed in the local environment.
+- `pytest tests/test_color_picker.py -q`: 4 passed. The full suite stopped at
+  `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
+  `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
+  the local environment.
