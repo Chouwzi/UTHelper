@@ -61,9 +61,10 @@ packages = true
 app = true
 
 [tool.flet.flutter.pubspec.dependency_overrides]
-# Flet 0.86.5's template pins 1.0.0; current generated JNI bindings require 1.1.
+# Flet 0.86.5's template pins 1.0.0; jni_flutter >=1.1.0 (published
+# 2026-11-18) requires jni ^1.2.0 for JReference.nonNullPointer.
 # https://github.com/flet-dev/flet/issues/6919
-jni = "1.1.0"
+jni = "1.2.0"
 
 # ── Windows-specific configuration ──
 [tool.flet.windows]
