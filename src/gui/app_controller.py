@@ -228,6 +228,13 @@ class AppController:
         self._notification_milestones_snapshot = tuple(
             settings.NOTIFY_MILESTONES_MINUTES or []
         )
+        self._notification_class_schedule_snapshot = (
+            bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED),
+            tuple(settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS),
+            bool(settings.NOTIFY_DND_ENABLE),
+            int(settings.NOTIFY_DND_START),
+            int(settings.NOTIFY_DND_END),
+        )
         self._last_successful_sync_at = None
         self._time_policy = ActivityTimePolicy(
             settings.URGENCY_CRITICAL_HOURS,
@@ -344,6 +351,25 @@ class AppController:
             # UX-5: Show success snackbar after dialog closes
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
             self._portal_client.clear_token()
+            # Flip identity and the schedule cache BEFORE any task is queued:
+            # otherwise the first reminder reconcile after login compares
+            # against the old identity and is mistaken for an account change.
+            self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+            schedule_namespace = (
+                f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
+                if settings.UTH_USERNAME
+                else f"{settings.PORTAL_API_BASE}|anonymous"
+            )
+            self._today_schedule_coordinator.replace_cache(
+                TodayScheduleCache(namespace=schedule_namespace)
+            )
+            # Tear down the PREVIOUS account's armed class reminders before the
+            # new snapshot is fetched: running refresh("login") first would let
+            # the fresh schedule land and only afterwards be wiped by the
+            # older clear. Ordering the tasks here is what makes the swap safe.
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, (), clear_only=True
+            )
             self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
@@ -1566,8 +1592,67 @@ class AppController:
         else:
             self._safe_run_task(coordinator.ensure_today)
 
+    def _fetch_tomorrow_sessions(self, credentials=None):
+        """Async callable: tomorrow's Portal classes for reminder scheduling.
+
+        The reconcile task passes the ``(username, password)`` pair captured
+        when it was created, so an in-flight task of the previous account keeps
+        fetching with its own credentials instead of reading the global
+        settings after a switch.
+        """
+        from datetime import timedelta
+
+        if credentials is None:
+            credentials = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        username, password = credentials
+        tomorrow = datetime.now().date() + timedelta(days=1)
+        return asyncio.to_thread(
+            self._portal_client.fetch_day,
+            tomorrow,
+            username,
+            password,
+        )
+
+    async def _reconcile_class_schedule_notifications(
+        self, sessions, *, clear_only: bool = False
+    ) -> None:
+        """Delegate the class-schedule reconcile use case to NotificationManager.
+
+        ``clear_only=True`` drops reminders owned by a previous account without
+        any network call: used on logout/credentials change where fetching a
+        day's timetable would use stale credentials and race the new account's
+        schedule. The manager serializes concurrent runs and re-checks the
+        account identity after every await.
+        """
+        manager = getattr(self, "notifier", None)
+        reconcile = getattr(
+            manager, "reconcile_class_schedule_notifications", None
+        )
+        if not callable(reconcile):
+            return
+        await reconcile(
+            sessions,
+            clear_only=clear_only,
+            fetch_day=self._fetch_tomorrow_sessions,
+            identity_getter=lambda: getattr(self, "_settings_identity", None),
+            android_bridge=getattr(self, "_android_background", None),
+        )
+
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
         self._today_schedule_state = state
+        if state.status is ScheduleLoadStatus.READY and state.snapshot is not None:
+            # Reconcile from the Portal snapshot already fetched for the dashboard.
+            # The platform receives only the scheduled reminder payload, never credentials.
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, state.snapshot.sessions
+            )
+        elif state.status is ScheduleLoadStatus.AUTH_REQUIRED:
+            # Logged out / session expired: drop reminders owned by the previous
+            # account so Windows never fires them again. No network call here.
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, (), clear_only=True
+            )
+
         if state.status is ScheduleLoadStatus.LOADING:
             self._diag_breadcrumb("schedule_load", "started", "portal")
         elif state.status is ScheduleLoadStatus.READY:
@@ -1578,6 +1663,7 @@ class AppController:
             )
         elif state.status is ScheduleLoadStatus.ERROR:
             self._diag_breadcrumb("schedule_load", "failed", "portal")
+
         component = getattr(self, "_today_schedule_component", None)
         if component is None:
             return
@@ -2789,9 +2875,24 @@ class AppController:
         new_milestones = tuple(settings.NOTIFY_MILESTONES_MINUTES or [])
         milestones_changed = new_milestones != self._notification_milestones_snapshot
         self._notification_milestones_snapshot = new_milestones
+        new_class_schedule_snapshot = (
+            bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED),
+            tuple(settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS),
+            bool(settings.NOTIFY_DND_ENABLE),
+            int(settings.NOTIFY_DND_START),
+            int(settings.NOTIFY_DND_END),
+        )
+        class_schedule_settings_changed = (
+            new_class_schedule_snapshot != self._notification_class_schedule_snapshot
+        )
+        self._notification_class_schedule_snapshot = new_class_schedule_snapshot
         if credentials_changed:
             # Credentials are the only settings change that requires immediate
             # network reload and an account-specific cache namespace.
+            # The identity flips FIRST: every reconcile/refresh task queued
+            # below (and any in-flight one) compares against it, so no stale
+            # task can mistake the new account for its own.
+            self._settings_identity = new_identity
             try:
                 self.orchestrator.moodle_service.clear_all_caches()
                 self.orchestrator.clear_detail_cache()
@@ -2821,8 +2922,15 @@ class AppController:
                 ScheduleLoadStatus.IDLE
             )
             self._today_schedule_component.set_state(self._today_schedule_state)
-            self._safe_run_task(self._today_schedule_coordinator.ensure_today)
-            self._settings_identity = new_identity
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, (), clear_only=True
+            )
+            # A plain ensure_today() would happily re-publish whatever the new
+            # namespace still holds as READY; refresh("credentials_changed")
+            # re-authenticates (or reports AUTH_REQUIRED) instead.
+            self._safe_run_task(
+                self._today_schedule_coordinator.refresh, "credentials_changed"
+            )
 
         load_theme_from_settings()
         set_page_theme(self.page)
@@ -2845,16 +2953,38 @@ class AppController:
                     await self._android_background.configure(
                         token, token_origin=token_origin
                     )
-                    if milestones_changed and any(
-                        int(value) <= 60
-                        for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
-                    ):
+                    needs_exact_alarm = (
+                        milestones_changed
+                        and any(
+                            int(value) <= 60
+                            for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
+                        )
+                    ) or (
+                        class_schedule_settings_changed
+                        and bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED)
+                    )
+                    if needs_exact_alarm:
                         diagnostics = await self._android_background.diagnostics()
                         self.orchestrator.android_background_diagnostics = diagnostics
                         if not bool(diagnostics.get("exact_alarm_allowed", False)):
                             await self._android_background.request_exact_alarm_access()
 
                 self._safe_run_task(_apply_android_settings)
+        # A credentials change already scheduled a clear_only reconcile above
+        # and refresh("credentials_changed") will rebuild the new account's
+        # reminders from its own snapshot; a non-clear run here would fetch
+        # tomorrow with the old generation and could overwrite the fresh
+        # account's schedule.
+        if class_schedule_settings_changed and not credentials_changed:
+            schedule_state = getattr(self, "_today_schedule_state", None)
+            schedule_snapshot = (
+                schedule_state.snapshot.sessions
+                if schedule_state is not None and schedule_state.snapshot is not None
+                else ()
+            )
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, schedule_snapshot
+            )
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
     def _on_activity_status_changed(self, url: str, new_status: str):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
@@ -2904,6 +3034,20 @@ class AppController:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             self._update_footer()
+
+            # A successful/manual submission must cancel every remaining local
+            # deadline reminder immediately instead of waiting for the next sync.
+            mobile_bridge = getattr(self, "_android_background", None)
+            if mobile_bridge is not None and mobile_bridge.available:
+                self._safe_run_task(
+                    mobile_bridge.import_activities,
+                    data_copy,
+                    authoritative=True,
+                )
+            elif getattr(self, "notifier", None) is not None:
+                self._safe_run_task(
+                    self.notifier.reconcile_schedules, data_copy
+                )
 
     def _show_detail(self, data: dict):
         self._dismiss_desktop_filter_menu()
