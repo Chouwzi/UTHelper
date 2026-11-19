@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from pathlib import Path
@@ -47,6 +47,13 @@ class ClassSession:
     period_end: int | None
     cancelled: bool
     note: str
+    # Not persisted: Portal links embed short-lived personal tokens.
+    link: str = ""
+    meeting_url: str = ""
+    subject_code: str = ""
+    lecturer: str = ""
+    has_outline: bool = False
+    outline: str = ""
 
     def phase_at(self, now: datetime) -> SchedulePhase:
         if self.cancelled:
@@ -86,7 +93,28 @@ class ClassSession:
             period_end=_optional_int(payload.get("period_end")),
             cancelled=bool(payload.get("cancelled", False)),
             note=str(payload.get("note", "")),
+            subject_code=str(payload.get("subject_code", "")),
+            lecturer=str(payload.get("lecturer", "")),
+            has_outline=bool(payload.get("has_outline", False)),
+            outline=str(payload.get("outline", "")),
         )
+
+    def to_cache_dict(self) -> dict[str, Any]:
+        """Like :meth:`to_dict` plus the display-only detail fields.
+
+        ``link``/``meeting_url`` stay out of the cache on purpose (they carry
+        short-lived personal tokens); a live refresh restores them.
+        """
+        payload = self.to_dict()
+        payload.update(
+            {
+                "subject_code": self.subject_code,
+                "lecturer": self.lecturer,
+                "has_outline": self.has_outline,
+                "outline": self.outline,
+            }
+        )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -195,6 +223,69 @@ def parse_portal_day(
     return tuple(sessions)
 
 
+def _parse_row_date(row: dict[str, Any]) -> date | None:
+    for key in ("ngayBatDauHoc", "ngayHoc", "ngay", "date"):
+        value = row.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip()[:10]
+        for pattern in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, pattern).date()
+            except ValueError:
+                continue
+    return None
+
+
+def parse_portal_week(
+    payload: Any, week_anchor: date
+) -> dict[date, tuple[ClassSession, ...]]:
+    """Parse ``lichhoc/lichTuan`` into sessions grouped by calendar date.
+
+    The date of each row comes from ``ngayBatDauHoc`` (dd/MM/yyyy); rows
+    without it fall back to ``thu`` (2=Monday ... 8=Sunday) of the Monday-based
+    week containing ``week_anchor``.
+    """
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise ValueError("unsuccessful Portal schedule envelope")
+    rows = payload.get("body")
+    if not isinstance(rows, list):
+        raise ValueError("Portal schedule body is not a list")
+    monday = week_anchor - timedelta(days=week_anchor.weekday())
+    grouped: dict[date, list[ClassSession]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        day = _parse_row_date(row)
+        if day is None:
+            thu = _optional_int(row.get("thu"))
+            if thu is None or not 2 <= thu <= 8:
+                continue
+            day = monday + timedelta(days=thu - 2)
+        sessions = parse_portal_day(
+            {"success": True, "body": [row]}, day
+        )
+        if not sessions:
+            continue
+        session = sessions[0]
+        session = replace(
+            session,
+            link=str(row.get("link") or "").strip(),
+            meeting_url=str(row.get("text1") or "").strip(),
+            subject_code=str(row.get("maMonHoc") or "").strip(),
+            lecturer=str(row.get("giangVien") or "").strip(),
+            has_outline=bool(row.get("haveOutlineFile")),
+            outline=str(row.get("outLineDescription") or "").strip(),
+        )
+        grouped.setdefault(day, []).append(session)
+    return {
+        day: tuple(
+            sorted(items, key=lambda item: (item.start_at, item.subject.casefold()))
+        )
+        for day, items in grouped.items()
+    }
+
+
 class TodayScheduleCache:
     SCHEMA_VERSION = 1
 
@@ -233,6 +324,111 @@ class TodayScheduleCache:
             "count": len(snapshot.sessions),
             "sessions": [session.to_dict() for session in snapshot.sessions],
         }
+        return bool(SafeFileIO.write_json_atomic(self._path, payload))
+
+
+WEEK_CACHE_RADIUS = 4  # weeks kept before and after the current week
+
+
+def monday_of(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+@dataclass(frozen=True)
+class WeekScheduleEntry:
+    monday: date
+    days: dict[date, tuple[ClassSession, ...]]
+    fetched_at: datetime
+
+
+class WeekScheduleCache:
+    """Disk cache of weekly timetables (``lichhoc/lichTuan``).
+
+    Keeps the current week plus ``WEEK_CACHE_RADIUS`` weeks on each side;
+    everything else is pruned on save.
+    """
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, cache_dir: Path | None = None, namespace: str = "") -> None:
+        self._cache_dir = cache_dir
+        self._path = self._resolve_path(namespace)
+
+    def _resolve_path(self, namespace: str) -> Path:
+        cache_dir = self._cache_dir
+        if cache_dir is None:
+            from config import _USER_DATA_DIR
+
+            cache_dir = _USER_DATA_DIR
+        digest = hashlib.sha256(
+            namespace.strip().casefold().encode("utf-8")
+        ).hexdigest()[:12]
+        return cache_dir / f"week_schedule_{digest}.json"
+
+    def set_namespace(self, namespace: str) -> None:
+        self._path = self._resolve_path(namespace)
+
+    @staticmethod
+    def window(today: date | None = None) -> list[date]:
+        """Mondays to cache, ordered by closeness to the current week."""
+        base = monday_of(today or date.today())
+        order = [base]
+        for step in range(1, WEEK_CACHE_RADIUS + 1):
+            order.append(base + timedelta(weeks=step))
+            order.append(base - timedelta(weeks=step))
+        return order
+
+    def _read(self) -> dict[str, Any]:
+        payload = SafeFileIO.read_json_safe(self._path, dict)
+        if not isinstance(payload, dict) or payload.get("version") != self.SCHEMA_VERSION:
+            return {}
+        weeks = payload.get("weeks")
+        return weeks if isinstance(weeks, dict) else {}
+
+    @staticmethod
+    def _decode(monday: date, raw: Any) -> WeekScheduleEntry | None:
+        if not isinstance(raw, dict):
+            return None
+        try:
+            fetched_at = datetime.fromisoformat(str(raw["fetched_at"]))
+            days: dict[date, tuple[ClassSession, ...]] = {}
+            for day_key, rows in (raw.get("days") or {}).items():
+                days[date.fromisoformat(day_key)] = tuple(
+                    ClassSession.from_dict(row) for row in rows if isinstance(row, dict)
+                )
+        except (KeyError, TypeError, ValueError, AttributeError):
+            logger.warning("Week schedule cache entry is invalid")
+            return None
+        return WeekScheduleEntry(monday, days, fetched_at)
+
+    def load_window(self, today: date | None = None) -> dict[date, WeekScheduleEntry]:
+        weeks = self._read()
+        entries: dict[date, WeekScheduleEntry] = {}
+        for monday in self.window(today):
+            entry = self._decode(monday, weeks.get(monday.isoformat()))
+            if entry is not None:
+                entries[monday] = entry
+        return entries
+
+    def save_week(
+        self,
+        monday: date,
+        days: dict[date, tuple[ClassSession, ...]],
+        fetched_at: datetime,
+        today: date | None = None,
+    ) -> bool:
+        keep = {m.isoformat() for m in self.window(today)}
+        if monday.isoformat() not in keep:
+            return False  # outside the ±4 week window: memory only
+        weeks = {k: v for k, v in self._read().items() if k in keep}
+        weeks[monday.isoformat()] = {
+            "fetched_at": fetched_at.isoformat(),
+            "days": {
+                day.isoformat(): [s.to_cache_dict() for s in sessions]
+                for day, sessions in sorted(days.items())
+            },
+        }
+        payload = {"version": self.SCHEMA_VERSION, "weeks": weeks}
         return bool(SafeFileIO.write_json_atomic(self._path, payload))
 
 

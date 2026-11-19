@@ -34,6 +34,7 @@ from gui.components.calendar_navigation import (
     shift_week,
     week_slot_anchors,
 )
+from gui.components.schedule_week_view import ScheduleWeekView
 from gui.core.theme import (
     C,
     on_color,
@@ -71,6 +72,8 @@ class CalendarView(ft.Container):
         page: ft.Page,
         on_close: Optional[Callable] = None,
         on_open_detail: Optional[Callable] = None,
+        fetch_schedule_week: Optional[Callable] = None,
+        schedule_cache: Optional[Any] = None,
     ):
         super().__init__(expand=True, visible=False, bgcolor=C.BG)
         self._page_ref = page
@@ -87,6 +90,8 @@ class CalendarView(ft.Container):
         self._view_mode: str = "month"  # "month" or "week"
         self._week_start: date = today - timedelta(days=today.weekday())  # Monday
         self._selected_date: Optional[date] = today  # full date for week view
+
+        self._schedule_view = ScheduleWeekView(page, fetch_schedule_week, schedule_cache)
 
         self._build_ui()
         self._rendered_palette = semantic_palette()
@@ -214,9 +219,26 @@ class CalendarView(ft.Container):
             on_click=lambda _: self._toggle_view_mode("week"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
+        self._mode_schedule_icon = ft.Icon(
+            ft.Icons.SCHOOL_ROUNDED, size=14, color=C.TEXT_SECONDARY
+        )
+        self._mode_schedule_text = ft.Text(
+            "Lịch học", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+        )
+        self._mode_schedule_btn = ft.Container(
+            content=ft.Row(controls=[
+                self._mode_schedule_icon,
+                self._mode_schedule_text,
+            ], spacing=4, tight=True),
+            bgcolor="transparent",
+            border_radius=12,
+            padding=ft.Padding(left=14, right=14, top=5, bottom=5),
+            on_click=lambda _: self._toggle_view_mode("schedule"),
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+        )
         self._mode_toggle = ft.Container(
             content=ft.Row(
-                [self._mode_month_btn, self._mode_week_btn],
+                [self._mode_month_btn, self._mode_week_btn, self._mode_schedule_btn],
                 spacing=2,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
@@ -224,7 +246,7 @@ class CalendarView(ft.Container):
             border_radius=14,
             padding=ft.Padding(left=3, right=3, top=3, bottom=3),
             border=ft.Border.all(1, C.BORDER),
-            margin=ft.Margin(left=60, right=60, top=4, bottom=6),
+            margin=ft.Margin(left=24, right=24, top=4, bottom=6),
         )
 
         # Calendar grid (6 rows × 7 cols) - CV-01: denser
@@ -386,6 +408,7 @@ class CalendarView(ft.Container):
                 self._mode_toggle,
                 self._period_surface,
                 detail_panel,
+                self._schedule_view,
             ],
             spacing=0,
             expand=True,
@@ -1340,6 +1363,8 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        if self._view_mode == "schedule":
+            self._apply_schedule_header()
 
     def show(self, activities: Optional[List[Dict[str, Any]]] = None):
         if activities is not None:
@@ -1358,6 +1383,9 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        if self._view_mode == "schedule":
+            self._apply_schedule_header()
+            self._schedule_view.show()
 
     def hide(self):
         self.visible = False
@@ -1655,7 +1683,13 @@ class CalendarView(ft.Container):
         """Switch between month and week view."""
         if self._view_mode == mode:
             return
+        previous_mode = self._view_mode
         self._view_mode = mode
+        if mode == "schedule":
+            self._enter_schedule_mode()
+            return
+        if previous_mode == "schedule":
+            self._leave_schedule_mode()
 
         if mode == "month":
             # Update toggle styling
@@ -1697,6 +1731,52 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        self._style_mode_buttons()
+
+    # Schedule (Portal timetable) mode
+    def _style_mode_buttons(self) -> None:
+        for mode, btn, icon, text in (
+            ("month", self._mode_month_btn, self._mode_month_icon, self._mode_month_text),
+            ("week", self._mode_week_btn, self._mode_week_icon, self._mode_week_text),
+            ("schedule", self._mode_schedule_btn, self._mode_schedule_icon, self._mode_schedule_text),
+        ):
+            active = self._view_mode == mode
+            btn.bgcolor = (
+                ft.Colors.with_opacity(0.19, C.ACCENT) if active else "transparent"
+            )
+            icon.color = C.TEXT_PRIMARY if active else C.TEXT_SECONDARY
+            text.color = C.TEXT_PRIMARY if active else C.TEXT_SECONDARY
+
+    def _apply_schedule_header(self) -> None:
+        self._month_label.value = "Lịch học"
+        self._month_summary.value = "Thời khóa biểu từ Portal"
+
+    def _set_deadline_surfaces_visible(self, visible: bool) -> None:
+        self._period_surface.visible = visible
+        self._detail_panel.visible = visible
+        # Keep the buttons in the layout (just invisible) so the centered
+        # title is not pushed against the right edge.
+        for button in (self._previous_btn, self._next_btn, self._today_btn):
+            button.opacity = 1.0 if visible else 0.0
+            button.disabled = not visible
+
+    def _enter_schedule_mode(self) -> None:
+        self._set_deadline_surfaces_visible(False)
+        self._apply_schedule_header()
+        self._style_mode_buttons()
+        self._schedule_view.show()
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    def reset_schedule(self) -> None:
+        """Drop in-memory timetable data (account/cache namespace changed)."""
+        self._schedule_view.reset()
+
+    def _leave_schedule_mode(self) -> None:
+        self._schedule_view.hide()
+        self._set_deadline_surfaces_visible(True)
 
     def _on_day_click(self, e):
         cell = e.control
@@ -1934,6 +2014,8 @@ class CalendarView(ft.Container):
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
+        self._style_mode_buttons()
+
         # Day Panel Static Info
         self._day_title.color = C.TEXT_PRIMARY
         self._day_count.color = C.TEXT_SECONDARY
@@ -1961,6 +2043,9 @@ class CalendarView(ft.Container):
 
         # Re-render selected day details list (re-creates mini-cards with correct theme)
         self._update_day_panel()
+        self._schedule_view.update_theme()
+        if self._view_mode == "schedule":
+            self._apply_schedule_header()
 
         try:
             self.update()

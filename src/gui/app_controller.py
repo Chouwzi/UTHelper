@@ -26,6 +26,7 @@ from core.portal_client import PortalClient
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
+    WeekScheduleCache,
     TodayScheduleCoordinator,
     TodayScheduleViewState,
 )
@@ -221,6 +222,10 @@ class AppController:
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
         self._portal_client = PortalClient(settings.PORTAL_API_BASE)
+        # The Portal web app (lichTuan) is served from its own host.
+        self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
+        self._portal_week_lock = threading.Lock()
+        self._week_schedule_cache = WeekScheduleCache(namespace=schedule_namespace)
         self._today_schedule_coordinator = TodayScheduleCoordinator(
             fetch_day=self._portal_client.fetch_day,
             cache=TodayScheduleCache(namespace=schedule_namespace),
@@ -796,6 +801,10 @@ class AppController:
         if self.detail_view.visible:
             await self._close_detail()
         current = self._current_section()
+        if target == current:
+            # Bấm lại đúng mục đang mở: giữ nguyên, không quay về Tổng quan.
+            self._sync_rail_active()
+            return
         if current == "settings":
             if self.settings_view.has_changes():
                 # Hiện hộp thoại "Chưa lưu"; người dùng bấm lại mục sau khi xử lý.
@@ -808,15 +817,14 @@ class AppController:
             await self._close_grades()
         elif current == "courses":
             await self._close_courses()
-        if target != current:
-            if target == "calendar":
-                await self._show_calendar()
-            elif target == "grades":
-                await self._show_grades()
-            elif target == "courses":
-                await self._show_courses()
-            elif target == "settings":
-                await self._show_settings()
+        if target == "calendar":
+            await self._show_calendar()
+        elif target == "grades":
+            await self._show_grades()
+        elif target == "courses":
+            await self._show_courses()
+        elif target == "settings":
+            await self._show_settings()
         self._sync_rail_active()
 
     def _on_page_resize(self, _event=None) -> None:
@@ -1296,6 +1304,8 @@ class AppController:
             self.page,
             on_close=lambda: self._safe_run_task(self._close_calendar),
             on_open_detail=lambda data: self._safe_run_task(self._show_detail_async, data),
+            fetch_schedule_week=self._fetch_schedule_week,
+            schedule_cache=self._week_schedule_cache,
         )
         self.settings_view = SettingsView(
             self.page,
@@ -1894,6 +1904,13 @@ class AppController:
         
         self.cards_column.controls = render_cards
         self.page.update()
+
+    def _fetch_schedule_week(self, week_anchor):
+        """Blocking Portal ``lichTuan`` fetch; runs in a worker thread."""
+        with self._portal_week_lock:
+            return self._portal_week_client.fetch_week(
+                week_anchor, settings.UTH_USERNAME, settings.UTH_PASSWORD
+            )
 
     def _request_today_schedule(self) -> None:
         coordinator = self._today_schedule_coordinator
@@ -3234,6 +3251,9 @@ class AppController:
                 else f"{settings.PORTAL_API_BASE}|anonymous"
             )
             self._portal_client.clear_token()
+            self._portal_week_client.clear_token()
+            self._week_schedule_cache.set_namespace(schedule_namespace)
+            self.calendar_view.reset_schedule()
             self._today_schedule_coordinator.replace_cache(
                 TodayScheduleCache(namespace=schedule_namespace)
             )
