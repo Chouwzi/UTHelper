@@ -299,7 +299,16 @@ class TodayScheduleCoordinator:
         )
 
     async def ensure_today(self) -> TodayScheduleViewState:
-        cached = self._cache.load_for(self._now_provider().date())
+        # The cache is only a valid stand-in for a live fetch while the same
+        # account can still authenticate. With missing/blank credentials the
+        # cached snapshot belongs to nobody, so fall through to refresh(),
+        # which reports AUTH_REQUIRED instead of publishing a stale READY.
+        username, password = self._credentials_provider()
+        cached = (
+            self._cache.load_for(self._now_provider().date())
+            if username and password
+            else None
+        )
         if cached is not None:
             state = TodayScheduleViewState(
                 ScheduleLoadStatus.READY,
@@ -315,6 +324,18 @@ class TodayScheduleCoordinator:
             generation = self._generation
             target_date = self._now_provider().date()
             existing = self._cache.load_for(target_date)
+            # Credentials are validated BEFORE the startup cache shortcut: with
+            # an absent/expired identity a cached snapshot can never be
+            # refreshed, so serving it as READY would mask the login prompt.
+            username, password = self._credentials_provider()
+            if not username or not password:
+                state = TodayScheduleViewState(
+                    ScheduleLoadStatus.AUTH_REQUIRED,
+                    snapshot=existing,
+                    from_cache=existing is not None,
+                )
+                self._publish(state)
+                return state
             # Startup and a fast first expansion can race before either task
             # observes the cache. The second task re-checks under the guard and
             # publishes the completed first result instead of logging in twice.
@@ -323,15 +344,6 @@ class TodayScheduleCoordinator:
                     ScheduleLoadStatus.READY,
                     snapshot=existing,
                     from_cache=True,
-                )
-                self._publish(state)
-                return state
-            username, password = self._credentials_provider()
-            if not username or not password:
-                state = TodayScheduleViewState(
-                    ScheduleLoadStatus.AUTH_REQUIRED,
-                    snapshot=existing,
-                    from_cache=existing is not None,
                 )
                 self._publish(state)
                 return state

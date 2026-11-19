@@ -274,6 +274,38 @@ def test_coordinator_exposes_auth_required_without_calling_network(tmp_path):
     assert states[-1].status is ScheduleLoadStatus.AUTH_REQUIRED
 
 
+def test_cached_snapshot_is_never_served_without_credentials(tmp_path):
+    """A cached day is only a stand-in for a fetch the same account can make.
+
+    Regression: ``ensure_today`` (and the ``refresh("startup")`` shortcut it
+    falls back to) used to publish READY from the cache even with blank
+    credentials, hiding the login prompt behind another account's schedule.
+    """
+    now = datetime(2026, 8, 11, 8, 0)
+    cache = TodayScheduleCache(cache_dir=tmp_path, namespace="portal|student")
+    cache.save(
+        TodayScheduleSnapshot(
+            schedule_date=now.date(),
+            sessions=(_session(),),
+            fetched_at=datetime.combine(now.date(), time(0, 0)),
+        )
+    )
+    states = []
+    coordinator = TodayScheduleCoordinator(
+        fetch_day=lambda *_: (_ for _ in ()).throw(AssertionError("network called")),
+        cache=cache,
+        credentials_provider=lambda: ("", ""),
+        state_sink=states.append,
+        now_provider=lambda: now,
+    )
+
+    asyncio.run(coordinator.ensure_today())
+    assert states[-1].status is ScheduleLoadStatus.AUTH_REQUIRED
+
+    asyncio.run(coordinator.refresh("startup"))
+    assert states[-1].status is ScheduleLoadStatus.AUTH_REQUIRED
+
+
 def test_concurrent_startup_and_fast_expand_coalesce_to_one_portal_fetch(tmp_path):
     calls = []
 

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import androidx.core.app.NotificationManagerCompat
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -26,7 +27,11 @@ class ClassScheduleAlarmScheduler(private val context: Context) {
                     .distinctBy { it.optString(KEY_REMINDER_ID) }
                     .sortedBy { it.optLong(KEY_SCHEDULED_AT) }
             } else {
-                emptyList()
+                // Full teardown (logout / credentials change): banners already
+                // sitting on the notification tray are exactly as stale as the
+                // alarms just cancelled above, so drop them too.
+                previous.forEach { dropPostedNotification(it.optString(KEY_REMINDER_ID)) }
+                emptyList<JSONObject>()
             }
 
             preferences.edit().putString(KEY_ITEMS, JSONArray(desired).toString()).commit()
@@ -131,6 +136,15 @@ class ClassScheduleAlarmScheduler(private val context: Context) {
         val operation = pendingIntent(item, PendingIntent.FLAG_NO_CREATE) ?: return
         alarmManager.cancel(operation)
         operation.cancel()
+    }
+
+    /** Removes an already displayed class banner using the receiver's id. */
+    private fun dropPostedNotification(reminderId: String) {
+        if (reminderId.isBlank()) return
+        runCatching {
+            NotificationManagerCompat.from(context)
+                .cancel(reminderId.hashCode() and 0x7fffffff)
+        }
     }
 
     private fun pendingIntent(item: JSONObject, flag: Int): PendingIntent? {

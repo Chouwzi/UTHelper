@@ -11,6 +11,7 @@ from core.notification_policy import (
     NotificationPolicyConfig,
 )
 from core.class_schedule_notifications import build_class_schedule_reminders
+from core.today_schedule import ScheduleAuthenticationError
 from core.notification_types import (
     ActivityNotification,
     DispatchResult,
@@ -430,11 +431,17 @@ class NotificationManager:
                 and identity_getter() != identity_before
             )
 
+        def stale_task() -> bool:
+            # ``clear_only`` is a pure teardown of the previous account's
+            # reminders: an account flip must never cancel it, otherwise the
+            # reminders it exists to drop would outlive the logout.
+            return (not clear_only) and identity_changed()
+
         lock = getattr(self, "_class_schedule_reconcile_lock", None)
         if lock is None:
             lock = self._class_schedule_reconcile_lock = asyncio.Lock()
         async with lock:
-            if identity_changed():
+            if stale_task():
                 # A stale task spent its whole wait behind the lock; by now
                 # the account has moved on, so it must not even fetch.
                 logger.info(
@@ -442,37 +449,48 @@ class NotificationManager:
                 )
                 return
 
-            # clear_only is a pure teardown: it must never schedule, even if
-            # the enabled switch is still on in the freshly written settings.
-            enabled = (not clear_only) and bool(
-                getattr(config, "NOTIFY_CLASS_SCHEDULE_ENABLED", False)
-            )
             session_snapshot = list(sessions)
             username, password = credentials_before
+            # Credentials gate the RESULT, not only the fetch: without a usable
+            # Portal identity the reminders cannot be refreshed, so keeping the
+            # old ones armed would fire stale (possibly foreign) classes.
             credentials_available = bool(username) and bool(password)
-            if (
-                enabled
+            # clear_only is a pure teardown: it must never schedule, even if
+            # the enabled switch is still on in the freshly written settings.
+            enabled = (
+                (not clear_only)
                 and credentials_available
-                and fetch_day is not None
-            ):
+                and bool(getattr(config, "NOTIFY_CLASS_SCHEDULE_ENABLED", False))
+            )
+            if enabled and fetch_day is not None:
                 # TodayScheduleCoordinator owns today's dashboard snapshot.
                 # Fetch tomorrow once during foreground scheduling as well, so
                 # a class beginning tomorrow can still have its alarm persisted
                 # before the app is suspended or the user leaves the device.
                 try:
                     tomorrow_sessions = await fetch_day(credentials_before)
-                    if identity_changed():
+                    if stale_task():
                         logger.info(
                             "Skipping class-schedule reconcile: account changed during fetch"
                         )
                         return
                     session_snapshot.extend(tomorrow_sessions)
+                except ScheduleAuthenticationError:
+                    # The Portal session is gone: the cached sessions belong to
+                    # a login that no longer works, so drop them and clear the
+                    # previously armed reminders instead of rescheduling them.
+                    logger.warning(
+                        "Portal authentication failed while reconciling class reminders; "
+                        "clearing the previously scheduled class list"
+                    )
+                    enabled = False
+                    session_snapshot = []
                 except Exception:
                     logger.warning(
                         "Could not fetch tomorrow's Portal timetable for reminders",
                         exc_info=True,
                     )
-            if identity_changed():
+            if stale_task():
                 logger.info(
                     "Skipping class-schedule reconcile: account changed before applying"
                 )

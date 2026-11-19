@@ -1,6 +1,8 @@
+import json
 import os
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -134,6 +136,58 @@ def test_failed_windows_schedule_retries_before_deadline(tmp_path):
     assert key in notifier._schedule_state
     assert notifier._schedule_state[key]["retry_at"]
     assert notifier.get_diagnostics()["last_schedule_error"] == "toast unavailable"
+    notifier.close()
+
+
+def test_deliver_pending_writes_class_receipts_to_the_class_receipt_file(tmp_path):
+    """Class deliveries must never land in the deadline receipt cache.
+
+    Regression: ``_deliver_pending`` falls back to ``_receipt_path`` whenever
+    ``_class_receipt_path`` is missing, which re-introduces class reminders into
+    the activity delivery cache keyed by course URL.
+    """
+    notifier = _scheduler_notifier(tmp_path)
+    start = datetime.now() + timedelta(hours=3)
+    reminder = SimpleNamespace(
+        reminder_id="reminder-1",
+        delivery_mode="in_person",
+        lead_hours=1,
+        scheduled_at=datetime.now() - timedelta(seconds=1),
+        session=SimpleNamespace(
+            subject="Mạng máy tính",
+            course_code="CN123",
+            room="F.302",
+            campus="Cơ sở Võ Oanh",
+            note="",
+            start_at=start,
+        ),
+    )
+    notifier.reconcile_class_schedule_reminders([reminder])
+    key = "class_schedule:reminder-1"
+    value = notifier._schedule_state[key]
+    notifier.notify_class_schedule_reminder = MagicMock(return_value=True)
+
+    notifier._deliver_pending(key, value)
+
+    notifier.notify_class_schedule_reminder.assert_called_once_with(value)
+    class_receipts = json.loads(
+        notifier._class_receipt_path.read_text(encoding="utf-8")
+    )
+    assert class_receipts == [
+        {
+            "activity_key": "reminder-1",
+            "deadline_revision": "",
+            "milestone": "class_schedule_1h",
+            "channel": "windows",
+            "delivered_at": class_receipts[0]["delivered_at"],
+        }
+    ]
+    deadline_receipts = tmp_path / "windows-receipts.json"
+    assert not deadline_receipts.exists() or json.loads(
+        deadline_receipts.read_text(encoding="utf-8")
+    ) == []
+    assert key not in notifier._schedule_state
+    assert notifier.get_diagnostics()["scheduled_delivered"] == 1
     notifier.close()
 
 

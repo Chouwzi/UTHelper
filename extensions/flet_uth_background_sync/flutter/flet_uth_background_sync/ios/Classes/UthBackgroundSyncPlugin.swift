@@ -107,7 +107,11 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             result(["status": "unavailable_on_ios"])
 
         case "logout":
-            clearNotifications()
+            // Moodle data only: Portal class-schedule notifications are owned
+            // by "schedule_class_sessions" (enabled=false) and must survive a
+            // Moodle logout, otherwise a configure() without a token would wipe
+            // a freshly armed class schedule.
+            clearDeadlineNotifications()
             defaults.removeObject(forKey: Self.settingsKey)
             defaults.removeObject(forKey: Self.receiptsKey)
             result(nil)
@@ -126,7 +130,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         guard bool(settings["enabled"], default: true) else {
             // Countdown alerts are off: drop only the deadline reminders.
             // Class-schedule notifications have their own switch and must
-            // survive here (clearNotifications() would wipe them too).
+            // survive here (a blanket clear would wipe them too).
             clearDeadlineNotifications()
             result(["imported": activities.count, "scheduled": 0, "cancelled": 0, "delivered": 0])
             return
@@ -283,9 +287,13 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             }
 
             guard enabled else {
-                // Pending class requests are all cancelled; delivered history is
-                // only cleared for classes whose start time has already passed.
-                self.removeStaleDeliveredClassNotifications(desiredIdentifiers: []) {
+                // Pending class requests are all cancelled; delivered banners
+                // are dropped as well, including ones whose class has not
+                // started yet — a teardown must leave no stale class notice.
+                self.removeStaleDeliveredClassNotifications(
+                    desiredIdentifiers: [],
+                    includeUpcoming: true
+                ) {
                     self.finish(result, [
                         "desired": 0,
                         "scheduled": 0,
@@ -506,11 +514,13 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         return Array(sorted.prefix(limit))
     }
 
-    /// Removes delivered class-schedule notifications that are no longer desired
-    /// and whose class has already started (a missing/zero `start_at` counts as
-    /// started). Pending identifiers can never remove delivered notifications.
+    /// Removes delivered class-schedule notifications that are no longer desired.
+    /// A missing/zero `start_at` counts as started; `includeUpcoming: true`
+    /// (used by full teardowns) also drops banners for classes still ahead.
+    /// Pending identifiers can never remove delivered notifications.
     private func removeStaleDeliveredClassNotifications(
         desiredIdentifiers: Set<String>,
+        includeUpcoming: Bool = false,
         completion: @escaping () -> Void
     ) {
         center.getDeliveredNotifications { delivered in
@@ -520,7 +530,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                 guard identifier.hasPrefix(Self.classSchedulePrefix),
                       !desiredIdentifiers.contains(identifier) else { return nil }
                 let start = (item.request.content.userInfo["start_at"] as? NSNumber)?.doubleValue ?? 0
-                return start <= now ? identifier : nil
+                return (includeUpcoming || start <= now) ? identifier : nil
             }
             if !stale.isEmpty {
                 self.center.removeDeliveredNotifications(withIdentifiers: stale)
@@ -544,29 +554,9 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         }
     }
 
-    private func clearNotifications() {
-        center.getPendingNotificationRequests { requests in
-            let pendingIds = requests.map(\.identifier).filter {
-                $0.hasPrefix(Self.requestPrefix)
-                    || $0.hasPrefix(Self.immediatePrefix)
-                    || $0.hasPrefix(Self.classSchedulePrefix)
-            }
-            self.center.removePendingNotificationRequests(withIdentifiers: pendingIds)
-            self.center.getDeliveredNotifications { delivered in
-                let deliveredIds = delivered.map(\.request.identifier).filter {
-                    $0.hasPrefix(Self.requestPrefix)
-                        || $0.hasPrefix(Self.immediatePrefix)
-                        || $0.hasPrefix(Self.classSchedulePrefix)
-                }
-                if !deliveredIds.isEmpty {
-                    self.center.removeDeliveredNotifications(withIdentifiers: deliveredIds)
-                }
-            }
-        }
-    }
-
     /// Clears only countdown/deadline notifications, preserving class-schedule
-    /// history when the deadline switch is turned off (used on logout).
+    /// reminders. Used when the deadline switch is turned off and on Moodle
+    /// logout, where the Portal schedule must stay armed.
     private func clearDeadlineNotifications() {
         center.getPendingNotificationRequests { requests in
             let pendingIds = requests.map(\.identifier).filter {

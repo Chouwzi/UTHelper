@@ -196,7 +196,11 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
             "logout" -> execute(result) {
                 BackgroundSyncScheduler(context).cancelAll()
-                ClassScheduleAlarmScheduler(context).cancelAll()
+                // Portal class-schedule alarms are deliberately NOT cancelled
+                // here: AndroidBackgroundBridge.configure() calls logout()
+                // whenever the Moodle token is missing, which would wipe a
+                // freshly armed class schedule. Class reminders are cleared
+                // only through "schedule_class_sessions" with enabled=false.
                 val database = UthDatabase.get(context)
                 database.dao().reminders().forEach(AlarmScheduler(context)::cancel)
                 database.withTransaction {

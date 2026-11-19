@@ -363,6 +363,13 @@ class AppController:
             self._today_schedule_coordinator.replace_cache(
                 TodayScheduleCache(namespace=schedule_namespace)
             )
+            # Tear down the PREVIOUS account's armed class reminders before the
+            # new snapshot is fetched: running refresh("login") first would let
+            # the fresh schedule land and only afterwards be wiped by the
+            # older clear. Ordering the tasks here is what makes the swap safe.
+            self._safe_run_task(
+                self._reconcile_class_schedule_notifications, (), clear_only=True
+            )
             self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
@@ -2918,7 +2925,12 @@ class AppController:
             self._safe_run_task(
                 self._reconcile_class_schedule_notifications, (), clear_only=True
             )
-            self._safe_run_task(self._today_schedule_coordinator.ensure_today)
+            # A plain ensure_today() would happily re-publish whatever the new
+            # namespace still holds as READY; refresh("credentials_changed")
+            # re-authenticates (or reports AUTH_REQUIRED) instead.
+            self._safe_run_task(
+                self._today_schedule_coordinator.refresh, "credentials_changed"
+            )
 
         load_theme_from_settings()
         set_page_theme(self.page)
@@ -2959,9 +2971,10 @@ class AppController:
 
                 self._safe_run_task(_apply_android_settings)
         # A credentials change already scheduled a clear_only reconcile above
-        # and ensure_today will rebuild the new account's reminders from its
-        # own snapshot; a non-clear run here would fetch tomorrow with the old
-        # generation and could overwrite the fresh account's schedule.
+        # and refresh("credentials_changed") will rebuild the new account's
+        # reminders from its own snapshot; a non-clear run here would fetch
+        # tomorrow with the old generation and could overwrite the fresh
+        # account's schedule.
         if class_schedule_settings_changed and not credentials_changed:
             schedule_state = getattr(self, "_today_schedule_state", None)
             schedule_snapshot = (
