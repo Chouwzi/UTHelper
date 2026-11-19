@@ -35,7 +35,6 @@ _CA_GROUP = {0: "", 1: "Sáng", 2: "Sáng", 3: "Chiều", 4: "Chiều", 5: "Tố
 _COL_W = 250          # a full card needs a wide column (grid scrolls sideways)
 _LABEL_W = 52
 _CELL_MIN_H = 56      # empty cell height so every Ca row keeps a visible band
-_TODAY_TINT = "#38BDF8"   # light aqua used to highlight today's column
 _SWIPE_VELOCITY = 250.0
 _TTL_CURRENT = timedelta(minutes=10)   # re-fetch the current week after this
 _TTL_OTHER = timedelta(hours=6)        # ...and the other cached weeks after this
@@ -596,7 +595,7 @@ class ScheduleWeekView(ft.Container):
                 height=40,
                 alignment=ft.Alignment(0, 0),
                 bgcolor=(
-                    ft.Colors.with_opacity(0.45, _TODAY_TINT)
+                    ft.Colors.with_opacity(0.45, C.ACCENT)
                     if today_col
                     else C.SURFACE_ELEVATED
                 ),
@@ -678,7 +677,7 @@ class ScheduleWeekView(ft.Container):
                         width=_COL_W,
                         top=0,
                         bottom=0,
-                        bgcolor=ft.Colors.with_opacity(0.18, _TODAY_TINT),
+                        bgcolor=ft.Colors.with_opacity(0.18, C.ACCENT),
                     )
                 )
             # Band divider, skipping the today column so the strip is not cut.
