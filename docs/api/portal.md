@@ -295,6 +295,18 @@ thúc, tiết, phòng, cơ sở, ghi chú và trạng thái tạm ngưng.
 }
 ```
 
+**Nhận diện hình thức học cho thông báo lịch học (Issue #86):** hợp đồng API được ghi nhận ở trên
+không có trường hình thức học riêng. UTHelper chỉ phân loại là **trực tuyến** khi `tenPhong`,
+`coSoToDisplay` hoặc `ghiChu` có dấu hiệu rõ ràng như `online`, `trực tuyến`, Zoom, Google Meet,
+Microsoft Teams hoặc Webex. Nếu không có dấu hiệu trực tuyến nhưng có phòng/cơ sở, ứng dụng phân
+loại là **trực tiếp**. Nếu cả dấu hiệu trực tuyến và thông tin địa điểm đều không đủ để xác định,
+ứng dụng bỏ qua buổi đó thay vì đoán. Vì vậy, các lớp online cần có dấu hiệu nhận diện trong ghi chú
+hoặc trường phòng/cơ sở do Portal trả về; không có dữ liệu này thì client không thể phân loại đáng tin cậy.
+
+Thông báo lịch học cho phép chọn một hoặc nhiều mốc 1, 2, 3 giờ trước giờ bắt đầu. Các buổi bị
+tạm ngưng (`isTamNgung`) không được lên lịch; khi Portal được đồng bộ lại, các thông báo cũ được
+đối chiếu và cập nhật/hủy theo snapshot mới.
+
 ### `GET /api/v1/lichhoc/tuan?date={YYYY-MM-DD}`
 
 **Description:** Lịch tuần; thêm `ngayBatDauHoc` và `giangVien` (có thể null).

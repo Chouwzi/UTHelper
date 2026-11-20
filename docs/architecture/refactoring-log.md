@@ -77,6 +77,9 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-11-18 | `feature/courses-tab` | Polish Apple HIG Visual Restraint on Grades & Quiz Review | Tiết chế màu sắc và đường kẻ theo chuẩn Apple HIG (`CourseDetailPane` + `QuizActivityView`): gỡ bỏ hoàn toàn các vạch dọc màu xanh/đỏ bên trái mỗi dòng điểm & câu hỏi, bỏ thanh `ProgressBar` ngang trong thẻ Hero Điểm môn, dưới từng con điểm và trong thẻ tổng quan Quiz Review; chuyển điểm số/KPI/huy hiệu trọng số về mực chính trung tính sắc nét (`C.TEXT_PRIMARY` / `C.SURFACE_ELEVATED`) kết hợp đường phân tách mảnh `Divider` tinh gọn, chỉ giữ sắc thái màu ngữ nghĩa cho duy nhất nhãn xếp loại tổng quan và điểm cảnh báo thấp (`< 5.0`) | Đạt 1812 passed, 25 skipped; `ruff check src tests` pass |
 | 2026-11-18 | `feature/courses-tab` | Fix Moodle Synthetic index.html Raw HTML Leak & Inline Label Cards | Loại bỏ tệp nội bộ ảo `index.html`/`structure` của Moodle trên `mod_page`/`mod_label`/`mod_book` (`providers.py`, `real_module_attachments`), ẩn hoàn toàn các `mod_label` khoảng trắng rỗng (`<div class="no-overflow"><p>   </p></div>`), hiển thị trực tiếp nội dung thông báo & nút liên kết Meet/URL của `mod_label` ngay trong từng chương (`CourseDetailPane._label_inline_card`), định tuyến `page`/`book`/`label` đã lưu cache sang `RichContentActivityView`/inline reader thay vì tải `index.html`, và bổ sung bộ chuyển đổi `.html`/`.htm` sang Markdown + HTML sạch chống rò rỉ thẻ HTML thô trong `DocumentReaderView` | Đạt 1814 passed, 25 skipped; `ruff check src tests` pass |
 
+| 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
+| 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
+
 
 ---
 
@@ -2020,3 +2023,37 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - Added `tests/test_courses_pdf_and_legacy_docs.py` and `tests/test_courses_activities_and_webview.py`.
   - `python -m pytest tests -q --tb=short`: **1795 passed, 25 skipped**.
   - `ruff check src tests`: all checks passed (0 errors).
+
+## Theme preview mode synchronization (2026-11-16)
+
+- Theme previews already applied draft colors globally, but `set_page_theme`
+  still read the persisted theme name to choose Flet's light/dark mode. When a
+  user previewed a light theme before saving, desktop controls could render
+  against dark-mode defaults, including a black grade screen.
+- `set_page_theme` now accepts an optional theme name. Theme selection, reset,
+  and discard pass the active draft/baseline theme so Flet brightness matches
+  the semantic palette. Startup and committed-settings flows continue to read
+  the persisted theme.
+- The cached grade radar card and course list now rebuild their root surfaces
+  even while detached, preventing a stale dark card from surviving a light
+  theme preview or discard.
+- Reopening the cached grade screen now refreshes its theme after it has been
+  attached to the desktop page, so Flet sends the updated surface colors.
+- Tests and lint were not run. The Python app packaged successfully, but the
+  Windows Flutter build stopped because this machine does not currently allow
+  the symlinks Flutter requires for plugin builds (Developer Mode is disabled).
+
+## Settings custom color picker review fixes (2026-11-18)
+
+- Keep the dialog on Flet's `show_dialog()` / `pop_dialog()` lifecycle and only
+  pop it when it is open.
+- Normalize accepted values to uppercase `#RRGGBB`; invalid values show an
+  inline error and leave the dialog open.
+- Applying a color invokes the settings field's `on_change` handler so the
+  color preview and unsaved-changes state update together.
+- Added focused tests for invalid values, normalized Apply and change callback,
+  clearing the field error, and avoiding dismissal of a closed dialog.
+- `pytest tests/test_color_picker.py -q`: 4 passed. The full suite stopped at
+  `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
+  `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
+  the local environment.

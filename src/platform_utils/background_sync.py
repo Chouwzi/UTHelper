@@ -69,6 +69,14 @@ class AndroidBackgroundBridge:
             return {}
         return await self.service.import_activities(activities, authoritative)
 
+    async def schedule_class_sessions(
+        self, sessions: list[dict[str, Any]], *, enabled: bool
+    ) -> dict[str, Any]:
+        """Replace locally scheduled reminders for the current Portal snapshot."""
+        if not self.service:
+            return {}
+        return await self.service.schedule_class_sessions(sessions, enabled)
+
     async def cached_activities(self) -> list[dict[str, Any]]:
         if not self.service:
             return []

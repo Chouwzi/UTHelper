@@ -139,6 +139,20 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return default
+
+
 def _parse_clock(value: Any) -> time | None:
     if not isinstance(value, str):
         return None
@@ -187,7 +201,7 @@ def parse_portal_day(
                 campus=str(row.get("coSoToDisplay") or "").strip(),
                 period_start=_optional_int(row.get("tuTiet")),
                 period_end=_optional_int(row.get("denTiet")),
-                cancelled=bool(row.get("isTamNgung", False)),
+                cancelled=_parse_bool(row.get("isTamNgung", False)),
                 note=str(row.get("ghiChu") or row.get("noteToDisplay") or "").strip(),
             )
         )
@@ -264,6 +278,10 @@ class TodayScheduleCoordinator:
         self._guard = asyncio.Lock()
         self._wake_event = asyncio.Event()
         self._closed = False
+        # Bumped by replace_cache(): an in-flight refresh started under a
+        # previous account must discard its result instead of publishing a
+        # stale READY into the new account's view.
+        self._generation = 0
         self.state = TodayScheduleViewState(ScheduleLoadStatus.IDLE)
 
     def _publish(self, state: TodayScheduleViewState) -> None:
@@ -281,7 +299,16 @@ class TodayScheduleCoordinator:
         )
 
     async def ensure_today(self) -> TodayScheduleViewState:
-        cached = self._cache.load_for(self._now_provider().date())
+        # The cache is only a valid stand-in for a live fetch while the same
+        # account can still authenticate. With missing/blank credentials the
+        # cached snapshot belongs to nobody, so fall through to refresh(),
+        # which reports AUTH_REQUIRED instead of publishing a stale READY.
+        username, password = self._credentials_provider()
+        cached = (
+            self._cache.load_for(self._now_provider().date())
+            if username and password
+            else None
+        )
         if cached is not None:
             state = TodayScheduleViewState(
                 ScheduleLoadStatus.READY,
@@ -294,8 +321,21 @@ class TodayScheduleCoordinator:
 
     async def refresh(self, trigger: str = "manual") -> TodayScheduleViewState:
         async with self._guard:
+            generation = self._generation
             target_date = self._now_provider().date()
             existing = self._cache.load_for(target_date)
+            # Credentials are validated BEFORE the startup cache shortcut: with
+            # an absent/expired identity a cached snapshot can never be
+            # refreshed, so serving it as READY would mask the login prompt.
+            username, password = self._credentials_provider()
+            if not username or not password:
+                state = TodayScheduleViewState(
+                    ScheduleLoadStatus.AUTH_REQUIRED,
+                    snapshot=existing,
+                    from_cache=existing is not None,
+                )
+                self._publish(state)
+                return state
             # Startup and a fast first expansion can race before either task
             # observes the cache. The second task re-checks under the guard and
             # publishes the completed first result instead of logging in twice.
@@ -304,15 +344,6 @@ class TodayScheduleCoordinator:
                     ScheduleLoadStatus.READY,
                     snapshot=existing,
                     from_cache=True,
-                )
-                self._publish(state)
-                return state
-            username, password = self._credentials_provider()
-            if not username or not password:
-                state = TodayScheduleViewState(
-                    ScheduleLoadStatus.AUTH_REQUIRED,
-                    snapshot=existing,
-                    from_cache=existing is not None,
                 )
                 self._publish(state)
                 return state
@@ -330,6 +361,15 @@ class TodayScheduleCoordinator:
                     username,
                     password,
                 )
+                if self._generation != generation:
+                    # The account/cache changed while fetching (login or
+                    # settings save): this snapshot belongs to the old
+                    # account, so drop it without touching the new cache.
+                    logger.info(
+                        "Discarding stale schedule refresh (%s): account changed mid-flight",
+                        trigger,
+                    )
+                    return self.state
                 snapshot = TodayScheduleSnapshot(
                     target_date,
                     tuple(sessions),
@@ -341,6 +381,12 @@ class TodayScheduleCoordinator:
                     snapshot=snapshot,
                 )
             except Exception as exc:
+                if self._generation != generation:
+                    logger.info(
+                        "Discarding stale schedule failure (%s): account changed mid-flight",
+                        trigger,
+                    )
+                    return self.state
                 auth_failure = isinstance(exc, ScheduleAuthenticationError)
                 logger.warning(
                     "Portal schedule refresh failed (%s)",
@@ -357,6 +403,7 @@ class TodayScheduleCoordinator:
 
     def replace_cache(self, cache: TodayScheduleCache) -> None:
         self._cache = cache
+        self._generation += 1
         self._wake_event.set()
 
     def close(self) -> None:

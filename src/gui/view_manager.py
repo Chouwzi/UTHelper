@@ -229,6 +229,7 @@ class ViewManager:
             self.tab_switcher.content = self.grade_overview_view
         else:
             self._show_only(self.grade_overview_view)
+        self.grade_overview_view.update_theme()
         self._sync_nav_buttons("grades")
         self._notify_destination("grades")
         self.page.update()

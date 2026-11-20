@@ -64,6 +64,16 @@ class AcademicRadarCard(ft.Container):
         except Exception:
             pass
 
+    def update_theme(self) -> None:
+        """Refresh the card surface and all generated controls for the active theme."""
+        self.bgcolor = C.SURFACE
+        self.border = ft.Border.all(1, C.BORDER)
+        self._build_ui()
+        try:
+            self.update()
+        except Exception:
+            pass
+
     def _toggle_compare(self, e: ft.ControlEvent | None) -> None:
         self._is_comparing = not self._is_comparing
         self._compare_btn.icon = ft.Icons.CHECK_CIRCLE_ROUNDED if self._is_comparing else ft.Icons.RADIO_BUTTON_UNCHECKED
@@ -85,6 +95,10 @@ class AcademicRadarCard(ft.Container):
             MetricDetailSheet.show(p, metric)
 
     def _build_ui(self) -> None:
+        # Data-driven rebuilds can happen after a theme preview while this view
+        # is detached. Reapply the root surface as well as child control colors.
+        self.bgcolor = C.SURFACE
+        self.border = ft.Border.all(1, C.BORDER)
         profile = self.current_profile
         if not profile:
             self.content = ft.Text("Chưa có dữ liệu học kỳ", size=14, color=C.TEXT_SECONDARY)

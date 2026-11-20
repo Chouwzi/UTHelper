@@ -53,6 +53,9 @@ def _make_state_only_view():
         _opening_soon_hours_field=_control(),
         _workers_field=_control(),
         _sw_dnd_enable=_control(),
+        _sw_class_schedule=_control(),
+        _class_schedule_lead_chips={1: _control(selected=False), 2: _control(selected=False), 3: _control(selected=False)},
+        _class_schedule_lead_field=_control(),
         _dnd_start_field=_control(),
         _dnd_end_field=_control(),
         _sw_ignore_sub=_control(),
@@ -61,8 +64,8 @@ def _make_state_only_view():
             for key in ("quiz", "assignment", "attendance", "forum", "resource", "choice", "zeta", "alpha")
         },
         _milestones_field=_control(),
-        _milestone_chips={31: _control(selected=False), 7: _control(selected=False)},
         _milestone_summary=_control(),
+        _milestone_chips={31: _control(selected=False), 7: _control(selected=False)},
         _muted_courses_field=_control(),
         _profile_cards={
             "quiet": _control(border=None, bgcolor=None),
@@ -268,6 +271,73 @@ def test_complete_settings_snapshot_round_trips_through_every_control(consent):
     view._toggle_integration_ui.assert_called_once_with()
     view._toggle_telegram_ui.assert_called_once_with()
     view._toggle_debug_ui.assert_called_once_with()
+
+
+def test_apply_snapshot_syncs_class_schedule_lead_field_from_non_default_chips():
+    """The hidden lead-hours field must mirror the chips so cancel/reset read it back."""
+    snapshot = SettingsFormSnapshot.from_form_values(
+        {
+            "notify_class_schedule_enabled": True,
+            "notify_class_schedule_lead_hours": (2,),
+        }
+    )
+    view = _make_state_only_view()
+
+    SettingsView._apply_snapshot_to_controls(view, snapshot)
+
+    assert view._class_schedule_lead_chips[2].selected is True
+    assert view._class_schedule_lead_chips[1].selected is False
+    assert view._class_schedule_lead_chips[3].selected is False
+    assert view._class_schedule_lead_field.value == "2"
+
+
+def test_reset_defaults_syncs_class_schedule_lead_field(monkeypatch):
+    import gui.components.settings_view as settings_view_module
+    import gui.core.theme as theme_module
+
+    monkeypatch.setattr(settings_view_module, "apply_theme", lambda *_a, **_k: None)
+    monkeypatch.setattr(theme_module, "set_page_theme", lambda *_a, **_k: None)
+
+    view = _make_state_only_view()
+    view._apply_theme_colors = Mock()
+    view._refresh_section_colors = Mock()
+    view._on_theme_preview = None
+    view._page = Mock()
+    view.update = Mock()
+    view._notify_min_field = _control()
+    view._class_schedule_lead_field.value = "2"
+    for chip in view._class_schedule_lead_chips.values():
+        chip.selected = False
+
+    asyncio.run(SettingsView._handle_reset_defaults(view, None))
+
+    assert view._class_schedule_lead_field.value == "1"
+    assert view._class_schedule_lead_chips[1].selected is True
+    assert view._class_schedule_lead_chips[2].selected is False
+    assert view._class_schedule_lead_chips[3].selected is False
+    assert view._sw_class_schedule.value is False
+
+
+def test_save_explains_empty_class_schedule_lead_hours():
+    """The lead-hours error must not be swallowed by the generic number error."""
+    from gui.view_models.settings_form import ClassScheduleLeadHoursError
+
+    baseline = SettingsFormSnapshot.from_form_values({})
+    view = SimpleNamespace(
+        _baseline_snapshot=baseline,
+        _capture_form_snapshot=Mock(
+            side_effect=ClassScheduleLeadHoursError(
+                "notify_class_schedule_lead_hours must contain at least one of 1, 2 or 3"
+            )
+        ),
+        _save_status=SimpleNamespace(value="", color=None),
+        _saving=False,
+        update=lambda: None,
+    )
+
+    assert asyncio.run(SettingsView._save(view, None)) is False
+    assert "ít nhất 1 mốc" in view._save_status.value
+    assert "Vui lòng nhập số hợp lệ" not in view._save_status.value
 
 
 def test_has_changes_compares_against_transactional_load_baseline():
@@ -539,7 +609,10 @@ def test_discard_restores_entire_baseline_and_theme_without_logging_secrets(
     assert view._capture_form_snapshot() == baseline
     assert SettingsView.has_changes(view) is False
     applied_theme.assert_called_once_with(baseline.theme)
-    applied_page_theme.assert_called_once_with(view._page)
+    applied_page_theme.assert_called_once_with(
+        view._page,
+        theme_name=baseline.theme,
+    )
     view._on_theme_preview.assert_called_once_with()
     for secret in (
         baseline.uth_password,
