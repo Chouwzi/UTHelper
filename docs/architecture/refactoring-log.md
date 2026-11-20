@@ -2017,3 +2017,36 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   tests/test_release_inventory.py tests/test_architecture_boundaries.py` → 96 passed; MSIX E2E (Tier 1–4 f12/p18/s06)
   pass; `ruff check` on M4 Python files clean; PowerShell AST parse of both scripts clean; workflow YAML parses.
   Live Partner Center upload and WACK execution were not run in this environment.
+
+## Store distribution M5 — final verification, E2E suite and push (2026-11-20)
+
+- **Scope** (`feature/store-distribution-chplay-msstore`): integration of M0–M4 plus the 256-test opaque-box E2E suite
+  (`tests/e2e_store_distribution/`, Tiers 1–4); no further `src/` behavior changes beyond one edge-case fix.
+- **Commits**: `cf7f2a6` (M0 worktree + hotfix/2.5.1 sync), `4a02dce` (M1 channel + store suppression/UI), `8dd7583`
+  (M2 PC/Mobile LTS update fixes), `9075dcf` (M4 MSIX), `71ee99f` (M3 CH Play AAB), `67280d7` (M5 fix), `820086b`
+  (M5 E2E suite), plus this log commit.
+- **Fix in `src/`**: `AndroidPackageDownloader.has_pending_download()` raised `RuntimeError("Android update release
+  version is unavailable")` when queried before any release candidate exists; it now returns `False` (nothing to
+  resume) and never touches the native bridge. `download()` still fails closed without a version. Covered by
+  `tests/test_android_updates.py::test_pending_download_probe_is_false_without_selected_release`.
+- **E2E harness corrections** (no assertion weakened): 10 `f12` tests called `Get-Command -LiteralPath`, which Windows
+  PowerShell 5.1 resolves to `ForEach-Object` parameters instead of the script's — replaced by the positional path
+  (Tier 1 and Tier 2 helpers). `test_t4_s05` simulated a 2.5.2 MSI while the PowerShell shim reported 2.6.0 so the
+  verifier correctly rejected an "MSI identity mismatch"; the test now sets the shim version to the release under test
+  (the cold-timeout cache preservation and UAC 1223 recovery then pass against unmodified production code).
+  `test_t2_f06_null_update_candidate...` required a non-empty version with no candidate; the provider contract is
+  `str | None` (a fabricated version would corrupt the native versionCode check), so it now asserts `None | str`
+  and additionally asserts `has_pending_download(...) is False`.
+- **Verification**: `python -m pytest tests -q` → **2091 passed, 25 skipped, 0 failed** (includes all 256 E2E tests;
+  skips are pre-existing platform/tool gates); `ruff check src tests scripts` → clean;
+  `extensions/flet_uth_background_sync/tests/test_package_contract.py` → 13 passed (with the extension `src` on
+  `PYTHONPATH`; the package is not pip-installed in this environment); PowerShell 5.1 AST parse of
+  `build_android.ps1`, `package_msix.ps1`, `verify_msix_release.ps1` → 0 errors; live smoke:
+  `generate_msix_assets.py` generate + `--verify-only` (4 PNGs), `verify_android_release.py --help`,
+  `verify_msix_release.ps1` exits 1 on invalid/missing MSIX.
+- **Invariants**: no `src/assets/distribution-channel.json` in tree or index (gitignored build artifact); `core`
+  has no `gui` imports; `gui` has no `ws_functions` references; `models.py` and `.github/workflows/release.yml`
+  unchanged versus `develop` (7-asset LTS contract intact); `urllib` HTTP layer preserved.
+- **Not verifiable here**: GitHub Actions `build-android.yml` / `build-msstore.yml` runs, Play Console and Partner
+  Center submission, WACK execution, and real-device Android install.
+- **Remote**: pushed to `origin/feature/store-distribution-chplay-msstore` (see PR to `develop` per gitflow).
