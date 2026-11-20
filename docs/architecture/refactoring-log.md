@@ -2140,3 +2140,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
+
+## Preserve class reminders after a transient timetable failure (2026-11-21)
+
+- A failed request for tomorrow's timetable was logged, then reconciliation
+  replaced the entire persisted alarm set with today's partial results. Return
+  without applying a replacement when the Portal request fails; authentication
+  failures still clear reminders for the previous account, and a successful
+  empty timetable still clears the schedule.
+- Added Windows and Android-bridge regression cases for transient failure and
+  strengthened the Android positive case to include both today and tomorrow.
+- Validation on Python 3.14.3: full suite `2150 passed, 25 skipped`; focused
+  notifier/schedule/store suite `192 passed`; Ruff 0.17.6 passed. Android
+  packaged-artifact and device validation remain pending local SDK licensing
+  and device/emulator availability.

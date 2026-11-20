@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import flet as ft
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -473,12 +474,12 @@ def test_reconcile_identity_is_captured_at_task_creation_not_after_lock(monkeypa
     assert len(fetch_log) == 2  # blocker fetched; stale aborted before fetch
 
 
-def _portal_session(*, hours_from_now: float = 5.0):
+def _portal_session(*, hours_from_now: float = 5.0, session_id: str = "session-1"):
     from core.today_schedule import ClassSession
 
     start = datetime.now() + timedelta(hours=hours_from_now)
     return ClassSession(
-        session_id="session-1",
+        session_id=session_id,
         subject="Mạng máy tính",
         course_code="CN123",
         start_at=start,
@@ -561,6 +562,75 @@ def test_reconcile_auth_failure_clears_the_previously_armed_schedule(monkeypatch
     assert applied == [()]
 
 
+@pytest.mark.parametrize("use_android_bridge", [False, True], ids=["windows", "android"])
+def test_reconcile_transient_tomorrow_failure_preserves_armed_schedule(
+    monkeypatch, use_android_bridge
+):
+    """An incomplete timetable must not replace the last complete alarm set."""
+    from unittest.mock import AsyncMock
+
+    from notifiers.manager import NotificationManager
+
+    _class_reconcile_settings(monkeypatch, username="student-01", password="secret")
+
+    async def fetch_day(_credentials):
+        raise OSError("temporary Portal outage")
+
+    applied = []
+    manager = NotificationManager(tray_app=None)
+    manager.notifiers.append(
+        SimpleNamespace(reconcile_class_schedule_reminders=lambda reminders: applied.append(reminders))
+    )
+    bridge = (
+        SimpleNamespace(
+            available=True,
+            schedule_class_sessions=AsyncMock(
+                return_value={"scheduled": 1, "cancelled": 0}
+            ),
+        )
+        if use_android_bridge
+        else None
+    )
+
+    asyncio.run(
+        manager.reconcile_class_schedule_notifications(
+            (_portal_session(),),
+            fetch_day=fetch_day,
+            android_bridge=bridge,
+        )
+    )
+
+    assert applied == []
+    if bridge is not None:
+        bridge.schedule_class_sessions.assert_not_awaited()
+
+
+def test_reconcile_successful_empty_timetable_clears_armed_schedule(monkeypatch):
+    """A valid empty response remains authoritative and must clear old alarms."""
+    from unittest.mock import AsyncMock
+
+    from notifiers.manager import NotificationManager
+
+    _class_reconcile_settings(monkeypatch, username="student-01", password="secret")
+    bridge = SimpleNamespace(
+        available=True,
+        schedule_class_sessions=AsyncMock(
+            return_value={"scheduled": 0, "cancelled": 2}
+        ),
+    )
+    manager = NotificationManager(tray_app=None)
+
+    asyncio.run(
+        manager.reconcile_class_schedule_notifications(
+            (),
+            fetch_day=AsyncMock(return_value=()),
+            android_bridge=bridge,
+        )
+    )
+
+    bridge.schedule_class_sessions.assert_awaited_once_with([], enabled=True)
+
+
 def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
     monkeypatch,
 ):
@@ -570,6 +640,8 @@ def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
     from notifiers.manager import NotificationManager
 
     _class_reconcile_settings(monkeypatch, username="student-01", password="secret")
+    today = _portal_session(hours_from_now=5)
+    tomorrow = _portal_session(hours_from_now=28, session_id="session-tomorrow")
 
     bridge = SimpleNamespace(
         available=True,
@@ -587,8 +659,8 @@ def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
 
     asyncio.run(
         manager.reconcile_class_schedule_notifications(
-            (_portal_session(),),
-            fetch_day=AsyncMock(return_value=()),
+            (today,),
+            fetch_day=AsyncMock(return_value=(tomorrow,)),
             android_bridge=bridge,
         )
     )
@@ -597,10 +669,13 @@ def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
     bridge.schedule_class_sessions.assert_awaited_once()
     (payload,) = bridge.schedule_class_sessions.await_args.args
     assert bridge.schedule_class_sessions.await_args.kwargs == {"enabled": True}
-    assert len(payload) == 1
-    assert payload[0]["subject"] == "Mạng máy tính"
-    assert payload[0]["delivery_mode"] == "in_person"
-    assert payload[0]["room"] == "F.302"
+    assert {item["session_id"] for item in payload} == {
+        "session-1",
+        "session-tomorrow",
+    }
+    assert all(item["subject"] == "Mạng máy tính" for item in payload)
+    assert all(item["delivery_mode"] == "in_person" for item in payload)
+    assert all(item["room"] == "F.302" for item in payload)
 
 
 def test_clear_only_reconcile_survives_the_account_switch_that_follows_it(monkeypatch):
