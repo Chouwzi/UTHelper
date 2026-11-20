@@ -608,7 +608,6 @@ def test_t2_f02_chplay_with_auto_update_enabled_true_still_blocks_github_request
 
 def test_t2_f02_msstore_with_auto_update_enabled_true_suppresses_github_and_shims(
     local_release_server,
-    windows_shim_env,
     fake_page,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -616,6 +615,13 @@ def test_t2_f02_msstore_with_auto_update_enabled_true_suppresses_github_and_shim
     config_mod = load_module("config")
     monkeypatch.setattr(config_mod.settings, "AUTO_UPDATE_ENABLED", True)
 
+    process_calls: list[tuple] = []
+
+    def unexpected_process(*args, **_kwargs):
+        process_calls.append(args)
+        pytest.fail("Microsoft Store updates must not launch external processes")
+
+    monkeypatch.setattr(subprocess, "Popen", unexpected_process)
     controller = _make_minimal_update_controller(fake_page, "msstore")
     controller._update_coordinator = controller._create_update_coordinator()
     assert controller._update_coordinator is None
@@ -623,7 +629,7 @@ def test_t2_f02_msstore_with_auto_update_enabled_true_suppresses_github_and_shim
     controller._check_updates_now()
     controller._request_update_download()
     assert local_release_server.request_count == 0
-    assert windows_shim_env.read_calls() == []
+    assert process_calls == []
 
 
 def test_t2_f02_schema3_sideload_manifest_does_not_leak_onto_chplay(

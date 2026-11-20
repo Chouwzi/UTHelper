@@ -2099,3 +2099,16 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Validation from `src/`: the two MSIX host cases plus 16 Windows autostart
   tests passed on Python 3.12, 3.13, and 3.14 (18 passed per version). Ruff and
   the working-tree diff check passed. Ubuntu CI requires the new commit.
+
+## Windows shim fixture platform boundary (2026-11-21)
+
+- PR #100's Ubuntu jobs reached a Store update-suppression test that requested
+  compiled Windows executable shims even though it expected zero process calls.
+  Observe `subprocess.Popen` directly and fail if a process is launched, so the
+  HTTP/coordinator/process suppression assertions execute on every host.
+- Guard the shared `windows_shim_env` fixture before constructing native shims
+  on non-Windows hosts. Missing compiler errors on Windows still fail normally.
+- Validation: the Store suppression test passed on Python 3.12, 3.13, and 3.14
+  with the shim compiler deliberately disabled. A simulated Linux fixture call
+  skipped before compiler lookup. All 97 Tier 2 tests passed on Windows, with
+  Ruff and the working-tree diff check clean. Ubuntu CI requires the new commit.

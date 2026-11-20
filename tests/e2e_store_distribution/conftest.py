@@ -161,6 +161,8 @@ def windows_shim_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[WindowsShimEnv]:
     """Activate compiled ``powershell.exe`` / ``msiexec.exe`` shims on ``PATH``."""
+    if sys.platform != "win32":
+        pytest.skip("Compiled Windows executable shims require Windows")
     shim = WindowsShimEnv(tmp_path / "win_sim")
     shim.activate(monkeypatch)
     try:
