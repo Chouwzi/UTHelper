@@ -3,6 +3,20 @@ from gui.core.theme import C
 
 class ColorPicker:
     """Helper class to build and display a custom color picker dialog in Flet."""
+
+    @staticmethod
+    def _normalize_hex(value):
+        if not isinstance(value, str):
+            return None
+
+        value = value.strip()
+        if value.startswith("#"):
+            value = value[1:]
+        if len(value) != 6 or any(
+            char not in "0123456789abcdefABCDEF" for char in value
+        ):
+            return None
+        return f"#{value.upper()}"
     
     def __init__(self, page: ft.Page, container_box: ft.Container, label: str, tb_field: ft.TextField):
         self.page = page
@@ -32,6 +46,7 @@ class ColorPicker:
         self.b_sl = b_sl
 
         self.dlg = ft.AlertDialog(
+            modal=True,
             title=ft.Text(f"Chọn màu: {self.label}", size=16, weight=ft.FontWeight.BOLD),
             content=ft.Container(
                 width=300,
@@ -49,8 +64,7 @@ class ColorPicker:
             ],
             shape=ft.RoundedRectangleBorder(radius=12)
         )
-        self.page.overlay.append(self.dlg)
-        self.dlg.open = True
+        self.page.show_dialog(self.dlg)
         self.page.update()
 
     def _update_from_sliders(self, e):
@@ -58,42 +72,49 @@ class ColorPicker:
         self.prv.bgcolor = hex_val
         self.prv.update()
         self.hex_inp.value = hex_val
+        self.hex_inp.error = None
         self.hex_inp.update()
 
     def _update_from_hex(self, e):
-        try:
-            val = self.hex_inp.value.strip().lstrip('#')
-            if len(val) == 6:
-                r, g, b = int(val[0:2], 16), int(val[2:4], 16), int(val[4:6], 16)
-                self.r_sl.value, self.g_sl.value, self.b_sl.value = r, g, b
-                self.r_sl.update()
-                self.g_sl.update()
-                self.b_sl.update()
-                self.prv.bgcolor = f"#{val}"
-                self.prv.update()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        normalized = self._normalize_hex(self.hex_inp.value)
+        if normalized is None:
+            return
+
+        val = normalized[1:]
+        r, g, b = int(val[0:2], 16), int(val[2:4], 16), int(val[4:6], 16)
+        self.r_sl.value, self.g_sl.value, self.b_sl.value = r, g, b
+        self.r_sl.update()
+        self.g_sl.update()
+        self.b_sl.update()
+        self.prv.bgcolor = normalized
+        self.prv.update()
+        self.hex_inp.error = None
+        self.hex_inp.update()
 
     def _apply(self, e):
-        self.container_box.bgcolor = self.hex_inp.value
-        self.tb_field.value = self.hex_inp.value
-        self.container_box.update()
+        normalized = self._normalize_hex(self.hex_inp.value)
+        if normalized is None:
+            self.hex_inp.error = "Mã màu không hợp lệ. Nhập theo dạng #RRGGBB."
+            self.hex_inp.update()
+            return
+
+        self.hex_inp.value = normalized
+        self.hex_inp.error = None
+        self.hex_inp.update()
+        self.container_box.bgcolor = normalized
+        self.tb_field.value = normalized
+        on_change = self.tb_field.on_change
+        if callable(on_change):
+            on_change(e)
+        else:
+            self.container_box.update()
         self.tb_field.update()
-        self.dlg.open = False
-        try:
-            self.page.overlay.remove(self.dlg)
-        except (ValueError, AttributeError):
-            pass
-        self.page.update()
+        if self.dlg is not None and self.dlg.open:
+            self.page.pop_dialog()
 
     def _cancel(self, e):
-        self.dlg.open = False
-        try:
-            self.page.overlay.remove(self.dlg)
-        except (ValueError, AttributeError):
-            pass
-        self.page.update()
+        if self.dlg is not None and self.dlg.open:
+            self.page.pop_dialog()
 
 def open_color_picker(page: ft.Page, container_box: ft.Container, label: str, tb_field: ft.TextField):
     """Utility function to open a custom ColorPicker dialog."""

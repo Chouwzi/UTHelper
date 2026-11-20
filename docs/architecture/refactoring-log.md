@@ -2125,3 +2125,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   With the same parent backend after the fix, all 257 Store E2E tests passed
   on each of Python 3.12, 3.13, and 3.14. A subprocess smoke check confirmed
   the private Linux data path. Ruff passed. Ubuntu CI requires the new commit.
+
+## Settings custom color picker review fixes (2026-11-18)
+
+- Keep the dialog on Flet's `show_dialog()` / `pop_dialog()` lifecycle and only
+  pop it when it is open.
+- Normalize accepted values to uppercase `#RRGGBB`; invalid values show an
+  inline error and leave the dialog open.
+- Applying a color invokes the settings field's `on_change` handler so the
+  color preview and unsaved-changes state update together.
+- Added focused tests for invalid values, normalized Apply and change callback,
+  clearing the field error, and avoiding dismissal of a closed dialog.
+- `pytest tests/test_color_picker.py -q`: 4 passed. The full suite stopped at
+  `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
+  `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
+  the local environment.
