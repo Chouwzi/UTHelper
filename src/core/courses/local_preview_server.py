@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import hmac
+import os
 import re
 import secrets
+import sys
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 _ITEM_ID_RE = re.compile(r"[0-9a-f]{16}")
 _CSP_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "image/svg+xml"})
@@ -21,7 +25,46 @@ _HTML_CSP = (
     "base-uri 'none'; "
     "form-action 'none'"
 )
+_VIEWER_APP_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' blob:; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
+_VIEWER_MIME_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".woff2": "font/woff2",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+}
+_VIEWER_PATH_RE = re.compile(r"^/viewer/([^/]+)(?:/(.*))?$")
 _DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError)
+
+
+def _resolve_viewer_assets_dir(override: Optional[Path] = None) -> Path:
+    """Resolve the offline Office viewer static asset directory without GUI imports."""
+    if override is not None:
+        return Path(override)
+    flet_assets = os.environ.get("FLET_ASSETS_DIR")
+    if flet_assets:
+        return Path(flet_assets) / "office_viewer"
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        meipass = Path(getattr(sys, "_MEIPASS"))
+        cand_assets = meipass / "assets" / "office_viewer"
+        if cand_assets.is_dir():
+            return cand_assets
+        cand_direct = meipass / "office_viewer"
+        if cand_direct.is_dir():
+            return cand_direct
+        return cand_assets
+    return Path(__file__).resolve().parents[2] / "assets" / "office_viewer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,11 +213,17 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/session/"):
             self._serve_session(method="GET", send_body=True)
             return
+        if self.path.startswith("/viewer/"):
+            self._serve_viewer(send_body=True)
+            return
         self._serve(send_body=True)
 
     def do_HEAD(self) -> None:
         if self.path.startswith("/session/"):
             self._serve_session(method="HEAD", send_body=False)
+            return
+        if self.path.startswith("/viewer/"):
+            self._serve_viewer(send_body=False)
             return
         self._serve(send_body=False)
 
@@ -259,6 +308,38 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
         except _DISCONNECT_ERRORS:
             return
 
+    def _serve_viewer(self, *, send_body: bool) -> None:
+        parsed = urlsplit(self.path)
+        match = _VIEWER_PATH_RE.fullmatch(parsed.path)
+        if match is None:
+            self._send_empty_status(HTTPStatus.NOT_FOUND)
+            return
+        token = match.group(1)
+        raw_asset_path = match.group(2) or ""
+        status, content_type, body = self.server.owner._resolve_viewer_asset(
+            token, raw_asset_path
+        )
+        if status != HTTPStatus.OK:
+            self._send_empty_status(status)
+            return
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store, private")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            if content_type.startswith("text/html"):
+                self.send_header("Content-Security-Policy", _VIEWER_APP_CSP)
+            elif content_type.startswith("image/svg+xml"):
+                self.send_header("Content-Security-Policy", _HTML_CSP)
+            self.end_headers()
+            if send_body and body:
+                self.wfile.write(body)
+        except _DISCONNECT_ERRORS:
+            return
+
     def _serve(self, *, send_body: bool) -> None:
         parsed = urlsplit(self.path)
         item_id = parsed.path.lstrip("/")
@@ -323,6 +404,7 @@ class LocalPreviewServer:
         *,
         max_items: int = 32,
         max_total_bytes: int = 128 * 1024 * 1024,
+        viewer_assets_dir: Optional[Path] = None,
     ) -> None:
         if isinstance(max_items, bool) or max_items < 1:
             raise ValueError("max_items must be an integer >= 1")
@@ -330,6 +412,9 @@ class LocalPreviewServer:
             raise ValueError("max_total_bytes must be an integer >= 1")
         self._max_items = int(max_items)
         self._max_total_bytes = int(max_total_bytes)
+        self._viewer_assets_dir: Optional[Path] = (
+            Path(viewer_assets_dir) if viewer_assets_dir is not None else None
+        )
         self._lock = threading.Lock()
         self._server: Optional[_PreviewThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -337,7 +422,65 @@ class LocalPreviewServer:
         self._items: OrderedDict[str, _PreviewEntry] = OrderedDict()
         self._total_bytes: int = 0
         self._bridge_token: str = secrets.token_urlsafe(24)
+        self._viewer_token: str = secrets.token_urlsafe(24)
         self._session_providers: dict[str, Any] = {}
+
+    def viewer_base_url(self) -> str:
+        """Return the authenticated loopback base URL for offline viewer assets."""
+        with self._lock:
+            port = self._ensure_started_locked()
+            token = self._viewer_token
+        return f"http://127.0.0.1:{port}/viewer/{token}/"
+
+    def _resolve_viewer_asset(
+        self, token: str, raw_asset_path: str
+    ) -> tuple[int, str, bytes]:
+        with self._lock:
+            expected_token = self._viewer_token
+            assets_override = self._viewer_assets_dir
+
+        if not token or not hmac.compare_digest(
+            token.encode("utf-8"), expected_token.encode("utf-8")
+        ):
+            return HTTPStatus.FORBIDDEN, "text/plain", b""
+
+        if not raw_asset_path or raw_asset_path.endswith("/"):
+            return HTTPStatus.NOT_FOUND, "text/plain", b""
+
+        decoded = unquote(raw_asset_path)
+        for variant in (raw_asset_path, decoded):
+            if "\x00" in variant or "\\" in variant or ":" in variant:
+                return HTTPStatus.FORBIDDEN, "text/plain", b""
+            if variant.startswith("/"):
+                return HTTPStatus.FORBIDDEN, "text/plain", b""
+            segments = variant.split("/")
+            if any(seg == ".." for seg in segments):
+                return HTTPStatus.FORBIDDEN, "text/plain", b""
+            if any(seg in ("", ".") for seg in segments):
+                return HTTPStatus.NOT_FOUND, "text/plain", b""
+
+        try:
+            root = _resolve_viewer_assets_dir(assets_override).resolve()
+            candidate = (root / decoded).resolve()
+        except OSError:
+            return HTTPStatus.NOT_FOUND, "text/plain", b""
+
+        if candidate == root or not candidate.is_relative_to(root):
+            return HTTPStatus.FORBIDDEN, "text/plain", b""
+
+        mime = _VIEWER_MIME_TYPES.get(candidate.suffix.lower())
+        if mime is None:
+            return HTTPStatus.NOT_FOUND, "text/plain", b""
+
+        if not candidate.is_file():
+            return HTTPStatus.NOT_FOUND, "text/plain", b""
+
+        try:
+            data = candidate.read_bytes()
+        except OSError:
+            return HTTPStatus.NOT_FOUND, "text/plain", b""
+
+        return HTTPStatus.OK, mime, data
 
     def register_session_provider(self, source: str, client: Any) -> None:
         """Register or clear a Moodle session client for authenticated session proxying."""

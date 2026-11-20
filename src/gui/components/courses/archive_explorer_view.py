@@ -186,6 +186,25 @@ class ArchiveExplorerView(ft.Container):
             safe_control_update(self)
         self._on_open_entry(node.name, extracted, node.preview_kind)
 
+    def _save_node(self, node: ArchiveNode) -> None:
+        if node.is_dir:
+            return
+        try:
+            extracted = self._svc.extract_entry_bytes(
+                self._name, self._bytes, node.full_path
+            )
+        except Exception as exc:
+            self._error_message = f"Không thể lưu '{node.name}': {exc}"
+            self._render()
+            safe_control_update(self)
+            return
+
+        if self._error_message:
+            self._error_message = ""
+            self._render()
+            safe_control_update(self)
+        self._on_save_raw(node.name, extracted)
+
     def _build_breadcrumbs(self) -> list[ft.Control]:
         controls: list[ft.Control] = []
         last_idx = len(self._stack) - 1
@@ -229,7 +248,19 @@ class ArchiveExplorerView(ft.Container):
             icon_color = C.TEXT_SECONDARY
             size_label = format_file_size(node.size) or "0 B"
             subtitle = f"{node.preview_kind.upper()} · {size_label}"
-            trailing = []
+            trailing = [
+                ft.IconButton(
+                    icon=ft.Icons.SAVE_ALT_ROUNDED,
+                    icon_size=18,
+                    icon_color=C.TEXT_SECONDARY,
+                    tooltip="Lưu tệp này",
+                    width=44,
+                    height=44,
+                    padding=ft.Padding.all(8),
+                    size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
+                    on_click=lambda _e, target=node: self._save_node(target),
+                )
+            ]
 
         return ft.Container(
             bgcolor=C.SURFACE,
@@ -275,11 +306,10 @@ class ArchiveExplorerView(ft.Container):
             or "Định dạng nén chưa được hỗ trợ xem trực tiếp."
         )
         card = ft.Container(
-            width=420,
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
             border_radius=14,
-            padding=24,
+            padding=18,
             content=ft.Column(
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=12,
@@ -296,6 +326,8 @@ class ArchiveExplorerView(ft.Container):
                         weight=ft.FontWeight.W_600,
                         color=C.TEXT_PRIMARY,
                         text_align=ft.TextAlign.CENTER,
+                        max_lines=3,
+                        overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                     ft.Text(
                         reason,
@@ -315,12 +347,28 @@ class ArchiveExplorerView(ft.Container):
                 ],
             ),
         )
-        return ft.Column(
+
+        def _on_body_resize(e) -> None:
+            w = getattr(e, "width", None)
+            if w is None or isinstance(w, bool):
+                return
+            try:
+                numeric = float(w)
+            except (TypeError, ValueError):
+                return
+            card.width = min(420.0, max(240.0, numeric - 32.0)) if numeric > 480 else None
+            safe_control_update(card)
+
+        return ft.Container(
             expand=True,
-            scroll=ft.ScrollMode.AUTO,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            alignment=ft.MainAxisAlignment.CENTER,
-            controls=[ft.Container(padding=24, content=card)],
+            on_size_change=_on_body_resize,
+            content=ft.Column(
+                expand=True,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                controls=[ft.Container(padding=16, content=card)],
+            ),
         )
 
     def _render(self) -> None:

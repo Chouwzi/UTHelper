@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 import flet as ft
 
+import platform_utils
 from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
 from core.courses.catalog_service import CourseCatalogService
@@ -49,6 +50,10 @@ from gui.components.courses.activity_views import (
 from gui.components.courses.archive_explorer_view import ArchiveExplorerView
 from gui.components.courses.courses_tab_view import CoursesTabView
 from gui.components.courses.document_reader_view import DocumentReaderView
+from gui.components.courses.embedded_webview_host import (
+    EmbeddedWebViewHost,
+    build_embedded_webview_host,
+)
 from gui.components.courses.webview_pane import CoursesWebViewPane
 from gui.components.detail_view import DetailView
 from gui.core.theme import C
@@ -61,17 +66,15 @@ _DANGEROUS_EXTERNAL_EXTS = frozenset(
 )
 
 
-def _try_build_embedded_webview(url: str) -> Optional[ft.Control]:
-    """Use compiled UthQuizWebView extension if available for a safe HTTP(S) URL."""
+def _try_build_embedded_webview(
+    url: str, *, page: Optional[ft.Page] = None
+) -> Optional[ft.Control]:
+    """Build an embedded WebView control if the current platform supports self-managed WebViews."""
     safe_url = safe_http_url(url)
     if not safe_url:
         return None
-    try:
-        from extensions.flet_uth_quiz import UthQuizWebView
-
-        return UthQuizWebView(url=safe_url, expand=True)
-    except Exception:
-        return None
+    host = build_embedded_webview_host(safe_url, page=page)
+    return host.control() if host is not None else None
 
 
 class _WebViewActivityOverlay(ft.Container):
@@ -358,6 +361,34 @@ class CoursesCoordinator:
             logger.exception("Failed to load Pane-3 assignment details")
             pane_assign.show_error_banner()
 
+    def build_webview_host(
+        self,
+        url: str = "",
+        *,
+        html: Optional[str] = None,
+        on_ready: Optional[Callable[[], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+        on_message: Optional[Callable[[str], None]] = None,
+        on_url_changed: Optional[Callable[[str], None]] = None,
+        on_title_changed: Optional[Callable[[str], None]] = None,
+        on_loading_changed: Optional[Callable[[bool], None]] = None,
+        on_history_changed: Optional[Callable[[bool, bool], None]] = None,
+    ) -> Optional[EmbeddedWebViewHost]:
+        """Build a cross-platform EmbeddedWebViewHost bound to the active Flet Page."""
+        return build_embedded_webview_host(
+            url,
+            html=html,
+            page=self._page,
+            bgcolor=C.BG,
+            on_ready=on_ready,
+            on_error=on_error,
+            on_message=on_message,
+            on_url_changed=on_url_changed,
+            on_title_changed=on_title_changed,
+            on_loading_changed=on_loading_changed,
+            on_history_changed=on_history_changed,
+        )
+
     def open_in_app_webview(
         self,
         source: CourseSource,
@@ -370,6 +401,13 @@ class CoursesCoordinator:
         safe_url = safe_http_url(url)
         if not safe_url:
             return
+        initial_pane_w: Optional[float] = None
+        bounds_fn = getattr(self.courses_view, "_compute_pane3_bounds", None)
+        if callable(bounds_fn):
+            try:
+                initial_pane_w = float(bounds_fn()[2])
+            except Exception:
+                initial_pane_w = None
         pane = CoursesWebViewPane(
             page=self._page,
             source=source,
@@ -380,7 +418,7 @@ class CoursesCoordinator:
             on_back=self.courses_view.pop_overlay,
             on_open_external=self._launch_url_safe,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
-            embedded_webview_factory=_try_build_embedded_webview,
+            pane_width=initial_pane_w,
         )
         self.courses_view.push_overlay(pane, tag=tag or f"webview:{abs(hash(safe_url))}")
 
@@ -513,6 +551,11 @@ class CoursesCoordinator:
             )
             self.courses_view.push_overlay(view, tag=f"activity:rich:{mod.cmid}")
 
+    def _build_embedded_webview_for_page(self, url: str) -> Optional[ft.Control]:
+        if "page" in inspect.signature(_try_build_embedded_webview).parameters:
+            return _try_build_embedded_webview(url, page=self._page)
+        return _try_build_embedded_webview(url)
+
     def _open_webview_activity(self, mod: CourseModuleItem) -> None:
         safe_url = safe_http_url(mod.web_url)
         if not safe_url:
@@ -521,7 +564,7 @@ class CoursesCoordinator:
             if not safe_url:
                 return
 
-        wv = _try_build_embedded_webview(safe_url)
+        wv = self._build_embedded_webview_for_page(safe_url)
         if wv is not None:
             overlay = _WebViewActivityOverlay(
                 title=mod.name,
@@ -740,7 +783,7 @@ class CoursesCoordinator:
                 self._open_external_async, n, b
             ),
             on_open_link=self._handle_course_url_action,
-            webview_builder=_try_build_embedded_webview,
+            webview_builder=self._build_embedded_webview_for_page,
             pdf_cache_dir=getattr(self.preview_cache, "cache_dir", None),
             preconverted=preconverted,
             preopened_pdf=preopened_pdf,
@@ -888,19 +931,34 @@ class CoursesCoordinator:
             logger.warning("Save attachment failed for %s: %s", att.file_name, exc)
             self._show_snack(f"Lỗi tải file «{att.file_name}»: {exc}")
 
+    def _should_use_mobile_file_save(self) -> bool:
+        if platform_utils.IS_ANDROID or platform_utils.IS_IOS:
+            return True
+        if bool(getattr(self._page, "web", False)):
+            return True
+        plat = getattr(self._page, "platform", None)
+        if plat in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS):
+            return True
+        plat_str = str(plat or "").lower()
+        return "android" in plat_str or "ios" in plat_str
+
     async def _save_bytes_async(self, file_name: str, data: bytes) -> None:
+        safe_name = Path(file_name or "document").name.strip() or "document"
+        if not data and self._should_use_mobile_file_save():
+            self._show_snack(f"Không thể lưu {safe_name}: tệp trống.")
+            return
         try:
             saved = await ft.FilePicker().save_file(
                 dialog_title="Lưu tài liệu",
-                file_name=file_name,
+                file_name=safe_name,
                 src_bytes=data,
             )
         except Exception as exc:
-            logger.warning("Save file failed for %s: %s", file_name, exc)
-            self._show_snack(f"Không thể lưu {file_name}: {exc}")
+            logger.warning("Save file failed for %s: %s", safe_name, exc)
+            self._show_snack(f"Không thể lưu {safe_name}: {exc}")
             return
         if saved:
-            self._show_snack(f"Đã lưu: {file_name}")
+            self._show_snack(f"Đã lưu: {safe_name}")
 
     async def _open_external_async(self, file_name: str, data: bytes) -> None:
         raw_leaf = Path(file_name or "document").name.strip()
@@ -916,6 +974,10 @@ class CoursesCoordinator:
         ext = Path(safe_leaf).suffix
         if ext.lower() in _DANGEROUS_EXTERNAL_EXTS:
             await self._save_bytes_async(file_name, data)
+            return
+
+        if self._should_use_mobile_file_save():
+            await self._save_bytes_async(safe_leaf, data)
             return
 
         unique_name = f"{stem}_{uuid.uuid4().hex[:8]}{ext}"

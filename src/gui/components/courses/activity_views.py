@@ -37,6 +37,7 @@ from gui.components.courses._shared import (
     sync_expand_toggle_button,
 )
 from gui.core.theme import C
+import platform_utils
 
 
 def _format_unix_dt(ts: int) -> str:
@@ -77,6 +78,7 @@ class _BasePaneActivityView(ft.Container):
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
         extra_actions: Optional[list[ft.Control]] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
         self._source = source
@@ -88,6 +90,7 @@ class _BasePaneActivityView(ft.Container):
         self._show_expand_toggle = bool(show_expand_toggle)
         self._on_toggle_expand = on_toggle_expand
         self._disposed = False
+        self._pane_width: Optional[float] = self._normalize_width(pane_width)
 
         self._expand_btn = build_expand_toggle_button(
             expanded=self._expanded,
@@ -222,7 +225,58 @@ class _BasePaneActivityView(ft.Container):
     def _load_async(self) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    def _normalize_width(width: object) -> Optional[float]:
+        if width is None or isinstance(width, bool):
+            return None
+        try:
+            numeric = float(width)
+        except (TypeError, ValueError):
+            return None
+        if numeric > 0:
+            return numeric
+        return None
+
+    def _effective_width(self) -> Optional[float]:
+        if self._pane_width is not None:
+            return self._pane_width
+        try:
+            page = self.page
+        except Exception:
+            page = None
+        if page is not None:
+            for candidate in (
+                getattr(page, "width", None),
+                getattr(getattr(page, "window", None), "width", None),
+            ):
+                normalized = self._normalize_width(candidate)
+                if normalized is not None:
+                    return normalized
+        return None
+
+    def _is_narrow(self) -> bool:
+        eff = self._effective_width()
+        if eff is not None:
+            return eff < 600.0
+        return bool(platform_utils.UI_IS_MOBILE)
+
+    def handle_back(self) -> bool:
+        """Step back inside nested activity views; return False when at root."""
+        return False
+
+    def _on_width_mode_changed(self) -> None:
+        pass
+
+    def set_width(self, width: float) -> None:
+        """Receive active Pane-3 width and re-render when crossing 600dp breakpoint."""
+        prev_narrow = self._is_narrow()
+        self._pane_width = self._normalize_width(width)
+        if self._is_narrow() != prev_narrow:
+            self._on_width_mode_changed()
+
     def _handle_close(self) -> None:
+        if self.handle_back():
+            return
         self.dispose()
         self._on_close()
 
@@ -272,6 +326,7 @@ class AttendanceActivityView(_BasePaneActivityView):
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
         initial_summary: Optional[AttendanceSummary] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(
             title=module.name or "Điểm danh",
@@ -284,6 +339,7 @@ class AttendanceActivityView(_BasePaneActivityView):
             is_expanded=is_expanded,
             show_expand_toggle=show_expand_toggle,
             on_toggle_expand=on_toggle_expand,
+            pane_width=pane_width,
         )
         self._summary: Optional[AttendanceSummary] = initial_summary
         self._feedback_banner: str = ""
@@ -334,6 +390,10 @@ class AttendanceActivityView(_BasePaneActivityView):
 
         threading.Thread(target=_worker, name="CourseAttendanceSubmit", daemon=True).start()
 
+    def _on_width_mode_changed(self) -> None:
+        if self._summary is not None:
+            self._render_summary(self._summary)
+
     def _render_summary(self, summary: AttendanceSummary) -> None:
         self._title_text.value = summary.title or self._module.name
         controls: list[ft.Control] = []
@@ -346,7 +406,13 @@ class AttendanceActivityView(_BasePaneActivityView):
                 )
             )
 
+        narrow = self._is_narrow()
         metric_cards: list[ft.Control] = []
+        card_w = (
+            max(130.0, (max(260.0, (self._effective_width() or 360.0) - 28.0) - 8.0) / 2.0)
+            if narrow
+            else None
+        )
         for label, value, color in (
             ("Số buổi ghi nhận", summary.taken_sessions or str(len(summary.records)), C.TEXT_PRIMARY),
             ("Điểm tích lũy", summary.points_over_taken or "--", C.ACCENT),
@@ -354,11 +420,12 @@ class AttendanceActivityView(_BasePaneActivityView):
         ):
             metric_cards.append(
                 ft.Container(
-                    expand=True,
+                    expand=not narrow,
+                    width=card_w,
                     bgcolor=C.SURFACE,
                     border=ft.Border.all(1, C.BORDER),
                     border_radius=10,
-                    padding=12,
+                    padding=10 if narrow else 12,
                     content=ft.Column(
                         spacing=4,
                         controls=[
@@ -373,7 +440,17 @@ class AttendanceActivityView(_BasePaneActivityView):
                     ),
                 )
             )
-        controls.append(ft.Row(spacing=10, controls=metric_cards))
+        if narrow:
+            controls.append(
+                ft.Row(
+                    wrap=True,
+                    spacing=8,
+                    run_spacing=8,
+                    controls=metric_cards,
+                )
+            )
+        else:
+            controls.append(ft.Row(spacing=10, controls=metric_cards))
 
         if summary.submit_form is not None and summary.submit_action_url:
             if not self._selected_status and summary.status_options:
@@ -549,6 +626,7 @@ class GroupActivityView(_BasePaneActivityView):
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
         initial_summary: Optional[GroupActivitySummary] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(
             title=module.name or "Nhóm học phần",
@@ -561,6 +639,7 @@ class GroupActivityView(_BasePaneActivityView):
             is_expanded=is_expanded,
             show_expand_toggle=show_expand_toggle,
             on_toggle_expand=on_toggle_expand,
+            pane_width=pane_width,
         )
         self._course_id = course_id
         self._summary: Optional[GroupActivitySummary] = initial_summary
@@ -604,6 +683,10 @@ class GroupActivityView(_BasePaneActivityView):
             self._render_summary(refreshed)
 
         threading.Thread(target=_worker, name="CourseGroupsSubmit", daemon=True).start()
+
+    def _on_width_mode_changed(self) -> None:
+        if self._summary is not None:
+            self._render_summary(self._summary)
 
     def _render_summary(self, summary: GroupActivitySummary) -> None:
         self._title_text.value = summary.title or self._module.name
@@ -706,54 +789,87 @@ class GroupActivityView(_BasePaneActivityView):
                         content=ft.Text("Đã tham gia", size=11, color=C.SAFE, weight=ft.FontWeight.W_600),
                     )
 
-                card_rows: list[ft.Control] = [
-                    ft.Row(
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[
-                            ft.Icon(
-                                ft.Icons.GROUPS_ROUNDED,
-                                size=20,
-                                color=C.SAFE if g.is_member else C.ACCENT,
-                            ),
-                            ft.Column(
-                                expand=True,
-                                spacing=2,
-                                controls=[
-                                    ft.Text(
-                                        g.name,
-                                        size=14,
-                                        weight=ft.FontWeight.W_600,
-                                        color=C.TEXT_PRIMARY,
-                                    ),
-                                    *(
-                                        [
-                                            ft.Text(
-                                                g.description,
-                                                size=12,
-                                                color=C.TEXT_SECONDARY,
-                                            )
-                                        ]
-                                        if g.description
-                                        else []
-                                    ),
-                                ],
-                            ),
-                            *(
-                                [
-                                    ft.Text(
-                                        f"Sĩ số: {g.member_count_label}",
-                                        size=12,
-                                        color=C.TEXT_SECONDARY,
-                                    )
-                                ]
-                                if g.member_count_label
-                                else []
-                            ),
-                            *([action_btn] if action_btn is not None else []),
-                        ],
+                narrow = self._is_narrow()
+                info_col = ft.Column(
+                    expand=True,
+                    spacing=2,
+                    controls=[
+                        ft.Text(
+                            g.name,
+                            size=14,
+                            weight=ft.FontWeight.W_600,
+                            color=C.TEXT_PRIMARY,
+                        ),
+                        *(
+                            [
+                                ft.Text(
+                                    g.description,
+                                    size=12,
+                                    color=C.TEXT_SECONDARY,
+                                )
+                            ]
+                            if g.description
+                            else []
+                        ),
+                    ],
+                )
+                count_txt = (
+                    ft.Text(
+                        f"Sĩ số: {g.member_count_label}",
+                        size=12,
+                        color=C.TEXT_SECONDARY,
                     )
-                ]
+                    if g.member_count_label
+                    else None
+                )
+                if narrow:
+                    card_rows: list[ft.Control] = [
+                        ft.Row(
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Icon(
+                                    ft.Icons.GROUPS_ROUNDED,
+                                    size=20,
+                                    color=C.SAFE if g.is_member else C.ACCENT,
+                                ),
+                                info_col,
+                            ],
+                        )
+                    ]
+                    if count_txt is not None or action_btn is not None:
+                        footer_items: list[ft.Control] = []
+                        if count_txt is not None:
+                            footer_items.append(count_txt)
+                        if action_btn is not None:
+                            footer_items.append(action_btn)
+                        card_rows.append(
+                            ft.Row(
+                                wrap=True,
+                                spacing=8,
+                                run_spacing=6,
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=footer_items,
+                            )
+                        )
+                else:
+                    card_rows = [
+                        ft.Row(
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Icon(
+                                    ft.Icons.GROUPS_ROUNDED,
+                                    size=20,
+                                    color=C.SAFE if g.is_member else C.ACCENT,
+                                ),
+                                info_col,
+                                *([count_txt] if count_txt is not None else []),
+                                *([action_btn] if action_btn is not None else []),
+                            ],
+                        )
+                    ]
                 if g.members:
                     card_rows.append(
                         ft.Text(
@@ -803,6 +919,7 @@ class QuizActivityView(_BasePaneActivityView):
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(
             title=module.name or "Bài kiểm tra / Quiz",
@@ -815,12 +932,36 @@ class QuizActivityView(_BasePaneActivityView):
             is_expanded=is_expanded,
             show_expand_toggle=show_expand_toggle,
             on_toggle_expand=on_toggle_expand,
+            pane_width=pane_width,
         )
         self._course_id = course_id
+        self._summary: Optional[QuizActivitySummary] = None
+        self._in_review: bool = False
+        self._current_review: Optional[
+            tuple[Optional[QuizAttemptInfo], QuizAttemptReviewReport]
+        ] = None
         self._review_cache: dict[int, QuizAttemptReviewReport] = {}
         self._review_filter: str = "all"
         self._review_search: str = ""
         self._load_async()
+
+    def handle_back(self) -> bool:
+        """Step back from attempt review to quiz summary before closing overlay."""
+        if self._in_review and self._summary is not None:
+            self._render_quiz(self._summary)
+            return True
+        return False
+
+    def _on_width_mode_changed(self) -> None:
+        if (
+            self._in_review
+            and self._summary is not None
+            and self._current_review is not None
+        ):
+            att_info, report = self._current_review
+            self._render_attempt_review(self._summary, att_info, report)
+        elif self._summary is not None:
+            self._render_quiz(self._summary)
 
     def _load_async(self) -> None:
         self._set_loading("Đang tải thông tin Quiz...")
@@ -886,6 +1027,7 @@ class QuizActivityView(_BasePaneActivityView):
             )
         )
 
+        narrow = self._is_narrow()
         header_items: list[ft.Control] = [
             ft.Text(
                 title_label,
@@ -910,7 +1052,8 @@ class QuizActivityView(_BasePaneActivityView):
                     ),
                 )
             )
-        header_items.append(ft.Container(expand=True))
+        if not narrow:
+            header_items.append(ft.Container(expand=True))
         if not is_info and (q.status_label or score_part):
             header_items.append(
                 ft.Container(
@@ -937,7 +1080,9 @@ class QuizActivityView(_BasePaneActivityView):
 
         body_controls: list[ft.Control] = [
             ft.Row(
-                spacing=8,
+                wrap=narrow,
+                spacing=6 if narrow else 8,
+                run_spacing=4 if narrow else 0,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=header_items,
             ),
@@ -989,6 +1134,21 @@ class QuizActivityView(_BasePaneActivityView):
                     tag_text = ""
                     tag_color = C.TEXT_SECONDARY
 
+                tag_pill = (
+                    ft.Container(
+                        bgcolor=ft.Colors.with_opacity(0.14, tag_color),
+                        border_radius=6,
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                        content=ft.Text(
+                            tag_text,
+                            size=10,
+                            weight=ft.FontWeight.W_600,
+                            color=tag_color,
+                        ),
+                    )
+                    if tag_text
+                    else None
+                )
                 option_children: list[ft.Control] = [
                     ft.Row(
                         spacing=8,
@@ -1020,25 +1180,20 @@ class QuizActivityView(_BasePaneActivityView):
                                 expand=True,
                             ),
                             *(
-                                [
-                                    ft.Container(
-                                        bgcolor=ft.Colors.with_opacity(0.14, tag_color),
-                                        border_radius=6,
-                                        padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-                                        content=ft.Text(
-                                            tag_text,
-                                            size=10,
-                                            weight=ft.FontWeight.W_600,
-                                            color=tag_color,
-                                        ),
-                                    )
-                                ]
-                                if tag_text
+                                [tag_pill]
+                                if (tag_pill is not None and not narrow)
                                 else []
                             ),
                         ],
                     )
                 ]
+                if tag_pill is not None and narrow:
+                    option_children.append(
+                        ft.Container(
+                            padding=ft.Padding.only(left=25),
+                            content=tag_pill,
+                        )
+                    )
                 if ch.feedback:
                     option_children.append(
                         ft.Text(
@@ -1155,6 +1310,9 @@ class QuizActivityView(_BasePaneActivityView):
         att_info: Optional[QuizAttemptInfo],
         report: QuizAttemptReviewReport,
     ) -> None:
+        self._summary = summary
+        self._in_review = True
+        self._current_review = (att_info, report)
         all_questions = list(report.questions)
         graded_questions = [q for q in all_questions if q.display_number != "Thông tin"]
         total_q = len(graded_questions)
@@ -1368,11 +1526,41 @@ class QuizActivityView(_BasePaneActivityView):
                     *(
                         [
                             ft.Divider(height=4, color=C.BORDER),
-                            ft.Row(
-                                wrap=True,
-                                spacing=5,
-                                run_spacing=5,
-                                controls=jump_badges,
+                            ft.ExpansionTile(
+                                title=ft.Text(
+                                    f"Mục lục câu hỏi ({len(jump_badges)})",
+                                    size=12,
+                                    weight=ft.FontWeight.W_600,
+                                    color=C.TEXT_PRIMARY,
+                                ),
+                                expanded=not self._is_narrow(),
+                                dense=True,
+                                tile_padding=ft.Padding.symmetric(horizontal=4, vertical=0),
+                                controls_padding=ft.Padding.only(top=6, bottom=2),
+                                bgcolor=C.SURFACE,
+                                collapsed_bgcolor=C.SURFACE,
+                                icon_color=C.ACCENT,
+                                collapsed_icon_color=C.TEXT_SECONDARY,
+                                shape=ft.RoundedRectangleBorder(
+                                    radius=8,
+                                    side=ft.BorderSide(
+                                        0, C.SURFACE, style=ft.BorderStyle.NONE
+                                    ),
+                                ),
+                                collapsed_shape=ft.RoundedRectangleBorder(
+                                    radius=8,
+                                    side=ft.BorderSide(
+                                        0, C.SURFACE, style=ft.BorderStyle.NONE
+                                    ),
+                                ),
+                                controls=[
+                                    ft.Row(
+                                        wrap=True,
+                                        spacing=5,
+                                        run_spacing=5,
+                                        controls=jump_badges,
+                                    )
+                                ],
                             ),
                         ]
                         if len(jump_badges) > 1
@@ -1456,11 +1644,15 @@ class QuizActivityView(_BasePaneActivityView):
         threading.Thread(target=_worker, name="CourseQuizReview", daemon=True).start()
 
     def _render_quiz(self, summary: QuizActivitySummary, notice: str = "") -> None:
+        self._summary = summary
+        self._in_review = False
+        self._current_review = None
         self._title_text.value = summary.title
         controls: list[ft.Control] = []
         if notice:
             controls.append(build_offline_banner(notice))
 
+        meta_label_w = 115 if self._is_narrow() else 150
         meta_rows = [
             ("Mở bài", _format_unix_dt(summary.time_open)),
             ("Đóng bài", _format_unix_dt(summary.time_close)),
@@ -1485,7 +1677,7 @@ class QuizActivityView(_BasePaneActivityView):
                         *[
                             ft.Row(
                                 controls=[
-                                    ft.Text(k, size=12, color=C.TEXT_SECONDARY, width=150),
+                                    ft.Text(k, size=12, color=C.TEXT_SECONDARY, width=meta_label_w),
                                     ft.Text(
                                         v,
                                         size=12,
@@ -1605,6 +1797,7 @@ class ForumActivityView(_BasePaneActivityView):
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(
             title=module.name or "Diễn đàn",
@@ -1617,10 +1810,33 @@ class ForumActivityView(_BasePaneActivityView):
             is_expanded=is_expanded,
             show_expand_toggle=show_expand_toggle,
             on_toggle_expand=on_toggle_expand,
+            pane_width=pane_width,
         )
         self._course_id = course_id
         self._summary: Optional[ForumActivitySummary] = None
+        self._in_posts: bool = False
+        self._current_posts: Optional[
+            tuple[ForumDiscussionEntry, list[ForumPostEntry]]
+        ] = None
         self._load_async()
+
+    def handle_back(self) -> bool:
+        """Step back from discussion posts to discussion list before closing overlay."""
+        if self._in_posts and self._summary is not None:
+            self._render_discussions(self._summary)
+            return True
+        return False
+
+    def _on_width_mode_changed(self) -> None:
+        if (
+            self._in_posts
+            and self._summary is not None
+            and self._current_posts is not None
+        ):
+            disc, posts = self._current_posts
+            self._render_posts(self._summary, disc, posts)
+        elif self._summary is not None:
+            self._render_discussions(self._summary)
 
     def _load_async(self) -> None:
         self._set_loading("Đang tải danh sách chủ đề...")
@@ -1654,6 +1870,9 @@ class ForumActivityView(_BasePaneActivityView):
         threading.Thread(target=_worker, name="CourseForumPosts", daemon=True).start()
 
     def _render_discussions(self, summary: ForumActivitySummary) -> None:
+        self._summary = summary
+        self._in_posts = False
+        self._current_posts = None
         self._title_text.value = summary.title
         controls: list[ft.Control] = []
         if summary.intro:
@@ -1764,9 +1983,16 @@ class ForumActivityView(_BasePaneActivityView):
         disc: ForumDiscussionEntry,
         posts: list[ForumPostEntry],
     ) -> None:
+        self._summary = summary
+        self._in_posts = True
+        self._current_posts = (disc, posts)
+        narrow = self._is_narrow()
         controls: list[ft.Control] = [
             ft.Row(
+                wrap=True,
                 spacing=8,
+                run_spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
                     ft.OutlinedButton(
                         "← Danh sách chủ đề",
@@ -1777,12 +2003,56 @@ class ForumActivityView(_BasePaneActivityView):
                         size=14,
                         weight=ft.FontWeight.W_700,
                         color=C.TEXT_PRIMARY,
-                        expand=True,
                     ),
                 ],
             )
         ]
         for post in posts:
+            header_ctrl: ft.Control
+            if narrow:
+                header_ctrl = ft.Column(
+                    spacing=2,
+                    controls=[
+                        ft.Text(
+                            post.author,
+                            size=12,
+                            weight=ft.FontWeight.W_600,
+                            color=C.ACCENT,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                        ft.Text(
+                            post.subject,
+                            size=11,
+                            color=C.TEXT_SECONDARY,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ],
+                )
+            else:
+                header_ctrl = ft.Row(
+                    spacing=8,
+                    controls=[
+                        ft.Text(
+                            post.author,
+                            size=12,
+                            weight=ft.FontWeight.W_600,
+                            color=C.ACCENT,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                        ft.Text(
+                            post.subject,
+                            size=11,
+                            color=C.TEXT_SECONDARY,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                            text_align=ft.TextAlign.RIGHT,
+                            expand=True,
+                        ),
+                    ],
+                )
             controls.append(
                 ft.Container(
                     bgcolor=C.SURFACE,
@@ -1792,22 +2062,7 @@ class ForumActivityView(_BasePaneActivityView):
                     content=ft.Column(
                         spacing=6,
                         controls=[
-                            ft.Row(
-                                controls=[
-                                    ft.Text(
-                                        post.author,
-                                        size=12,
-                                        weight=ft.FontWeight.W_600,
-                                        color=C.ACCENT,
-                                        expand=True,
-                                    ),
-                                    ft.Text(
-                                        post.subject,
-                                        size=11,
-                                        color=C.TEXT_SECONDARY,
-                                    ),
-                                ]
-                            ),
+                            header_ctrl,
                             ft.Markdown(
                                 post.message_text or "(Không có nội dung)",
                                 selectable=True,
@@ -1852,6 +2107,7 @@ class RichContentActivityView(_BasePaneActivityView):
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(
             title=module.name or "Nội dung bài học",
@@ -1864,9 +2120,11 @@ class RichContentActivityView(_BasePaneActivityView):
             is_expanded=is_expanded,
             show_expand_toggle=show_expand_toggle,
             on_toggle_expand=on_toggle_expand,
+            pane_width=pane_width,
         )
         self._course_id = course_id
         self._active_chapter_idx = 0
+        self._rich_page: Optional[RichActivityPage] = None
         self._load_async()
 
     def _load_async(self) -> None:
@@ -1883,6 +2141,7 @@ class RichContentActivityView(_BasePaneActivityView):
         threading.Thread(target=_worker, name="CourseRichPageFetch", daemon=True).start()
 
     def _render_page(self, rich_page: RichActivityPage) -> None:
+        self._rich_page = rich_page
         self._title_text.value = rich_page.title
         chapters = rich_page.chapters
         if not chapters:
@@ -1916,13 +2175,16 @@ class RichContentActivityView(_BasePaneActivityView):
         if len(chapters) > 1:
             controls.append(
                 ft.Row(
-                    wrap=True,
+                    scroll=ft.ScrollMode.AUTO,
                     spacing=6,
-                    run_spacing=6,
                     controls=[
-                        ft.OutlinedButton(
+                        build_filter_chip(
                             ch.title,
-                            on_click=lambda _e, idx=i: self._select_chapter(rich_page, idx),
+                            selected=(i == self._active_chapter_idx),
+                            bold_selected=True,
+                            on_select=lambda _e, idx=i: self._select_chapter(
+                                rich_page, idx
+                            ),
                         )
                         for i, ch in enumerate(chapters)
                     ],
@@ -1946,6 +2208,37 @@ class RichContentActivityView(_BasePaneActivityView):
                 ),
             )
         )
+        if len(chapters) > 1:
+            controls.append(
+                ft.Row(
+                    wrap=True,
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=8,
+                    run_spacing=6,
+                    controls=[
+                        ft.OutlinedButton(
+                            "← Chương trước",
+                            disabled=self._active_chapter_idx <= 0,
+                            on_click=lambda _e: self._select_chapter(
+                                rich_page, self._active_chapter_idx - 1
+                            ),
+                        ),
+                        ft.Text(
+                            f"Chương {self._active_chapter_idx + 1}/{len(chapters)}",
+                            size=12,
+                            color=C.TEXT_SECONDARY,
+                        ),
+                        ft.OutlinedButton(
+                            "Chương sau →",
+                            disabled=self._active_chapter_idx >= len(chapters) - 1,
+                            on_click=lambda _e: self._select_chapter(
+                                rich_page, self._active_chapter_idx + 1
+                            ),
+                        ),
+                    ],
+                )
+            )
         self._body_host.content = ft.ListView(
             expand=True,
             padding=14,
@@ -2035,7 +2328,9 @@ class PaneAssignmentView(ft.Container):
             margin=ft.Margin.only(left=16, right=16, top=10),
             visible=False,
             content=ft.Row(
+                wrap=True,
                 spacing=8,
+                run_spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
                     ft.Icon(ft.Icons.ERROR_OUTLINE_ROUNDED, size=18, color=C.WARNING),
@@ -2043,7 +2338,6 @@ class PaneAssignmentView(ft.Container):
                         "Không thể tải đầy đủ đề bài hoặc trạng thái nộp bài.",
                         size=12,
                         color=C.TEXT_PRIMARY,
-                        expand=True,
                     ),
                     *(
                         [
@@ -2127,6 +2421,12 @@ class PaneAssignmentView(ft.Container):
             expanded=self._expanded,
             visible=self._show_expand_toggle,
         )
+
+    def set_width(self, width: float) -> None:
+        """Forward active Pane-3 width to embedded DetailView if supported."""
+        setter = getattr(self._detail_view, "set_width", None)
+        if callable(setter):
+            setter(width)
 
     def dispose(self) -> None:
         self._detail_view.visible = False

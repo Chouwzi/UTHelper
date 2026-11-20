@@ -1143,6 +1143,8 @@ class AppController:
         )
         self.courses_view = self._courses_coordinator.courses_view
         self.courses_view.visible = False
+        if hasattr(self.courses_view, "set_on_immersive_changed"):
+            self.courses_view.set_on_immersive_changed(self._on_courses_immersive_changed)
 
         for _view in (
             self.detail_view,
@@ -1278,6 +1280,25 @@ class AppController:
             )
         self.page.add(self._app_shell)
 
+    def _on_courses_immersive_changed(self, immersive: bool) -> None:
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is None or not hasattr(nav_shell, "set_immersive"):
+            return
+        nav_shell.set_immersive(bool(immersive))
+        bar = getattr(nav_shell, "bar", None)
+        if bar is not None and getattr(bar, "page", None) is not None:
+            try:
+                bar.update()
+                return
+            except Exception:
+                pass
+        page = getattr(self, "page", None)
+        if page is not None and callable(getattr(page, "update", None)):
+            try:
+                page.update()
+            except Exception:
+                pass
+
     def _current_page_width(self, width: float | None = None) -> float:
         candidates = (
             width,
@@ -1296,22 +1317,51 @@ class AppController:
                 return numeric
         return 420.0 if platform_utils.UI_IS_MOBILE else 1120.0
 
-    def _apply_responsive_layout(self, width: float | None = None) -> None:
+    def _current_page_height(self, height: float | None = None) -> float:
+        candidates = (
+            height,
+            getattr(self.page, "height", None),
+            getattr(getattr(self.page, "window", None), "height", None),
+            760.0,
+        )
+        for candidate in candidates:
+            if candidate is None or isinstance(candidate, bool):
+                continue
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric) and numeric > 0:
+                return numeric
+        return 760.0
+
+    def _apply_responsive_layout(
+        self, width: float | None = None, height: float | None = None
+    ) -> None:
         resolved_width = self._current_page_width(width)
+        resolved_height = self._current_page_height(height)
         nav_shell = getattr(self, "_nav_shell", None)
         use_rail = False
         if nav_shell is not None:
             use_rail = nav_shell.apply_width(resolved_width)
+            if hasattr(nav_shell, "apply_height"):
+                nav_shell.apply_height(resolved_height)
         content_width = max(0.0, resolved_width - (RAIL_WIDTH if use_rail else 0.0))
         courses_view = getattr(self, "courses_view", None)
-        if courses_view is not None and hasattr(courses_view, "set_width"):
-            courses_view.set_width(content_width)
+        if courses_view is not None:
+            if hasattr(courses_view, "set_width"):
+                courses_view.set_width(content_width)
+            if hasattr(courses_view, "set_viewport_height"):
+                courses_view.set_viewport_height(resolved_height)
 
     def _on_page_resize(self, e) -> None:
         width = getattr(e, "width", None)
         if width is None:
             width = getattr(self.page, "width", None)
-        self._apply_responsive_layout(width)
+        height = getattr(e, "height", None)
+        if height is None:
+            height = getattr(self.page, "height", None)
+        self._apply_responsive_layout(width, height=height)
         try:
             self.page.update()
         except Exception:

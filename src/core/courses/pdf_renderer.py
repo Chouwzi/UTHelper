@@ -19,6 +19,14 @@ except Exception:  # pragma: no cover - optional on minimal runtimes
     _pdfium = None  # type: ignore[assignment]
 
 try:
+    import pymupdf as _pymupdf
+except Exception:  # pragma: no cover - optional runtime fallback
+    try:
+        import fitz as _pymupdf  # type: ignore[no-redef]
+    except Exception:  # pragma: no cover
+        _pymupdf = None  # type: ignore[assignment]
+
+try:
     import pypdf as _pypdf
 except Exception:  # pragma: no cover
     _pypdf = None  # type: ignore[assignment]
@@ -136,6 +144,7 @@ class PdfDocumentSession:
         self._cache_max_bytes = max(128, int(cache_max_bytes))
         self._lock = threading.RLock()
         self._doc: Any = None
+        self._mupdf_doc: Any = None
         self._pypdf_reader: Any = None
         self._memory_cache: OrderedDict[tuple[int, int, bool], RenderedPdfPage] = OrderedDict()
         self._text_cache: dict[int, str] = {}
@@ -177,6 +186,38 @@ class PdfDocumentSession:
                     self.error_message = f"Không thể mở PDF trực tiếp: {exc}"
                 return
 
+        if _pymupdf is not None and _PilImage is not None:
+            try:
+                mupdf_doc = _pymupdf.open(stream=self._data, filetype="pdf")
+                if getattr(mupdf_doc, "needs_pass", False):
+                    try:
+                        mupdf_doc.close()
+                    except Exception:
+                        pass
+                    self.error_message = "Tệp PDF được bảo vệ bằng mật khẩu."
+                    return
+                count = int(getattr(mupdf_doc, "page_count", 0) or len(mupdf_doc))
+                if count <= 0:
+                    try:
+                        mupdf_doc.close()
+                    except Exception:
+                        pass
+                    self.error_message = "Tài liệu PDF không có trang nào."
+                    return
+                self._mupdf_doc = mupdf_doc
+                self.page_count = count
+                self.supported = True
+                self.can_render_images = True
+                self.outline = self._read_pymupdf_outline(mupdf_doc, count)
+                return
+            except Exception as exc:
+                err_text = str(exc).lower()
+                if "password" in err_text or "encrypt" in err_text:
+                    self.error_message = "Tệp PDF được bảo vệ bằng mật khẩu."
+                else:
+                    self.error_message = f"Không thể mở PDF trực tiếp: {exc}"
+                return
+
         if _pypdf is not None:
             try:
                 reader = _pypdf.PdfReader(io.BytesIO(self._data))
@@ -205,10 +246,42 @@ class PdfDocumentSession:
         except Exception:
             return entries
         for item in toc:
-            title = str(getattr(item, "title", "") or "").strip()
-            page_idx = getattr(item, "page_index", None)
-            level = int(getattr(item, "level", 0) or 0)
-            if title and isinstance(page_idx, int) and 0 <= page_idx < page_count:
+            raw_title: Any = ""
+            if callable(getattr(item, "get_title", None)):
+                try:
+                    raw_title = item.get_title()
+                except Exception:
+                    raw_title = ""
+            else:
+                raw_title = getattr(item, "title", "")
+            title = str(raw_title or "").strip()
+
+            page_idx: Any = None
+            if callable(getattr(item, "get_dest", None)):
+                try:
+                    dest = item.get_dest()
+                    if dest is not None and callable(getattr(dest, "get_index", None)):
+                        page_idx = dest.get_index()
+                except Exception:
+                    page_idx = None
+            if page_idx is None:
+                page_idx = getattr(item, "page_index", None)
+
+            if callable(getattr(item, "get_level", None)):
+                try:
+                    raw_level = item.get_level()
+                except Exception:
+                    raw_level = 0
+            else:
+                raw_level = getattr(item, "level", 0)
+            level = int(raw_level or 0)
+
+            if (
+                title
+                and isinstance(page_idx, int)
+                and not isinstance(page_idx, bool)
+                and 0 <= page_idx < page_count
+            ):
                 entries.append(
                     PdfOutlineEntry(title=title, page_index=page_idx, level=max(0, level))
                 )
@@ -242,6 +315,34 @@ class PdfDocumentSession:
                     )
 
         _walk(list(raw_outline), 0)
+        return entries
+
+    @staticmethod
+    def _read_pymupdf_outline(doc: Any, page_count: int) -> list[PdfOutlineEntry]:
+        entries: list[PdfOutlineEntry] = []
+        try:
+            toc = doc.get_toc(simple=True)
+        except Exception:
+            return entries
+        for row in toc or ():
+            if not isinstance(row, (list, tuple)) or len(row) < 3:
+                continue
+            try:
+                raw_level = int(row[0])
+                title = str(row[1] or "").strip()
+                page_idx = int(row[2]) - 1
+            except (TypeError, ValueError):
+                continue
+            if title and 0 <= page_idx < page_count:
+                entries.append(
+                    PdfOutlineEntry(
+                        title=title,
+                        page_index=page_idx,
+                        level=max(0, raw_level - 1),
+                    )
+                )
+            if len(entries) >= 200:
+                break
         return entries
 
     def _cache_key_parts(
@@ -345,6 +446,11 @@ class PdfDocumentSession:
                     return (float(w), float(h))
                 finally:
                     page.close()
+            if self._mupdf_doc is not None and not self._closed:
+                page = self._mupdf_doc[page_index]
+                rect = getattr(page, "rect", None)
+                if rect is not None:
+                    return (float(rect.width), float(rect.height))
             if self._pypdf_reader is not None:
                 box = self._pypdf_reader.pages[page_index].mediabox
                 return (float(box.width), float(box.height))
@@ -380,7 +486,7 @@ class PdfDocumentSession:
             if (
                 not self.supported
                 or not self.can_render_images
-                or self._doc is None
+                or (self._doc is None and self._mupdf_doc is None)
                 or self._closed
                 or page_index < 0
                 or page_index >= self.page_count
@@ -400,12 +506,34 @@ class PdfDocumentSession:
                 self._remember_in_memory(key, disk_cached)
                 return disk_cached
 
-            page = self._doc[page_index]
-            try:
-                bitmap = page.render(scale=clamped_scale)
-                pil_img = bitmap.to_pil()
-            finally:
-                page.close()
+            if self._doc is not None:
+                page = self._doc[page_index]
+                try:
+                    bitmap = page.render(scale=clamped_scale)
+                    pil_img = bitmap.to_pil()
+                finally:
+                    page.close()
+            else:
+                page = self._mupdf_doc[page_index]
+                matrix = (
+                    _pymupdf.Matrix(clamped_scale, clamped_scale)
+                    if hasattr(_pymupdf, "Matrix")
+                    else None
+                )
+                pix = (
+                    page.get_pixmap(matrix=matrix, alpha=False)
+                    if matrix is not None
+                    else page.get_pixmap(alpha=False)
+                )
+                channels = int(getattr(pix, "n", 3) or 3)
+                mode = "RGBA" if channels == 4 else ("L" if channels == 1 else "RGB")
+                pil_img = _PilImage.frombytes(
+                    mode,
+                    (int(pix.width), int(pix.height)),
+                    bytes(pix.samples),
+                )
+                if mode != "RGB":
+                    pil_img = pil_img.convert("RGB")
 
             if dark_mode:
                 pil_img = _invert_image_luminance(pil_img)
@@ -449,13 +577,23 @@ class PdfDocumentSession:
                         except Exception:
                             pass
                     page.close()
+            elif self._mupdf_doc is not None and not self._closed:
+                try:
+                    page = self._mupdf_doc[page_index]
+                    text = str(page.get_text("text") or "")
+                except Exception:
+                    text = ""
             elif self._pypdf_reader is not None:
                 try:
                     text = str(self._pypdf_reader.pages[page_index].extract_text() or "")
                 except Exception:
                     text = ""
 
-            if not text.strip() and _pypdf is not None and self._doc is not None:
+            if (
+                not text.strip()
+                and _pypdf is not None
+                and (self._doc is not None or self._mupdf_doc is not None)
+            ):
                 try:
                     if self._pypdf_reader is None:
                         self._pypdf_reader = _pypdf.PdfReader(io.BytesIO(self._data))
@@ -500,6 +638,12 @@ class PdfDocumentSession:
                 except Exception:
                     pass
                 self._doc = None
+            if self._mupdf_doc is not None:
+                try:
+                    self._mupdf_doc.close()
+                except Exception:
+                    pass
+                self._mupdf_doc = None
 
     def __enter__(self) -> "PdfDocumentSession":
         return self

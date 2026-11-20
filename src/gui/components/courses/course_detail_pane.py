@@ -34,6 +34,7 @@ from gui.view_models.courses_state import (
     extract_readable_html_and_links,
     flatten_course_resources,
     format_file_size,
+    is_compact_height,
     module_matches_type_filter,
     real_module_attachments,
     safe_http_url,
@@ -286,6 +287,7 @@ class CourseDetailPane(ft.Container):
         self._on_toggle_expand = on_toggle_expand
         self._last_state: Optional[CoursesState] = None
         self._last_show_back = False
+        self._meta_expanded: bool = False
 
         self._back_btn = ft.IconButton(
             icon=ft.Icons.ARROW_BACK_ROUNDED,
@@ -293,6 +295,10 @@ class CourseDetailPane(ft.Container):
             icon_size=20,
             tooltip="Quay lại danh sách",
             visible=False,
+            width=44,
+            height=44,
+            padding=ft.Padding.all(8),
+            size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
             on_click=lambda _e: self._on_back_mobile() if callable(self._on_back_mobile) else None,
         )
         self._expand_btn = build_expand_toggle_button(
@@ -310,14 +316,39 @@ class CourseDetailPane(ft.Container):
         self._grades_tab_body = ft.Column(expand=True, spacing=12, scroll=ft.ScrollMode.AUTO)
 
         self._segment_labels: list[ft.Text] = [
-            ft.Text("Nội dung", size=12, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY),
-            ft.Text("Tài liệu", size=12, weight=ft.FontWeight.W_500, color=C.TEXT_SECONDARY),
-            ft.Text("Điểm môn", size=12, weight=ft.FontWeight.W_500, color=C.TEXT_SECONDARY),
+            ft.Text(
+                "Nội dung",
+                size=12,
+                weight=ft.FontWeight.W_600,
+                color=C.TEXT_PRIMARY,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Text(
+                "Tài liệu",
+                size=12,
+                weight=ft.FontWeight.W_500,
+                color=C.TEXT_SECONDARY,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Text(
+                "Điểm môn",
+                size=12,
+                weight=ft.FontWeight.W_500,
+                color=C.TEXT_SECONDARY,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                text_align=ft.TextAlign.CENTER,
+            ),
         ]
         self._segment_pills: list[ft.Container] = [
             ft.Container(
                 expand=True,
-                height=32,
+                height=36,
+                padding=ft.Padding.symmetric(horizontal=4),
                 alignment=ft.Alignment.CENTER,
                 border_radius=8,
                 animate=ft.Animation(170, ft.AnimationCurve.EASE_OUT_CUBIC),
@@ -490,10 +521,17 @@ class CourseDetailPane(ft.Container):
             ],
         )
 
+    def _toggle_meta_expanded(self) -> None:
+        self._meta_expanded = not self._meta_expanded
+        if self._last_state is not None:
+            self.render(self._last_state, show_back=self._last_show_back)
+
     def _build_header(
         self, course: CourseSummary, state: CoursesState, *, show_back: bool
     ) -> list[ft.Control]:
         self._back_btn.visible = show_back
+        is_mobile = state.layout_mode == "mobile"
+        short_vp = is_compact_height(state.viewport_height)
         sync_label = _format_sync_timestamp(state.last_synced_at or course.last_synced_at)
         course_web = (
             safe_http_url(course.web_url)
@@ -506,10 +544,10 @@ class CourseDetailPane(ft.Container):
             controls=[
                 ft.Text(
                     course.display_name or course.fullname,
-                    size=18,
+                    size=17 if is_mobile else 18,
                     weight=ft.FontWeight.W_700,
                     color=C.TEXT_PRIMARY,
-                    max_lines=2,
+                    max_lines=1 if short_vp else 2,
                     overflow=ft.TextOverflow.ELLIPSIS,
                 ),
                 *([ft.Text(sync_label, size=11, color=C.TEXT_SECONDARY)] if sync_label else []),
@@ -599,7 +637,14 @@ class CourseDetailPane(ft.Container):
             meta_controls.append(
                 ft.Chip(
                     leading=ft.Icon(ft.Icons.PERSON_OUTLINE_ROUNDED, size=15, color=C.ACCENT),
-                    label=ft.Text(teacher_label, size=11, color=C.TEXT_PRIMARY),
+                    label=ft.Text(
+                        teacher_label,
+                        size=11,
+                        color=C.TEXT_PRIMARY,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    width=290 if (is_mobile and len(teacher_label) > 34) else None,
                     bgcolor=C.SURFACE,
                     border_side=ft.BorderSide(1, C.BORDER),
                     tooltip="Nhấn để sao chép liên hệ giảng viên",
@@ -616,14 +661,16 @@ class CourseDetailPane(ft.Container):
                 if isinstance(g, dict) and str(g.get("name") or "").strip()
             )
             if group_names:
+                is_long_group = is_mobile and len(group_names) > 28
                 meta_controls.append(
                     ft.Container(
+                        width=290 if is_long_group else None,
                         bgcolor=ft.Colors.with_opacity(0.08, C.ACCENT),
                         border=ft.Border.all(1, ft.Colors.with_opacity(0.35, C.ACCENT)),
                         border_radius=8,
                         padding=ft.Padding.symmetric(horizontal=9, vertical=4),
                         content=ft.Row(
-                            tight=True,
+                            tight=not is_long_group,
                             spacing=5,
                             controls=[
                                 ft.Icon(ft.Icons.GROUP_OUTLINED, size=14, color=C.ACCENT),
@@ -632,6 +679,9 @@ class CourseDetailPane(ft.Container):
                                     size=11,
                                     weight=ft.FontWeight.W_600,
                                     color=C.ACCENT,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    expand=is_long_group,
                                 ),
                             ],
                         ),
@@ -652,7 +702,49 @@ class CourseDetailPane(ft.Container):
 
         controls: list[ft.Control] = [top_row]
         if meta_controls:
-            controls.append(ft.Row(controls=meta_controls, wrap=True, spacing=6, run_spacing=6))
+            if short_vp:
+                controls.append(
+                    ft.Container(
+                        bgcolor=C.SURFACE,
+                        border=ft.Border.all(1, C.BORDER),
+                        border_radius=8,
+                        padding=ft.Padding.symmetric(horizontal=9, vertical=4),
+                        ink=True,
+                        on_click=lambda _e: self._toggle_meta_expanded(),
+                        content=ft.Row(
+                            tight=True,
+                            spacing=4,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Text(
+                                    "Thông tin môn",
+                                    size=11,
+                                    weight=ft.FontWeight.W_600,
+                                    color=C.TEXT_SECONDARY,
+                                ),
+                                ft.Icon(
+                                    ft.Icons.EXPAND_LESS_ROUNDED
+                                    if self._meta_expanded
+                                    else ft.Icons.EXPAND_MORE_ROUNDED,
+                                    size=15,
+                                    color=C.TEXT_SECONDARY,
+                                ),
+                            ],
+                        ),
+                    )
+                )
+                controls.append(
+                    ft.Container(
+                        visible=self._meta_expanded,
+                        content=ft.Row(
+                            scroll=ft.ScrollMode.AUTO,
+                            spacing=6,
+                            controls=meta_controls,
+                        ),
+                    )
+                )
+            else:
+                controls.append(ft.Row(controls=meta_controls, wrap=True, spacing=6, run_spacing=6))
         return controls
 
     def _module_row(self, mod: CourseModuleItem, *, section_label: str = "") -> ft.Control:
@@ -677,7 +769,10 @@ class CourseDetailPane(ft.Container):
                     icon_size=18,
                     icon_color=C.TEXT_SECONDARY,
                     tooltip="Tải xuống",
-                    style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                    width=44,
+                    height=44,
+                    padding=ft.Padding.all(8),
+                    size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
                     on_click=lambda _e, att=first_att: (
                         self._on_download_attachment(att) if callable(self._on_download_attachment) else None
                     ),
@@ -760,7 +855,9 @@ class CourseDetailPane(ft.Container):
             ),
         )
 
-    def _label_inline_card(self, mod: CourseModuleItem) -> ft.Control:
+    def _label_inline_card(
+        self, mod: CourseModuleItem, *, is_mobile: bool = False
+    ) -> ft.Control:
         raw_html = mod.inline_html or mod.description_html
         body_text, links = extract_readable_html_and_links(raw_html)
         display_text = body_text or (mod.name or "").strip()
@@ -778,9 +875,12 @@ class CourseDetailPane(ft.Container):
             )
         if links:
             link_pills: list[ft.Control] = []
+            max_chars = 32 if is_mobile else 56
             for label, href in links:
                 is_meet = "meet.google.com" in href.lower()
-                short_label = label if len(label) <= 56 else f"{label[:53]}..."
+                short_label = (
+                    label if len(label) <= max_chars else f"{label[: max_chars - 3]}..."
+                )
                 link_pills.append(
                     ft.OutlinedButton(
                         content=short_label,
@@ -790,6 +890,15 @@ class CourseDetailPane(ft.Container):
                             else ft.Icons.OPEN_IN_NEW_ROUNDED
                         ),
                         tooltip=href,
+                        width=248 if (is_mobile and len(short_label) > 24) else None,
+                        style=ft.ButtonStyle(
+                            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                            text_style=ft.TextStyle(
+                                size=12, overflow=ft.TextOverflow.ELLIPSIS
+                            ),
+                        )
+                        if is_mobile
+                        else None,
                         on_click=lambda _e, u=href: (
                             self._on_launch_url(u)
                             if callable(self._on_launch_url)
@@ -829,12 +938,15 @@ class CourseDetailPane(ft.Container):
             ),
         )
 
-    def _build_section_item(self, mod: CourseModuleItem) -> ft.Control:
+    def _build_section_item(
+        self, mod: CourseModuleItem, *, is_mobile: bool = False
+    ) -> ft.Control:
         if mod.modname == "label" and not real_module_attachments(mod):
-            return self._label_inline_card(mod)
+            return self._label_inline_card(mod, is_mobile=is_mobile)
         return self._module_row(mod)
 
     def _build_content_tab(self, state: CoursesState) -> list[ft.Control]:
+        is_mobile = state.layout_mode == "mobile"
         controls: list[ft.Control] = [
             self._build_filter_chips(_MODULE_FILTERS, state.module_filter, "module_filter")
         ]
@@ -872,8 +984,20 @@ class CourseDetailPane(ft.Container):
                             radius=13,
                             side=ft.BorderSide(0, C.SURFACE, style=ft.BorderStyle.NONE),
                         ),
-                        controls_padding=ft.Padding.only(left=10, right=10, bottom=10, top=2),
-                        controls=[ft.Column(spacing=6, controls=[self._build_section_item(m) for m in mods])],
+                        controls_padding=(
+                            ft.Padding.only(left=8, right=8, bottom=8, top=2)
+                            if is_mobile
+                            else ft.Padding.only(left=10, right=10, bottom=10, top=2)
+                        ),
+                        controls=[
+                            ft.Column(
+                                spacing=6,
+                                controls=[
+                                    self._build_section_item(m, is_mobile=is_mobile)
+                                    for m in mods
+                                ],
+                            )
+                        ],
                     ),
                 )
             )
@@ -910,7 +1034,9 @@ class CourseDetailPane(ft.Container):
             )
         return controls
 
-    def _build_grade_row(self, parsed: _ParsedGradeRow) -> ft.Control:
+    def _build_grade_row(
+        self, parsed: _ParsedGradeRow, *, is_mobile: bool = False
+    ) -> ft.Control:
         meta_chips: list[ft.Control] = []
         if parsed.is_course_total:
             meta_chips.append(
@@ -1025,17 +1151,22 @@ class CourseDetailPane(ft.Container):
                 if (is_low_score or parsed.is_course_total)
                 else ft.Border.all(1, C.BORDER)
             )
+            grade_str = str(parsed.item.grade_formatted or "")
             trailing_score: ft.Control = ft.Container(
                 bgcolor=score_bg,
                 border=score_border,
                 border_radius=9,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                width=104 if (is_mobile and len(grade_str) > 8) else None,
+                padding=ft.Padding.symmetric(horizontal=10 if is_mobile else 12, vertical=6),
                 alignment=ft.Alignment.CENTER,
                 content=ft.Text(
-                    parsed.item.grade_formatted,
+                    grade_str,
                     size=15,
                     weight=ft.FontWeight.W_700,
                     color=score_text_color,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                    text_align=ft.TextAlign.CENTER,
                 ),
             )
         else:
@@ -1044,13 +1175,17 @@ class CourseDetailPane(ft.Container):
                 size=12,
                 weight=ft.FontWeight.W_500,
                 color=C.TEXT_SECONDARY,
+                max_lines=1,
             )
 
         return ft.Container(
-            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            padding=ft.Padding.symmetric(
+                horizontal=12 if is_mobile else 16,
+                vertical=10 if is_mobile else 12,
+            ),
             bgcolor=ft.Colors.with_opacity(0.04, C.ACCENT) if parsed.is_course_total else None,
             content=ft.Row(
-                spacing=14,
+                spacing=10 if is_mobile else 14,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
                     ft.Column(expand=True, spacing=4, controls=left_col_items),
@@ -1059,17 +1194,19 @@ class CourseDetailPane(ft.Container):
             ),
         )
 
-    def _build_grouped_grade_card(self, rows: list[_ParsedGradeRow]) -> ft.Container:
+    def _build_grouped_grade_card(
+        self, rows: list[_ParsedGradeRow], *, is_mobile: bool = False
+    ) -> ft.Container:
         children: list[ft.Control] = []
         for idx, row_data in enumerate(rows):
             if idx > 0:
                 children.append(
                     ft.Container(
-                        padding=ft.Padding.symmetric(horizontal=16),
+                        padding=ft.Padding.symmetric(horizontal=12 if is_mobile else 16),
                         content=ft.Divider(height=1, thickness=0.6, color=C.BORDER),
                     )
                 )
-            children.append(self._build_grade_row(row_data))
+            children.append(self._build_grade_row(row_data, is_mobile=is_mobile))
         return ft.Container(
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
@@ -1084,6 +1221,8 @@ class CourseDetailPane(ft.Container):
         graded_rows: list[_ParsedGradeRow],
         pending_rows: list[_ParsedGradeRow],
         active_filter: str,
+        *,
+        is_mobile: bool = False,
     ) -> ft.Control:
         total_row = next((r for r in graded_rows if r.is_course_total), None)
         regular_all = [r for r in all_rows if not r.is_course_total]
@@ -1187,7 +1326,9 @@ class CourseDetailPane(ft.Container):
                         spacing=4,
                         controls=[
                             ft.Row(
+                                wrap=True,
                                 spacing=8,
+                                run_spacing=6,
                                 vertical_alignment=ft.CrossAxisAlignment.END,
                                 controls=[
                                     ft.Text(
@@ -1228,7 +1369,7 @@ class CourseDetailPane(ft.Container):
                             ft.Text(hero_caption, size=12, color=C.TEXT_SECONDARY),
                         ],
                     ),
-                    ft.Row(tight=True, spacing=8, controls=kpi_pills),
+                    ft.Row(wrap=True, spacing=8, run_spacing=8, controls=kpi_pills),
                 ],
             )
         ]
@@ -1244,11 +1385,12 @@ class CourseDetailPane(ft.Container):
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
             border_radius=14,
-            padding=ft.Padding.all(16),
+            padding=ft.Padding.all(12 if is_mobile else 16),
             content=ft.Column(spacing=12, controls=hero_controls),
         )
 
     def _build_grades_tab(self, course: CourseSummary, state: CoursesState) -> list[ft.Control]:
+        is_mobile = state.layout_mode == "mobile"
         grades_url = f"{compute_course_origin(course)}/grade/report/user/index.php?id={course.id}"
         if state.grades:
             parsed_all = [_analyze_grade_item(item) for item in state.grades]
@@ -1267,13 +1409,17 @@ class CourseDetailPane(ft.Container):
 
             controls: list[ft.Control] = [
                 self._build_grades_summary_hero(
-                    parsed_all, graded_rows, pending_rows, g_filter
+                    parsed_all,
+                    graded_rows,
+                    pending_rows,
+                    g_filter,
+                    is_mobile=is_mobile,
                 )
             ]
 
             if g_filter == "graded":
                 if graded_rows:
-                    controls.append(self._build_grouped_grade_card(graded_rows))
+                    controls.append(self._build_grouped_grade_card(graded_rows, is_mobile=is_mobile))
                 else:
                     controls.append(
                         ft.Container(
@@ -1288,7 +1434,7 @@ class CourseDetailPane(ft.Container):
                     )
             elif g_filter == "pending":
                 if pending_rows:
-                    controls.append(self._build_grouped_grade_card(pending_rows))
+                    controls.append(self._build_grouped_grade_card(pending_rows, is_mobile=is_mobile))
                 else:
                     controls.append(
                         ft.Container(
@@ -1311,7 +1457,7 @@ class CourseDetailPane(ft.Container):
                             color=C.TEXT_SECONDARY,
                         )
                     )
-                    controls.append(self._build_grouped_grade_card(graded_rows))
+                    controls.append(self._build_grouped_grade_card(graded_rows, is_mobile=is_mobile))
                 if pending_rows and graded_rows:
                     controls.append(
                         ft.Container(
@@ -1345,12 +1491,12 @@ class CourseDetailPane(ft.Container):
                                     side=ft.BorderSide(0, C.SURFACE, style=ft.BorderStyle.NONE),
                                 ),
                                 controls_padding=ft.Padding.only(left=4, right=4, bottom=8),
-                                controls=[self._build_grouped_grade_card(pending_rows)],
+                                controls=[self._build_grouped_grade_card(pending_rows, is_mobile=is_mobile)],
                             ),
                         )
                     )
                 elif pending_rows:
-                    controls.append(self._build_grouped_grade_card(pending_rows))
+                    controls.append(self._build_grouped_grade_card(pending_rows, is_mobile=is_mobile))
 
             controls.append(
                 ft.Container(
@@ -1404,6 +1550,16 @@ class CourseDetailPane(ft.Container):
         """Render the selected course header, warnings, and 3 workspace sub-tabs."""
         self._last_state = state
         self._last_show_back = show_back
+        is_mobile = state.layout_mode == "mobile"
+        short_vp = is_compact_height(state.viewport_height)
+        self.padding = ft.Padding.symmetric(
+            horizontal=12 if is_mobile else 16,
+            vertical=8 if short_vp else (12 if is_mobile else 16),
+        )
+        self._detail_column.spacing = 6 if short_vp else 10
+        if isinstance(self._tabs.content, ft.Column):
+            self._tabs.content.spacing = 6 if short_vp else 10
+
         course = state.selected_course()
         if course is None:
             self._empty_placeholder.visible = True
@@ -1418,7 +1574,12 @@ class CourseDetailPane(ft.Container):
         self._header_slot.controls = self._build_header(course, state, show_back=show_back)
 
         if state.offline_notice:
-            self._notice_slot.controls = [build_offline_banner(state.offline_notice)]
+            self._notice_slot.controls = [
+                build_offline_banner(
+                    state.offline_notice,
+                    on_retry=self._on_refresh_course,
+                )
+            ]
             self._notice_slot.visible = True
         else:
             self._notice_slot.controls = []

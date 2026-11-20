@@ -60,8 +60,25 @@ def build_offline_banner(
     message: str,
     *,
     icon: Optional[ft.IconData] = None,
+    on_retry: Optional[Callable[[], None]] = None,
+    retry_label: str = "Thử lại",
 ) -> ft.Container:
     """Build the warning banner displayed when offline or a provider/archive call fails."""
+    row_controls: list[ft.Control] = [
+        ft.Icon(icon or ft.Icons.WIFI_OFF_ROUNDED, size=16, color=C.WARNING),
+        ft.Text(message, size=12, color=C.TEXT_PRIMARY, expand=True),
+    ]
+    if callable(on_retry):
+        row_controls.append(
+            ft.TextButton(
+                retry_label,
+                style=ft.ButtonStyle(
+                    color=C.ACCENT,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                ),
+                on_click=lambda _e: on_retry(),
+            )
+        )
     return ft.Container(
         bgcolor=C.SURFACE,
         border=ft.Border.all(1, C.WARNING),
@@ -69,10 +86,8 @@ def build_offline_banner(
         padding=ft.Padding.symmetric(horizontal=10, vertical=8),
         content=ft.Row(
             spacing=8,
-            controls=[
-                ft.Icon(icon or ft.Icons.WIFI_OFF_ROUNDED, size=16, color=C.WARNING),
-                ft.Text(message, size=12, color=C.TEXT_PRIMARY, expand=True),
-            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=row_controls,
         ),
     )
 
@@ -90,6 +105,9 @@ def build_viewer_header(
         icon=ft.Icons.ARROW_BACK_ROUNDED,
         tooltip=back_tooltip,
         icon_color=C.TEXT_PRIMARY,
+        icon_size=20,
+        padding=ft.Padding.all(4),
+        size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
         on_click=on_back,
     )
     title_text = ft.Text(
@@ -107,22 +125,31 @@ def build_viewer_header(
         max_lines=1,
         overflow=ft.TextOverflow.ELLIPSIS,
     )
+    header_controls: list[ft.Control] = [
+        back_btn,
+        ft.Column(
+            expand=True,
+            spacing=1,
+            controls=[title_text, subtitle_text],
+        ),
+    ]
+    if trailing_actions:
+        header_controls.append(
+            ft.Row(
+                spacing=0,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=list(trailing_actions),
+            )
+        )
     container = ft.Container(
         bgcolor=C.SURFACE,
         border=ft.Border.only(bottom=ft.BorderSide(1, C.BORDER)),
-        padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+        padding=ft.Padding.symmetric(horizontal=6, vertical=4),
         content=ft.Row(
-            spacing=4,
+            spacing=2,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            controls=[
-                back_btn,
-                ft.Column(
-                    expand=True,
-                    spacing=1,
-                    controls=[title_text, subtitle_text],
-                ),
-                *trailing_actions,
-            ],
+            controls=header_controls,
         ),
     )
     return container, back_btn, title_text, subtitle_text
@@ -219,7 +246,7 @@ def build_course_tab_skeleton(
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             controls=[
                 ft.ProgressRing(width=15, height=15, stroke_width=2, color=C.ACCENT),
-                ft.Text(status_label, size=12, color=C.TEXT_SECONDARY),
+                ft.Text(status_label, size=12, color=C.TEXT_SECONDARY, expand=True),
             ],
         )
     ]
@@ -262,7 +289,7 @@ def build_course_tab_skeleton(
                         controls=[
                             build_skeleton_block(width=220, height=14),
                             build_skeleton_block(height=11, subtle=True),
-                            build_skeleton_block(width=260, height=11, subtle=True),
+                            build_skeleton_block(width=210, height=11, subtle=True),
                         ],
                     ),
                 )
@@ -438,22 +465,21 @@ def _build_preset_skeleton(preset: Literal["document", "archive", "assignment", 
     # document preset
     return [
         ft.Container(
-            width=760,
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
             border_radius=12,
-            padding=22,
+            padding=16,
             content=ft.Column(
                 spacing=12,
                 controls=[
-                    build_skeleton_block(width=240, height=18),
+                    build_skeleton_block(width=200, height=18),
                     build_skeleton_block(height=12, subtle=True),
                     build_skeleton_block(height=12, subtle=True),
-                    build_skeleton_block(width=320, height=12, subtle=True),
+                    build_skeleton_block(width=220, height=12, subtle=True),
                     ft.Container(height=8),
                     build_skeleton_block(height=140, radius=10, subtle=True),
                     build_skeleton_block(height=12, subtle=True),
-                    build_skeleton_block(width=280, height=12, subtle=True),
+                    build_skeleton_block(width=180, height=12, subtle=True),
                 ],
             ),
         )
@@ -691,11 +717,10 @@ class PaneErrorOverlay(ft.Container):
         )
 
         self._card = ft.Container(
-            width=460,
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.WARNING),
             border_radius=12,
-            padding=22,
+            padding=18,
             content=ft.Column(
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=12,
@@ -726,6 +751,18 @@ class PaneErrorOverlay(ft.Container):
                 ],
             ),
         )
+
+        def _on_body_resize(e) -> None:
+            w = getattr(e, "width", None)
+            if w is None or isinstance(w, bool):
+                return
+            try:
+                numeric = float(w)
+            except (TypeError, ValueError):
+                return
+            self._card.width = min(460.0, max(240.0, numeric - 32.0)) if numeric > 500 else None
+            safe_control_update(self._card)
+
         self.content = ft.Column(
             expand=True,
             spacing=0,
@@ -733,9 +770,14 @@ class PaneErrorOverlay(ft.Container):
                 self._header_container,
                 ft.Container(
                     expand=True,
-                    alignment=ft.Alignment.CENTER,
-                    padding=24,
-                    content=self._card,
+                    on_size_change=_on_body_resize,
+                    content=ft.Column(
+                        expand=True,
+                        scroll=ft.ScrollMode.AUTO,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[ft.Container(padding=16, content=self._card)],
+                    ),
                 ),
             ],
         )

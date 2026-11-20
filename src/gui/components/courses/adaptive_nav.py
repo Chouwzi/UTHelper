@@ -12,6 +12,7 @@ from gui.core.theme import C
 
 RAIL_BREAKPOINT = 600
 RAIL_WIDTH = 88
+RAIL_SCROLL_HEIGHT_BREAKPOINT = 420
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,8 @@ class AdaptiveNavShell:
     def __init__(self, *, on_navigate: Callable[[str], None]) -> None:
         self._on_navigate = on_navigate
         self.rail_visible = False
+        self._immersive = False
+        self._compact_rail_height = False
         indicator = ft.Colors.with_opacity(0.18, C.ACCENT)
         self.rail = ft.NavigationRail(
             selected_index=0,
@@ -149,8 +152,26 @@ class AdaptiveNavShell:
                 use_rail = False
         self.rail_visible = use_rail
         self.rail_host.visible = use_rail
-        self.bar.visible = not use_rail
+        self.bar.visible = (not use_rail) and (not self._immersive)
         return use_rail
+
+    def apply_height(self, height: object) -> bool:
+        """Enable scrollable NavigationRail when viewport height is below 420dp."""
+        scrollable = False
+        if height is not None and not isinstance(height, bool):
+            try:
+                numeric = float(height)
+                scrollable = math.isfinite(numeric) and 0 < numeric < RAIL_SCROLL_HEIGHT_BREAKPOINT
+            except (TypeError, ValueError):
+                scrollable = False
+        self._compact_rail_height = scrollable
+        self.rail.scrollable = scrollable
+        return scrollable
+
+    def set_immersive(self, immersive: bool) -> None:
+        """Collapse bottom NavigationBar cleanly during mobile immersive overlays."""
+        self._immersive = bool(immersive)
+        self.bar.visible = (not self.rail_visible) and (not self._immersive)
 
     def refresh_theme(self) -> None:
         """Repaint navigation surfaces, borders, indicator, and labels from C tokens."""

@@ -18,7 +18,8 @@ dependencies = [
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
     "sentry-sdk>=2,<3",
-    "pypdf>=6.9.0",
+    "pypdf>=7.1.1",
+    "pillow>=13.0.0",
     "xlrd>=2.0.2",
     "olefile>=0.47",
 ]
@@ -97,7 +98,6 @@ dependencies = [
     "flet-android-notifications==0.10.0",
     "flet-uth-background-sync==0.1.0",
     "flet-webview==0.86.5",
-    "pypdfium2>=5.9.0",
 ]
 
 [tool.flet.android.dev_packages]
@@ -112,9 +112,10 @@ flet-uth-background-sync = "extensions/flet_uth_background_sync"
 "android.permission.FOREGROUND_SERVICE" = true
 "android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
 
-# Android needs cleartext traffic for some Moodle instances
+# CH Play compliant: disallow external cleartext and backups; allow loopback HTTP only via network_security_config
 [tool.flet.android.manifest_application]
-"usesCleartextTraffic" = "true"
+"allowBackup" = "false"
+"networkSecurityConfig" = "@xml/network_security_config"
 
 # ── iOS-specific configuration ──
 [tool.flet.ios]

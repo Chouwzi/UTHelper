@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 import logging
-import os
-from pathlib import Path
-import queue
-import sys
 import threading
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -24,9 +18,26 @@ from gui.components.courses._shared import (
     refresh_viewer_header,
     safe_control_update,
 )
+from gui.components.courses.embedded_webview_host import (
+    EmbeddedWebViewHost,
+    WindowsWebView2Dock,
+    _is_flet_webview_platform,
+    _webview2_runtime_available,
+    build_embedded_webview_host,
+)
 from gui.core.theme import C
+from platform_utils import UI_IS_MOBILE
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "CoursesWebViewPane",
+    "WindowsWebView2Dock",
+    "_is_flet_webview_platform",
+    "_is_loopback_url",
+    "_webview2_runtime_available",
+    "is_external_meeting_url",
+]
 
 _EXTERNAL_MEETING_HOSTS = (
     "meet.google.com",
@@ -35,43 +46,7 @@ _EXTERNAL_MEETING_HOSTS = (
     "zalo.me",
 )
 
-
-def is_external_meeting_url(url: str) -> bool:
-    """Return True only for external video/chat tools better opened in native apps."""
-    host = (urlsplit(str(url or "").strip()).hostname or "").lower()
-    if not host:
-        return False
-    return any(host == m or host.endswith(f".{m}") for m in _EXTERNAL_MEETING_HOSTS)
-
-
-def _is_flet_webview_platform(page: Optional[ft.Page]) -> bool:
-    if bool(getattr(page, "web", False)):
-        return True
-    platform_val = str(getattr(page, "platform", "") or "").lower()
-    if any(p in platform_val for p in ("android", "ios", "macos")):
-        return True
-    return sys.platform != "win32"
-
-
-def _webview2_runtime_available() -> bool:
-    if sys.platform != "win32":
-        return False
-    try:
-        from webview2.microsoft.web.webview2 import core as wv2  # noqa: F401
-        from winrt.windows.foundation import Rect  # noqa: F401
-        import win32con  # noqa: F401
-        import win32gui  # noqa: F401
-
-        try:
-            ver = wv2.CoreWebView2Environment.get_available_browser_version_string()
-        except TypeError:
-            ver = wv2.CoreWebView2Environment.get_available_browser_version_string_with_options(
-                "", None
-            )
-        return bool(ver)
-    except Exception:
-        return False
-
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 _NON_READABLE_HTML_TAGS = (
     "script",
@@ -90,536 +65,18 @@ _NON_READABLE_HTML_TAGS = (
 )
 
 
-class WindowsWebView2Dock:
-    """Owned borderless WebView2 host window synced over Pane 3 on Windows Desktop."""
+def is_external_meeting_url(url: str) -> bool:
+    """Return True only for external video/chat tools better opened in native apps."""
+    host = (urlsplit(str(url or "").strip()).hostname or "").lower()
+    if not host:
+        return False
+    return any(host == m or host.endswith(f".{m}") for m in _EXTERNAL_MEETING_HOSTS)
 
-    _class_registered = False
-    _class_name = "UTHelperCoursesWebView2Host"
 
-    def __init__(
-        self,
-        *,
-        page_title: str,
-        url: str,
-        cookies: list[dict[str, Any]],
-        cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
-        on_title_changed: Optional[Callable[[str], None]] = None,
-        on_url_changed: Optional[Callable[[str], None]] = None,
-        on_loading_changed: Optional[Callable[[bool], None]] = None,
-        on_external_url: Optional[Callable[[str], None]] = None,
-        on_ready_failed: Optional[Callable[[str], None]] = None,
-    ) -> None:
-        self._page_title = page_title or "UTHelper"
-        self._url = url
-        self._cookies = list(cookies or ())
-        self._cookie_provider = cookie_provider
-        self._on_title_changed = on_title_changed
-        self._on_url_changed = on_url_changed
-        self._on_loading_changed = on_loading_changed
-        self._on_external_url = on_external_url
-        self._on_ready_failed = on_ready_failed
-
-        self._cmd_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self._stop_event = threading.Event()
-        self._ready = False
-        self._failed = False
-        self._visible = True
-        self._bounds_dip: tuple[float, float, float, float] = (410.0, 90.0, 640.0, 480.0)
-        self._bottom_inset_dip: float = 0.0
-        self._hwnd: int = 0
-        self._parent_hwnd: int = 0
-        self._controller: Any = None
-        self._core: Any = None
-        self._thread: Optional[threading.Thread] = None
-        self._thread_id: int = 0
-
-    def start(self) -> None:
-        if self._thread is not None or sys.platform != "win32":
-            return
-        self._thread = threading.Thread(
-            target=self._run_sta_thread,
-            name="CoursesWebView2STA",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def navigate(self, url: str) -> None:
-        self._url = url
-        self._enqueue("navigate", url)
-
-    def go_back(self) -> None:
-        self._enqueue("go_back", None)
-
-    def go_forward(self) -> None:
-        self._enqueue("go_forward", None)
-
-    def reload(self) -> None:
-        self._enqueue("reload", None)
-
-    def set_visible(self, visible: bool) -> None:
-        self._visible = bool(visible)
-        self._enqueue("visible", self._visible)
-
-    def set_bounds(
-        self,
-        left: float,
-        top: float,
-        width: float,
-        height: float,
-        *,
-        bottom_inset: float = 0.0,
-    ) -> None:
-        self._bounds_dip = (
-            max(0.0, float(left)),
-            max(0.0, float(top)),
-            max(120.0, float(width)),
-            max(120.0, float(height)),
-        )
-        self._bottom_inset_dip = max(0.0, float(bottom_inset))
-        self._enqueue("bounds", self._bounds_dip)
-
-    def dispose(self) -> None:
-        if self._stop_event.is_set():
-            return
-        self._stop_event.set()
-        self._enqueue("dispose", None)
-        if self._thread_id and sys.platform == "win32":
-            try:
-                ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
-            except Exception:
-                pass
-
-    def _enqueue(self, action: str, payload: Any) -> None:
-        self._cmd_queue.put((action, payload))
-        if self._thread_id and sys.platform == "win32":
-            try:
-                ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0400 + 42, 0, 0)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _collect_child_pids(parent_pid: int) -> set[int]:
-        """Collect parent + all descendant process IDs on Windows (python.exe <-> flet.exe)."""
-        pids: set[int] = {parent_pid}
-        if sys.platform != "win32":
-            return pids
-        try:
-            class _PROCESSENTRY32W(ctypes.Structure):
-                _fields_ = [
-                    ("dwSize", wintypes.DWORD),
-                    ("cntUsage", wintypes.DWORD),
-                    ("th32ProcessID", wintypes.DWORD),
-                    ("th32DefaultHeapID", ctypes.c_void_p),
-                    ("th32ModuleID", wintypes.DWORD),
-                    ("cntThreads", wintypes.DWORD),
-                    ("th32ParentProcessID", wintypes.DWORD),
-                    ("pcPriClassBase", ctypes.c_long),
-                    ("dwFlags", wintypes.DWORD),
-                    ("szExeFile", ctypes.c_wchar * 260),
-                ]
-
-            k32 = ctypes.windll.kernel32
-            snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)
-            if snap in (0, -1, ctypes.c_void_p(-1).value):
-                return pids
-            parent_map: dict[int, int] = {}
-            children_map: dict[int, list[int]] = {}
-            try:
-                entry = _PROCESSENTRY32W()
-                entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
-                if k32.Process32FirstW(snap, ctypes.byref(entry)):
-                    while True:
-                        pid = int(entry.th32ProcessID)
-                        ppid = int(entry.th32ParentProcessID)
-                        parent_map[pid] = ppid
-                        children_map.setdefault(ppid, []).append(pid)
-                        if not k32.Process32NextW(snap, ctypes.byref(entry)):
-                            break
-            finally:
-                k32.CloseHandle(snap)
-            if parent_pid in parent_map and parent_map[parent_pid] > 0:
-                pids.add(parent_map[parent_pid])
-            frontier = [parent_pid]
-            while frontier:
-                cur = frontier.pop()
-                for child in children_map.get(cur, ()):
-                    if child not in pids:
-                        pids.add(child)
-                        frontier.append(child)
-        except Exception:
-            pass
-        return pids
-
-    @staticmethod
-    def _find_parent_hwnd(expected_title: str) -> int:
-        import win32gui
-        import win32process
-
-        cur_pid = os.getpid()
-        family_pids = WindowsWebView2Dock._collect_child_pids(cur_pid)
-        matched: list[tuple[int, int]] = []
-
-        def _enum_cb(hwnd: int, _ctx: Any) -> bool:
-            try:
-                if not win32gui.IsWindowVisible(hwnd):
-                    return True
-                title = win32gui.GetWindowText(hwnd) or ""
-                cls_name = win32gui.GetClassName(hwnd) or ""
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                score = 0
-                if pid == cur_pid:
-                    score += 12
-                elif pid in family_pids:
-                    score += 10
-                if cls_name == "FLUTTER_RUNNER_WIN32_WINDOW":
-                    score += 6
-                if expected_title and expected_title.lower() in title.lower():
-                    score += 5
-                if "uthelper" in title.lower():
-                    score += 4
-                if score > 0 and (title.strip() or cls_name == "FLUTTER_RUNNER_WIN32_WINDOW"):
-                    matched.append((score, hwnd))
-            except Exception:
-                pass
-            return True
-
-        win32gui.EnumWindows(_enum_cb, None)
-        if not matched:
-            return 0
-        matched.sort(key=lambda item: item[0], reverse=True)
-        return matched[0][1]
-
-    def _run_sta_thread(self) -> None:
-        try:
-            ctypes.oledll.ole32.CoInitializeEx(None, 2)
-        except Exception:
-            pass
-        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        try:
-            self._init_window_and_webview2()
-            self._pump_messages()
-        except Exception as exc:
-            logger.warning("WindowsWebView2Dock STA failed: %s", exc)
-            if not self._failed and self._on_ready_failed is not None:
-                self._failed = True
-                self._on_ready_failed(str(exc))
-        finally:
-            self._cleanup_native()
-            try:
-                ctypes.oledll.ole32.CoUninitialize()
-            except Exception:
-                pass
-
-    def _init_window_and_webview2(self) -> None:
-        import time as _time
-        import win32api
-        import win32con
-        import win32gui
-        from webview2.microsoft.web.webview2 import core as wv2
-
-        for _ in range(15):
-            self._parent_hwnd = self._find_parent_hwnd(self._page_title)
-            if self._parent_hwnd:
-                break
-            _time.sleep(0.04)
-        if not self._parent_hwnd:
-            self._fail("Không tìm thấy cửa sổ chính để gắn WebView2.")
-            return
-
-        hinst = win32api.GetModuleHandle(None)
-        if not WindowsWebView2Dock._class_registered:
-            wc = win32gui.WNDCLASS()
-            wc.lpfnWndProc = win32gui.DefWindowProc
-            wc.hInstance = hinst
-            wc.lpszClassName = WindowsWebView2Dock._class_name
-            try:
-                win32gui.RegisterClass(wc)
-            except Exception:
-                pass
-            WindowsWebView2Dock._class_registered = True
-
-        style = win32con.WS_POPUP | win32con.WS_CLIPCHILDREN
-        ex_style = win32con.WS_EX_TOOLWINDOW
-        hwnd = win32gui.CreateWindowEx(
-            ex_style,
-            WindowsWebView2Dock._class_name,
-            "UTHelper WebView",
-            style,
-            100,
-            100,
-            640,
-            480,
-            self._parent_hwnd,
-            0,
-            hinst,
-            None,
-        )
-        try:
-            ctypes.windll.user32.SetWindowLongPtrW(
-                int(hwnd), -8, ctypes.c_void_p(int(self._parent_hwnd))
-            )
-        except Exception:
-            pass
-        self._hwnd = hwnd
-        self._apply_window_bounds()
-
-        local_app = os.environ.get("LOCALAPPDATA") or str(Path.home())
-        user_data_dir = str(Path(local_app) / "UTHelper" / "webview2_profile")
-        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
-
-        env_op = wv2.CoreWebView2Environment.create_with_options_async("", user_data_dir, None)
-
-        def _on_env_done(op: Any, status: Any) -> None:
-            self._enqueue("_env_done", (op, status))
-
-        env_op.completed = _on_env_done
-
-    def _handle_env_done(self, op: Any) -> None:
-        from webview2.microsoft.web.webview2 import core as wv2
-
-        if self._stop_event.is_set() or not self._hwnd:
-            return
-        try:
-            env = op.get_results()
-            win_ref = wv2.CoreWebView2ControllerWindowReference.create_from_window_handle(
-                int(self._hwnd)
-            )
-            ctrl_op = env.create_core_webview2_controller_async(win_ref)
-            ctrl_op.completed = lambda cop, st: self._enqueue("_ctrl_done", (cop, st))
-        except Exception as exc:
-            self._fail(str(exc))
-
-    def _handle_ctrl_done(self, op: Any) -> None:
-        if self._stop_event.is_set() or not self._hwnd:
-            return
-        try:
-            ctrl = op.get_results()
-            core = ctrl.core_webview2
-            self._controller = ctrl
-            self._core = core
-            self._ready = True
-            try:
-                settings_obj = getattr(core, "settings", None)
-                if settings_obj is not None:
-                    settings_obj.is_status_bar_enabled = False
-            except Exception:
-                pass
-            if not self._cookies and callable(self._cookie_provider):
-                try:
-                    self._cookies = list(self._cookie_provider() or ())
-                except Exception as exc:
-                    logger.debug("WebView2 async cookie provider failed: %s", exc)
-            self._inject_cookies(core)
-            self._bind_events(core)
-            self._apply_window_bounds()
-            ctrl.is_visible = self._visible
-            if self._visible:
-                import win32con
-                import win32gui
-
-                win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNOACTIVATE)
-            if self._url:
-                core.navigate(self._url)
-        except Exception as exc:
-            self._fail(str(exc))
-
-    def _inject_cookies(self, core: Any) -> None:
-        cm = getattr(core, "cookie_manager", None)
-        if cm is None:
-            return
-        for ck in self._cookies:
-            name = str(ck.get("name") or "")
-            value = str(ck.get("value") or "")
-            domain = str(ck.get("domain") or "")
-            path = str(ck.get("path") or "/")
-            if not name or not domain:
-                continue
-            try:
-                cookie_obj = cm.create_cookie(name, value, domain, path)
-                try:
-                    cookie_obj.is_secure = bool(ck.get("secure", False))
-                    cookie_obj.is_http_only = bool(ck.get("httpOnly", False))
-                except Exception:
-                    pass
-                cm.add_or_update_cookie(cookie_obj)
-            except Exception as exc:
-                logger.debug("WebView2 cookie injection skipped for %s: %s", domain, exc)
-
-    def _bind_events(self, core: Any) -> None:
-        try:
-            core.add_document_title_changed(
-                lambda _s, _a: self._on_title_changed(str(core.document_title or ""))
-                if self._on_title_changed
-                else None
-            )
-            core.add_source_changed(
-                lambda _s, _a: self._on_url_changed(str(core.source or ""))
-                if self._on_url_changed
-                else None
-            )
-
-            core.add_navigation_starting(
-                lambda _s, _a: self._on_loading_changed(True)
-                if self._on_loading_changed
-                else None
-            )
-            core.add_navigation_completed(
-                lambda _s, _a: self._on_loading_changed(False)
-                if self._on_loading_changed
-                else None
-            )
-
-            def _on_new_window(_sender: Any, args: Any) -> None:
-                uri = str(getattr(args, "uri", "") or "")
-                try:
-                    args.handled = True
-                except Exception:
-                    pass
-                if uri:
-                    core.navigate(uri)
-
-            core.add_new_window_requested(_on_new_window)
-        except Exception:
-            pass
-
-    def _apply_window_bounds(self, *, preserve_zorder: bool = False) -> None:
-        if not self._hwnd or sys.platform != "win32":
-            return
-        import win32con
-        import win32gui
-        from winrt.windows.foundation import Rect
-
-        parent = self._parent_hwnd
-        if parent and win32gui.IsWindow(parent):
-            if win32gui.IsIconic(parent) or not win32gui.IsWindowVisible(parent) or not self._visible:
-                win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
-                if self._controller is not None:
-                    self._controller.is_visible = False
-                return
-            try:
-                dpi = float(ctypes.windll.user32.GetDpiForWindow(parent))
-            except Exception:
-                dpi = 96.0
-            scale = max(1.0, dpi / 96.0)
-            origin_x, origin_y = win32gui.ClientToScreen(parent, (0, 0))
-            crect = win32gui.GetClientRect(parent)
-            max_w = max(160, crect[2] - crect[0])
-            max_h = max(160, crect[3] - crect[1])
-            left_px = max(0, int(round(self._bounds_dip[0] * scale)))
-            top_px = max(0, int(round(self._bounds_dip[1] * scale)))
-            bot_px = max(0, int(round(self._bottom_inset_dip * scale)))
-            w_px = max(160, max_w - left_px)
-            h_px = max(160, max_h - top_px - bot_px)
-            fg_hwnd = 0
-            try:
-                fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
-            except Exception:
-                fg_hwnd = 0
-            app_is_fg = fg_hwnd in (int(parent), int(self._hwnd))
-            keep_z = preserve_zorder or not app_is_fg
-            flags = win32con.SWP_NOACTIVATE | (
-                win32con.SWP_NOZORDER if keep_z else 0
-            )
-            win32gui.SetWindowPos(
-                self._hwnd,
-                0 if keep_z else win32con.HWND_TOP,
-                origin_x + left_px,
-                origin_y + top_px,
-                w_px,
-                h_px,
-                flags,
-            )
-            if self._visible:
-                win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNOACTIVATE)
-            if self._controller is not None:
-                self._controller.bounds = Rect(0.0, 0.0, float(w_px), float(h_px))
-                self._controller.is_visible = self._visible
-                self._controller.notify_parent_window_position_changed()
-
-    def _fail(self, reason: str) -> None:
-        if self._failed:
-            return
-        self._failed = True
-        if self._on_ready_failed is not None:
-            self._on_ready_failed(reason)
-
-    def _pump_messages(self) -> None:
-        import win32con
-        import win32gui
-
-        msg = wintypes.MSG()
-        last_parent_state: tuple[int, int, int, int, bool] = (0, 0, 0, 0, False)
-        while not self._stop_event.is_set():
-            self._drain_commands()
-            if self._parent_hwnd and win32gui.IsWindow(self._parent_hwnd):
-                try:
-                    cur_rect = win32gui.GetWindowRect(self._parent_hwnd)
-                    is_min = bool(win32gui.IsIconic(self._parent_hwnd))
-                    cur_state = (cur_rect[0], cur_rect[1], cur_rect[2], cur_rect[3], is_min)
-                    if cur_state != last_parent_state:
-                        last_parent_state = cur_state
-                        self._apply_window_bounds(preserve_zorder=True)
-                except Exception:
-                    pass
-            while ctypes.windll.user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, win32con.PM_REMOVE):
-                if msg.message == win32con.WM_QUIT:
-                    return
-                ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
-                ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
-            ctypes.windll.user32.MsgWaitForMultipleObjects(0, None, False, 16, 0x04FF)
-
-    def _drain_commands(self) -> None:
-        import win32con
-        import win32gui
-
-        while True:
-            try:
-                action, payload = self._cmd_queue.get_nowait()
-            except queue.Empty:
-                break
-            if action == "_env_done":
-                self._handle_env_done(payload[0])
-            elif action == "_ctrl_done":
-                self._handle_ctrl_done(payload[0])
-            elif action == "navigate" and self._core is not None and payload:
-                self._core.navigate(str(payload))
-            elif action == "go_back" and self._core is not None and getattr(self._core, "can_go_back", False):
-                self._core.go_back()
-            elif action == "go_forward" and self._core is not None and getattr(self._core, "can_go_forward", False):
-                self._core.go_forward()
-            elif action == "reload" and self._core is not None:
-                self._core.reload()
-            elif action == "visible":
-                if self._controller is not None:
-                    self._controller.is_visible = bool(payload)
-                if self._hwnd:
-                    win32gui.ShowWindow(
-                        self._hwnd,
-                        win32con.SW_SHOWNOACTIVATE if payload else win32con.SW_HIDE,
-                    )
-                self._apply_window_bounds()
-            elif action == "bounds":
-                self._apply_window_bounds()
-            elif action == "dispose":
-                self._stop_event.set()
-                break
-
-    def _cleanup_native(self) -> None:
-        if self._controller is not None:
-            try:
-                self._controller.close()
-            except Exception:
-                pass
-            self._controller = None
-        self._core = None
-        if self._hwnd and sys.platform == "win32":
-            try:
-                import win32gui
-
-                win32gui.DestroyWindow(self._hwnd)
-            except Exception:
-                pass
-            self._hwnd = 0
+def _is_loopback_url(url: str) -> bool:
+    """Return True for ephemeral local loopback URLs that should not open externally."""
+    host = (urlsplit(str(url or "").strip()).hostname or "").lower()
+    return host in _LOOPBACK_HOSTS
 
 
 class CoursesWebViewPane(ft.Container):
@@ -640,6 +97,7 @@ class CoursesWebViewPane(ft.Container):
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
         embedded_webview_factory: Optional[Callable[[str], Optional[ft.Control]]] = None,
+        pane_width: Optional[float] = None,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
         self._page = page
@@ -655,16 +113,30 @@ class CoursesWebViewPane(ft.Container):
         self._on_toggle_expand = on_toggle_expand
         self._embedded_factory = embedded_webview_factory
 
+        if pane_width is not None:
+            resolved_width = float(pane_width)
+        elif page is not None and getattr(page, "width", None):
+            resolved_width = float(getattr(page, "width"))
+        elif page is not None and getattr(getattr(page, "window", None), "width", None):
+            resolved_width = float(getattr(page.window, "width"))
+        else:
+            resolved_width = 400.0 if UI_IS_MOBILE else 1100.0
+        self._pane_width = max(240.0, resolved_width)
+        self._compact_mode: Optional[bool] = None
+
+        self._host: Optional[EmbeddedWebViewHost] = None
         self._dock: Optional[WindowsWebView2Dock] = None
-        self._flet_webview: Any = None
         self._fallback_html_loaded = False
         self._disposed = False
 
+        touch_constraints = ft.BoxConstraints(min_width=44, min_height=44)
         self._wv_back_btn = ft.IconButton(
             icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED,
             icon_size=16,
             tooltip="Trang trước",
             icon_color=C.TEXT_PRIMARY,
+            disabled_color=C.TEXT_SECONDARY,
+            size_constraints=touch_constraints,
             on_click=self._on_webview_back,
         )
         self._wv_fwd_btn = ft.IconButton(
@@ -672,6 +144,8 @@ class CoursesWebViewPane(ft.Container):
             icon_size=16,
             tooltip="Trang kế",
             icon_color=C.TEXT_PRIMARY,
+            disabled_color=C.TEXT_SECONDARY,
+            size_constraints=touch_constraints,
             on_click=self._on_webview_forward,
         )
         self._wv_reload_btn = ft.IconButton(
@@ -679,6 +153,7 @@ class CoursesWebViewPane(ft.Container):
             icon_size=18,
             tooltip="Tải lại trang",
             icon_color=C.TEXT_PRIMARY,
+            size_constraints=touch_constraints,
             on_click=self._on_webview_reload,
         )
         self._ext_btn = ft.IconButton(
@@ -686,6 +161,7 @@ class CoursesWebViewPane(ft.Container):
             icon_size=18,
             tooltip="Mở bằng trình duyệt ngoài",
             icon_color=C.TEXT_PRIMARY,
+            size_constraints=touch_constraints,
             on_click=lambda _e: self._on_open_external(self._url),
         )
         self._expand_btn = ft.IconButton(
@@ -697,10 +173,29 @@ class CoursesWebViewPane(ft.Container):
             if self._expanded
             else "Mở rộng toàn vùng môn học (Ctrl+\\)",
             icon_color=C.TEXT_PRIMARY,
+            size_constraints=touch_constraints,
             visible=self._show_expand_toggle,
             on_click=lambda _e: self._on_toggle_expand()
             if self._on_toggle_expand is not None
             else None,
+        )
+        self._more_menu_item_reload = ft.PopupMenuItem(
+            content="Tải lại trang",
+            icon=ft.Icons.REFRESH_ROUNDED,
+            on_click=self._on_webview_reload,
+        )
+        self._more_menu_item_ext = ft.PopupMenuItem(
+            content="Mở bằng trình duyệt ngoài",
+            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+            on_click=lambda _e: self._on_open_external(self._url),
+        )
+        self._more_menu_btn = ft.PopupMenuButton(
+            icon=ft.Icons.MORE_VERT_ROUNDED,
+            icon_color=C.TEXT_PRIMARY,
+            bgcolor=C.SURFACE,
+            tooltip="Tùy chọn",
+            size_constraints=touch_constraints,
+            items=[self._more_menu_item_reload, self._more_menu_item_ext],
         )
 
         self._header_container, self._back_btn, self._title_text, self._subtitle_text = (
@@ -718,6 +213,22 @@ class CoursesWebViewPane(ft.Container):
                 ],
             )
         )
+        self._back_btn.size_constraints = touch_constraints
+        self._title_col = self._header_container.content.controls[1]
+
+        self._mobile_nav_row = ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_AROUND,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[],
+        )
+        self._mobile_nav_bar = ft.Container(
+            height=44,
+            bgcolor=C.SURFACE,
+            border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
+            content=self._mobile_nav_row,
+            visible=False,
+        )
+
         self._nav_progress = ft.ProgressBar(
             value=None,
             bar_height=2,
@@ -729,9 +240,58 @@ class CoursesWebViewPane(ft.Container):
         self.content = ft.Column(
             expand=True,
             spacing=0,
-            controls=[self._header_container, self._nav_progress, self._body_host],
+            controls=[
+                self._header_container,
+                self._nav_progress,
+                self._body_host,
+                self._mobile_nav_bar,
+            ],
         )
+        self._apply_responsive_chrome()
         self._mount_engine()
+
+    def _sync_external_visibility(self) -> None:
+        show_ext = not _is_loopback_url(self._url)
+        self._ext_btn.visible = show_ext
+        self._more_menu_item_ext.visible = show_ext
+        self._more_menu_btn.items = (
+            [self._more_menu_item_reload, self._more_menu_item_ext]
+            if show_ext
+            else [self._more_menu_item_reload]
+        )
+
+    def _apply_responsive_chrome(self) -> bool:
+        compact = self._pane_width < 600.0
+        changed = self._compact_mode != compact
+        self._compact_mode = compact
+        header_row = self._header_container.content
+        if compact:
+            header_row.controls = [
+                self._back_btn,
+                self._title_col,
+                self._more_menu_btn,
+            ]
+            self._mobile_nav_row.controls = [
+                self._wv_back_btn,
+                self._wv_fwd_btn,
+                self._wv_reload_btn,
+                self._ext_btn,
+            ]
+            self._mobile_nav_bar.visible = True
+        else:
+            header_row.controls = [
+                self._back_btn,
+                self._title_col,
+                self._wv_back_btn,
+                self._wv_fwd_btn,
+                self._wv_reload_btn,
+                self._expand_btn,
+                self._ext_btn,
+            ]
+            self._mobile_nav_row.controls = []
+            self._mobile_nav_bar.visible = False
+        self._sync_external_visibility()
+        return changed
 
     @staticmethod
     def _short_subtitle(url: str) -> str:
@@ -748,88 +308,67 @@ class CoursesWebViewPane(ft.Container):
         return self._url
 
     def _mount_engine(self) -> None:
+        use_bridge = _is_flet_webview_platform(self._page)
+        load_url = self._build_bridge_or_target_url() if use_bridge else self._url
+
         if self._embedded_factory is not None:
-            load_url = (
-                self._build_bridge_or_target_url()
-                if _is_flet_webview_platform(self._page)
-                else self._url
-            )
             custom = self._embedded_factory(load_url)
             if custom is not None:
+                if isinstance(custom, EmbeddedWebViewHost):
+                    self._host = custom
+                    self._dock = custom.dock
+                    self._nav_progress.visible = False
+                    self._body_host.content = ft.Container(
+                        expand=True, content=custom.control()
+                    )
+                    return
                 self._nav_progress.visible = False
                 self._body_host.content = ft.Container(expand=True, content=custom)
                 return
 
-        if _is_flet_webview_platform(self._page):
-            try:
-                import flet_webview as fwv
+        target_host = (urlsplit(self._url or "").hostname or "").lower()
+        is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
+        cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
+        if (
+            is_uth_site
+            and self._session_client is not None
+            and hasattr(self._session_client, "get_session_cookies")
+        ):
+            client_ref = self._session_client
 
-                load_url = self._build_bridge_or_target_url()
-                wv = fwv.WebView(
-                    url=load_url,
-                    expand=True,
-                    on_page_started=lambda _e: self._set_nav_loading(True),
-                    on_page_ended=lambda _e: self._set_nav_loading(False),
-                    on_url_change=lambda e: self._update_subtitle(str(getattr(e, "data", "") or "")),
-                    on_web_resource_error=lambda e: (
-                        self._set_nav_loading(False),
-                        logger.debug("flet_webview resource error: %s", getattr(e, "data", "")),
-                    ),
-                )
-                self._flet_webview = wv
-                self._body_host.content = ft.Container(expand=True, content=wv)
-                return
-            except Exception as exc:
-                logger.debug("flet_webview unavailable, falling back: %s", exc)
+            def _provide_cookies() -> list[dict[str, Any]]:
+                return client_ref.get_session_cookies(ensure_login=True)
 
-        if isinstance(self._page, ft.Page) and _webview2_runtime_available():
-            target_host = (urlsplit(self._url or "").hostname or "").lower()
-            is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
-            cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
+            cookie_provider = _provide_cookies
+
+        host = build_embedded_webview_host(
+            load_url,
+            page=self._page,
+            bgcolor=C.BG,
+            cookie_provider=cookie_provider,
+            on_title_changed=self._on_native_title,
+            on_url_changed=self._on_native_url_or_bridge,
+            on_loading_changed=self._on_host_loading_changed,
+            on_history_changed=self._on_history_changed,
+            on_error=self._on_host_error,
+            on_external_url=self._on_open_external,
+        )
+        if host is not None:
+            self._host = host
+            self._dock = host.dock
             if (
-                is_uth_site
-                and self._session_client is not None
-                and hasattr(self._session_client, "get_session_cookies")
+                host.backend == "webview2"
+                and host.dock is not None
+                and getattr(host.dock, "_failed", False)
             ):
-                client_ref = self._session_client
-
-                def _provide_cookies() -> list[dict[str, Any]]:
-                    return client_ref.get_session_cookies(ensure_login=True)
-
-                cookie_provider = _provide_cookies
-            dock = WindowsWebView2Dock(
-                page_title=str(getattr(self._page, "title", "") or "UTHelper"),
-                url=self._url,
-                cookies=[],
-                cookie_provider=cookie_provider,
-                on_title_changed=self._on_native_title,
-                on_url_changed=self._on_native_url,
-                on_loading_changed=self._on_webview2_loading_changed,
-                on_external_url=self._on_open_external,
-                on_ready_failed=self._on_webview2_failed,
-            )
-            self._dock = dock
-            dock.start()
+                self._host = None
+                self._dock = None
+                host.dispose()
+                self._set_nav_loading(False)
+                self._show_html_fallback_or_card()
+                return
             self._nav_progress.visible = True
-            self._body_host.content = ft.Container(
-                expand=True,
-                alignment=ft.Alignment.CENTER,
-                padding=24,
-                content=ft.Column(
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=10,
-                    controls=[
-                        ft.ProgressRing(width=28, height=28, stroke_width=3, color=C.ACCENT),
-                        ft.Text(
-                            "Đang khởi tạo trình duyệt ngay trong ứng dụng...",
-                            size=13,
-                            color=C.TEXT_SECONDARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                    ],
-                ),
-            )
+            self._body_host.content = host.control()
             return
 
         self._show_html_fallback_or_card()
@@ -840,38 +379,52 @@ class CoursesWebViewPane(ft.Container):
         self._nav_progress.visible = bool(loading)
         safe_control_update(self._nav_progress)
 
-    def _on_webview2_loading_changed(self, loading: bool) -> None:
+    def _on_host_loading_changed(self, loading: bool) -> None:
         if self._disposed:
             return
         self._nav_progress.visible = bool(loading)
-        if not loading and self._dock is not None:
-            self._body_host.content = ft.Container(expand=True, bgcolor=C.BG)
-            safe_control_update(self)
-        else:
-            safe_control_update(self._nav_progress)
+        safe_control_update(self._nav_progress)
+
+    def _on_history_changed(self, can_back: bool, can_forward: bool) -> None:
+        if self._disposed:
+            return
+        self._wv_back_btn.disabled = not bool(can_back)
+        self._wv_fwd_btn.disabled = not bool(can_forward)
+        safe_control_update(self._wv_back_btn)
+        safe_control_update(self._wv_fwd_btn)
 
     def _on_native_title(self, title: str) -> None:
         if title and not self._disposed:
             self._title_text.value = title
             safe_control_update(self._title_text)
 
-    def _on_native_url(self, url: str) -> None:
-        if url and not self._disposed:
-            self._url = url
-            self._subtitle_text.value = self._short_subtitle(url)
-            safe_control_update(self._subtitle_text)
+    def _on_native_url_or_bridge(self, url: str) -> None:
+        if not url or self._disposed:
+            return
+        if "/session/" in url:
+            return
+        self._url = url
+        self._subtitle_text.value = self._short_subtitle(url)
+        self._sync_external_visibility()
+        safe_control_update(self._subtitle_text)
+        safe_control_update(self._ext_btn)
 
-    def _update_subtitle(self, url: str) -> None:
-        if url and "/session/" not in url:
-            self._subtitle_text.value = self._short_subtitle(url)
-            safe_control_update(self._subtitle_text)
-
-    def _on_webview2_failed(self, _reason: str) -> None:
+    def _on_host_error(self, reason: str) -> None:
         if self._disposed:
             return
-        self._dock = None
-        self._show_html_fallback_or_card()
-        safe_control_update(self)
+        self._set_nav_loading(False)
+        host = self._host
+        if host is not None and host.backend == "webview2":
+            dock = host.dock
+            if dock is None or not getattr(dock, "_ready", False):
+                self._host = None
+                self._dock = None
+                host.dispose()
+                if not self._disposed:
+                    self._show_html_fallback_or_card()
+                    safe_control_update(self)
+                return
+        logger.debug("EmbeddedWebViewHost error: %s", reason)
 
     def _show_html_fallback_or_card(self) -> None:
         self._body_host.content = ft.Container(
@@ -883,7 +436,7 @@ class CoursesWebViewPane(ft.Container):
                 alignment=ft.MainAxisAlignment.CENTER,
                 spacing=10,
                 controls=[
-                    ft.ProgressRing(width=24, height=24, stroke_width=2.5),
+                    ft.ProgressRing(width=24, height=24, stroke_width=2.5, color=C.ACCENT),
                     ft.Text(
                         "Đang tải nội dung hoạt động qua phiên Moodle...",
                         size=13,
@@ -909,8 +462,10 @@ class CoursesWebViewPane(ft.Container):
         is_local_preview = target_host in {"127.0.0.1", "localhost"}
         html_text = ""
         try:
-            if is_uth_site and self._session_client is not None and hasattr(
-                self._session_client, "open_session_url"
+            if (
+                is_uth_site
+                and self._session_client is not None
+                and hasattr(self._session_client, "open_session_url")
             ):
                 _final_url, html_text, redirected = self._session_client.open_session_url(
                     self._url
@@ -948,13 +503,21 @@ class CoursesWebViewPane(ft.Container):
                 for el in main.find_all(["h1", "h2", "h3", "p", "li"]):
                     txt = " ".join(el.get_text(" ", strip=True).split())
                     if txt:
-                        prefix = "## " if el.name in ("h1", "h2", "h3") else ("- " if el.name == "li" else "")
+                        prefix = (
+                            "## "
+                            if el.name in ("h1", "h2", "h3")
+                            else ("- " if el.name == "li" else "")
+                        )
                         lines.append(f"{prefix}{txt}")
                 markdown_text = "\n\n".join(lines[:140])
                 for anchor in main.select("a[href]"):
                     href = str(anchor.get("href") or "").strip()
                     label = " ".join(anchor.get_text(" ", strip=True).split())
-                    if label and href.startswith(("http://", "https://")) and len(extracted_links) < 12:
+                    if (
+                        label
+                        and href.startswith(("http://", "https://"))
+                        and len(extracted_links) < 12
+                    ):
                         extracted_links.append((label, href))
         except Exception as exc:
             error_text = str(exc)
@@ -966,6 +529,31 @@ class CoursesWebViewPane(ft.Container):
         safe_control_update(self._nav_progress)
 
         if error_text or not markdown_text:
+            card_controls: list[ft.Control] = [
+                ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
+                ft.Text(
+                    self._title,
+                    size=16,
+                    weight=ft.FontWeight.W_600,
+                    color=C.TEXT_PRIMARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Text(
+                    error_text
+                    or "Hoạt động này yêu cầu trình duyệt tương tác trực tiếp trên thiết bị.",
+                    size=13,
+                    color=C.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ]
+            if not _is_loopback_url(self._url):
+                card_controls.append(
+                    ft.FilledButton(
+                        "Mở bằng trình duyệt ngoài",
+                        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                        on_click=lambda _e: self._on_open_external(self._url),
+                    )
+                )
             self._body_host.content = ft.Container(
                 expand=True,
                 alignment=ft.Alignment.CENTER,
@@ -974,28 +562,7 @@ class CoursesWebViewPane(ft.Container):
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                     alignment=ft.MainAxisAlignment.CENTER,
                     spacing=12,
-                    controls=[
-                        ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
-                        ft.Text(
-                            self._title,
-                            size=16,
-                            weight=ft.FontWeight.W_600,
-                            color=C.TEXT_PRIMARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Text(
-                            error_text
-                            or "Hoạt động này yêu cầu trình duyệt tương tác trực tiếp trên thiết bị.",
-                            size=13,
-                            color=C.TEXT_SECONDARY,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.FilledButton(
-                            "Mở bằng trình duyệt ngoài",
-                            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                            on_click=lambda _e: self._on_open_external(self._url),
-                        ),
-                    ],
+                    controls=card_controls,
                 ),
             )
             safe_control_update(self._body_host)
@@ -1006,7 +573,9 @@ class CoursesWebViewPane(ft.Container):
                 value=markdown_text,
                 selectable=True,
                 extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                on_tap_link=lambda e: self._navigate_link(str(getattr(e, "data", "") or "")),
+                on_tap_link=lambda e: self._navigate_link(
+                    str(getattr(e, "data", "") or "")
+                ),
             )
         ]
         if extracted_links:
@@ -1046,36 +615,56 @@ class CoursesWebViewPane(ft.Container):
             return
         self._url = clean
         self._subtitle_text.value = self._short_subtitle(clean)
+        self._sync_external_visibility()
         safe_control_update(self._subtitle_text)
-        if self._dock is not None:
+        if self._host is not None:
+            self._set_nav_loading(True)
+            nav_url = (
+                self._build_bridge_or_target_url()
+                if self._host.backend == "flet_webview"
+                else clean
+            )
+            self._host.navigate(nav_url)
+        elif self._dock is not None:
             self._set_nav_loading(True)
             self._dock.navigate(clean)
-        elif self._flet_webview is not None:
-            self._mount_engine()
-            safe_control_update(self._body_host)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
             safe_control_update(self._body_host)
 
     def _on_webview_back(self, _e: Any) -> None:
-        if self._dock is not None:
+        if self._host is not None:
+            self._host.go_back()
+        elif self._dock is not None:
             self._dock.go_back()
 
     def _on_webview_forward(self, _e: Any) -> None:
-        if self._dock is not None:
+        if self._host is not None:
+            self._host.go_forward()
+        elif self._dock is not None:
             self._dock.go_forward()
 
     def _on_webview_reload(self, _e: Any) -> None:
-        if self._dock is not None:
+        if self._host is not None:
+            self._set_nav_loading(True)
+            self._host.reload()
+        elif self._dock is not None:
             self._dock.reload()
-        elif self._flet_webview is not None:
-            self._mount_engine()
-            safe_control_update(self._body_host)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
             safe_control_update(self._body_host)
+
+    def handle_back(self) -> bool:
+        """Step back within WebView history if possible; otherwise allow overlay pop."""
+        if self._host is not None and self._host.can_go_back():
+            self._host.go_back()
+            return True
+        if self._dock is not None and self._dock.can_go_back():
+            self._dock.go_back()
+            return True
+        return False
 
     def _handle_back(self) -> None:
         self.dispose()
@@ -1098,28 +687,53 @@ class CoursesWebViewPane(ft.Container):
         safe_control_update(self._expand_btn)
 
     def sync_bounds(self, left: float, top: float, width: float, height: float) -> None:
-        if self._dock is not None and not self._disposed:
-            header_h = 55.0
-            bottom_inset = 80.0 if left <= 1.0 and width < 600.0 else 0.0
+        self._pane_width = max(240.0, float(width))
+        changed = self._apply_responsive_chrome()
+        if changed:
+            safe_control_update(self)
+        if self._disposed:
+            return
+        header_h = 55.0
+        mobile_bar_h = 44.0 if self._mobile_nav_bar.visible else 0.0
+        bottom_inset = (80.0 if left <= 1.0 and width < 600.0 else 0.0) + mobile_bar_h
+        if self._host is not None:
+            self._host.sync_bounds(
+                left,
+                top + header_h,
+                width,
+                max(160.0, height - header_h - mobile_bar_h),
+                bottom_inset=bottom_inset,
+            )
+        elif self._dock is not None:
             self._dock.set_bounds(
                 left,
                 top + header_h,
                 width,
-                max(160.0, height - header_h),
+                max(160.0, height - header_h - mobile_bar_h),
                 bottom_inset=bottom_inset,
             )
 
     def suspend(self) -> None:
-        if self._dock is not None:
+        if self._host is not None:
+            self._host.suspend()
+        elif self._dock is not None:
             self._dock.set_visible(False)
 
     def resume(self) -> None:
-        if self._dock is not None and not self._disposed:
+        if self._disposed:
+            return
+        if self._host is not None:
+            self._host.resume()
+        elif self._dock is not None:
             self._dock.set_visible(True)
 
     def dispose(self) -> None:
         self._disposed = True
-        if self._dock is not None:
+        if self._host is not None:
+            self._host.dispose()
+            self._host = None
+            self._dock = None
+        elif self._dock is not None:
             self._dock.dispose()
             self._dock = None
 
@@ -1128,6 +742,10 @@ class CoursesWebViewPane(ft.Container):
         self._body_host.bgcolor = C.BG
         self._nav_progress.color = C.ACCENT
         self._nav_progress.bgcolor = C.BORDER
+        self._mobile_nav_bar.bgcolor = C.SURFACE
+        self._mobile_nav_bar.border = ft.Border.only(top=ft.BorderSide(1, C.BORDER))
+        self._more_menu_btn.icon_color = C.TEXT_PRIMARY
+        self._more_menu_btn.bgcolor = C.SURFACE
         refresh_viewer_header(
             self._header_container,
             self._back_btn,
@@ -1142,4 +760,8 @@ class CoursesWebViewPane(ft.Container):
             self._ext_btn,
         ):
             btn.icon_color = C.TEXT_PRIMARY
+        self._wv_back_btn.disabled_color = C.TEXT_SECONDARY
+        self._wv_fwd_btn.disabled_color = C.TEXT_SECONDARY
+        if self._host is not None:
+            self._host.update_theme()
         safe_control_update(self)

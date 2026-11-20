@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import logging
 from collections import Counter
+import platform_utils
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from gui.core.utils import (
     clean_course_name,
@@ -144,6 +145,76 @@ class DetailView(ft.Container):
         self._pending_file_mutation: tuple[MutationOperation, bool] | None = None
         self._view_generation = 0
         self._snapshot_load_generation = 0
+        self._pane_width: float | None = None
+
+    @staticmethod
+    def _normalize_width(width) -> float | None:
+        if width is None or isinstance(width, bool):
+            return None
+        try:
+            numeric = float(width)
+        except (TypeError, ValueError):
+            return None
+        if numeric > 0:
+            return numeric
+        return None
+
+    def _effective_width(self) -> float | None:
+        if getattr(self, "_pane_width", None) is not None:
+            return self._pane_width
+        page = getattr(self, "_page", None)
+        if page is not None:
+            for candidate in (
+                getattr(page, "width", None),
+                getattr(getattr(page, "window", None), "width", None),
+            ):
+                normalized = DetailView._normalize_width(candidate)
+                if normalized is not None:
+                    return normalized
+        return None
+
+    def _is_narrow(self) -> bool:
+        eff = self._effective_width()
+        if eff is not None:
+            return eff < 600.0
+        return bool(platform_utils.UI_IS_MOBILE)
+
+    def _sync_dialog_widths(self) -> None:
+        narrow = self._is_narrow()
+        eff = self._effective_width() or 360.0
+        if narrow:
+            edit_w = min(340.0, max(220.0, eff - 112.0))
+            del_w = min(320.0, max(220.0, eff - 112.0))
+        else:
+            edit_w = 340.0
+            del_w = 320.0
+        edit_content = getattr(self, "_file_edit_dialog_content", None)
+        if edit_content is not None:
+            edit_content.width = edit_w
+        del_content = getattr(self, "_delete_confirm_dialog_content", None)
+        if del_content is not None:
+            del_content.width = del_w
+
+    def _sync_responsive_layout(self) -> None:
+        narrow = self._is_narrow()
+        row = getattr(self, "_submission_actions_row", None)
+        if row is not None:
+            row.wrap = narrow
+        for btn_name in ("_submit_btn", "_finalize_btn"):
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.expand = not narrow
+        self._sync_dialog_widths()
+
+    def set_width(self, width: float) -> None:
+        """Apply active Pane-3 width and adapt narrow submission/dialog layout."""
+        self._pane_width = DetailView._normalize_width(width)
+        self._sync_responsive_layout()
+        try:
+            if self.page is not None:
+                self.update()
+        except Exception:
+            pass
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
@@ -315,19 +386,20 @@ class DetailView(ft.Container):
             bgcolor=C.BG, value="/",
         )
         self._edit_status = ft.Text("", size=12, visible=False)
+        self._file_edit_dialog_content = ft.Container(
+            content=ft.Column(controls=[
+                self._edit_filename,
+                self._edit_filepath,
+                self._edit_status,
+            ], spacing=12, tight=True),
+            width=340,
+        )
         self._file_edit_dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Chỉnh sửa file", size=16, weight=ft.FontWeight.BOLD,
                           color=C.TEXT_PRIMARY),
             bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=ft.Column(controls=[
-                    self._edit_filename,
-                    self._edit_filepath,
-                    self._edit_status,
-                ], spacing=12, tight=True),
-                width=340,
-            ),
+            content=self._file_edit_dialog_content,
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_edit_dialog,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
@@ -342,15 +414,16 @@ class DetailView(ft.Container):
         )
 
         self._delete_confirm_text = ft.Text("", size=13, color=C.TEXT_PRIMARY)
+        self._delete_confirm_dialog_content = ft.Container(
+            content=self._delete_confirm_text,
+            width=320,
+        )
         self._delete_confirm_dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Xác nhận xóa", size=16, weight=ft.FontWeight.BOLD,
                           color=C.CRITICAL),
             bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=self._delete_confirm_text,
-                width=320,
-            ),
+            content=self._delete_confirm_dialog_content,
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_delete_confirm,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
@@ -458,7 +531,7 @@ class DetailView(ft.Container):
                 ft.Row(controls=[
                     self._multiselect_btn,
                     self._batch_delete_btn,
-                ], spacing=8),
+                ], spacing=8, run_spacing=6, wrap=True),
                 self._edit_submitted_btn,
             ], spacing=8),
             bgcolor=C.SURFACE,
@@ -496,7 +569,7 @@ class DetailView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=C.SAFE,
-            padding=ft.Padding.symmetric(vertical=13),
+            padding=ft.Padding.symmetric(vertical=13, horizontal=16),
             border_radius=8,
             on_click=self._on_submit,
             ink=True,
@@ -516,7 +589,7 @@ class DetailView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=C.SAFE,
-            padding=ft.Padding.symmetric(vertical=13),
+            padding=ft.Padding.symmetric(vertical=13, horizontal=16),
             border_radius=8,
             on_click=self._on_finalize,
             ink=True,
@@ -584,6 +657,16 @@ class DetailView(ft.Container):
             visible=False,  
         )
 
+        self._submission_actions_row = ft.Row(
+            controls=[
+                self._pick_btn,
+                self._submit_btn,
+                self._finalize_btn,
+            ],
+            spacing=8,
+            run_spacing=8,
+            wrap=False,
+        )
         self._submission_area = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
@@ -597,11 +680,7 @@ class DetailView(ft.Container):
                 self._submission_statement,
                 self._upload_progress,
                 self._upload_status,
-                ft.Row(controls=[
-                    self._pick_btn,
-                    self._submit_btn,
-                    self._finalize_btn,
-                ], spacing=8),
+                self._submission_actions_row,
             ], spacing=10),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
@@ -657,6 +736,7 @@ class DetailView(ft.Container):
             tooltip="Mở trong trình duyệt",
             on_click=self._open_browser,
         )
+        self._sync_responsive_layout()
 
     def _init_layout(self, on_close):
         self._back_icon = ft.Icon(
@@ -846,6 +926,9 @@ class DetailView(ft.Container):
 
     def update_detail(self, data: dict):
         self._view_generation += 1
+        sync_resp = getattr(self, "_sync_responsive_layout", None)
+        if callable(sync_resp):
+            sync_resp()
         self._loading_bar.visible  = False
         self._error_banner.visible = False
         self._title_text.value     = data.get("title", "Không có tiêu đề")
@@ -1067,6 +1150,7 @@ class DetailView(ft.Container):
         if not isinstance(status_data, dict):
             status_data = {}
         rows = []
+        label_w = 110 if (callable(getattr(self, "_is_narrow", None)) and self._is_narrow()) else 130
         has_submission_status = False
         self._submission_status_value.value = "Đang đồng bộ với Moodle..."
         self._submission_status_value.color = C.TEXT_SECONDARY
@@ -1111,7 +1195,7 @@ class DetailView(ft.Container):
 
                 rows.append(
                     ft.Row(controls=[
-                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
+                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=label_w),
                         value_control,
                     ], spacing=8)
                 )
@@ -1124,7 +1208,7 @@ class DetailView(ft.Container):
                             "Trạng thái nộp bài",
                             size=12,
                             color=C.TEXT_SECONDARY,
-                            width=130,
+                            width=label_w,
                         ),
                         self._submission_status_value,
                     ],
@@ -1144,13 +1228,13 @@ class DetailView(ft.Container):
         time_limit = details.get("time_limit")
         if attempts:
             quiz_rows.append(ft.Row(controls=[
-                ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=130),
-                ft.Text(attempts, size=12, color=C.TEXT_PRIMARY),
+                ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=label_w),
+                ft.Text(attempts, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
         if time_limit:
             quiz_rows.append(ft.Row(controls=[
-                ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=130),
-                ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY),
+                ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=label_w),
+                ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
         for info in details.get("quiz_info", []):
             if info and attempts not in info and time_limit not in info:
@@ -1979,6 +2063,9 @@ class DetailView(ft.Container):
         self._edit_status.value = ""
         self._edit_status.visible = False
 
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._file_edit_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -2011,6 +2098,9 @@ class DetailView(ft.Container):
                 )
         else:
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -2042,6 +2132,9 @@ class DetailView(ft.Container):
         else:
             file_list = "\n".join(f"  • {n}" for n in names)
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa {len(names)} file?\n{file_list}"
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)

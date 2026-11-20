@@ -14,7 +14,14 @@ from gui.components.courses._shared import (
     safe_control_update,
 )
 from gui.core.theme import C
-from gui.view_models.courses_state import CoursesState
+from gui.view_models.courses_state import CoursesState, is_compact_height
+import platform_utils
+
+
+def _search_hint_text() -> str:
+    if platform_utils.UI_IS_MOBILE:
+        return "Tìm tên môn, mã HP, giảng viên..."
+    return "Tìm tên môn, mã HP, giảng viên... (Ctrl+K)"
 
 
 def _safe_progress(course: CourseSummary) -> Optional[float]:
@@ -67,6 +74,7 @@ class CourseListPane(ft.Container):
         self._card_map: dict[str, ft.Container] = {}
         self._prev_selected_key: Optional[str] = None
         self._last_cards_sig: Optional[tuple] = None
+        self._recent_expanded: bool = False
 
         self._title_text = ft.Text(
             "Môn học", size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY, expand=True
@@ -89,7 +97,7 @@ class CourseListPane(ft.Container):
             on_click=self._handle_clear_search,
         )
         self._search_field = ft.TextField(
-            hint_text="Tìm tên môn, mã HP, giảng viên... (Ctrl+K)",
+            hint_text=_search_hint_text(),
             prefix_icon=ft.Icons.SEARCH_ROUNDED,
             suffix=self._clear_search_btn,
             dense=True,
@@ -208,19 +216,25 @@ class CourseListPane(ft.Container):
             for key, label in options
         ]
 
+    def _toggle_recent_expanded(self) -> None:
+        self._recent_expanded = not self._recent_expanded
+        if self._last_state is not None:
+            self.render(self._last_state)
+
+    @staticmethod
+    def _recent_subtitle(entry: RecentMaterialEntry) -> str:
+        fname = (entry.file_name or "").strip()
+        if fname.lower() in {"index.html", "index.htm", "structure"}:
+            fname = ""
+        return fname or entry.title or "Tài liệu vừa xem"
+
     def _build_recent_banner(self, state: CoursesState) -> Optional[ft.Control]:
         if not state.recent_items:
             return None
-        recent = state.recent_items[0]
-        fname = (recent.file_name or "").strip()
-        if fname.lower() in {"index.html", "index.htm", "structure"}:
-            fname = ""
-        subtitle = fname or recent.title or "Tài liệu vừa xem"
-        return ft.Container(
-            bgcolor=C.SURFACE_ELEVATED,
-            border=ft.Border.all(1, C.BORDER),
-            border_radius=10,
-            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+        items = list(state.recent_items[:5])
+        recent = items[0]
+        subtitle = self._recent_subtitle(recent)
+        primary_row = ft.Container(
             ink=True,
             on_click=(
                 (lambda _e, entry=recent: self._on_open_recent(entry))
@@ -246,9 +260,81 @@ class CourseListPane(ft.Container):
                             ),
                         ],
                     ),
-                    ft.Icon(ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, size=18, color=C.TEXT_SECONDARY),
+                    *(
+                        [
+                            ft.IconButton(
+                                icon=(
+                                    ft.Icons.EXPAND_LESS_ROUNDED
+                                    if self._recent_expanded
+                                    else ft.Icons.EXPAND_MORE_ROUNDED
+                                ),
+                                icon_size=18,
+                                icon_color=C.TEXT_SECONDARY,
+                                tooltip=(
+                                    "Thu gọn"
+                                    if self._recent_expanded
+                                    else f"Xem thêm {len(items) - 1} mục gần đây"
+                                ),
+                                width=44,
+                                height=44,
+                                padding=ft.Padding.all(8),
+                                size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
+                                on_click=lambda _e: self._toggle_recent_expanded(),
+                            )
+                        ]
+                        if len(items) > 1
+                        else [
+                            ft.Icon(
+                                ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED,
+                                size=18,
+                                color=C.TEXT_SECONDARY,
+                            )
+                        ]
+                    ),
                 ],
             ),
+        )
+        banner_controls: list[ft.Control] = [primary_row]
+        if self._recent_expanded and len(items) > 1:
+            for extra in items[1:]:
+                extra_sub = self._recent_subtitle(extra)
+                banner_controls.append(ft.Divider(height=1, thickness=0.6, color=C.BORDER))
+                banner_controls.append(
+                    ft.Container(
+                        ink=True,
+                        padding=ft.Padding.symmetric(vertical=4),
+                        on_click=(
+                            (lambda _e, entry=extra: self._on_open_recent(entry))
+                            if callable(self._on_open_recent)
+                            else None
+                        ),
+                        content=ft.Row(
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Icon(
+                                    ft.Icons.ARTICLE_OUTLINED,
+                                    size=15,
+                                    color=C.TEXT_SECONDARY,
+                                ),
+                                ft.Text(
+                                    f"{extra.course_name} • {extra_sub}",
+                                    size=12,
+                                    color=C.TEXT_PRIMARY,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    expand=True,
+                                ),
+                            ],
+                        ),
+                    )
+                )
+        return ft.Container(
+            bgcolor=C.SURFACE_ELEVATED,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            content=ft.Column(spacing=4, controls=banner_controls),
         )
 
     def _build_skeleton_cards(self) -> list[ft.Control]:
@@ -279,7 +365,9 @@ class CourseListPane(ft.Container):
             )
         return (C.SURFACE, ft.Border.all(1, C.BORDER))
 
-    def _build_course_card(self, course: CourseSummary, *, selected: bool) -> ft.Container:
+    def _build_course_card(
+        self, course: CourseSummary, *, selected: bool, is_mobile: bool = False
+    ) -> ft.Container:
         badges: list[ft.Control] = []
         if course.source == "thnn":
             badges.append(_badge_pill("THNN", bgcolor=C.ACCENT, text_color=C.ON_ACCENT))
@@ -299,31 +387,43 @@ class CourseListPane(ft.Container):
             badges.append(_badge_pill("Mới", bgcolor=C.UPDATE, text_color=C.ON_UPDATE))
 
         subtitle_parts = [p for p in (course.course_code, course.teacher_name) if p]
+        top_controls: list[ft.Control] = [
+            ft.Text(
+                course.display_name or course.fullname,
+                size=14,
+                weight=ft.FontWeight.W_600,
+                color=C.TEXT_PRIMARY,
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+                expand=True,
+            ),
+            ft.IconButton(
+                icon=ft.Icons.STAR_ROUNDED if course.is_pinned else ft.Icons.STAR_BORDER_ROUNDED,
+                icon_color=C.WARNING if course.is_pinned else C.TEXT_SECONDARY,
+                icon_size=18,
+                tooltip="Bỏ ghim" if course.is_pinned else "Ghim môn học",
+                width=44,
+                height=44,
+                padding=ft.Padding.all(8),
+                size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
+                on_click=lambda _e, key=course.course_key: (
+                    self._on_toggle_pin(key) if callable(self._on_toggle_pin) else None
+                ),
+            ),
+        ]
+        if is_mobile:
+            top_controls.append(
+                ft.Icon(
+                    ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                    size=18,
+                    color=C.TEXT_SECONDARY,
+                )
+            )
         card_controls: list[ft.Control] = [
             ft.Row(
-                spacing=6,
-                vertical_alignment=ft.CrossAxisAlignment.START,
-                controls=[
-                    ft.Text(
-                        course.display_name or course.fullname,
-                        size=14,
-                        weight=ft.FontWeight.W_600,
-                        color=C.TEXT_PRIMARY,
-                        max_lines=2,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                        expand=True,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.STAR_ROUNDED if course.is_pinned else ft.Icons.STAR_BORDER_ROUNDED,
-                        icon_color=C.WARNING if course.is_pinned else C.TEXT_SECONDARY,
-                        icon_size=18,
-                        tooltip="Bỏ ghim" if course.is_pinned else "Ghim môn học",
-                        style=ft.ButtonStyle(padding=ft.Padding.all(4)),
-                        on_click=lambda _e, key=course.course_key: (
-                            self._on_toggle_pin(key) if callable(self._on_toggle_pin) else None
-                        ),
-                    ),
-                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=top_controls,
             )
         ]
         if badges:
@@ -412,40 +512,81 @@ class CourseListPane(ft.Container):
     def render(self, state: CoursesState, *, update: bool = True) -> None:
         """Render search bar, chips, notices, recent resume, and filtered courses."""
         self._last_state = state
+        self._search_field.hint_text = _search_hint_text()
         if (self._search_field.value or "") != state.search_query:
             self._search_field.value = state.search_query
         self._clear_search_btn.visible = bool(state.search_query)
+
+        is_mobile = state.layout_mode == "mobile"
+        short_vp = is_compact_height(state.viewport_height)
+        scroll_banners = is_mobile or short_vp
+        self.padding = ft.Padding.symmetric(horizontal=12, vertical=6 if short_vp else 12)
+        if isinstance(self.content, ft.Column):
+            self.content.spacing = 6 if short_vp else 10
 
         self._chips_row.controls = self._build_semester_chips(state)
         self._progress_strip.visible = bool(state.loading_catalog)
         self._sync_status_note.visible = bool(state.loading_catalog)
 
-        if state.offline_notice:
-            self._notice_slot.controls = [build_offline_banner(state.offline_notice)]
-            self._notice_slot.visible = True
-        else:
+        offline_banner = (
+            build_offline_banner(
+                state.offline_notice,
+                on_retry=self._on_refresh_catalog,
+            )
+            if state.offline_notice
+            else None
+        )
+        recent_banner = self._build_recent_banner(state)
+
+        if scroll_banners:
             self._notice_slot.controls = []
             self._notice_slot.visible = False
+            self._recent_slot.controls = []
+            self._recent_slot.visible = False
+            top_banners = [b for b in (offline_banner, recent_banner) if b is not None]
+        else:
+            self._notice_slot.controls = [offline_banner] if offline_banner is not None else []
+            self._notice_slot.visible = offline_banner is not None
+            self._recent_slot.controls = [recent_banner] if recent_banner is not None else []
+            self._recent_slot.visible = recent_banner is not None
+            top_banners = []
 
-        recent_banner = self._build_recent_banner(state)
-        self._recent_slot.controls = [recent_banner] if recent_banner is not None else []
-        self._recent_slot.visible = recent_banner is not None
+        effective_selected_key = (
+            state.selected_course_key
+            if (not is_mobile or state.in_detail_mobile)
+            else None
+        )
 
         filtered = state.filtered_courses()
         if state.loading_catalog and not state.courses:
             self._card_map.clear()
             self._last_cards_sig = None
-            self._cards_list.controls = self._build_skeleton_cards()
+            self._cards_list.controls = [*top_banners, *self._build_skeleton_cards()]
         elif not filtered:
             self._card_map.clear()
             self._last_cards_sig = None
-            self._cards_list.controls = [self._build_empty_state(state)]
+            self._cards_list.controls = [*top_banners, self._build_empty_state(state)]
         else:
+            banner_sig = (
+                (
+                    state.offline_notice,
+                    tuple(
+                        (r.course_key, r.cmid, r.file_name, r.opened_at)
+                        for r in state.recent_items[:5]
+                    ),
+                    self._recent_expanded,
+                )
+                if scroll_banners
+                else None
+            )
             cur_sig = (
                 C.BG,
                 C.SURFACE,
                 C.ACCENT,
                 C.BORDER,
+                is_mobile,
+                scroll_banners,
+                banner_sig,
                 tuple(
                     (
                         c.course_key,
@@ -463,29 +604,30 @@ class CourseListPane(ft.Container):
             )
             if cur_sig == self._last_cards_sig and len(self._card_map) == len(filtered):
                 # O(1) in-place selection update: zero widget tree rebuild & preserves scroll!
-                if self._prev_selected_key != state.selected_course_key:
+                if self._prev_selected_key != effective_selected_key:
                     for key_change, is_sel in (
                         (self._prev_selected_key, False),
-                        (state.selected_course_key, True),
+                        (effective_selected_key, True),
                     ):
                         if key_change and key_change in self._card_map:
                             bg, bdr = self._card_selection_Visuals(is_sel)
                             card_ref = self._card_map[key_change]
                             card_ref.bgcolor = bg
                             card_ref.border = bdr
-                    self._prev_selected_key = state.selected_course_key
+                    self._prev_selected_key = effective_selected_key
             else:
                 new_map: dict[str, ft.Container] = {}
-                new_controls: list[ft.Control] = []
+                new_controls: list[ft.Control] = list(top_banners)
                 for course in filtered:
                     card_ctrl = self._build_course_card(
                         course,
-                        selected=(course.course_key == state.selected_course_key),
+                        selected=(course.course_key == effective_selected_key),
+                        is_mobile=is_mobile,
                     )
                     new_map[course.course_key] = card_ctrl
                     new_controls.append(card_ctrl)
                 self._card_map = new_map
-                self._prev_selected_key = state.selected_course_key
+                self._prev_selected_key = effective_selected_key
                 self._last_cards_sig = cur_sig
                 self._cards_list.controls = new_controls
         if update:
@@ -497,6 +639,7 @@ class CourseListPane(ft.Container):
         self._title_text.color = C.TEXT_PRIMARY
         self._refresh_btn.icon_color = C.TEXT_SECONDARY
         self._clear_search_btn.icon_color = C.TEXT_SECONDARY
+        self._search_field.hint_text = _search_hint_text()
         self._search_field.bgcolor = C.SURFACE
         self._search_field.color = C.TEXT_PRIMARY
         self._search_field.border_color = C.BORDER

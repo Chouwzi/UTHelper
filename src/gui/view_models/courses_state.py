@@ -22,6 +22,7 @@ from core.courses.providers import is_synthetic_moodle_attachment
 from core.html_compat import BS4_PARSER
 
 CoursesLayoutMode = Literal["mobile", "tablet_portrait", "wide"]
+COMPACT_HEIGHT_BREAKPOINT = 500.0
 
 _RESOURCE_MODNAMES = frozenset({"resource", "folder", "url", "googlemeet"})
 _LINK_MODNAMES = frozenset({"url", "googlemeet"})
@@ -70,6 +71,17 @@ def compute_courses_layout_mode(width: float) -> CoursesLayoutMode:
     if numeric >= 600:
         return "tablet_portrait"
     return "mobile"
+
+
+def is_compact_height(height: object) -> bool:
+    """Return True when finite positive viewport height is below 500dp (phone landscape)."""
+    if height is None or isinstance(height, bool):
+        return False
+    try:
+        numeric = float(height)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and 0 < numeric < COMPACT_HEIGHT_BREAKPOINT
 
 
 def format_file_size(num_bytes: int) -> str:
@@ -263,6 +275,8 @@ class CoursesState:
     offline_notice: str = ""
     in_detail_mobile: bool = False
     pane3_expanded: bool = False
+    layout_mode: CoursesLayoutMode = "wide"
+    viewport_height: float = 760.0
     user_groups: list[dict[str, Any]] = field(default_factory=list)
 
     def set_courses(self, courses: list[CourseSummary]) -> None:

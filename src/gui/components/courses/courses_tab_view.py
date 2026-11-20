@@ -17,7 +17,7 @@ from core.courses.models import (
     CourseSummary,
     RecentMaterialEntry,
 )
-from gui.components.courses._shared import PaneLoadingOverlay
+from gui.components.courses._shared import PaneLoadingOverlay, build_viewer_header
 from gui.components.courses.adaptive_nav import RAIL_BREAKPOINT, RAIL_WIDTH
 from gui.components.courses.course_detail_pane import CourseDetailPane
 from gui.components.courses.course_list_pane import CourseListPane
@@ -28,9 +28,11 @@ from gui.view_models.courses_state import (
     compute_courses_layout_mode,
     extract_readable_html_and_links,
     format_file_size,
+    is_compact_height,
     real_module_attachments,
     safe_http_url,
 )
+import platform_utils
 
 if TYPE_CHECKING:
     from core.courses.catalog_service import CourseCatalogService
@@ -71,6 +73,7 @@ class CoursesTabView(ft.Container):
         on_open_inline_page: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         on_open_custom_activity: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         on_course_loaded: Optional[Callable[[CourseSummary, list[Any]], Any]] = None,
+        on_immersive_changed: Optional[Callable[[bool], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, **kwargs)
@@ -84,10 +87,18 @@ class CoursesTabView(ft.Container):
         self._on_open_inline_page = on_open_inline_page
         self._on_open_custom_activity = on_open_custom_activity
         self._on_course_loaded = on_course_loaded
+        self._on_immersive_changed = on_immersive_changed
 
         self._state = CoursesState()
         self._current_width: float = 1100.0
         self._layout_mode: CoursesLayoutMode = "wide"
+        self._current_height: float = 760.0
+        self._compact_height: bool = False
+        self._has_explicit_width: bool = False
+        self._immersive_active: bool = False
+        self._tab_hidden: bool = False
+        self._state.layout_mode = self._layout_mode
+        self._state.viewport_height = self._current_height
         self._overlays: list[ft.Control] = []
         self._theme_snapshot = semantic_palette()
         self._catalog_request_seq = 0
@@ -143,6 +154,14 @@ class CoursesTabView(ft.Container):
         self._tablet_content = ft.Container(expand=True, width=820.0)
         self._tablet_wrapper = ft.Container(
             expand=True, alignment=ft.Alignment.TOP_CENTER, content=self._tablet_content
+        )
+        self._narrow_list_host = ft.Container(expand=True)
+        self._narrow_workspace_host = ft.Container(
+            expand=True, bgcolor=C.BG, visible=False
+        )
+        self._narrow_stack = ft.Stack(
+            expand=True,
+            controls=[self._narrow_list_host, self._narrow_workspace_host],
         )
         self._main_host = ft.Container(expand=True)
         self._root_stack = ft.Stack(expand=True, controls=[self._main_host])
@@ -221,6 +240,10 @@ class CoursesTabView(ft.Container):
         if self._layout_mode == "wide":
             expanded = bool(self._state.pane3_expanded)
             self._tablet_content.content = None
+            self._narrow_list_host.content = None
+            self._narrow_workspace_host.content = None
+            self._narrow_workspace_host.visible = False
+            self._list_pane_host.content = self._list_pane
             self._pane3_host.content = self._workspace_stack
             self._list_pane_host.width = 0 if expanded else 320
             self._list_pane_host.opacity = 0.0 if expanded else 1.0
@@ -229,20 +252,72 @@ class CoursesTabView(ft.Container):
             self._main_host.content = self._wide_row
             return
 
+        self._list_pane_host.content = None
         self._pane3_host.content = None
         show_workspace = bool(self._overlays) or (
             self._state.in_detail_mobile and self._state.selected_course() is not None
         )
-        active_pane: ft.Control = (
-            self._workspace_stack if show_workspace else self._list_pane
-        )
+        self._narrow_list_host.content = self._list_pane
+        self._narrow_list_host.opacity = 0.0 if show_workspace else 1.0
+        self._narrow_list_host.ignore_interactions = show_workspace
+        self._narrow_workspace_host.content = self._workspace_stack
+        self._narrow_workspace_host.bgcolor = C.BG
+        self._narrow_workspace_host.visible = show_workspace
         if self._layout_mode == "tablet_portrait":
-            self._tablet_content.content = active_pane
+            self._tablet_content.content = self._narrow_stack
             self._tablet_content.width = min(820.0, max(320.0, self._current_width))
             self._main_host.content = self._tablet_wrapper
         else:
             self._tablet_content.content = None
-            self._main_host.content = active_pane
+            self._main_host.content = self._narrow_stack
+
+    def set_on_immersive_changed(
+        self, callback: Optional[Callable[[bool], None]]
+    ) -> None:
+        """Attach or replace the callback notifying shell nav of mobile immersive overlays."""
+        self._on_immersive_changed = callback
+        self._sync_immersive_state(force=True)
+
+    def _compute_immersive(self) -> bool:
+        if (
+            not self._overlays
+            or self._tab_hidden
+            or not bool(getattr(self, "visible", True))
+        ):
+            return False
+        return self._layout_mode == "mobile" or (
+            bool(platform_utils.UI_IS_MOBILE) and not self._has_explicit_width
+        )
+
+    def _sync_immersive_state(self, *, force: bool = False) -> None:
+        desired = self._compute_immersive()
+        if not force and desired == self._immersive_active:
+            return
+        self._immersive_active = desired
+        if callable(self._on_immersive_changed):
+            try:
+                self._on_immersive_changed(desired)
+            except Exception:
+                logger.debug("on_immersive_changed callback failed", exc_info=True)
+
+    def _overlay_pane_width(self) -> float:
+        if self._has_explicit_width and self._current_width > 0:
+            if self._layout_mode == "wide":
+                list_w = 0.0 if self._state.pane3_expanded else 321.0
+                return max(240.0, self._current_width - list_w)
+            if self._layout_mode == "tablet_portrait":
+                return min(820.0, max(240.0, self._current_width))
+            return max(240.0, self._current_width)
+        return self._compute_pane3_bounds()[2]
+
+    def _sync_overlay_widths(self) -> None:
+        if not self._overlays:
+            return
+        pane_w = self._overlay_pane_width()
+        for item in self._overlays:
+            setter = getattr(item, "set_width", None)
+            if callable(setter):
+                setter(pane_w)
 
     def _compute_pane3_bounds(self) -> tuple[float, float, float, float]:
         page = self._get_page()
@@ -254,6 +329,7 @@ class CoursesTabView(ft.Container):
         page_h = float(
             getattr(page, "height", 0)
             or getattr(getattr(page, "window", None), "height", 0)
+            or self._current_height
             or 760.0
         )
         is_web = bool(getattr(page, "web", False))
@@ -276,7 +352,7 @@ class CoursesTabView(ft.Container):
         )
         left = rail_w + list_w
         top = 0.0 if is_web else 36.0
-        bottom_inset = 0.0 if has_rail else 80.0
+        bottom_inset = 0.0 if (has_rail or self._immersive_active) else 80.0
         width = max(240.0, content_w - list_w)
         height = max(200.0, page_h - top - bottom_inset)
         return (left, top, width, height)
@@ -309,6 +385,7 @@ class CoursesTabView(ft.Container):
             return
         self._state.pane3_expanded = target
         self._sync_overlay_expand_buttons()
+        self._sync_overlay_widths()
         self._render()
         self._sync_pane3_bounds()
 
@@ -318,6 +395,8 @@ class CoursesTabView(ft.Container):
 
     def on_tab_hidden(self) -> None:
         """Suspend active native overlays (e.g. WebView2) when switching away."""
+        self._tab_hidden = True
+        self._sync_immersive_state()
         for item in self._overlays:
             suspend_fn = getattr(item, "suspend", None)
             if callable(suspend_fn):
@@ -325,6 +404,8 @@ class CoursesTabView(ft.Container):
 
     def on_tab_shown(self) -> None:
         """Resume top active overlay (e.g. WebView2) when returning to Courses tab."""
+        self._tab_hidden = False
+        self._sync_immersive_state()
         if not self._overlays:
             return
         for item in self._overlays[:-1]:
@@ -337,6 +418,8 @@ class CoursesTabView(ft.Container):
         self._sync_pane3_bounds()
 
     def _render(self) -> None:
+        self._state.layout_mode = self._layout_mode
+        self._state.viewport_height = self._current_height
         self._rebuild_layout()
         self._list_pane.render(self._state, update=False)
         self._detail_pane.render(
@@ -345,17 +428,50 @@ class CoursesTabView(ft.Container):
         self._safe_update()
         self._sync_pane3_bounds()
 
-    def set_width(self, width: float) -> None:
-        """Apply viewport width and adapt Master-Detail layout breakpoint."""
+    def _apply_width_state(self, width: float) -> None:
         try:
             numeric = float(width)
         except (TypeError, ValueError):
             numeric = 0.0
+        self._has_explicit_width = True
         self._current_width = numeric if numeric > 0 else 0.0
         self._layout_mode = compute_courses_layout_mode(width)
+        self._state.layout_mode = self._layout_mode
         if self._layout_mode != "wide" and self._state.pane3_expanded:
             self._state.pane3_expanded = False
         self._sync_overlay_expand_buttons()
+        self._sync_overlay_widths()
+        self._sync_immersive_state()
+
+    def _apply_height_state(self, height: float) -> None:
+        if height is not None and not isinstance(height, bool):
+            try:
+                numeric = float(height)
+            except (TypeError, ValueError):
+                numeric = 0.0
+            if numeric > 0:
+                self._current_height = numeric
+        self._compact_height = is_compact_height(self._current_height)
+        self._state.viewport_height = self._current_height
+
+    def set_width(self, width: float) -> None:
+        """Apply viewport width and adapt Master-Detail layout breakpoint."""
+        self._apply_width_state(width)
+        self._render()
+
+    def set_viewport_height(self, height: float) -> None:
+        """Apply viewport height and adapt compact landscape presentation."""
+        self._apply_height_state(height)
+        self._render()
+
+    def set_height(self, height: float) -> None:
+        """Alias for set_viewport_height."""
+        self.set_viewport_height(height)
+
+    def set_viewport_size(self, width: float, height: float) -> None:
+        """Apply both viewport width and height in a single render pass."""
+        self._apply_width_state(width)
+        self._apply_height_state(height)
         self._render()
 
     @staticmethod
@@ -392,12 +508,16 @@ class CoursesTabView(ft.Container):
                 control.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
             except Exception:
                 pass
+        width_setter = getattr(control, "set_width", None)
+        if callable(width_setter):
+            width_setter(self._overlay_pane_width())
         setter = getattr(control, "set_expanded", None)
         if callable(setter):
             setter(self._state.pane3_expanded, visible=(self._layout_mode == "wide"))
         self._overlays.append(control)
         self._workspace_stack.controls = [self._detail_pane, *self._overlays]
         self._rebuild_layout()
+        self._sync_immersive_state()
         self._safe_update()
         self._sync_pane3_bounds()
 
@@ -413,6 +533,7 @@ class CoursesTabView(ft.Container):
             if callable(resume_fn):
                 resume_fn()
         self._rebuild_layout()
+        self._sync_immersive_state()
         self._safe_update()
         self._sync_pane3_bounds()
         return True
@@ -426,13 +547,22 @@ class CoursesTabView(ft.Container):
         self._overlays.clear()
         self._workspace_stack.controls = [self._detail_pane]
         self._rebuild_layout()
+        self._sync_immersive_state()
         if update:
             self._safe_update()
 
     def handle_back(self) -> bool:
-        """Dismiss Pane-3 overlay, collapse 2+3 expand, or exit mobile detail view."""
-        if self.pop_overlay():
-            return True
+        """Delegate back to top overlay sub-stack, dismiss overlay, collapse 2+3 expand, or exit mobile detail."""
+        if self._overlays:
+            top = self._overlays[-1]
+            top_back = getattr(top, "handle_back", None)
+            if callable(top_back):
+                try:
+                    if top_back():
+                        return True
+                except Exception:
+                    logger.exception("Overlay handle_back() failed")
+            return self.pop_overlay()
         if self._layout_mode == "wide" and self._state.pane3_expanded:
             self.set_pane3_expanded(False)
             return True
@@ -947,7 +1077,9 @@ class CoursesTabView(ft.Container):
             *([ft.Divider(color=C.BORDER), *link_controls] if link_controls else []),
         ]
         self.push_overlay(
-            self._build_modal_overlay(mod.name, body_controls),
+            self._build_modal_overlay(
+                mod.name, body_controls, subtitle="Nội dung chi tiết"
+            ),
             tag=f"courses_modal:inline:{mod.cmid}",
         )
 
@@ -1002,17 +1134,65 @@ class CoursesTabView(ft.Container):
                 )
             )
         self.push_overlay(
-            self._build_modal_overlay(mod.name, rows),
+            self._build_modal_overlay(
+                mod.name,
+                rows,
+                subtitle=f"{len(mod.attachments)} tệp đính kèm",
+            ),
             tag=f"courses_modal:folder:{mod.cmid}",
         )
 
-    def _build_modal_overlay(self, title: str, body_controls: list[ft.Control]) -> ft.Control:
+    def _build_modal_overlay(
+        self,
+        title: str,
+        body_controls: list[ft.Control],
+        *,
+        subtitle: str = "",
+    ) -> ft.Control:
+        is_mobile = self._layout_mode == "mobile" or (
+            bool(platform_utils.UI_IS_MOBILE) and not self._has_explicit_width
+        )
+        if is_mobile:
+            header_ctrl, _back_btn, _title_txt, _sub_txt = build_viewer_header(
+                title=title or "Chi tiết",
+                subtitle=subtitle,
+                back_tooltip="Quay lại",
+                on_back=lambda _e: self.pop_overlay(),
+                trailing_actions=[],
+            )
+            return ft.Container(
+                expand=True,
+                bgcolor=C.BG,
+                content=ft.Column(
+                    expand=True,
+                    spacing=0,
+                    controls=[
+                        header_ctrl,
+                        ft.Container(
+                            expand=True,
+                            padding=ft.Padding.all(14),
+                            content=ft.Column(
+                                expand=True,
+                                spacing=8,
+                                scroll=ft.ScrollMode.AUTO,
+                                controls=body_controls,
+                            ),
+                        ),
+                    ],
+                ),
+            )
+
+        modal_width = (
+            min(720.0, max(280.0, self._current_width - 32.0))
+            if self._current_width > 0
+            else 720.0
+        )
         card = ft.Container(
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
             border_radius=14,
             padding=ft.Padding.all(16),
-            width=720,
+            width=modal_width,
             content=ft.Column(
                 spacing=12,
                 expand=True,
@@ -1058,7 +1238,12 @@ class CoursesTabView(ft.Container):
         self._dispose_overlay(target)
         self._overlays = [item for item in self._overlays if item is not target]
         self._workspace_stack.controls = [self._detail_pane, *self._overlays]
+        if self._overlays:
+            resume_fn = getattr(self._overlays[-1], "resume", None)
+            if callable(resume_fn):
+                resume_fn()
         self._rebuild_layout()
+        self._sync_immersive_state()
         self._safe_update()
         self._sync_pane3_bounds()
 
@@ -1211,6 +1396,7 @@ class CoursesTabView(ft.Container):
         """Apply updated global palette tokens across panes and open overlays once."""
         current = semantic_palette()
         self.bgcolor = C.BG
+        self._narrow_workspace_host.bgcolor = C.BG
         self._split_divider.color = C.BORDER
         self._list_pane.update_theme(update=False, rerender=False)
         self._detail_pane.update_theme(update=False, rerender=False)
