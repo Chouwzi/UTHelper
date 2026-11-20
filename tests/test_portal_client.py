@@ -109,3 +109,75 @@ def test_portal_client_rejects_login_without_token():
         pass
     else:
         raise AssertionError("missing Portal token was accepted")
+
+
+def test_portal_client_caches_the_token_per_account_and_clear_token_drops_it():
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": []})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    assert client._cached_token("student") == ""
+    assert client.fetch_day(date(2026, 8, 11), "student", "secret") == ()
+
+    # Same account replays the cached token...
+    assert client._cached_token("student") == "jwt-token"
+    # ...a different account never does.
+    assert client._cached_token("other-student") == ""
+
+    client.clear_token()
+    assert client._cached_token("student") == ""
+
+
+def test_portal_client_fetch_started_before_clear_token_never_restores_it():
+    """A login finishing after clear_token() must not resurrect the session."""
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            # The account is switched/logged out while this login is on the wire.
+            client.clear_token()
+            return _Response({"success": True, "token": "late-token"})
+        return _Response({"success": True, "body": []})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    assert client.fetch_day(date(2026, 8, 11), "student", "secret") == ()
+    assert client._cached_token("student") == ""
+
+
+def test_portal_client_store_token_after_a_newer_clear_is_accepted():
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response({"success": True, "body": []}),
+    )
+
+    client.clear_token()
+    client._store_token("fresh-token", "student", client._current_generation())
+
+    assert client._cached_token("student") == "fresh-token"
+
+
+def test_portal_client_rejected_stale_login_keeps_the_newer_token():
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response(
+            {"success": False, "message": "invalid"}
+        ),
+    )
+    stale_generation = client._current_generation()
+    client.clear_token()
+    client._store_token("fresh-token", "student", client._current_generation())
+
+    try:
+        client._login("student", "wrong", stale_generation)
+    except PortalAuthenticationError:
+        pass
+    else:
+        raise AssertionError("rejected login was accepted")
+
+    assert client._cached_token("student") == "fresh-token"
+

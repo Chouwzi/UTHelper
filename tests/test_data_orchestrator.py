@@ -79,10 +79,12 @@ class TestDetailCache:
     def test_cache_ttl_expiry(self):
         orch = self._make_orchestrator()
         orch._detail_cache_ttl_seconds = 0  # Expire immediately
-        orch._set_cached_detail("http://test.com/1", {"title": "Old"})
-        # Force time to pass (TTL = 0, any time > 0 is expired)
-        time.sleep(0.01)
-        result = orch._get_cached_detail("http://test.com/1")
+        with patch(
+            "core.data_orchestrator.time.monotonic",
+            side_effect=[100.0, 100.01],
+        ):
+            orch._set_cached_detail("http://test.com/1", {"title": "Old"})
+            result = orch._get_cached_detail("http://test.com/1")
         assert result is None  # Should be expired
 
     def test_cache_max_entries_eviction(self):

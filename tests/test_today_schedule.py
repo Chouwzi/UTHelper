@@ -274,6 +274,38 @@ def test_coordinator_exposes_auth_required_without_calling_network(tmp_path):
     assert states[-1].status is ScheduleLoadStatus.AUTH_REQUIRED
 
 
+def test_cached_snapshot_is_never_served_without_credentials(tmp_path):
+    """A cached day is only a stand-in for a fetch the same account can make.
+
+    Regression: ``ensure_today`` (and the ``refresh("startup")`` shortcut it
+    falls back to) used to publish READY from the cache even with blank
+    credentials, hiding the login prompt behind another account's schedule.
+    """
+    now = datetime(2026, 8, 11, 8, 0)
+    cache = TodayScheduleCache(cache_dir=tmp_path, namespace="portal|student")
+    cache.save(
+        TodayScheduleSnapshot(
+            schedule_date=now.date(),
+            sessions=(_session(),),
+            fetched_at=datetime.combine(now.date(), time(0, 0)),
+        )
+    )
+    states = []
+    coordinator = TodayScheduleCoordinator(
+        fetch_day=lambda *_: (_ for _ in ()).throw(AssertionError("network called")),
+        cache=cache,
+        credentials_provider=lambda: ("", ""),
+        state_sink=states.append,
+        now_provider=lambda: now,
+    )
+
+    asyncio.run(coordinator.ensure_today())
+    assert states[-1].status is ScheduleLoadStatus.AUTH_REQUIRED
+
+    asyncio.run(coordinator.refresh("startup"))
+    assert states[-1].status is ScheduleLoadStatus.AUTH_REQUIRED
+
+
 def test_concurrent_startup_and_fast_expand_coalesce_to_one_portal_fetch(tmp_path):
     calls = []
 
@@ -299,3 +331,82 @@ def test_concurrent_startup_and_fast_expand_coalesce_to_one_portal_fetch(tmp_pat
     asyncio.run(run_both())
 
     assert calls == ["fetch"]
+
+
+def test_refresh_discards_stale_result_when_cache_replaced_mid_flight(tmp_path):
+    """An account switch during refresh must not publish or save the old data.
+
+    Regression: refresh() used to publish READY for the previous account's
+    fetch even after replace_cache() had moved the view to the new account.
+    """
+    import threading
+
+    now = datetime(2026, 8, 11, 8, 0)
+    old_cache = TodayScheduleCache(cache_dir=tmp_path, namespace="portal|old")
+    new_cache = TodayScheduleCache(cache_dir=tmp_path, namespace="portal|new")
+    started = threading.Event()
+    gate = threading.Event()
+    states = []
+
+    def fetcher(target_date, username, password):
+        started.set()
+        assert gate.wait(timeout=5), "gate never released"
+        return (_session(),)
+
+    coordinator = TodayScheduleCoordinator(
+        fetch_day=fetcher,
+        cache=old_cache,
+        credentials_provider=lambda: ("student", "secret"),
+        state_sink=states.append,
+        now_provider=lambda: now,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(coordinator.refresh("manual"))
+        for _ in range(1000):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert started.is_set(), "refresh never reached the fetch"
+        # The user switches accounts while the fetch is in flight.
+        coordinator.replace_cache(new_cache)
+        gate.set()
+        return await task
+
+    final = asyncio.run(scenario())
+
+    # Only LOADING was published; the stale READY for the old account was dropped.
+    assert [state.status for state in states] == [ScheduleLoadStatus.LOADING]
+    assert final.status is ScheduleLoadStatus.LOADING
+    # The stale snapshot reached neither the old nor the new cache.
+    assert old_cache.load_for(now.date()) is None
+    assert new_cache.load_for(now.date()) is None
+
+
+def test_parse_portal_day_treats_string_false_as_active_and_string_true_as_cancelled():
+    payload = {
+        "success": True,
+        "body": [
+            {
+                "id": 1,
+                "tenMonHoc": "Lớp trực tuyến",
+                "tuGio": "07:00",
+                "denGio": "09:00",
+                "isTamNgung": "false",
+                "ghiChu": "Học trực tuyến qua Zoom",
+            },
+            {
+                "id": 2,
+                "tenMonHoc": "Lớp tạm ngưng",
+                "tuGio": "10:00",
+                "denGio": "12:00",
+                "isTamNgung": "true",
+                "tenPhong": "F.302",
+            },
+        ],
+    }
+
+    sessions = parse_portal_day(payload, date(2026, 8, 11))
+
+    assert sessions[0].cancelled is False
+    assert sessions[1].cancelled is True
