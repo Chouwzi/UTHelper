@@ -10,6 +10,7 @@ from typing import Any
 import flet as ft
 
 import platform_utils
+from platform_utils import quiz_client_bootstrap
 from gui.core.theme import (
     C,
     refresh_semantic_control_colors,
@@ -26,6 +27,8 @@ _ENTRY_ENTER_TIMEOUT_SECONDS = 30
 
 def _native_runtime_supported(page=None) -> bool:
     """Use native WebView only in the supported app runtimes."""
+    if quiz_client_bootstrap.source_quiz_client_unavailable():
+        return False
     if page is not None and bool(getattr(page, "web", False)):
         return False
     return bool(
@@ -327,6 +330,8 @@ class QuizPlayerView(ft.Container):
             reason = getattr(exc, "reason", "")
             return None, reason or None
         if not self.native_runtime_supported():
+            if quiz_client_bootstrap.source_quiz_client_unavailable():
+                return target, "player_unavailable"
             return target, "unsupported_runtime"
         if self._resolve_player_factory() is None:
             return target, "player_unavailable"

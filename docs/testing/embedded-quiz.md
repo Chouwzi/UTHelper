@@ -58,14 +58,18 @@ route because framing depends on site CSP.
 
 ```powershell
 python -m pip install -e ".[windows]"
-python -m pip install -e extensions/flet_uth_quiz
-flet build windows --yes
-flet run src/main.py
+python src/main.py
 ```
 
-Rebuild the custom client after Dart changes. Windows requires WebView2 Runtime
-and a writable profile directory. Android and iOS use their system WebViews.
-Native build dependencies are documented in the
+The Windows source launcher adds the local Python control to its import path and
+builds the custom client before startup when the client is missing or local
+Flutter extension sources/configuration changed. Flet then selects `build/windows/UTHelper.exe`
+instead of the generic desktop client. A failed build marks the in-app quiz
+unavailable, leaves the rest of the app available, and exposes the browser
+action for the user to choose. `flet run src/main.py` uses the same bootstrap
+and adds Python hot reload.
+Windows requires WebView2 Runtime and a writable profile directory. Android and
+iOS use their system WebViews. Native build dependencies are documented in the
 [plugin setup guide](https://inappwebview.dev/docs/intro/).
 
 ## Evidence and acceptance

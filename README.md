@@ -129,9 +129,12 @@ credential, cookie, token, HAR chưa che dữ liệu hoặc payload sinh viên v
 commit, fixture hay log CI.
 
 Luồng làm quiz trong app dùng custom Flet client trên Windows, Android và iOS.
-Trên Windows, chạy `flet build windows --yes` một lần rồi `flet run src\main.py`;
-build lại khi sửa Dart trong `extensions/flet_uth_quiz`. Client Flet có sẵn và
-bản web vẫn dùng đường mở trình duyệt. Xem
+Trên Windows, chạy `python src\main.py` để mở app từ source; lần đầu và sau khi
+sửa mã nguồn Flutter hoặc cấu hình extension cục bộ, app tự build client WebView trước khi mở.
+`flet run src\main.py` cũng hỗ trợ hot reload Python qua cùng client. Nếu thiếu
+công cụ build, app vẫn mở nhưng báo trình xem quiz chưa sẵn sàng và giữ nút mở
+bằng trình duyệt để người dùng chọn rõ ràng. Chế độ `--web` vẫn dùng đường mở
+trình duyệt. Xem
 [kiểm chứng quiz](docs/testing/embedded-quiz.md) để phân biệt test nguồn, build
 native và nghiệm thu lưu/nộp bài trên Moodle.
 

@@ -702,6 +702,25 @@ def test_missing_extension_shows_browser_recovery(monkeypatch):
     assert "trình duyệt" in detail_view._quiz_runtime_notice.value.casefold()
 
 
+def test_failed_source_client_build_keeps_explicit_browser_action(monkeypatch):
+    enable_native_runtime(monkeypatch)
+    from platform_utils import quiz_client_bootstrap
+
+    monkeypatch.setattr(quiz_client_bootstrap, "_source_quiz_client_ready", False)
+    _page, _lease, players, _sessions, player_view, detail_view = make_quiz_ui(
+        monkeypatch
+    )
+
+    detail_view.update_detail(trusted_quiz())
+
+    assert player_view.native_runtime_supported() is False
+    assert detail_view._quiz_open_btn.visible is False
+    assert detail_view._quiz_runtime_notice.visible is True
+    assert "trình duyệt" in detail_view._quiz_runtime_notice.value.casefold()
+    assert detail_view._open_btn.visible is True
+    assert players == []
+
+
 def test_missing_saved_account_opens_existing_app_login_and_rebuilds_quiz_target(
     monkeypatch,
 ):
