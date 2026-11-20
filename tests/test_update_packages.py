@@ -163,6 +163,20 @@ def test_packaged_windows_target_is_msix_without_registry_guess(monkeypatch):
     assert windows_update.detect_windows_runtime_target().install_channel == "msix"
 
 
+def test_windows_target_falls_back_when_winreg_is_unavailable(monkeypatch):
+    from core.distribution import DistributionChannel, build_distribution_profile
+    from platform_utils import windows_update
+
+    monkeypatch.setitem(sys.modules, "winreg", None)
+    monkeypatch.setattr(windows_update, "has_package_identity", lambda: False)
+    monkeypatch.setattr(windows_update.platform, "machine", lambda: "AMD64")
+
+    profile = build_distribution_profile(DistributionChannel.EXE_LTS)
+    assert windows_update.detect_windows_runtime_target(profile) == RuntimeTarget(
+        "windows", "x64", "bootstrapper"
+    )
+
+
 def test_cross_platform_target_delegates_to_windows_adapter(monkeypatch):
     import platform_utils.update_packages as update_packages
 

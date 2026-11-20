@@ -323,7 +323,10 @@ def read_install_channel() -> str | None:
     """Read only the machine-scoped channel marker written by the MSI."""
     try:
         import winreg
+    except ImportError:
+        return None
 
+    try:
         access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
         with winreg.OpenKey(
             winreg.HKEY_LOCAL_MACHINE,

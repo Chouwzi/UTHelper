@@ -2083,3 +2083,8 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `pillow>=12.3.0` to the test job, matching the Windows packaging minimum.
 - On Windows, test collection from `src/` and all 22 MSIX packaging tests
   passed on Python 3.12, 3.13, and 3.14 with the CI dependencies.
+- The next Ubuntu run reached the Windows install E2E scenario and failed
+  because the registry module is unavailable on Ubuntu. Treat a missing
+  `winreg` as no install-channel marker and retain the existing bootstrapper
+  fallback. The failing E2E and a new fallback regression passed locally on
+  Python 3.12, 3.13, and 3.14 with `winreg` blocked.
