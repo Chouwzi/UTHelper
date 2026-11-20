@@ -235,6 +235,9 @@ class AndroidPackageDownloader:
         self._native.stopped.set()
 
     def has_pending_download(self, package: ReleasePackage) -> bool:
+        if not self._native.release_version_provider():
+            # No release is selected yet, so there is no OS transfer to resume.
+            return False
         identity = self._native.identity(package)
         result = self._native.call(self._native.bridge.get_update_download_status, *identity)
         return result["status"] in {"pending", "running", "paused", "completed"}

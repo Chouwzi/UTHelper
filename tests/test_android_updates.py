@@ -180,6 +180,18 @@ def test_recovery_only_queries_previously_authorized_job(package):
     assert [name for name, _ in bridge.calls] == ["query", "query"]
 
 
+@pytest.mark.parametrize("missing_version", [None, ""])
+def test_pending_download_probe_is_false_without_selected_release(package, missing_version):
+    bridge = DownloadBridge([])
+    observer = AndroidPackageDownloader(
+        bridge, run_task, lambda: missing_version, poll_interval_seconds=0.001
+    )
+    assert observer.has_pending_download(package) is False
+    assert bridge.calls == []
+    with pytest.raises(RuntimeError, match="release version is unavailable"):
+        observer.download(package, cancel=threading.Event())
+
+
 def test_shutdown_detaches_without_removing_os_download(package):
     bridge = DownloadBridge([{"status": "running"}])
     observer = downloader(bridge)
