@@ -2088,3 +2088,14 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `winreg` as no install-channel marker and retain the existing bootstrapper
   fallback. The failing E2E and a new fallback regression passed locally on
   Python 3.12, 3.13, and 3.14 with `winreg` blocked.
+
+## MSIX runtime test host independence (2026-11-21)
+
+- PR #100's next Ubuntu run failed in the packaged MSIX autostart test because
+  it mocked package identity but left the service factory using the Linux host
+  platform. Pass `platform_name="win32"` to request the Windows backend.
+- Parameterize the test over simulated Linux and Windows hosts. The packaged
+  backend and notifier assertions remain active on both hosts.
+- Validation from `src/`: the two MSIX host cases plus 16 Windows autostart
+  tests passed on Python 3.12, 3.13, and 3.14 (18 passed per version). Ruff and
+  the working-tree diff check passed. Ubuntu CI requires the new commit.

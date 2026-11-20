@@ -18,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -1215,15 +1216,18 @@ def test_t1_f12_msstore_appdata_virtualization_never_writes_into_bundle_dir(
                 os.chmod(item, stat.S_IWRITE | stat.S_IREAD)
 
 
+@pytest.mark.parametrize("host_platform", ["linux", "win32"])
 def test_t1_f12_msix_runtime_uses_startup_task_and_packaged_notifier(
+    host_platform: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F12: Packaged MSIX runtime selects ``StartupTaskAutostartBackend`` & packaged AUMID notifier."""
     autostart_mod = load_module("platform_utils.autostart")
     win_notifier_mod = load_module("notifiers.windows")
 
+    monkeypatch.setattr(autostart_mod, "sys", SimpleNamespace(platform=host_platform))
     monkeypatch.setattr(autostart_mod, "has_package_identity", lambda: True)
-    backend = autostart_mod.create_autostart_service()
+    backend = autostart_mod.create_autostart_service(platform_name="win32")
     assert isinstance(backend, autostart_mod.StartupTaskAutostartBackend)
     assert backend.task_id == "UTHelperStartup"
 
