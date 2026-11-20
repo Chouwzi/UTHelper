@@ -1985,3 +1985,35 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - Tests and lint were not run. The Python app packaged successfully, but the
   Windows Flutter build stopped because this machine does not currently allow
   the symlinks Flutter requires for plugin builds (Developer Mode is disabled).
+
+## Store distribution M4 — Microsoft Store MSIX, verification, CI and docs (2026-11-20)
+
+- **Scope** (`feature/store-distribution-chplay-msstore`): Features #13/#14 — Microsoft Store (`msstore`) `.msix`
+  packaging, verification, CI isolation, and Store submission/privacy documentation. Decision recorded in
+  [ADR 0004](../adr/0004-multi-channel-store-and-lts-distribution.md); ADR 0003 now cross-references it and keeps
+  the exact 7-asset GitHub LTS release contract (`.aab`/`.msix` are never mixed into it).
+- **Packaging**: `scripts/generate_msix_assets.py` (Pillow, deterministic RGBA PNG tiles 44x44 / 50x50 / 150x150 /
+  310x150 from `src/assets/icon.png`, `--verify-only` mode); `scripts/package_msix.ps1` now accepts `IdentityName`,
+  `Publisher`, `StoreProductId`, `Channel`, `SignMode` (`none` for Partner Center, `test` for self-signed sideload),
+  optional `Version` (derived from `pyproject.toml` as `X.Y.Z.0`), validates inputs, stages `distribution-channel.json`
+  into the unique per-run MSIX stage (`app/assets` and `data/flutter_assets/assets`) so `src/assets/` is never mutated,
+  and always removes stage/verify directories in `finally`. Manifest keeps argument-free `windows.startupTask`
+  (`UTHelperAutostart.exe`, `UTHelperStartup`), `runFullTrust`, `internetClient`, and default AppData virtualization.
+- **Verification**: `scripts/verify_msix_release.ps1` (PowerShell 5.1 compatible) unpacks via `makeappx`, checks
+  Identity/Publisher/4-part Version/x64, capabilities, forbidden `uap10:Parameters`/`unvirtualizedResources`/disabled
+  virtualization, PE headers, PNG IHDR dimensions, `distribution-channel.json` (`channel`, allowed keys, product id),
+  optionally `-RunWack`, and emits SHA-bound JSON evidence.
+- **CI**: new `.github/workflows/build-msstore.yml` (workflow_dispatch + path-filtered PR) builds the Flet Windows
+  bundle with the reviewed diagnostics template, packages and verifies the unsigned Partner Center MSIX; `release.yml`
+  untouched.
+- **Docs**: `PRIVACY.md` (Data Safety summary, per-channel behavior, Android storage `FLET_APP_STORAGE_DATA`, data
+  deletion), `TERMS.md` (channel-neutral wording), `guides/windows-packaging.md`, new
+  `guides/store-distribution-submission.md` (CH Play, Microsoft Store/WACK/`runFullTrust` justification, LTS, deferred
+  Apple App Store roadmap), `docs/README.md` index.
+- **Tests**: new `tests/test_msstore_packaging.py` (assets, PS 5.1 AST, real `makeappx` pack/verify, 10 negative
+  verifier cases, forged ZIP, invalid params, docs alignment); `tests/test_release_hardening.py` now allows the new
+  Store workflow in the `flet build` inventory and asserts its isolation; `tests/test_release_inventory.py` unchanged.
+- **Verification**: `pytest tests/test_msstore_packaging.py tests/test_release_hardening.py
+  tests/test_release_inventory.py tests/test_architecture_boundaries.py` → 96 passed; MSIX E2E (Tier 1–4 f12/p18/s06)
+  pass; `ruff check` on M4 Python files clean; PowerShell AST parse of both scripts clean; workflow YAML parses.
+  Live Partner Center upload and WACK execution were not run in this environment.

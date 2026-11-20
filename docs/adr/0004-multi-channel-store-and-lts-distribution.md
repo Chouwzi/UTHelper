@@ -1,0 +1,118 @@
+# ADR 0004: Multi-channel Store (`chplay`, `msstore`) and GitHub LTS (`apk_lts`, `exe_lts`) distribution
+
+- Status: Accepted
+- Date: 2026-11-20
+- Extends: [ADR 0003: Platform release update channel](0003-signed-release-update-channel.md)
+
+## Context
+
+UTHelper originally shipped all production packages through a single GitHub Releases pipeline
+(ADR 0003: 7 exact assets covering signed Android sideload APKs, signed Windows MSI/Burn EXE,
+and an unsigned iOS sideload IPA). Publishing UTHelper on official app stores introduces
+non-negotiable platform compliance requirements that conflict with GitHub self-updating
+packages:
+
+1. **Google Play Store (`chplay`)**:
+   - Device and Network Abuse policy prohibits self-updating outside Google Play or
+     downloading executable `.apk`/`.dex` payloads from external hosts (such as GitHub).
+   - `REQUEST_INSTALL_PACKAGES` is a restricted permission explicitly banned for self-updating;
+     static and dynamic scanners inspect both the merged `AndroidManifest.xml` and DEX bytecode.
+   - Android 15+ (API 35+, transitioning to API 36) mandates `.aab` (Android App Bundle) format,
+     **16 KB memory page-size alignment** (`PT_LOAD` `p_align >= 0x4000`, uncompressed native
+     libraries via `--no-android-legacy-packaging`), and accurate Play Data Safety disclosures.
+   - Unused `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_DATA_SYNC` permissions trigger review
+     rejection without a persistent-notification demo; `usesCleartextTraffic="true"` contradicts
+     HTTPS-only transport; `allowBackup="false"` protects local credentials from Auto Backup.
+2. **Microsoft Store (`msstore`)**:
+   - Microsoft Store Policy 10.2 requires updates to be managed exclusively by the Microsoft
+     Store and prohibits downloading or executing external `.msi`/`.exe` installers.
+   - Partner Center requires a reserved `Package/Identity` (`Name`, `Publisher="CN=..."`,
+     4-part `Version="X.Y.Z.0"`), exact-dimension PNG tile assets (`44x44`, `50x50`, `150x150`,
+     `310x150`), and a written submission justification for `<rescap:Capability Name="runFullTrust" />`.
+   - MSIX packages must preserve standard AppData and Registry virtualization (no
+     `unvirtualizedResources`, no disabled write virtualization) and pass Windows App
+     Certification Kit (WACK) validation.
+3. **Long-Term Support (LTS) on GitHub Releases (`apk_lts`, `exe_lts`)**:
+   - Existing users on sideloaded Android `.apk` and Windows `.msi`/Burn `.exe` depend on
+     signed GitHub Releases auto-update and must continue receiving uninterrupted LTS updates
+     without regressions.
+4. **Apple App Store (iOS) budget constraint**:
+   - Enrolling in the Apple Developer Program requires an annual fee ($99 USD/year) that the
+     non-commercial student team cannot currently fund.
+
+## Decision
+
+1. **Explicit Distribution Channel Model (`src/core/distribution.py`)**:
+   - Introduce a pure, testable 5-channel `DistributionChannel` boundary:
+     - `chplay`: Google Play Store Android `.aab` (`supports_github_self_update = False`,
+       deep link `market://details?id=com.uthelper.uthelper` with HTTPS fallback).
+     - `apk_lts`: GitHub Releases Android `.apk` LTS (`supports_github_self_update = True`).
+     - `msstore`: Microsoft Store Windows `.msix` (`supports_github_self_update = False`,
+       deep link `ms-windows-store://pdp/?ProductId=<StoreProductId>` with web fallback when
+       configured).
+     - `exe_lts`: GitHub Releases Windows `.msi` / Burn `.exe` LTS
+       (`supports_github_self_update = True`).
+     - `source`: Local Python development / unsigned iOS sideload fallback.
+   - Channel resolution reads build-time staged `distribution-channel.json`
+     (`schema_version: 1`, `channel`, optional `store_product_id`, `android_package_id`) from
+     `FLET_ASSETS_DIR` (never committed to `src/assets/`). On Windows, an active MSIX package
+     identity (`has_package_identity()`) always enforces `msstore` as a fail-closed safeguard
+     against accidental self-update activation.
+2. **Store Runtime Update Suppression & Compliant UI**:
+   - On `chplay` and `msstore`, `AppController` does not instantiate or start
+     `UpdateCoordinator` or `GitHubReleaseClient`, emits zero GitHub API traffic, hides
+     GitHub auto-update toggles/buttons/banners and Debug force-check actions, and renders
+     Store-managed update guidance plus Store deep links and channel-accurate Terms/Privacy
+     text (`terms_dialog.py`).
+3. **Android `chplay` vs `apk_lts` Build Separation**:
+   - `chplay` builds produce a universal 16 KB-aligned `.aab` (`--no-android-legacy-packaging`,
+     `targetSdk >= 35`) with `REQUEST_INSTALL_PACKAGES`, `UthUpdateFileProvider`,
+     `ApkUpdateDownloadManager.kt`, `ApkUpdateInstaller.kt`, updater MethodChannel handlers,
+     `FOREGROUND_SERVICE*`, and `usesCleartextTraffic="true"` completely stripped, and
+     `android:allowBackup="false"` enforced.
+   - `scripts/verify_android_release.py` validates both `chplay` `.aab` (manifest, DEX symbol
+     absence, 16 KB ELF64 `PT_LOAD` alignment, `distribution-channel.json`) and `apk_lts`
+     `.apk` builds.
+4. **Windows `msstore` MSIX Packaging, Verification & CI Isolation**:
+   - Restore MSIX packaging specifically for the `msstore` channel (not GitHub Releases) via:
+     - `scripts/generate_msix_assets.py` (deterministic Pillow PNG generation for `44x44`,
+       `50x50`, `150x150`, `310x150`).
+     - `scripts/package_msix.ps1` (parameterized `IdentityName`, `Publisher`, `StoreProductId`,
+       `Channel`, `SignMode=none|test`, 4-part `Version`, clean staging of
+       `distribution-channel.json` inside the MSIX bundle without mutating `src/assets/`,
+       preserving `UTHelperAutostart.exe` `windows.startupTask`, `runFullTrust`,
+       `internetClient`, and AppData virtualization).
+     - `scripts/verify_msix_release.ps1` (`makeappx unpack`, manifest/capability/virtualization
+       checks, argument-free `StartupTask`, exact PNG IHDR dimensions,
+       `distribution-channel.json`, optional `-RunWack` invoking `appcert.exe`).
+     - Dedicated `.github/workflows/build-msstore.yml` workflow producing unsigned Partner
+       Center `.msix` artifacts and verification evidence.
+5. **Preservation of the 7-Asset GitHub LTS Pipeline**:
+   - `.github/workflows/release.yml`, `scripts/release_inventory.py`, and Schema 3
+     `release-manifest.json` remain strictly locked to the 7 GitHub LTS assets
+     (`ipa`, `universal apk`, `arm64 apk`, `exe`, `msi`, `release-manifest.json`,
+     `SHA256SUMS`). Store `.aab` and `.msix` artifacts are never mixed into the GitHub LTS
+     release directory.
+6. **Apple App Store Deferral**:
+   - Apple App Store distribution is deferred until after Google Play launch and adoption, at
+     which point the team may consider transparent community support/crowdfunding to fund an
+     Apple Developer Program membership. Unsigned iOS `.ipa` sideload builds remain part of
+     the 7-asset GitHub LTS release.
+
+## Consequences
+
+- **Positive**:
+  - Store submissions (`chplay` `.aab` and `msstore` `.msix`) are structurally free of
+    self-updating code/permissions and verified automatically before upload.
+  - Existing `apk_lts` and `exe_lts` users retain full verified GitHub auto-update support
+    and the unchanged fail-closed 7-asset release contract from ADR 0003.
+  - Clean Architecture boundaries (`core` never imports `gui`; `distribution.py` is pure and
+    independently testable) remain intact.
+- **Trade-offs & Operational Notes**:
+  - Store and GitHub LTS tracks use different signing keys (Play App Signing vs GitHub APK
+    keystore) and Windows installation models (MSIX container vs machine-scoped Program Files
+    MSI). Users migrating between GitHub LTS and a Store release must reinstall rather than
+    in-place upgrading across tracks.
+  - Maintainers must supply Partner Center identity values (`MSSTORE_IDENTITY_NAME`,
+    `MSSTORE_PUBLISHER`, `MSSTORE_PRODUCT_ID`) and Play Console upload credentials via
+    environment variables/workflow inputs rather than committing secrets to the repository.
