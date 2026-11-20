@@ -2112,3 +2112,16 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   with the shim compiler deliberately disabled. A simulated Linux fixture call
   skipped before compiler lookup. All 97 Tier 2 tests passed on Windows, with
   Ruff and the working-tree diff check clean. Ubuntu CI requires the new commit.
+
+## Store E2E subprocess keyring isolation (2026-11-21)
+
+- PR #100's Ubuntu matrix failed when the crash-reporting opt-out test saved
+  settings in a subprocess without an available keyring backend.
+- In `tests/e2e_store_distribution/harness.py`, configure the built-in no-op
+  keyring only for isolated subprocesses and give each test a private
+  `TMPDIR` for the Linux data path. The opt-out test still checks that saving
+  consent clears the pending spool and blocks new reports.
+- Reproduced the original failure with the failing keyring backend on Windows.
+  With the same parent backend after the fix, all 257 Store E2E tests passed
+  on each of Python 3.12, 3.13, and 3.14. A subprocess smoke check confirmed
+  the private Linux data path. Ruff passed. Ubuntu CI requires the new commit.

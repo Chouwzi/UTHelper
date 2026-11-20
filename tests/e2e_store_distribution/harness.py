@@ -104,9 +104,8 @@ def run_isolated_python(
 ) -> subprocess.CompletedProcess[str]:
     """Execute Python code in an isolated subprocess inside the worktree.
 
-    Configures ``UTH_TEST_MODE="1"``, worktree ``PYTHONPATH``, and isolated temp
-    paths for ``APPDATA``, ``FLET_APP_STORAGE_DATA``, ``FLET_APP_STORAGE_TEMP``,
-    and ``FLET_ASSETS_DIR``. Keys mapped to ``None`` in ``env_overrides`` are
+    Configures test mode, worktree imports, isolated runtime paths, and a
+    no-op keyring backend. Keys mapped to ``None`` in ``env_overrides`` are
     explicitly removed from the child environment.
     """
     pythonpath = os.pathsep.join(
@@ -122,7 +121,8 @@ def run_isolated_python(
         flet_data = base_dir / "flet_data"
         flet_temp = base_dir / "flet_temp"
         assets = base_dir / "assets"
-        for folder in (appdata, flet_data, flet_temp, assets):
+        runtime_temp = base_dir / "tmp"
+        for folder in (appdata, flet_data, flet_temp, assets, runtime_temp):
             folder.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
@@ -130,7 +130,9 @@ def run_isolated_python(
         env["PYTHONPATH"] = pythonpath
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
         env["APPDATA"] = str(appdata)
+        env["TMPDIR"] = str(runtime_temp)
         env["FLET_APP_STORAGE_DATA"] = str(flet_data)
         env["FLET_APP_STORAGE_TEMP"] = str(flet_temp)
         env["FLET_ASSETS_DIR"] = str(assets)
