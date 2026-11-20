@@ -2075,3 +2075,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   Python syntax checks, and PowerShell script AST checks passed.
 - Signed Android AAB builds, Play Console/Partner Center submission, WACK, and
   device installation were not performed in this verification.
+
+## CI test dependency for MSIX assets (2026-11-21)
+
+- PR #100 failed during test collection because the Ubuntu test matrix did
+  not install Pillow, which the MSIX asset tests import as `PIL`. Add
+  `pillow>=12.3.0` to the test job, matching the Windows packaging minimum.
+- On Windows, test collection from `src/` and all 22 MSIX packaging tests
+  passed on Python 3.12, 3.13, and 3.14 with the CI dependencies.

@@ -119,7 +119,7 @@ jobs:
         run: |
           pip install -e .
           pip install -e extensions/flet_uth_background_sync
-          pip install pytest pytest-cov keyring
+          pip install pytest pytest-cov keyring "pillow>=12.3.0"
 
       - name: Run tests
         run: |
