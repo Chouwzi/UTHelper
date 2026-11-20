@@ -73,12 +73,86 @@ def test_android_updater_requires_local_checksum_and_package_installer():
     assert "expectedVersionCode" in updater
     assert "expectedCertificateSha256" in updater
     assert "AtomicBoolean" in updater
-    assert '"stage" to update.stage' in next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(
-        encoding="utf-8"
-    )
+    assert '"stage" to update.stage' in next(
+        ANDROID.rglob("ApkLtsUpdateBridgeDelegate.kt")
+    ).read_text(encoding="utf-8")
     assert "REQUEST_INSTALL_PACKAGES" in (
         ANDROID / "src/main/AndroidManifest.xml"
     ).read_text(encoding="utf-8")
+
+
+def test_updater_method_channel_lives_only_in_apk_lts_delegate():
+    plugin = next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(encoding="utf-8")
+    delegate = next(ANDROID.rglob("ApkLtsUpdateBridgeDelegate.kt")).read_text(
+        encoding="utf-8"
+    )
+    chplay_factory = (
+        ANDROID / "variants/chplay/kotlin/com/uthelper/backgroundsync/UpdateBridgeFactory.kt"
+    ).read_text(encoding="utf-8")
+    lts_factory = (
+        ANDROID / "variants/apk_lts/kotlin/com/uthelper/backgroundsync/UpdateBridgeFactory.kt"
+    ).read_text(encoding="utf-8")
+
+    for forbidden in (
+        "ApkUpdateInstaller",
+        "ApkUpdateDownloadManager",
+        "install_update",
+        "start_update_download",
+        "get_update_download_status",
+        "cancel_update_download",
+        "cancel_update",
+    ):
+        assert forbidden not in plugin
+        assert forbidden not in chplay_factory
+    for method in (
+        "install_update",
+        "start_update_download",
+        "get_update_download_status",
+        "cancel_update_download",
+        "cancel_update",
+    ):
+        assert f'"{method}"' in delegate
+    assert "ApkLtsUpdateBridgeDelegate(context)" in lts_factory
+    assert "NoOpUpdateBridgeDelegate" in chplay_factory
+    assert "ApkLtsUpdateBridgeDelegate" not in chplay_factory
+
+
+def test_chplay_manifest_variant_strips_updater_and_foreground_permissions():
+    manifest = (ANDROID / "variants/chplay/AndroidManifest.xml").read_text(
+        encoding="utf-8"
+    )
+    main = (ANDROID / "src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+    for token in (
+        "REQUEST_INSTALL_PACKAGES",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "USE_EXACT_ALARM",
+        "UthUpdateFileProvider",
+    ):
+        assert token in manifest
+    assert manifest.count('tools:node="remove"') == 5
+    assert "uses-permission android:name=\"android.permission.USE_EXACT_ALARM\" />" not in manifest
+    assert 'android:allowBackup="false"' in manifest
+    assert 'android:usesCleartextTraffic="false"' in manifest
+    assert 'android:allowBackup="false"' in main
+    assert 'android:usesCleartextTraffic="false"' in main
+    assert "USE_EXACT_ALARM" not in main
+    assert "FOREGROUND_SERVICE" not in main
+    for receiver in ("DeadlineAlarmReceiver", "RescheduleReceiver"):
+        assert receiver in manifest
+
+
+def test_gradle_selects_chplay_sources_and_defaults_to_apk_lts():
+    gradle = (ANDROID / "build.gradle").read_text(encoding="utf-8")
+    assert "uthDistributionChannel" in gradle
+    assert "UTH_DISTRIBUTION_CHANNEL" in gradle
+    assert "?: 'apk_lts'" in gradle
+    assert "variants/chplay/AndroidManifest.xml" in gradle
+    assert "variants/chplay/kotlin" in gradle
+    assert "variants/apk_lts/kotlin" in gradle
+    assert "com/uthelper/backgroundsync/update/**" in gradle
+    assert "xml/uth_update_paths.xml" in gradle
+    assert "useLegacyPackaging = false" in gradle
 
 
 def test_android_download_uses_pinned_durable_download_manager_request():

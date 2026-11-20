@@ -17,6 +17,13 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 apply plugin: 'kotlin-kapt'
 
+def uthDistributionChannel = (
+    project.findProperty('uthDistributionChannel')
+        ?: System.getenv('UTH_DISTRIBUTION_CHANNEL')
+        ?: 'apk_lts'
+).toString().trim().toLowerCase()
+def isChplayChannel = (uthDistributionChannel == 'chplay')
+
 android {
     namespace 'com.uthelper.backgroundsync'
     compileSdk 36
@@ -24,6 +31,34 @@ android {
     defaultConfig {
         minSdk 23
         consumerProguardFiles 'consumer-rules.pro'
+    }
+
+    sourceSets {
+        main {
+            if (isChplayChannel) {
+                manifest.srcFile 'variants/chplay/AndroidManifest.xml'
+                kotlin.srcDirs = ['src/main/kotlin', 'variants/chplay/kotlin']
+                kotlin.exclude 'com/uthelper/backgroundsync/update/**'
+                java.exclude 'com/uthelper/backgroundsync/update/**'
+                res.exclude 'xml/uth_update_paths.xml'
+            } else {
+                kotlin.srcDirs = ['src/main/kotlin', 'variants/apk_lts/kotlin']
+            }
+        }
+        test {
+            if (isChplayChannel) {
+                kotlin.exclude 'com/uthelper/backgroundsync/update/**'
+                java.exclude 'com/uthelper/backgroundsync/update/**'
+            }
+        }
+    }
+
+    if (isChplayChannel) {
+        packaging {
+            jniLibs {
+                useLegacyPackaging = false
+            }
+        }
     }
 
     compileOptions {

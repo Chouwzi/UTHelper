@@ -15,9 +15,6 @@ import com.uthelper.backgroundsync.data.UthDatabase
 import com.uthelper.backgroundsync.notification.AlarmScheduler
 import com.uthelper.backgroundsync.notification.NotificationReconciler
 import com.uthelper.backgroundsync.security.CredentialVault
-import com.uthelper.backgroundsync.update.ApkUpdateDownloadManager
-import com.uthelper.backgroundsync.update.ApkUpdateInstaller
-import com.uthelper.backgroundsync.update.UpdateDownloadIdentity
 import com.uthelper.backgroundsync.worker.BackgroundSyncScheduler
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
@@ -34,8 +31,7 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var channel: MethodChannel
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val updateInstaller by lazy { ApkUpdateInstaller(context) }
-    private val updateDownloader by lazy { ApkUpdateDownloadManager(context) }
+    private val updateBridge: UpdateBridgeDelegate by lazy { UpdateBridgeFactory.create(context) }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -44,7 +40,9 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        updateInstaller.cancel()
+        if (::context.isInitialized) {
+            updateBridge.cancel()
+        }
         channel.setMethodCallHandler(null)
         scope.cancel()
     }
@@ -172,37 +170,6 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     false
                 }
             }
-            "install_update" -> execute(result) {
-                val update = updateInstaller.verifyLocalAndOpen(
-                    localPath = call.argument<String>("local_path").orEmpty(),
-                    expectedSha256 = call.argument<String>("sha256").orEmpty(),
-                    expectedSize = call.argument<Number>("expected_size")?.toLong() ?: 0L,
-                    expectedPackageId = call.argument<String>("expected_package_id").orEmpty(),
-                    expectedVersionCode = call.argument<Number>("expected_version_code")?.toLong() ?: 0L,
-                    expectedCertificateSha256 = call.argument<String>("expected_certificate_sha256").orEmpty(),
-                )
-                mapOf(
-                    "status" to update.status,
-                    "stage" to update.stage,
-                    "bytes" to update.bytes,
-                    "sha256" to update.sha256,
-                    "reason" to update.reason,
-                )
-            }
-            "start_update_download" -> execute(result) {
-                updateDownloader.start(updateIdentity(call)).toMap()
-            }
-            "get_update_download_status" -> execute(result) {
-                updateDownloader.status(updateIdentity(call)).toMap()
-            }
-            "cancel_update_download" -> execute(result) {
-                updateDownloader.cancel(updateIdentity(call))
-                null
-            }
-            "cancel_update" -> {
-                updateInstaller.cancel()
-                result.success(null)
-            }
             "logout" -> execute(result) {
                 BackgroundSyncScheduler(context).cancelAll()
                 val database = UthDatabase.get(context)
@@ -216,30 +183,13 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 SettingsStore(context).clear()
                 null
             }
-            else -> result.notImplemented()
+            else -> {
+                if (!updateBridge.handleMethodCall(call, result, ::execute)) {
+                    result.notImplemented()
+                }
+            }
         }
     }
-
-    private fun updateIdentity(call: MethodCall): UpdateDownloadIdentity =
-        UpdateDownloadIdentity(
-            url = call.argument<String>("url").orEmpty(),
-            sha256 = call.argument<String>("sha256").orEmpty(),
-            expectedSize = call.argument<Number>("expected_size")?.toLong() ?: 0L,
-            expectedPackageId = call.argument<String>("expected_package_id").orEmpty(),
-            expectedVersionCode = call.argument<Number>("expected_version_code")?.toLong() ?: 0L,
-            expectedCertificateSha256 =
-                call.argument<String>("expected_certificate_sha256").orEmpty(),
-        )
-
-    private fun com.uthelper.backgroundsync.update.UpdateDownloadResult.toMap(): Map<String, Any?> =
-        mapOf(
-            "status" to status,
-            "download_id" to downloadId,
-            "downloaded" to downloaded,
-            "total" to total,
-            "local_path" to localPath,
-            "reason" to reason,
-        )
 
     private fun execute(
         result: MethodChannel.Result,
