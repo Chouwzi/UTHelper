@@ -1651,8 +1651,18 @@ class FakePage:
                 asyncio.set_event_loop(loop)
                 holder.append(loop)
                 ready.set()
-                loop.run_forever()
-                loop.close()
+                try:
+                    loop.run_forever()
+                finally:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                    loop.close()
 
             thread = threading.Thread(
                 target=_runner,
@@ -1859,6 +1869,7 @@ def _default_manifest_xml(package_id: str, *, chplay_compliant: bool = True) -> 
         '    <receiver android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />\n'
         '    <receiver android:name="com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver" />\n'
         '    <receiver android:name="com.uthelper.backgroundsync.notification.RescheduleReceiver" />\n'
+        '    <receiver android:name="com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver" />\n'
         "  </application>\n"
         "</manifest>\n"
     )

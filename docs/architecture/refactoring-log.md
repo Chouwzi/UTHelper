@@ -69,6 +69,8 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
 | 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
 | 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
+| 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
 
 
 ---
@@ -2050,3 +2052,26 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - **Not verifiable here**: GitHub Actions `build-android.yml` / `build-msstore.yml` runs, Play Console and Partner
   Center submission, WACK execution, and real-device Android install.
 - **Remote**: pushed to `origin/feature/store-distribution-chplay-msstore` (see PR to `develop` per gitflow).
+
+## Store distribution integration regression fixes (2026-11-20)
+
+- Merge `origin/develop` (`a83cd29`) into the store distribution worktree and
+  resolve `tests/test_config.py` by retaining both the storage-path tests and
+  the class-schedule settings migration tests.
+- Register `ClassScheduleAlarmReceiver` in the CH Play manifest. Require it in
+  the Android release verifier, update synthetic APK/AAB fixtures, and add a
+  regression that rejects an AAB missing the class-schedule receiver.
+- Use controlled monotonic clocks in Android observer, tray-close, and
+  diagnostics retry tests to preserve timeout assertions across Windows Python
+  clock resolutions and floating-point differences.
+- Give Tier 3 and Tier 4 MSIX tests unique directories under the workspace's
+  `build` directory, preserving the packager's workspace constraint while
+  allowing concurrent test runs. Drain cancelled FakePage tasks before closing
+  the harness event loop.
+- Verification on Windows: full `tests` plus extension package-contract suite
+  passed on Python 3.12, 3.13, and 3.14, each with **2143 passed, 36 skipped**.
+  Each run includes **256 passing E2E tests**. Six Sentry SDK deprecation
+  warnings remain in each run. Ruff (`src tests scripts` and extension tests),
+  Python syntax checks, and PowerShell script AST checks passed.
+- Signed Android AAB builds, Play Console/Partner Center submission, WACK, and
+  device installation were not performed in this verification.

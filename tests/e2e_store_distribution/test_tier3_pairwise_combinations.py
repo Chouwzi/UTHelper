@@ -16,6 +16,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -1144,6 +1145,7 @@ def test_t3_p10_android_artifact_x_elf_align_x_compliance(
         '    <receiver android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />\n'
         '    <receiver android:name="com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver" />\n'
         '    <receiver android:name="com.uthelper.backgroundsync.notification.RescheduleReceiver" />\n'
+        '    <receiver android:name="com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver" />\n'
         "  </application>\n"
         "</manifest>\n"
     )
@@ -1737,7 +1739,9 @@ def test_t3_p18_msix_packaging_x_tile_dimensions_x_channel_asset() -> None:
     )
     assert makeappx is not None, "makeappx.exe is required on Windows for MSIX E2E verification"
 
-    temp_root = WORKTREE_ROOT / "build" / "e2e-tier3-msix"
+    build_root = WORKTREE_ROOT / "build"
+    build_root.mkdir(parents=True, exist_ok=True)
+    temp_root = Path(tempfile.mkdtemp(prefix="e2e-t3-msix-", dir=build_root))
     bundle_dir = temp_root / "bundle"
     unpack_dir = temp_root / "unpacked"
     msix_out = temp_root / "UTHelper-msstore.msix"
@@ -1843,4 +1847,3 @@ def test_t3_p18_msix_packaging_x_tile_dimensions_x_channel_asset() -> None:
         assert channel_data["channel"] == "msstore"
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
-        shutil.rmtree(WORKTREE_ROOT / "build" / "msix-stage", ignore_errors=True)

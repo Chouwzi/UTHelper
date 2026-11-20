@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -147,9 +148,11 @@ def test_tray_close_does_not_join_unowned_or_current_thread():
     assert events == ["stop", "stop"]
 
 
-def test_tray_close_contains_stop_failure_and_reports_join_timeout():
+def test_tray_close_contains_stop_failure_and_reports_join_timeout(monkeypatch):
+    import gui.tray as tray_module
     from gui.tray import TrayApp
 
+    monkeypatch.setattr(tray_module, "time", SimpleNamespace(monotonic=lambda: 0.0))
     events: list[object] = []
     tray = TrayApp()
     tray._icon = _FailingTrayIconSpy(events)

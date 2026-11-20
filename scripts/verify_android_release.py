@@ -42,6 +42,7 @@ _RECEIVERS = (
     "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
     "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
     "com.uthelper.backgroundsync.notification.RescheduleReceiver",
+    "com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver",
 )
 _CHPLAY_MIN_TARGET_SDK = 35
 _ELF_16KB_ALIGN = 0x4000

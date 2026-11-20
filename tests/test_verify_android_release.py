@@ -72,6 +72,7 @@ def _fake_run(command, **kwargs):
             "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
             "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
             "com.uthelper.backgroundsync.notification.RescheduleReceiver",
+            "com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver",
             "androidx.work.impl.background.systemalarm.RescheduleReceiver",
         )
         receivers = "".join(

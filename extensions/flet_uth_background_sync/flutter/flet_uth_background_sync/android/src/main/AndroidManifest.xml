@@ -22,6 +22,10 @@
             android:enabled="true"
             android:exported="false" />
         <receiver
+            android:name=".notification.ClassScheduleAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
+        <receiver
             android:name=".notification.RescheduleReceiver"
             android:enabled="true"
             android:exported="true">

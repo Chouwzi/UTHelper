@@ -60,6 +60,7 @@ _CLEAN_CHPLAY_MANIFEST_XML = """<?xml version="1.0" encoding="utf-8"?>
     <receiver android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
     <receiver android:name="com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver" />
     <receiver android:name="com.uthelper.backgroundsync.notification.RescheduleReceiver" />
+    <receiver android:name="com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver" />
   </application>
 </manifest>
 """

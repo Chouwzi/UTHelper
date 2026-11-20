@@ -51,6 +51,7 @@ _RECEIVERS = (
     "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
     "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
     "com.uthelper.backgroundsync.notification.RescheduleReceiver",
+    "com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver",
 )
 
 
@@ -407,6 +408,17 @@ def test_verifier_accepts_compliant_chplay_aab(tmp_path):
 def test_verifier_rejects_non_compliant_manifests(tmp_path, manifest):
     with pytest.raises(AndroidVerificationError):
         _verify(_aab(tmp_path / "bad.aab", manifest=manifest), tmp_path)
+
+
+def test_verifier_rejects_missing_class_schedule_receiver(tmp_path):
+    receivers = tuple(
+        name for name in _RECEIVERS if not name.endswith(".ClassScheduleAlarmReceiver")
+    )
+    with pytest.raises(AndroidVerificationError, match="receiver wiring is incomplete"):
+        _verify(
+            _aab(tmp_path / "missing-class-schedule.aab", manifest=_manifest(receivers=receivers)),
+            tmp_path,
+        )
 
 
 def test_verifier_ignores_manifest_nodes_marked_for_removal(tmp_path):

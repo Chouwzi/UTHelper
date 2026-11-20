@@ -212,10 +212,20 @@ def test_user_cancellation_removes_native_job(package):
     assert [name for name, _ in bridge.calls] == ["start", "cancel"]
 
 
-def test_observer_timeout_keeps_job_recoverable(package):
+def test_observer_timeout_keeps_job_recoverable(package, monkeypatch):
+    import platform_utils.android_updates as updates
+
+    clock = [100.0]
+    monkeypatch.setattr(updates, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     bridge = DownloadBridge([{"status": "paused"}])
+
+    def advance_clock(*_args):
+        clock[0] += 1.0
+
     with pytest.raises(TimeoutError):
-        downloader(bridge, observation_timeout_seconds=0.000001).download(package, cancel=threading.Event())
+        downloader(bridge, observation_timeout_seconds=0.5).download(
+            package, cancel=threading.Event(), progress=advance_clock
+        )
     assert [name for name, _ in bridge.calls] == ["start"]
 
 

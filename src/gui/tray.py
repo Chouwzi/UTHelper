@@ -191,20 +191,38 @@ class TrayApp:
                 self._stop_helper_failed = True
             logger.warning("Tray icon stop failed", exc_info=True)
 
-    def notify(self, title: str, message: str):
-        """Send a Windows balloon notification via pystray, with fallback."""   
+    # Shell_NotifyIcon balloon limits: szInfoTitle holds 64 chars and szInfo
+    # 256; pystray fails on longer strings, so the caller-facing text is
+    # truncated up front instead of falling back to a broken notify.
+    _BALLOON_TITLE_LIMIT = 64
+    _BALLOON_MESSAGE_LIMIT = 256
+
+    def notify(self, title: str, message: str) -> bool:
+        """Send a Windows balloon notification; True only when it was shown.
+
+        The fallback log line deliberately never contains the message body:
+        class reminders may embed room links or passwords in their note.
+        """
+        title = str(title or "")[: self._BALLOON_TITLE_LIMIT - 1]
+        message = str(message or "")[: self._BALLOON_MESSAGE_LIMIT - 1]
         with self._lifecycle_lock:
             if self._close_requested:
-                return
+                return False
         if not self._icon:
             self.setup()
-        
+
+        icon = self._icon
+        if icon is None:
+            logger.warning(
+                "Tray notification skipped: icon unavailable (title=%r)", title
+            )
+            return False
         try:
-            if self._icon:
-                self._icon.notify(message, title)
+            icon.notify(message, title)
+            return True
         except Exception as exc:
-            logger.warning("Tray notification failed, falling back to log: %s", exc)
-            logger.info("NOTIFICATION: %s - %s", title, message)
+            logger.warning("Tray notification failed (title=%r): %s", title, exc)
+            return False
 
 
 def _bounded_timeout_seconds(timeout_seconds: float, *, maximum: float) -> float:

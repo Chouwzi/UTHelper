@@ -61,9 +61,10 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
    - `targetSdkVersion < 35`.
    - Any 64-bit (`arm64-v8a`, `x86_64`) ELF `PT_LOAD` segment has
      `p_align < 0x4000` (16 KB).
-   - Any of the 5 required notification/alarm receivers is missing
+   - Any of the 6 required notification/alarm receivers is missing
      (`ScheduledNotificationReceiver`, `ScheduledNotificationBootReceiver`,
-     `ActionBroadcastReceiver`, `DeadlineAlarmReceiver`, `RescheduleReceiver`).
+     `ActionBroadcastReceiver`, `DeadlineAlarmReceiver`, `RescheduleReceiver`,
+     `ClassScheduleAlarmReceiver`).
    - Embedded `distribution-channel.json` is missing or not `"channel": "chplay"`.
 3. **Runtime compliance checks**:
    - `SCHEDULE_EXACT_ALARM` gracefully degrades to `setAndAllowWhileIdle(...)`

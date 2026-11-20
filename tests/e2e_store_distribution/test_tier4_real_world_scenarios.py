@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 import urllib.parse
@@ -993,7 +994,9 @@ def test_t4_s06_msstore_msix_cold_start_and_package_verification(
     )
     assert makeappx is not None, "makeappx.exe is required for Scenario 6"
 
-    temp_root = WORKTREE_ROOT / "build" / "e2e-tier4-msix"
+    build_root = WORKTREE_ROOT / "build"
+    build_root.mkdir(parents=True, exist_ok=True)
+    temp_root = Path(tempfile.mkdtemp(prefix="e2e-t4-msix-", dir=build_root))
     bundle_dir = temp_root / "bundle"
     unpack_dir = temp_root / "unpacked"
     msix_out = temp_root / "UTHelper-Store.msix"
@@ -1143,7 +1146,6 @@ def test_t4_s06_msstore_msix_cold_start_and_package_verification(
             assert verify_proc.returncode == 0, verify_proc.stderr or verify_proc.stdout
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
-        shutil.rmtree(WORKTREE_ROOT / "build" / "msix-stage", ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1206,6 +1208,7 @@ def test_t4_s07_chplay_aab_release_compliance_pipeline(tmp_path: Path) -> None:
         '    <receiver android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />\n'
         '    <receiver android:name="com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver" />\n'
         '    <receiver android:name="com.uthelper.backgroundsync.notification.RescheduleReceiver" />\n'
+        '    <receiver android:name="com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver" />\n'
         "  </application>\n"
         "</manifest>\n"
     )

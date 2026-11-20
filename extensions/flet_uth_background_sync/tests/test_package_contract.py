@@ -138,7 +138,9 @@ def test_chplay_manifest_variant_strips_updater_and_foreground_permissions():
     assert 'android:usesCleartextTraffic="false"' in main
     assert "USE_EXACT_ALARM" not in main
     assert "FOREGROUND_SERVICE" not in main
-    for receiver in ("DeadlineAlarmReceiver", "RescheduleReceiver"):
+    for receiver in (
+        "DeadlineAlarmReceiver", "RescheduleReceiver", "ClassScheduleAlarmReceiver"
+    ):
         assert receiver in manifest
 
 
