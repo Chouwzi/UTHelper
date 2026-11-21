@@ -2247,3 +2247,27 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   were Windows MSIX subprocess tests whose child PowerShell process could not
   find the local Python executable on `PATH`; one existing quiz player timing
   test failed on Windows. The iOS-specific test set passed.
+
+## iOS App Store, Keychain, and iPhone compatibility follow-up (2026-11-22)
+
+- Added optional numeric `app_store_id` distribution metadata and Apple App
+  Store deep links (`itms-apps://` with HTTPS fallback). The iOS build reads the
+  GitHub Actions `APP_STORE_ID` variable; it remains unset until the app is
+  published.
+- Declared `ITSAppUsesNonExemptEncryption = false` in the iOS build metadata and
+  made the bundle preparation validator require the generated Info.plist flag.
+- Added Keychain-backed iOS app-secret read/write/clear calls to the Swift
+  background-sync plugin using `WhenUnlockedThisDeviceOnly`; generalized the
+  Python mobile secret backend and legacy plaintext migration to iOS while
+  retaining the Android compatibility names.
+- Added the plugin's `PrivacyInfo.xcprivacy` to its CocoaPods resource bundle.
+- Kept the mobile app content inside Flet `SafeArea` and removed redundant
+  dashboard header top padding so content clears the notch/Dynamic Island and
+  home indicator without a second fixed inset.
+- Updated privacy and store documentation for Keychain behavior, encryption
+  declaration, and the not-yet-assigned App Store ID.
+- **Verification**: focused distribution, iOS packaging, config, GUI controller,
+  background-sync, and plugin contract suites passed (**249 passed**); `ruff
+  check src tests scripts extensions/flet_uth_background_sync` and
+  `git diff --check` passed. Native Swift plugin compilation is covered by the
+  macOS iOS build workflow and must be confirmed by the PR check.

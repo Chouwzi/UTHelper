@@ -109,6 +109,15 @@ opt-out crash diagnostics rules above, with channel-specific update behavior:
     UTHelper's Moodle, Portal, notification and diagnostic endpoints use HTTPS.
   - App updates are delivered by the Apple App Store. The iOS App Store
     distribution profile disables GitHub update checks and external installers.
+  - App credentials and integration secrets are stored in the iOS Keychain with
+    `WhenUnlockedThisDeviceOnly` accessibility. Legacy plaintext settings are
+    migrated into Keychain before being scrubbed from `settings.json`.
+  - The App Store listing link is generated from the numeric `APP_STORE_ID`
+    GitHub Actions variable when one is configured. The app has not yet been
+    published, so this value is intentionally unset until Apple assigns the ID.
+  - The build declares `ITSAppUsesNonExemptEncryption = false`; confirm the
+    shipped app and all linked libraries still use only exempt encryption before
+    submitting each release.
 - **GitHub Releases LTS (`apk_lts`, `exe_lts`, and unsigned iOS `.ipa`)**:
   - Connects to `api.github.com` / `github.com` solely to check signed LTS
     release manifests and download verified updates after explicit user
@@ -132,6 +141,10 @@ opt-out crash diagnostics rules above, with channel-specific update behavior:
   `context.noBackupFilesDir` (`CredentialVault` for native background sync and
   `AppSecretVault` for app settings secrets), and are never persisted in
   plaintext `settings.json`.
+- **iOS (`ios_app_store` and iOS LTS)**: sensitive app settings are stored in
+  Apple Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. They are
+  available while the device is unlocked and do not migrate to a different
+  device through backup or restore.
 
 The diagnostics queue retains at most **20 reports**, **1 MiB** total, and
 **7 days**. It is non-recursive, rejects links/reparse points, deduplicates
@@ -152,8 +165,9 @@ account is owned by UTH. You can delete all locally stored data at any time:
    target. Re-enabling affects only future delivery attempts; it does not
    recreate deleted reports.
 2. **Clear credentials**: sign out inside UTHelper Settings to remove stored
-   credentials from Windows Credential Manager (`keyring`) or Android
-   `AndroidKeyStore` vaults (`CredentialVault` and `AppSecretVault`); any
+   credentials from Windows Credential Manager (`keyring`), Android
+   `AndroidKeyStore` vaults (`CredentialVault` and `AppSecretVault`), or the iOS
+   Keychain; any
    legacy plaintext entries in `settings.json` are scrubbed automatically upon
    migration or save.
 3. **Remove all local app data**:
