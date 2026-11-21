@@ -81,9 +81,10 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
     background_source.write_text("class BackgroundExtension {}\n", encoding="utf-8")
 
     calls = []
+    run_child = subprocess.run
 
-    def build(command, *, cwd, check):
-        calls.append((command, cwd, check))
+    def build(command, *, cwd, env, check):
+        calls.append({"command": command, "cwd": cwd, "env": env, "check": check})
         (cwd / "build" / "windows").mkdir(parents=True, exist_ok=True)
         (cwd / "build" / "windows" / "UTHelper.exe").write_bytes(b"client")
         generated = cwd / "build" / "flutter" / "lib"
@@ -95,12 +96,27 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
 
     monkeypatch.setattr(quiz_client_bootstrap, "_flet_cli_is_installed", lambda: True)
     monkeypatch.setattr(quiz_client_bootstrap.subprocess, "run", build)
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    monkeypatch.setenv("UTH_BUILD_ENV_SENTINEL", "kept-for-flet")
 
     client = quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
     assert client == project_root / "build" / "windows" / "UTHelper.exe"
     assert len(calls) == 1
-    assert calls[0][0][-5:] == ["-m", "flet_cli.cli", "build", "windows", "--yes"]
-    assert calls[0][1:] == (project_root.resolve(), False)
+    assert calls[0]["command"][-5:] == ["-m", "flet_cli.cli", "build", "windows", "--yes"]
+    assert calls[0]["cwd"] == project_root.resolve()
+    assert calls[0]["check"] is False
+    assert calls[0]["env"]["PYTHONIOENCODING"] == "utf-8:replace"
+    assert calls[0]["env"]["UTH_BUILD_ENV_SENTINEL"] == "kept-for-flet"
+    assert os.environ["PYTHONIOENCODING"] == "cp1252"
+    unicode_probe = run_child(
+        [sys.executable, "-c", "print(chr(0x2705))"],
+        cwd=project_root,
+        env=calls[0]["env"],
+        capture_output=True,
+        check=False,
+    )
+    assert unicode_probe.returncode == 0, unicode_probe.stderr
+    assert unicode_probe.stdout.decode("utf-8").strip() == "✅"
 
     quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
     assert len(calls) == 1

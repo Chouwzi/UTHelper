@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -150,10 +151,16 @@ def ensure_windows_quiz_client(project_root: Path) -> Path:
         )
 
     print("Preparing the in-app quiz view for this source checkout...")
+    # Flet's Rich progress output includes Unicode glyphs. Under captured or
+    # redirected Windows stdout, the inherited console encoding may be cp1252
+    # and abort the build before the custom client is generated.
+    build_env = os.environ.copy()
+    build_env["PYTHONIOENCODING"] = "utf-8:replace"
     try:
         result = subprocess.run(
             [sys.executable, "-m", "flet_cli.cli", "build", "windows", "--yes"],
             cwd=project_root,
+            env=build_env,
             check=False,
         )
     except OSError as exc:
