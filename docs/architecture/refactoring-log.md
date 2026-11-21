@@ -2226,3 +2226,24 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
   - `flutter analyze --no-pub && flutter test --no-pub` (`extensions/flet_uth_quiz/flutter/flet_uth_quiz`): **No issues found!**, **23/23 tests passed!**.
   - Built real Windows client via `quiz_client_bootstrap.ensure_windows_quiz_client(Path('.'))`, prepared & verified `build/windows` via `prepare_windows_bundle.py` + `verify_windows_bundle.py` (**passed**). Live quiz `784921` was left untouched (1 attempt remaining).
+
+## iOS App Store packaging preparation (2026-11-22)
+
+- Added distinct `ios_app_store` and `ios_lts` distribution channels. iOS now
+  defaults to the App Store profile, which disables GitHub self-updates; the
+  explicit LTS profile retains sideload update behavior.
+- Added the app-owned `packaging/ios/PrivacyInfo.xcprivacy` manifest for the
+  diagnostic data and required-reason APIs used by the app, kept ATS enabled,
+  and added `scripts/prepare_ios_app_store.py` to validate and install the
+  manifest in the built app bundle.
+- Updated iOS simulator and unsigned LTS archive workflows to emit their
+  respective distribution channels and validate the packaged privacy
+  manifest. The simulator job now runs the dedicated iOS packaging tests.
+- Added distribution, runtime-target, privacy-manifest, ATS, and workflow
+  contract tests; updated the store submission and privacy guides.
+- **Verification**: focused iOS/distribution/release/update tests passed
+  (**147 passed**); `ruff check src tests scripts` passed; `git diff --check`
+  passed. Full local suite: **2347 passed, 36 skipped, 7 failed**. Six failures
+  were Windows MSIX subprocess tests whose child PowerShell process could not
+  find the local Python executable on `PATH`; one existing quiz player timing
+  test failed on Windows. The iOS-specific test set passed.

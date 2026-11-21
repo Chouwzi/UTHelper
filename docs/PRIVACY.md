@@ -99,6 +99,16 @@ opt-out crash diagnostics rules above, with channel-specific update behavior:
   - **AppData virtualization**: writes to `%APPDATA%\UTHelper` are isolated by
     standard MSIX AppData virtualization (`LocalCache\Roaming`) and are cleanly
     removed when the Microsoft Store package is uninstalled.
+- **Apple App Store (`ios_app_store`)**:
+  - iOS builds include the app-owned `PrivacyInfo.xcprivacy` manifest at the
+    root of the app bundle. It reports anonymous crash and diagnostic data sent
+    to Sentry, does not declare tracking, and includes the required-reason APIs
+    used for app-container file metadata, app-private preferences, and elapsed
+    time measurement.
+  - App Transport Security stays enabled with no cleartext exception domains.
+    UTHelper's Moodle, Portal, notification and diagnostic endpoints use HTTPS.
+  - App updates are delivered by the Apple App Store. The iOS App Store
+    distribution profile disables GitHub update checks and external installers.
 - **GitHub Releases LTS (`apk_lts`, `exe_lts`, and unsigned iOS `.ipa`)**:
   - Connects to `api.github.com` / `github.com` solely to check signed LTS
     release manifests and download verified updates after explicit user
