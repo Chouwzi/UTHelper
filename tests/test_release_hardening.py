@@ -156,6 +156,9 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert "ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}" in workflow
     assert "ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}" in workflow
     assert "ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}" in workflow
+    assert "UTH_DISTRIBUTION_CHANNEL=apk_lts" in workflow
+    assert "--distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json" in workflow
+    assert "--channel apk_lts" in workflow
     assert 'application-id "$APK")" = "com.uthelper.uthelper"' in workflow
     assert 'version-code "$APK")" = "$BUILD_NUMBER"' in workflow
     assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
@@ -448,6 +451,7 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
         ".github/workflows/release.yml",
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
+        ".github/workflows/build-msstore.yml",
         ".github/workflows/package-benchmark.yml",
         "scripts/build_android.ps1",
     }
@@ -499,12 +503,13 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
             assert version_output in version_matching[0]
             previous_build = build_index
 
-    assert total_builds == 13
+    assert total_builds >= 14
 
     for workflow_path in (
         ".github/workflows/release.yml",
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
+        ".github/workflows/build-msstore.yml",
     ):
         workflow = _read(workflow_path)
         assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
@@ -547,13 +552,14 @@ def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_templat
 
     for relative_path in (
         ".github/workflows/release.yml",
+        ".github/workflows/build-msstore.yml",
     ):
         content = _read(relative_path).replace("\\", "/")
         build_index = content.index("flet build windows")
         assert official_url in content
         assert prepared_name in content
         assert patcher in content[:build_index]
-        if relative_path.endswith("release.yml"):
+        if relative_path.endswith(("release.yml", "build-msstore.yml")):
             assert f"--template build/support/{prepared_name}" in content
         else:
             assert "--template $diagnosticsTemplate" in content
@@ -811,3 +817,49 @@ def test_release_manifest_preserves_the_supported_2_1_floor():
 
     assert '--minimum-supported-version "2.1.0"' in workflow
     assert '--minimum-supported-version "$VERSION"' not in workflow
+
+
+def test_msstore_workflow_builds_and_verifies_msix_without_mutating_lts_release():
+    workflow = _read(".github/workflows/build-msstore.yml")
+    release_workflow = _read(".github/workflows/release.yml")
+
+    for action in (
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    ):
+        assert action in workflow
+
+    assert "permissions: {}" in workflow
+    assert "contents: write" not in workflow
+    assert "gh release" not in workflow
+    assert "PYTHONUTF8: '1'" in workflow
+    assert "PYTHONIOENCODING: utf-8" in workflow
+    assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
+    assert "secrets.SENTRY_DSN" not in workflow
+
+    ordered_commands = (
+        "prepare_flet_diagnostics_template.py",
+        "flet build windows",
+        "verify_flutter_diagnostics.py",
+        "prepare_windows_bundle.py build/windows",
+        "verify_windows_bundle.py build/windows",
+        "./scripts/package_msix.ps1",
+        "./scripts/verify_msix_release.ps1",
+    )
+    positions = [workflow.index(command) for command in ordered_commands]
+    assert positions == sorted(positions)
+
+    # Every step in build-msstore-msix must have an explicit timeout.
+    steps_block = workflow.split("    steps:\n", 1)[1]
+    steps = [
+        block
+        for block in re.split(r"(?m)(?=^      - )", steps_block)
+        if block.startswith("      - ")
+    ]
+    assert steps
+    assert all("timeout-minutes:" in step for step in steps)
+
+    # GitHub LTS release workflow stays isolated from Store MSIX/AAB artifacts.
+    assert ".msix" not in release_workflow
+    assert ".aab" not in release_workflow

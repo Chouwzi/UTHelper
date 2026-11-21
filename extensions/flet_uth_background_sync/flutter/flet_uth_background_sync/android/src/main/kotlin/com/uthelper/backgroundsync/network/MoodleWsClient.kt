@@ -3,6 +3,7 @@ package com.uthelper.backgroundsync.network
 import com.uthelper.backgroundsync.data.ActivityEntity
 import com.uthelper.backgroundsync.data.NativeSettings
 import com.uthelper.backgroundsync.security.MoodleCredential
+import com.uthelper.backgroundsync.security.TrustedMoodleUri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -18,7 +19,16 @@ data class DiscoveryResult(
 
 class MoodleWsException(message: String, val errorCode: String = "") : Exception(message)
 
-class MoodleWsClient(private val credential: MoodleCredential) {
+class MoodleWsClient internal constructor(
+    private val credential: MoodleCredential,
+    private val connectionFactory: (String) -> HttpURLConnection = { endpoint ->
+        URI(endpoint).toURL().openConnection() as HttpURLConnection
+    },
+) {
+    constructor(credential: MoodleCredential) : this(
+        credential,
+        { endpoint -> URI(endpoint).toURL().openConnection() as HttpURLConnection },
+    )
     fun fetchActivities(settings: NativeSettings, generation: Long): DiscoveryResult {
         val now = Instant.now().epochSecond
         val end = now + settings.fetchMonths * 31L * 24L * 3600L
@@ -143,7 +153,7 @@ class MoodleWsClient(private val credential: MoodleCredential) {
         return "not_submitted"
     }
 
-    private fun parseEvent(event: JSONObject, generation: Long): ActivityEntity? {
+    internal fun parseEvent(event: JSONObject, generation: Long): ActivityEntity? {
         val deadline = event.optLong("timesort", event.optLong("timestart", 0))
         if (deadline <= 0) return null
         val module = event.optString("modulename", "other").lowercase()
@@ -153,8 +163,13 @@ class MoodleWsClient(private val credential: MoodleCredential) {
             "attendance" -> "attendance"
             else -> module
         }
-        val url = event.optString("url", "")
-        val cmid = cmid(url) ?: event.optLong("instance", 0).takeIf { it > 0 }
+        val rawUrl = event.optString("url", "")
+        val cmid = cmid(rawUrl) ?: event.optLong("instance", 0).takeIf { it > 0 }
+        val url = if (TrustedMoodleUri.validateActivityUri(rawUrl, credential.baseUrl) != null) {
+            rawUrl
+        } else {
+            ""
+        }
         val eventId = event.optString("id", "")
         val key = if (cmid != null) "$module:$cmid" else "event:$eventId"
         val course = event.optJSONObject("course") ?: JSONObject()
@@ -175,8 +190,10 @@ class MoodleWsClient(private val credential: MoodleCredential) {
         )
     }
 
-    private fun callObject(function: String, parameters: Map<String, Any>): JSONObject {
-        val endpoint = "${credential.baseUrl}/webservice/rest/server.php"
+    internal fun callObject(function: String, parameters: Map<String, Any>): JSONObject {
+        val origin = TrustedMoodleUri.normalizeTrustedOrigin(credential.baseUrl)
+            ?: throw MoodleWsException("Untrusted Moodle base URL")
+        val endpoint = "$origin/webservice/rest/server.php"
         val form = linkedMapOf<String, Any>(
             "wstoken" to credential.token,
             "wsfunction" to function,
@@ -185,8 +202,9 @@ class MoodleWsClient(private val credential: MoodleCredential) {
         val body = form.entries.joinToString("&") { (key, value) ->
             "${encode(key)}=${encode(value.toString())}"
         }.toByteArray(Charsets.UTF_8)
-        val connection = URI(endpoint).toURL().openConnection() as HttpURLConnection
+        val connection = connectionFactory(endpoint)
         return try {
+            connection.instanceFollowRedirects = false
             connection.requestMethod = "POST"
             connection.connectTimeout = 20_000
             connection.readTimeout = 25_000
@@ -196,7 +214,11 @@ class MoodleWsClient(private val credential: MoodleCredential) {
                 "application/x-www-form-urlencoded; charset=UTF-8",
             )
             connection.outputStream.use { it.write(body) }
-            val stream = if (connection.responseCode in 200..299) {
+            val code = connection.responseCode
+            if (code in 300..399) {
+                throw MoodleWsException("Unexpected Moodle redirect: HTTP $code")
+            }
+            val stream = if (code in 200..299) {
                 connection.inputStream
             } else {
                 connection.errorStream

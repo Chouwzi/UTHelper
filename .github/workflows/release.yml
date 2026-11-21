@@ -150,7 +150,7 @@ jobs:
           test -n "$ANDROID_SIGNING_CERT_SHA256"
           umask 077
           KEYSTORE="$RUNNER_TEMP/uthelper-release.jks"
-          cleanup() { rm -f -- "$KEYSTORE"; }
+          cleanup() { rm -f -- "$KEYSTORE" src/assets/distribution-channel.json; }
           trap cleanup EXIT
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
           unset ANDROID_KEYSTORE_BASE64
@@ -158,16 +158,18 @@ jobs:
           export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
           export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
           export FLET_ANDROID_SIGNING_KEY_ALIAS="$ANDROID_KEY_ALIAS"
+          export UTH_DISTRIBUTION_CHANNEL=apk_lts
+          export ORG_GRADLE_PROJECT_uthDistributionChannel=apk_lts
 
           set -- --android-legacy-packaging
           if [ "$ARCHITECTURE" = arm64 ]; then set -- "$@" --arch arm64-v8a; fi
 
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose
 
           grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter-packages/flet_uth_background_sync/android/build.gradle
@@ -199,6 +201,7 @@ jobs:
           mv "$APK" "$FINAL_APK"
           python scripts/verify_android_release.py \
             --apk "$FINAL_APK" \
+            --channel apk_lts \
             --version "$VERSION" \
             --build-number "$BUILD_NUMBER" \
             --package-id com.uthelper.uthelper \

@@ -1,8 +1,8 @@
 # ADR 0003: Platform release update channel
 
-- Status: Accepted (iOS and Windows trust model superseded by the 2026-08-09 sideload/self-signed design)
+- Status: Accepted (GitHub LTS 7-asset release contract active; extended by [ADR 0004](0004-multi-channel-store-and-lts-distribution.md) for dedicated `chplay` and `msstore` Store channels)
 - Date: 2026-07-19
-- Updated: 2026-10-28
+- Updated: 2026-11-20
 
 ## Context
 
@@ -17,10 +17,12 @@ stable package identity, deterministic selection, or end-to-end verification.
 
 - `pyproject.toml` is the only authored application version. A protected
   `vX.Y.Z` tag must equal it and point to a commit contained in `main`.
-- From 2.5.0, a public release contains exactly seven assets: one unsigned device
+- From 2.5.0, a public GitHub LTS release contains exactly seven assets: one unsigned device
   IPA, signed ARM64 APK, signed universal compatibility APK, x64 Burn
   EXE, x64 machine-scoped MSI, `release-manifest.json`, and `SHA256SUMS`.
-  MSIX, AppInstaller, ZIP, and GitHub Pages are not production release paths.
+  MSIX, AppInstaller, ZIP, AAB, and GitHub Pages are never mixed into the GitHub LTS
+  release inventory. Dedicated official store channels (`chplay` `.aab` and `msstore` `.msix`)
+  are packaged and verified separately under [ADR 0004](0004-multi-channel-store-and-lts-distribution.md).
 - Android ARM64 processes select the ARM64 APK. Unknown/32-bit/x86 runtimes and
   older clients retain the canonical universal filename/manifest target. An ARM64
   client falls back to universal only when an older manifest has no exact ARM64
