@@ -11,7 +11,7 @@ import flet as ft
 
 from core.course_grades_service import CourseWithGrades
 from gui.components.course_grade_table import build_grade_table
-from gui.core.theme import C, semantic_palette
+from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 
 
 def _fmt_pct_color(value: Optional[float]) -> str:
@@ -53,9 +53,13 @@ class CoursesView(ft.Container):
         self._on_refresh = on_refresh
         self._courses: list[CourseWithGrades] = []
 
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
         self._back_btn = ft.IconButton(
             icon=ft.Icons.ARROW_BACK_ROUNDED, icon_color=C.TEXT_SECONDARY,
-            icon_size=20, tooltip="Quay lại", on_click=self._handle_close,
+            icon_size=20, tooltip="Quay lại", padding=0,
+            size_constraints=btn_constraints, on_click=self._handle_close,
         )
         self._title = ft.Text(
             "Môn học", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY,
@@ -63,17 +67,46 @@ class CoursesView(ft.Container):
         )
         self._refresh_btn = ft.IconButton(
             icon=ft.Icons.REFRESH_ROUNDED, icon_color=C.TEXT_SECONDARY,
-            icon_size=20, tooltip="Làm mới", on_click=self._handle_refresh,
+            icon_size=20, tooltip="Làm mới", padding=0,
+            size_constraints=btn_constraints, on_click=self._handle_refresh,
         )
         header = ft.Row(
-            [self._back_btn, self._title, self._refresh_btn],
+            [
+                ft.Semantics(label="Quay lại", button=True, content=self._back_btn),
+                self._title,
+                ft.Semantics(label="Làm mới", button=True, content=self._refresh_btn),
+            ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        self._header_divider = ft.Divider(height=1, color=C.BORDER)
+        self._loading_ring = ft.ProgressRing(
+            width=24, height=24, stroke_width=3, color=C.ACCENT
+        )
+        self._loading_label = ft.Text(
+            "Đang tải môn học...", size=13, color=C.TEXT_SECONDARY
+        )
         self._loading_row = ft.Row(
-            [ft.ProgressRing(width=24, height=24, stroke_width=3, color=C.ACCENT),
-             ft.Text("Đang tải môn học...", size=13, color=C.TEXT_SECONDARY)],
+            [self._loading_ring, self._loading_label],
             alignment=ft.MainAxisAlignment.CENTER, visible=False,
+        )
+        self._stale_text = ft.Text(
+            "", size=11.5, color=C.WARNING, expand=True
+        )
+        self._stale_icon = ft.Icon(
+            ft.Icons.CLOUD_OFF_ROUNDED, size=15, color=C.WARNING
+        )
+        self._stale_banner = ft.Container(
+            content=ft.Row(
+                [self._stale_icon, self._stale_text],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.WARNING),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            visible=False,
         )
         self._empty_text = ft.Text(
             "Không có môn học nào đang học.", size=13, color=C.TEXT_SECONDARY,
@@ -85,8 +118,8 @@ class CoursesView(ft.Container):
         self._list = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
 
         self.content = ft.Column(
-            [header, ft.Divider(height=1, color=C.BORDER),
-             self._loading_row, self._empty_state, self._list],
+            [header, self._header_divider,
+             self._stale_banner, self._loading_row, self._empty_state, self._list],
             spacing=8, expand=True,
         )
         self.bgcolor = C.BG
@@ -118,14 +151,35 @@ class CoursesView(ft.Container):
         self.opacity = 0.0
 
     def update_theme(self) -> None:
-        self.bgcolor = C.BG
-        self._title.color = C.TEXT_PRIMARY
-        self._back_btn.icon_color = C.TEXT_SECONDARY
-        self._refresh_btn.icon_color = C.TEXT_SECONDARY
+        from gui.core.theme import C as _C
+        current_palette = semantic_palette()
+        refresh_semantic_control_colors(
+            [self], self._rendered_palette, current_palette
+        )
+        self._rendered_palette = current_palette
+        self.bgcolor = _C.BG
+        self._title.color = _C.TEXT_PRIMARY
+        self._back_btn.icon_color = _C.TEXT_SECONDARY
+        self._refresh_btn.icon_color = _C.TEXT_SECONDARY
+        self._header_divider.color = _C.BORDER
+        self._loading_ring.color = _C.ACCENT
+        self._loading_label.color = _C.TEXT_SECONDARY
+        self._empty_text.color = _C.TEXT_SECONDARY
+        self._stale_banner.bgcolor = _C.SURFACE
+        self._stale_banner.border = ft.Border.all(1, _C.WARNING)
+        self._stale_icon.color = _C.WARNING
+        self._stale_text.color = _C.WARNING
         if self._courses:
             self._build(self._courses)
+        self._safe_update()
+
+    def set_stale_notice(self, message: Optional[str]) -> None:
+        self._stale_text.value = message or ""
+        self._stale_banner.visible = bool(message)
+        self._safe_update()
 
     def show_loading(self) -> None:
+        self._stale_banner.visible = False
         self._loading_row.visible = True
         self._empty_state.visible = False
         self._list.visible = False
@@ -135,6 +189,7 @@ class CoursesView(ft.Container):
         self._safe_update()
 
     def show_error(self) -> None:
+        self._stale_banner.visible = False
         self._loading_row.visible = False
         self._empty_text.value = "Không tải được danh sách môn học.\nKiểm tra tài khoản/kết nối rồi bấm làm mới."
         self._empty_state.visible = True
@@ -143,6 +198,7 @@ class CoursesView(ft.Container):
 
     def update_courses(self, courses: list[CourseWithGrades]) -> None:
         self._courses = courses
+        self._stale_banner.visible = False
         self._loading_row.visible = False
         if not courses:
             self._empty_text.value = "Không có môn học nào đang học."
@@ -162,20 +218,41 @@ class CoursesView(ft.Container):
         return ft.Colors.with_opacity(opacity, color)
 
     def _summary_tile(self, icon: str, label: str, value: str, color: str) -> ft.Container:
+        badge = ft.Container(
+            content=ft.Icon(icon, size=16, color=color),
+            width=30, height=30, border_radius=8, bgcolor=self._tint(color),
+            alignment=ft.Alignment(0, 0),
+        )
         return ft.Container(
-            content=ft.Row(
-                [ft.Container(
-                    content=ft.Icon(icon, size=18, color=color),
-                    width=36, height=36, border_radius=10, bgcolor=self._tint(color),
-                    alignment=ft.Alignment(0, 0)),
-                 ft.Column(
-                    [ft.Text(value, size=18, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
-                     ft.Text(label, size=10.5, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500,
-                             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)],
-                    spacing=0, tight=True, expand=True)],
-                spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            badge,
+                            ft.Text(
+                                value,
+                                size=17,
+                                weight=ft.FontWeight.W_700,
+                                color=C.TEXT_PRIMARY,
+                            ),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Text(
+                        label,
+                        size=10.5,
+                        color=C.TEXT_SECONDARY,
+                        weight=ft.FontWeight.W_500,
+                        max_lines=2,
+                    ),
+                ],
+                spacing=6,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.START,
+            ),
             bgcolor=C.SURFACE, border=ft.Border.all(1, C.BORDER), border_radius=12,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=10), expand=True,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=9), expand=True,
         )
 
     def _summary_bar(self, courses: list[CourseWithGrades]) -> ft.Row:

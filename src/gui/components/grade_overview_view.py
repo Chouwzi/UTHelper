@@ -52,11 +52,16 @@ class GradeOverviewView(ft.Container):
         self._selected_semester_idx = 0
 
         # 1. Header (Back button on left, Centered Title in middle, Refresh on right)
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
         self._back_btn = ft.IconButton(
             icon=ft.Icons.ARROW_BACK_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Quay lại",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=self._handle_close,
         )
         self._title = ft.Text(
@@ -72,6 +77,8 @@ class GradeOverviewView(ft.Container):
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Làm mới bảng điểm từ Portal",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=self._handle_refresh,
         )
         self._planner_btn = ft.IconButton(
@@ -79,14 +86,16 @@ class GradeOverviewView(ft.Container):
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Tính GPA mong muốn",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=self._open_planner,
         )
         self._header = ft.Row(
             controls=[
-                self._back_btn,
+                ft.Semantics(label="Quay lại", button=True, content=self._back_btn),
                 self._title,
-                self._planner_btn,
-                self._refresh_btn,
+                ft.Semantics(label="Tính GPA mong muốn", button=True, content=self._planner_btn),
+                ft.Semantics(label="Làm mới bảng điểm từ Portal", button=True, content=self._refresh_btn),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -105,7 +114,7 @@ class GradeOverviewView(ft.Container):
             visible=False,
         )
 
-        # 3. Empty state
+        # 3. Empty & Error states
         self._empty_text = ft.Text(
             "Chưa có dữ liệu bảng điểm.\nRadar học tập sẽ xuất hiện khi có kết quả học phần.",
             size=13,
@@ -116,6 +125,38 @@ class GradeOverviewView(ft.Container):
             content=self._empty_text,
             alignment=ft.Alignment(0, 0),
             padding=40,
+            visible=False,
+        )
+        self._error_icon = ft.Icon(
+            ft.Icons.CLOUD_OFF_ROUNDED, size=36, color=C.CRITICAL
+        )
+        self._error_text = ft.Text(
+            "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi thử lại.",
+            size=13,
+            color=C.TEXT_SECONDARY,
+            text_align=ft.TextAlign.CENTER,
+        )
+        self._error_retry_btn = ft.Button(
+            "Thử lại",
+            icon=ft.Icons.REFRESH_ROUNDED,
+            bgcolor=C.ACCENT,
+            color=C.ON_ACCENT,
+            height=44,
+            on_click=self._handle_refresh,
+        )
+        self._error_state = ft.Container(
+            content=ft.Column(
+                controls=[
+                    self._error_icon,
+                    self._error_text,
+                    self._error_retry_btn,
+                ],
+                spacing=10,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
+            ),
+            alignment=ft.Alignment(0, 0),
+            padding=32,
             visible=False,
         )
 
@@ -151,6 +192,7 @@ class GradeOverviewView(ft.Container):
                 self._header_divider,
                 self._loading_row,
                 self._empty_state,
+                self._error_state,
                 self._scrollable_content,
             ],
             spacing=8,
@@ -179,11 +221,30 @@ class GradeOverviewView(ft.Container):
         """Shows loading state."""
         self._loading_row.visible = True
         self._empty_state.visible = False
+        self._error_state.visible = False
         self._radar_card.visible = False
         self._grade_list_view.visible = False
         self.visible = True
         self.offset = ft.Offset(0, 0)
         self.opacity = 1.0
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    def show_error(self, message: str = "") -> None:
+        """Shows an explicit error state with retry action."""
+        self._loading_row.visible = False
+        self._empty_state.visible = False
+        self._radar_card.visible = False
+        self._grade_list_view.visible = False
+        if message:
+            self._error_text.value = message
+        else:
+            self._error_text.value = (
+                "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi thử lại."
+            )
+        self._error_state.visible = True
         try:
             self.update()
         except Exception:
@@ -197,6 +258,7 @@ class GradeOverviewView(ft.Container):
     ) -> None:
         """Populates the view with full academic transcript and computed radar profiles."""
         self._loading_row.visible = False
+        self._error_state.visible = False
         self._semesters = semesters
         self._profiles = profiles
         self._selected_semester_idx = 0
@@ -212,6 +274,7 @@ class GradeOverviewView(ft.Container):
             return
 
         self._empty_state.visible = False
+        self._error_state.visible = False
         self._radar_card.visible = True
         if progress is not None:
             self._progress = progress
@@ -326,8 +389,15 @@ class GradeOverviewView(ft.Container):
         body_w = max(280.0, min(440.0, page_w - 80)) if page_w else 440.0
 
         dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text("Tính GPA mong muốn", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+            modal=True,
+            semantics_label="Tính GPA mong muốn",
+            title=ft.Text(
+                "Tính GPA mong muốn",
+                size=16,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+                semantics_label="Tính GPA mong muốn",
+            ),
             content=ft.Container(
                 content=ft.Column(
                     controls=[self._gpa_target_card, self._graduation_card],
@@ -337,7 +407,7 @@ class GradeOverviewView(ft.Container):
                 width=body_w,
                 height=body_h,
             ),
-            actions=[ft.TextButton("Đóng", on_click=lambda _: self._close_planner(page, dialog))],
+            actions=[ft.TextButton("Đóng", height=44, on_click=lambda _: self._close_planner(page, dialog))],
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )
@@ -409,6 +479,10 @@ class GradeOverviewView(ft.Container):
         self._loading.color = C.ACCENT
         self._loading_text.color = C.TEXT_SECONDARY
         self._empty_text.color = C.TEXT_SECONDARY
+        self._error_icon.color = C.CRITICAL
+        self._error_text.color = C.TEXT_SECONDARY
+        self._error_retry_btn.bgcolor = C.ACCENT
+        self._error_retry_btn.color = C.ON_ACCENT
         self._planner_btn.icon_color = C.TEXT_SECONDARY
 
         # These views are cached while detached from the desktop page. Rebuild

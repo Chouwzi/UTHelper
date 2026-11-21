@@ -194,14 +194,16 @@ def cumulative_gpa4(semesters: list[SemesterGradeData]) -> tuple[float | None, s
     """GPA tích lũy hệ 4 hiện tại và nguồn: ``portal`` | ``computed`` | ``none``.
 
     Ưu tiên giá trị Portal đã tổng hợp (``diemTBTinChiTichLuy``, học kỳ mới nhất
-    có giá trị). Nếu thiếu thì tự tính từ các môn đã có điểm.
+    có giá trị). Nếu thiếu thì tự tính từ các môn đã có điểm (môn học lại chỉ
+    tính lần có điểm hệ 4 cao nhất).
     """
     for sem in semesters:
         val = sem.summary.get("diemTBTinChiTichLuy") if sem.summary else None
         if val is not None:
             return float(val), "portal"
 
-    points = credits = 0.0
+    best_by_code: dict[str, tuple[float, float]] = {}
+    anonymous: list[tuple[float, float]] = []
     for sem in semesters:
         for c in sem.courses:
             if not _is_gpa_course(c):
@@ -209,8 +211,17 @@ def cumulative_gpa4(semesters: list[SemesterGradeData]) -> tuple[float | None, s
             p = _course_point4(c)
             if p is None:
                 continue
-            points += c.credits * p
-            credits += c.credits
+            code = (c.course_code or "").strip().upper()
+            if not code:
+                anonymous.append((c.credits, p))
+                continue
+            existing = best_by_code.get(code)
+            if existing is None or p > existing[1]:
+                best_by_code[code] = (c.credits, p)
+
+    entries = [*best_by_code.values(), *anonymous]
+    credits = sum(cred for cred, _ in entries)
+    points = sum(cred * pt for cred, pt in entries)
     if credits > 0:
         return points / credits, "computed"
     return None, "none"

@@ -67,7 +67,6 @@ def report_from_ws_items(course_id: int, items: list[dict]) -> CourseGradeReport
 def fetch_current_courses_with_grades(orchestrator: Any, max_workers: int = 4) -> List[CourseWithGrades]:
     """Danh sách môn đang học (Moodle 'inprogress') kèm bảng điểm."""
     service = orchestrator.moodle_service
-    client = orchestrator.client
     raw = service.get_enrolled_courses("inprogress") or []
 
     courses: list[CourseWithGrades] = []
@@ -97,10 +96,10 @@ def fetch_current_courses_with_grades(orchestrator: Any, max_workers: int = 4) -
     def work(item: CourseWithGrades) -> CourseWithGrades:
         html_text = None
         try:
-            html_text = client.fetch_grade_report_html(item.course_id)
+            html_text = service.fetch_grade_report_html(item.course_id)
         except Exception as exc:  # không để một môn làm hỏng cả danh sách
             logger.warning("Grade report web lỗi (môn %s): %s", item.course_id, exc)
-        web_reason = getattr(client, "last_grade_report_error", "")
+        web_reason = getattr(service, "last_grade_report_error", "")
         if html_text is not None:
             item.report = parse_course_grade_report(html_text, item.course_id)
             item.source = "web"

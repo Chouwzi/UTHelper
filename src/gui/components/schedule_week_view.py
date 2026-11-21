@@ -23,14 +23,21 @@ from core.today_schedule import (
     SchedulePhase,
     WeekScheduleCache,
 )
+from core.url_validation import is_trusted_uth_lms_url, validate_https_url
+from gui.components.in_app_webview import InAppWebViewDialog
 from gui.core.theme import C
+import platform_utils
 
 logger = logging.getLogger(__name__)
 
 FetchWeek = Callable[[date], "dict[date, tuple[ClassSession, ...]]"]
+OpenUrlCallback = Callable[[str, str], None]
+OpenExternalCallback = Callable[[str], None]
 
 _WEEKDAYS_LONG = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"]
 _NARROW_BREAKPOINT = 920
+_WIDE_SHELL_BREAKPOINT = 980
+_RAIL_WIDTH = 88
 _DAY_COLUMN_MIN_W = 112
 _DAY_COLUMN_MAX_W = 225
 _DAY_COLUMN_GAP = 8
@@ -61,11 +68,15 @@ class ScheduleWeekView(ft.Container):
         page: ft.Page,
         fetch_week: Optional[FetchWeek] = None,
         cache: Optional[WeekScheduleCache] = None,
+        on_open_url: Optional[OpenUrlCallback] = None,
+        on_open_external: Optional[OpenExternalCallback] = None,
     ) -> None:
         super().__init__(expand=True, visible=False)
         self._page_ref = page
         self._fetch_week = fetch_week
         self._cache = cache
+        self._on_open_url = on_open_url
+        self._on_open_external = on_open_external
         self._cache_lock = threading.Lock()
         self._layout_width = self._initial_layout_width()
         self.on_size_change = self._on_size_change
@@ -175,8 +186,10 @@ class ScheduleWeekView(ft.Container):
             except (TypeError, ValueError):
                 continue
             if width > 0:
+                if not platform_utils.UI_IS_MOBILE and width >= _WIDE_SHELL_BREAKPOINT:
+                    return max(0.0, width - _RAIL_WIDTH)
                 return width
-        return 1120.0
+        return 1120.0 - _RAIL_WIDTH
 
     def _is_narrow_layout(self) -> bool:
         return self._layout_width < _NARROW_BREAKPOINT
@@ -229,10 +242,10 @@ class ScheduleWeekView(ft.Container):
     def update_theme(self) -> None:
         self.bgcolor = C.BG
         self._week_label.color = C.TEXT_PRIMARY
-        self._prev_btn.icon_color = C.TEXT_SECONDARY
-        self._next_btn.icon_color = C.TEXT_SECONDARY
-        self._today_btn.icon_color = C.ACCENT
-        self._refresh_btn.icon_color = C.TEXT_SECONDARY
+        self._prev_btn.style = _text_action_style(C.TEXT_SECONDARY)
+        self._next_btn.style = _text_action_style(C.TEXT_SECONDARY)
+        self._today_btn.style = _text_action_style(C.ACCENT)
+        self._refresh_btn.style = _text_action_style(C.TEXT_SECONDARY)
         self._render()
 
     # ------------------------------------------------------------ navigation
@@ -327,26 +340,32 @@ class ScheduleWeekView(ft.Container):
 
     async def _prefetch_async(self) -> None:
         """Keep the current week and 4 weeks each side warm, nearest first."""
+        generation = self._generation
         try:
             for monday in WeekScheduleCache.window():
-                if self._auth_failed:
+                if generation != self._generation or self._auth_failed:
                     break
                 if monday in self._loading or not self._needs_fetch(monday):
                     continue
                 self._loading.add(monday)
                 await self._load_async(monday)
+                if generation != self._generation or self._auth_failed:
+                    break
                 await asyncio.sleep(_PREFETCH_GAP_S)
+                if generation != self._generation or self._auth_failed:
+                    break
         finally:
             self._prefetching = False
 
     async def _load_async(self, monday: date) -> None:
         generation = self._generation
         error = ""
+        auth_error = False
         data: dict[date, tuple[ClassSession, ...]] | None = None
         try:
             data = await asyncio.to_thread(self._fetch_week, monday)  # type: ignore[arg-type]
         except ScheduleAuthenticationError:
-            self._auth_failed = True
+            auth_error = True
             error = "Chưa đăng nhập Portal. Vào Cài đặt để nhập MSSV và mật khẩu."
         except Exception:
             logger.warning("Portal week schedule request failed", exc_info=True)
@@ -356,7 +375,12 @@ class ScheduleWeekView(ft.Container):
         self._loading.discard(monday)
         forced = monday in self._forced
         self._forced.discard(monday)
-        if data is not None:
+        if auth_error:
+            self._auth_failed = True
+            self._weeks.clear()
+            self._live_at.clear()
+            self._errors[monday] = error
+        elif data is not None:
             fetched_at = datetime.now()
             self._weeks[monday] = data
             self._live_at[monday] = fetched_at
@@ -366,7 +390,7 @@ class ScheduleWeekView(ft.Container):
             # Cached data stays on screen; only surface the error when there
             # is nothing to show or the person asked for a reload.
             self._errors[monday] = error
-        if monday == _monday(self._selected):
+        if monday == _monday(self._selected) or auth_error:
             self._render()
 
     # ---------------------------------------------------------------- render
@@ -417,7 +441,12 @@ class ScheduleWeekView(ft.Container):
                 ft.Text(
                     self._errors[monday], size=11, color=C.CRITICAL, expand=True
                 ),
-                ft.TextButton("Thử lại", on_click=lambda _: self._reload()),
+                ft.TextButton(
+                    "Thử lại",
+                    height=44,
+                    style=_text_action_style(C.ACCENT),
+                    on_click=lambda _: self._reload(),
+                ),
             ]
         self._status.controls = controls
         self._status.visible = bool(controls)
@@ -478,7 +507,7 @@ class ScheduleWeekView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.START,
         )
 
-    def _link_button(self, label: str, icon, color: str, on_click) -> ft.Control:
+    def _link_button(self, label: str, icon, color: str, on_click) -> ft.TextButton:
         return ft.TextButton(
             label,
             icon=icon,
@@ -487,6 +516,48 @@ class ScheduleWeekView(ft.Container):
             tooltip=label,
             style=_text_action_style(color),
             on_click=on_click,
+        )
+
+    def _link_with_external_button(
+        self,
+        label: str,
+        icon,
+        color: str,
+        url: str,
+        title: str,
+        *,
+        require_uth_lms: bool = False,
+    ) -> ft.Row:
+        primary = self._link_button(
+            label,
+            icon,
+            color,
+            lambda _, u=url, t=title, req=require_uth_lms: self._open_url(
+                u, t, require_uth_lms=req
+            ),
+        )
+        external_btn = ft.Semantics(
+            label=f"Mở {label} bằng trình duyệt ngoài",
+            button=True,
+            content=ft.IconButton(
+                icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                icon_color=color,
+                icon_size=18,
+                tooltip=f"Mở {label} bằng trình duyệt ngoài",
+                padding=0,
+                size_constraints=ft.BoxConstraints(
+                    min_width=44, max_width=44, min_height=44, max_height=44
+                ),
+                on_click=lambda _, u=url, req=require_uth_lms: self._open_external(
+                    u, require_uth_lms=req
+                ),
+            ),
+        )
+        return ft.Row(
+            [primary, external_btn],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4,
         )
 
     def _session_card(self, session: ClassSession, now: datetime) -> ft.Control:
@@ -548,29 +619,35 @@ class ScheduleWeekView(ft.Container):
             )
         if session.meeting_url:
             rows.append(
-                self._link_button(
+                self._link_with_external_button(
                     "Truy cập Zoom",
                     ft.Icons.VIDEOCAM_OUTLINED,
                     C.ACCENT,
-                    lambda _, u=session.meeting_url: self._open_url(u),
+                    session.meeting_url,
+                    f"Zoom · {session.subject}",
+                    require_uth_lms=False,
                 )
             )
         if session.has_outline:
-            rows.append(
-                self._link_button(
-                    "Đề cương chi tiết học phần",
-                    ft.Icons.AUTO_STORIES_ROUNDED,
-                    C.WARNING,
-                    lambda _, item=session: self._show_outline(item),
-                )
+            outline_btn = self._link_button(
+                "Đề cương chi tiết học phần",
+                ft.Icons.AUTO_STORIES_ROUNDED,
+                C.WARNING,
+                None,
             )
+            outline_btn.on_click = lambda _, item=session, btn=outline_btn: self._show_outline(
+                item, return_focus=btn
+            )
+            rows.append(outline_btn)
         if session.link:
             rows.append(
-                self._link_button(
+                self._link_with_external_button(
                     "LMS",
                     ft.Icons.SCHOOL_ROUNDED,
                     C.CRITICAL,
-                    lambda _, u=session.link: self._open_url(u),
+                    session.link,
+                    f"LMS · {session.subject}",
+                    require_uth_lms=True,
                 )
             )
         return ft.Container(
@@ -685,6 +762,11 @@ class ScheduleWeekView(ft.Container):
         self, session: ClassSession, *, return_focus: ft.Control | None = None
     ) -> None:
         width = max(280.0, min(520.0, self._layout_width - 48))
+        try:
+            page_h = float(getattr(self._page_ref, "height", 0) or 0)
+        except (TypeError, ValueError):
+            page_h = 0.0
+        height = min(460.0, max(240.0, page_h * 0.65)) if page_h > 0 else 460.0
 
         def _on_key_down(event) -> None:
             if event.key == "Escape":
@@ -708,7 +790,7 @@ class ScheduleWeekView(ft.Container):
                 content=ft.Column(
                     [self._session_card(session, datetime.now())],
                     width=width,
-                    height=460,
+                    height=height,
                     spacing=0,
                     scroll=ft.ScrollMode.AUTO,
                 ),
@@ -732,30 +814,62 @@ class ScheduleWeekView(ft.Container):
         except Exception:
             logger.debug("Could not show class details", exc_info=True)
 
-    def _show_outline(self, session: ClassSession) -> None:
+    def _show_outline(
+        self, session: ClassSession, *, return_focus: ft.Control | None = None
+    ) -> None:
         body = session.outline or "Môn học này chưa có mô tả đề cương."
+        width = max(280.0, min(520.0, self._layout_width - 48))
+        try:
+            page_h = float(getattr(self._page_ref, "height", 0) or 0)
+        except (TypeError, ValueError):
+            page_h = 0.0
+        max_h = min(420.0, max(220.0, page_h * 0.55)) if page_h > 0 else 420.0
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                self._page_ref.pop_dialog()
+
+        async def _restore_focus(_event=None) -> None:
+            if return_focus is not None:
+                await return_focus.focus()
+
         dialog = ft.AlertDialog(
+            modal=True,
+            semantics_label="Đề cương chi tiết học phần",
             title=ft.Text(
                 "Đề cương chi tiết học phần",
                 size=16,
                 weight=ft.FontWeight.W_700,
                 color=C.TEXT_PRIMARY,
+                semantics_label="Đề cương chi tiết học phần",
             ),
-            content=ft.Column(
-                [
-                    ft.Text(session.subject, size=13, weight=ft.FontWeight.W_600, color=C.ACCENT),
-                    ft.Text(
-                        f"Mã môn học: {session.subject_code or '—'}  ·  Mã lớp: {session.course_code or '—'}",
-                        size=11,
-                        color=C.TEXT_SECONDARY,
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    width=width,
+                    height=max_h,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                session.subject,
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=C.ACCENT,
+                            ),
+                            ft.Text(
+                                f"Mã môn học: {session.subject_code or '—'}  ·  Mã lớp: {session.course_code or '—'}",
+                                size=11,
+                                color=C.TEXT_SECONDARY,
+                            ),
+                            ft.Divider(height=8, color=C.BORDER),
+                            ft.Text(body, size=12, color=C.TEXT_PRIMARY, selectable=True),
+                        ],
+                        tight=True,
+                        scroll=ft.ScrollMode.AUTO,
+                        spacing=6,
                     ),
-                    ft.Divider(height=8, color=C.BORDER),
-                    ft.Text(body, size=12, color=C.TEXT_PRIMARY, selectable=True),
-                ],
-                tight=True,
-                scroll=ft.ScrollMode.AUTO,
-                width=460,
-                spacing=6,
+                ),
             ),
             actions=[
                 ft.TextButton(
@@ -767,6 +881,7 @@ class ScheduleWeekView(ft.Container):
             ],
             bgcolor=C.SURFACE,
             shape=ft.RoundedRectangleBorder(radius=14),
+            on_dismiss=_restore_focus,
         )
         try:
             self._page_ref.show_dialog(dialog)
@@ -861,10 +976,45 @@ class ScheduleWeekView(ft.Container):
         ]
 
     # ------------------------------------------------------------------ misc
-    def _open_url(self, url: str) -> None:
+    @staticmethod
+    def _validated_url(url: str, *, require_uth_lms: bool) -> str | None:
+        if require_uth_lms:
+            return url if is_trusted_uth_lms_url(url) else None
+        return validate_https_url(url)
+
+    def _open_url(
+        self, url: str, title: str = "", *, require_uth_lms: bool = False
+    ) -> None:
+        validated = self._validated_url(url, require_uth_lms=require_uth_lms)
+        if validated is None:
+            logger.warning("Blocked invalid or untrusted schedule URL")
+            return
+        if callable(self._on_open_url):
+            self._on_open_url(validated, title)
+            return
+        InAppWebViewDialog(
+            self._page_ref,
+            url=validated,
+            title=title,
+            on_open_external=lambda target: self._open_external(
+                target, require_uth_lms=require_uth_lms
+            ),
+        ).show()
+
+    def _open_external(
+        self, url: str, *, require_uth_lms: bool = False
+    ) -> None:
+        validated = self._validated_url(url, require_uth_lms=require_uth_lms)
+        if validated is None:
+            logger.warning("Blocked invalid or untrusted external schedule URL")
+            return
+        if callable(self._on_open_external):
+            self._on_open_external(validated)
+            return
+
         async def _launch() -> None:
             try:
-                await ft.UrlLauncher().launch_url(url)
+                await ft.UrlLauncher().launch_url(validated)
             except Exception:
                 logger.debug("Could not open schedule link", exc_info=True)
 

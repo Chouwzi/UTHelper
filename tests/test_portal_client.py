@@ -284,3 +284,69 @@ def test_portal_client_rejects_mismatched_response_geturl_and_oversized_payload(
     with pytest.raises(PortalProtocolError, match="maximum size"):
         client_huge.fetch_day(date(2026, 8, 11), "student", "secret")
 
+
+def test_portal_client_fetch_week_and_credit_progress_isolate_tokens_per_user():
+    tokens_by_user = {"student1": "tok-1", "student2": "tok-2"}
+    auth_headers = []
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            body = json.loads(request.data)
+            return _Response({"success": True, "token": tokens_by_user[body["username"]]})
+        auth_headers.append((request.full_url, request.get_header("Authorization")))
+        if "hoctap/tiendo" in request.full_url:
+            return _Response({"success": True, "body": {"soTinChiDat": 90}})
+        return _Response({"success": True, "body": []})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    client.fetch_week(date(2026, 8, 11), "student1", "secret1")
+    client.fetch_credit_progress("student1", "secret1")  # Reuses student1 token
+    client.fetch_week(date(2026, 8, 11), "student2", "secret2")  # Must re-login for student2
+
+    assert len(auth_headers) == 3
+    assert auth_headers[0][1] == "Bearer tok-1"
+    assert auth_headers[1][1] == "Bearer tok-1"
+    assert auth_headers[2][1] == "Bearer tok-2"
+
+
+def test_portal_client_fetch_week_and_progress_reauthenticate_once_on_401():
+    login_count = 0
+
+    def opener(request, timeout):
+        del timeout
+        nonlocal login_count
+        if request.full_url.endswith("/user/login"):
+            login_count += 1
+            return _Response({"success": True, "token": f"tok-{login_count}"})
+        if request.get_header("Authorization") == "Bearer tok-1":
+            raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+        if "hoctap/tiendo" in request.full_url:
+            return _Response({"success": True, "body": {"soTinChiDat": 100}})
+        return _Response({"success": True, "body": []})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    assert client.fetch_week(date(2026, 8, 11), "student", "secret") == {}
+    assert login_count == 2
+    assert client.fetch_credit_progress("student", "secret") == {"soTinChiDat": 100}
+    assert login_count == 2  # Still valid cached tok-2
+
+
+def test_portal_client_clear_token_during_login_prevents_stale_token_resurrection():
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1")
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            # Simulate account switch / reset mid-flight while login is running
+            client.clear_token()
+            return _Response({"success": True, "token": "stale-token"})
+        return _Response({"success": True, "body": {"ok": True}})
+
+    client._opener = opener
+    progress = client.fetch_credit_progress("student", "secret")
+    assert progress == {"ok": True}
+    # Because generation incremented mid-login, stale-token must NOT be cached
+    assert client._cached_token("student") == ""

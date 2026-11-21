@@ -8,8 +8,31 @@ logger = logging.getLogger(__name__)
 class MoodleService:
     """Lớp dịch vụ đóng gói các hành động gọi Web Service Moodle và cơ chế lưu cache."""
 
-    def __init__(self, call_ws_api: Callable):
+    def __init__(
+        self,
+        call_ws_api: Callable,
+        grade_report_fetcher: Optional[Callable[[int], Optional[str]]] = None,
+        grade_report_error_getter: Optional[Callable[[], str]] = None,
+    ):
         self.call_ws_api = call_ws_api
+        self._grade_report_fetcher = grade_report_fetcher
+        self._grade_report_error_getter = grade_report_error_getter
+
+    @property
+    def last_grade_report_error(self) -> str:
+        """Last error recorded when fetching a Moodle HTML grade report."""
+        if callable(self._grade_report_error_getter):
+            try:
+                return str(self._grade_report_error_getter() or "")
+            except Exception:
+                return ""
+        return ""
+
+    def fetch_grade_report_html(self, course_id: int) -> Optional[str]:
+        """Fetch /grade/report/user/index.php?id=<course_id> HTML via bound client."""
+        if not callable(self._grade_report_fetcher):
+            return None
+        return self._grade_report_fetcher(course_id)
 
     def get_site_info(self) -> Optional[Dict[str, Any]]:
         """Lấy thông tin chung của tài khoản và cấu hình hệ thống e-learning."""

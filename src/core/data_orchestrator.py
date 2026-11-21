@@ -26,7 +26,13 @@ class DataOrchestrator:
     
     def __init__(self):
         self.client = MoodleClient()
-        self.moodle_service = MoodleService(self.client.call_ws_api)
+        self.moodle_service = MoodleService(
+            self.client.call_ws_api,
+            grade_report_fetcher=self.client.fetch_grade_report_html,
+            grade_report_error_getter=lambda: getattr(
+                self.client, "last_grade_report_error", ""
+            ),
+        )
         self.thnn_client = MoodleClient("https://thnn.ut.edu.vn")
         self.thnn_service = MoodleService(self.thnn_client.call_ajax_api)
         self._last_thnn_fetch_ts = 0.0

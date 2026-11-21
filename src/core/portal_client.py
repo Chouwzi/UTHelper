@@ -291,7 +291,10 @@ class PortalClient:
     ) -> dict[date, tuple[ClassSession, ...]]:
         """Fetch the Monday-based week containing ``target_date`` in one call
         (``lichhoc/lichTuan``) and group the sessions by calendar date."""
-        token = self._token or self._login(username, password)
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
         query = {"date": target_date.isoformat()}
         try:
             payload = self._request_json(
@@ -300,13 +303,13 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password)
+            token = self._login(username, password, generation)
             payload = self._request_json(
                 "GET", "lichhoc/lichTuan", token=token, query=query
             )
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            self._store_token(refreshed_token, username, generation)
         try:
             return parse_portal_week(payload, target_date)
         except ValueError as exc:
@@ -316,17 +319,20 @@ class PortalClient:
         self, username: str, password: str
     ) -> dict[str, Any] | None:
         """Fetches graduation credit progress (``canDat`` / ``hienTai``) from Portal."""
-        token = self._token or self._login(username, password)
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
         try:
             payload = self._request_json("GET", "hoctap/tiendo", token=token)
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password)
+            token = self._login(username, password, generation)
             payload = self._request_json("GET", "hoctap/tiendo", token=token)
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            self._store_token(refreshed_token, username, generation)
         body = payload.get("body")
         return body if isinstance(body, dict) else None
 

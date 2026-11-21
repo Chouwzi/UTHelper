@@ -107,7 +107,22 @@ def build_desktop_window_header(
     close.on_hover = rotate_close_on_hover
     return ft.Container(
         content=ft.Row(
-            controls=[drag_area, minimize, *([maximize] if maximize else []), close],
+            controls=[
+                drag_area,
+                ft.Semantics(label="Thu nhỏ", button=True, content=minimize),
+                *(
+                    [
+                        ft.Semantics(
+                            label="Phóng to / Khôi phục",
+                            button=True,
+                            content=maximize,
+                        )
+                    ]
+                    if maximize
+                    else []
+                ),
+                ft.Semantics(label="Thoát ứng dụng", button=True, content=close),
+            ],
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),

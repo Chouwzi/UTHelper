@@ -62,7 +62,7 @@ def show_course_components_dialog(
         page_w = float(getattr(page, "width", None) or 0)
     except (TypeError, ValueError):
         page_w = 0.0
-    body_w = max(300.0, min(520.0, page_w - 60)) if page_w else 480.0
+    body_w = max(260.0, min(520.0, page_w - 72)) if page_w else 480.0
     try:
         page_h = float(getattr(page, "height", None) or 0)
     except (TypeError, ValueError):
@@ -70,13 +70,21 @@ def show_course_components_dialog(
     max_h = max(240.0, page_h * 0.6) if page_h else 0.0
 
     dialog = ft.AlertDialog(
-        modal=False,
-        title=ft.Text(course.course_name, size=15, weight=ft.FontWeight.W_700,
-                      color=C.TEXT_PRIMARY, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+        modal=True,
+        semantics_label=f"Bảng điểm {course.course_name}",
+        title=ft.Text(
+            course.course_name,
+            size=15,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            semantics_label=course.course_name,
+        ),
         content=build_course_components_body(course, moodle_course, body_w, max_h),
-        content_padding=ft.Padding.only(left=24, right=24, top=12, bottom=4),
+        content_padding=ft.Padding.only(left=20, right=20, top=12, bottom=4),
         actions_padding=ft.Padding.only(left=16, right=16, top=0, bottom=8),
-        actions=[ft.TextButton("Đóng", on_click=lambda _: _close(page, dialog))],
+        actions=[ft.TextButton("Đóng", height=44, on_click=lambda _: _close(page, dialog))],
         bgcolor=C.BG,
         shape=ft.RoundedRectangleBorder(radius=16),
     )

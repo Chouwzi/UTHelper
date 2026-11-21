@@ -217,6 +217,7 @@ class ViewManager:
         else:
             self._show_only(self.courses_view)
         self._sync_detail_host()
+        self.courses_view.update_theme()
         self.controller.courses_btn.icon_color = C.ACCENT
         self.page.update()
 
@@ -226,6 +227,20 @@ class ViewManager:
 
     def show_courses_error(self):
         self.courses_view.show_error()
+        self.page.update()
+
+    def show_courses_stale_notice(self, message: str) -> None:
+        set_notice = getattr(self.courses_view, "set_stale_notice", None)
+        if callable(set_notice):
+            set_notice(message)
+            self.page.update()
+
+    def show_grades_error(self, message: str = "") -> None:
+        show_err = getattr(self.grade_overview_view, "show_error", None)
+        if callable(show_err):
+            show_err(message)
+        else:
+            self.grade_overview_view.update_academic_data([], [])
         self.page.update()
 
     async def close_courses(self):

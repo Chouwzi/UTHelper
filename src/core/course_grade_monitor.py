@@ -6,6 +6,7 @@ Lần đầu (chưa có snapshot của môn) chỉ lưu nền, không thông bá
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from datetime import datetime
@@ -36,14 +37,50 @@ def _row_keys(rows: List[GradeRow]) -> List[str]:
     return keys
 
 
+def _default_namespace() -> str:
+    try:
+        from config import settings
+
+        base = str(getattr(settings, "MOODLE_BASE_URL", "") or "").strip()
+        user = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        return f"{base}|{user or 'anonymous'}"
+    except Exception:
+        return "anonymous"
+
+
+def _namespace_digest(namespace: str) -> str:
+    return hashlib.sha256(namespace.strip().casefold().encode("utf-8")).hexdigest()[:12]
+
+
 class CourseGradeMonitor:
-    def __init__(self, snapshot_path: Optional[str] = None):
+    def __init__(
+        self,
+        snapshot_path: Optional[str] = None,
+        namespace: Optional[str] = None,
+    ):
+        self._explicit_path = snapshot_path is not None
         if snapshot_path is None:
             from config import _USER_DATA_DIR
-            snapshot_path = str(_USER_DATA_DIR / "course_grades_snapshot.json")
+
+            self._base_dir = Path(_USER_DATA_DIR)
+            digest = _namespace_digest(
+                namespace if namespace is not None else _default_namespace()
+            )
+            snapshot_path = str(self._base_dir / f"course_grades_snapshot_{digest}.json")
+        else:
+            self._base_dir = Path(snapshot_path).parent
         self._path = Path(snapshot_path)
         self._lock = threading.Lock()
         self._data: Dict[str, dict] = self._load()
+
+    def set_namespace(self, namespace: str) -> None:
+        """Switch the persisted course-grade snapshot to another account namespace."""
+        if self._explicit_path:
+            return
+        digest = _namespace_digest(namespace or _default_namespace())
+        with self._lock:
+            self._path = self._base_dir / f"course_grades_snapshot_{digest}.json"
+            self._data = self._load()
 
     # --- persistence -------------------------------------------------
     def _load(self) -> Dict[str, dict]:
@@ -137,7 +174,7 @@ class CourseGradeMonitor:
                                 course_name=c.name, item_name=label,
                                 old_grade=old.get("grade", DASH), new_grade=new["grade"],
                                 timestamp=now))
-                        if new["percentage"] != old.get("percentage", DASH):
+                        elif new["percentage"] != old.get("percentage", DASH):
                             changes.append(GradeChange(
                                 course_name=c.name, item_name=f"{label} (%)",
                                 old_grade=old.get("percentage", DASH), new_grade=new["percentage"],

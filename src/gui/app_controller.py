@@ -410,6 +410,12 @@ class AppController:
             self._portal_client.clear_token()
         except Exception:
             logger.debug("Portal token clear failed after login", exc_info=True)
+        portal_week_client = getattr(self, "_portal_week_client", None)
+        if portal_week_client is not None:
+            try:
+                portal_week_client.clear_token()
+            except Exception:
+                logger.debug("Portal week token clear failed after login", exc_info=True)
 
         new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         identity_changed = new_identity != self._settings_identity
@@ -421,6 +427,17 @@ class AppController:
                 self.orchestrator.moodle_service.clear_all_caches()
                 self.orchestrator.clear_detail_cache()
                 self.orchestrator._userid_cache = None
+                for client_attr in ("client", "thnn_client"):
+                    client_obj = getattr(self.orchestrator, client_attr, None)
+                    clear_session = getattr(client_obj, "clear_session", None)
+                    if callable(clear_session):
+                        clear_session()
+                grade_monitor = getattr(self.orchestrator, "course_grade_monitor", None)
+                set_grade_ns = getattr(grade_monitor, "set_namespace", None)
+                if callable(set_grade_ns):
+                    set_grade_ns(f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}")
+                if hasattr(self.orchestrator, "latest_course_grades"):
+                    self.orchestrator.latest_course_grades = []
             except Exception:
                 logger.debug("Moodle cache clear failed after login", exc_info=True)
 
@@ -447,6 +464,14 @@ class AppController:
             if settings.UTH_USERNAME
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
+        week_cache = getattr(self, "_week_schedule_cache", None)
+        set_week_ns = getattr(week_cache, "set_namespace", None)
+        if callable(set_week_ns):
+            set_week_ns(schedule_namespace)
+        calendar_view = getattr(self, "calendar_view", None)
+        reset_schedule = getattr(calendar_view, "reset_schedule", None)
+        if callable(reset_schedule):
+            reset_schedule()
         self._today_schedule_coordinator.replace_cache(
             TodayScheduleCache(namespace=schedule_namespace)
         )
@@ -1264,10 +1289,15 @@ class AppController:
         )
 
     def _init_header_controls(self):
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
         self.calendar_btn = ft.IconButton(
             ft.Icons.CALENDAR_MONTH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Lịch",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_calendar
             ),
@@ -1276,6 +1306,8 @@ class AppController:
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Làm mới",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._load_data_async
             ),
@@ -1284,6 +1316,8 @@ class AppController:
             ft.Icons.SETTINGS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Cài đặt",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._show_settings
             ),
@@ -1292,6 +1326,8 @@ class AppController:
             ft.Icons.INSIGHTS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Bảng điểm",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_grades
             ),
@@ -1301,6 +1337,8 @@ class AppController:
             ft.Icons.MENU_BOOK_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Môn học",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_courses
             ),
@@ -1545,6 +1583,8 @@ class AppController:
             submission_workflow_factory=self._submission_workflow_factory,
             quiz_player_view=self.quiz_player_view,
             get_quiz_account_id=lambda: settings.UTH_USERNAME,
+            on_open_url=self._open_url_in_app,
+            on_open_external=self._open_url_external,
         )
         self.calendar_view = CalendarView(
             self.page,
@@ -1552,6 +1592,8 @@ class AppController:
             on_open_detail=lambda data: self._safe_run_task(self._show_detail_async, data),
             fetch_schedule_week=self._fetch_schedule_week,
             schedule_cache=self._week_schedule_cache,
+            on_open_url=self._open_url_in_app,
+            on_open_external=self._open_url_external,
         )
         supports_self_update = self._get_distribution_profile().supports_github_self_update
         self.settings_view = SettingsView(
@@ -1737,34 +1779,75 @@ class AppController:
             version_control=self._version_badge,
         )
 
+    def _open_url_in_app(self, url: str, title: str = "") -> None:
+        from core.url_validation import validate_https_url
+        from gui.components.in_app_webview import InAppWebViewDialog
+
+        validated = validate_https_url(url)
+        if validated is None:
+            logger.warning("Blocked invalid or non-HTTPS URL")
+            return
+        InAppWebViewDialog(
+            self.page,
+            url=validated,
+            title=title,
+            on_open_external=self._open_url_external,
+        ).show()
+
+    def _open_url_external(self, url: str) -> None:
+        from core.url_validation import validate_https_url
+
+        validated = validate_https_url(url)
+        if validated is None:
+            logger.warning("Blocked invalid or non-HTTPS external URL")
+            return
+
+        async def _launch() -> None:
+            try:
+                await ft.UrlLauncher().launch_url(validated)
+            except Exception:
+                logger.debug("External URL launch failed", exc_info=True)
+
+        self._safe_run_task(_launch)
+
     def _build_dashboard_header(self) -> ft.Container:
+        def _wrap_header_btn(btn: ft.Control, fallback_label: str) -> ft.Control:
+            label = getattr(btn, "tooltip", None) or fallback_label
+            return ft.Semantics(label=label, button=True, content=btn)
+
         action_buttons = ft.Row(
             controls=[
-                self.calendar_btn,
-                self.courses_btn,
-                self.grades_btn,
-                self.refresh_btn,
-                self.settings_btn,
+                _wrap_header_btn(self.calendar_btn, "Lịch"),
+                _wrap_header_btn(self.courses_btn, "Môn học"),
+                _wrap_header_btn(self.grades_btn, "Bảng điểm"),
+                _wrap_header_btn(self.refresh_btn, "Làm mới"),
+                _wrap_header_btn(self.settings_btn, "Cài đặt"),
             ],
             spacing=0,
+            tight=True,
         )
         if platform_utils.UI_IS_MOBILE:
+            self._app_title.max_lines = 1
+            self._app_title.overflow = ft.TextOverflow.ELLIPSIS
             title_group = ft.Row(
                 controls=[self._app_title, self._version_badge],
-                spacing=6,
+                spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
             )
             content = ft.Column(
                 controls=[
                     ft.Row(
                         controls=[title_group, action_buttons],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=4,
                     ),
                     self._sync_status.control,
                 ],
                 spacing=4,
             )
-            padding = ft.Padding.only(left=16, right=8, top=25, bottom=8)
+            padding = ft.Padding.only(left=12, right=4, top=20, bottom=8)
         else:
             self._sync_status.control.expand = True
             self.status_text.no_wrap = True
@@ -2365,23 +2448,26 @@ class AppController:
             return []
 
     async def _check_grades_background(self):
-        """Chạy cùng chu kỳ cập nhật Tổng quan: điểm tổng kết + điểm theo môn.
+        """Chạy cùng chu kỳ cập nhật Tổng quan qua GradeMonitor (WS nhẹ).
 
-        Điểm theo môn (tab Môn học) được lưu snapshot; nếu lần sau có thay đổi
-        (kể cả giá trị "-") thì gộp vào cùng một thông báo.
+        Tránh cào HTML N+1 cho toàn bộ môn học trên mỗi chu kỳ đồng bộ nền
+        và tránh phát trùng thông báo khi tab Môn học không đang mở.
         """
         grade_changes = []
         try:
             grade_changes = list(await asyncio.to_thread(self.orchestrator.check_grade_changes) or [])
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
-        try:
-            courses, course_changes = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
-            grade_changes.extend(course_changes or [])
-            if self.courses_view.visible and courses:
-                self.view_manager.show_courses_data(courses)
-        except Exception as e:
-            logger.debug("Course grades background failed (non-critical): %s", e)
+
+        courses_view = getattr(self, "courses_view", None)
+        if courses_view is not None and getattr(courses_view, "visible", False):
+            try:
+                courses, _ = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+                if courses:
+                    self.view_manager.show_courses_data(courses)
+            except Exception as e:
+                logger.debug("Course grades background refresh failed (non-critical): %s", e)
+
         await self._notify_grade_changes(grade_changes)
 
     async def _notify_grade_changes(self, grade_changes: list) -> None:
@@ -3075,11 +3161,13 @@ class AppController:
         with self._data_lock:
             data_snapshot = list(self.all_data)
         self.view_manager.show_calendar(data_snapshot)
+        self._sync_rail_active()
 
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
         await self.view_manager.close_calendar()
         self._diag_screen("home")
+        self._sync_rail_active()
 
     async def _show_settings(self):
         if hasattr(self, "_diag_screen"):
@@ -3102,6 +3190,7 @@ class AppController:
         self._diag_screen("grades")
         self._diag_breadcrumb("navigation", "succeeded", "user", screen="grades")
         self.view_manager.show_grades_loading()
+        self._sync_rail_active()
 
         # Load academic radar data from daily cache / Portal in background thread
         try:
@@ -3156,7 +3245,9 @@ class AppController:
                     self.view_manager.show_academic_radar_data([], [])
         except Exception as e:
             logger.error("Academic grades fetch failed: %s", e)
-            self.view_manager.show_academic_radar_data([], [])
+            self.view_manager.show_grades_error(
+                "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
+            )
 
     async def _toggle_courses(self):
         if self.courses_view.visible:
@@ -3176,12 +3267,15 @@ class AppController:
         if cached and not force_refresh:
             self.view_manager.show_courses_data(cached)
         try:
-            courses, changes = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+            courses, _ = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
             self.view_manager.show_courses_data(courses)
-            await self._notify_grade_changes(changes)
         except Exception as e:
             logger.error("Courses fetch failed: %s", e, exc_info=True)
-            if not cached:
+            if cached:
+                self.view_manager.show_courses_stale_notice(
+                    "Không thể làm mới danh sách môn · đang hiển thị dữ liệu đã lưu."
+                )
+            else:
                 self.view_manager.show_courses_error()
 
     async def _close_courses(self):
@@ -3193,6 +3287,7 @@ class AppController:
         """Close grade overview and return to dashboard."""
         await self.view_manager.close_grades()
         self._diag_screen("home")
+        self._sync_rail_active()
 
     def _rebuild_colors(self):
         """Repaint ALL existing controls with current C values for live theme switching.
@@ -3792,6 +3887,17 @@ class AppController:
                 self.orchestrator.clear_detail_cache()
                 self.orchestrator._userid_cache = None
                 self.orchestrator.is_logged_in = False
+                for client_attr in ("client", "thnn_client"):
+                    client_obj = getattr(self.orchestrator, client_attr, None)
+                    clear_session = getattr(client_obj, "clear_session", None)
+                    if callable(clear_session):
+                        clear_session()
+                grade_monitor = getattr(self.orchestrator, "course_grade_monitor", None)
+                set_grade_ns = getattr(grade_monitor, "set_namespace", None)
+                if callable(set_grade_ns):
+                    set_grade_ns(f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}")
+                if hasattr(self.orchestrator, "latest_course_grades"):
+                    self.orchestrator.latest_course_grades = []
             except Exception:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -3809,9 +3915,17 @@ class AppController:
                 else f"{settings.PORTAL_API_BASE}|anonymous"
             )
             self._portal_client.clear_token()
-            self._portal_week_client.clear_token()
-            self._week_schedule_cache.set_namespace(schedule_namespace)
-            self.calendar_view.reset_schedule()
+            portal_week_client = getattr(self, "_portal_week_client", None)
+            if portal_week_client is not None:
+                portal_week_client.clear_token()
+            week_cache = getattr(self, "_week_schedule_cache", None)
+            set_week_ns = getattr(week_cache, "set_namespace", None)
+            if callable(set_week_ns):
+                set_week_ns(schedule_namespace)
+            calendar_view = getattr(self, "calendar_view", None)
+            reset_schedule = getattr(calendar_view, "reset_schedule", None)
+            if callable(reset_schedule):
+                reset_schedule()
             self._today_schedule_coordinator.replace_cache(
                 TodayScheduleCache(namespace=schedule_namespace)
             )

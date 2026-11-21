@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import hashlib
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -12,8 +12,15 @@ from core.academic_radar.gpa_planner import CreditProgress, parse_credit_progres
 from core.academic_radar.models import CourseGradeItem, RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.portal_client import PortalClient
+from core.safe_file_io import SafeFileIO
 
 logger = logging.getLogger(__name__)
+
+
+def _namespace_digest(username: str) -> str:
+    base = str(getattr(settings, "PORTAL_API_BASE", "") or "").strip()
+    owner = username.strip() or "anonymous"
+    return hashlib.sha256(f"{base}|{owner}".casefold().encode("utf-8")).hexdigest()[:12]
 
 
 class AcademicGradeService:
@@ -27,32 +34,38 @@ class AcademicGradeService:
     ) -> None:
         self._portal_client = portal_client or PortalClient(settings.PORTAL_API_BASE)
         self._cache_dir = cache_dir or get_data_dir()
-        self._cache_file = self._cache_dir / "portal_grades_cache.json"
-        self._progress_cache_file = self._cache_dir / "portal_progress_cache.json"
         self._normalizer = normalizer or SemesterNormalizer()
 
-    def _read_cache(self) -> dict[str, Any] | None:
+    def _cache_paths(self, username: str) -> tuple[Path, Path]:
+        digest = _namespace_digest(username)
+        return (
+            self._cache_dir / f"portal_grades_cache_{digest}.json",
+            self._cache_dir / f"portal_progress_cache_{digest}.json",
+        )
+
+    def _read_cache(self, username: str = "") -> dict[str, Any] | None:
         """Reads cached raw transcript from disk if exists and valid JSON."""
-        if not self._cache_file.exists():
+        cache_file, _ = self._cache_paths(username)
+        if not cache_file.exists():
             return None
         try:
-            with open(self._cache_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            data = SafeFileIO.read_json_safe(cache_file, dict)
+            return data if isinstance(data, dict) and data else None
         except Exception as exc:
             logger.warning("Failed to read academic grades cache: %s", exc)
             return None
 
-    def _write_cache(self, raw_transcript: list[dict[str, Any]]) -> None:
+    def _write_cache(self, raw_transcript: list[dict[str, Any]], username: str = "") -> None:
         """Writes raw transcript to disk with today's cache date."""
         try:
+            cache_file, _ = self._cache_paths(username)
             self._cache_dir.mkdir(parents=True, exist_ok=True)
             payload = {
                 "cached_date": date.today().isoformat(),
                 "updated_at": datetime.now().isoformat(),
                 "transcript": raw_transcript,
             }
-            with open(self._cache_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+            SafeFileIO.write_json_atomic(cache_file, payload)
         except Exception as exc:
             logger.warning("Failed to write academic grades cache: %s", exc)
 
@@ -70,7 +83,7 @@ class AcademicGradeService:
         password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
 
         today_str = date.today().isoformat()
-        cache = self._read_cache()
+        cache = self._read_cache(username)
 
         if not force_refresh and cache and cache.get("cached_date") == today_str:
             transcript = cache.get("transcript")
@@ -81,11 +94,11 @@ class AcademicGradeService:
         # Fetch from Portal if credentials are provided
         if username and password:
             try:
-                logger.info("Fetching full academic transcript from Portal for %s...", username)
+                logger.info("Fetching full academic transcript from Portal...")
                 raw_transcript = self._portal_client.fetch_full_transcript(username, password)
                 if raw_transcript:
                     logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
-                    self._write_cache(raw_transcript)
+                    self._write_cache(raw_transcript, username)
                     return self._normalizer.normalize_transcript(raw_transcript)
             except Exception as exc:
                 logger.warning("Portal academic fetch failed: %s; checking stale cache", exc)
@@ -106,12 +119,13 @@ class AcademicGradeService:
         """Loads graduation credit progress (canDat/hienTai); daily cache, stale fallback."""
         username = username or settings.UTH_USERNAME or settings.MOODLE_USERNAME
         password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        _, progress_cache_file = self._cache_paths(username)
 
         cache: dict[str, Any] | None = None
         try:
-            if self._progress_cache_file.exists():
-                with open(self._progress_cache_file, "r", encoding="utf-8") as f:
-                    cache = json.load(f)
+            if progress_cache_file.exists():
+                loaded = SafeFileIO.read_json_safe(progress_cache_file, dict)
+                cache = loaded if isinstance(loaded, dict) and loaded else None
         except Exception as exc:
             logger.warning("Failed to read credit progress cache: %s", exc)
 
@@ -127,11 +141,10 @@ class AcademicGradeService:
                 if progress:
                     try:
                         self._cache_dir.mkdir(parents=True, exist_ok=True)
-                        with open(self._progress_cache_file, "w", encoding="utf-8") as f:
-                            json.dump(
-                                {"cached_date": date.today().isoformat(), "body": body},
-                                f, ensure_ascii=False, indent=2,
-                            )
+                        SafeFileIO.write_json_atomic(
+                            progress_cache_file,
+                            {"cached_date": date.today().isoformat(), "body": body},
+                        )
                     except Exception as exc:
                         logger.warning("Failed to write credit progress cache: %s", exc)
                     return progress

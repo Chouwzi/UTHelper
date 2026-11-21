@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import flet as ft
 
-from core.today_schedule import ClassSession
-from gui.components.schedule_week_view import ScheduleWeekView
+from core.today_schedule import ClassSession, ScheduleAuthenticationError
+from gui.components.schedule_week_view import ScheduleWeekView, _monday
+from gui.core.theme import C, apply_theme
 
 
 TODAY = date(2026, 11, 21)
@@ -324,3 +326,171 @@ def test_week_navigation_still_moves_a_full_week_on_desktop():
     view._next_btn.on_click(None)
 
     assert view._selected == TODAY + timedelta(days=7)
+
+
+def test_schedule_links_open_in_app_by_default_and_validate_origins(monkeypatch):
+    in_app_calls = []
+    external_calls = []
+    launched = []
+    monkeypatch.setattr(
+        "gui.components.schedule_week_view.ft.UrlLauncher.launch_url",
+        lambda self, url: launched.append(url),
+        raising=False,
+    )
+    session = _session(TODAY)
+    session = ClassSession(
+        session_id=session.session_id,
+        subject=session.subject,
+        course_code=session.course_code,
+        start_at=session.start_at,
+        end_at=session.end_at,
+        room=session.room,
+        campus=session.campus,
+        period_start=session.period_start,
+        period_end=session.period_end,
+        cancelled=False,
+        note="",
+        link="https://courses.ut.edu.vn/course/view.php?id=99",
+        meeting_url="https://us02web.zoom.us/j/987654",
+    )
+    view = ScheduleWeekView(
+        page=SimpleNamespace(width=390, height=700, dialogs=[], show_dialog=lambda _d: None),
+        fetch_week=lambda _d: {},
+        on_open_url=lambda url, title: in_app_calls.append((url, title)),
+        on_open_external=lambda url: external_calls.append(url),
+    )
+
+    card = view._session_card(session, datetime(2026, 11, 21, 6, 0))
+    ext_wrappers = [
+        c
+        for c in _walk(card)
+        if isinstance(c, ft.Semantics)
+        and isinstance(c.content, ft.IconButton)
+        and c.content.icon == ft.Icons.OPEN_IN_NEW_ROUNDED
+    ]
+    assert len(ext_wrappers) == 2
+    assert ext_wrappers[0].content.size_constraints.min_width == 44
+    assert ext_wrappers[0].content.size_constraints.min_height == 44
+
+    view._open_url(session.link, "LMS", require_uth_lms=True)
+    view._open_url(session.meeting_url, "Zoom")
+    view._open_url("https://evil.example/phish", "LMS", require_uth_lms=True)
+    view._open_url("http://courses.ut.edu.vn/insecure", "LMS", require_uth_lms=True)
+    for wrapper in ext_wrappers:
+        wrapper.content.on_click(None)
+
+    assert in_app_calls == [
+        ("https://courses.ut.edu.vn/course/view.php?id=99", "LMS"),
+        ("https://us02web.zoom.us/j/987654", "Zoom"),
+    ]
+    assert set(external_calls) == {
+        "https://courses.ut.edu.vn/course/view.php?id=99",
+        "https://us02web.zoom.us/j/987654",
+    }
+    assert launched == []
+
+
+def test_schedule_theme_update_rebuilds_nav_button_styles():
+    view = _view(1120)
+    try:
+        apply_theme("steel_light")
+        view.update_theme()
+        expected_secondary = C.TEXT_SECONDARY
+        assert view._prev_btn.style.color == expected_secondary
+        assert view._next_btn.style.color == expected_secondary
+        assert view._refresh_btn.style.color == expected_secondary
+        assert view._today_btn.style.color == C.ACCENT
+    finally:
+        apply_theme("midnight_blue")
+
+
+def test_schedule_auth_error_clears_cached_weeks_and_shows_error():
+    def _auth_fail(_target_date):
+        raise ScheduleAuthenticationError("Hết phiên đăng nhập")
+
+    view = ScheduleWeekView(
+        page=SimpleNamespace(
+            width=390,
+            height=700,
+            dialogs=[],
+            show_dialog=lambda _d: None,
+            update=lambda: None,
+        ),
+        fetch_week=_auth_fail,
+    )
+    anchor = _monday(TODAY)
+    view._selected = TODAY
+    view._weeks[anchor] = {TODAY: (_session(TODAY),)}
+    view._live_at[anchor] = datetime.now()
+
+    asyncio.run(view._load_async(anchor))
+
+    assert view._weeks == {}
+    assert view._live_at == {}
+    assert view._auth_failed is True
+    texts = [item.value for item in _walk(view) if isinstance(item, ft.Text)]
+    assert any("Chưa đăng nhập Portal" in text for text in texts)
+
+
+def test_schedule_outline_modal_clamped_width_escape_close_and_focus_restore():
+    dialogs = []
+    pop_calls = []
+    focused = []
+    page = SimpleNamespace(
+        width=360,
+        height=640,
+        dialogs=dialogs,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: pop_calls.append(True),
+        on_keyboard_event=None,
+    )
+
+    class _Trigger:
+        async def focus(self):
+            focused.append(True)
+
+    view = ScheduleWeekView(page=page, fetch_week=lambda _d: {})
+    view._show_outline(_session(TODAY), return_focus=_Trigger())
+
+    assert len(dialogs) == 1
+    dialog = dialogs[0]
+    assert dialog.modal is True
+    assert "Đề cương" in dialog.semantics_label
+    assert dialog.content.content.width == 312.0
+    assert callable(dialog.content.on_key_down)
+    dialog.content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pop_calls == [True]
+    asyncio.run(dialog.on_dismiss(None))
+    assert focused == [True]
+
+
+def test_schedule_prefetch_aborts_immediately_when_reset_bumps_generation(monkeypatch):
+    calls = []
+
+    def _counting_fetch(target_date):
+        calls.append(target_date)
+        return {}
+
+    view = ScheduleWeekView(
+        page=SimpleNamespace(
+            width=1120,
+            height=700,
+            dialogs=[],
+            show_dialog=lambda _d: None,
+            update=lambda: None,
+        ),
+        fetch_week=_counting_fetch,
+    )
+
+    async def _fake_load(_monday_date):
+        calls.append(_monday_date)
+
+    async def _fake_sleep(_seconds):
+        view.reset()
+
+    monkeypatch.setattr(view, "_load_async", _fake_load)
+    monkeypatch.setattr("gui.components.schedule_week_view.asyncio.sleep", _fake_sleep)
+    asyncio.run(view._prefetch_async())
+
+    # Stops after first week because reset() bumped generation during _PREFETCH_GAP_S
+    assert len(calls) == 1

@@ -23,7 +23,7 @@ _COMPONENT_NAME_KEYS = (
     "tenThanhPhan", "tenDiem", "tenCotDiem", "tenLoaiDiem", "loaiDiem", "ten", "name",
 )
 _COMPONENT_SCORE_KEYS = ("diem", "diemSo", "giaTri", "score", "value")
-_COMPONENT_WEIGHT_KEYS = ("trongSo", "tyLe", "tiLe", "heSo", "phanTram", "weight", "percent")
+_COMPONENT_WEIGHT_KEYS = ("trongSo", "tyLe", "tiLe", "phanTram", "weight", "percent")
 
 
 def _first(raw: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -43,7 +43,7 @@ def _extract_components(raw: dict[str, Any]) -> tuple[ComponentScore, ...]:
             break
     if not items:
         return ()
-    result: list[ComponentScore] = []
+    entries: list[tuple[str, float | None, float | None, float | None]] = []
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -53,10 +53,28 @@ def _extract_components(raw: dict[str, Any]) -> tuple[ComponentScore, ...]:
         weight = _parse_float(_first(it, _COMPONENT_WEIGHT_KEYS))
         if weight is not None and 0 < weight <= 1:
             weight *= 100  # 0.3 -> 30%
+        factor = _parse_float(it.get("heSo"))
+        entries.append((name, _parse_float(_first(it, _COMPONENT_SCORE_KEYS)), weight, factor))
+
+    if not entries:
+        return ()
+
+    # Chỉ quy đổi hệ số (heSo) sang % khi tất cả các mục đều không có trọng số %
+    # và đều có hệ số dương; tránh nhầm heSo=1 thành 100% hoặc heSo=2 thành 2%.
+    use_factors = (
+        all(w is None and f is not None and f > 0 for _, _, w, f in entries)
+    )
+    total_factor = sum(f for _, _, _, f in entries if f is not None) if use_factors else 0.0
+
+    result: list[ComponentScore] = []
+    for name, score, weight, factor in entries:
+        resolved_weight = weight
+        if resolved_weight is None and use_factors and total_factor > 0 and factor is not None:
+            resolved_weight = (factor / total_factor) * 100.0
         result.append(ComponentScore(
             name=name,
-            score=_parse_float(_first(it, _COMPONENT_SCORE_KEYS)),
-            weight=weight,
+            score=score,
+            weight=resolved_weight,
         ))
     return tuple(result)
 

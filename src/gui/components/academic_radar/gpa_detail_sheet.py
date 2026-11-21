@@ -83,14 +83,38 @@ class GpaDetailSheet:
                 except Exception:
                     pass
 
+        try:
+            page_w = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        try:
+            page_h = float(getattr(page, "height", 0) or 0)
+        except (TypeError, ValueError):
+            page_h = 0.0
+        dialog_w = max(260.0, min(360.0, page_w - 64.0)) if page_w > 0 else 360.0
+        max_h = max(220.0, min(480.0, page_h * 0.65)) if page_h > 0 else None
+
         dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text(profile.semester_name, size=15, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
-            content=ft.Container(
-                content=ft.Column([semester, cumulative], spacing=10, tight=True),
-                width=360,
+            modal=True,
+            semantics_label=f"Chi tiết GPA {profile.semester_name}",
+            title=ft.Text(
+                profile.semester_name,
+                size=15,
+                weight=ft.FontWeight.BOLD,
+                color=C.TEXT_PRIMARY,
+                semantics_label=profile.semester_name,
             ),
-            actions=[ft.TextButton("Đóng", on_click=_close)],
+            content=ft.Container(
+                content=ft.Column(
+                    [semester, cumulative],
+                    spacing=10,
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                width=dialog_w,
+                height=max_h,
+            ),
+            actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )

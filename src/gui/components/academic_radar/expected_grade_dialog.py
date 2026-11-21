@@ -127,9 +127,27 @@ class ExpectedGradeDialog:
                 except Exception:
                     pass
 
+        try:
+            page_w = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        try:
+            page_h = float(getattr(page, "height", 0) or 0)
+        except (TypeError, ValueError):
+            page_h = 0.0
+        dialog_w = max(260.0, min(360.0, page_w - 64.0)) if page_w > 0 else 360.0
+        max_h = max(260.0, min(520.0, page_h * 0.65)) if page_h > 0 else None
+
         dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text("Tính điểm kỳ vọng", size=15, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
+            modal=True,
+            semantics_label="Tính điểm kỳ vọng",
+            title=ft.Text(
+                "Tính điểm kỳ vọng",
+                size=15,
+                weight=ft.FontWeight.BOLD,
+                color=C.TEXT_PRIMARY,
+                semantics_label="Tính điểm kỳ vọng",
+            ),
             content=ft.Container(
                 content=ft.Column(
                     [scale_dd, current_gpa, current_credits, target_gpa, extra_credits, result_box],
@@ -137,9 +155,10 @@ class ExpectedGradeDialog:
                     tight=True,
                     scroll=ft.ScrollMode.AUTO,
                 ),
-                width=360,
+                width=dialog_w,
+                height=max_h,
             ),
-            actions=[ft.TextButton("Đóng", on_click=_close)],
+            actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )
