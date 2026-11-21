@@ -115,6 +115,7 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
     monkeypatch.setenv("PYTHONPATH", r"C:\stale-pythonpath")
     monkeypatch.delenv("PYTHONUTF8", raising=False)
     monkeypatch.delenv("UTHELPER_SKIP_QUIZ_CLIENT_BUILD", raising=False)
+    monkeypatch.delenv("CL", raising=False)
     monkeypatch.setenv("UTH_BUILD_ENV_SENTINEL", "kept-for-flet")
 
     client = quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
@@ -133,6 +134,10 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
     assert calls[0]["env"]["PYTHONNOUSERSITE"] == "1"
     assert calls[0]["env"]["PIP_DEFAULT_TIMEOUT"] == "20"
     assert calls[0]["env"]["PIP_RETRIES"] == "3"
+    assert (
+        calls[0]["env"]["CL"]
+        == "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+    )
     assert "PYTHONHOME" not in calls[0]["env"]
     assert "UV_INTERNAL__PYTHONHOME" not in calls[0]["env"]
     assert "PYTHONPATH" not in calls[0]["env"]
@@ -278,6 +283,70 @@ def test_quiz_client_bootstrap_guards_opt_out_low_disk_and_timeout(
         match="timed out",
     ):
         quiz_client_bootstrap.ensure_windows_quiz_client(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("existing_cl", "expected_cl"),
+    [
+        (None, "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"),
+        ("   ", "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"),
+        (
+            "/Zi /DFOO=1",
+            "/Zi /DFOO=1 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS",
+        ),
+        (
+            "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS",
+            "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS",
+        ),
+        (
+            "-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS=1 /W4",
+            "-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS=1 /W4",
+        ),
+        (
+            "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS_OTHER",
+            "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS_OTHER "
+            "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS",
+        ),
+    ],
+)
+def test_windows_quiz_client_bootstrap_preserves_existing_cl_flags(
+    tmp_path, monkeypatch, existing_cl, expected_cl
+):
+    _create_minimal_quiz_project(tmp_path)
+    captured_envs: list[dict[str, str]] = []
+
+    def build(_command, *, cwd, env, check, timeout=None):
+        captured_envs.append(env)
+        (cwd / "build" / "windows").mkdir(parents=True, exist_ok=True)
+        (cwd / "build" / "windows" / "UTHelper.exe").write_bytes(b"client")
+        generated = cwd / "build" / "flutter" / "lib"
+        generated.mkdir(parents=True, exist_ok=True)
+        (generated / "flet_generated.dart").write_text(
+            "flet_uth_quiz.Extension()\n", encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(quiz_client_bootstrap, "_flet_cli_is_installed", lambda: True)
+    monkeypatch.setattr(quiz_client_bootstrap.subprocess, "run", build)
+    monkeypatch.setattr(
+        quiz_client_bootstrap.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=10**11, used=10**10, free=10**10),
+    )
+    monkeypatch.delenv("UTHELPER_SKIP_QUIZ_CLIENT_BUILD", raising=False)
+    if existing_cl is None:
+        monkeypatch.delenv("CL", raising=False)
+    else:
+        monkeypatch.setenv("CL", existing_cl)
+
+    quiz_client_bootstrap.ensure_windows_quiz_client(tmp_path)
+
+    assert len(captured_envs) == 1
+    assert captured_envs[0]["CL"] == expected_cl
+    if existing_cl is None:
+        assert "CL" not in os.environ
+    else:
+        assert os.environ["CL"] == existing_cl
 
 
 def test_flet_desktop_selects_built_quiz_client_on_windows(monkeypatch):

@@ -218,6 +218,12 @@ jobs:
           if ((Get-FileHash $template -Algorithm SHA256).Hash.ToLowerInvariant() -ne '8f95dc20ef6d901d9b5ee59f00e33d19f1d2bc6be8d6d3b800c4aab3d7315b73') { throw 'Template hash changed' }
           python scripts/prepare_flet_diagnostics_template.py --source $template --output build/support/template-diagnostics.zip
           if ($LASTEXITCODE -ne 0) { throw 'Template validation failed' }
+          $clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+          if ([string]::IsNullOrWhiteSpace($env:CL)) {
+            $env:CL = $clFlag
+          } elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+            $env:CL = "$($env:CL.Trim()) $clFlag"
+          }
           flet build windows --build-version $version --build-number $build --template build/support/template-diagnostics.zip --yes --verbose
           if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
           python scripts/verify_flutter_diagnostics.py --template build/support/template-diagnostics.zip --project-root build/flutter

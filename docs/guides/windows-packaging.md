@@ -26,9 +26,15 @@ Fresh verification before build:
 .\.venv\Scripts\python.exe src\main.py
 ```
 
-Build and prepare the argument-free autostart alias:
+Build and prepare the argument-free autostart alias (if building manually with Visual Studio 2026 / MSVC 14.52+, append `/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` to `$env:CL` for `flutter_inappwebview_windows` WIL `<experimental/coroutine>` compatibility):
 
 ```powershell
+$clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+if ([string]::IsNullOrWhiteSpace($env:CL)) {
+  $env:CL = $clFlag
+} elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+  $env:CL = "$($env:CL.Trim()) $clFlag"
+}
 flet build windows --verbose
 .\.venv\Scripts\python.exe scripts\prepare_windows_bundle.py build\windows
 ```

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,11 @@ _QUIZ_CLIENT_STAMP = ".flet-quiz-client.sha256"
 _QUIZ_EXTENSION_MARKER = "flet_uth_quiz.Extension()"
 _QUIZ_CLIENT_BUILD_TIMEOUT_SECONDS = 600
 _MIN_BUILD_FREE_BYTES = 1_500_000_000
+_MSVC_COROUTINE_SILENCE_DEFINE = "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+_MSVC_COROUTINE_SILENCE_CL_FLAG = f"/D{_MSVC_COROUTINE_SILENCE_DEFINE}"
+_MSVC_COROUTINE_SILENCE_PATTERN = re.compile(
+    rf"(?:^|\s)[/-]D{re.escape(_MSVC_COROUTINE_SILENCE_DEFINE)}(?:=\S*)?(?=\s|$)"
+)
 _GENERATED_DIRECTORIES = frozenset(
     {
         ".dart_tool",
@@ -59,6 +65,16 @@ class QuizClientBootstrapError(RuntimeError):
 
 def _is_truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _with_msvc_experimental_coroutine_cl_flag(existing_cl: str | None) -> str:
+    """Append MSVC STL1011 suppression without clobbering existing CL flags."""
+    current = (existing_cl or "").strip()
+    if not current:
+        return _MSVC_COROUTINE_SILENCE_CL_FLAG
+    if _MSVC_COROUTINE_SILENCE_PATTERN.search(current):
+        return current
+    return f"{current} {_MSVC_COROUTINE_SILENCE_CL_FLAG}"
 
 
 def set_source_quiz_client_ready(ready: bool) -> None:
@@ -219,6 +235,7 @@ def ensure_windows_quiz_client(project_root: Path) -> Path:
     build_env["PYTHONNOUSERSITE"] = "1"
     build_env["PIP_DEFAULT_TIMEOUT"] = "20"
     build_env["PIP_RETRIES"] = "3"
+    build_env["CL"] = _with_msvc_experimental_coroutine_cl_flag(build_env.get("CL"))
     build_env.pop("PYTHONPATH", None)
     build_env.pop("PYTHONHOME", None)
     build_env.pop("UV_INTERNAL__PYTHONHOME", None)
