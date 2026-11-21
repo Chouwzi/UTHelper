@@ -39,7 +39,7 @@ dependencies {
     if (project.hasProperty('flutterEmbeddingJar')) {
         compileOnly files(project.property('flutterEmbeddingJar'))
     }
-    implementation 'androidx.core:core-ktx:1.17.0'
+    implementation 'androidx.core:core-ktx:1.19.0'
     implementation 'androidx.work:work-runtime-ktx:2.11.2'
     implementation 'androidx.room:room-runtime:2.8.4'
     implementation 'androidx.room:room-ktx:2.8.4'
