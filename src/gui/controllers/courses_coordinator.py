@@ -30,6 +30,7 @@ from core.courses.models import (
 )
 from core.courses.pdf_renderer import PdfDocumentSession
 from core.courses.preview_cache import PreviewFileCache
+from core.courses.windows_office_bridge import render_office_pdf
 from gui.components.courses._shared import (
     PaneErrorOverlay,
     PaneLoadingOverlay,
@@ -426,13 +427,6 @@ class CoursesCoordinator:
         safe_url = safe_http_url(url)
         if not safe_url:
             return
-        if (
-            self._activity_service is None
-            and self._courses_client is None
-            and self._thnn_client is None
-        ):
-            self._launch_url_safe(safe_url)
-            return
         selected = None
         if hasattr(self.courses_view, "_state"):
             selected = self.courses_view._state.selected_course()
@@ -450,14 +444,6 @@ class CoursesCoordinator:
     def _handle_open_webview_activity(
         self, course: CourseSummary, mod: CourseModuleItem
     ) -> None:
-        if (
-            self._activity_service is None
-            and self._courses_client is None
-            and self._thnn_client is None
-        ):
-            self._open_webview_activity(mod)
-            return
-
         modname = (mod.modname or "").lower()
         if modname == "attendance" and self._activity_service is not None:
             view = AttendanceActivityView(
@@ -564,19 +550,8 @@ class CoursesCoordinator:
             if not safe_url:
                 return
 
-        wv = self._build_embedded_webview_for_page(safe_url)
-        if wv is not None:
-            overlay = _WebViewActivityOverlay(
-                title=mod.name,
-                subtitle=(mod.modname or "Hoạt động").upper(),
-                webview=wv,
-                on_close=self.courses_view.pop_overlay,
-                on_open_external=lambda u=safe_url: self._launch_url_safe(u),
-                on_toggle_expand=self.courses_view.toggle_pane3_expanded,
-            )
-            self.courses_view.push_overlay(overlay, tag=f"webview:{mod.cmid}")
-            return
-        self._launch_url_safe(safe_url)
+        source: CourseSource = "thnn" if "thnn.ut.edu.vn" in safe_url.lower() else "courses"
+        self.open_in_app_webview(source, mod.name, safe_url, tag=f"webview:{mod.cmid}")
 
     async def _prefetch_course_attachments_async(
         self, course: CourseSummary, sections: list[CourseSection]
@@ -695,6 +670,7 @@ class CoursesCoordinator:
         *,
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
+        rendered_pdf_bytes: Optional[bytes] = None,
     ) -> None:
         """Record recent access and open ArchiveExplorerView or DocumentReaderView overlay."""
         try:
@@ -742,6 +718,7 @@ class CoursesCoordinator:
             att.preview_kind,
             preconverted=preconverted,
             preopened_pdf=preopened_pdf,
+            rendered_pdf_bytes=rendered_pdf_bytes,
         )
 
     def _open_entry_reader(
@@ -752,6 +729,7 @@ class CoursesCoordinator:
         *,
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
+        rendered_pdf_bytes: Optional[bytes] = None,
     ) -> None:
         if kind == "archive":
             nested = ArchiveExplorerView(
@@ -783,11 +761,13 @@ class CoursesCoordinator:
                 self._open_external_async, n, b
             ),
             on_open_link=self._handle_course_url_action,
-            webview_builder=self._build_embedded_webview_for_page,
+            webview_builder=self.build_webview_host,
             pdf_cache_dir=getattr(self.preview_cache, "cache_dir", None),
             preconverted=preconverted,
             preopened_pdf=preopened_pdf,
+            rendered_pdf_bytes=rendered_pdf_bytes,
             pane_width=initial_pane_w,
+            pdf_in_webview=isinstance(self._page, ft.Page) and self._page.platform == ft.PagePlatform.WINDOWS and not self._page.web,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")
@@ -860,8 +840,16 @@ class CoursesCoordinator:
             )
 
             preconverted: Optional[ConvertedDocument] = None
+            rendered_pdf_bytes: Optional[bytes] = None
             if not (att.is_archive or att.preview_kind == "archive"):
-                if att.preview_kind in {"docx", "xlsx", "csv", "pptx", "text"}:
+                if att.preview_kind in {"docx", "pptx"} and isinstance(self._page, ft.Page) and self._page.platform == ft.PagePlatform.WINDOWS and not self._page.web:
+                    rendered_pdf_bytes = await asyncio.to_thread(render_office_pdf, raw, att.file_name)
+                if rendered_pdf_bytes is not None:
+                    preopened_pdf = await asyncio.to_thread(
+                        PdfDocumentSession, rendered_pdf_bytes,
+                        cache_dir=getattr(self.preview_cache, "cache_dir", None),
+                    )
+                elif att.preview_kind in {"docx", "xlsx", "csv", "pptx", "text"}:
                     preconverted = await asyncio.to_thread(
                         convert_document_bytes,
                         att.file_name,
@@ -892,6 +880,7 @@ class CoursesCoordinator:
                 raw,
                 preconverted=preconverted,
                 preopened_pdf=preopened_pdf,
+                rendered_pdf_bytes=rendered_pdf_bytes,
             )
             preopened_pdf = None
         except Exception as exc:

@@ -107,7 +107,7 @@ def test_f6_docx_host_supports_omml_responsive_a4_scaling_and_theme_hooks() -> N
 
     host_html = (OFFICE_VIEWER_DIR / "docx_host.html").read_text(encoding="utf-8")
     host_js = (OFFICE_VIEWER_DIR / "docx_host.js").read_text(encoding="utf-8")
-    combined = (host_html + "\n" + host_js).lower()
+    combined = (host_html + "\n" + host_js + "\n" + (OFFICE_VIEWER_DIR / "viewer_common.js").read_text(encoding="utf-8")).lower()
 
     assert "viewport" in host_html.lower()
     assert "theme" in combined
@@ -239,13 +239,13 @@ def test_f7_pptx_host_supports_aspect_fit_navigation_and_notes() -> None:
     """F7: pptx_host shell/JS exposes slide navigation, aspect-ratio fit, notes, and theme controls."""
     host_html = (OFFICE_VIEWER_DIR / "pptx_host.html").read_text(encoding="utf-8")
     host_js = (OFFICE_VIEWER_DIR / "pptx_host.js").read_text(encoding="utf-8")
-    combined = (host_html + "\n" + host_js).lower()
+    combined = (host_html + "\n" + host_js + "\n" + (OFFICE_VIEWER_DIR / "viewer_common.js").read_text(encoding="utf-8")).lower()
 
     assert "viewport" in host_html.lower()
     assert "note" in combined
     assert "slide" in combined
     assert "theme" in combined
-    assert any(k in combined for k in ("nextslide", "gotoslide", "prevslide", "setslide", "slideindex"))
+    assert "prev.onclick" in combined and "next.onclick" in combined
 
 
 def test_f7_convert_document_bytes_preserves_rich_slides_aspects_tables_and_notes() -> None:

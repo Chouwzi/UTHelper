@@ -51,6 +51,7 @@ class _FakeControl:
         self.controls = []
         self.back_calls = 0
         self.back_result = True
+        self.theme_updates = 0
 
     def hide(self):
         self.visible = False
@@ -63,6 +64,9 @@ class _FakeControl:
 
     def cancel_pending_load(self):
         pass
+
+    def update_theme(self):
+        self.theme_updates += 1
 
     async def load_current_settings(self):
         return None
@@ -192,6 +196,7 @@ def test_view_manager_switches_to_courses_and_hides_others():
     vm.show_grades_loading()
     assert courses.visible is False
     assert destinations[-1] == "grades"
+    assert grades.theme_updates == 1
 
     asyncio.run(vm.close_grades())
     assert destinations[-1] == "home"
@@ -511,22 +516,21 @@ def test_courses_coordinator_webview_activity_validates_url_and_supports_theme(
         assert launched == []
         assert coord.courses_view._overlays == []
 
-        # 2. Safe URL launches externally when embedded webview is unavailable
+        # 2. An unavailable WebView keeps recovery in-app until an explicit action.
         assert _try_build_embedded_webview("javascript:alert(1)") is None
         good_mod = _make_mod(cmid=55, web_url="https://courses.ut.edu.vn/mod/quiz/view.php?id=55")
         monkeypatch.setattr(
-            "gui.controllers.courses_coordinator._try_build_embedded_webview",
-            lambda _u: None,
+            "gui.components.courses.webview_pane.build_embedded_webview_host",
+            lambda *_args, **_kwargs: None,
         )
         coord._open_webview_activity(good_mod)
-        assert launched == ["https://courses.ut.edu.vn/mod/quiz/view.php?id=55"]
+        assert launched == []
+        overlay = coord.courses_view._overlays[-1]
+        overlay._ext_btn.on_click(None)
+        assert launched == [good_mod.web_url]
+        coord.courses_view.pop_overlay()
 
         # 3. Embedded webview pushes overlay with tag & update_theme support
-        fake_wv = ft.Container(expand=True)
-        monkeypatch.setattr(
-            "gui.controllers.courses_coordinator._try_build_embedded_webview",
-            lambda _u: fake_wv,
-        )
         coord._open_webview_activity(good_mod)
         assert len(coord.courses_view._overlays) == 1
         overlay = coord.courses_view._overlays[0]

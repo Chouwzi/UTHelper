@@ -23,6 +23,7 @@ from core.courses.document_converter import (
 )
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import PreviewKind
+from core.courses.office_viewer_service import OfficeViewerDescriptor, prepare_office_viewer
 from core.courses.pdf_renderer import PdfDocumentSession, PdfSearchHit
 from gui.components.courses._shared import (
     build_expand_toggle_button,
@@ -99,6 +100,8 @@ class DocumentReaderView(ft.Container):
         pdf_cache_dir: Optional[Path] = None,
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
+        rendered_pdf_bytes: Optional[bytes] = None,
+        pdf_in_webview: bool = False,
         pane_width: float = 700.0,
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
@@ -134,9 +137,13 @@ class DocumentReaderView(ft.Container):
         self._pptx_outline_open: bool = False
         self._pdf_session: Optional[PdfDocumentSession] = preopened_pdf
         self._pdf_session_loaded: bool = preopened_pdf is not None
+        self._rendered_pdf_bytes = rendered_pdf_bytes
+        self._pdf_in_webview = pdf_in_webview
         self._pdf_page_index: int = 0
         self._pdf_scale: float = 1.6
         self._pdf_outline_open: bool = False
+        self._pdf_outline_sheet: Optional[ft.BottomSheet] = None
+        self._pdf_search_open: bool = False
         self._pdf_search_query: str = ""
         self._pdf_search_hits: list[PdfSearchHit] = []
         self._pdf_search_hit_pos: int = 0
@@ -148,6 +155,9 @@ class DocumentReaderView(ft.Container):
         self._html_urls: dict[bool, str] = {}
         self._pdf_url: Optional[str] = None
         self._active_webview_url: Optional[str] = None
+        self._office_viewer: Optional[OfficeViewerDescriptor] = None
+        self._office_webview: Optional[ft.Control] = None
+        self._embedded_host = None
 
         size_text = format_file_size(len(self._data)) or "0 B"
         self._night_btn = ft.IconButton(
@@ -219,7 +229,7 @@ class DocumentReaderView(ft.Container):
         """Warm the opposite dark/light conversion in a background thread so toggling is 0ms."""
         if not force and self._get_page() is None:
             return
-        if self._kind not in _NIGHT_MODE_KINDS or self._kind == "pdf":
+        if self._kind not in _NIGHT_MODE_KINDS or self._kind == "pdf" or self._office_webview is not None:
             return
         alt_dark = not bool(self._dark_reader)
         if alt_dark in self._converted_cache:
@@ -287,7 +297,7 @@ class DocumentReaderView(ft.Container):
         if self._pdf_url and self._preview_server.has_active_url(self._pdf_url):
             return self._pdf_url
         try:
-            url = self._preview_server.register_bytes(self._data, "application/pdf")
+            url = self._preview_server.register_bytes(self._rendered_pdf_bytes or self._data, "application/pdf")
         except ValueError:
             self._pdf_url = None
             return None
@@ -312,7 +322,14 @@ class DocumentReaderView(ft.Container):
         if self._webview_builder is None:
             return None
         try:
-            return self._webview_builder(url)
+            result = self._webview_builder(url)
+            control_fn = getattr(result, "control", None)
+            if callable(control_fn):
+                if self._embedded_host is not None and self._embedded_host is not result:
+                    self._embedded_host.dispose()
+                self._embedded_host = result
+                return control_fn()
+            return result if isinstance(result, ft.Control) else None
         except Exception:
             return None
 
@@ -330,6 +347,25 @@ class DocumentReaderView(ft.Container):
     def _toggle_reader_mode(self, _e=None) -> None:
         self._dark_reader = not self._dark_reader
         self._sync_night_button()
+        if self._office_webview is not None:
+            evaluator = getattr(self._embedded_host or self._office_webview, "eval_js", None)
+            if callable(evaluator):
+                async def _set_office_theme() -> None:
+                    mode = "dark" if self._dark_reader else "light"
+                    result = evaluator(f"window.setTheme && window.setTheme('{mode}');")
+                    if inspect.isawaitable(result):
+                        await result
+
+                page = self._get_page()
+                if page is not None and callable(getattr(page, "run_task", None)):
+                    page.run_task(_set_office_theme)
+                else:
+                    try:
+                        asyncio.get_running_loop().create_task(_set_office_theme())
+                    except RuntimeError:
+                        asyncio.run(_set_office_theme())
+                safe_control_update(self._night_btn)
+                return
         target_mode = bool(self._dark_reader)
         # Offload uncached non-PDF conversion when mounted on a live page so UI never stutters
         if (
@@ -375,7 +411,11 @@ class DocumentReaderView(ft.Container):
     def dispose(self) -> None:
         """Release underlying PDF session handles and cancel background pre-rendering."""
         self._disposed = True
+        self._close_pdf_outline_sheet()
         self._pdf_render_seq += 1
+        if self._embedded_host is not None:
+            self._embedded_host.dispose()
+            self._embedded_host = None
         if self._pdf_session is not None:
             self._pdf_session.close()
             self._pdf_session = None
@@ -393,6 +433,8 @@ class DocumentReaderView(ft.Container):
         """Adapt document page width proportionally when Pane 3 resizes or expands."""
         if self._disposed:
             return
+        if self._embedded_host is not None:
+            self._embedded_host.sync_bounds(_left, _top + 55, width, max(80, _height - 55))
         try:
             new_w = max(320.0, float(width))
         except (TypeError, ValueError):
@@ -403,6 +445,32 @@ class DocumentReaderView(ft.Container):
         if self._kind in {"docx", "doc", "pptx", "ppt", "pdf"} and not self._active_webview_url:
             self._set_body_content(self._build_body())
             safe_control_update(self)
+
+    def suspend(self) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.suspend()
+
+    def resume(self) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.resume()
+
+    def _close_pdf_outline_sheet(self) -> None:
+        sheet, self._pdf_outline_sheet = self._pdf_outline_sheet, None
+        self._pdf_outline_open = False
+        if sheet is not None:
+            sheet.open = False
+            safe_control_update(sheet)
+
+    def handle_back(self) -> bool:
+        if self._pdf_outline_open:
+            self._close_pdf_outline_sheet()
+        elif self._pdf_search_open:
+            self._pdf_search_open = False
+        else:
+            return False
+        self._set_body_content(self._build_body())
+        safe_control_update(self)
+        return True
 
     def _jump_to_anchor(self, list_view: ft.ListView, anchor_id: str) -> None:
         async def _do_scroll() -> None:
@@ -479,7 +547,7 @@ class DocumentReaderView(ft.Container):
         on_primary: Callable[[], None],
     ) -> ft.Control:
         card = ft.Container(
-            width=420,
+            width=min(420, max(240, self._pane_width - 32)),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
             border_radius=14,
@@ -1087,12 +1155,17 @@ class DocumentReaderView(ft.Container):
                         controls=row_cells,
                     )
                 )
-        return ft.Container(
+        table = ft.Container(
             border=ft.Border.all(1, border_color) if has_borders else None,
             border_radius=8 if has_borders else 0,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS if has_borders else ft.ClipBehavior.NONE,
             content=ft.Column(spacing=0 if has_borders else 4, controls=grid_rows),
         )
+        column_count = max((sum(max(1, int(getattr(cell, "col_span", 1))) for cell in row) for row in source_rows), default=0)
+        if self._pane_width < 600 and column_count >= 5:
+            table.width = column_count * 100
+            return ft.Row(scroll=ft.ScrollMode.AUTO, controls=[table])
+        return table
 
     def _build_pptx_element_control(
         self,
@@ -2087,7 +2160,7 @@ class DocumentReaderView(ft.Container):
         if self._pdf_session is None and not self._pdf_session_loaded:
             self._pdf_session_loaded = True
             self._pdf_session = PdfDocumentSession(
-                self._data, cache_dir=self._pdf_cache_dir
+                self._rendered_pdf_bytes or self._data, cache_dir=self._pdf_cache_dir
             )
         assert self._pdf_session is not None
         return self._pdf_session
@@ -2111,6 +2184,7 @@ class DocumentReaderView(ft.Container):
 
         def _jump_pdf_page(target_idx: int) -> None:
             clamped = max(0, min(page_count - 1, int(target_idx)))
+            self._close_pdf_outline_sheet()
             if clamped == self._pdf_page_index:
                 return
             self._pdf_page_index = clamped
@@ -2128,6 +2202,31 @@ class DocumentReaderView(ft.Container):
             safe_control_update(self)
 
         def _toggle_outline() -> None:
+            if self._pane_width < 600:
+                if self._pdf_outline_open:
+                    self._close_pdf_outline_sheet()
+                else:
+                    self._pdf_outline_open = True
+
+                    def _dismiss_outline(_e=None):
+                        self._pdf_outline_open = False
+                        self._pdf_outline_sheet = None
+
+                    self._pdf_outline_sheet = ft.BottomSheet(
+                        content=ft.Container(
+                            height=360, padding=16, bgcolor=surface_color,
+                            content=ft.ListView(controls=[
+                                ft.TextButton(
+                                    content=f"{entry.title} (tr.{entry.page_index + 1})",
+                                    on_click=lambda _e, idx=entry.page_index: _jump_pdf_page(idx),
+                                ) for entry in session.outline
+                            ]),
+                        ), on_dismiss=_dismiss_outline,
+                    )
+                    page = self._get_page()
+                    if page is not None:
+                        page.show_dialog(self._pdf_outline_sheet)
+                return
             self._pdf_outline_open = not self._pdf_outline_open
             self._set_body_content(self._build_native_pdf_body(session))
             safe_control_update(self)
@@ -2228,6 +2327,7 @@ class DocumentReaderView(ft.Container):
                 ),
                 ft.TextField(
                     value=self._pdf_search_query,
+                    visible=self._pane_width >= 600 or self._pdf_search_open,
                     hint_text="Tìm trong PDF...",
                     width=170,
                     height=32,
@@ -2240,6 +2340,17 @@ class DocumentReaderView(ft.Container):
                 ),
             ]
         )
+        if self._pane_width < 600:
+            def _toggle_search(_e=None):
+                self._pdf_search_open = not self._pdf_search_open
+                self._set_body_content(self._build_native_pdf_body(session))
+                safe_control_update(self)
+
+            toolbar_controls.append(ft.IconButton(
+                icon=ft.Icons.SEARCH_ROUNDED, tooltip="Tìm trong PDF",
+                icon_color=accent_color if self._pdf_search_open else text_primary,
+                on_click=_toggle_search,
+            ))
         if hit_badge:
             toolbar_controls.extend(
                 [
@@ -2306,6 +2417,14 @@ class DocumentReaderView(ft.Container):
                     if self._pdf_scale > 1.6
                     else img_ctrl
                 )
+                if self._pane_width < 600:
+                    body_item = ft.Container(
+                        width=display_w,
+                        height=display_w * getattr(rendered, "height", 1000) / max(1, getattr(rendered, "width", 800)),
+                        content=ft.InteractiveViewer(
+                            min_scale=1, max_scale=4, content=img_ctrl,
+                        ),
+                    )
                 return ft.Container(
                     bgcolor=surface_color,
                     border=ft.Border.all(1, border_color),
@@ -2451,6 +2570,7 @@ class DocumentReaderView(ft.Container):
             page_cards.append(
                 ft.Row(
                     alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True,
                     spacing=12,
                     controls=nav_footer,
                 )
@@ -2465,7 +2585,7 @@ class DocumentReaderView(ft.Container):
         )
 
         content_area: ft.Control = pdf_viewer_col
-        if self._pdf_outline_open and session.outline:
+        if self._pdf_outline_open and session.outline and self._pane_width >= 600:
             outline_panel = ft.Container(
                 width=220,
                 bgcolor=surface_color,
@@ -2673,12 +2793,18 @@ class DocumentReaderView(ft.Container):
                 ),
             )
 
-        if self._kind == "pdf":
+        if self._kind == "pdf" or self._rendered_pdf_bytes is not None:
+            if self._pdf_in_webview and self._webview_builder is not None:
+                pdf_url = self._try_register_pdf_url()
+                webview = self._build_webview(pdf_url) if pdf_url else None
+                if webview is not None:
+                    self._active_webview_url = pdf_url
+                    return webview
             session = self._ensure_pdf_session()
             if session.supported and session.page_count > 0:
                 size_text = format_file_size(len(self._data)) or "0 B"
                 self._subtitle_text.value = (
-                    f"PDF · {session.page_count} trang · {size_text}"
+                    f"{self._kind.upper()} · {session.page_count} trang · {size_text}"
                 )
                 return self._build_native_pdf_body(session)
             if self._webview_builder is not None:
@@ -2698,6 +2824,19 @@ class DocumentReaderView(ft.Container):
             )
 
         if self._kind in {"docx", "xlsx", "csv", "pptx", "text"}:
+            if self._kind in {"docx", "pptx"} and self._webview_builder is not None:
+                if self._office_viewer is None or not self._preview_server.has_active_url(self._office_viewer.blob_url):
+                    self._office_viewer = prepare_office_viewer(
+                        self._data, self._file_name, self._preview_server,
+                        theme="dark" if self._dark_reader else "light",
+                    )
+                    self._office_webview = None
+                if self._office_viewer is not None:
+                    if self._office_webview is None:
+                        self._office_webview = self._build_webview(self._office_viewer.viewer_url)
+                    if self._office_webview is not None:
+                        self._active_webview_url = self._office_viewer.viewer_url
+                        return self._office_webview
             converted = self._get_converted()
             if converted.html_document and self._webview_builder is not None:
                 html_url = self._try_register_html_url(
@@ -2744,6 +2883,10 @@ class DocumentReaderView(ft.Container):
         self._sync_night_button()
 
         preserve_webview = (
+            self._office_webview is not None
+            and self._office_viewer is not None
+            and self._preview_server.has_active_url(self._office_viewer.blob_url)
+        ) or (
             self._active_webview_url is not None
             and self._preview_server.has_active_url(self._active_webview_url)
             and (self._kind == "pdf" or self._dark_reader)

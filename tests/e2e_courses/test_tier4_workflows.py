@@ -593,12 +593,12 @@ def test_scenario3_nested_zip_archive_pdf_outlines_bottomsheet_and_back(
     page3_item.on_click(None)
     assert reader._pdf_page_index == 2
 
-    # Step-by-step Android Back: 1st closes BottomSheet, 2nd pops reader -> week04 -> labs -> root -> detail -> catalog
-    assert courses_view.handle_back() is True
+    # Selecting a destination dismisses its sheet and preserves the reader.
     assert len(courses_view._overlays) == 2
     assert courses_view._overlays[-1] is reader
     assert sheet.open is False
 
+    # Android Back then pops reader -> week04 -> labs -> root -> detail -> catalog.
     assert courses_view.handle_back() is True
     assert len(courses_view._overlays) == 1
     assert courses_view._overlays[-1] is explorer

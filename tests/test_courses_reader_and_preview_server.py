@@ -554,7 +554,12 @@ def test_document_reader_tier_a_webview_mounts_html_and_pdf(
     status, headers, body = _http_request(captured_urls[0])
     assert status == 200
     assert headers["content-type"].startswith("text/html")
-    assert b"N\xe1\xbb\x99i dung m\xe1\xba\xabu" in body
+    assert b"docx_host.js" in body
+    assert reader_docx._office_viewer is not None
+    blob_status, blob_headers, blob_body = _http_request(reader_docx._office_viewer.blob_url)
+    assert blob_status == 200
+    assert "wordprocessingml.document" in blob_headers["content-type"]
+    assert blob_body == docx_bytes
     assert any(getattr(c, "key", None) == "fake-wv" for c in _walk_controls(reader_docx))
 
     pdf_bytes = b"%PDF-1.4\n%fake\n"

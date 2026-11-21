@@ -2057,3 +2057,31 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
+
+## Courses integration, offline Office previews and mobile reader (2026-11-21)
+
+- Preserved the existing course work in an isolated topic checkout, then merged
+  remote course and develop history. Grade loading retains both adaptive navigation
+  and develop's theme refresh after attachment.
+- Replaced extracted Office text as the primary WebView path with pinned offline
+  DOCX pages and PPTX SVG slides. Bundled licenses/notices, locked build and asset
+  hashes; validated package expansion before rendering and local tokenized URLs.
+- Added optional local Windows Office PDF export off the UI thread. Documents
+  stay on device, macro execution is disabled, original save/open actions remain
+  original bytes, active Office sessions are left untouched and link options are
+  restored. Static layout limits and rendering boundaries are recorded in ADR0005.
+- The reader now mounts a host's actual Flet control and owns host bounds,
+  suspension, theme and disposal. Missing session clients retain an in-app recovery
+  pane; only an explicit external icon opens the browser.
+- Phone PDF search collapses, bookmarks use a modal sheet, page images pinch zoom,
+  wide fallback tables scroll and pagination wraps. Corrected E2E palette cleanup
+  to restore its incoming palette instead of changing unrelated tests' defaults.
+- Verification: 187 focused course/UI cases passed; full course integration suite
+  subsequently passed **2072 tests, 25 skipped**. Actual local Office exported
+  synthetic DOCX/PPTX to two-page PDFs. Local Chrome at 390px displayed original
+  packages with slide geometry/navigation/notes and no JavaScript errors. Windows
+  host rendered the DOCX in its exact-title fixture window. Startup binding now
+  waits for that window instead of selecting an unrelated Flutter window, handles
+  64-bit process snapshots, and has positive/ambiguity regressions. Further native
+  interactions are blocked by an unrelated Windows privacy-permission dialog;
+  wide/mobile browser fixture and native/device acceptance remain distinct.

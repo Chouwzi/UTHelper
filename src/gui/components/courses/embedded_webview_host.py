@@ -284,6 +284,11 @@ class WindowsWebView2Dock:
                 ]
 
             k32 = ctypes.windll.kernel32
+            k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+            k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
             snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)
             if snap in (0, -1, ctypes.c_void_p(-1).value):
                 return pids
@@ -322,7 +327,7 @@ class WindowsWebView2Dock:
 
         cur_pid = os.getpid()
         family_pids = WindowsWebView2Dock._collect_child_pids(cur_pid)
-        matched: list[tuple[int, int]] = []
+        matched: list[tuple[bool, int]] = []
 
         def _enum_cb(hwnd: int, _ctx: Any) -> bool:
             try:
@@ -330,22 +335,12 @@ class WindowsWebView2Dock:
                     return True
                 title = win32gui.GetWindowText(hwnd) or ""
                 cls_name = win32gui.GetClassName(hwnd) or ""
+                if cls_name != "FLUTTER_RUNNER_WIN32_WINDOW":
+                    return True
+                if not expected_title or title.casefold() != expected_title.casefold():
+                    return True
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                score = 0
-                if pid == cur_pid:
-                    score += 12
-                elif pid in family_pids:
-                    score += 10
-                if cls_name == "FLUTTER_RUNNER_WIN32_WINDOW":
-                    score += 6
-                if expected_title and expected_title.lower() in title.lower():
-                    score += 5
-                if "uthelper" in title.lower():
-                    score += 4
-                if score > 0 and (
-                    title.strip() or cls_name == "FLUTTER_RUNNER_WIN32_WINDOW"
-                ):
-                    matched.append((score, hwnd))
+                matched.append((pid in family_pids, hwnd))
             except Exception:
                 pass
             return True
@@ -353,8 +348,13 @@ class WindowsWebView2Dock:
         win32gui.EnumWindows(_enum_cb, None)
         if not matched:
             return 0
-        matched.sort(key=lambda item: item[0], reverse=True)
-        return matched[0][1]
+        owned = [hwnd for related, hwnd in matched if related]
+        if owned:
+            return owned[0] if len(owned) == 1 else 0
+        # Detached Flet clients can be outside the Python process tree. A unique
+        # exact-title Flet window is still valid; unrelated/ambiguous windows are
+        # never a fallback while the requested window is being created.
+        return matched[0][1] if len(matched) == 1 else 0
 
     def _run_sta_thread(self) -> None:
         try:
@@ -1317,7 +1317,7 @@ def build_embedded_webview_host(
             on_history_changed=on_history_changed,
         )
         holder_wv2["host"] = host
-        dock._hwnd_retries = 15 if isinstance(page, ft.Page) else 1
+        dock._hwnd_retries = 50 if isinstance(page, ft.Page) else 1
         dock.start()
         return host
 

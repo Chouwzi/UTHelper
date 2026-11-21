@@ -17,8 +17,9 @@ import flet as ft
 import pytest
 
 import platform_utils
+from gui.core import theme
 from core.courses.local_preview_server import LocalPreviewServer
-from gui.core.theme import apply_theme
+from gui.core.theme import C
 
 _PLATFORM_FLAG_NAMES: tuple[str, ...] = (
     "IS_WINDOWS",
@@ -204,9 +205,16 @@ def set_platform_profile(
 
 @pytest.fixture(autouse=True)
 def theme_restore() -> Iterator[None]:
-    """Restore default Midnight Blue theme after every test."""
-    yield
-    apply_theme("midnight_blue")
+    """Restore the incoming palette rather than changing later tests' theme."""
+    palette = {name: value for name, value in vars(C).items() if name.isupper()}
+    type_colors = theme._TYPE_COLORS.copy()
+    try:
+        yield
+    finally:
+        for name, value in palette.items():
+            setattr(C, name, value)
+        theme._TYPE_COLORS.clear()
+        theme._TYPE_COLORS.update(type_colors)
 
 
 @pytest.fixture(autouse=True)
