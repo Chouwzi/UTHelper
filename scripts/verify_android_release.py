@@ -68,6 +68,17 @@ _CHPLAY_PROHIBITED_DEX_STRINGS = (
     "cancel_update",
 )
 _SIXTY_FOUR_BIT_ABIS = frozenset({"arm64-v8a", "x86_64"})
+_REQUIRED_OFFICE_VIEWER_ASSETS = (
+    "docx_host.html",
+    "docx_host.js",
+    "docx-preview.min.js",
+    "jszip.min.js",
+    "pptx_host.html",
+    "pptx_host.js",
+    "pptx_engine.js",
+    "viewer.css",
+    "viewer_common.js",
+)
 
 
 class AndroidVerificationError(ValueError):
@@ -486,6 +497,67 @@ def _read_embedded_distribution_channel(archive: zipfile.ZipFile) -> dict[str, o
     return None
 
 
+def _verify_office_viewer_assets_in_app_zip(
+    archive: zipfile.ZipFile,
+    *,
+    require: bool,
+) -> bool:
+    """Verify bundled ``assets/office_viewer/*`` files inside nested Flet ``app.zip``."""
+    nested_zips = [
+        name
+        for name in archive.namelist()
+        if name == "assets/app.zip"
+        or name.endswith("/assets/app.zip")
+        or name.endswith("/app/app.zip")
+        or name.endswith("flutter_assets/app/app.zip")
+    ]
+    if not nested_zips:
+        if require:
+            raise AndroidVerificationError(
+                "Android artifact is missing nested Flet app.zip containing office_viewer assets"
+            )
+        return False
+
+    verified_any = False
+    for nested_name in sorted(nested_zips):
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive.read(nested_name))) as nested:
+                names = set(nested.namelist())
+                has_office_or_release = any(
+                    item == "assets/release-version"
+                    or item.endswith("/assets/release-version")
+                    or "assets/office_viewer/" in item
+                    for item in names
+                )
+                if not require and not has_office_or_release:
+                    continue
+                for asset_name in _REQUIRED_OFFICE_VIEWER_ASSETS:
+                    candidates = (
+                        f"assets/office_viewer/{asset_name}",
+                        f"app/assets/office_viewer/{asset_name}",
+                    )
+                    matched = next((c for c in candidates if c in names), None)
+                    if matched is None:
+                        raise AndroidVerificationError(
+                            f"Nested app.zip ({nested_name}) is missing office_viewer asset: {asset_name}"
+                        )
+                    if nested.getinfo(matched).file_size <= 0:
+                        raise AndroidVerificationError(
+                            f"Nested app.zip ({nested_name}) has empty office_viewer asset: {asset_name}"
+                        )
+                verified_any = True
+        except zipfile.BadZipFile as exc:
+            raise AndroidVerificationError(
+                f"Failed to inspect nested app bundle {nested_name}"
+            ) from exc
+
+    if require and not verified_any:
+        raise AndroidVerificationError(
+            "Android artifact is missing office_viewer assets inside nested app.zip"
+        )
+    return verified_any
+
+
 def _verify_chplay_manifest_policy(manifest_root: ET.Element) -> None:
     """Enforce Google Play Store manifest compliance policy."""
     target_sdks: list[int] = []
@@ -762,6 +834,7 @@ def verify_android_release(
     android_home: Path | None = None,
     architecture: str = "universal",
     allow_unsigned: bool = False,
+    require_office_viewer: bool = False,
 ) -> dict[str, object]:
     if (apk is None) == (aab is None):
         raise AndroidVerificationError("Provide exactly one of apk or aab")
@@ -925,6 +998,10 @@ def verify_android_release(
                     expected_package_id=package_id,
                     native_libs=native_libs,
                 )
+            office_viewer_verified = _verify_office_viewer_assets_in_app_zip(
+                archive,
+                require=require_office_viewer,
+            )
     except zipfile.BadZipFile as exc:
         raise AndroidVerificationError(
             f"{'AAB' if is_aab else 'APK'} native library archive is invalid"
@@ -957,6 +1034,7 @@ def verify_android_release(
                     "version_code",
                     "notification_receivers",
                     "sha256",
+                    *(("office_viewer_assets",) if office_viewer_verified else ()),
                 )
             ),
             "commit_sha": commit_sha.lower(),
@@ -979,6 +1057,8 @@ def verify_android_release(
         ]
         if not allow_unsigned:
             checks.append("aab_signature" if is_aab else "apk_signature")
+        if office_viewer_verified:
+            checks.append("office_viewer_assets")
         evidence = {
             "schema_version": 2,
             "platform": "android",
@@ -1035,6 +1115,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workflow-run-id", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--architecture", choices=("universal", "arm64"), default="universal")
+    parser.add_argument(
+        "--require-office-viewer",
+        action="store_true",
+        help="Require office_viewer static assets inside nested Flet app.zip",
+    )
     return parser
 
 
@@ -1053,6 +1138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output=args.output,
         architecture=args.architecture,
         allow_unsigned=args.allow_unsigned,
+        require_office_viewer=args.require_office_viewer,
     )
     return 0
 

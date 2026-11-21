@@ -98,6 +98,8 @@ def test_startup_screen_publishes_compact_window_with_logo_and_animation():
 
     assert (page.window.width, page.window.height) == (1120, 760)
     assert (page.window.min_width, page.window.min_height) == (420, 560)
+    assert page.window.max_width is None
+    assert page.window.max_height is None
     assert page.window.resizable is True
     assert page.window.maximizable is True
     assert page.window.minimizable is True
@@ -110,7 +112,12 @@ def test_startup_screen_publishes_compact_window_with_logo_and_animation():
     controls = list(walk(page.controls[0]))
     drag_areas = [control for control in controls if isinstance(control, ft.WindowDragArea)]
     assert len(drag_areas) == 1
-    assert drag_areas[0].maximizable is False
+    assert drag_areas[0].maximizable is True
+    assert any(
+        isinstance(control, ft.IconButton)
+        and control.icon == ft.Icons.CROP_SQUARE_ROUNDED
+        for control in controls
+    )
     assert any(isinstance(control, ft.Image) and control.src == "icon.png" for control in controls)
     assert any(isinstance(control, ft.ProgressRing) for control in controls)
     assert any(
@@ -267,6 +274,10 @@ def test_activation_broker_is_ready_before_initial_window_state_is_published(
     controller._init_window()
 
     assert page.window.visible is expected_visible
+    assert (page.window.width, page.window.height) == (1120, 760)
+    assert (page.window.min_width, page.window.min_height) == (420, 560)
+    assert page.window.max_width is None
+    assert page.window.resizable is True
     assert page.window.maximizable is True
     assert page.window.minimizable is True
     assert page.window.title_bar_hidden is True

@@ -14,9 +14,16 @@ _file_locks: Dict[Path, threading.RLock] = {}
 _file_locks_lock = threading.Lock()
 _thread_local = threading.local()
 
+def _canonical_lock_path(filepath: Path) -> Path:
+    """Resolve parent directory only so transient leaf renames never alter lock identity."""
+    raw = Path(os.path.abspath(str(filepath)))
+    parent_resolved = raw.parent.resolve()
+    return Path(os.path.normcase(os.path.abspath(str(parent_resolved / raw.name))))
+
+
 def get_memory_lock(filepath: Path) -> threading.RLock:
     """Trả về hoặc tạo mới một RLock cho đường dẫn tệp cụ thể để bảo vệ đa luồng."""
-    resolved = filepath.resolve()
+    resolved = _canonical_lock_path(filepath)
     with _file_locks_lock:
         if resolved not in _file_locks:
             _file_locks[resolved] = threading.RLock()
@@ -97,9 +104,10 @@ class SafeFileIO:
         Ghi dữ liệu JSON nguyên tử và an toàn tuyệt đối.
         Sử dụng Memory Lock + File Lock + Robust Retry Loop với Backoff + Dọn dẹp stale lock toàn cầu.
         """
-        is_in_transaction = filepath in getattr(_thread_local, "_safe_io_transactions", set())
+        canonical = _canonical_lock_path(filepath)
+        is_in_transaction = canonical in getattr(_thread_local, "_safe_io_transactions", set())
 
-        mem_lock = get_memory_lock(filepath)
+        mem_lock = get_memory_lock(canonical)
         with mem_lock:
             if is_in_transaction:
                 return SafeFileIO._write_unlocked_impl(filepath, data)
@@ -141,11 +149,10 @@ class SafeFileIO:
         Đọc dữ liệu JSON an toàn sử dụng Memory Lock.
         Nếu đang trong transaction, file_lock đã được giữ nên việc đọc hoàn toàn an toàn khỏi tiến trình khác.
         """
-        if not filepath.exists():
-            return default_factory()
-            
         mem_lock = get_memory_lock(filepath)
         with mem_lock:
+            if not filepath.exists():
+                return default_factory()
             try:
                 # Đọc trực tiếp dưới sự bảo vệ của RLock bộ nhớ
                 with open(filepath, "r", encoding="utf-8") as f:
@@ -164,23 +171,24 @@ class SafeFileIO:
         
         @contextlib.contextmanager
         def _transaction():
-            lock_path = filepath.with_suffix(".lock")
-            if lock_path.exists():
-                try:
-                    if time.time() - os.path.getmtime(lock_path) > 10.0:
-                        os.remove(lock_path)
-                except Exception:
-                    pass
-
-            mem_lock = get_memory_lock(filepath)
+            canonical = _canonical_lock_path(filepath)
+            mem_lock = get_memory_lock(canonical)
             with mem_lock:
+                lock_path = filepath.with_suffix(".lock")
+                if lock_path.exists():
+                    try:
+                        if time.time() - os.path.getmtime(lock_path) > 10.0:
+                            os.remove(lock_path)
+                    except Exception:
+                        pass
+
                 file_lock = SafeFileIO.get_file_lock(filepath)
                 with file_lock.acquire(timeout=timeout):
                     if not hasattr(_thread_local, "_safe_io_transactions"):
                         _thread_local._safe_io_transactions = set()
-                    _thread_local._safe_io_transactions.add(filepath)
+                    _thread_local._safe_io_transactions.add(canonical)
                     try:
                         yield
                     finally:
-                        _thread_local._safe_io_transactions.remove(filepath)
+                        _thread_local._safe_io_transactions.discard(canonical)
         return _transaction()

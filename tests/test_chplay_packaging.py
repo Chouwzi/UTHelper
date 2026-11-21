@@ -890,3 +890,23 @@ def test_decode_aab_manifest_handles_protobuf_and_plain_xml():
     assert decode_aab_manifest_bytes(_manifest().encode()).tag.endswith("manifest")
     with pytest.raises(AndroidVerificationError):
         decode_aab_manifest_bytes(b"\x0a\xff\xff")
+
+
+def test_verifier_requires_office_viewer_assets_when_app_zip_present(tmp_path):
+    sdk_dir = tmp_path / "sdk"
+    (sdk_dir / "build-tools" / "35.0.0").mkdir(parents=True)
+    app_zip = io.BytesIO()
+    with zipfile.ZipFile(app_zip, "w") as inner:
+        inner.writestr("assets/release-version", VERSION)
+        inner.writestr("assets/distribution-channel.json", json.dumps({"channel": "chplay"}))
+    bad_aab = _aab(tmp_path / "missing-office.aab")
+    with zipfile.ZipFile(bad_aab, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("base/assets/flutter_assets/app/app.zip", app_zip.getvalue())
+    with pytest.raises(AndroidVerificationError, match="office_viewer"):
+        _verify(
+            bad_aab,
+            tmp_path,
+            output=tmp_path / "out-missing-office.json",
+            android_home=sdk_dir,
+            require_office_viewer=True,
+        )

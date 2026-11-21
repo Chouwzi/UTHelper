@@ -209,6 +209,7 @@ jobs:
             --commit-sha "$GITHUB_SHA" \
             --workflow-run-id "$GITHUB_RUN_ID" \
             --architecture "$ARCHITECTURE" \
+            --require-office-viewer \
             --output "evidence/UTHelper-$VERSION$APK_SUFFIX.apk.verification.json"
       - name: Attest signed APK
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d

@@ -44,6 +44,20 @@ def _write_valid_bundle(root: Path) -> None:
     (root / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
     (root / "app" / "main.pyc").write_bytes(b"pyc")
     (root / "app" / "assets" / "release-version").write_bytes(b"2.2.11\n")
+    office_dir = root / "app" / "assets" / "office_viewer"
+    office_dir.mkdir(parents=True)
+    for asset_name in (
+        "docx_host.html",
+        "docx_host.js",
+        "docx-preview.min.js",
+        "jszip.min.js",
+        "pptx_host.html",
+        "pptx_host.js",
+        "pptx_engine.js",
+        "viewer.css",
+        "viewer_common.js",
+    ):
+        (office_dir / asset_name).write_bytes(b"asset")
 
 
 def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
@@ -81,6 +95,8 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
         ("site-packages/pywin32_system32/pywintypes314.dll", "pywintypes"),
         ("site-packages/flet_uth_quiz/__init__.pyc", "flet_uth_quiz"),
         ("site-packages/flet_uth_quiz/quiz_player.pyc", "flet_uth_quiz"),
+        ("app/assets/office_viewer/docx_host.html", "office_viewer"),
+        ("app/assets/office_viewer/pptx_engine.js", "office_viewer"),
     ],
 )
 def test_missing_runtime_artifact_fails_closed(tmp_path, relative_path, message):

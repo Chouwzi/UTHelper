@@ -111,6 +111,74 @@ def test_portal_client_rejects_login_without_token():
         raise AssertionError("missing Portal token was accepted")
 
 
+def test_portal_client_fetches_current_semester_courses_with_fallback_and_401_retry():
+    paths: list[str] = []
+    login_count = 0
+
+    def opener(request, timeout):
+        del timeout
+        nonlocal login_count
+        paths.append(request.full_url)
+        if request.full_url.endswith("/user/login"):
+            login_count += 1
+            return _Response({"success": True, "token": f"tok-{login_count}"})
+        if request.full_url.endswith("/hoctap/hocky"):
+            if login_count == 1:
+                raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+            return _Response(
+                {
+                    "success": True,
+                    "body": [
+                        {"id": 77, "tenDot": "Học kỳ 1 năm học 2026-2027"},
+                        {"id": 78, "tenDot": "Học kỳ 2 năm học 2026-2027"},
+                    ],
+                }
+            )
+        if request.full_url.endswith("/hoctap/montheoky/78"):
+            # Newest dot has no registered courses yet -> must fall back to id=77
+            return _Response({"success": True, "body": []})
+        if request.full_url.endswith("/hoctap/montheoky/77"):
+            return _Response(
+                {
+                    "success": True,
+                    "body": [
+                        {
+                            "id": 180519,
+                            "maHocPhan": "0120121137",
+                            "tenMonHoc": "Quản trị doanh nghiệp CNTT",
+                            "soTinChi": 3,
+                        },
+                        {
+                            "id": 180520,
+                            "maHocPhan": "0120005107",
+                            "tenMonHoc": "Chủ nghĩa xã hội khoa học",
+                            "soTinChi": 2,
+                        },
+                    ],
+                }
+            )
+        raise AssertionError(f"Unexpected URL: {request.full_url}")
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+    ten_dot, courses = client.fetch_current_semester_courses("student", "secret")
+
+    assert login_count == 2
+    assert ten_dot == "Học kỳ 1 năm học 2026-2027"
+    assert courses == [
+        {
+            "maHocPhan": "0120121137",
+            "tenMonHoc": "Quản trị doanh nghiệp CNTT",
+            "soTinChi": 3,
+        },
+        {
+            "maHocPhan": "0120005107",
+            "tenMonHoc": "Chủ nghĩa xã hội khoa học",
+            "soTinChi": 2,
+        },
+    ]
+    assert any(p.endswith("/hoctap/montheoky/78") for p in paths)
+    assert any(p.endswith("/hoctap/montheoky/77") for p in paths)
+
 def test_portal_client_caches_the_token_per_account_and_clear_token_drops_it():
     def opener(request, timeout):
         del timeout

@@ -18,7 +18,7 @@ def build_desktop_window_header(
     title_control: ft.Control | None = None,
     version_control: ft.Control | None = None,
 ) -> ft.Container:
-    """Build a draggable header with title, minimize and close controls."""
+    """Build a draggable header with title, minimize, optional maximize, and close controls."""
     button_constraints = ft.BoxConstraints(
         min_width=42,
         max_width=42,
@@ -102,7 +102,10 @@ def build_desktop_window_header(
             return
         close_rotation += math.tau
         close.rotate = close_rotation
-        close.update()
+        try:
+            close.update()
+        except Exception:
+            pass
 
     close.on_hover = rotate_close_on_hover
     return ft.Container(

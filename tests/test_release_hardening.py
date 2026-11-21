@@ -74,8 +74,7 @@ def test_patched_security_floors_are_consistent_across_build_surfaces():
     config = tomllib.loads(_read("pyproject.toml"))
     release_workflow = _read(".github/workflows/release.yml")
 
-    assert "pillow>=12.3.0" in config["project"]["optional-dependencies"]["windows"]
-    assert "pillow>=12.3.0" in config["tool"]["flet"]["windows"]["dependencies"]
+    assert "pillow>=13.0.0" in config["project"]["dependencies"]
     assert "lxml>=6.1.0" in config["project"]["optional-dependencies"]["windows"]
     assert "lxml>=6.1.0" in config["tool"]["flet"]["windows"]["dependencies"]
     assert "pytest>=9.0.3" in config["dependency-groups"]["dev"]

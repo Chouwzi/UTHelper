@@ -1,14 +1,18 @@
+import gzip
+import http.client
+import io
 import json
 import os
 import threading
 import time
+import zlib
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from config import settings
 from core.moodle_sites import (
     COURSES_MOODLE_SITE,
@@ -84,6 +88,103 @@ def _normalize_draft_filepath(filepath: str) -> str:
     return f"/{parts}/" if parts else "/"
 
 
+def _is_same_moodle_origin_url(url: str, origin: str) -> bool:
+    """Validate an http/https URL has no control/whitespace chars and matches ``origin``."""
+    if not origin or not isinstance(url, str):
+        return False
+    raw = url.strip()
+    if not raw or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        return False
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" == origin.rstrip("/").lower()
+
+
+def _read_bounded_response_bytes(
+    response,
+    *,
+    max_bytes: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> Optional[bytes]:
+    """Read HTTP response bytes in 64 KB chunks with size bound, gzip support, and progress callback."""
+    info = response.info() if hasattr(response, "info") else None
+    total_len = 0
+    if info is not None:
+        try:
+            raw_cl = info.get("Content-Length") if hasattr(info, "get") else None
+            total_len = max(0, int(raw_cl)) if raw_cl else 0
+        except (TypeError, ValueError):
+            total_len = 0
+
+    # Stream in 64 KB chunks on real HTTPResponse / BufferedIOBase; read once on non-advancing test fakes.
+    is_real_stream = isinstance(response, (http.client.HTTPResponse, io.IOBase)) or hasattr(
+        getattr(response, "fp", None), "read"
+    )
+    if is_real_stream:
+        buf = bytearray()
+        chunk_size = 65536
+        last_emit = 0.0
+        while True:
+            to_read = (
+                min(chunk_size, (max_bytes + 1) - len(buf))
+                if max_bytes is not None
+                else chunk_size
+            )
+            if to_read <= 0:
+                extra = response.read(1)
+                if extra:
+                    buf.extend(extra)
+                break
+            chunk = response.read(to_read)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if max_bytes is not None and len(buf) > max_bytes:
+                logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+                return None
+            if callable(progress_callback):
+                now_m = time.monotonic()
+                if (now_m - last_emit) >= 0.065:
+                    last_emit = now_m
+                    try:
+                        progress_callback(len(buf), total_len)
+                    except Exception:
+                        pass
+        body = bytes(buf)
+        if callable(progress_callback):
+            try:
+                progress_callback(len(body), total_len or len(body))
+            except Exception:
+                pass
+    else:
+        body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
+        if max_bytes is not None and len(body) > max_bytes:
+            logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+            return None
+        if callable(progress_callback):
+            try:
+                progress_callback(len(body), total_len or len(body))
+            except Exception:
+                pass
+
+    encoding = str(info.get("Content-Encoding") or "").lower() if info and hasattr(info, "get") else ""
+    if encoding == "gzip":
+        if max_bytes is None:
+            return gzip.decompress(body)
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        decompressed = decompressor.decompress(body, max_bytes + 1)
+        if len(decompressed) > max_bytes or decompressor.unconsumed_tail:
+            logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
+            return None
+        tail = decompressor.flush()
+        if len(decompressed) + len(tail) > max_bytes:
+            logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
+            return None
+        return decompressed + tail
+    return body
+
+
 @dataclass(frozen=True)
 class DraftFileRecord:
     """The exact identity Moodle assigned to an uploaded draft file."""
@@ -140,12 +241,12 @@ else:
     _DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 # SSL: dùng urllib default trên MỌI platform
-# Custom ssl.create_default_context() bị Cloudflare chặn (403).
-# urllib default SSL không bị chặn. Nếu iOS gặp cert error → thêm certifi sau.
+# Custom ssl.create_default_context() và raw http.client.HTTPSConnection bị Cloudflare chặn (403).
+# urllib.request.urlopen giữ nguyên header/TLS chuẩn, tương thích 100% Cloudflare & Moodle.
 
 
 def _urlopen(req, timeout=15):
-    """urlopen wrapper - dùng urllib default SSL."""
+    """Thin wrapper around urllib.request.urlopen for uniform timeout & test monkeypatching."""
     return urllib.request.urlopen(req, timeout=timeout)
 
 
@@ -241,7 +342,13 @@ class MoodleClient:
             )
         return self._html_opener
 
-    def _open_html(self, path: str, *, data: dict[str, str] | None = None) -> tuple[str, str]:
+    def _open_html(
+        self,
+        path: str,
+        *,
+        data: dict[str, str] | None = None,
+        timeout: int = 20,
+    ) -> tuple[str, str]:
         opener = self._ensure_html_opener()
         origin = self.moodle_site_origin
         url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
@@ -252,7 +359,7 @@ class MoodleClient:
             method="POST" if data is not None else "GET",
             headers={"User-Agent": _DEFAULT_UA, "Accept": "text/html"},
         )
-        with opener.open(request, timeout=20) as response:
+        with opener.open(request, timeout=timeout) as response:
             final_url = response.geturl()
             parsed = urllib.parse.urlsplit(final_url)
             final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
@@ -262,6 +369,220 @@ class MoodleClient:
         if len(body) > 2 * 1024 * 1024:
             raise ValueError("Moodle web response was too large")
         return final_url, body.decode("utf-8", errors="replace")
+
+    def get_sesskey(self) -> str:
+        """Return current authenticated Moodle session ``sesskey`` if available."""
+        with self._session_lock:
+            self._reset_session_if_account_changed()
+            return self._sesskey or ""
+
+    def get_session_cookies(self, *, ensure_login: bool = True) -> list[dict[str, Any]]:
+        """Return snapshot cookie dicts from this client's cookie jar for WebView injection."""
+        with self._session_lock:
+            self._reset_session_if_account_changed()
+            if ensure_login and not self._sesskey:
+                try:
+                    self.login_session()
+                except Exception as exc:
+                    logger.warning("Session login before cookie export failed (%s)", type(exc).__name__)
+                    return []
+            cookies: list[dict[str, Any]] = []
+            for cookie in list(self._cookie_jar):
+                if not cookie.name or cookie.value is None:
+                    continue
+                cookies.append(
+                    {
+                        "name": cookie.name,
+                        "value": cookie.value,
+                        "domain": cookie.domain or "",
+                        "path": cookie.path or "/",
+                        "secure": bool(cookie.secure),
+                        "expires": cookie.expires,
+                        "httpOnly": bool(getattr(cookie, "_rest", {}).get("HttpOnly", False)),
+                    }
+                )
+            return cookies
+
+    def _resolve_same_origin_path(self, url: str) -> str:
+        origin = self.moodle_site_origin
+        if not origin:
+            raise ValueError("Moodle site origin is not configured")
+        raw = str(url or "").strip()
+        if not raw or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+            raise ValueError("Invalid session URL")
+        parsed = urllib.parse.urlsplit(raw)
+        if parsed.scheme or parsed.netloc:
+            if not _is_same_moodle_origin_url(raw, origin):
+                raise ValueError("URL origin does not match Moodle site origin")
+            return f"{parsed.path}?{parsed.query}" if parsed.query else (parsed.path or "/")
+        resolved = urllib.parse.urljoin(f"{origin}/", raw.lstrip("/"))
+        rp = urllib.parse.urlsplit(resolved)
+        return f"{rp.path}?{rp.query}" if rp.query else (rp.path or "/")
+
+    def submit_session_form(
+        self,
+        url: str,
+        fields: dict[str, str],
+        *,
+        form_timeout: int = 20,
+    ) -> tuple[str, str, bool]:
+        """Submit a same-origin Moodle web form over authenticated session with retry."""
+        path = self._resolve_same_origin_path(url)
+        with self._session_lock:
+            self._reset_session_if_account_changed()
+            if not self._sesskey and not self.login_session():
+                raise RuntimeError("Moodle session login failed")
+
+            post_fields = {str(k): str(v) for k, v in (fields or {}).items()}
+            for attempt in range(2):
+                if "sesskey" in post_fields and self._sesskey:
+                    post_fields["sesskey"] = self._sesskey
+                try:
+                    final_url, html_text = self._open_html(
+                        path, data=post_fields, timeout=form_timeout
+                    )
+                except urllib.error.HTTPError as exc:
+                    try:
+                        reason_text = f"{getattr(exc, 'msg', '')} {getattr(exc, 'reason', '')}"
+                        redirect_target = str(
+                            getattr(exc, "filename", "") or getattr(exc, "url", "") or ""
+                        )
+                        if "Untrusted Moodle redirect" in reason_text and redirect_target:
+                            return redirect_target, "", True
+                        raise
+                    finally:
+                        exc.close()
+                if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                    if attempt == 0:
+                        if not self.login_session(force=True):
+                            raise RuntimeError("Moodle session re-login failed")
+                        continue
+                    raise RuntimeError("Moodle session expired")
+                return final_url, html_text, False
+            raise RuntimeError("Moodle session expired")
+
+    def open_session_raw(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        body: bytes | None = None,
+        content_type: str = "",
+        accept: str = "*/*",
+        max_bytes: int = 8 * 1024 * 1024,
+        timeout: int = 20,
+    ) -> tuple[int, str, str, bytes]:
+        """Fetch raw response bytes for same-origin Moodle resources with auto-login recovery."""
+        path = self._resolve_same_origin_path(url)
+        origin = self.moodle_site_origin
+        with self._session_lock:
+            self._reset_session_if_account_changed()
+            if not self._sesskey and not path.startswith("/login/index.php"):
+                self.login_session()
+
+            req_method = (method or "GET").upper()
+            opener = self._ensure_html_opener()
+            target_url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+            headers: dict[str, str] = {"User-Agent": _DEFAULT_UA, "Accept": accept}
+            if body is not None and content_type:
+                headers["Content-Type"] = content_type
+
+            for attempt in range(2):
+                request = urllib.request.Request(
+                    target_url,
+                    data=body if req_method == "POST" else None,
+                    method=req_method,
+                    headers=headers,
+                )
+                try:
+                    with opener.open(request, timeout=timeout) as response:
+                        status = int(getattr(response, "status", 200) or 200)
+                        final_url = response.geturl()
+                        resp_ct = str(
+                            response.headers.get("Content-Type", "application/octet-stream")
+                        )
+                        raw = response.read(max_bytes + 1)
+                except urllib.error.HTTPError as exc:
+                    try:
+                        reason_text = f"{getattr(exc, 'msg', '')} {getattr(exc, 'reason', '')}"
+                        redirect_target = str(
+                            getattr(exc, "filename", "") or getattr(exc, "url", "") or ""
+                        )
+                        if "Untrusted Moodle redirect" in reason_text and redirect_target:
+                            return 302, redirect_target, "text/plain", b""
+                        err_ct = str(
+                            exc.headers.get("Content-Type", "text/html; charset=utf-8")
+                            if exc.headers
+                            else "text/html; charset=utf-8"
+                        )
+                        err_body = exc.read(min(max_bytes, 512 * 1024))
+                        return int(exc.code), str(exc.geturl() or target_url), err_ct, err_body
+                    finally:
+                        exc.close()
+
+                parsed = urllib.parse.urlsplit(final_url)
+                final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+                if final_origin != origin:
+                    raise ValueError("Moodle response changed origin")
+                if (
+                    parsed.path == "/login/index.php"
+                    and not path.startswith("/login/index.php")
+                    and attempt == 0
+                    and self.login_session(force=True)
+                ):
+                    continue
+                if len(raw) > max_bytes:
+                    raw = raw[:max_bytes]
+                return status, final_url, resp_ct, raw
+
+            raise RuntimeError("Moodle session expired")
+
+    def open_session_url(self, url: str) -> tuple[str, str, bool]:
+        """Open a same-origin Moodle web page using cookie session, recovering once on expiry."""
+        origin = self.moodle_site_origin
+        if not origin:
+            raise ValueError("Moodle site origin is not configured")
+        raw = str(url or "").strip()
+        if not raw or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+            raise ValueError("Invalid session URL")
+
+        parsed = urllib.parse.urlsplit(raw)
+        if parsed.scheme or parsed.netloc:
+            if not _is_same_moodle_origin_url(raw, origin):
+                raise ValueError("URL origin does not match Moodle site origin")
+            path = f"{parsed.path}?{parsed.query}" if parsed.query else (parsed.path or "/")
+        else:
+            resolved = urllib.parse.urljoin(f"{origin}/", raw.lstrip("/"))
+            rp = urllib.parse.urlsplit(resolved)
+            path = f"{rp.path}?{rp.query}" if rp.query else (rp.path or "/")
+
+        with self._session_lock:
+            self._reset_session_if_account_changed()
+            if not self._sesskey and not self.login_session():
+                raise RuntimeError("Moodle session login failed")
+
+            for attempt in range(2):
+                try:
+                    final_url, html_text = self._open_html(path)
+                except urllib.error.HTTPError as exc:
+                    try:
+                        reason_text = f"{getattr(exc, 'msg', '')} {getattr(exc, 'reason', '')}"
+                        redirect_target = str(
+                            getattr(exc, "filename", "") or getattr(exc, "url", "") or ""
+                        )
+                        if "Untrusted Moodle redirect" in reason_text and redirect_target:
+                            return redirect_target, "", True
+                        raise
+                    finally:
+                        exc.close()
+                if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                    if attempt == 0:
+                        if not self.login_session(force=True):
+                            raise RuntimeError("Moodle session re-login failed")
+                        continue
+                    raise RuntimeError("Moodle session expired")
+                return final_url, html_text, False
+            raise RuntimeError("Moodle session expired")
 
     def login_session(
         self,
@@ -905,22 +1226,112 @@ class MoodleClient:
         record = self.upload_draft_file_record(filename, file_bytes, itemid, "/")
         return record.itemid if record else None
 
-    def download_file(self, url: str) -> Optional[bytes]:
-        """Tải file từ Moodle server. Tự động append wstoken."""
+    def download_file(
+        self,
+        url: str,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Optional[bytes]:
+        """Tải file từ Moodle server bằng WS token trên đúng origin tin cậy."""
+        origin = self.moodle_site_origin
+        if not _is_same_moodle_origin_url(url, origin):
+            logger.warning("Blocked off-origin or unsafe WS download URL")
+            return None
+
         token = self._get_ws_token()
         if not token:
             return None
-        
-        sep = '&' if '?' in url else '?'
-        authed_url = f"{url}{sep}token={token}"
-        
+
+        parts = urllib.parse.urlsplit(url.strip())
+        token_param = f"token={urllib.parse.quote(token, safe='')}"
+        query = f"{parts.query}&{token_param}" if parts.query else token_param
+        authed_url = urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, query, "")
+        )
+
+        opener = urllib.request.build_opener(_SameMoodleOriginRedirectHandler(origin))
+        request = urllib.request.Request(
+            authed_url,
+            headers={"User-Agent": _DEFAULT_UA, "Accept-Encoding": "gzip"},
+        )
         try:
-            status, content = self._get(authed_url, timeout=60)
-            if status == 200:
-                return content
-            logger.error("Download failed (HTTP %d): %s", status, url)
+            self._throttle()
+            with opener.open(request, timeout=60) as response:
+                final_url = response.geturl()
+                if not _is_same_moodle_origin_url(final_url, origin):
+                    logger.warning("Download response changed origin")
+                    return None
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    logger.error("Download failed (HTTP %d): %s", status, url)
+                    return None
+                return _read_bounded_response_bytes(
+                    response,
+                    max_bytes=max_bytes,
+                    progress_callback=progress_callback,
+                )
+        except urllib.error.HTTPError as e:
+            try:
+                logger.error("Download failed (HTTP %d): %s", e.code, url)
+            finally:
+                e.close()
         except Exception as e:
             logger.error("Download error: %s", e)
+        return None
+
+    def download_session_file(
+        self,
+        url: str,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Optional[bytes]:
+        """Download a same-origin Moodle file authenticated by cookie session."""
+        origin = self.moodle_site_origin
+        if not _is_same_moodle_origin_url(url, origin):
+            logger.warning("Blocked off-origin or unsafe session download URL")
+            return None
+
+        target_url = url.strip()
+        try:
+            with self._session_lock:
+                self._reset_session_if_account_changed()
+                if not self._sesskey and not self.login_session():
+                    return None
+
+                for attempt in range(2):
+                    opener = self._ensure_html_opener()
+                    request = urllib.request.Request(
+                        target_url,
+                        headers={"User-Agent": _DEFAULT_UA, "Accept-Encoding": "gzip"},
+                    )
+                    self._throttle()
+                    with opener.open(request, timeout=60) as response:
+                        final_url = response.geturl()
+                        if not _is_same_moodle_origin_url(final_url, origin):
+                            logger.warning("Session download response changed origin")
+                            return None
+                        if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                            if attempt == 0 and self.login_session(force=True):
+                                continue
+                            return None
+                        status = getattr(response, "status", 200)
+                        if status != 200:
+                            logger.error("Session download failed (HTTP %d): %s", status, url)
+                            return None
+                        return _read_bounded_response_bytes(
+                            response,
+                            max_bytes=max_bytes,
+                            progress_callback=progress_callback,
+                        )
+        except urllib.error.HTTPError as e:
+            try:
+                logger.error("Session download failed (HTTP %d): %s", e.code, url)
+            finally:
+                e.close()
+        except Exception as e:
+            logger.error("Session download error: %s", e)
         return None
 
     def remove_assignment_submission(

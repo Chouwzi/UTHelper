@@ -11,7 +11,9 @@ from concurrent.futures import Future
 from datetime import datetime
 from core.time_utils import parse_datetime
 import asyncio
+import inspect
 import logging
+import math
 import platform_utils
 from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
@@ -21,6 +23,14 @@ from urllib.parse import urlsplit
 
 
 from core.data_orchestrator import DataOrchestrator
+from core.courses.activity_service import CourseActivityService
+from core.courses.archive_service import ArchiveService
+from core.courses.cache_store import CourseCacheStore
+from core.courses.catalog_service import CourseCatalogService
+from core.courses.local_preview_server import LocalPreviewServer
+from core.courses.models import CourseModuleItem, CourseSummary
+from core.courses.preview_cache import PreviewFileCache
+from core.courses.providers import CoursesWsProvider, ThnnCourseProvider
 from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
@@ -70,11 +80,14 @@ from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
 from gui.components.desktop_window_header import build_desktop_window_header
+from gui.components.courses.adaptive_nav import AdaptiveNavShell, RAIL_WIDTH
 from gui.components.adaptive_filter_menu import (
     AdaptiveFilterMenu,
     FilterMenuOption,
 )
 from gui.view_manager import ViewManager
+from gui.controllers.courses_coordinator import CoursesCoordinator
+from gui.view_models.courses_state import safe_http_url
 from gui.controllers.startup_visibility import (
     is_autostart_launch,
     should_hide_startup_window,
@@ -295,6 +308,7 @@ class AppController:
         # Events
         self.page.on_disconnect = self._on_disconnect
         self.page.on_keyboard_event = self._on_keyboard_event
+        self.page.on_resize = self._on_page_resize
         
         # Intercept the native root-view pop on Android/iOS. This app swaps
         # controls inside one root View, so on_view_pop alone cannot prevent the
@@ -395,7 +409,10 @@ class AppController:
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             await self._complete_login_success()
-            await retry_callback()
+            if callable(retry_callback):
+                result = retry_callback()
+                if inspect.isawaitable(result):
+                    await result
 
         await show_login_dialog(
             self.page,
@@ -458,6 +475,13 @@ class AppController:
                 and not getattr(quiz_player_view, "visible", False)
             ):
                 self._safe_run_task(clear_quiz_sessions)
+            courses_coord = getattr(self, "_courses_coordinator", None)
+            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
+            if callable(reset_courses):
+                courses_ns = (
+                    f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+                )
+                reset_courses(courses_ns)
 
         schedule_namespace = (
             f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
@@ -769,21 +793,23 @@ class AppController:
 
             self._android_background = create_mobile_background_bridge(self.page)
         
-        # Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống
+        # Chỉ dành cho Desktop: Cửa sổ kích thước linh hoạt hỗ trợ khay hệ thống
         if not _is_mobile:
             # PC: cửa sổ co giãn được. Rộng >= _WIDE_BREAKPOINT sẽ chuyển sang
             # bố cục 2 cột; hẹp hơn vẫn dùng bố cục gọn như bản cũ.
-            self.page.window.width        = 1120
-            self.page.window.height       = 760
-            self.page.window.min_width    = 420
-            self.page.window.min_height   = 560
+            self.page.window.width         = 1120
+            self.page.window.height        = 760
+            self.page.window.min_width     = 420
+            self.page.window.min_height    = 560
+            self.page.window.max_width     = None
+            self.page.window.max_height    = None
             self.page.window.always_on_top = settings.ALWAYS_ON_TOP
-            self.page.window.resizable    = True
-            self.page.window.maximizable  = True
-            self.page.window.minimizable  = True
+            self.page.window.resizable     = True
+            self.page.window.maximizable   = True
+            self.page.window.minimizable   = True
             self.page.window.title_bar_hidden = True
             self.page.window.title_bar_buttons_hidden = True
-            self.page.window.icon         = "icon.ico"  # Icon của app, để ở thư mục assets
+            self.page.window.icon          = "icon.ico"  # Icon của app, để ở thư mục assets
             self.page.window.prevent_close = True
             self.page.window.on_event = self._on_window_event
         
@@ -1005,36 +1031,45 @@ class AppController:
         return rail
 
     def _current_section(self) -> str:
-        if self.settings_view.visible:
+        if getattr(getattr(self, "settings_view", None), "visible", False):
             return "settings"
-        if self.calendar_view.visible:
+        if getattr(getattr(self, "calendar_view", None), "visible", False):
             return "calendar"
-        if self.grade_overview_view.visible:
+        if getattr(getattr(self, "grade_overview_view", None), "visible", False) or getattr(
+            getattr(self, "course_grades_view", None), "visible", False
+        ):
             return "grades"
-        if self.courses_view.visible:
+        if getattr(getattr(self, "courses_view", None), "visible", False):
             return "courses"
         return "home"
 
     def _sync_rail_active(self, force_home: bool = False) -> None:
+        current = "home" if force_home else self._current_section()
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is not None and hasattr(nav_shell, "set_active"):
+            nav_shell.set_active(current)
         if not getattr(self, "_rail_items", None):
             return
-        current = "home" if force_home else self._current_section()
         for key, (box, ic, tx) in self._rail_items.items():
             active = key == current
             color = C.ACCENT if active else C.TEXT_SECONDARY
             ic.color = color
             tx.color = color
             box.bgcolor = ft.Colors.with_opacity(0.14, C.ACCENT) if active else None
-        try:
-            self._rail.update()
-        except Exception:
-            pass
+        rail = getattr(self, "_rail", None)
+        if rail is not None:
+            try:
+                rail.update()
+            except Exception:
+                pass
 
     async def _rail_navigate(self, target: str) -> None:
         """Chuyển mục từ thanh điều hướng: đóng view đang mở rồi mở view đích."""
         self._dismiss_desktop_filter_menu()
-        if self.detail_view.visible:
+        if getattr(getattr(self, "detail_view", None), "visible", False):
             await self._close_detail()
+        if getattr(getattr(self, "course_grades_view", None), "visible", False):
+            await self._close_course_grades()
         current = self._current_section()
         if target == current:
             # Bấm lại đúng mục đang mở: giữ nguyên, không quay về Tổng quan.
@@ -1062,70 +1097,12 @@ class AppController:
             await self._show_settings()
         self._sync_rail_active()
 
-    def _on_page_resize(self, _event=None) -> None:
-        try:
-            self._apply_responsive_layout()
-        except Exception:
-            logger.debug("Responsive layout update skipped", exc_info=True)
-
-    def _apply_responsive_layout(self, force: bool = False) -> None:
-        width = float(getattr(self.page, "width", None) or self.page.window.width or 0)
-        if width <= 0:
+    def _toggle_maximize_window(self, _event=None) -> None:
+        """Toggle desktop maximized window state from the custom header."""
+        window = getattr(self.page, "window", None)
+        if window is None:
             return
-        wide = width >= _WIDE_BREAKPOINT
-        mode_changed = wide != self._wide_layout
-        if not (force or mode_changed or getattr(self, "_last_layout_width", None) is None
-                or abs(width - self._last_layout_width) >= 1):
-            return
-        self._last_layout_width = width
-        self._wide_layout = wide
-
-        # Gutter để nội dung không bị kéo dãn quá mức trên màn hình lớn.
-        list_width = width - (_SIDE_PANE_WIDTH if wide else 0)
-        gutter = max(0.0, (list_width - _LIST_MAX_WIDTH) / 2)
-        self._content_area.padding = ft.Padding.only(left=4 + gutter, right=4 + gutter, bottom=8)
-        self._filter_container.padding = ft.Padding.only(left=gutter, right=gutter, top=4, bottom=10)
-
-        # Cài đặt giữ lề hai bên; Lịch và Bảng điểm dùng toàn bộ chiều rộng (100%).
-        single_gutter = max(0.0, (width - _SINGLE_VIEW_MAX_WIDTH) / 2)
-        self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
-        for view in (self.grade_overview_view, self.calendar_view, self.courses_view):
-            view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
-
-        # Panel chi tiết bên phải khi rộng, toàn màn hình khi hẹp.
-        host = self._detail_host
-        if wide:
-            host.left = None
-            host.width = _SIDE_PANE_WIDTH
-            self.detail_view.border = ft.Border.only(left=ft.BorderSide(1, C.BORDER))
-        else:
-            host.left = 0
-            host.width = None
-            self.detail_view.border = None
-
-        self._stat_row.padding = ft.Padding(left=16 + gutter, right=16 + gutter, top=2, bottom=10)
-        self._header_container.padding = (
-            ft.Padding(left=16 + gutter, right=16 + gutter, top=18, bottom=10)
-            if wide else self._header_compact_padding
-        )
-
-        if mode_changed:
-            self._sidebar.visible = wide
-            self._rail.visible = wide
-            self._stat_row.visible = wide
-            self._footer.visible = not wide
-            self._header_container.content = (
-                self._wide_header_content if wide else self._header_compact_content
-            )
-            self._sync_status.control.expand = not wide
-            if wide:
-                self._sidebar_column.controls = [self._sidebar_title, self.today_schedule_panel]
-            else:
-                self._sidebar_column.controls = []
-            cards = [c for c in self.cards_column.controls if c is not self.today_schedule_panel]
-            self.cards_column.controls = self._with_inline_schedule(cards)
-            with self._cards_lock:
-                self.active_cards = list(self.cards_column.controls)
+        window.maximized = not bool(getattr(window, "maximized", False))
         self.page.update()
 
     def _minimize_window(self, _event=None) -> None:
@@ -1158,9 +1135,44 @@ class AppController:
         await self._request_window_exit()
 
     async def _on_keyboard_event(self, e):
-        """H-04: Escape key to go back from Detail/Settings/Calendar views."""
-        if e.key == "Escape":
+        """Handle Escape back navigation and Ctrl+K / search focus shortcuts."""
+        key = str(getattr(e, "key", "") or "")
+        courses_view = getattr(self, "courses_view", None)
+        detail_open = bool(getattr(getattr(self, "detail_view", None), "visible", False))
+        if (
+            courses_view is not None
+            and getattr(courses_view, "visible", False)
+            and not detail_open
+        ):
+            overlays = getattr(courses_view, "_overlays", None)
+            if overlays:
+                key_handler = getattr(overlays[-1], "handle_key_event", None)
+                if callable(key_handler) and key_handler(e):
+                    return
+        if key == "Escape":
             await self._navigate_back()
+            return
+        if (
+            courses_view is not None
+            and getattr(courses_view, "visible", False)
+            and not detail_open
+        ):
+            ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
+            if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not getattr(e, "alt", False)):
+                toggle_expand = getattr(courses_view, "toggle_pane3_expanded", None)
+                if callable(toggle_expand):
+                    toggle_expand()
+                    return
+            if (ctrl and key.lower() == "k") or (
+                not ctrl
+                and not getattr(e, "alt", False)
+                and key in ("/", "Slash")
+            ):
+                focus_search = getattr(courses_view, "focus_search", None)
+                if callable(focus_search):
+                    res = focus_search()
+                    if inspect.isawaitable(res):
+                        await res
 
     async def _on_back_button(self, e):
         """Fallback for explicit AppBar/View pop events."""
@@ -1198,21 +1210,37 @@ class AppController:
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
             return True
+        courses_view = getattr(self, "courses_view", None)
+        detail_over_courses = (
+            bool(getattr(getattr(self, "detail_view", None), "visible", False))
+            and getattr(getattr(self, "view_manager", None), "_detail_origin", None)
+            is courses_view
+        )
+        courses_handle_back = getattr(courses_view, "handle_back", None)
+        if (
+            courses_view is not None
+            and getattr(courses_view, "visible", False)
+            and not detail_over_courses
+            and callable(courses_handle_back)
+            and courses_handle_back()
+        ):
+            return True
         handled = False
+        course_grades_view = getattr(self, "course_grades_view", None)
         if self.settings_view.visible:
             await self.settings_view._handle_back(None)
             handled = True
         elif self.detail_view.visible:
             await self._close_detail()
             handled = True
+        elif course_grades_view is not None and course_grades_view.visible:
+            await self._close_course_grades()
+            handled = True
         elif self.calendar_view.visible:
             await self._close_calendar()
             handled = True
         elif self.grade_overview_view.visible:
             await self._close_grades()
-            handled = True
-        elif self.courses_view.visible:
-            await self._close_courses()
             handled = True
         self._sync_rail_active()
         return handled
@@ -1287,6 +1315,20 @@ class AppController:
             content_padding=ft.Padding.only(left=12, right=10, top=10, bottom=10),
             on_change=self._on_search,
         )
+        self.courses_btn = ft.IconButton(
+            ft.Icons.MENU_BOOK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=20,
+            tooltip="Môn học",
+            on_click=lambda _event: self._run_dashboard_header_action(
+                lambda: self._navigate_destination("courses")
+            ),
+        )
+        self._nav_shell = AdaptiveNavShell(
+            on_navigate=lambda key: self._safe_run_task(
+                self._navigate_destination, key
+            )
+        )
 
     def _init_header_controls(self):
         btn_constraints = ft.BoxConstraints(
@@ -1330,17 +1372,6 @@ class AppController:
             size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_grades
-            ),
-        )
-
-        self.courses_btn = ft.IconButton(
-            ft.Icons.MENU_BOOK_ROUNDED,
-            icon_color=C.TEXT_SECONDARY, icon_size=20,
-            tooltip="Môn học",
-            padding=0,
-            size_constraints=btn_constraints,
-            on_click=lambda _event: self._run_dashboard_header_action(
-                self._toggle_courses
             ),
         )
 
@@ -1622,15 +1653,78 @@ class AppController:
             on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
             page=self.page,
             moodle_courses_provider=self._get_moodle_course_grades,
+            on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
+        )
+        self.course_grades_view = CoursesView(
+            on_close=lambda: self._safe_run_task(self._close_course_grades),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_course_grades(force_refresh=True)),
         )
 
-        self.courses_view = CoursesView(
-            on_close=lambda: self._safe_run_task(self._close_courses),
-            on_refresh=lambda: self._safe_run_task(lambda: self._show_courses(force_refresh=True)),
+        courses_namespace = (
+            f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
         )
+        self._course_cache_store = CourseCacheStore(namespace=courses_namespace)
+        self._preview_cache = PreviewFileCache()
+        self._courses_ws_provider = CoursesWsProvider(
+            service=self.orchestrator.moodle_service,
+            client=self.orchestrator.client,
+            origin=settings.MOODLE_BASE_URL,
+            userid_resolver=getattr(self.orchestrator, "_get_userid", None),
+        )
+        self._thnn_course_provider = ThnnCourseProvider(
+            client=self.orchestrator.thnn_client,
+        )
+        def _fetch_portal_current_courses() -> tuple[str, list[dict[str, object]]]:
+            u_name = settings.UTH_USERNAME or settings.MOODLE_USERNAME
+            u_pass = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+            if not u_name or not u_pass:
+                return ("", [])
+            return self._portal_client.fetch_current_semester_courses(u_name, u_pass)
 
-        for _view in (self.detail_view, self.settings_view, self.calendar_view,
-                      self.grade_overview_view, self.courses_view):
+        self._course_catalog_service = CourseCatalogService(
+            cache_store=self._course_cache_store,
+            preview_cache=self._preview_cache,
+            courses_provider=self._courses_ws_provider,
+            thnn_provider=self._thnn_course_provider,
+            portal_courses_fetcher=_fetch_portal_current_courses,
+        )
+        self._archive_service = ArchiveService()
+        self._preview_server = LocalPreviewServer()
+        self._course_activity_service = CourseActivityService(
+            moodle_service=self.orchestrator.moodle_service,
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+        )
+        self._courses_coordinator = CoursesCoordinator(
+            page=self.page,
+            catalog_service=self._course_catalog_service,
+            preview_cache=self._preview_cache,
+            archive_service=self._archive_service,
+            preview_server=self._preview_server,
+            on_open_assignment_fallback=self._open_course_assignment,
+            on_launch_url=self._launch_safe_url,
+            activity_service=self._course_activity_service,
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+            assignment_detail_fetcher=self.orchestrator.fetch_full_details,
+            on_assignment_status_changed=self._on_activity_status_changed,
+            submission_workflow_factory=self._submission_workflow_factory,
+            all_assignments_provider=self._snapshot_all_data,
+            on_start_quiz=self._start_course_quiz,
+        )
+        self.courses_view = self._courses_coordinator.courses_view
+        self.courses_view.visible = False
+        if hasattr(self.courses_view, "set_on_immersive_changed"):
+            self.courses_view.set_on_immersive_changed(self._on_courses_immersive_changed)
+
+        for _view in (
+            self.detail_view,
+            self.settings_view,
+            self.calendar_view,
+            self.grade_overview_view,
+            self.courses_view,
+            self.course_grades_view,
+        ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
             _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
@@ -1734,30 +1828,54 @@ class AppController:
             self.grade_overview_view,
             self,
             courses_view=self.courses_view,
+            course_grades_view=self.course_grades_view,
             view_host=main_stack,
             overlays=overlays,
             tab_switcher=self.tab_switcher,
             detail_switcher=self.detail_switcher,
             empty_detail=self._empty_detail,
+            on_destination_change=self._nav_shell.set_active,
         )
+        body_with_rail = ft.Row(
+            controls=[self._nav_shell.rail_host, main_stack],
+            spacing=0,
+            expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+        shell_body = ft.Column(
+            controls=[body_with_rail, self._nav_shell.bar],
+            spacing=0,
+            expand=True,
+        )
+        self._wide_header_content = ft.Row(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            "Tổng quan",
+                            size=26,
+                            weight=ft.FontWeight.W_800,
+                            color=C.TEXT_PRIMARY,
+                        ),
+                        self._sync_status.control,
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._wide_title = self._wide_header_content.controls[0].controls[0]
+        self._apply_responsive_layout(force=True)
         self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
         if platform_utils.UI_IS_MOBILE:
-            self._app_shell = ft.SafeArea(content=main_stack, expand=True)
+            self._app_shell = ft.SafeArea(content=shell_body, expand=True)
         else:
             self._window_header = self._build_desktop_window_header()
-            self._rail = self._build_rail()
             self._app_shell = ft.Column(
-                controls=[
-                    self._window_header,
-                    ft.Row(
-                        controls=[self._rail, main_stack],
-                        spacing=0,
-                        expand=True,
-                        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                    ),
-                ],
+                controls=[self._window_header, shell_body],
                 spacing=0,
                 expand=True,
             )
@@ -1765,6 +1883,260 @@ class AppController:
         if not platform_utils.UI_IS_MOBILE:
             self.page.on_resize = self._on_page_resize
             self._apply_responsive_layout(force=True)
+
+    def _on_courses_immersive_changed(self, immersive: bool) -> None:
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is None or not hasattr(nav_shell, "set_immersive"):
+            return
+        nav_shell.set_immersive(bool(immersive))
+        bar = getattr(nav_shell, "bar", None)
+        if bar is not None and getattr(bar, "page", None) is not None:
+            try:
+                bar.update()
+                return
+            except Exception:
+                pass
+        page = getattr(self, "page", None)
+        if page is not None and callable(getattr(page, "update", None)):
+            try:
+                page.update()
+            except Exception:
+                pass
+
+    def _current_page_width(self, width: float | None = None) -> float:
+        candidates = (
+            width,
+            getattr(self.page, "width", None),
+            getattr(getattr(self.page, "window", None), "width", None),
+            420.0 if platform_utils.UI_IS_MOBILE else 1120.0,
+        )
+        for candidate in candidates:
+            if candidate is None or isinstance(candidate, bool):
+                continue
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric) and numeric > 0:
+                return numeric
+        return 420.0 if platform_utils.UI_IS_MOBILE else 1120.0
+
+    def _current_page_height(self, height: float | None = None) -> float:
+        candidates = (
+            height,
+            getattr(self.page, "height", None),
+            getattr(getattr(self.page, "window", None), "height", None),
+            760.0,
+        )
+        for candidate in candidates:
+            if candidate is None or isinstance(candidate, bool):
+                continue
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric) and numeric > 0:
+                return numeric
+        return 760.0
+
+    def _apply_responsive_layout(
+        self,
+        width: float | None = None,
+        height: float | None = None,
+        force: bool = False,
+    ) -> None:
+        resolved_width = self._current_page_width(width)
+        resolved_height = self._current_page_height(height)
+        nav_shell = getattr(self, "_nav_shell", None)
+        use_rail = False
+        if nav_shell is not None:
+            use_rail = nav_shell.apply_width(resolved_width)
+            if hasattr(nav_shell, "apply_height"):
+                nav_shell.apply_height(resolved_height)
+        content_width = max(0.0, resolved_width - (RAIL_WIDTH if use_rail else 0.0))
+        courses_view = getattr(self, "courses_view", None)
+        if courses_view is not None:
+            if hasattr(courses_view, "set_width"):
+                courses_view.set_width(content_width)
+            if hasattr(courses_view, "set_viewport_height"):
+                courses_view.set_viewport_height(resolved_height)
+
+        content_area = getattr(self, "_content_area", None)
+        if content_area is None or not hasattr(self, "_wide_layout"):
+            return
+
+        wide = (not platform_utils.UI_IS_MOBILE) and content_width >= _WIDE_BREAKPOINT
+        mode_changed = wide != self._wide_layout
+        if not (
+            force
+            or mode_changed
+            or getattr(self, "_last_layout_width", None) is None
+            or abs(content_width - self._last_layout_width) >= 1
+        ):
+            return
+        self._last_layout_width = content_width
+        self._wide_layout = wide
+
+        list_width = content_width - (_SIDE_PANE_WIDTH if wide else 0)
+        gutter = max(0.0, (list_width - _LIST_MAX_WIDTH) / 2)
+        content_area.padding = ft.Padding.only(left=4 + gutter, right=4 + gutter, bottom=8)
+        self._filter_container.padding = ft.Padding.only(left=gutter, right=gutter, top=4, bottom=10)
+
+        single_gutter = max(0.0, (content_width - _SINGLE_VIEW_MAX_WIDTH) / 2)
+        self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
+        for view in (
+            getattr(self, "grade_overview_view", None),
+            getattr(self, "calendar_view", None),
+            courses_view,
+            getattr(self, "course_grades_view", None),
+        ):
+            if view is not None:
+                view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
+
+        host = getattr(self, "_detail_host", None)
+        if host is not None:
+            if wide:
+                host.left = None
+                host.width = _SIDE_PANE_WIDTH
+                self.detail_view.border = ft.Border.only(left=ft.BorderSide(1, C.BORDER))
+            else:
+                host.left = 0
+                host.width = None
+                self.detail_view.border = None
+
+        self._stat_row.padding = ft.Padding(left=16 + gutter, right=16 + gutter, top=2, bottom=10)
+        self._header_container.padding = (
+            ft.Padding(left=16 + gutter, right=16 + gutter, top=18, bottom=10)
+            if wide
+            else self._header_compact_padding
+        )
+
+        if mode_changed:
+            self._sidebar.visible = wide
+            self._stat_row.visible = wide
+            self._footer.visible = not wide
+            self._header_container.content = (
+                self._wide_header_content if wide else self._header_compact_content
+            )
+            self._sync_status.control.expand = not wide
+            if wide:
+                self._sidebar_column.controls = [self._sidebar_title, self.today_schedule_panel]
+            else:
+                self._sidebar_column.controls = []
+            cards = [c for c in self.cards_column.controls if c is not self.today_schedule_panel]
+            self.cards_column.controls = self._with_inline_schedule(cards)
+            with self._cards_lock:
+                self.active_cards = list(self.cards_column.controls)
+
+    def _on_page_resize(self, e=None) -> None:
+        width = getattr(e, "width", None) if e is not None else None
+        height = getattr(e, "height", None) if e is not None else None
+        try:
+            self._apply_responsive_layout(width, height=height)
+            self.page.update()
+        except Exception:
+            logger.debug("Responsive layout update skipped", exc_info=True)
+
+    def _launch_safe_url(self, url: str) -> None:
+        safe = safe_http_url(url)
+        if not safe:
+            return
+
+        async def _open() -> None:
+            try:
+                await ft.UrlLauncher().launch_url(safe)
+            except Exception:
+                launcher = getattr(self.page, "launch_url", None)
+                if callable(launcher):
+                    res = launcher(safe)
+                    if inspect.isawaitable(res):
+                        await res
+
+        self._safe_run_task(_open)
+
+    def _snapshot_all_data(self) -> list[dict]:
+        """Thread-safe shallow copy of all_data dicts for Pane-3 assignment lookup."""
+        with self._data_lock:
+            return [dict(item) for item in (self.all_data or [])]
+
+    def _open_course_assignment(self, mod: CourseModuleItem) -> None:
+        courses_view = getattr(self, "courses_view", None)
+        selected_course = (
+            courses_view._state.selected_course()
+            if courses_view is not None and hasattr(courses_view, "_state")
+            else None
+        )
+        url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
+        if not url:
+            return
+        activity_data = None
+        with self._data_lock:
+            for item in self.all_data:
+                if item.get("url") == url or (
+                    mod.cmid
+                    and item.get("cmid") == mod.cmid
+                    and (
+                        selected_course is None
+                        or item.get("course_id") == selected_course.id
+                    )
+                ):
+                    activity_data = dict(item)
+                    break
+        if activity_data is None:
+            activity_data = {
+                "title": mod.name or "Bài tập",
+                "course": (
+                    (selected_course.display_name or selected_course.fullname)
+                    if selected_course is not None
+                    else ""
+                ),
+                "course_id": selected_course.id if selected_course is not None else None,
+                "cmid": mod.cmid,
+                "type": "assignment" if mod.modname == "assign" else mod.modname,
+                "url": url,
+                "site_identity": (
+                    selected_course.source if selected_course is not None else "courses"
+                ),
+                "submission_status": "unknown",
+                "details": {"description_html": mod.description_html or ""},
+            }
+        self._show_detail(activity_data)
+
+    async def _navigate_destination(self, key: str) -> None:
+        player_view = getattr(self, "quiz_player_view", None)
+        if player_view is not None and getattr(player_view, "visible", False):
+            self._sync_rail_active()
+            try:
+                self.page.update()
+            except Exception:
+                pass
+            player_view.request_close(
+                after_close=lambda k=key: self._safe_run_task(
+                    self._navigate_destination, k
+                )
+            )
+            return
+        if key == "home":
+            self.view_manager.show_dashboard()
+            self._diag_screen("home")
+            self._diag_breadcrumb("navigation", "succeeded", "user", screen="home")
+        elif key == "courses":
+            self.view_manager.show_courses()
+            self._diag_screen("courses")
+            self._diag_breadcrumb("navigation", "succeeded", "user", screen="courses")
+            coord = getattr(self, "_courses_coordinator", None)
+            if coord is not None:
+                await coord.ensure_loaded_async(
+                    background_sync_hours=getattr(
+                        settings, "COURSES_SYNC_INTERVAL_HOURS", 6
+                    )
+                )
+        elif key == "calendar":
+            await self._show_calendar()
+        elif key == "grades":
+            await self._show_grades()
+        elif key == "settings":
+            await self._show_settings()
 
     def _build_desktop_window_header(self) -> ft.Container:
         self._app_title.size = 13
@@ -1848,6 +2220,8 @@ class AppController:
                 spacing=4,
             )
             padding = ft.Padding.only(left=12, right=4, top=20, bottom=8)
+            self._header_compact_content = content
+            self._header_compact_padding = padding
         else:
             self._sync_status.control.expand = True
             self.status_text.no_wrap = True
@@ -1887,10 +2261,16 @@ class AppController:
         if active is not None:
             active._set_expanded(False)
 
+        nav_shell = getattr(self, "_nav_shell", None)
+        rail_offset = (
+            float(RAIL_WIDTH)
+            if nav_shell is not None and getattr(nav_shell, "rail_visible", False)
+            else 0.0
+        )
         global_position = getattr(event, "global_position", None)
         local_position = getattr(event, "local_position", None)
         if global_position is not None and local_position is not None:
-            anchor_left = float(global_position.x - local_position.x)
+            anchor_left = float(global_position.x - local_position.x) - rail_offset
             anchor_bottom = float(
                 global_position.y - local_position.y + menu.trigger.height
             )
@@ -1903,9 +2283,9 @@ class AppController:
         header_height = float(
             getattr(getattr(self, "_window_header", None), "height", 34) or 34
         )
-        rail_width = float(_RAIL_WIDTH if getattr(self, "_wide_layout", False) else 0)
-        anchor_left -= rail_width
-        viewport_width = float(getattr(self.page, "width", 420) or 420) - rail_width
+        viewport_width = max(
+            0.0, float(getattr(self.page, "width", 420) or 420) - rail_offset
+        )
         popup_width = float(menu.popup_width)
         popup_left = min(
             max(8.0, anchor_left),
@@ -3044,9 +3424,166 @@ class AppController:
         from_calendar = getattr(self, '_detail_from_calendar', False)
         self._detail_from_calendar = False
         await self.view_manager.close_detail(from_calendar)
+        if hasattr(self, "_diag_screen"):
+            if from_calendar:
+                self._diag_screen("calendar")
+            elif getattr(getattr(self, "courses_view", None), "visible", False):
+                self._diag_screen("courses")
+            else:
+                self._diag_screen("home")
+
+    def _active_course_quiz_overlay(self, activity: dict | None = None):
+        courses_view = getattr(self, "courses_view", None)
+        overlays = getattr(courses_view, "_overlays", None)
+        if not overlays:
+            return None
+        top = overlays[-1]
+        if not hasattr(top, "set_runtime_notice") or not hasattr(top, "reload"):
+            return None
+        if isinstance(activity, dict):
+            mod = getattr(top, "_module", None)
+            cmid = activity.get("cmid")
+            mod_cmid = getattr(mod, "cmid", None)
+            if cmid and mod_cmid and int(cmid) != int(mod_cmid):
+                return None
+        return top
+
+    def _sync_quiz_immersive(self, active: bool) -> None:
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is None or not hasattr(nav_shell, "set_immersive"):
+            return
+        if active:
+            nav_shell.set_immersive(True)
+        else:
+            courses_view = getattr(self, "courses_view", None)
+            keep_immersive = False
+            if courses_view is not None and getattr(courses_view, "visible", False):
+                comp = getattr(courses_view, "_compute_immersive", None)
+                if callable(comp):
+                    keep_immersive = bool(comp())
+            nav_shell.set_immersive(keep_immersive)
+        bar = getattr(nav_shell, "bar", None)
+        if bar is not None:
+            try:
+                if getattr(bar, "page", None) is not None:
+                    bar.update()
+            except Exception:
+                pass
+
+    def _build_course_quiz_activity(
+        self, course: CourseSummary, mod: CourseModuleItem
+    ) -> dict:
+        origin = (
+            "https://thnn.ut.edu.vn"
+            if course.source == "thnn"
+            else "https://courses.ut.edu.vn"
+        )
+        url = (
+            safe_http_url(mod.web_url)
+            or safe_http_url(mod.url)
+            or (f"{origin}/mod/quiz/view.php?id={mod.cmid}" if mod.cmid else "")
+        )
+        activity: dict = {}
+        for item in self._snapshot_all_data():
+            if (url and item.get("url") == url) or (
+                mod.cmid
+                and item.get("cmid") == mod.cmid
+                and item.get("course_id") == course.id
+            ):
+                activity = dict(item)
+                break
+        activity.setdefault("title", mod.name or "Bài kiểm tra")
+        activity.setdefault("course", course.display_name or course.fullname)
+        activity.setdefault("course_id", course.id)
+        activity.setdefault("cmid", mod.cmid)
+        activity["type"] = "quiz"
+        activity["site_identity"] = course.source
+        if url:
+            activity["url"] = url
+        return activity
+
+    def _start_course_quiz(self, course: CourseSummary, mod: CourseModuleItem) -> None:
+        player_view = getattr(self, "quiz_player_view", None)
+        activity = self._build_course_quiz_activity(course, mod)
+        url = str(activity.get("url") or "")
+        if player_view is None:
+            if url and getattr(self, "_courses_coordinator", None) is not None:
+                self._courses_coordinator.open_in_app_webview(
+                    course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
+                )
+            return
+        if getattr(player_view, "visible", False):
+            return
+
+        account_id = getattr(settings, "UTH_USERNAME", "") or ""
+        target, state = player_view.prepare_activity(activity, account_id)
+        if state == "missing_account":
+            request_auth = getattr(player_view, "request_app_auth", None)
+            if callable(request_auth):
+                async def _retry_course_quiz(c=course, m=mod) -> None:
+                    self._start_course_quiz(c, m)
+
+                self._safe_run_task(
+                    request_auth,
+                    _retry_course_quiz,
+                )
+            return
+        if state == "requires_safe_exam_browser":
+            overlay = self._active_course_quiz_overlay(activity)
+            if overlay is not None:
+                overlay.set_runtime_notice(
+                    "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt ngoài."
+                )
+            if url:
+                self._open_url_external(url)
+            return
+        if target is None or state in {"player_unavailable", "unsupported_runtime"}:
+            if url and getattr(self, "_courses_coordinator", None) is not None:
+                self._courses_coordinator.open_in_app_webview(
+                    course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
+                )
+            return
+
+        self._sync_quiz_immersive(True)
+        opened = player_view.open_activity_for_account(
+            target,
+            activity,
+            account_id,
+            on_entry_unavailable=self._on_course_quiz_entry_unavailable,
+        )
+        if not opened and not getattr(player_view, "visible", False):
+            self._sync_quiz_immersive(False)
+            if url and getattr(self, "_courses_coordinator", None) is not None:
+                self._courses_coordinator.open_in_app_webview(
+                    course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
+                )
+
+    async def _on_course_quiz_entry_unavailable(
+        self, activity: dict | None, reason: str
+    ) -> None:
+        self._sync_quiz_immersive(False)
+        overlay = self._active_course_quiz_overlay(activity if isinstance(activity, dict) else None)
+        messages = {
+            "quiz_closed": "Bài kiểm tra hiện đã đóng.",
+            "quiz_unavailable": "Bài kiểm tra hiện không thể mở.",
+            "unsupported_action": "Bài kiểm tra hiện không thể mở trong ứng dụng.",
+            "requires_safe_exam_browser": "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt.",
+            "entry_in_progress": "Bài kiểm tra đang được thực hiện.",
+            "entry_not_opened": "Không thể mở lượt làm bài.",
+            "attempts_exhausted": "Bạn đã sử dụng hết số lượt làm bài.",
+        }
+        msg = messages.get(
+            reason,
+            "Không thể mở bài kiểm tra trực tiếp. Hãy tải lại hoặc mở trang web.",
+        )
+        if overlay is not None:
+            if reason == "attempts_exhausted":
+                overlay.reload()
+            overlay.set_runtime_notice(msg)
 
     async def _on_quiz_player_closed(self, activity: dict | None) -> None:
         """Refresh quiz state from Moodle after the native player is released."""
+        self._sync_quiz_immersive(False)
         if not isinstance(activity, dict):
             return
         url = activity.get("url")
@@ -3062,6 +3599,10 @@ class AppController:
                 and self.detail_view._current_url == url
             ):
                 await self._show_detail_async(dict(activity))
+            if getattr(getattr(self, "courses_view", None), "visible", False):
+                overlay = self._active_course_quiz_overlay(activity)
+                if overlay is not None:
+                    overlay.reload()
         except Exception:
             logger.exception("Quiz detail refresh failed after player close")
         finally:
@@ -3249,6 +3790,38 @@ class AppController:
                 "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
             )
 
+    async def _show_course_grades(self, force_refresh: bool = False):
+        """Mở danh sách môn & điểm/chuyên cần từ màn hình Bảng điểm."""
+        self._diag_screen("course_grades")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="course_grades")
+        self.view_manager.show_course_grades_loading()
+        cached = getattr(self.orchestrator, "latest_course_grades", None) or (
+            self.orchestrator.course_grade_monitor.load_cached()
+        )
+        if cached and not force_refresh:
+            self.view_manager.show_course_grades_data(cached)
+        try:
+            courses, changes = await asyncio.to_thread(
+                self.orchestrator.refresh_course_grades
+            )
+            self.view_manager.show_course_grades_data(courses)
+            if changes:
+                await self._notify_grade_changes(changes)
+        except Exception as e:
+            logger.error("Course grades fetch failed: %s", e, exc_info=True)
+            if cached:
+                self.view_manager.show_course_grades_stale_notice(
+                    "Không thể làm mới danh sách môn · đang hiển thị dữ liệu đã lưu."
+                )
+            else:
+                self.view_manager.show_course_grades_error()
+
+    async def _close_course_grades(self):
+        """Đóng danh sách điểm môn và quay về màn hình Bảng điểm."""
+        await self.view_manager.close_course_grades()
+        self._diag_screen("grades")
+        self._sync_rail_active()
+
     async def _toggle_courses(self):
         if self.courses_view.visible:
             await self._close_courses()
@@ -3256,30 +3829,13 @@ class AppController:
             await self._show_courses()
 
     async def _show_courses(self, force_refresh: bool = False):
-        """Hiện tab Môn học: các môn đang học + điểm/% tham gia cào từ grade report."""
-        self._diag_screen("courses")
-        self._diag_breadcrumb("navigation", "succeeded", "user", screen="courses")
-        self.view_manager.show_courses_loading()
+        """Mở tab Môn học hợp nhất (Courses & THNN)."""
+        del force_refresh
+        await self._navigate_destination("courses")
         self._sync_rail_active()
-        # Hiện ngay dữ liệu đã lưu (nếu có) trong lúc tải mới.
-        cached = getattr(self.orchestrator, "latest_course_grades", None) or \
-            self.orchestrator.course_grade_monitor.load_cached()
-        if cached and not force_refresh:
-            self.view_manager.show_courses_data(cached)
-        try:
-            courses, _ = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
-            self.view_manager.show_courses_data(courses)
-        except Exception as e:
-            logger.error("Courses fetch failed: %s", e, exc_info=True)
-            if cached:
-                self.view_manager.show_courses_stale_notice(
-                    "Không thể làm mới danh sách môn · đang hiển thị dữ liệu đã lưu."
-                )
-            else:
-                self.view_manager.show_courses_error()
 
     async def _close_courses(self):
-        await self.view_manager.close_courses()
+        self.view_manager.show_dashboard()
         self._diag_screen("home")
         self._sync_rail_active()
 
@@ -3301,8 +3857,6 @@ class AppController:
         window_header = getattr(self, "_window_header", None)
         if window_header is not None:
             theme_roots.append(window_header)
-        if getattr(self, "_rail", None) is not None:
-            theme_roots.append(self._rail)
         refresh_semantic_control_colors(
             theme_roots, self._rendered_palette, current_palette
         )
@@ -3310,12 +3864,9 @@ class AppController:
 
         # Page
         self.page.bgcolor = _C.BG
-        if getattr(self, "_rail", None) is not None:
-            self._rail.bgcolor = _C.SURFACE
-            self._rail.border = ft.Border.only(right=ft.BorderSide(1, _C.BORDER))
-            self._rail_logo.bgcolor = _C.ACCENT
+        if getattr(self, "_sidebar", None) is not None:
             self._sidebar.border = ft.Border.only(left=ft.BorderSide(1, _C.BORDER))
-            self._sync_rail_active()
+        self._sync_rail_active()
 
         self._header_container.bgcolor = _C.BG
         self._app_title.color = _C.TEXT_PRIMARY
@@ -3396,10 +3947,24 @@ class AppController:
             component.refresh_theme()
 
         # Icon buttons
-        buttons_to_update = [self.calendar_btn, self.courses_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
+        buttons_to_update = [
+            btn
+            for btn in (
+                getattr(self, "calendar_btn", None),
+                getattr(self, "grades_btn", None),
+                getattr(self, "courses_btn", None),
+                getattr(self, "refresh_btn", None),
+                getattr(self, "settings_btn", None),
+            )
+            if btn is not None
+        ]
 
         for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
+
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is not None and hasattr(nav_shell, "refresh_theme"):
+            nav_shell.refresh_theme()
 
         self._sync_status.refresh_theme()
 
@@ -3409,31 +3974,43 @@ class AppController:
         self._update_text.color = _C.TEXT_PRIMARY
         self._update_progress.color = _C.UPDATE
         self._update_progress.bgcolor = _C.BORDER
-        self._update_btn.style = ft.ButtonStyle(
-            color=_C.TEXT_PRIMARY, shape=ft.RoundedRectangleBorder(radius=8),
-        )
-        self._update_cancel_btn.style = ft.ButtonStyle(
-            color=_C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
-        )
+        update_btn = getattr(self, "_update_btn", None)
+        if update_btn is not None:
+            update_btn.style = ft.ButtonStyle(
+                color=_C.TEXT_PRIMARY, shape=ft.RoundedRectangleBorder(radius=8),
+            )
+        update_cancel_btn = getattr(self, "_update_cancel_btn", None)
+        if update_cancel_btn is not None:
+            update_cancel_btn.style = ft.ButtonStyle(
+                color=_C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
+            )
 
         # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
 
         # Sub-views theme update propagation
         for view_attr in (
-            'calendar_view',
-            'detail_view',
-            'grade_overview_view',
-            'courses_view',
-            'quiz_player_view',
+            "calendar_view",
+            "detail_view",
+            "grade_overview_view",
+            "courses_view",
+            "course_grades_view",
+            "quiz_player_view",
         ):
             view_obj = getattr(self, view_attr, None)
-            if view_obj and hasattr(view_obj, 'update_theme'):
+            if view_obj and hasattr(view_obj, "update_theme"):
                 try:
                     view_obj.update_theme()
                 except Exception as e:
                     import logging
                     logging.getLogger("UTHelper").error(f"Failed to update theme for {view_attr}: {e}", exc_info=True)
+
+        courses_coord = getattr(self, "_courses_coordinator", None)
+        if courses_coord is not None and hasattr(courses_coord, "update_theme"):
+            try:
+                courses_coord.update_theme()
+            except Exception as e:
+                logger.error("Failed to update theme for _courses_coordinator: %s", e, exc_info=True)
 
         self.page.update()
 
@@ -3939,6 +4516,13 @@ class AppController:
             )
             if callable(clear_quiz_sessions):
                 self._safe_run_task(clear_quiz_sessions)
+            courses_coord = getattr(self, "_courses_coordinator", None)
+            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
+            if callable(reset_courses):
+                courses_ns = (
+                    f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+                )
+                reset_courses(courses_ns)
             self._safe_run_task(
                 self._reconcile_class_schedule_notifications, (), clear_only=True
             )
@@ -4245,6 +4829,12 @@ class AppController:
         update_coordinator = getattr(self, "_update_coordinator", None)
         if update_coordinator is not None:
             update_coordinator.shutdown(timeout_seconds=1.0)
+        courses_coord = getattr(self, "_courses_coordinator", None)
+        if courses_coord is not None:
+            try:
+                courses_coord.close()
+            except Exception:
+                logger.debug("Ignored courses coordinator close error", exc_info=True)
         orchestrator = getattr(self, "orchestrator", None)
         client = getattr(orchestrator, "client", None)
         if client is not None:

@@ -17,6 +17,7 @@ on:
       - '.github/workflows/build-android.yml'
       - 'src/core/distribution.py'
       - 'src/platform_utils/background_sync.py'
+      - 'src/assets/office_viewer/**'
   workflow_dispatch:
     inputs:
       sign_upload:
@@ -259,6 +260,7 @@ jobs:
             --commit-sha "${{ github.sha }}"
             --workflow-run-id "${{ github.run_id }}"
             --architecture universal
+            --require-office-viewer
             --output "chplay-diagnostic.verification.json"
           )
           if [ "${CHPLAY_SIGNED_UPLOAD:-false}" = "true" ]; then

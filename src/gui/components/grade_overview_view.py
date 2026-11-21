@@ -40,12 +40,14 @@ class GradeOverviewView(ft.Container):
         on_refresh: Optional[Callable] = None,
         page: Optional[ft.Page] = None,
         moodle_courses_provider: Optional[Callable[[], list]] = None,
+        on_open_courses: Optional[Callable] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self._moodle_courses_provider = moodle_courses_provider
         self._on_close = on_close
         self._on_refresh = on_refresh
+        self._on_open_courses = on_open_courses
         self._page_ref = page
         self._semesters: list[SemesterGradeData] = []
         self._profiles: list[RadarProfile] = []
@@ -81,6 +83,12 @@ class GradeOverviewView(ft.Container):
             size_constraints=btn_constraints,
             on_click=self._handle_refresh,
         )
+        self._courses_btn = ft.TextButton(
+            "Môn học",
+            height=44,
+            on_click=self._handle_open_courses,
+            style=ft.ButtonStyle(color=C.ACCENT),
+        )
         self._planner_btn = ft.IconButton(
             icon=ft.Icons.CALCULATE_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
@@ -94,6 +102,7 @@ class GradeOverviewView(ft.Container):
             controls=[
                 ft.Semantics(label="Quay lại", button=True, content=self._back_btn),
                 self._title,
+                ft.Semantics(label="Môn học", button=True, content=self._courses_btn),
                 ft.Semantics(label="Tính GPA mong muốn", button=True, content=self._planner_btn),
                 ft.Semantics(label="Làm mới bảng điểm từ Portal", button=True, content=self._refresh_btn),
             ],
@@ -478,6 +487,10 @@ class GradeOverviewView(ft.Container):
         if self._on_refresh:
             self._on_refresh()
 
+    def _handle_open_courses(self, e: ft.ControlEvent | None = None) -> None:
+        if self._on_open_courses:
+            self._on_open_courses()
+
     def _handle_close(self, e: ft.ControlEvent) -> None:
         if self._on_close:
             self._on_close()
@@ -505,6 +518,7 @@ class GradeOverviewView(ft.Container):
         self._error_text.color = C.TEXT_SECONDARY
         self._error_retry_btn.bgcolor = C.ACCENT
         self._error_retry_btn.color = C.ON_ACCENT
+        self._courses_btn.style = ft.ButtonStyle(color=C.ACCENT)
         self._planner_btn.icon_color = C.TEXT_SECONDARY
 
         # These views are cached while detached from the desktop page. Rebuild
