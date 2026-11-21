@@ -71,6 +71,8 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
 | 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
 | 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
+| 2026-11-21 | `feature/store-distribution-chplay-msstore` | Store M1 Security, Privacy & Autostart UI Hardening | Loại bỏ lưu plaintext secret trên Android trong `src/config.py` qua `SecretStoreBackend` / `AndroidSecretBackend` (`AppSecretVault` `AndroidKeyStore`) và startup migration an toàn trong `AppController._startup_android_sequence`; vệ sinh log lỗi `TelegramNotifier` / `DiscordNotifier` và bắt buộc `https://` cho webhook; pin redirect & `https://` cùng giới hạn payload 8 MiB trong `PortalClient`; siết chặt `windows_update._launch_elevated_handoff` (bỏ fallback `%TEMP%`, kiểm tra symlink/reparse point, tạo thư mục với `SE_DACL_PROTECTED`, ghi file `O_EXCL`, `System32` cwd); đưa `_autostart_status` ra ngoài `_sw_start_minimized_container` để hiển thị trạng thái StartupTask khi tắt; cập nhật `docs/PRIVACY.md`. | Đạt 270/270 owned + boundary tests (373/373 gồm packaging/UI); `ruff check src tests` pass |
+| 2026-11-21 | `feature/store-distribution-chplay-msstore` | Store M1 Integration Build & Release Gate Verification | Cập nhật 3 path `variants/apk_lts/` trong `tests/e2e_store_distribution/test_tier1_auto_update_lts.py` và `test_tier4_real_world_scenarios.py`; bổ sung loại bỏ `androidx.work.impl.foreground.SystemForegroundService` trong `scripts/prepare_android_flutter_project.py` + dọn `PYTHONHOME`/`UV_INTERNAL__PYTHONHOME` trong `scripts/build_android.ps1`; cập nhật `scripts/verify_android_release.py` đọc `assets/app.zip` (`base/assets/app.zip` trong `.aab` thực tế); build & kiểm chứng thật CH Play `UTHelper.aab` (110.7 MB, 0 `ApkUpdate*`/`UthUpdate*` trong dex, không còn `ForegroundService`, `extractNativeLibs="false"`, `BundleConfig.pb` 16 KB, `verify_android_release.py` pass 12/12 checks) và MS Store `-SignMode test` `.msix` (65.09 MB, `verify_msix_release.ps1` pass 10/10 checks không gồm WACK admin). | Full suite đạt **2188 passed, 25 skipped**; `ruff check src tests scripts extensions/flet_uth_background_sync/tests extensions/flet_uth_background_sync/src` pass |
 
 
 ---
@@ -1988,6 +1990,144 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   Windows Flutter build stopped because this machine does not currently allow
   the symlinks Flutter requires for plugin builds (Developer Mode is disabled).
 
+## Store distribution M4 — Microsoft Store MSIX, verification, CI and docs (2026-11-20)
+
+- **Scope** (`feature/store-distribution-chplay-msstore`): Features #13/#14 — Microsoft Store (`msstore`) `.msix`
+  packaging, verification, CI isolation, and Store submission/privacy documentation. Decision recorded in
+  [ADR 0004](../adr/0004-multi-channel-store-and-lts-distribution.md); ADR 0003 now cross-references it and keeps
+  the exact 7-asset GitHub LTS release contract (`.aab`/`.msix` are never mixed into it).
+- **Packaging**: `scripts/generate_msix_assets.py` (Pillow, deterministic RGBA PNG tiles 44x44 / 50x50 / 150x150 /
+  310x150 from `src/assets/icon.png`, `--verify-only` mode); `scripts/package_msix.ps1` now accepts `IdentityName`,
+  `Publisher`, `StoreProductId`, `Channel`, `SignMode` (`none` for Partner Center, `test` for self-signed sideload),
+  optional `Version` (derived from `pyproject.toml` as `X.Y.Z.0`), validates inputs, stages `distribution-channel.json`
+  into the unique per-run MSIX stage (`app/assets` and `data/flutter_assets/assets`) so `src/assets/` is never mutated,
+  and always removes stage/verify directories in `finally`. Manifest keeps argument-free `windows.startupTask`
+  (`UTHelperAutostart.exe`, `UTHelperStartup`), `runFullTrust`, `internetClient`, and default AppData virtualization.
+- **Verification**: `scripts/verify_msix_release.ps1` (PowerShell 5.1 compatible) unpacks via `makeappx`, checks
+  Identity/Publisher/4-part Version/x64, capabilities, forbidden `uap10:Parameters`/`unvirtualizedResources`/disabled
+  virtualization, PE headers, PNG IHDR dimensions, `distribution-channel.json` (`channel`, allowed keys, product id),
+  optionally `-RunWack`, and emits SHA-bound JSON evidence.
+- **CI**: new `.github/workflows/build-msstore.yml` (workflow_dispatch + path-filtered PR) builds the Flet Windows
+  bundle with the reviewed diagnostics template, packages and verifies the unsigned Partner Center MSIX; `release.yml`
+  untouched.
+- **Docs**: `PRIVACY.md` (Data Safety summary, per-channel behavior, Android storage `FLET_APP_STORAGE_DATA`, data
+  deletion), `TERMS.md` (channel-neutral wording), `guides/windows-packaging.md`, new
+  `guides/store-distribution-submission.md` (CH Play, Microsoft Store/WACK/`runFullTrust` justification, LTS, deferred
+  Apple App Store roadmap), `docs/README.md` index.
+- **Tests**: new `tests/test_msstore_packaging.py` (assets, PS 5.1 AST, real `makeappx` pack/verify, 10 negative
+  verifier cases, forged ZIP, invalid params, docs alignment); `tests/test_release_hardening.py` now allows the new
+  Store workflow in the `flet build` inventory and asserts its isolation; `tests/test_release_inventory.py` unchanged.
+- **Verification**: `pytest tests/test_msstore_packaging.py tests/test_release_hardening.py
+  tests/test_release_inventory.py tests/test_architecture_boundaries.py` → 96 passed; MSIX E2E (Tier 1–4 f12/p18/s06)
+  pass; `ruff check` on M4 Python files clean; PowerShell AST parse of both scripts clean; workflow YAML parses.
+  Live Partner Center upload and WACK execution were not run in this environment.
+
+## Store distribution M5 — final verification, E2E suite and push (2026-11-20)
+
+- **Scope** (`feature/store-distribution-chplay-msstore`): integration of M0–M4 plus the 256-test opaque-box E2E suite
+  (`tests/e2e_store_distribution/`, Tiers 1–4); no further `src/` behavior changes beyond one edge-case fix.
+- **Commits**: `cf7f2a6` (M0 worktree + hotfix/2.5.1 sync), `4a02dce` (M1 channel + store suppression/UI), `8dd7583`
+  (M2 PC/Mobile LTS update fixes), `9075dcf` (M4 MSIX), `71ee99f` (M3 CH Play AAB), `67280d7` (M5 fix), `820086b`
+  (M5 E2E suite), plus this log commit.
+- **Fix in `src/`**: `AndroidPackageDownloader.has_pending_download()` raised `RuntimeError("Android update release
+  version is unavailable")` when queried before any release candidate exists; it now returns `False` (nothing to
+  resume) and never touches the native bridge. `download()` still fails closed without a version. Covered by
+  `tests/test_android_updates.py::test_pending_download_probe_is_false_without_selected_release`.
+- **E2E harness corrections** (no assertion weakened): 10 `f12` tests called `Get-Command -LiteralPath`, which Windows
+  PowerShell 5.1 resolves to `ForEach-Object` parameters instead of the script's — replaced by the positional path
+  (Tier 1 and Tier 2 helpers). `test_t4_s05` simulated a 2.5.2 MSI while the PowerShell shim reported 2.6.0 so the
+  verifier correctly rejected an "MSI identity mismatch"; the test now sets the shim version to the release under test
+  (the cold-timeout cache preservation and UAC 1223 recovery then pass against unmodified production code).
+  `test_t2_f06_null_update_candidate...` required a non-empty version with no candidate; the provider contract is
+  `str | None` (a fabricated version would corrupt the native versionCode check), so it now asserts `None | str`
+  and additionally asserts `has_pending_download(...) is False`.
+- **Verification**: `python -m pytest tests -q` → **2091 passed, 25 skipped, 0 failed** (includes all 256 E2E tests;
+  skips are pre-existing platform/tool gates); `ruff check src tests scripts` → clean;
+  `extensions/flet_uth_background_sync/tests/test_package_contract.py` → 13 passed (with the extension `src` on
+  `PYTHONPATH`; the package is not pip-installed in this environment); PowerShell 5.1 AST parse of
+  `build_android.ps1`, `package_msix.ps1`, `verify_msix_release.ps1` → 0 errors; live smoke:
+  `generate_msix_assets.py` generate + `--verify-only` (4 PNGs), `verify_android_release.py --help`,
+  `verify_msix_release.ps1` exits 1 on invalid/missing MSIX.
+- **Invariants**: no `src/assets/distribution-channel.json` in tree or index (gitignored build artifact); `core`
+  has no `gui` imports; `gui` has no `ws_functions` references; `models.py` and `.github/workflows/release.yml`
+  unchanged versus `develop` (7-asset LTS contract intact); `urllib` HTTP layer preserved.
+- **Not verifiable here**: GitHub Actions `build-android.yml` / `build-msstore.yml` runs, Play Console and Partner
+  Center submission, WACK execution, and real-device Android install.
+- **Remote**: pushed to `origin/feature/store-distribution-chplay-msstore` (see PR to `develop` per gitflow).
+
+## Store distribution integration regression fixes (2026-11-20)
+
+- Merge `origin/develop` (`a83cd29`) into the store distribution worktree and
+  resolve `tests/test_config.py` by retaining both the storage-path tests and
+  the class-schedule settings migration tests.
+- Register `ClassScheduleAlarmReceiver` in the CH Play manifest. Require it in
+  the Android release verifier, update synthetic APK/AAB fixtures, and add a
+  regression that rejects an AAB missing the class-schedule receiver.
+- Use controlled monotonic clocks in Android observer, tray-close, and
+  diagnostics retry tests to preserve timeout assertions across Windows Python
+  clock resolutions and floating-point differences.
+- Give Tier 3 and Tier 4 MSIX tests unique directories under the workspace's
+  `build` directory, preserving the packager's workspace constraint while
+  allowing concurrent test runs. Drain cancelled FakePage tasks before closing
+  the harness event loop.
+- Verification on Windows: full `tests` plus extension package-contract suite
+  passed on Python 3.12, 3.13, and 3.14, each with **2143 passed, 36 skipped**.
+  Each run includes **256 passing E2E tests**. Six Sentry SDK deprecation
+  warnings remain in each run. Ruff (`src tests scripts` and extension tests),
+  Python syntax checks, and PowerShell script AST checks passed.
+- Signed Android AAB builds, Play Console/Partner Center submission, WACK, and
+  device installation were not performed in this verification.
+
+## CI test dependency for MSIX assets (2026-11-21)
+
+- PR #100 failed during test collection because the Ubuntu test matrix did
+  not install Pillow, which the MSIX asset tests import as `PIL`. Add
+  `pillow>=12.3.0` to the test job, matching the Windows packaging minimum.
+- On Windows, test collection from `src/` and all 22 MSIX packaging tests
+  passed on Python 3.12, 3.13, and 3.14 with the CI dependencies.
+- The next Ubuntu run reached the Windows install E2E scenario and failed
+  because the registry module is unavailable on Ubuntu. Treat a missing
+  `winreg` as no install-channel marker and retain the existing bootstrapper
+  fallback. The failing E2E and a new fallback regression passed locally on
+  Python 3.12, 3.13, and 3.14 with `winreg` blocked.
+
+## MSIX runtime test host independence (2026-11-21)
+
+- PR #100's next Ubuntu run failed in the packaged MSIX autostart test because
+  it mocked package identity but left the service factory using the Linux host
+  platform. Pass `platform_name="win32"` to request the Windows backend.
+- Parameterize the test over simulated Linux and Windows hosts. The packaged
+  backend and notifier assertions remain active on both hosts.
+- Validation from `src/`: the two MSIX host cases plus 16 Windows autostart
+  tests passed on Python 3.12, 3.13, and 3.14 (18 passed per version). Ruff and
+  the working-tree diff check passed. Ubuntu CI requires the new commit.
+
+## Windows shim fixture platform boundary (2026-11-21)
+
+- PR #100's Ubuntu jobs reached a Store update-suppression test that requested
+  compiled Windows executable shims even though it expected zero process calls.
+  Observe `subprocess.Popen` directly and fail if a process is launched, so the
+  HTTP/coordinator/process suppression assertions execute on every host.
+- Guard the shared `windows_shim_env` fixture before constructing native shims
+  on non-Windows hosts. Missing compiler errors on Windows still fail normally.
+- Validation: the Store suppression test passed on Python 3.12, 3.13, and 3.14
+  with the shim compiler deliberately disabled. A simulated Linux fixture call
+  skipped before compiler lookup. All 97 Tier 2 tests passed on Windows, with
+  Ruff and the working-tree diff check clean. Ubuntu CI requires the new commit.
+
+## Store E2E subprocess keyring isolation (2026-11-21)
+
+- PR #100's Ubuntu matrix failed when the crash-reporting opt-out test saved
+  settings in a subprocess without an available keyring backend.
+- In `tests/e2e_store_distribution/harness.py`, configure the built-in no-op
+  keyring only for isolated subprocesses and give each test a private
+  `TMPDIR` for the Linux data path. The opt-out test still checks that saving
+  consent clears the pending spool and blocks new reports.
+- Reproduced the original failure with the failing keyring backend on Windows.
+  With the same parent backend after the fix, all 257 Store E2E tests passed
+  on each of Python 3.12, 3.13, and 3.14. A subprocess smoke check confirmed
+  the private Linux data path. Ruff passed. Ubuntu CI requires the new commit.
+
 ## Settings custom color picker review fixes (2026-11-18)
 
 - Keep the dialog on Flet's `show_dialog()` / `pop_dialog()` lifecycle and only
@@ -2002,3 +2142,51 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
+
+## Preserve class reminders after a transient timetable failure (2026-11-21)
+
+- A failed request for tomorrow's timetable was logged, then reconciliation
+  replaced the entire persisted alarm set with today's partial results. Return
+  without applying a replacement when the Portal request fails; authentication
+  failures still clear reminders for the previous account, and a successful
+  empty timetable still clears the schedule.
+- Added Windows and Android-bridge regression cases for transient failure and
+  strengthened the Android positive case to include both today and tomorrow.
+- Validation on Python 3.14.3: full suite `2150 passed, 25 skipped`; focused
+  notifier/schedule/store suite `192 passed`; Ruff 0.17.6 passed. Android
+  packaged-artifact and device validation remain pending local SDK licensing
+  and device/emulator availability.
+
+## Store M1 security, privacy, and autostart UI hardening (2026-11-21)
+
+- **Android Fail-Closed Secrets & `AndroidKeyStore` Hydration (`src/config.py`, `src/platform_utils/background_sync.py`, `src/gui/app_controller.py`, `src/gui/components/settings_view.py`, `src/gui/components/login_dialog.py`)**:
+  - Added `_is_real_android()` (excluding iOS), `SecretStoreBackend` protocol, `register_secret_backend()`, `hydrate_secrets()`, and `pop_pending_plaintext_migration()` in `src/config.py` with zero `gui`/`flet` imports.
+  - Updated `load_settings()` and `save_settings()` so real Android never writes `_SECRET_FIELDS` in plaintext to `settings.json` (failing closed when no secure backend is registered and secrets are non-empty, while stashing legacy `settings.json` secrets in RAM only until `AppSecretVault` confirms write and scrubs `settings.json`). Preserved desktop/test `keyring` fallback.
+  - Added `read_app_secrets`, `write_app_secrets`, `clear_app_secrets` on `AndroidBackgroundBridge` plus `AndroidSecretBackend` (thread-safe `run_coroutine_threadsafe`, failing closed on the event loop thread), wired `AppController._startup_android_sequence()`, and offloaded async `save_settings` / `_persist_snapshot_to_settings` calls with `asyncio.to_thread`.
+- **Notifier Log Sanitization (`src/notifiers/telegram.py`, `src/notifiers/discord.py`)**:
+  - Replaced raw `str(e)` error logging with `HTTP <status_code>` for `httpx.HTTPStatusError` and `type(e).__name__` for `httpx.RequestError` / `Exception` (no `exc_info=True`), preventing Telegram bot tokens and Discord webhook URLs from leaking into logs; enforced `https://` + non-empty netloc for `DISCORD_WEBHOOK_URL`.
+- **`PortalClient` HTTPS & Redirect Pinning (`src/core/portal_client.py`)**:
+  - Enforced `https://` `base_url` without userinfo/query/fragment in `__init__`, added `_SamePortalOriginRedirectHandler` for the default `urllib` opener, verified final `response.geturl()` origin, and capped response payload size at 8 MiB.
+- **Windows Elevated Handoff Hardening (`src/platform_utils/windows_update.py`)**:
+  - Removed the `tempfile.gettempdir()` fallback when `LOCALAPPDATA` is unset/blank/relative, added symlink and `FILE_ATTRIBUTE_REPARSE_POINT` guards on `LOCALAPPDATA`/`UTHelper`/`update_handoff`/`handoff-*`/files, created `update_handoff` and `handoff-*` with `SE_DACL_PROTECTED` (`CurrentUser`, `Administrators`, `SYSTEM` only) via `pywin32` on `os.name == "nt"` (`0o700` on POSIX CI), wrote handoff files via `os.O_WRONLY | os.O_CREAT | os.O_EXCL`, and switched elevated `safe_cwd` to `%SystemRoot%\System32`.
+- **`SettingsView` Autostart Status Visibility (`src/gui/components/settings/system_section.py`, `src/gui/components/settings_view.py`)**:
+  - Moved `view._autostart_status` out of `view._sw_start_minimized_container` directly below `view._sw_start_with_windows` and managed `visible` explicitly so `DISABLED_BY_USER`, `DISABLED_BY_POLICY`, and `ERROR` states remain visible when `START_WITH_WINDOWS` is `False`.
+- **Documentation (`docs/PRIVACY.md`)**:
+  - Updated Android storage and credential clearing sections to document `CredentialVault` + `AppSecretVault` (`AndroidKeyStore` AES-GCM in `context.noBackupFilesDir`) and automatic scrubbing of legacy `settings.json` secrets.
+- **Validation**: targeted suite (`test_config*`, `test_background_sync_bridge`, `test_portal_client`, `test_notifiers`, `test_update_packages`, `test_windows_autostart`, `test_gui_app_controller`, `test_settings_view_state`, `test_diagnostic_logging`, `test_architecture_boundaries`, `test_settings_grid_navigation`, `test_settings_autostart_ui`, `test_msstore_packaging`, `test_chplay_packaging`) passed (`373 passed`); `ruff check src tests` passed.
+
+## Store M1 integration build and release verification (2026-11-21)
+
+- **E2E `variants/apk_lts/` Path Alignment (`tests/e2e_store_distribution/test_tier1_auto_update_lts.py`, `test_tier4_real_world_scenarios.py`)**:
+  - Updated the 3 test assertions inspecting `ApkUpdateInstaller.kt` and `ApkUpdateInstallerFlowTest.kt` to point at `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/variants/apk_lts/...`.
+- **Real CH Play `.aab` Build & Verifier Fixes (`scripts/prepare_android_flutter_project.py`, `scripts/build_android.ps1`, `scripts/verify_android_release.py`, `tests/test_chplay_packaging.py`)**:
+  - Added `androidx.work.impl.foreground.SystemForegroundService` `tools:node="remove"` alongside `com.dexterous.flutterlocalnotifications.ForegroundService` in `prepare_android_flutter_project.py` (observed in real `UTHelper.aab` merged manifest from `work-runtime-ktx`).
+  - Saved/cleared `PYTHONHOME` and `UV_INTERNAL__PYTHONHOME` inside `scripts/build_android.ps1` so `uv`-managed virtualenvs do not leak Python 3.13 `PYTHONHOME` into `serious_python`'s bundled Python 3.14.6 subprocess.
+  - Updated `_read_embedded_distribution_channel` in `scripts/verify_android_release.py` to also inspect `assets/app.zip` / `*/assets/app.zip` (`base/assets/app.zip` in real `.aab` builds), with regression coverage in `tests/test_chplay_packaging.py`.
+  - Built real universal CH Play `UTHelper.aab` (110.7 MB, SHA-256 `99451fa3bac89625fc5c65b68f8bcf3169b2c007e719968883b49ad11f6a03be`) and verified with `verify_android_release.py --allow-unsigned` (`12/12` checks passed: `0` updater classes in `base/dex/classes*.dex`, no `ForegroundService`, `extractNativeLibs="false"`, `BundleConfig.pb` 16 KB `uncompress_native_libraries`).
+- **Local MS Store `.msix` Packaging Check**:
+  - Built Windows app bundle via `flet build windows` + `prepare_windows_bundle.py` + `verify_windows_bundle.py`, packaged `UTHelper-2.5.1-msstore-test.msix` (65,093,259 bytes, SHA-256 `862a9e787aea4e200eb4dcc70e9051ca1ff6540baf04cdb8827c0ec1e13ff664`) via `scripts/package_msix.ps1 -SignMode test`, and passed `scripts/verify_msix_release.ps1` (`10/10` non-WACK checks: `makeappx_unpack`, `appx_manifest_schema`, `identity_and_version`, `manifest_resources`, `capabilities_full_trust`, `appdata_virtualization_enabled`, `startup_task_argument_free`, `pe_executables`, `visual_asset_dimensions`, `distribution_channel_msstore`; `appcert.exe` WACK requires admin and runs in Windows CI).
+- **Final Combined Validation**:
+  - `pytest tests extensions/flet_uth_background_sync/tests -q --tb=short` (with `PYTHONPATH=src;extensions/flet_uth_background_sync/src;.`): **2188 passed, 25 skipped** (6 upstream `sentry_sdk` deprecation warnings).
+  - `ruff check src tests scripts extensions/flet_uth_background_sync/tests extensions/flet_uth_background_sync/src`: **All checks passed!**.
+  - Cleaned all temporary `build/` and `E:\tmp_uth_build\` verification artifacts.

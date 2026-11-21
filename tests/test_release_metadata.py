@@ -24,8 +24,10 @@ def test_project_version_is_only_authored_version(tmp_path):
     )
 
 
-def test_this_feature_release_bumps_the_single_authored_version():
-    assert read_project_version(ROOT / "pyproject.toml") == "2.5.0"
+def test_hotfix_version_can_upgrade_the_affected_release():
+    version = read_project_version(ROOT / "pyproject.toml")
+    assert version == "2.5.1"
+    assert release_build_number(version) > release_build_number("2.5.0")
 
 
 def test_runtime_version_is_generated_from_the_single_authored_version(tmp_path):
@@ -58,3 +60,53 @@ def test_project_version_must_be_canonical_numeric_triplet(tmp_path, version):
 
     with pytest.raises(ReleaseMetadataError, match="numeric X.Y.Z"):
         read_project_version(project)
+
+
+def test_distribution_channel_asset_contract_is_deterministic(tmp_path):
+    from scripts.release_metadata import (
+        build_distribution_channel_payload,
+        write_distribution_channel,
+    )
+
+    target = write_distribution_channel(tmp_path / "assets" / "distribution-channel.json", "apk_lts")
+    assert target.read_text(encoding="utf-8") == (
+        '{\n  "android_package_id": "com.uthelper.uthelper",\n'
+        '  "channel": "apk_lts",\n  "schema_version": 1\n}\n'
+    )
+    assert build_distribution_channel_payload("EXE_LTS") == {
+        "schema_version": 1,
+        "channel": "exe_lts",
+    }
+
+
+def test_release_metadata_cli_writes_distribution_channel(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    output = tmp_path / "distribution-channel.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "release_metadata.py"),
+            "--channel",
+            "chplay",
+            "--channel-output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output.read_text(encoding="utf-8"))["channel"] == "chplay"
+
+    rejected = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "release_metadata.py"), "--channel", "chplay"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert rejected.returncode != 0

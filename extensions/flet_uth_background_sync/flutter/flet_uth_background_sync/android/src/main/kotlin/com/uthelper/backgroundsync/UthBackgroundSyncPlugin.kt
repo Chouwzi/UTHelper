@@ -15,8 +15,8 @@ import com.uthelper.backgroundsync.data.UthDatabase
 import com.uthelper.backgroundsync.notification.AlarmScheduler
 import com.uthelper.backgroundsync.notification.ClassScheduleAlarmScheduler
 import com.uthelper.backgroundsync.notification.NotificationReconciler
+import com.uthelper.backgroundsync.security.AppSecretVault
 import com.uthelper.backgroundsync.security.CredentialVault
-import com.uthelper.backgroundsync.update.ApkUpdateInstaller
 import com.uthelper.backgroundsync.worker.BackgroundSyncScheduler
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
@@ -33,7 +33,7 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var channel: MethodChannel
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val updateInstaller by lazy { ApkUpdateInstaller(context) }
+    private val updateBridge: UpdateBridgeDelegate by lazy { UpdateBridgeFactory.create(context) }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -42,7 +42,9 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        updateInstaller.cancel()
+        if (::context.isInitialized) {
+            updateBridge.cancel()
+        }
         channel.setMethodCallHandler(null)
         scope.cancel()
     }
@@ -72,6 +74,26 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     call.argument<String>("token").orEmpty(),
                 )
                 null
+            }
+            "read_app_secrets" -> execute(result) {
+                AppSecretVault(context).readAll()
+            }
+            "write_app_secrets" -> execute(result) {
+                val raw = call.argument<Map<*, *>>("secrets") ?: emptyMap<Any, Any>()
+                val sanitized = linkedMapOf<String, String>()
+                for ((k, v) in raw) {
+                    val key = k?.toString()?.trim().orEmpty()
+                    val value = v?.toString().orEmpty()
+                    if (key.isNotEmpty() && value.isNotBlank()) {
+                        sanitized[key] = value
+                    }
+                }
+                AppSecretVault(context).writeAll(sanitized)
+                true
+            }
+            "clear_app_secrets" -> execute(result) {
+                AppSecretVault(context).clear()
+                true
             }
             "schedule_periodic" -> execute(result) {
                 val interval = call.argument<Number>("interval_minutes")?.toInt() ?: 60
@@ -175,25 +197,6 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     false
                 }
             }
-            "install_update" -> execute(result) {
-                val update = updateInstaller.verifyLocalAndOpen(
-                    localPath = call.argument<String>("local_path").orEmpty(),
-                    expectedSha256 = call.argument<String>("sha256").orEmpty(),
-                    expectedSize = call.argument<Number>("expected_size")?.toLong() ?: 0L,
-                    expectedPackageId = call.argument<String>("expected_package_id").orEmpty(),
-                    expectedVersionCode = call.argument<Number>("expected_version_code")?.toLong() ?: 0L,
-                    expectedCertificateSha256 = call.argument<String>("expected_certificate_sha256").orEmpty(),
-                )
-                mapOf(
-                    "status" to update.status,
-                    "bytes" to update.bytes,
-                    "sha256" to update.sha256,
-                )
-            }
-            "cancel_update" -> {
-                updateInstaller.cancel()
-                result.success(null)
-            }
             "logout" -> execute(result) {
                 BackgroundSyncScheduler(context).cancelAll()
                 // Portal class-schedule alarms are deliberately NOT cancelled
@@ -212,7 +215,11 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 SettingsStore(context).clear()
                 null
             }
-            else -> result.notImplemented()
+            else -> {
+                if (!updateBridge.handleMethodCall(call, result, ::execute)) {
+                    result.notImplemented()
+                }
+            }
         }
     }
 

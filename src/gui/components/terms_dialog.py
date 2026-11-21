@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import flet as ft
 
+from core.distribution import (
+    DistributionChannel,
+    DistributionProfile,
+    resolve_distribution_channel,
+)
 from gui.core.theme import C
 import platform_utils
 
@@ -40,7 +45,45 @@ TERMS_SECTIONS: tuple[tuple[str, str], ...] = (
 )
 
 
-def build_terms_dialog(page: ft.Page) -> ft.AlertDialog:
+def get_terms_sections(
+    profile: DistributionProfile | None = None,
+) -> tuple[tuple[str, str], ...]:
+    active = profile if profile is not None else resolve_distribution_channel()
+    if active.supports_github_self_update:
+        third_party_body = (
+            "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, "
+            "GitHub để kiểm tra bản phát hành, Sentry để nhận chẩn đoán sự cố (khi được bật) "
+            "và các kênh thông báo do người dùng tự cấu hình (Gmail, Discord, Telegram). "
+            "Việc xử lý tại các dịch vụ này còn chịu chính sách của đơn vị cung cấp tương ứng."
+        )
+    elif active.channel is DistributionChannel.CHPLAY:
+        third_party_body = (
+            "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, "
+            "Sentry để nhận chẩn đoán sự cố ẩn danh (khi được bật) và các kênh thông báo "
+            "do người dùng tự cấu hình (Gmail, Discord, Telegram). Việc cập nhật phiên bản "
+            "trên kênh phân phối này được quản lý hoàn toàn bởi Google Play. Việc xử lý tại "
+            "các dịch vụ bên thứ ba còn chịu chính sách của đơn vị cung cấp tương ứng."
+        )
+    else:
+        store_name = active.store_display_name or "Microsoft Store"
+        third_party_body = (
+            "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, "
+            "Sentry để nhận chẩn đoán sự cố ẩn danh (khi được bật) và các kênh thông báo "
+            "do người dùng tự cấu hình (Gmail, Discord, Telegram). Việc cập nhật phiên bản "
+            f"trên kênh phân phối này được quản lý hoàn toàn bởi {store_name}. Việc xử lý tại "
+            "các dịch vụ bên thứ ba còn chịu chính sách của đơn vị cung cấp tương ứng."
+        )
+
+    sections = list(TERMS_SECTIONS)
+    sections[3] = ("4. Dịch vụ bên thứ ba", third_party_body)
+    return tuple(sections)
+
+
+def build_terms_dialog(
+    page: ft.Page,
+    profile: DistributionProfile | None = None,
+) -> ft.AlertDialog:
+    sections = get_terms_sections(profile)
     content = ft.Column(
         [
             ft.Text(
@@ -57,7 +100,7 @@ def build_terms_dialog(page: ft.Page) -> ft.AlertDialog:
                     spacing=5,
                     tight=True,
                 )
-                for title, body in TERMS_SECTIONS
+                for title, body in sections
             ],
         ],
         spacing=14,
@@ -85,5 +128,8 @@ def build_terms_dialog(page: ft.Page) -> ft.AlertDialog:
     return dialog
 
 
-def show_terms_dialog(page: ft.Page) -> None:
-    page.show_dialog(build_terms_dialog(page))
+def show_terms_dialog(
+    page: ft.Page,
+    profile: DistributionProfile | None = None,
+) -> None:
+    page.show_dialog(build_terms_dialog(page, profile=profile))

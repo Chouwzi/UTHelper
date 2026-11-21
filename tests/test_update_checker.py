@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import os
 import sys
 import threading
@@ -135,6 +136,9 @@ class _Response:
     def read(self, size=-1):
         return self._stream.read(size)
 
+    def read1(self, size=-1):
+        return self.read(size)
+
 
 class _ChunkedResponse(_Response):
     def __init__(self, chunks, after_first=None):
@@ -165,6 +169,36 @@ class _InterruptedResponse(_Response):
             self._returned_chunk = True
             return self._stream.read()
         raise ConnectionResetError("simulated connection reset")
+
+
+class _AdvancingClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class _DeadlineRead1Response(_Response):
+    def __init__(self, data, clock, *, chunk_size=1024, delay_seconds=0.1):
+        super().__init__(data)
+        self.clock = clock
+        self.chunk_size = chunk_size
+        self.delay_seconds = delay_seconds
+        self.read_calls = 0
+        self.read1_calls = 0
+
+    def read(self, _size=-1):
+        self.read_calls += 1
+        raise AssertionError("downloader used an aggregating read")
+
+    def read1(self, size=-1):
+        self.read1_calls += 1
+        self.clock.advance(self.delay_seconds)
+        return self._stream.read(min(size, self.chunk_size))
 
 
 def _release_package(data: bytes) -> ReleasePackage:
@@ -296,6 +330,283 @@ def test_downloader_cancels_and_removes_partial_file(tmp_path, monkeypatch):
     assert list(tmp_path.glob("*.apk")) == []
 
 
+def test_downloader_uses_a_finite_slow_network_budget(tmp_path):
+    downloader = update_checker.VerifiedDownloader(cache_dir=tmp_path)
+
+    assert downloader.total_timeout_seconds == 600
+    assert update_checker.VerifiedDownloader(
+        cache_dir=tmp_path,
+        total_timeout_seconds=600,
+    ).total_timeout_seconds == 600
+    with pytest.raises(ValueError, match="within 600 seconds"):
+        update_checker.VerifiedDownloader(
+            cache_dir=tmp_path,
+            total_timeout_seconds=601,
+        )
+
+
+def test_downloader_reuses_only_a_complete_verified_artifact(tmp_path, monkeypatch):
+    data = b"cached verified apk"
+    package = _release_package(data)
+    destination = tmp_path / "UTHelper-2.2.0.apk"
+    destination.write_bytes(data)
+    requests = []
+    progress = []
+
+    def unexpected_request(*_args, **_kwargs):
+        requests.append("request")
+        return _Response(data)
+
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        unexpected_request,
+    )
+
+    result = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+        progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert result == destination
+    assert result.read_bytes() == data
+    assert requests == []
+    assert progress[-1] == (len(data), len(data))
+
+
+@pytest.mark.parametrize("cached_data", [b"tampered package", b"too short"])
+def test_downloader_redownloads_cache_with_wrong_size_or_sha(
+    tmp_path,
+    monkeypatch,
+    cached_data,
+):
+    data = b"expected package"
+    package = _release_package(data)
+    destination = tmp_path / "UTHelper-2.2.0.apk"
+    destination.write_bytes(cached_data)
+    requests = []
+
+    def open_request(request, timeout):
+        requests.append((request, timeout))
+        return _Response(data)
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+
+    result = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+    )
+
+    assert result == destination
+    assert result.read_bytes() == data
+    assert len(requests) == 1
+
+
+def test_downloader_promotes_verified_complete_partial_without_request(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"complete interrupted transfer"
+    package = _release_package(data)
+    partial = tmp_path / "UTHelper-2.2.0.apk.part"
+    sidecar = partial.with_suffix(partial.suffix + ".json")
+    partial.write_bytes(data)
+    sidecar.write_text(
+        json.dumps(
+            {
+                "url": package.url,
+                "sha256": package.sha256,
+                "size": package.size,
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests = []
+    progress = []
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: requests.append("request"),
+    )
+
+    destination = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+        progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert destination.read_bytes() == data
+    assert requests == []
+    assert progress[-1] == (len(data), len(data))
+    assert not partial.exists()
+    assert not sidecar.exists()
+
+
+def test_downloader_rejects_tampered_complete_partial(tmp_path, monkeypatch):
+    data = b"complete interrupted transfer"
+    package = _release_package(data)
+    partial = tmp_path / "UTHelper-2.2.0.apk.part"
+    sidecar = partial.with_suffix(partial.suffix + ".json")
+    partial.write_bytes(b"x" * len(data))
+    sidecar.write_text(
+        json.dumps(
+            {
+                "url": package.url,
+                "sha256": package.sha256,
+                "size": package.size,
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests = []
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: requests.append("request"),
+    )
+
+    with pytest.raises(update_checker.PackageIntegrityError, match="SHA-256"):
+        update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+            package,
+            cancel=threading.Event(),
+        )
+
+    assert requests == []
+    assert not partial.exists()
+    assert not sidecar.exists()
+    assert not (tmp_path / "UTHelper-2.2.0.apk").exists()
+
+
+def test_downloader_cancellation_removes_complete_partial(tmp_path, monkeypatch):
+    data = b"complete interrupted transfer"
+    package = _release_package(data)
+    partial = tmp_path / "UTHelper-2.2.0.apk.part"
+    sidecar = partial.with_suffix(partial.suffix + ".json")
+    partial.write_bytes(data)
+    sidecar.write_text(
+        json.dumps(
+            {
+                "url": package.url,
+                "sha256": package.sha256,
+                "size": package.size,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cancel = threading.Event()
+    cancel.set()
+    requests = []
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: requests.append("request"),
+    )
+
+    with pytest.raises(update_checker.DownloadCancelled):
+        update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+            package,
+            cancel=cancel,
+        )
+
+    assert requests == []
+    assert not partial.exists()
+    assert not sidecar.exists()
+    assert not (tmp_path / "UTHelper-2.2.0.apk").exists()
+
+
+def test_downloader_cancellation_precedes_verified_cache_reuse(tmp_path, monkeypatch):
+    data = b"cached verified apk"
+    destination = tmp_path / "UTHelper-2.2.0.apk"
+    destination.write_bytes(data)
+    cancel = threading.Event()
+    cancel.set()
+    requests = []
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: requests.append("request"),
+    )
+
+    with pytest.raises(update_checker.DownloadCancelled):
+        update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+            _release_package(data),
+            cancel=cancel,
+        )
+
+    assert destination.read_bytes() == data
+    assert requests == []
+
+
+def test_downloader_does_not_retry_or_sleep_after_deadline(tmp_path, monkeypatch):
+    now = [10.0]
+    requests = []
+    sleeps = []
+
+    def fail_after_deadline(request, timeout):
+        requests.append((request, timeout))
+        now[0] = 20.0
+        raise ConnectionResetError("deadline elapsed during request")
+
+    monkeypatch.setattr(update_checker.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(update_checker.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        fail_after_deadline,
+    )
+
+    with pytest.raises(TimeoutError, match="total deadline"):
+        update_checker.VerifiedDownloader(
+            cache_dir=tmp_path,
+            total_timeout_seconds=10,
+        ).download(
+            _release_package(b"expected"),
+            cancel=threading.Event(),
+        )
+
+    assert len(requests) == 1
+    assert requests[0][1] == 10
+    assert sleeps == []
+
+
+def test_downloader_checks_deadline_and_reports_progress_between_single_reads(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"x" * (8 * 1024)
+    package = _release_package(data)
+    clock = _AdvancingClock()
+    response = _DeadlineRead1Response(data, clock)
+    requests = []
+    progress = []
+    monkeypatch.setattr(update_checker.time, "monotonic", clock)
+
+    def open_request(request, timeout):
+        requests.append((request, timeout))
+        return response
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+
+    with pytest.raises(TimeoutError, match="total deadline"):
+        update_checker.VerifiedDownloader(
+            cache_dir=tmp_path,
+            total_timeout_seconds=0.25,
+        ).download(
+            package,
+            cancel=threading.Event(),
+            progress=lambda done, total: progress.append((done, total)),
+        )
+
+    assert requests[0][1] == 0.25
+    assert response.read_calls == 0
+    assert response.read1_calls == 3
+    assert clock.now >= 0.3
+    assert [done for done, _total in progress] == [0, 1024, 2048]
+    partial = tmp_path / "UTHelper-2.2.0.apk.part"
+    assert partial.read_bytes() == b"x" * 2048
+
+
 def test_progress_throttler_bounds_events_and_keeps_endpoints():
     total = 46_882_816
     chunk = 64 * 1024
@@ -349,6 +660,73 @@ def test_downloader_resumes_after_transient_disconnect(tmp_path, monkeypatch):
     assert requests == [(None, 20), ("bytes=5-", 20)]
     assert not any(tmp_path.glob("*.part"))
     assert not any(tmp_path.glob("*.json"))
+
+
+def test_downloader_resumes_after_truncated_response(tmp_path, monkeypatch):
+    data = b"firstsecond"
+    package = _release_package(data)
+    requests = []
+    responses = iter(
+        [
+            _Response(b"first"),
+            _Response(
+                b"second",
+                status=206,
+                headers={"Content-Range": "bytes 5-10/11"},
+            ),
+        ]
+    )
+
+    def open_request(request, timeout):
+        requests.append((request.get_header("Range"), timeout))
+        return next(responses)
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(update_checker.time, "sleep", lambda _delay: None)
+
+    path = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+    )
+
+    assert path.read_bytes() == data
+    assert requests == [(None, 20), ("bytes=5-", 20)]
+
+
+def test_downloader_continues_valid_partial_range_responses(tmp_path, monkeypatch):
+    data = b"firstsecond"
+    package = _release_package(data)
+    requests = []
+    responses = iter(
+        [
+            _InterruptedResponse(b"first"),
+            _Response(
+                b"sec",
+                status=206,
+                headers={"Content-Range": "bytes 5-7/11"},
+            ),
+            _Response(
+                b"ond",
+                status=206,
+                headers={"Content-Range": "bytes 8-10/11"},
+            ),
+        ]
+    )
+
+    def open_request(request, timeout):
+        requests.append(request.get_header("Range"))
+        return next(responses)
+
+    monkeypatch.setattr(update_checker.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(update_checker.time, "sleep", lambda _delay: None)
+
+    path = update_checker.VerifiedDownloader(cache_dir=tmp_path).download(
+        package,
+        cancel=threading.Event(),
+    )
+
+    assert path.read_bytes() == data
+    assert requests == [None, "bytes=5-", "bytes=8-"]
 
 
 def test_downloader_restarts_safely_when_server_ignores_range(tmp_path, monkeypatch):
@@ -416,6 +794,67 @@ def test_download_update_verifies_checksum_and_uses_atomic_destination(tmp_path)
     assert not (Path(tmp_path) / "UTHelper.apk.part").exists()
 
 
+def test_release_client_cancel_interrupts_retry_backoff_promptly(monkeypatch):
+    import time
+
+    client = update_checker.GitHubReleaseClient()
+    cancel = threading.Event()
+    attempts = []
+
+    def fail_once(*_args, **_kwargs):
+        attempts.append("attempt")
+        cancel.set()
+        raise TimeoutError("simulated timeout")
+
+    monkeypatch.setattr(update_checker, "_request_json", fail_once)
+    started = time.monotonic()
+    with pytest.raises(update_checker.UpdateDiscoveryError, match="cancelled"):
+        client.fetch_candidate(
+            "2.1.0",
+            RuntimeTarget("windows", "x64", "msi"),
+            cancel=cancel,
+        )
+    assert time.monotonic() - started < 0.5
+    assert attempts == ["attempt"]
+
+
+def test_verified_downloader_cancel_active_unblocks_stalled_read(tmp_path, monkeypatch):
+    cancel = threading.Event()
+    entered_read = threading.Event()
+    closed = threading.Event()
+
+    class StalledResponse(_Response):
+        def __init__(self):
+            super().__init__(b"")
+
+        def read1(self, _size=-1):
+            entered_read.set()
+            closed.wait(5.0)
+            raise OSError("socket closed")
+
+        def close(self):
+            closed.set()
+
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: StalledResponse(),
+    )
+    downloader = update_checker.VerifiedDownloader(cache_dir=tmp_path)
+
+    def canceller():
+        assert entered_read.wait(1.0)
+        cancel.set()
+        downloader.cancel_active()
+
+    thread = threading.Thread(target=canceller, daemon=True)
+    thread.start()
+    with pytest.raises(update_checker.DownloadCancelled):
+        downloader.download(_release_package(b"expected"), cancel=cancel)
+    thread.join(1.0)
+    assert closed.is_set()
+
+
 def test_download_update_rejects_bad_checksum(tmp_path):
     with (
         patch.object(update_checker, "_get_update_temp_dir", return_value=tmp_path),
@@ -434,3 +873,144 @@ def test_download_update_rejects_bad_checksum(tmp_path):
             expected_size=len(b"tampered"),
         ) is None
     assert not (Path(tmp_path) / "UTHelper.apk.part").exists()
+
+
+def _start_stalling_http_server(
+    *,
+    body_prefix: bytes,
+    content_length: int,
+    entered: threading.Event,
+    release: threading.Event,
+):
+    import http.server
+
+    class StallingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(content_length))
+            self.end_headers()
+            self.wfile.write(body_prefix)
+            self.wfile.flush()
+            entered.set()
+            release.wait(5.0)
+
+        def log_message(self, *_args):
+            return None
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StallingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_release_client_cancel_unblocks_real_stalled_http_read():
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    server, server_thread = _start_stalling_http_server(
+        body_prefix=b'{"tag_name":',
+        content_length=4096,
+        entered=entered,
+        release=release,
+    )
+    port = server.server_address[1]
+    client = update_checker.GitHubReleaseClient(
+        releases_url=f"http://127.0.0.1:{port}/latest"
+    )
+    outcomes: list[BaseException] = []
+
+    def worker():
+        try:
+            client.fetch_candidate(
+                "2.1.0",
+                RuntimeTarget("windows", "x64", "msi"),
+            )
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+    try:
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with client._lock:
+                if client._active_responses:
+                    break
+            threading.Event().wait(0.01)
+        started = time.monotonic()
+        client.cancel()
+        worker_thread.join(2.0)
+        elapsed = time.monotonic() - started
+        assert not worker_thread.is_alive()
+        assert elapsed < 0.5
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], update_checker.UpdateDiscoveryError)
+        assert "cancelled" in str(outcomes[0]).lower()
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1.0)
+
+
+def test_verified_downloader_cancel_active_unblocks_real_stalled_http_read(tmp_path):
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    server, server_thread = _start_stalling_http_server(
+        body_prefix=b"partial-chunk",
+        content_length=4096,
+        entered=entered,
+        release=release,
+    )
+    port = server.server_address[1]
+    package = ReleasePackage(
+        platform="windows",
+        architecture="x64",
+        package_type="msi",
+        install_channel="bootstrapper",
+        url=f"http://127.0.0.1:{port}/UTHelper.msi",
+        sha256="a" * 64,
+        size=4096,
+        signer_identity="CN=UTHelper",
+        certificate_fingerprint="b" * 64,
+        install_strategy={"kind": "launch_msi"},
+    )
+    downloader = update_checker.VerifiedDownloader(cache_dir=tmp_path)
+    cancel = threading.Event()
+    outcomes: list[BaseException] = []
+
+    def worker():
+        try:
+            downloader.download(package, cancel=cancel)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+    try:
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with downloader._lock:
+                if downloader._active_responses:
+                    break
+            threading.Event().wait(0.01)
+        started = time.monotonic()
+        cancel.set()
+        downloader.cancel_active()
+        worker_thread.join(2.0)
+        elapsed = time.monotonic() - started
+        assert not worker_thread.is_alive()
+        assert elapsed < 0.5
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], update_checker.DownloadCancelled)
+        assert list(tmp_path.glob("*.part")) == []
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1.0)

@@ -490,6 +490,12 @@ class NotificationManager:
                         "Could not fetch tomorrow's Portal timetable for reminders",
                         exc_info=True,
                     )
+                    # The native and Windows schedulers replace their full
+                    # persisted set. Applying today's partial snapshot here
+                    # would silently cancel tomorrow's already-armed classes
+                    # during a transient Portal outage. Auth failures above
+                    # still clear the old account's reminders deliberately.
+                    return
             if stale_task():
                 logger.info(
                     "Skipping class-schedule reconcile: account changed before applying"

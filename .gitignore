@@ -104,6 +104,7 @@ flet_build/
 
 # ── Android SDK/Gradle ──
 .gradle/
+.kotlin/
 local.properties
 *.hprof
 
@@ -132,3 +133,4 @@ test-results/
 src/assets/cache/
 src/assets/diagnostics-config.json
 src/assets/release-version
+src/assets/distribution-channel.json

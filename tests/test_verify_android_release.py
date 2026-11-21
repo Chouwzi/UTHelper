@@ -72,6 +72,7 @@ def _fake_run(command, **kwargs):
             "com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver",
             "com.uthelper.backgroundsync.notification.DeadlineAlarmReceiver",
             "com.uthelper.backgroundsync.notification.RescheduleReceiver",
+            "com.uthelper.backgroundsync.notification.ClassScheduleAlarmReceiver",
             "androidx.work.impl.background.systemalarm.RescheduleReceiver",
         )
         receivers = "".join(
@@ -284,3 +285,54 @@ def test_verify_android_release_rejects_receiver_names_outside_receiver_elements
             output=tmp_path / "evidence.json",
             android_home=_sdk(tmp_path),
         )
+
+
+def test_apk_lts_evidence_schema_is_unchanged_by_channel_support(tmp_path, monkeypatch):
+    apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    _write_apk(apk)
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    evidence = verify_android_release(
+        apk=apk,
+        channel="apk_lts",
+        version=VERSION,
+        build_number=BUILD_NUMBER,
+        package_id=PACKAGE_ID,
+        certificate_sha256=FINGERPRINT,
+        commit_sha=COMMIT_SHA,
+        workflow_run_id="12345",
+        output=tmp_path / "evidence.json",
+        android_home=_sdk(tmp_path),
+    )
+
+    assert "channel" not in evidence
+    assert evidence["signature_kind"] == "apk-pinned"
+    assert evidence["signature_valid"] is True
+
+
+def test_apk_lts_does_not_apply_play_compliance_policy(tmp_path, monkeypatch):
+    apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    _write_apk(apk)
+
+    def sideload_manifest(command, **kwargs):
+        result = _fake_run(command, **kwargs)
+        if command[1:3] == ["manifest", "print"]:
+            result.stdout = result.stdout.replace(
+                "<application>",
+                '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />'
+                '<application android:allowBackup="true">',
+            )
+        return result
+
+    monkeypatch.setattr(subprocess, "run", sideload_manifest)
+    verify_android_release(
+        apk=apk,
+        version=VERSION,
+        build_number=BUILD_NUMBER,
+        package_id=PACKAGE_ID,
+        certificate_sha256=FINGERPRINT,
+        commit_sha=COMMIT_SHA,
+        workflow_run_id="12345",
+        output=tmp_path / "evidence.json",
+        android_home=_sdk(tmp_path),
+    )

@@ -20,6 +20,28 @@ class AndroidBackgroundSync(Service):
             "set_credentials", {"base_url": base_url, "token": token}
         )
 
+    async def read_app_secrets(self) -> dict[str, str]:
+        raw = await self._invoke_method("read_app_secrets", timeout=5)
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in raw.items()
+            if isinstance(key, str) and value is not None
+        }
+
+    async def write_app_secrets(self, secrets: dict[str, str]) -> bool:
+        return bool(
+            await self._invoke_method(
+                "write_app_secrets",
+                {"secrets": {str(key): str(value) for key, value in secrets.items()}},
+                timeout=5,
+            )
+        )
+
+    async def clear_app_secrets(self) -> bool:
+        return bool(await self._invoke_method("clear_app_secrets", timeout=5))
+
     async def schedule_periodic(self, interval_minutes: int) -> dict[str, Any]:
         return await self._invoke_method(
             "schedule_periodic", {"interval_minutes": interval_minutes}
@@ -101,6 +123,76 @@ class AndroidBackgroundSync(Service):
                 "expected_version_code": expected_version_code,
                 "expected_certificate_sha256": expected_certificate_sha256,
             },
+            timeout=190,
+        )
+
+    async def start_update_download(
+        self,
+        url: str,
+        sha256: str,
+        expected_size: int,
+        expected_package_id: str,
+        expected_version_code: int,
+        expected_certificate_sha256: str,
+    ) -> dict[str, Any]:
+        """Start or resume the OS-managed download for one pinned Android release."""
+        return await self._invoke_method(
+            "start_update_download",
+            {
+                "url": url,
+                "sha256": sha256,
+                "expected_size": expected_size,
+                "expected_package_id": expected_package_id,
+                "expected_version_code": expected_version_code,
+                "expected_certificate_sha256": expected_certificate_sha256,
+            },
+            timeout=30,
+        )
+
+    async def get_update_download_status(
+        self,
+        url: str,
+        sha256: str,
+        expected_size: int,
+        expected_package_id: str,
+        expected_version_code: int,
+        expected_certificate_sha256: str,
+    ) -> dict[str, Any]:
+        """Read durable progress for the same release metadata passed to start."""
+        return await self._invoke_method(
+            "get_update_download_status",
+            {
+                "url": url,
+                "sha256": sha256,
+                "expected_size": expected_size,
+                "expected_package_id": expected_package_id,
+                "expected_version_code": expected_version_code,
+                "expected_certificate_sha256": expected_certificate_sha256,
+            },
+            timeout=30,
+        )
+
+    async def cancel_update_download(
+        self,
+        url: str,
+        sha256: str,
+        expected_size: int,
+        expected_package_id: str,
+        expected_version_code: int,
+        expected_certificate_sha256: str,
+    ) -> None:
+        """Cancel the OS download and remove its app-specific cached package."""
+        await self._invoke_method(
+            "cancel_update_download",
+            {
+                "url": url,
+                "sha256": sha256,
+                "expected_size": expected_size,
+                "expected_package_id": expected_package_id,
+                "expected_version_code": expected_version_code,
+                "expected_certificate_sha256": expected_certificate_sha256,
+            },
+            timeout=30,
         )
 
     async def cancel_update(self) -> None:
