@@ -250,7 +250,10 @@ class WindowsWebView2Dock:
             if scheme == "blob":
                 return True
             prefix = self._viewer_prefix()
-            return bool(prefix and raw.lower().startswith(prefix))
+            if not prefix or "\\" in raw or ".." in parsed.path.split("/"):
+                return False
+            normalized_target = f"{scheme}://{parsed.netloc.lower()}{parsed.path}"
+            return normalized_target.startswith(prefix)
         return bool(
             _validate_webview_url(
                 raw,

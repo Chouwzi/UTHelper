@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 import stat
 from urllib.parse import urlencode
 import zipfile
+import zlib
 
 from core.courses.local_preview_server import LocalPreviewServer
 
@@ -40,7 +41,7 @@ def is_supported_office_package(data: bytes, file_name: str) -> bool:
             if len(entries) > 5000 or sum(item.file_size for item in entries) > _MAX_TOTAL_UNCOMPRESSED_BYTES:
                 return False
             names: set[str] = set()
-            xml_names: list[str] = []
+            entries_to_verify: list[tuple[zipfile.ZipInfo, bool]] = []
             for item in entries:
                 name = item.filename
                 if item.flag_bits & 1 or "\\" in name or name.startswith("/") or ".." in PurePosixPath(name).parts:
@@ -52,27 +53,31 @@ def is_supported_office_package(data: bytes, file_name: str) -> bool:
                 if name in names or (is_xml_part and item.file_size > _MAX_XML_PART_BYTES):
                     return False
                 names.add(name)
-                if is_xml_part and not item.is_dir():
-                    xml_names.append(name)
+                if item.is_dir():
+                    if item.file_size > 0:
+                        return False
+                else:
+                    if mode == stat.S_IFDIR and name in (spec[1], "[Content_Types].xml"):
+                        return False
+                    entries_to_verify.append((item, is_xml_part))
             if spec[1] not in names or "[Content_Types].xml" not in names:
                 return False
-            total_xml_read = 0
-            for part_name in xml_names:
-                with package.open(part_name) as part_stream:
+            total_read = 0
+            for item, is_xml_part in entries_to_verify:
+                with package.open(item) as part_stream:
                     part_read = 0
                     while True:
                         chunk = part_stream.read(65536)
                         if not chunk:
                             break
                         part_read += len(chunk)
-                        total_xml_read += len(chunk)
-                        if (
-                            part_read > _MAX_XML_PART_BYTES
-                            or total_xml_read > _MAX_TOTAL_UNCOMPRESSED_BYTES
-                        ):
+                        total_read += len(chunk)
+                        if total_read > _MAX_TOTAL_UNCOMPRESSED_BYTES:
+                            return False
+                        if is_xml_part and part_read > _MAX_XML_PART_BYTES:
                             return False
             return True
-    except (zipfile.BadZipFile, OSError, ValueError):
+    except (zipfile.BadZipFile, OSError, ValueError, EOFError, RuntimeError, zlib.error):
         return False
 
 

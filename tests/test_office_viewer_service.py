@@ -123,6 +123,29 @@ def test_office_package_rejects_symlinks_case_insensitive_xml_and_forged_zip_siz
     assert not is_supported_office_package(bytes(raw_forged), "bomb.docx")
 
 
+def test_office_package_rejects_forged_header_non_xml_zip_bomb():
+    import struct
+
+    bomb_size = 100 * 1024 * 1024
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        dst.writestr("[Content_Types].xml", "<Types/>")
+        dst.writestr("word/document.xml", "<w:document/>")
+        dst.writestr("word/media/bomb.bin", b"A" * bomb_size)
+
+    patched = bytearray(buf.getvalue())
+    real_size_bytes = struct.pack("<I", bomb_size)
+    forged_size_bytes = struct.pack("<I", 16)
+    assert patched.count(real_size_bytes) >= 2
+    patched = patched.replace(real_size_bytes, forged_size_bytes)
+
+    with zipfile.ZipFile(io.BytesIO(bytes(patched))) as check_zf:
+        info = check_zf.getinfo("word/media/bomb.bin")
+        assert info.file_size == 16
+
+    assert is_supported_office_package(bytes(patched), "bomb.docx") is False
+
+
 def test_pptx_host_sanitizes_smil_and_svg_data_href_while_preserving_foreign_object():
     from pathlib import Path
 

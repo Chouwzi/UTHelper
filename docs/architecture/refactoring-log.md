@@ -2457,3 +2457,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - **Verification**:
   - Added regression tests across `tests/test_courses_app_integration.py`, `tests/test_courses_reader_and_preview_server.py`, `tests/test_embedded_webview_session_isolation.py`, `tests/test_office_viewer_service.py`, `tests/test_chplay_packaging.py`, and `tests/test_msstore_packaging.py`, and updated `tests/test_release_hardening.py` and `tests/test_gui_app_controller.py`.
   - Verified with full `pytest`, `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and `flutter analyze && flutter test` on `flet_uth_quiz`.
+
+## M3 Part B Iteration 2: Security, Integration & UX Polish Remediation (2026-11-22)
+
+- **Viewer Token Case & Missing-Account Quiz Re-Auth (`src/gui/components/courses/embedded_webview_host.py`, `src/gui/app_controller.py`)**:
+  - Updated `WindowsWebView2Dock._is_navigation_uri_allowed()` to normalize only scheme and netloc while preserving exact case-sensitive `/viewer/<token>/` matching (fixing mixed-case `secrets.token_urlsafe(24)` self-navigation rejections) and blocking `..` path traversal.
+  - Updated `AppController._start_course_quiz()` to pass an `async` retry callback for `state == "missing_account"` and guarded `retry_callback()` in `_show_quiz_auth_dialog()` with `inspect.isawaitable(...)`.
+- **Office ZIP Bomb & WebView HTML-Fallback / Blocked-URL Hardening (`src/core/courses/office_viewer_service.py`, `src/gui/components/courses/webview_pane.py`)**:
+  - Updated `is_supported_office_package()` to stream-verify all non-directory ZIP entries against `_MAX_TOTAL_UNCOMPRESSED_BYTES`, preventing forged `file_size` headers on non-XML media entries from bypassing ZIP-bomb bounds.
+  - Hardened `CoursesWebViewPane`: validated `_navigate_link()` and `extracted_links` against `safe_http_url()` or active `LocalPreviewServer.is_active_loopback_origin()`, restricted `_load_authenticated_html_fallback()` loopback fetches strictly to active preview origins with `_SameOriginRedirectHandler`, and enforced `Blocked disallowed WebView URL:` errors in `_on_host_error()` by disposing the host and rendering a blocked-URL card.
+- **Session Bridge, PDF Fallback & Semantics Polish (`src/core/courses/local_preview_server.py`, `src/gui/components/courses/document_reader_view.py`, `src/gui/components/courses/course_detail_pane.py`)**:
+  - Stripped pre-existing `<base ...>` tags before injecting `<base href>` in `_rewrite_session_html()` and added `_SESSION_HTML_CSP` to 302 session redirects.
+  - Restored `self._night_btn.visible = True` when `DocumentReaderView._build_body()` falls through synchronously from WebView PDF to `_build_native_pdf_body()`.
+  - Added `exclude_semantics=True` to `CourseDetailPane._segment_semantics` pills to avoid duplicate accessible labels.
+- **Verification**:
+  - Added regression tests in `tests/test_embedded_webview_window_binding.py`, `tests/test_courses_app_integration.py`, `tests/test_office_viewer_service.py`, `tests/test_courses_activities_and_webview.py`, and `tests/test_courses_reader_and_preview_server.py`.

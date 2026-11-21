@@ -1186,3 +1186,148 @@ def test_detail_view_never_hangs_on_syncing_status_and_courses_pane_bounds(tmp_p
     # Clicking the already-selected course card in Pane 1 dismisses the overlay cleanly
     asyncio.run(tab_view._on_user_select_course_async(c1.course_key))
     assert len(tab_view._overlays) == 0
+
+
+def test_courses_webview_pane_blocks_html_fallback_ssrf_and_flet_webview_disallowed_urls(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+    from unittest.mock import Mock
+
+    from gui.components.courses import webview_pane as webview_pane_mod
+    from gui.components.courses.embedded_webview_host import EmbeddedWebViewHost
+
+    # 1. Local server returning HTML with unsafe links & a 302 redirect off origin
+    class _TrapHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_a):
+            return
+
+        def do_GET(self):
+            if self.path == "/redir":
+                self.send_response(302)
+                self.send_header("Location", "https://evil.example/steal")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<main><p>Trap reached</p></main>")
+
+    trap_srv = HTTPServer(("127.0.0.1", 0), _TrapHandler)
+    trap_port = trap_srv.server_address[1]
+    trap_thread = threading.Thread(target=trap_srv.serve_forever, daemon=True)
+    trap_thread.start()
+
+    try:
+        monkeypatch.setattr(webview_pane_mod, "build_embedded_webview_host", lambda *_a, **_kw: None)
+        pane = CoursesWebViewPane(
+            page=None,
+            source="courses",
+            title="Test",
+            url=f"http://127.0.0.1:{trap_port}/secret",
+            preview_server=None,
+            on_back=lambda: None,
+            on_open_external=lambda _u: None,
+        )
+        # Unowned loopback URL must not be fetched via urllib in fallback mode
+        pane._load_authenticated_html_fallback()
+        pane._navigate_link(f"http://127.0.0.1:{trap_port}/secret")
+        pane._navigate_link("javascript:alert(1)")
+        pane._navigate_link("http://evil.example/")
+        assert pane._url == f"http://127.0.0.1:{trap_port}/secret"
+        texts = [c.value for c in _iter_controls(pane._body_host) if isinstance(c, ft.Text) and c.value]
+        assert not any("Trap reached" in t for t in texts)
+        pane.dispose()
+
+        # 2. Active preview server origin blocks off-origin 302 redirect & filters extracted_links
+        active_srv = LocalPreviewServer()
+        try:
+            active_port = active_srv._ensure_started_locked()
+            fake_preview = SimpleNamespace(
+                is_active_loopback_origin=lambda u: f"127.0.0.1:{trap_port}" in str(u),
+            )
+            pane_redir = CoursesWebViewPane(
+                page=None,
+                source="courses",
+                title="Redir",
+                url=f"http://127.0.0.1:{trap_port}/redir",
+                preview_server=fake_preview,
+                on_back=lambda: None,
+                on_open_external=lambda _u: None,
+            )
+            pane_redir._load_authenticated_html_fallback()
+            redir_texts = [
+                c.value for c in _iter_controls(pane_redir._body_host) if isinstance(c, ft.Text) and c.value
+            ]
+            assert any("redirect" in t.lower() or "preview" in t.lower() for t in redir_texts)
+            pane_redir.dispose()
+
+            # extracted_links filters out unsafe/loopback links when rendering Moodle HTML
+            moodle_html = (
+                "<main><p>Xin chào</p>"
+                "<a href='https://courses.ut.edu.vn/mod/page/view.php?id=2'>Safe Link</a>"
+                f"<a href='http://127.0.0.1:{active_port}/steal'>Local SSRF</a>"
+                "<a href='http://evil.example/'>Plain HTTP</a>"
+                "<a href='javascript:alert(1)'>XSS</a>"
+                "</main>"
+            )
+            pane_links = CoursesWebViewPane(
+                page=None,
+                source="courses",
+                title="Moodle",
+                url="https://courses.ut.edu.vn/mod/page/view.php?id=1",
+                preview_server=None,
+                session_client=SimpleNamespace(
+                    open_session_url=lambda u: (u, moodle_html, False),
+                ),
+                on_back=lambda: None,
+                on_open_external=lambda _u: None,
+            )
+            pane_links._load_authenticated_html_fallback()
+            link_labels = [
+                c.content
+                for c in _iter_controls(pane_links._body_host)
+                if isinstance(c, ft.OutlinedButton)
+            ]
+            assert link_labels == ["Safe Link"]
+            pane_links.dispose()
+        finally:
+            active_srv.stop()
+
+        # 3. _on_host_error enforces Blocked disallowed WebView URL on flet_webview
+        wv_ctrl = ft.Container(expand=True, data="fake-flet-webview")
+        flet_host = EmbeddedWebViewHost(
+            backend="flet_webview",
+            url="https://courses.ut.edu.vn/mod/page/view.php?id=1",
+            webview_control=wv_ctrl,
+        )
+        flet_host.dispose = Mock(wraps=flet_host.dispose)  # type: ignore[method-assign]
+        pane_fwv = CoursesWebViewPane(
+            page=None,
+            source="courses",
+            title="Mobile",
+            url="https://courses.ut.edu.vn/mod/page/view.php?id=1",
+            embedded_webview_factory=lambda _u: flet_host,
+            on_back=lambda: None,
+            on_open_external=lambda _u: None,
+        )
+        assert pane_fwv._host is flet_host
+        pane_fwv._on_host_error("Blocked disallowed WebView URL: http://evil.example/phish")
+        flet_host.dispose.assert_called_once()
+        assert pane_fwv._host is None
+        assert wv_ctrl not in list(_iter_controls(pane_fwv._body_host))
+        blocked_texts = [
+            c.value for c in _iter_controls(pane_fwv._body_host) if isinstance(c, ft.Text) and c.value
+        ]
+        assert any("chặn" in t.lower() for t in blocked_texts)
+        pane_fwv.dispose()
+    finally:
+        trap_srv.shutdown()
+        trap_srv.server_close()
+
+
+def test_course_detail_pane_segment_semantics_exclude_duplicate_children():
+    pane = CourseDetailPane()
+    assert len(pane._segment_semantics) == 3
+    assert all(sem.exclude_semantics is True for sem in pane._segment_semantics)

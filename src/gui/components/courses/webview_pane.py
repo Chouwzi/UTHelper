@@ -6,6 +6,8 @@ import asyncio
 import logging
 import threading
 from typing import Any, Callable, Optional
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 import flet as ft
@@ -28,6 +30,7 @@ from gui.components.courses.embedded_webview_host import (
     build_embedded_webview_host,
 )
 from gui.core.theme import C
+from gui.view_models.courses_state import safe_http_url
 from platform_utils import UI_IS_MOBILE
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,38 @@ def _is_loopback_url(url: str) -> bool:
     """Return True for ephemeral local loopback URLs that should not open externally."""
     host = (urlsplit(str(url or "").strip()).hostname or "").lower()
     return host in _LOOPBACK_HOSTS
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Pin fallback loopback fetches to the originating active preview origin."""
+
+    def __init__(
+        self,
+        *,
+        expected_scheme: str,
+        expected_netloc: str,
+        origin_validator: Callable[[str], bool],
+    ) -> None:
+        super().__init__()
+        self._expected_scheme = expected_scheme.lower()
+        self._expected_netloc = expected_netloc.lower()
+        self._origin_validator = origin_validator
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = str(newurl or "").strip()
+        try:
+            parsed = urlsplit(target)
+        except ValueError as exc:
+            raise urllib.error.URLError("Invalid redirect URL") from exc
+        if (
+            parsed.scheme.lower() != self._expected_scheme
+            or parsed.netloc.lower() != self._expected_netloc
+            or not self._origin_validator(target)
+        ):
+            raise urllib.error.URLError(
+                "Blocked redirect outside active preview origin"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class CoursesWebViewPane(ft.Container):
@@ -443,10 +478,71 @@ class CoursesWebViewPane(ft.Container):
 
         self._marshal_ui(_apply)
 
+    def _is_allowed_preview_url(self, url: str) -> bool:
+        if self._preview_server is None:
+            return False
+        checker = getattr(self._preview_server, "is_active_loopback_origin", None)
+        if not callable(checker):
+            return False
+        return bool(safe_http_url(url, allow_loopback=True)) and bool(checker(url))
+
+    def _is_allowed_navigation_url(self, url: str) -> bool:
+        if bool(safe_http_url(url)):
+            return True
+        return self._is_allowed_preview_url(url)
+
+    def _show_blocked_url_card(self) -> None:
+        self._body_host.content = ft.Container(
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+            padding=24,
+            content=ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=12,
+                controls=[
+                    ft.Icon(ft.Icons.BLOCK_ROUNDED, size=44, color=C.CRITICAL),
+                    ft.Text(
+                        self._title,
+                        size=16,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        "Đã chặn điều hướng tới liên kết không được phép vì lý do bảo mật.",
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.FilledButton(
+                        "Quay lại",
+                        icon=ft.Icons.ARROW_BACK_ROUNDED,
+                        on_click=lambda _e: self._handle_back(),
+                    ),
+                ],
+            ),
+        )
+        safe_control_update(self._body_host)
+
     def _on_host_error(self, reason: str) -> None:
         def _apply() -> None:
             self._set_nav_loading(False)
             host = self._host
+            reason_str = str(reason or "")
+            if reason_str.startswith("Blocked disallowed WebView URL:"):
+                if host is not None:
+                    self._host = None
+                    self._dock = None
+                    host.dispose()
+                if not self._disposed:
+                    self._show_blocked_url_card()
+                    safe_control_update(self)
+                logger.warning(
+                    "Blocked disallowed WebView URL in CoursesWebViewPane: %s",
+                    reason_str,
+                )
+                return
             if host is not None and host.backend == "webview2":
                 dock = host.dock
                 if dock is None or not getattr(dock, "_ready", False):
@@ -492,12 +588,15 @@ class CoursesWebViewPane(ft.Container):
         markdown_text = ""
         extracted_links: list[tuple[str, str]] = []
         error_text = ""
-        target_host = (urlsplit(self._url or "").hostname or "").lower()
+        parsed_target = urlsplit(self._url or "")
+        target_host = (parsed_target.hostname or "").lower()
         is_uth_site = target_host == "ut.edu.vn" or target_host.endswith(".ut.edu.vn")
-        is_local_preview = target_host in {"127.0.0.1", "localhost"}
+        is_local_preview = self._is_allowed_preview_url(self._url)
         html_text = ""
         try:
-            if (
+            if not self._is_allowed_navigation_url(self._url):
+                error_text = "Liên kết không hợp lệ hoặc không được phép mở."
+            elif (
                 is_uth_site
                 and self._session_client is not None
                 and hasattr(self._session_client, "open_session_url")
@@ -507,14 +606,19 @@ class CoursesWebViewPane(ft.Container):
                 )
                 if redirected:
                     error_text = "Liên kết điều hướng ra ngoài hệ thống UTH."
-            elif is_local_preview and self._url.startswith(("http://", "https://")):
-                import urllib.request
-
+            elif is_local_preview:
+                opener = urllib.request.build_opener(
+                    _SameOriginRedirectHandler(
+                        expected_scheme=parsed_target.scheme,
+                        expected_netloc=parsed_target.netloc,
+                        origin_validator=self._is_allowed_preview_url,
+                    )
+                )
                 req = urllib.request.Request(
                     self._url,
                     headers={"User-Agent": "UTHelper/2.5"},
                 )
-                with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
+                with opener.open(req, timeout=5) as resp:  # nosec B310
                     raw_bytes = resp.read(512 * 1024)
                     html_text = raw_bytes.decode("utf-8", errors="replace")
             elif not is_uth_site:
@@ -550,7 +654,7 @@ class CoursesWebViewPane(ft.Container):
                     label = " ".join(anchor.get_text(" ", strip=True).split())
                     if (
                         label
-                        and href.startswith(("http://", "https://"))
+                        and self._is_allowed_navigation_url(href)
                         and len(extracted_links) < 12
                     ):
                         extracted_links.append((label, href))
@@ -581,7 +685,7 @@ class CoursesWebViewPane(ft.Container):
                     text_align=ft.TextAlign.CENTER,
                 ),
             ]
-            if not _is_loopback_url(self._url):
+            if safe_http_url(self._url) and not _is_loopback_url(self._url):
                 card_controls.append(
                     ft.FilledButton(
                         "Mở bằng trình duyệt ngoài",
@@ -646,7 +750,8 @@ class CoursesWebViewPane(ft.Container):
 
     def _navigate_link(self, target_url: str) -> None:
         clean = str(target_url or "").strip()
-        if not clean:
+        if not clean or not self._is_allowed_navigation_url(clean):
+            logger.warning("Blocked disallowed navigation link in CoursesWebViewPane")
             return
         self._url = clean
         self._subtitle_text.value = self._short_subtitle(clean)

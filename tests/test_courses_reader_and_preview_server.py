@@ -1395,3 +1395,76 @@ def test_document_reader_webview_error_falls_back_to_native_and_handles_escape()
     finally:
         reader.dispose()
         srv.stop()
+
+
+def test_session_bridge_strips_existing_base_tag_and_sets_csp_on_redirect():
+    from core.courses.local_preview_server import _SESSION_HTML_CSP
+
+    class _BaseInjectionClient:
+        moodle_site_origin = "https://courses.ut.edu.vn"
+
+        def open_session_raw(self, url: str, **_kwargs):
+            if "redir" in url:
+                return 302, "https://courses.ut.edu.vn/mod/page/view.php?id=2", "text/plain", b""
+            return (
+                200,
+                url,
+                "text/html; charset=utf-8",
+                (
+                    '<html><head><base href="https://evil.com/"><title>Test</title></head>'
+                    '<body><a href="sub.html">Sub</a></body></html>'
+                ).encode("utf-8"),
+            )
+
+    srv = LocalPreviewServer()
+    try:
+        srv.register_session_provider("courses", _BaseInjectionClient())
+        bridge_url = srv.build_session_bridge_url(
+            "courses", "https://courses.ut.edu.vn/mod/page/view.php?id=1"
+        )
+        assert bridge_url is not None
+        status, _hdrs, body = _http_request(bridge_url)
+        assert status == 200
+        decoded = body.decode("utf-8")
+        assert "evil.com" not in decoded
+        assert decoded.lower().count("<base ") == 1
+
+        redir_url = srv.build_session_bridge_url(
+            "courses", "https://courses.ut.edu.vn/redir"
+        )
+        assert redir_url is not None
+        parsed_r = urlsplit(redir_url)
+        conn = http.client.HTTPConnection("127.0.0.1", parsed_r.port, timeout=5)
+        try:
+            conn.request("GET", parsed_r.path)
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.status == 302
+            assert resp.getheader("Content-Security-Policy") == _SESSION_HTML_CSP
+        finally:
+            conn.close()
+    finally:
+        srv.stop()
+
+
+def test_document_reader_sync_webview_absence_on_pdf_restores_night_button(
+    preview_server: LocalPreviewServer,
+):
+    from tests.e2e_courses.builders import build_pdf_bytes
+
+    pdf_bytes = build_pdf_bytes(["Native PDF fallback"])
+    reader = DocumentReaderView(
+        file_name="handout.pdf",
+        data=pdf_bytes,
+        kind="pdf",
+        preview_server=preview_server,
+        on_close=Mock(),
+        on_save=Mock(),
+        on_open_external=Mock(),
+        webview_builder=lambda _u: None,
+        pdf_in_webview=True,
+    )
+    try:
+        assert reader._night_btn.visible is True
+    finally:
+        reader.dispose()

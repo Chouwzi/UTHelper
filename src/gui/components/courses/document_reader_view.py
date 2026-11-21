@@ -2904,6 +2904,7 @@ class DocumentReaderView(ft.Container):
                 self._subtitle_text.value = (
                     f"{self._kind.upper()} · {session.page_count} trang · {size_text}"
                 )
+                self._night_btn.visible = True
                 return self._build_native_pdf_body(session)
             if self._webview_builder is not None and not self._webview_failed:
                 pdf_url = self._try_register_pdf_url()

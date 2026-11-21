@@ -409,7 +409,10 @@ class AppController:
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             await self._complete_login_success()
-            await retry_callback()
+            if callable(retry_callback):
+                result = retry_callback()
+                if inspect.isawaitable(result):
+                    await result
 
         await show_login_dialog(
             self.page,
@@ -3517,9 +3520,12 @@ class AppController:
         if state == "missing_account":
             request_auth = getattr(player_view, "request_app_auth", None)
             if callable(request_auth):
+                async def _retry_course_quiz(c=course, m=mod) -> None:
+                    self._start_course_quiz(c, m)
+
                 self._safe_run_task(
                     request_auth,
-                    lambda c=course, m=mod: self._start_course_quiz(c, m),
+                    _retry_course_quiz,
                 )
             return
         if state == "requires_safe_exam_browser":

@@ -1054,3 +1054,105 @@ def test_courses_quiz_launch_and_close_wire_immersive_shell_and_cleanup():
         ctrl._courses_coordinator.reset_for_account_switch.assert_called_once()
 
     asyncio.run(_run())
+
+
+def test_start_course_quiz_missing_account_reauth_callback_succeeds(monkeypatch):
+    import gui.components.login_dialog as login_dialog_mod
+
+    async def _run() -> None:
+        scheduled_tasks: list[asyncio.Task] = []
+        ctrl = AppController.__new__(AppController)
+        ctrl.page = SimpleNamespace(
+            width=1120,
+            height=800,
+            web=False,
+            platform=ft.PagePlatform.WINDOWS,
+            session=SimpleNamespace(connection=object()),
+            update=Mock(),
+            run_task=lambda fn, *a, **kw: scheduled_tasks.append(asyncio.create_task(fn(*a, **kw))) or scheduled_tasks[-1],
+        )
+        ctrl._nav_shell = AdaptiveNavShell(on_navigate=lambda _k: None)
+        ctrl._quiz_mode_window_state = None
+        ctrl._window_maximized = False
+        ctrl._data_lock = Mock()
+        ctrl._data_lock.__enter__ = lambda s: None
+        ctrl._data_lock.__exit__ = lambda s, *a: None
+        ctrl.all_data = []
+        ctrl._settings_identity = ("", "")
+        ctrl._portal_client = SimpleNamespace(clear_token=Mock())
+        ctrl._portal_week_client = None
+        ctrl.orchestrator = SimpleNamespace(
+            moodle_service=SimpleNamespace(clear_all_caches=Mock()),
+            clear_detail_cache=Mock(),
+            _userid_cache=None,
+            client=SimpleNamespace(clear_session=Mock()),
+            thnn_client=SimpleNamespace(clear_session=Mock()),
+            course_grade_monitor=None,
+        )
+        ctrl._courses_coordinator = None
+        ctrl._week_schedule_cache = None
+        ctrl.calendar_view = None
+        ctrl._today_schedule_coordinator = SimpleNamespace(
+            replace_cache=Mock(),
+            refresh=AsyncMock(),
+        )
+        ctrl._today_schedule_component = None
+        ctrl._reconcile_class_schedule_notifications = AsyncMock()
+        ctrl._sync_coordinator = None
+        ctrl._diag_screen = Mock()
+        ctrl._diag_breadcrumb = Mock()
+        ctrl._load_data_async = AsyncMock()
+
+        prepare_calls = [0]
+
+        def _prepare(activity, account_id):
+            prepare_calls[0] += 1
+            if prepare_calls[0] == 1:
+                return None, "missing_account"
+            return "target", "ready"
+
+        ctrl.quiz_player_view = SimpleNamespace(
+            visible=False,
+            prepare_activity=Mock(side_effect=_prepare),
+            open_activity_for_account=Mock(return_value=True),
+            request_app_auth=lambda cb: ctrl._show_quiz_auth_dialog(cb),
+            clear_persisted_sessions=AsyncMock(),
+        )
+
+        async def _fake_show_login(_page, _orch, on_success, **_kw):
+            monkeypatch.setattr(config.settings, "UTH_USERNAME", "sv001")
+            monkeypatch.setattr(config.settings, "UTH_PASSWORD", "secret")
+            await on_success()
+
+        monkeypatch.setattr(login_dialog_mod, "show_login_dialog", _fake_show_login)
+        monkeypatch.setattr(config.settings, "UTH_USERNAME", "")
+        monkeypatch.setattr(config.settings, "UTH_PASSWORD", "")
+
+        course = _make_course()
+        quiz_mod = CourseModuleItem(
+            cmid=11,
+            instance_id=99,
+            modname="quiz",
+            name="Midterm Quiz",
+            section_id=1,
+            web_url="https://courses.ut.edu.vn/mod/quiz/view.php?id=11",
+        )
+        ctrl._start_course_quiz(course, quiz_mod)
+        assert scheduled_tasks
+        await asyncio.gather(*list(scheduled_tasks))
+
+        assert prepare_calls[0] == 2
+        ctrl.quiz_player_view.open_activity_for_account.assert_called_once()
+
+        # _show_quiz_auth_dialog also supports synchronous callbacks defensively
+        sync_called = []
+
+        async def _fake_show_login_sync(_page, _orch, on_success, **_kw):
+            await on_success()
+
+        monkeypatch.setattr(login_dialog_mod, "show_login_dialog", _fake_show_login_sync)
+        await ctrl._show_quiz_auth_dialog(lambda: sync_called.append(True))
+        await asyncio.gather(*list(scheduled_tasks))
+        assert sync_called == [True]
+
+    asyncio.run(_run())

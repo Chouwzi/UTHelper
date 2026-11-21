@@ -92,6 +92,7 @@ _SESSION_PATH_RE = re.compile(r"^/session/([^/]+)/([^/]+)/(.*)$")
 _ATTR_URL_RE = re.compile(
     r"""(?i)\b(href|src|action|data-url)\s*=\s*(["'])([^"']+)\2"""
 )
+_BASE_TAG_RE = re.compile(r"""<base\b(?:"[^"]*"|'[^']*'|[^>"'])*>""", re.IGNORECASE)
 
 
 def _rewrite_session_html(
@@ -130,10 +131,11 @@ def _rewrite_session_html(
         return match.group(0)
 
     rewritten = _ATTR_URL_RE.sub(_replace_attr, raw_html)
+    rewritten = _BASE_TAG_RE.sub("", rewritten)
     base_href = f"http://127.0.0.1:{port}{bridge_prefix}{base_dir}"
     base_tag = f'<base href="{html.escape(base_href, quote=True)}">'
     head_match = re.search(r"<head\b[^>]*>", rewritten, flags=re.IGNORECASE)
-    if head_match is not None and "<base " not in rewritten[: head_match.end() + 200].lower():
+    if head_match is not None:
         pos = head_match.end()
         rewritten = rewritten[:pos] + base_tag + rewritten[pos:]
     return rewritten
@@ -318,6 +320,7 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header("Content-Security-Policy", _SESSION_HTML_CSP)
                 self.end_headers()
             except _DISCONNECT_ERRORS:
                 return

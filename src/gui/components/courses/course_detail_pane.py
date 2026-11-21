@@ -350,6 +350,7 @@ class CourseDetailPane(ft.Container):
                 label=_default_titles[i],
                 button=True,
                 selected=(i == 0),
+                exclude_semantics=True,
                 content=self._segment_labels[i],
             )
             for i in range(3)
