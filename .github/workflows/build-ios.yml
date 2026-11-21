@@ -38,7 +38,7 @@ jobs:
           pip install "flet[cli]==0.86.5"
           flet --version
 
-      - name: 🧪 Verify notification contracts
+      - name: 🧪 Verify notification and App Store contracts
         env:
           PYTHONPATH: src:extensions/flet_uth_background_sync/src
         run: |
@@ -48,6 +48,7 @@ jobs:
             tests/test_notification_manager_extended.py \
             tests/test_windows_notifier.py \
             tests/test_background_sync_bridge.py \
+            tests/test_ios_app_store.py \
             extensions/flet_uth_background_sync/tests/test_package_contract.py \
             -q
 
@@ -59,11 +60,12 @@ jobs:
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel ios_app_store --distribution-output src/assets/distribution-channel.json
           flet build ios-simulator --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
           find build/ios-simulator -type d -name '*.app' -prune -print | sort > "$RUNNER_TEMP/ios-apps.txt"
           test "$(wc -l < "$RUNNER_TEMP/ios-apps.txt" | tr -d ' ')" -eq 1
           APP=$(sed -n '1p' "$RUNNER_TEMP/ios-apps.txt")
+          python scripts/prepare_ios_app_store.py --app-bundle "$APP"
           DIAGNOSTIC="UTHelper-${GITHUB_SHA}-ios-unsigned-diagnostic.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIAGNOSTIC"
 
