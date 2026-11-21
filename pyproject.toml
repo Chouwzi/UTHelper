@@ -76,7 +76,11 @@ dependencies = [
     "keyring>=25.0.0",
     "pillow>=12.3.0",
     "lxml>=6.1.0",
+    "flet-uth-quiz==0.1.0",
 ]
+
+[tool.flet.windows.dev_packages]
+flet-uth-quiz = "extensions/flet_uth_quiz"
 
 [tool.flet.windows.cleanup]
 # PyWin32 compiled help is not used at runtime; retain every runtime module.
@@ -90,10 +94,12 @@ adaptive_icon_background = "#0F172A"
 dependencies = [
     "flet-android-notifications==0.10.0",
     "flet-uth-background-sync==0.1.0",
+    "flet-uth-quiz==0.1.0",
 ]
 
 [tool.flet.android.dev_packages]
 flet-uth-background-sync = "extensions/flet_uth_background_sync"
+flet-uth-quiz = "extensions/flet_uth_quiz"
 
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true
@@ -111,10 +117,11 @@ flet-uth-background-sync = "extensions/flet_uth_background_sync"
 # ── iOS-specific configuration ──
 [tool.flet.ios]
 bundle_id = "com.uthelper.UTHelper"
-dependencies = ["flet-uth-background-sync==0.1.0"]
+dependencies = ["flet-uth-background-sync==0.1.0", "flet-uth-quiz==0.1.0"]
 
 [tool.flet.ios.dev_packages]
 flet-uth-background-sync = "extensions/flet_uth_background_sync"
+flet-uth-quiz = "extensions/flet_uth_quiz"
 
 [tool.flet.ios.info]
 # Allow cleartext HTTP for Moodle instances without HTTPS

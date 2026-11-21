@@ -10,10 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 _src = str(ROOT / "src")
 _ext = str(ROOT / "extensions" / "flet_uth_background_sync" / "src")
+_quiz_ext = str(ROOT / "extensions" / "flet_uth_quiz" / "src")
 if _src not in sys.path:
     sys.path.insert(0, _src)
 if _ext not in sys.path:
     sys.path.insert(0, _ext)
+if _quiz_ext not in sys.path:
+    sys.path.insert(0, _quiz_ext)
 
 # Set before test modules import ``src.main`` so synthetic failures never enter
 # the real user's AppData log. Direct logging tests still configure tmp_path.

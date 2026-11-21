@@ -591,6 +591,9 @@ class DataOrchestrator:
                     if existing is not None:
                         if quiz_item.get("quiz_id"):
                             existing["quiz_id"] = quiz_item["quiz_id"]
+                        quiz_security = quiz_item.get("quiz_security")
+                        if isinstance(quiz_security, dict) and quiz_security:
+                            existing["quiz_security"] = dict(quiz_security)
                         continue
                     if not quiz_item.get("catalog_only"):
                         results.append(quiz_item)
@@ -675,6 +678,11 @@ class DataOrchestrator:
                 deadline_ts = int(quiz.get("timeclose") or 0)
             except (TypeError, ValueError):
                 continue
+            quiz_security = {
+                field: quiz[field]
+                for field in ("browsersecurity", "activerulenames")
+                if field in quiz
+            }
             quiz_url = f"{settings.MOODLE_BASE_URL}/mod/quiz/view.php?id={cmid}"
             is_action_quiz = quiz_url in action_quiz_urls
             if not cmid or cmid in seen_cmids or (
@@ -689,13 +697,14 @@ class DataOrchestrator:
                 or deadline_ts > time_end
             ):
                 if is_action_quiz:
-                    results.append(
-                        {
-                            "url": quiz_url,
-                            "quiz_id": quiz_id,
-                            "catalog_only": True,
-                        }
-                    )
+                    catalog_item = {
+                        "url": quiz_url,
+                        "quiz_id": quiz_id,
+                        "catalog_only": True,
+                    }
+                    if quiz_security:
+                        catalog_item["quiz_security"] = quiz_security
+                    results.append(catalog_item)
                 continue
             remaining = deadline_ts - now_ts
             if remaining < 0:
@@ -708,26 +717,27 @@ class DataOrchestrator:
                 urgency = "safe"
             deadline = datetime.fromtimestamp(deadline_ts).strftime("%Y-%m-%d %H:%M:%S")
             course_name = course_names.get(course_id, "")
-            results.append(
-                {
-                    "id": f"quiz_{quiz_id}",
-                    "title": html.unescape(quiz.get("name") or "Không tên"),
-                    "course_name": course_name,
-                    "course": course_name,
-                    "course_id": course_id,
-                    "quiz_id": quiz_id,
-                    "deadline": deadline,
-                    "deadline_str": deadline,
-                    "url": quiz_url,
-                    "type": "quiz",
-                    "urgency": urgency,
-                    "source": "ws_quiz_calendar_api",
-                    "submission_status": "unknown",
-                    "details": {},
-                    "is_open": False,
-                    "site_identity": "courses",
-                }
-            )
+            quiz_item = {
+                "id": f"quiz_{quiz_id}",
+                "title": html.unescape(quiz.get("name") or "Không tên"),
+                "course_name": course_name,
+                "course": course_name,
+                "course_id": course_id,
+                "quiz_id": quiz_id,
+                "deadline": deadline,
+                "deadline_str": deadline,
+                "url": quiz_url,
+                "type": "quiz",
+                "urgency": urgency,
+                "source": "ws_quiz_calendar_api",
+                "submission_status": "unknown",
+                "details": {},
+                "is_open": False,
+                "site_identity": "courses",
+            }
+            if quiz_security:
+                quiz_item["quiz_security"] = quiz_security
+            results.append(quiz_item)
 
         return results
     
@@ -1132,6 +1142,12 @@ class DataOrchestrator:
             details['attempts_allowed'] = ws_details['attempts_allowed']
         if ws_details.get('time_limit'):
             details['time_limit'] = ws_details['time_limit']
+        for field in ("quiz_attempts_remaining", "quiz_has_unfinished_attempt"):
+            if field in ws_details:
+                details[field] = ws_details[field]
+        quiz_security = ws_details.get("quiz_security")
+        if isinstance(quiz_security, dict) and quiz_security:
+            details["quiz_security"] = dict(quiz_security)
         
         result['details'] = details
         

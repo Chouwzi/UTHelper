@@ -46,6 +46,7 @@ from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
+from gui.components.quiz_player_view import QuizPlayerView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
@@ -374,6 +375,26 @@ class AppController:
             await self._load_data_async()
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
+    async def _show_quiz_auth_dialog(self, retry_callback):
+        """Reuse the app credential dialog, then retry Moodle session setup."""
+        from gui.components.login_dialog import show_login_dialog
+
+        self._diag_screen("login")
+        self._diag_breadcrumb("login", "started", "quiz_player", screen="login")
+
+        async def _on_login_success():
+            self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
+            self._diag_screen("home")
+            try:
+                self._portal_client.clear_token()
+            except Exception:
+                logger.debug("Portal token clear failed after quiz login", exc_info=True)
+            self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
+            await self._load_data_async()
+            await retry_callback()
+
+        await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
         from platform_utils.autostart import create_autostart_service
@@ -640,29 +661,36 @@ class AppController:
                         import logging as _fb_log
                         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             else:
-                try:
-                    await self.page.window.destroy()
-                except RuntimeError as exc:
-                    # The host can close its Flet session between the close
-                    # event and the native destroy RPC. That is a completed
-                    # shutdown, not an application failure.
-                    if str(exc) != "Session closed":
-                        raise
-                    logger.debug("Window session closed before destroy completed")
+                await self._request_window_exit()
 
     def _minimize_window(self, _event=None) -> None:
         """Minimize from the custom desktop header without hiding to tray."""
         self.page.window.minimized = True
         self.page.update()
 
-    async def _exit_from_window_header(self, _event=None) -> None:
-        """The custom close button is an explicit application-exit action."""
+    async def _destroy_window(self) -> None:
         try:
             await self.page.window.destroy()
         except RuntimeError as exc:
             if str(exc) != "Session closed":
                 raise
             logger.debug("Window session closed before custom exit completed")
+
+    async def _request_window_exit(self) -> None:
+        """Confirm a window exit while a Moodle quiz page is mounted."""
+        player_view = getattr(self, "quiz_player_view", None)
+        if player_view is not None and player_view.visible:
+            player_view.request_close(
+                after_close=self._destroy_window,
+                title="Thoát ứng dụng?",
+                action_label="Thoát",
+            )
+            return
+        await self._destroy_window()
+
+    async def _exit_from_window_header(self, _event=None) -> None:
+        """The custom close button follows the same safe exit path."""
+        await self._request_window_exit()
 
     async def _on_keyboard_event(self, e):
         """H-04: Escape key to go back from Detail/Settings/Calendar views."""
@@ -699,6 +727,9 @@ class AppController:
 
     async def _navigate_back(self) -> bool:
         """Shared back-navigation logic. Returns True if a view was closed."""
+        quiz_player_view = getattr(self, "quiz_player_view", None)
+        if quiz_player_view is not None and quiz_player_view.handle_back():
+            return True
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
             return True
@@ -1015,7 +1046,21 @@ class AppController:
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
-        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed, submission_workflow_factory=self._submission_workflow_factory)
+        self.quiz_player_view = QuizPlayerView(
+            self.page,
+            on_closed=self._on_quiz_player_closed,
+            account_id_provider=lambda: settings.UTH_USERNAME,
+            on_auth_required=self._show_quiz_auth_dialog,
+        )
+        self.detail_view   = DetailView(
+            self.page,
+            on_close=lambda: self._safe_run_task(self._close_detail),
+            get_client=lambda: self.orchestrator.client,
+            on_status_changed=self._on_activity_status_changed,
+            submission_workflow_factory=self._submission_workflow_factory,
+            quiz_player_view=self.quiz_player_view,
+            get_quiz_account_id=lambda: settings.UTH_USERNAME,
+        )
         self.calendar_view = CalendarView(
             self.page,
             on_close=lambda: self._safe_run_task(self._close_calendar),
@@ -1121,6 +1166,8 @@ class AppController:
                 self._desktop_filter_popup_host,
             ]
             main_stack_controls.extend(overlays)
+        overlays.append(self.quiz_player_view)
+        main_stack_controls.append(self.quiz_player_view)
         main_stack = ft.Stack(
             controls=main_stack_controls,
             expand=True,
@@ -2273,6 +2320,31 @@ class AppController:
         self._detail_from_calendar = False
         await self.view_manager.close_detail(from_calendar)
 
+    async def _on_quiz_player_closed(self, activity: dict | None) -> None:
+        """Refresh quiz state from Moodle after the native player is released."""
+        if not isinstance(activity, dict):
+            return
+        url = activity.get("url")
+        if not isinstance(url, str) or not url:
+            return
+        try:
+            # The following detail load must ask Moodle for the latest attempt
+            # state; a player close does not prove that an attempt was submitted.
+            self.orchestrator.invalidate_detail_cache(url)
+            if (
+                getattr(self, "detail_view", None) is not None
+                and self.detail_view.visible
+                and self.detail_view._current_url == url
+            ):
+                await self._show_detail_async(dict(activity))
+        except Exception:
+            logger.exception("Quiz detail refresh failed after player close")
+        finally:
+            detail_view = getattr(self, "detail_view", None)
+            focus_opener = getattr(detail_view, "focus_quiz_opener", None)
+            if callable(focus_opener):
+                await focus_opener()
+
     def _set_scroll_to_top_visible(self, visible: bool) -> bool:
         """Update the floating affordance without rebuilding the card list."""
         if visible == self._scroll_to_top_visible:
@@ -2558,7 +2630,12 @@ class AppController:
         self.settings_view.bgcolor = _C.BG
 
         # Sub-views theme update propagation
-        for view_attr in ('calendar_view', 'detail_view', 'grade_overview_view'):
+        for view_attr in (
+            'calendar_view',
+            'detail_view',
+            'grade_overview_view',
+            'quiz_player_view',
+        ):
             view_obj = getattr(self, view_attr, None)
             if view_obj and hasattr(view_obj, 'update_theme'):
                 try:

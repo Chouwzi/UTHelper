@@ -23,6 +23,8 @@ UI và metadata đóng gói được sinh từ nguồn này.
   iOS, or desktop presentation on another runtime.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
+- [Embedded quiz](testing/embedded-quiz.md) — native player, session boundaries,
+  build checks and provider acceptance for Courses and THNN.
 - [Package performance](testing/package-performance.md) — measured APK/IPA size,
   packaging tradeoffs and isolated Windows installation benchmarks.
 - [Android device performance](testing/android-device-performance.md) — physical
