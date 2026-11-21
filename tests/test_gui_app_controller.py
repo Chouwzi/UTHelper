@@ -682,6 +682,9 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     controller.orchestrator = None
     controller._data_cache = None
     controller._portal_client = SimpleNamespace(clear_token=Mock())
+    controller._portal_week_client = SimpleNamespace(clear_token=Mock())
+    controller._week_schedule_cache = SimpleNamespace(set_namespace=Mock())
+    controller.calendar_view = SimpleNamespace(reset_schedule=Mock())
     coordinator = SimpleNamespace(
         replace_cache=Mock(), ensure_today=Mock(), refresh=Mock()
     )
@@ -718,6 +721,12 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     # namespace happens to hold (ensure_today would publish it as READY).
     assert scheduled[1][0] is coordinator.refresh
     assert scheduled[1][1] == ("credentials_changed",)
+    controller._portal_client.clear_token.assert_called_once()
+    controller._portal_week_client.clear_token.assert_called_once()
+    controller._week_schedule_cache.set_namespace.assert_called_once_with(
+        f"{settings.PORTAL_API_BASE}|new-user"
+    )
+    controller.calendar_view.reset_schedule.assert_called_once()
     coordinator.ensure_today.assert_not_called()
     coordinator.replace_cache.assert_called_once()
 
