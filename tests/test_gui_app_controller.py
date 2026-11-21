@@ -1892,3 +1892,103 @@ def test_detail_view_routes_links_in_app_by_default_and_external_opt_out():
         ("https://courses.ut.edu.vn/mod/page/view.php?id=9", "Bài tập 1"),
     ]
     assert external == ["https://courses.ut.edu.vn/mod/assign/view.php?id=55"]
+
+
+def test_open_external_update_url_validates_github_releases_strictly():
+    launched = []
+    controller = _update_event_controller()
+    controller._safe_run_task = lambda fn, *args, **kwargs: (launched.append(fn), True)[1]
+
+    assert (
+        controller._open_external_update_url(
+            "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1"
+        )
+        is True
+    )
+    assert len(launched) == 1
+
+    for bad_url in (
+        "http://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://evil.example/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://user@github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://github.com:444/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1?next=evil",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1#frag",
+        "https://github.com/Other/Repo/releases/tag/v2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/../issues",
+        "javascript:alert(1)",
+    ):
+        assert controller._open_external_update_url(bad_url) is False
+    assert len(launched) == 1
+
+
+def test_manual_download_required_is_not_overwritten_by_subsequent_update_available():
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    dialogs = []
+    controller._show_update_confirmation = lambda: dialogs.append("confirm")
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED, controller._update_candidate)
+        )
+    )
+    assert controller._update_ready is False
+    assert controller._update_manual_download is True
+    assert controller._update_btn.content == "Mở trang tải"
+    assert controller._update_text.value == "Có bản cập nhật"
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+        )
+    )
+    assert controller._update_ready is False
+    assert controller._update_btn.content == "Mở trang tải"
+    assert controller._update_text.value == "Có bản cập nhật"
+    controller._request_update_download()
+    assert dialogs == ["confirm"]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_release_page"),
+    [
+        ("sha256_mismatch", False),
+        ("size_mismatch", False),
+        ("installed_signer_mismatch", True),
+        ("installer strategy is not allowed", True),
+    ],
+)
+def test_install_failed_clears_update_ready_for_mismatches_and_release_page_errors(
+    reason, expected_release_page
+):
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    controller._update_ready = True
+    requested = []
+    controller._update_coordinator = SimpleNamespace(
+        request_download=lambda candidate: requested.append(candidate)
+    )
+    controller._show_update_confirmation = lambda: requested.append("confirm")
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.INSTALL_FAILED,
+                controller._update_candidate,
+                message=reason,
+            )
+        )
+    )
+    assert controller._update_ready is False
+    assert controller._update_open_release_page is expected_release_page
+
+    # A subsequent UPDATE_AVAILABLE must not show "Cài đặt" for a failed package.
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+        )
+    )
+    assert controller._update_btn.content == "Cập nhật"
+    controller._request_update_download()
+    assert requested == [controller._update_candidate]

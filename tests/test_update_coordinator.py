@@ -929,3 +929,53 @@ def test_shutdown_unblocks_real_stalled_http_download_promptly(tmp_path):
         server.shutdown()
         server.server_close()
         server_thread.join(1.0)
+
+
+def test_shutdown_marks_detach_before_stop_so_completed_download_is_not_deleted(tmp_path):
+    pkg_path = tmp_path / "UTHelper-2.3.0.apk"
+    pkg_path.write_bytes(b"apk-bytes")
+    download_finished = threading.Event()
+    proceed_to_stop_check = threading.Event()
+    detach_entered = threading.Event()
+    release_detach = threading.Event()
+
+    class DetachableRacyDownloader:
+        def download(self, _package, *, cancel, progress=None):
+            del cancel, progress
+            download_finished.set()
+            assert proceed_to_stop_check.wait(2.0)
+            return pkg_path
+
+        def detach(self):
+            detach_entered.set()
+            release_detach.wait(2.0)
+
+    state, sink = _event_sink()
+    candidate = _candidate(platform="android")
+    coordinator = UpdateCoordinator(
+        client=_Client(candidate),
+        downloader=DetachableRacyDownloader(),
+        verifier=_Verifier(),
+        launcher=_Launcher(),
+        target=RuntimeTarget("android", "arm64", "sideload"),
+        current_version="2.2.0",
+        event_sink=sink,
+        automatic_enabled=False,
+    )
+    coordinator.request_download(candidate)
+    assert download_finished.wait(2.0)
+
+    shutdown_result = []
+    shutdown_thread = threading.Thread(
+        target=lambda: shutdown_result.append(coordinator.shutdown(timeout_seconds=1.0))
+    )
+    shutdown_thread.start()
+    assert detach_entered.wait(2.0)
+    # Release _perform_download while detach() is still running (after _stop.set()).
+    proceed_to_stop_check.set()
+    release_detach.set()
+    shutdown_thread.join(2.0)
+
+    assert shutdown_result == [True]
+    assert pkg_path.is_file()
+    assert not any(ev.kind is UpdateEventKind.FAILED for ev in state["items"])

@@ -221,6 +221,8 @@ class UpdateCoordinator:
                 first_shutdown = False
             else:
                 self._closed = True
+                if callable(getattr(self._downloader, "detach", None)):
+                    self._detached_downloader = True
                 self._stop.set()
                 first_shutdown = True
                 if self._started and not self._install_handed_off:
