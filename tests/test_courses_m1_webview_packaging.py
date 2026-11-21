@@ -535,6 +535,10 @@ def test_f2_embedded_webview_host_webview2_backend_and_eval_js(
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(host_mod, "_webview2_runtime_available", lambda: True)
     monkeypatch.setattr(host_mod, "WindowsWebView2Dock", _FakeDock)
+    # The logical command bridge is exercised on Linux CI too; native window
+    # operations belong to the separate Windows fixture, not this fake dock.
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(SW_SHOWNOACTIVATE=4, SW_HIDE=0))
+    monkeypatch.setitem(sys.modules, "win32gui", SimpleNamespace(ShowWindow=lambda *_: None))
 
     ready_events: list[str] = []
     messages: list[str] = []
@@ -705,6 +709,7 @@ def test_f2_coordinator_removes_quiz_import_and_wires_webview_host(
         assert pane._pane_width <= 600.0
         assert coord.build_webview_host("javascript:alert(1)") is None
 
+        monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(host_mod, "_webview2_runtime_available", lambda: False)
         assert coord.build_webview_host("https://courses.ut.edu.vn/") is None
 

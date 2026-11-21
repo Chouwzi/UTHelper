@@ -2112,3 +2112,8 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   short-lived asyncio loop could cancel the scheduled job. The fake now queues
   and explicitly drains fetch/retry jobs, preserving the real persistent-loop
   contract. CI reports the whole suite instead of stopping at its first failure.
+- The full Linux CI run then identified two Windows fixture boundary errors: a
+  fake dock imported real Win32 modules, and a Windows-routing check left the
+  runner's platform as Linux. The fixtures now model those boundaries explicitly;
+  all eleven focused packaging/host cases pass. No production runtime was made
+  unavailable to satisfy these checks.
