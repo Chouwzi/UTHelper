@@ -827,6 +827,47 @@ def get_course_contents(call_api: Callable, courseid: int) -> Optional[List[Dict
         return None
 
 
+def get_pages_by_courses(call_api: Callable, courseid: int) -> Optional[List[Dict[str, Any]]]:
+    """mod_page_get_pages_by_courses - nội dung HTML chi tiết của các mod_page."""
+    try:
+        result = call_api("mod_page_get_pages_by_courses", **{"courseids[0]": courseid})
+        if isinstance(result, dict) and "exception" not in result:
+            pages = result.get("pages")
+            if isinstance(pages, list):
+                return pages
+            logger.error("Malformed get_pages_by_courses payload (course=%s)", courseid)
+            return None
+        if isinstance(result, dict) and "exception" in result:
+            logger.error(
+                "WS error get_pages_by_courses (course=%s): %s",
+                courseid,
+                result.get("message") or result.get("errorcode") or "exception",
+            )
+        return None
+    except Exception as e:
+        logger.error("Lỗi get_pages_by_courses (course=%s): %s", courseid, e)
+        return None
+
+
+def update_activity_completion_manually(call_api: Callable, cmid: int, completed: bool) -> bool:
+    """core_completion_update_activity_completion_status_manually - tick hoàn thành thủ công."""
+    try:
+        result = call_api(
+            "core_completion_update_activity_completion_status_manually",
+            cmid=cmid,
+            completed=1 if completed else 0,
+        )
+        return (
+            isinstance(result, dict)
+            and "exception" not in result
+            and not result.get("warnings")
+            and result.get("status") is True
+        )
+    except Exception as e:
+        logger.error("Lỗi update_activity_completion_manually (cmid=%s): %s", cmid, e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Event → Assignment converter
 # ---------------------------------------------------------------------------
@@ -956,3 +997,157 @@ def ws_events_to_assignments(events: List[Dict[str, Any]]) -> List[Dict[str, Any
         len(events),
     )
     return assignments
+
+
+def get_course_user_groups(
+    call_api: Callable, course_id: int, user_id: int = 0
+) -> List[Dict[str, Any]]:
+    """core_group_get_course_user_groups - lấy danh sách nhóm của sinh viên trong môn học."""
+    try:
+        kwargs: Dict[str, Any] = {"courseid": int(course_id)}
+        if int(user_id or 0) > 0:
+            kwargs["userid"] = int(user_id)
+        result = call_api("core_group_get_course_user_groups", **kwargs)
+        if isinstance(result, dict) and isinstance(result.get("groups"), list):
+            return [g for g in result["groups"] if isinstance(g, dict)]
+        return []
+    except Exception as e:
+        logger.warning("Lỗi gọi core_group_get_course_user_groups (course=%s): %s", course_id, e)
+        return []
+
+
+def get_forums_by_courses(
+    call_api: Callable, course_ids: List[int]
+) -> List[Dict[str, Any]]:
+    """mod_forum_get_forums_by_courses - lấy danh sách diễn đàn của các môn học."""
+    if not course_ids:
+        return []
+    try:
+        params = {f"courseids[{idx}]": int(cid) for idx, cid in enumerate(course_ids)}
+        result = call_api("mod_forum_get_forums_by_courses", **params)
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_forum_get_forums_by_courses: %s", e)
+        return []
+
+
+def get_forum_discussions(
+    call_api: Callable, forum_id: int, *, page: int = 0, perpage: int = 20
+) -> List[Dict[str, Any]]:
+    """mod_forum_get_forum_discussions - lấy danh sách chủ đề trong một diễn đàn."""
+    try:
+        result = call_api(
+            "mod_forum_get_forum_discussions",
+            forumid=int(forum_id),
+            page=int(page),
+            perpage=int(perpage),
+            sortorder=1,
+        )
+        if isinstance(result, dict) and isinstance(result.get("discussions"), list):
+            return [d for d in result["discussions"] if isinstance(d, dict)]
+        return []
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_forum_get_forum_discussions (forum=%s): %s", forum_id, e)
+        return []
+
+
+def get_discussion_posts(
+    call_api: Callable, discussion_id: int
+) -> List[Dict[str, Any]]:
+    """mod_forum_get_discussion_posts - lấy các bài viết trong một chủ đề thảo luận."""
+    try:
+        result = call_api(
+            "mod_forum_get_discussion_posts",
+            discussionid=int(discussion_id),
+            sortby="created",
+            sortdirection="ASC",
+        )
+        if isinstance(result, dict) and isinstance(result.get("posts"), list):
+            return [p for p in result["posts"] if isinstance(p, dict)]
+        return []
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_forum_get_discussion_posts (discussion=%s): %s", discussion_id, e)
+        return []
+
+
+def get_choice_options(call_api: Callable, choice_id: int) -> List[Dict[str, Any]]:
+    """mod_choice_get_choice_options - lấy danh sách lựa chọn của hoạt động bình chọn."""
+    try:
+        result = call_api("mod_choice_get_choice_options", choiceid=int(choice_id))
+        if isinstance(result, dict) and isinstance(result.get("options"), list):
+            return [opt for opt in result["options"] if isinstance(opt, dict)]
+        return []
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_choice_get_choice_options (choice=%s): %s", choice_id, e)
+        return []
+
+
+def submit_choice_response(
+    call_api: Callable, choice_id: int, responses: List[int]
+) -> bool:
+    """mod_choice_submit_choice_response - gửi lựa chọn của sinh viên."""
+    if not responses:
+        return False
+    try:
+        params: Dict[str, Any] = {"choiceid": int(choice_id)}
+        for idx, opt_id in enumerate(responses):
+            params[f"responses[{idx}]"] = int(opt_id)
+        result = call_api("mod_choice_submit_choice_response", **params)
+        if isinstance(result, dict) and result.get("exception"):
+            logger.warning("Submit choice rejected: %s", result.get("message", ""))
+            return False
+        return bool(result is not None)
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_choice_submit_choice_response: %s", e)
+        return False
+
+
+def get_quiz_access_information(
+    call_api: Callable, quiz_id: int
+) -> Optional[Dict[str, Any]]:
+    """mod_quiz_get_quiz_access_information - lấy quyền truy cập và quy tắc bài quiz."""
+    try:
+        result = call_api("mod_quiz_get_quiz_access_information", quizid=int(quiz_id))
+        if isinstance(result, dict) and not result.get("exception"):
+            return result
+        return None
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_quiz_get_quiz_access_information (quiz=%s): %s", quiz_id, e)
+        return None
+
+
+def get_quiz_attempt_review(
+    call_api: Callable, attempt_id: int, page: int = -1
+) -> Optional[Dict[str, Any]]:
+    """mod_quiz_get_attempt_review - lấy chi tiết xem lại một lượt làm quiz."""
+    try:
+        result = call_api(
+            "mod_quiz_get_attempt_review",
+            attemptid=int(attempt_id),
+            page=int(page),
+        )
+        if isinstance(result, dict) and not result.get("exception"):
+            return result
+        return None
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_quiz_get_attempt_review (attempt=%s): %s", attempt_id, e)
+        return None
+
+
+def get_books_by_courses(
+    call_api: Callable, course_ids: List[int]
+) -> List[Dict[str, Any]]:
+    """mod_book_get_books_by_courses - lấy metadata hoạt động Book trong môn học."""
+    if not course_ids:
+        return []
+    try:
+        params = {f"courseids[{idx}]": int(cid) for idx, cid in enumerate(course_ids)}
+        result = call_api("mod_book_get_books_by_courses", **params)
+        if isinstance(result, dict) and isinstance(result.get("books"), list):
+            return [b for b in result["books"] if isinstance(b, dict)]
+        return []
+    except Exception as e:
+        logger.warning("Lỗi gọi mod_book_get_books_by_courses: %s", e)
+        return []

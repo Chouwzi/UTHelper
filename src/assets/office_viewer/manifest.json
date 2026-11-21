@@ -1,0 +1,20 @@
+{
+  "packages": {
+    "docx-preview": "0.4.1",
+    "jszip": "3.10.2",
+    "@office-kit/pptx": "0.28.0",
+    "@office-kit/pptx-preview": "0.21.0"
+  },
+  "hashes": {
+    "docx-preview.min.js": "c4a133c65a112799e35b143c572dfff9e923a3bf39b5fd3b07a06aa0f8f530c2",
+    "jszip.min.js": "7f839b2d4688b845c105ebf5d2f9803075f91ea0fe72bdaac176c3a04dd3d2c1",
+    "pptx_engine.js": "81ccff858c985a52520fff878308d370b050ef68e887ff9de327b83fb520957a"
+  },
+  "inputs": [
+    "fflate/esm/browser.js",
+    "@office-kit/pptx/dist/api-miOxITQn.js",
+    "@office-kit/pptx/dist/index.js",
+    "@office-kit/pptx-preview/dist/src-DoFuEaap.js",
+    "@office-kit/pptx-preview/dist/index.js"
+  ]
+}

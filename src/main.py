@@ -173,14 +173,14 @@ def _show_startup_screen(
     from gui.core.theme import C, set_page_theme
 
     if compact_desktop:
-        page.window.width = 420
-        page.window.height = 720
+        page.window.width = 1120
+        page.window.height = 760
         page.window.min_width = 420
-        page.window.max_width = 420
-        page.window.min_height = 720
-        page.window.max_height = 720
-        page.window.resizable = False
-        page.window.maximizable = False
+        page.window.min_height = 560
+        page.window.max_width = None
+        page.window.max_height = None
+        page.window.resizable = True
+        page.window.maximizable = True
         page.window.minimizable = True
         page.window.title_bar_hidden = True
         page.window.title_bar_buttons_hidden = True
@@ -242,6 +242,10 @@ def _show_startup_screen(
             page.window.minimized = True
             page.update()
 
+        def toggle_maximize(_event):
+            page.window.maximized = not bool(getattr(page.window, "maximized", False))
+            page.update()
+
         async def close_window(_event):
             await page.window.destroy()
 
@@ -250,6 +254,7 @@ def _show_startup_screen(
                 controls=[
                     build_desktop_window_header(
                         on_minimize=minimize_window,
+                        on_maximize=toggle_maximize,
                         on_close=close_window,
                     ),
                     splash,

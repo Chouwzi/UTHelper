@@ -268,3 +268,78 @@ class PortalClient:
             pass
 
         return []
+
+    def fetch_current_semester_courses(
+        self, username: str, password: str
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Fetch registered courses for the student's active semester via `/hoctap/hocky` & `/hoctap/montheoky/{idDot}`."""
+        token = self._token or self._login(username, password)
+        try:
+            hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password)
+            hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
+
+        refreshed_token = hk_payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._token = refreshed_token
+
+        hk_list = hk_payload.get("body")
+        if not isinstance(hk_list, list) or not hk_list:
+            return ("", [])
+
+        # Sort newest semester first by numeric idDot when present, preserving server order on tie
+        valid_semesters = [s for s in hk_list if isinstance(s, dict) and (s.get("id") or s.get("idDot"))]
+        if not valid_semesters:
+            return ("", [])
+
+        def _sem_id_key(item: dict[str, Any]) -> int:
+            raw_id = item.get("id") or item.get("idDot") or 0
+            try:
+                return int(raw_id)
+            except (TypeError, ValueError):
+                return 0
+
+        ordered = sorted(valid_semesters, key=_sem_id_key, reverse=True)
+        for sem_entry in ordered[:2]:
+            dot_id = sem_entry.get("id") or sem_entry.get("idDot")
+            ten_dot = str(sem_entry.get("tenDot") or sem_entry.get("name") or "").strip()
+            if not dot_id:
+                continue
+            mon_payload = self._request_json(
+                "GET", f"hoctap/montheoky/{dot_id}", token=token
+            )
+            mon_body = mon_payload.get("body")
+            if isinstance(mon_body, list) and mon_body:
+                normalized_items: list[dict[str, Any]] = []
+                for row in mon_body:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(
+                        row.get("maHocPhan")
+                        or row.get("maLopHocPhan")
+                        or row.get("course_code")
+                        or ""
+                    ).strip()
+                    name = str(
+                        row.get("tenMonHoc")
+                        or row.get("tenLopHocPhan")
+                        or row.get("name")
+                        or ""
+                    ).strip()
+                    raw_tc = row.get("soTinChi") if row.get("soTinChi") is not None else row.get("stc", 0)
+                    try:
+                        credits = max(0, int(float(raw_tc or 0)))
+                    except (TypeError, ValueError):
+                        credits = 0
+                    if code or name:
+                        normalized_items.append(
+                            {"maHocPhan": code, "tenMonHoc": name, "soTinChi": credits}
+                        )
+                if normalized_items:
+                    return (ten_dot, normalized_items)
+
+        first_ten = str(ordered[0].get("tenDot") or "").strip()
+        return (first_ten, [])

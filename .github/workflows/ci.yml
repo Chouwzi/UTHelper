@@ -119,7 +119,7 @@ jobs:
         run: |
           pip install -e .
           pip install -e extensions/flet_uth_background_sync
-          pip install pytest pytest-cov keyring
+          pip install pytest pytest-cov keyring flet-webview==0.86.5
 
       - name: Run tests
         run: |
@@ -128,8 +128,7 @@ jobs:
             --tb=short \
             --cov=. \
             --cov-report=term-missing \
-            --cov-report=xml:../coverage.xml \
-            -x
+            --cov-report=xml:../coverage.xml
 
       - name: Compile check (syntax)
         run: python -m py_compile src/main.py && python -c "import py_compile, pathlib; [py_compile.compile(str(f), doraise=True) for f in pathlib.Path('src').rglob('*.py')]"

@@ -14,10 +14,11 @@ def build_desktop_window_header(
     *,
     on_minimize: Callable,
     on_close: Callable,
+    on_maximize: Callable | None = None,
     title_control: ft.Control | None = None,
     version_control: ft.Control | None = None,
 ) -> ft.Container:
-    """Build a draggable header with title, minimize and close controls."""
+    """Build a draggable header with title, minimize, optional maximize, and close controls."""
     button_constraints = ft.BoxConstraints(
         min_width=42,
         max_width=42,
@@ -51,7 +52,7 @@ def build_desktop_window_header(
             expand=True,
         ),
         expand=True,
-        maximizable=False,
+        maximizable=on_maximize is not None,
     )
     minimize = ft.IconButton(
         # Material's MINIMIZE glyph sits on the baseline by design. A centered
@@ -89,12 +90,30 @@ def build_desktop_window_header(
             return
         close_rotation += math.tau
         close.rotate = close_rotation
-        close.update()
+        try:
+            close.update()
+        except Exception:
+            pass
 
     close.on_hover = rotate_close_on_hover
+    header_controls: list[ft.Control] = [drag_area, minimize]
+    if on_maximize is not None:
+        header_controls.append(
+            ft.IconButton(
+                ft.Icons.CROP_SQUARE_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                icon_size=16,
+                tooltip="Phóng to / Thu nhỏ",
+                padding=0,
+                size_constraints=button_constraints,
+                hover_color=C.SURFACE_HOVER,
+                on_click=on_maximize,
+            )
+        )
+    header_controls.append(close)
     return ft.Container(
         content=ft.Row(
-            controls=[drag_area, minimize, close],
+            controls=header_controls,
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),

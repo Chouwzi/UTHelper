@@ -69,6 +69,14 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
 | 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
 | 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-17 | `feature/courses-tab` | Môn học / Courses & THNN Unified Workspace | Tích hợp workspace Môn học hợp nhất Courses & THNN (`core/courses/*`, `CoursesTabView`, `DocumentReaderView`, `ArchiveExplorerView`), điều hướng thích ứng 5 tab `AdaptiveNavShell` (`NavigationBar` <600px / `NavigationRail` >=600px), `CoursesCoordinator`, phím tắt `Ctrl+K`/`/`/`Esc`, cửa sổ Desktop co giãn `1120x760` (tối thiểu `420x560`), và thống kê/dọn cache xem trước + cache môn học trong `SettingsView` | Đạt 1785 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-17 | `feature/courses-tab` | Courses UX Feedback, PDF Scroll Fix, Rich Word/PPTX & In-App WebView | Khắc phục cuộn lên PDF bị phóng to (`DocumentReaderView` bỏ `InteractiveViewer`, dùng `ListView` + cuộn ngang khi zoom); chuẩn hóa `/ux-feedback` (skeleton + `PaneLoadingOverlay` + `PaneErrorOverlay` + `SnackBar` tải file, bỏ header lặp ở `PaneAssignmentView`/`DetailView`, hiển thị `Không giới hạn`); nâng cấp render `.docx`/`.doc`/`.pptx`/`.ppt` (`AlternateContent`, OMML math, hyperlink, numbering, bảng gộp ô/ẩn viền, layout placeholder, group transform, crop ảnh, SmartArt, Chart); mở trực tiếp mọi liên kết HTTP(S) bằng `CoursesWebViewPane` ngay trong ứng dụng | Đạt 1801 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | WebView2 Native Fix, Quiz Review UX, High-Fidelity Word OOXML & Fast Download/Cache Engine | Sửa dò Edge WebView2 0-arg trên Windows Desktop (`CoursesWebViewPane` + `WindowsWebView2Dock` nạp cookie bất đồng bộ, đồng bộ 60fps, khử triệt để rò rỉ JS/CSS thô trên SPA ngoài như Zalo/Google Meet và HTML Moodle); tái thiết kế toàn diện Xem lại bài làm Quiz (`CourseActivityService` + `QuizActivityView`: đánh số tuần tự `Câu 1..N`, gỡ tiền tố GIFT `::CODE::[html]`, bóc tách lựa chọn A/B/C/D + đối chiếu `.rightanswer`, thẻ tổng quan điểm/độ chính xác, bộ lọc `Tất cả`/`Câu sai`/`Câu đúng` & lưới nhảy nhanh câu hỏi); nâng cấp engine Word OOXML độ chính xác cao (`theme1.xml`, kế thừa đệ quy `styles.xml`, đánh số phân cấp `%1.%2.`, `footnotes`/`endnotes`, kích thước ảnh `wp:extent`, bảng `tblGrid`/`vMerge`/Quốc hiệu, trang giấy A4 thu phóng & `Bản in A4`); tối ưu tốc độ tải & đa tầng cache (tải phân mảnh 64 KB kèm tiến trình `%` + `MB/s`, gộp tải trùng `SingleFlight`, đồng bộ song song `courses` + `thnn`, bỏ gọi thừa `mod_page`, RAM cache `CourseCacheStore`, LRU cache `ConvertedDocument`, dựng trước tài liệu ngoài luồng UI và prefetch nền thông minh) | Đạt 1805 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Fix Live WebView2 Py3.14, Cloudflare HTTP 403 Moodle Sync & Responsive Word Auto-Scale | Cài đặt và khai báo bắt buộc `webview2-Microsoft.Web.WebView2.Core==3.2.1` cho Windows (`sys_platform == 'win32'`) trên cả môi trường Python 3.14, đồng thời gia cố `WindowsWebView2Dock` (dò cây tiến trình cha-con `python.exe <-> flet.exe`, khóa chủ sở hữu `GWLP_HWNDPARENT`, tự động bám sát biên phải/dưới theo `GetClientRect` 60fps); khôi phục `urllib.request.urlopen` chuẩn trong `core/client.py` khắc phục triệt để lỗi Cloudflare chặn `HTTP 403` trên `POST` WS API làm treo `Đang đồng bộ với Moodle...`, kèm fallback trạng thái an toàn trong `DetailView`; bổ sung tự động co giãn tỷ lệ trang Word/Slide/PDF (`DocumentReaderView.sync_bounds` + `fit_ratio`) vừa khít 100% bề ngang Pane 3 không mất lề phải | Đạt 1806 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Apple HIG Courses Redesign, Grades Bento UI, 0ms PDF Dark/Light & Portal Current-Term Sync | Tích hợp API Portal môn đăng ký học kỳ hiện tại (`PortalClient.fetch_current_semester_courses`: `/hoctap/hocky` + `/hoctap/montheoky/{idDot}`) đồng bộ song song 3 luồng trong `CourseCatalogService` (đối chiếu `maHocPhan`/`tenMonHoc` có khóa học kỳ chống nhầm môn học lại, lưu bền vững `CourseCacheStore`), mặc định lọc `Kỳ hiện tại (N)` kèm huy hiệu `{credits} TC` trên `CoursesTabView`/`CourseListPane` và cho phép chuyển thủ công sang `Tất cả` hoặc kỳ bất kỳ; tái thiết kế toàn diện tab `Điểm môn` theo chuẩn Apple HIG Bento + Inset-Grouped (`CourseDetailPane`: thẻ tổng quan điểm trung bình có trọng số/tổng kết + xếp loại `Xuất sắc`/`Khá · Tốt` + KPI, tự bóc trọng số `(20%...)`/`(40%...)` từ tiêu đề UTH, khử nhiễu `0.00 %` & `-`, xếp mục đã chấm lên đầu và gom mục chưa chấm vào ngăn thu gọn `Chưa có điểm / Bài tự luyện`); nâng cấp toàn diện giao diện Môn học theo Apple Cupertino Segmented Pill Control, icon squircle ngữ nghĩa, chọn thẻ `O(1)` tại chỗ (`_card_map`) không dựng lại danh sách; triệt tiêu hoàn toàn độ trễ đổi Dark/Light trên PDF & tài liệu (`_DARK_LUMA_LUT` C-speed, PNG `compress_level=1`, RAM LRU 28 trang `peek_cached_page_png`, pre-warm nền chế độ đối nghịch và `AnimatedSwitcher` 150ms mượt mà); sửa dứt điểm lỗi Flutter `ErrorWidget` mảng xám do truyền `ft.Border` vào `ExpansionTile.shape` (`OutlinedBorder`) và `ft.Padding` vào `Container.margin` (`Margin`), kèm test khóa kiểu MRO cho toàn bộ điều khiển Flet | Đạt 1812 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Polish Apple HIG Visual Restraint on Grades & Quiz Review | Tiết chế màu sắc và đường kẻ theo chuẩn Apple HIG (`CourseDetailPane` + `QuizActivityView`): gỡ bỏ hoàn toàn các vạch dọc màu xanh/đỏ bên trái mỗi dòng điểm & câu hỏi, bỏ thanh `ProgressBar` ngang trong thẻ Hero Điểm môn, dưới từng con điểm và trong thẻ tổng quan Quiz Review; chuyển điểm số/KPI/huy hiệu trọng số về mực chính trung tính sắc nét (`C.TEXT_PRIMARY` / `C.SURFACE_ELEVATED`) kết hợp đường phân tách mảnh `Divider` tinh gọn, chỉ giữ sắc thái màu ngữ nghĩa cho duy nhất nhãn xếp loại tổng quan và điểm cảnh báo thấp (`< 5.0`) | Đạt 1812 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Fix Moodle Synthetic index.html Raw HTML Leak & Inline Label Cards | Loại bỏ tệp nội bộ ảo `index.html`/`structure` của Moodle trên `mod_page`/`mod_label`/`mod_book` (`providers.py`, `real_module_attachments`), ẩn hoàn toàn các `mod_label` khoảng trắng rỗng (`<div class="no-overflow"><p>   </p></div>`), hiển thị trực tiếp nội dung thông báo & nút liên kết Meet/URL của `mod_label` ngay trong từng chương (`CourseDetailPane._label_inline_card`), định tuyến `page`/`book`/`label` đã lưu cache sang `RichContentActivityView`/inline reader thay vì tải `index.html`, và bổ sung bộ chuyển đổi `.html`/`.htm` sang Markdown + HTML sạch chống rò rỉ thẻ HTML thô trong `DocumentReaderView` | Đạt 1814 passed, 25 skipped; `ruff check src tests` pass |
+
 | 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
 | 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
 
@@ -1969,6 +1977,53 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
 
+## Môn học / Courses & THNN Unified Workspace (2026-11-17)
+
+- **Scope & Boundaries (`feature/courses-tab`)**:
+  - Kept `core/courses/*` pure of `gui` imports (`models`, `shortname_parser`,
+    `cache_store`, `preview_cache`, `providers`, `catalog_service`,
+    `archive_service`, `document_converter`, `local_preview_server`).
+  - Added `src/gui/components/courses/adaptive_nav.py` (`AdaptiveNavShell`,
+    `NAV_DESTINATIONS`, `RAIL_BREAKPOINT = 600`, `RAIL_WIDTH = 88`) coordinating
+    the 5-tab `NavigationBar` (`< 600px`) and `NavigationRail` (`>= 600px`).
+  - Added `src/gui/controllers/courses_coordinator.py` (`CoursesCoordinator`)
+    to decouple `AppController` from `PreviewFileCache`, `ArchiveService`,
+    `LocalPreviewServer`, `DocumentReaderView`/`ArchiveExplorerView` overlays,
+    optional `UthQuizWebView` fallback, `FilePicker().save_file`, and safe
+    external launch guards (routing executable extensions to Save As).
+  - Updated `src/gui/view_manager.py` (`show_courses`, destination sync,
+    `courses_view` origin tracking behind `detail_switcher`),
+    `src/gui/components/desktop_window_header.py` (optional maximize button),
+    `src/main.py` and `src/gui/app_controller.py` (resizable `1120x760` desktop
+    bounds, `on_resize` responsiveness, `RAIL_WIDTH` filter menu offset,
+    `Ctrl+K`/`/`/`Esc` shortcuts, `_navigate_back` priority, theme propagation,
+    and disconnect cleanup), and `src/gui/components/settings_view.py`
+    (cache stats and cleanup for `PreviewFileCache` and `courses_catalog_*` /
+    `course_tree_*` / `courses_cache_*`).
+- **Verification**:
+  - Added `tests/test_courses_app_integration.py` and updated
+    `tests/test_desktop_window_header.py` and `tests/test_startup_visibility.py`.
+  - `python -m pytest tests -q --tb=short`: **1785 passed, 25 skipped**.
+  - `ruff check src tests`: all checks passed (0 errors).
+
+## Môn học V2: Native Readers, Authenticated In-App WebView & Pane-3 UX (2026-11-17)
+
+- **Scope & Boundaries (`feature/courses-tab`)**:
+  - **Dependencies (`pyproject.toml`)**: Added `pypdf>=6.9.0`, `xlrd>=2.0.2`, `olefile>=0.47` to base dependencies; `webview2-Microsoft.Web.WebView2.Core==3.2.1` + `pypdfium2>=5.9.0` to `windows` / `[tool.flet.windows]`; `flet-webview==0.86.5` + `pypdfium2>=5.9.0` to `[tool.flet.android]`; `flet-webview==0.86.5` to `[tool.flet.ios]`.
+  - **Native PDF & Document Support (`core/courses/*`)**:
+    - Created `src/core/courses/pdf_renderer.py` (`PdfDocumentSession` with `pypdfium2` + `PIL` primary backend and `pypdf` fallback, YCbCr dark-mode luminance inversion, in-PDF text search, outline extraction, and bounded `96 MiB` PNG LRU cache under `preview_cache/rendered_pdf/`; cleanup wired in `SettingsView._do_clear_data_cache`).
+    - Extended `archive_service.py` with `.7z` inspection & extraction strictly via `7z`/`7za` (`find_windows_7z_cli`).
+    - Extended `document_converter.py` with `DocxRichBlock`, `PptxSlideRich` (inline raster media & tables), and OLE2 `.doc` / `.xls` / `.ppt` support.
+    - Extended `providers.py`, `ws_functions.py`, `moodle_service.py`, `client.py`, and `catalog_service.py` with live THNN fixes (JSON-string `core_courseformat_get_state`, `/grade/report/user/index.php` HTML gradebook parsing, `pluginfile.php` resource resolution), session cookie export, form submission helpers, and `CourseActivityService` (`src/core/courses/activity_service.py`).
+    - Extended `LocalPreviewServer` with SSRF-guarded `/session/{bridge_token}/{source}/...` reverse proxy (`GET`/`HEAD`/`POST`, `X-Frame-Options` stripping, same-origin HTML link/form rewriting).
+  - **Pane-3 Default UX & In-App Views (`gui/components/courses/*`, `CoursesCoordinator`)**:
+    - Refactored `CoursesTabView` so all viewers and activities open inside Pane 3 (`_workspace_stack`) by default with Panes 1 & 2 visible, smooth 220ms `width`/`opacity` expand/collapse toggle (`3` <-> `2+3`, `Ctrl+\` / `F11`, `Esc`), overlay disposal on course switch, and `on_tab_hidden()` / `on_tab_shown()` lifecycle hooks in `ViewManager`.
+    - Upgraded `DocumentReaderView` (native multi-page PDF reader with 5-page progressive hydration, paginated/filterable Excel `120x40` view, rich DOCX/PPTX), added `CoursesWebViewPane` (`WindowsWebView2Dock` + `flet_webview` + HTML fallback), and added native Pane-3 `AttendanceActivityView`, `GroupActivityView`, `QuizActivityView`, `ForumActivityView`, `RichContentActivityView`, and `PaneAssignmentView`.
+- **Verification**:
+  - Added `tests/test_courses_pdf_and_legacy_docs.py` and `tests/test_courses_activities_and_webview.py`.
+  - `python -m pytest tests -q --tb=short`: **1795 passed, 25 skipped**.
+  - `ruff check src tests`: all checks passed (0 errors).
+
 ## Theme preview mode synchronization (2026-11-16)
 
 - Theme previews already applied draft colors globally, but `set_page_theme`
@@ -2002,3 +2057,71 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
+
+## Courses integration, offline Office previews and mobile reader (2026-11-21)
+
+- Preserved the existing course work in an isolated topic checkout, then merged
+  remote course and develop history. Grade loading retains both adaptive navigation
+  and develop's theme refresh after attachment.
+- Replaced extracted Office text as the primary WebView path with pinned offline
+  DOCX pages and PPTX SVG slides. Bundled licenses/notices, locked build and asset
+  hashes; validated package expansion before rendering and local tokenized URLs.
+- Added optional local Windows Office PDF export off the UI thread. Documents
+  stay on device, macro execution is disabled, original save/open actions remain
+  original bytes, active Office sessions are left untouched and link options are
+  restored. Static layout limits and rendering boundaries are recorded in ADR0005.
+- The reader now mounts a host's actual Flet control and owns host bounds,
+  suspension, theme and disposal. Missing session clients retain an in-app recovery
+  pane; only an explicit external icon opens the browser.
+- Phone PDF search collapses, bookmarks use a modal sheet, page images pinch zoom,
+  wide fallback tables scroll and pagination wraps. Corrected E2E palette cleanup
+  to restore its incoming palette instead of changing unrelated tests' defaults.
+- Verification: 187 focused course/UI cases passed; full course integration suite
+  subsequently passed **2072 tests, 25 skipped**. Actual local Office exported
+  synthetic DOCX/PPTX to two-page PDFs. Local Chrome at 390px displayed original
+  packages with slide geometry/navigation/notes and no JavaScript errors. Windows
+  host rendered the DOCX in its exact-title fixture window. Startup binding now
+  waits for that window instead of selecting an unrelated Flutter window, handles
+  64-bit process snapshots, and has positive/ambiguity regressions. Further native
+  interactions are blocked by an unrelated Windows privacy-permission dialog;
+  wide/mobile browser fixture and native/device acceptance remain distinct.
+
+- Follow-up review found the Windows host continued navigation after its cookie
+  provider failed or disposal occurred during authentication. It now retains the
+  successful cookie/navigation path, reports refresh failure before navigation,
+  and stops disposed work. Each pane uses a separate InPrivate profile so a prior
+  account's shared browser storage cannot supply authentication.
+- Initial Linux CI exposed an undeclared test dependency: mobile host contracts
+  import the real `flet_webview` wrapper. CI installs the pinned wrapper alongside
+  pytest; runtime platform dependency choices are unchanged. Focused host/session
+  regression suite: **27 passed**, Ruff clean; full/CI checks are rerun on the
+  follow-up commit.
+
+- Course quiz start now has a dedicated app-entry callback, separate from history/
+  review WebViews, for integration with the native quiz branch. Its primary action
+  is unavailable at a known exhausted limit, while in-progress/overdue attempts,
+  fresh attempts and unlimited quizzes remain available. Module and quiz instance
+  identifiers remain distinct. Native entry remains authoritative when metadata
+  changes. Windows popup navigation also reuses the outer HTTP(S) URL guard.
+  Baseline verification failed eight new cases; the bounded repair passes all
+  thirteen callback/session/popup cases. Native callback wiring is validated in
+  the cross-branch integration checkout.
+
+- Linux CI exposed another fixture race: the assignment scenario expected a
+  background fetch to finish before its initiating callback returned, and its
+  short-lived asyncio loop could cancel the scheduled job. The fake now queues
+  and explicitly drains fetch/retry jobs, preserving the real persistent-loop
+  contract. CI reports the whole suite instead of stopping at its first failure.
+- The full Linux CI run then identified two Windows fixture boundary errors: a
+  fake dock imported real Win32 modules, and a Windows-routing check left the
+  runner's platform as Linux. The fixtures now model those boundaries explicitly;
+  all eleven focused packaging/host cases pass. No production runtime was made
+  unavailable to satisfy these checks.
+
+- Review against the real course activity service found that attempt states are
+  localized before reaching the course quiz view. The prior English-only check
+  could disable a resumable attempt at its limit. The view now recognizes both
+  raw and localized states and treats only known terminal states as proof of
+  exhaustion; unknown states proceed to the authoritative entry check. Three
+  positive regressions failed on the previous commit; all ten cases now pass,
+  including a service-to-view check preserving module/quiz identifiers.

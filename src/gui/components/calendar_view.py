@@ -47,6 +47,18 @@ from gui.core.utils import (
 )
 
 _WEEKDAYS = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+# --- Screen sizing -------------------------------------------------------
+# Every font size, cell metric and padding on this screen is derived from
+# the base values below through _s(), so the whole view can be resized from
+# a single knob without hunting magic numbers.
+_UI_SCALE = 1.18
+
+
+def _s(value: float) -> int:
+    """Scale a base font/layout metric for the calendar screen."""
+    return int(round(value * _UI_SCALE))
+
+
 _MONTHS_VI = {
     1: "Tháng 1", 2: "Tháng 2", 3: "Tháng 3", 4: "Tháng 4",
     5: "Tháng 5", 6: "Tháng 6", 7: "Tháng 7", 8: "Tháng 8",
@@ -95,11 +107,11 @@ class CalendarView(ft.Container):
     def _build_ui(self):
         # Month navigation header
         self._month_label = ft.Text(
-            "", size=16, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY,
+            "", size=_s(16), weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY,
         )
         # Month summary (CV-05)
         self._month_summary = ft.Text(
-            "", size=10, color=C.TEXT_SECONDARY,
+            "", size=_s(10), color=C.TEXT_SECONDARY,
         )
         self._back_btn = ft.IconButton(
             ft.Icons.ARROW_BACK_ROUNDED,
@@ -153,12 +165,12 @@ class CalendarView(ft.Container):
                     ft.Container(
                         content=self._month_summary,
                         alignment=ft.Alignment(0, 0),
-                        padding=ft.Padding.only(bottom=2),
+                        padding=ft.Padding.only(bottom=_s(2)),
                     ),
                 ],
                 spacing=0,
             ),
-            padding=ft.Padding.only(left=4, right=4, top=20, bottom=0),
+            padding=ft.Padding.only(left=_s(4), right=_s(4), top=_s(20), bottom=0),
             bgcolor=C.BG,
         )
 
@@ -167,64 +179,64 @@ class CalendarView(ft.Container):
             controls=[
                 ft.Container(
                     content=ft.Text(
-                        wd, size=10, weight=ft.FontWeight.W_600,
+                        wd, size=_s(10), weight=ft.FontWeight.W_600,
                         color=C.CRITICAL if wd == "CN" else C.TEXT_SECONDARY,
                         text_align=ft.TextAlign.CENTER,
                     ),
-                    width=44, alignment=ft.Alignment(0, 0),
+                    width=_s(44), alignment=ft.Alignment(0, 0),
                 )
                 for wd in _WEEKDAYS
             ],
-            spacing=2,
+            spacing=_s(2),
             alignment=ft.MainAxisAlignment.CENTER,
         )
 
         # Mode toggle (Month / Week)
         self._mode_month_icon = ft.Icon(
-            ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY
+            ft.Icons.CALENDAR_MONTH_ROUNDED, size=_s(14), color=C.TEXT_PRIMARY
         )
         self._mode_month_text = ft.Text(
-            "Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
+            "Tháng", size=_s(11), weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
         )
         self._mode_month_btn = ft.Container(
             content=ft.Row(controls=[
                 self._mode_month_icon,
                 self._mode_month_text,
-            ], spacing=4, tight=True),
+            ], spacing=_s(4), tight=True),
             bgcolor=ft.Colors.with_opacity(0.19, C.ACCENT),
-            border_radius=12,
-            padding=ft.Padding(left=14, right=14, top=5, bottom=5),
+            border_radius=_s(12),
+            padding=ft.Padding(left=_s(14), right=_s(14), top=_s(5), bottom=_s(5)),
             on_click=lambda _: self._toggle_view_mode("month"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
         self._mode_week_icon = ft.Icon(
-            ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY
+            ft.Icons.VIEW_WEEK_ROUNDED, size=_s(14), color=C.TEXT_SECONDARY
         )
         self._mode_week_text = ft.Text(
-            "Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+            "Tuần", size=_s(11), weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
         )
         self._mode_week_btn = ft.Container(
             content=ft.Row(controls=[
                 self._mode_week_icon,
                 self._mode_week_text,
-            ], spacing=4, tight=True),
+            ], spacing=_s(4), tight=True),
             bgcolor="transparent",
-            border_radius=12,
-            padding=ft.Padding(left=14, right=14, top=5, bottom=5),
+            border_radius=_s(12),
+            padding=ft.Padding(left=_s(14), right=_s(14), top=_s(5), bottom=_s(5)),
             on_click=lambda _: self._toggle_view_mode("week"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
         self._mode_toggle = ft.Container(
             content=ft.Row(
                 [self._mode_month_btn, self._mode_week_btn],
-                spacing=2,
+                spacing=_s(2),
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
             bgcolor=C.SURFACE,
-            border_radius=14,
-            padding=ft.Padding(left=3, right=3, top=3, bottom=3),
+            border_radius=_s(14),
+            padding=ft.Padding(left=_s(3), right=_s(3), top=_s(3), bottom=_s(3)),
             border=ft.Border.all(1, C.BORDER),
-            margin=ft.Margin(left=60, right=60, top=4, bottom=6),
+            margin=ft.Margin(left=_s(60), right=_s(60), top=_s(4), bottom=_s(6)),
         )
 
         # Calendar grid (6 rows × 7 cols) - CV-01: denser
@@ -238,12 +250,12 @@ class CalendarView(ft.Container):
                 row_cells.append(cell)
                 row_controls.append(cell)
             self._day_cells.append(row_cells)
-            row = ft.Row(controls=row_controls, spacing=2, alignment=ft.MainAxisAlignment.CENTER)
+            row = ft.Row(controls=row_controls, spacing=_s(2), alignment=ft.MainAxisAlignment.CENTER)
             self._grid_rows.append(row)
 
         self._grid = ft.Column(
             controls=[self._weekday_row] + self._grid_rows,
-            spacing=2,
+            spacing=_s(2),
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -260,30 +272,30 @@ class CalendarView(ft.Container):
                 controls=[
                     ft.Row(
                         controls=week_cell_controls,
-                        spacing=3,
+                        spacing=_s(3),
                         alignment=ft.MainAxisAlignment.CENTER,
                     ),
                 ],
-                spacing=2,
+                spacing=_s(2),
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.only(top=4, bottom=4),
+            padding=ft.Padding.only(top=_s(4), bottom=_s(4)),
             visible=False,  # Hidden by default (month mode)
         )
 
         # Selected day detail panel
-        self._day_title = ft.Text("", size=14, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY)
-        self._day_count = ft.Text("", size=11, color=C.TEXT_SECONDARY)
-        self._day_list = ft.ListView(spacing=6, expand=True)
+        self._day_title = ft.Text("", size=_s(14), weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY)
+        self._day_count = ft.Text("", size=_s(11), color=C.TEXT_SECONDARY)
+        self._day_list = ft.ListView(spacing=_s(6), expand=True)
         # CV-06: Better empty state
         self._day_empty_icon = ft.Icon(
-            ft.Icons.CALENDAR_TODAY_ROUNDED, size=28, color=C.BORDER
+            ft.Icons.CALENDAR_TODAY_ROUNDED, size=_s(28), color=C.BORDER
         )
         self._day_empty_title = ft.Text(
-            "Không có bài tập đến hạn", size=12, color=C.TEXT_SECONDARY
+            "Không có bài tập đến hạn", size=_s(12), color=C.TEXT_SECONDARY
         )
         self._day_empty_hint = ft.Text(
-            "Chọn ngày có chấm màu để xem", size=10, color=C.BORDER
+            "Chọn ngày có chấm màu để xem", size=_s(10), color=C.BORDER
         )
         self._day_empty = ft.Container(
             content=ft.Column(
@@ -293,14 +305,14 @@ class CalendarView(ft.Container):
                     self._day_empty_hint,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=4,
+                spacing=_s(4),
             ),
             alignment=ft.Alignment(0, 0),
             expand=True,
             visible=False,
         )
 
-        self._detail_divider = ft.Divider(height=1, color=C.BORDER)
+        self._detail_divider = ft.Divider(height=_s(1), color=C.BORDER)
         detail_panel = ft.Container(
             content=ft.Column(
                 controls=[
@@ -310,11 +322,11 @@ class CalendarView(ft.Container):
                             controls=[self._day_title, self._day_count],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         ),
-                        padding=ft.Padding.only(left=16, right=16, top=8, bottom=4),
+                        padding=ft.Padding.only(left=_s(16), right=_s(16), top=_s(8), bottom=_s(4)),
                     ),
                     ft.Container(
                         content=ft.Stack(controls=[self._day_list, self._day_empty], expand=True),
-                        padding=ft.Padding.only(left=14, right=14, bottom=8),
+                        padding=ft.Padding.only(left=_s(14), right=_s(14), bottom=_s(8)),
                         expand=True,
                     ),
                 ],
@@ -333,7 +345,7 @@ class CalendarView(ft.Container):
         self._native_desktop_period_drag = platform_utils.UI_IS_DESKTOP
         self._period_pager = ft.PageView(
             controls=[],
-            height=316,
+            height=_s(316),
             selected_index=1,
             horizontal=True,
             snap=True,
@@ -348,7 +360,7 @@ class CalendarView(ft.Container):
         # is the stationary viewport that clips that overflow.
         self._desktop_period_host = ft.Container(
             width=float("inf"),
-            height=316,
+            height=_s(316),
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
         # The slot itself is positioned in the outer stage. It must be a
@@ -398,7 +410,7 @@ class CalendarView(ft.Container):
         weekday_labels = [
             ft.Text(
                 weekday,
-                size=10,
+                size=_s(10),
                 weight=ft.FontWeight.W_600,
                 color=C.CRITICAL if weekday == "CN" else C.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,
@@ -409,12 +421,12 @@ class CalendarView(ft.Container):
             controls=[
                 ft.Container(
                     content=label,
-                    width=44,
+                    width=_s(44),
                     alignment=ft.Alignment(0, 0),
                 )
                 for label in weekday_labels
             ],
-            spacing=2,
+            spacing=_s(2),
             alignment=ft.MainAxisAlignment.CENTER,
         )
         weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
@@ -446,13 +458,13 @@ class CalendarView(ft.Container):
             rows.append(
                 ft.Row(
                     controls=cells,
-                    spacing=2,
+                    spacing=_s(2),
                     alignment=ft.MainAxisAlignment.CENTER,
                 )
             )
         control = ft.Column(
             controls=[weekday_row, *rows],
-            spacing=2,
+            spacing=_s(2),
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
         period = _CalendarPeriodPage(
@@ -476,10 +488,10 @@ class CalendarView(ft.Container):
         control = ft.Container(
             content=ft.Row(
                 controls=cells,
-                spacing=3,
+                spacing=_s(3),
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.only(top=4, bottom=4),
+            padding=ft.Padding.only(top=_s(4), bottom=_s(4)),
         )
         period = _CalendarPeriodPage(week_start, control, week_cells=cells)
         self._render_week_period_page(period)
@@ -549,7 +561,7 @@ class CalendarView(ft.Container):
             )
         if self._native_desktop_period_drag:
             self._period_dismiss_generation += 1
-            height = 316 if self._view_mode == "month" else 88
+            height = _s(316) if self._view_mode == "month" else _s(88)
 
             def strip_period(control: ft.Control, offset_x: int) -> ft.Container:
                 return ft.Container(
@@ -682,7 +694,7 @@ class CalendarView(ft.Container):
         # first swipe in the newly mounted mode.
         self._pending_desktop_delta = None
         self._pending_desktop_control = None
-        height = 316 if self._view_mode == "month" else 88
+        height = _s(316) if self._view_mode == "month" else _s(88)
         self._period_pager.height = height
         self._desktop_period_host.height = height
         self._seed_period_pages()
@@ -1080,14 +1092,14 @@ class CalendarView(ft.Container):
                 ft.Container(
                     content=ft.Text(
                         str(len(activities)),
-                        size=8,
+                        size=_s(8),
                         color=on_color(color),
                         weight=ft.FontWeight.W_700,
                         text_align=ft.TextAlign.CENTER,
                     ),
-                    width=16,
-                    height=16,
-                    border_radius=8,
+                    width=_s(16),
+                    height=_s(16),
+                    border_radius=_s(8),
                     bgcolor=color,
                     alignment=ft.Alignment(0, 0),
                 )
@@ -1100,7 +1112,7 @@ class CalendarView(ft.Container):
                 continue
             seen.add(color)
             dots_row.controls.append(
-                ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+                ft.Container(width=_s(6), height=_s(6), border_radius=_s(3), bgcolor=color)
             )
 
     def _on_absolute_date_click(self, selected: date) -> None:
@@ -1116,12 +1128,12 @@ class CalendarView(ft.Container):
 
     def _make_day_cell(self) -> ft.Container:
         """Create a single day cell with today indicator dot."""
-        day_num = ft.Text("", size=12, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER)
+        day_num = ft.Text("", size=_s(12), color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER)
         # Today indicator - small accent dot under the number (always visible for today)
         today_dot = ft.Container(
-            width=5, height=5, border_radius=3, bgcolor=C.ACCENT, visible=False,
+            width=_s(5), height=_s(5), border_radius=_s(3), bgcolor=C.ACCENT, visible=False,
         )
-        dots_row = ft.Row(controls=[], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
+        dots_row = ft.Row(controls=[], spacing=_s(2), alignment=ft.MainAxisAlignment.CENTER)
         cell = ft.Container(
             content=ft.Column(
                 controls=[
@@ -1132,8 +1144,8 @@ class CalendarView(ft.Container):
                 spacing=0,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            width=44, height=48,
-            border_radius=8,
+            width=_s(44), height=_s(48),
+            border_radius=_s(8),
             alignment=ft.Alignment(0, -0.1),
             on_click=lambda e, c=None: self._on_day_click(e),
             animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
@@ -1147,24 +1159,24 @@ class CalendarView(ft.Container):
         wd_color = C.CRITICAL if col_index == 6 else C.TEXT_SECONDARY
 
         wd_label = ft.Text(
-            weekday_labels[col_index], size=10, weight=ft.FontWeight.W_600,
+            weekday_labels[col_index], size=_s(10), weight=ft.FontWeight.W_600,
             color=wd_color, text_align=ft.TextAlign.CENTER,
         )
         day_num = ft.Text(
-            "", size=18, weight=ft.FontWeight.W_600,
+            "", size=_s(18), weight=ft.FontWeight.W_600,
             color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER,
         )
-        dots_row = ft.Row(controls=[], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
-        count_text = ft.Text("", size=9, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
+        dots_row = ft.Row(controls=[], spacing=_s(2), alignment=ft.MainAxisAlignment.CENTER)
+        count_text = ft.Text("", size=_s(9), color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
 
         cell = ft.Container(
             content=ft.Column(
                 controls=[wd_label, day_num, dots_row, count_text],
-                spacing=1,
+                spacing=_s(1),
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            width=52, height=80,
-            border_radius=12,
+            width=_s(52), height=_s(80),
+            border_radius=_s(12),
             alignment=ft.Alignment(0, 0),
             on_click=lambda e, idx=col_index: self._on_week_cell_click(idx),
             animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
@@ -1294,12 +1306,12 @@ class CalendarView(ft.Container):
                         ft.Container(
                             content=ft.Text(
                                 str(len(acts)),
-                                size=8,
+                                size=_s(8),
                                 color=on_color(most_urgent_color or C.ACCENT),
                                 weight=ft.FontWeight.W_700,
                                 text_align=ft.TextAlign.CENTER,
                             ),
-                            width=16, height=16, border_radius=8,
+                            width=_s(16), height=_s(16), border_radius=_s(8),
                             bgcolor=most_urgent_color or C.ACCENT,
                             alignment=ft.Alignment(0, 0),
                         )
@@ -1312,7 +1324,7 @@ class CalendarView(ft.Container):
                         if col not in seen:
                             seen.add(col)
                             dots_row.controls.append(
-                                ft.Container(width=6, height=6, border_radius=3, bgcolor=col)
+                                ft.Container(width=_s(6), height=_s(6), border_radius=_s(3), bgcolor=col)
                             )
 
             # Count text
@@ -1495,12 +1507,12 @@ class CalendarView(ft.Container):
                             ft.Container(
                                 content=ft.Text(
                                     str(len(acts)),
-                                    size=7,
+                                    size=_s(7),
                                     color=on_color(most_urgent_color or C.ACCENT),
                                     weight=ft.FontWeight.W_700,
                                     text_align=ft.TextAlign.CENTER,
                                 ),
-                                width=14, height=14, border_radius=7,
+                                width=_s(14), height=_s(14), border_radius=_s(7),
                                 bgcolor=most_urgent_color or C.ACCENT,
                                 alignment=ft.Alignment(0, 0),
                             )
@@ -1516,7 +1528,7 @@ class CalendarView(ft.Container):
                                 urgency_colors.append(col)
                         for color in urgency_colors[:3]:
                             dots_row.controls.append(
-                                ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+                                ft.Container(width=_s(6), height=_s(6), border_radius=_s(3), bgcolor=color)
                             )
 
         self._update_day_panel()
@@ -1587,12 +1599,12 @@ class CalendarView(ft.Container):
                     ft.Container(
                         content=ft.Text(
                             str(len(acts)),
-                            size=7,
+                            size=_s(7),
                             color=on_color(most_urgent_color or C.ACCENT),
                             weight=ft.FontWeight.W_700,
                             text_align=ft.TextAlign.CENTER,
                         ),
-                        width=14, height=14, border_radius=7,
+                        width=_s(14), height=_s(14), border_radius=_s(7),
                         bgcolor=most_urgent_color or C.ACCENT,
                         alignment=ft.Alignment(0, 0),
                     )
@@ -1608,7 +1620,7 @@ class CalendarView(ft.Container):
                         urgency_colors.append(col_c)
                 for color in urgency_colors[:3]:
                     dots_row.controls.append(
-                        ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+                        ft.Container(width=_s(6), height=_s(6), border_radius=_s(3), bgcolor=color)
                     )
 
     def _navigate(self, delta: int):
@@ -1798,26 +1810,26 @@ class CalendarView(ft.Container):
         if submission in ("submitted", "Đã nộp"):
             sub_controls.append(
                 ft.Container(
-                    content=ft.Text("✓ Đã nộp", size=9, weight=ft.FontWeight.W_600, color=C.SAFE),
-                    padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                    content=ft.Text("✓ Đã nộp", size=_s(9), weight=ft.FontWeight.W_600, color=C.SAFE),
+                    padding=ft.Padding.symmetric(horizontal=_s(5), vertical=_s(1)),
                     bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
-                    border_radius=4,
+                    border_radius=_s(4),
                 )
             )
         elif submission in ("graded", "Đã chấm"):
             sub_controls.append(
                 ft.Container(
-                    content=ft.Text("★ Đã chấm", size=9, weight=ft.FontWeight.W_600, color=C.SAFE),
-                    padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                    content=ft.Text("★ Đã chấm", size=_s(9), weight=ft.FontWeight.W_600, color=C.SAFE),
+                    padding=ft.Padding.symmetric(horizontal=_s(5), vertical=_s(1)),
                     bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
-                    border_radius=4,
+                    border_radius=_s(4),
                 )
             )
 
         # Course row
         course_row_controls = [
             ft.Text(
-                clean_course, size=10, color=C.TEXT_SECONDARY,
+                clean_course, size=_s(10), color=C.TEXT_SECONDARY,
                 max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True,
             ),
         ] + sub_controls
@@ -1827,9 +1839,9 @@ class CalendarView(ft.Container):
                 controls=[
                     # CV-08: Left color bar full height
                     ft.Container(
-                        width=3, bgcolor=urg_color,
-                        border_radius=ft.BorderRadius.only(top_left=8, bottom_left=8),
-                        height=60,
+                        width=_s(3), bgcolor=urg_color,
+                        border_radius=ft.BorderRadius.only(top_left=_s(8), bottom_left=_s(8)),
+                        height=_s(60),
                     ),
                     # Content
                     ft.Container(
@@ -1838,13 +1850,13 @@ class CalendarView(ft.Container):
                                 ft.Row(
                                     controls=[
                                         ft.Container(
-                                            content=ft.Text(type_label, size=9, weight=ft.FontWeight.W_600, color=type_color),
-                                            padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                                            content=ft.Text(type_label, size=_s(9), weight=ft.FontWeight.W_600, color=type_color),
+                                            padding=ft.Padding.symmetric(horizontal=_s(6), vertical=_s(1)),
                                             border=ft.Border.all(1, type_color),
-                                            border_radius=4,
+                                            border_radius=_s(4),
                                         ),
                                         ft.Text(
-                                            countdown_text, size=10,
+                                            countdown_text, size=_s(10),
                                             color=C.CRITICAL if is_overdue else urg_color,
                                             weight=ft.FontWeight.W_600,
                                             italic=is_overdue,
@@ -1853,7 +1865,7 @@ class CalendarView(ft.Container):
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 ),
                                 ft.Text(
-                                    title, size=13, weight=ft.FontWeight.W_600,
+                                    title, size=_s(13), weight=ft.FontWeight.W_600,
                                     color=C.TEXT_PRIMARY, max_lines=1,
                                     overflow=ft.TextOverflow.ELLIPSIS,
                                 ),
@@ -1862,16 +1874,16 @@ class CalendarView(ft.Container):
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 ),
                             ],
-                            spacing=3,
+                            spacing=_s(3),
                         ),
-                        padding=ft.Padding.only(left=10, right=10, top=8, bottom=8),
+                        padding=ft.Padding.only(left=_s(10), right=_s(10), top=_s(8), bottom=_s(8)),
                         expand=True,
                     ),
                 ],
                 spacing=0,
             ),
             bgcolor=C.SURFACE,
-            border_radius=8,
+            border_radius=_s(8),
             border=ft.Border.all(1, C.BORDER),
             on_click=lambda _, a=act: self._on_card_click(a),
             ink=True,

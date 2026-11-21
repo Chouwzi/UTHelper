@@ -11,8 +11,10 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import inspect
 import logging
 from collections import Counter
+import platform_utils
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from gui.core.utils import (
     clean_course_name,
@@ -90,18 +92,46 @@ def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None):
+    def __init__(
+        self,
+        page: ft.Page,
+        on_close,
+        get_client=None,
+        on_status_changed=None,
+        submission_workflow_factory=None,
+        *,
+        embedded_in_pane: bool = False,
+        on_open_url=None,
+    ):
         super().__init__()
-        self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
+        self._init_variables(
+            page,
+            get_client,
+            on_status_changed,
+            submission_workflow_factory,
+            embedded_in_pane=embedded_in_pane,
+            on_open_url=on_open_url,
+        )
         self._init_controls()
         self._init_layout(on_close)
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
+    def _init_variables(
+        self,
+        page: ft.Page,
+        get_client,
+        on_status_changed,
+        submission_workflow_factory,
+        *,
+        embedded_in_pane: bool = False,
+        on_open_url=None,
+    ):
         self._page          = page
         self.visible        = False
         self.expand         = True
         self.bgcolor        = C.BG
+        self._embedded_in_pane = bool(embedded_in_pane)
+        self._on_open_url   = on_open_url
         self._current_url   = ""
         self._current_data  = {}
         self._get_client    = get_client   
@@ -115,6 +145,76 @@ class DetailView(ft.Container):
         self._pending_file_mutation: tuple[MutationOperation, bool] | None = None
         self._view_generation = 0
         self._snapshot_load_generation = 0
+        self._pane_width: float | None = None
+
+    @staticmethod
+    def _normalize_width(width) -> float | None:
+        if width is None or isinstance(width, bool):
+            return None
+        try:
+            numeric = float(width)
+        except (TypeError, ValueError):
+            return None
+        if numeric > 0:
+            return numeric
+        return None
+
+    def _effective_width(self) -> float | None:
+        if getattr(self, "_pane_width", None) is not None:
+            return self._pane_width
+        page = getattr(self, "_page", None)
+        if page is not None:
+            for candidate in (
+                getattr(page, "width", None),
+                getattr(getattr(page, "window", None), "width", None),
+            ):
+                normalized = DetailView._normalize_width(candidate)
+                if normalized is not None:
+                    return normalized
+        return None
+
+    def _is_narrow(self) -> bool:
+        eff = self._effective_width()
+        if eff is not None:
+            return eff < 600.0
+        return bool(platform_utils.UI_IS_MOBILE)
+
+    def _sync_dialog_widths(self) -> None:
+        narrow = self._is_narrow()
+        eff = self._effective_width() or 360.0
+        if narrow:
+            edit_w = min(340.0, max(220.0, eff - 112.0))
+            del_w = min(320.0, max(220.0, eff - 112.0))
+        else:
+            edit_w = 340.0
+            del_w = 320.0
+        edit_content = getattr(self, "_file_edit_dialog_content", None)
+        if edit_content is not None:
+            edit_content.width = edit_w
+        del_content = getattr(self, "_delete_confirm_dialog_content", None)
+        if del_content is not None:
+            del_content.width = del_w
+
+    def _sync_responsive_layout(self) -> None:
+        narrow = self._is_narrow()
+        row = getattr(self, "_submission_actions_row", None)
+        if row is not None:
+            row.wrap = narrow
+        for btn_name in ("_submit_btn", "_finalize_btn"):
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.expand = not narrow
+        self._sync_dialog_widths()
+
+    def set_width(self, width: float) -> None:
+        """Apply active Pane-3 width and adapt narrow submission/dialog layout."""
+        self._pane_width = DetailView._normalize_width(width)
+        self._sync_responsive_layout()
+        try:
+            if self.page is not None:
+                self.update()
+        except Exception:
+            pass
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
@@ -286,19 +386,20 @@ class DetailView(ft.Container):
             bgcolor=C.BG, value="/",
         )
         self._edit_status = ft.Text("", size=12, visible=False)
+        self._file_edit_dialog_content = ft.Container(
+            content=ft.Column(controls=[
+                self._edit_filename,
+                self._edit_filepath,
+                self._edit_status,
+            ], spacing=12, tight=True),
+            width=340,
+        )
         self._file_edit_dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Chỉnh sửa file", size=16, weight=ft.FontWeight.BOLD,
                           color=C.TEXT_PRIMARY),
             bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=ft.Column(controls=[
-                    self._edit_filename,
-                    self._edit_filepath,
-                    self._edit_status,
-                ], spacing=12, tight=True),
-                width=340,
-            ),
+            content=self._file_edit_dialog_content,
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_edit_dialog,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
@@ -313,15 +414,16 @@ class DetailView(ft.Container):
         )
 
         self._delete_confirm_text = ft.Text("", size=13, color=C.TEXT_PRIMARY)
+        self._delete_confirm_dialog_content = ft.Container(
+            content=self._delete_confirm_text,
+            width=320,
+        )
         self._delete_confirm_dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Xác nhận xóa", size=16, weight=ft.FontWeight.BOLD,
                           color=C.CRITICAL),
             bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=self._delete_confirm_text,
-                width=320,
-            ),
+            content=self._delete_confirm_dialog_content,
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_delete_confirm,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
@@ -429,7 +531,7 @@ class DetailView(ft.Container):
                 ft.Row(controls=[
                     self._multiselect_btn,
                     self._batch_delete_btn,
-                ], spacing=8),
+                ], spacing=8, run_spacing=6, wrap=True),
                 self._edit_submitted_btn,
             ], spacing=8),
             bgcolor=C.SURFACE,
@@ -467,7 +569,7 @@ class DetailView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=C.SAFE,
-            padding=ft.Padding.symmetric(vertical=13),
+            padding=ft.Padding.symmetric(vertical=13, horizontal=16),
             border_radius=8,
             on_click=self._on_submit,
             ink=True,
@@ -487,7 +589,7 @@ class DetailView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=C.SAFE,
-            padding=ft.Padding.symmetric(vertical=13),
+            padding=ft.Padding.symmetric(vertical=13, horizontal=16),
             border_radius=8,
             on_click=self._on_finalize,
             ink=True,
@@ -555,6 +657,16 @@ class DetailView(ft.Container):
             visible=False,  
         )
 
+        self._submission_actions_row = ft.Row(
+            controls=[
+                self._pick_btn,
+                self._submit_btn,
+                self._finalize_btn,
+            ],
+            spacing=8,
+            run_spacing=8,
+            wrap=False,
+        )
         self._submission_area = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
@@ -568,11 +680,7 @@ class DetailView(ft.Container):
                 self._submission_statement,
                 self._upload_progress,
                 self._upload_status,
-                ft.Row(controls=[
-                    self._pick_btn,
-                    self._submit_btn,
-                    self._finalize_btn,
-                ], spacing=8),
+                self._submission_actions_row,
             ], spacing=10),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
@@ -581,8 +689,18 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=C.ON_ACCENT)
-        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=C.ON_ACCENT,
+        cta_default_label = (
+            "Mở trang gốc ngay trong ứng dụng"
+            if self._embedded_in_pane
+            else "Xem trong trình duyệt"
+        )
+        cta_default_icon = (
+            ft.Icons.WEB_ASSET_ROUNDED
+            if self._embedded_in_pane
+            else ft.Icons.OPEN_IN_BROWSER_ROUNDED
+        )
+        self._cta_icon = ft.Icon(cta_default_icon, size=16, color=C.ON_ACCENT)
+        self._cta_text = ft.Text(cta_default_label, size=13, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
             content=ft.Row(
@@ -618,6 +736,7 @@ class DetailView(ft.Container):
             tooltip="Mở trong trình duyệt",
             on_click=self._open_browser,
         )
+        self._sync_responsive_layout()
 
     def _init_layout(self, on_close):
         self._back_icon = ft.Icon(
@@ -665,13 +784,18 @@ class DetailView(ft.Container):
         )
         self._details_divider = ft.Divider(height=16, color=C.BORDER)
 
+        self._top_bar_container = ft.Container(
+            content=ft.Row(
+                controls=[back_btn, self._header_open_btn],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            ),
+            padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
+            visible=not self._embedded_in_pane,
+        )
+
         self.content = ft.Column(
             controls=[
-                ft.Container(
-                    content=ft.Row(controls=[back_btn, self._header_open_btn],
-                                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
-                ),
+                self._top_bar_container,
                 self._loading_bar,
                 self._error_banner,
                 ft.Container(
@@ -743,9 +867,15 @@ class DetailView(ft.Container):
 
         deadline_str = data.get("deadline", "")
         cd_text, overdue, cd_color, _ = get_card_countdown(data)
-        self._countdown_txt.value = cd_text
-        self._countdown_txt.color = cd_color
-        
+        if deadline_str:
+            self._countdown_txt.value = cd_text or "Không xác định"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+            self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
+        else:
+            self._countdown_txt.value = cd_text or "Không giới hạn thời gian"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+            self._deadline_txt.value = "Không giới hạn"
+
         details = data.get("details", {})
         open_time_str = details.get("open_time", "")
         if open_time_str:
@@ -753,8 +883,6 @@ class DetailView(ft.Container):
             self._opentime_row.visible = True
         else:
             self._opentime_row.visible = False
-            
-        self._deadline_txt.value = format_deadline(deadline_str)
 
         # Cutoff date display
         cutoff_ts = data.get('cutoff_date', 0)
@@ -798,6 +926,9 @@ class DetailView(ft.Container):
 
     def update_detail(self, data: dict):
         self._view_generation += 1
+        sync_resp = getattr(self, "_sync_responsive_layout", None)
+        if callable(sync_resp):
+            sync_resp()
         self._loading_bar.visible  = False
         self._error_banner.visible = False
         self._title_text.value     = data.get("title", "Không có tiêu đề")
@@ -805,8 +936,26 @@ class DetailView(ft.Container):
         self._current_data         = data
         browser_available = self._is_safe_browser_url(self._current_url)
         self._open_btn.visible = browser_available
-        self._header_open_btn.visible = browser_available
+        self._header_open_btn.visible = browser_available and not self._embedded_in_pane
         self._content_col.controls.clear()
+
+        badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
+        self._badge_ctrl.content = ft.Text(
+            badge_text, size=10, color=badge_color, weight=ft.FontWeight.BOLD
+        )
+        self._badge_ctrl.border = ft.Border.all(1, badge_color)
+        self._badge_ctrl.visible = True
+
+        deadline_str = data.get("deadline", "")
+        cd_text, _, cd_color, _ = get_card_countdown(data)
+        if deadline_str:
+            self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
+            self._countdown_txt.value = cd_text or "Không xác định"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+        else:
+            self._deadline_txt.value = "Không giới hạn"
+            self._countdown_txt.value = cd_text or "Không giới hạn thời gian"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
 
         # UX-8: Dynamic CTA based on submission status and type
         sub_status = data.get("submission_status", "unknown")
@@ -837,10 +986,20 @@ class DetailView(ft.Container):
         self._submitted_files_col.controls.clear()
         self._submitted_area.visible = False
 
+        web_cta_icon = (
+            ft.Icons.WEB_ASSET_ROUNDED
+            if self._embedded_in_pane
+            else ft.Icons.OPEN_IN_BROWSER_ROUNDED
+        )
+        web_cta_label = (
+            "Mở trang gốc ngay trong ứng dụng"
+            if self._embedded_in_pane
+            else "Mở trong trình duyệt"
+        )
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
-            # CTA chính → mở browser (fallback)
-            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            # CTA chính → mở browser (fallback) hoặc trình duyệt trong app
+            self._cta_icon.name = web_cta_icon
+            self._cta_text.value = web_cta_label
             self._open_btn.bgcolor = C.SURFACE
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
@@ -866,7 +1025,14 @@ class DetailView(ft.Container):
 
         # Load submitted files in background (for assignments)
         if is_assignment and data.get("site_identity") == "thnn":
-            submission_context_reason = "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. Vui lòng mở trong trình duyệt."
+            submission_context_reason = (
+                "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. "
+                + (
+                    "Vui lòng mở trang gốc trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Vui lòng mở trong trình duyệt."
+                )
+            )
         elif is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
@@ -878,13 +1044,15 @@ class DetailView(ft.Container):
                 )
             elif not self._is_native_submission_url(url):
                 submission_context_reason = (
-                    "Đường dẫn này không phải bài tập Moodle. "
-                    "Hãy mở trong trình duyệt."
+                    "Đường dẫn này không phải bài tập Moodle. Hãy mở trực tiếp trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Đường dẫn này không phải bài tập Moodle. Hãy mở trong trình duyệt."
                 )
             elif not course_context_valid:
                 submission_context_reason = (
-                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
-                    "Hãy mở bài tập trong trình duyệt."
+                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trực tiếp trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt."
                 )
             else:
                 try:
@@ -922,16 +1090,16 @@ class DetailView(ft.Container):
                         "Hãy mở bài tập trong trình duyệt."
                     )
             if submission_context_reason:
-                self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._cta_text.value = "Mở trong trình duyệt"
+                self._cta_icon.name = web_cta_icon
+                self._cta_text.value = web_cta_label
                 self._open_btn.bgcolor = C.SURFACE
                 self._open_btn.border = ft.Border.all(1, C.ACCENT)
                 self._cta_text.color = C.ACCENT
                 self._cta_icon.color = C.ACCENT
         else:
             self._submission_area.visible = False
-            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_icon.name = web_cta_icon
+            self._cta_text.value = web_cta_label
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
             self._cta_text.color = C.ON_ACCENT
@@ -982,6 +1150,7 @@ class DetailView(ft.Container):
         if not isinstance(status_data, dict):
             status_data = {}
         rows = []
+        label_w = 110 if (callable(getattr(self, "_is_narrow", None)) and self._is_narrow()) else 130
         has_submission_status = False
         self._submission_status_value.value = "Đang đồng bộ với Moodle..."
         self._submission_status_value.color = C.TEXT_SECONDARY
@@ -1026,7 +1195,7 @@ class DetailView(ft.Container):
 
                 rows.append(
                     ft.Row(controls=[
-                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
+                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=label_w),
                         value_control,
                     ], spacing=8)
                 )
@@ -1039,7 +1208,7 @@ class DetailView(ft.Container):
                             "Trạng thái nộp bài",
                             size=12,
                             color=C.TEXT_SECONDARY,
-                            width=130,
+                            width=label_w,
                         ),
                         self._submission_status_value,
                     ],
@@ -1059,13 +1228,13 @@ class DetailView(ft.Container):
         time_limit = details.get("time_limit")
         if attempts:
             quiz_rows.append(ft.Row(controls=[
-                ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=130),
-                ft.Text(attempts, size=12, color=C.TEXT_PRIMARY),
+                ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=label_w),
+                ft.Text(attempts, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
         if time_limit:
             quiz_rows.append(ft.Row(controls=[
-                ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=130),
-                ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY),
+                ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=label_w),
+                ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
         for info in details.get("quiz_info", []):
             if info and attempts not in info and time_limit not in info:
@@ -1148,9 +1317,19 @@ class DetailView(ft.Container):
 
         # Chỉ thay đổi giao diện, không tự gọi update
 
+    async def _launch_or_open_url(self, url: str) -> None:
+        if not self._is_safe_browser_url(url):
+            return
+        if callable(self._on_open_url):
+            res = self._on_open_url(url)
+            if inspect.isawaitable(res):
+                await res
+            return
+        await ft.UrlLauncher().launch_url(url)
+
     async def _handle_link_tap(self, e):
         try:
-            await ft.UrlLauncher().launch_url(e.data)
+            await self._launch_or_open_url(str(getattr(e, "data", "") or ""))
         except Exception as exc:
             logger.warning(f"Failed to launch url {e.data}: {exc}")
 
@@ -1173,12 +1352,7 @@ class DetailView(ft.Container):
         )
 
     async def _open_browser(self, e):
-        if not self._is_safe_browser_url(self._current_url):
-            return
-
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        await self._launch_or_open_url(self._current_url)
 
     # In-App Submission
 
@@ -1772,6 +1946,7 @@ class DetailView(ft.Container):
             if result.ok and result.snapshot is not None:
                 self._apply_submission_snapshot(result.snapshot)
             elif result.issue is not None:
+                self._resolve_pending_submission_status_on_error()
                 failed = SubmissionMutationResult.failure(result.issue, None)
                 self._show_upload_status(mutation_message(failed), C.CRITICAL)
             self._page.update()
@@ -1784,10 +1959,29 @@ class DetailView(ft.Container):
                 course_id,
             ):
                 return
+            self._resolve_pending_submission_status_on_error()
             self._show_upload_status(
                 "Không thể kiểm tra trạng thái bài nộp mới nhất.", C.CRITICAL
             )
             self._page.update()
+
+    def _resolve_pending_submission_status_on_error(self) -> None:
+        """Clear stuck 'Đang đồng bộ với Moodle...' label when snapshot fetch fails."""
+        if getattr(self._submission_status_value, "value", "") != "Đang đồng bộ với Moodle...":
+            return
+        fallback_raw = str(
+            getattr(self, "_last_server_status", "")
+            or (self._current_data or {}).get("submission_status")
+            or ""
+        ).strip()
+        if fallback_raw and fallback_raw.lower() not in {"unknown", "none", "-"}:
+            mapped = DetailView._map_submission_status(fallback_raw)
+            is_ok = any(k in mapped.lower() for k in ("đã nộp", "đã chấm", "hoàn thành"))
+            self._submission_status_value.value = mapped
+            self._submission_status_value.color = C.SAFE if is_ok else C.WARNING
+            return
+        self._submission_status_value.value = "Chưa thể đồng bộ trực tuyến"
+        self._submission_status_value.color = C.WARNING
 
     def _is_current_snapshot_load(
         self,
@@ -1850,12 +2044,10 @@ class DetailView(ft.Container):
         )
 
     async def _on_edit_submitted(self, e):
-        """Mở trình duyệt để chỉnh sửa bài nộp."""
+        """Mở trang bài nộp ngay trong app hoặc trình duyệt để chỉnh sửa."""
         if not self._current_url:
             return
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        await self._launch_or_open_url(self._current_url)
 
     # File Edit Dialog
 
@@ -1871,6 +2063,9 @@ class DetailView(ft.Container):
         self._edit_status.value = ""
         self._edit_status.visible = False
 
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._file_edit_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -1903,6 +2098,9 @@ class DetailView(ft.Container):
                 )
         else:
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -1934,6 +2132,9 @@ class DetailView(ft.Container):
         else:
             file_list = "\n".join(f"  • {n}" for n in names)
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa {len(names)} file?\n{file_list}"
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
