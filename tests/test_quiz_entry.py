@@ -160,10 +160,37 @@ def test_resume_is_entered_without_new_attempt_confirmation(monkeypatch):
         _release(prepared, lease)
 
 
-def test_password_is_required_and_wrong_password_can_be_retried(monkeypatch):
+@pytest.mark.parametrize(
+    "label,expected_mode",
+    [
+        ("Tiếp tục làm bài", "resume"),
+        ("Attempt quiz", "start"),
+        ("Thực hiện đề thi", "start"),
+    ],
+)
+def test_moodle_default_labels_are_classified(label, expected_mode):
+    assert quiz_entry._label_mode([label]) == expected_mode
+
+
+def test_conflicting_start_and_resume_controls_remain_ambiguous():
+    assert quiz_entry._label_mode(["Continue attempt", "Start attempt"]) is None
+
+
+@pytest.mark.parametrize(
+    "wrong_text",
+    [
+        "Sai mật khẩu",
+        "The password entered was incorrect",
+        "Mật khẩu đã nhập không đúng",
+        "Mật khẩu đã nhập không chính xác",
+    ],
+)
+def test_password_is_required_and_wrong_password_can_be_retried(
+    monkeypatch, wrong_text
+):
     def respond(data, calls, _overview_state):
         if data.get("quizpassword") == "private-wrong-password":
-            return "https://courses.ut.edu.vn/mod/quiz/view.php?id=52", "Sai mật khẩu"
+            return "https://courses.ut.edu.vn/mod/quiz/view.php?id=52", wrong_text
         return (
             "https://courses.ut.edu.vn/mod/quiz/summary.php?attempt=81",
             "<html>Summary</html>",

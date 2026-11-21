@@ -192,7 +192,7 @@ def _label_mode(labels: list[str]) -> str | None:
         "làm tiếp",
     )
     start_phrases = (
-        "attempt quiz now",
+        "attempt quiz",
         "start attempt",
         "start a new attempt",
         "re-attempt quiz",
@@ -200,13 +200,20 @@ def _label_mode(labels: list[str]) -> str | None:
         "bắt đầu",
         "làm bài",
         "thực hiện bài",
+        "thực hiện đề thi",
         "thực hiện lại đề thi",
     )
-    resume = any(any(phrase in label for phrase in resume_phrases) for label in normalized)
-    start = any(any(phrase in label for phrase in start_phrases) for label in normalized)
-    if resume == start:
+    modes = set()
+    for label in normalized:
+        if any(phrase in label for phrase in resume_phrases):
+            # A resume label can also contain a broad start phrase such as
+            # "làm bài"; classify the more specific intent first.
+            modes.add("resume")
+        elif any(phrase in label for phrase in start_phrases):
+            modes.add("start")
+    if len(modes) != 1:
         return None
-    return "resume" if resume else "start"
+    return modes.pop()
 
 
 def _page_reason(text: str) -> str:
@@ -362,9 +369,12 @@ def _wrong_password(text: str) -> bool:
             "wrong password",
             "incorrect password",
             "password is incorrect",
+            "the password entered was incorrect",
             "sai mật khẩu",
             "mật khẩu không đúng",
             "mật khẩu không hợp lệ",
+            "mật khẩu đã nhập không đúng",
+            "mật khẩu đã nhập không chính xác",
         )
     )
 

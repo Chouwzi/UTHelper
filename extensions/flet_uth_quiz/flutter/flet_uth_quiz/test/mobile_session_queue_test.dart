@@ -33,4 +33,17 @@ void main() {
       third!.release();
     },
   );
+
+  test('does not grant another shared-store lease after cleanup is disabled',
+      () async {
+    final queue = MobileSessionQueue();
+    final active = await queue.acquire(cancelled: Completer<void>().future);
+    expect(active, isNotNull);
+
+    queue.disable();
+    active!.release();
+
+    final next = await queue.acquire(cancelled: Completer<void>().future);
+    expect(next, isNull);
+  });
 }

@@ -344,35 +344,17 @@ class AppController:
 
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
+
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "user", screen="login")
+
         async def _on_login_success():
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             # UX-5: Show success snackbar after dialog closes
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
-            self._portal_client.clear_token()
-            # Flip identity and the schedule cache BEFORE any task is queued:
-            # otherwise the first reminder reconcile after login compares
-            # against the old identity and is mistaken for an account change.
-            self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
-            schedule_namespace = (
-                f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
-                if settings.UTH_USERNAME
-                else f"{settings.PORTAL_API_BASE}|anonymous"
-            )
-            self._today_schedule_coordinator.replace_cache(
-                TodayScheduleCache(namespace=schedule_namespace)
-            )
-            # Tear down the PREVIOUS account's armed class reminders before the
-            # new snapshot is fetched: running refresh("login") first would let
-            # the fresh schedule land and only afterwards be wiped by the
-            # older clear. Ordering the tasks here is what makes the swap safe.
-            self._safe_run_task(
-                self._reconcile_class_schedule_notifications, (), clear_only=True
-            )
-            self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
-            await self._load_data_async()
+            await self._complete_login_success()
+
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
 
     async def _show_quiz_auth_dialog(self, retry_callback):
@@ -385,15 +367,65 @@ class AppController:
         async def _on_login_success():
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
-            try:
-                self._portal_client.clear_token()
-            except Exception:
-                logger.debug("Portal token clear failed after quiz login", exc_info=True)
-            self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
-            await self._load_data_async()
+            await self._complete_login_success()
             await retry_callback()
 
-        await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+        await show_login_dialog(
+            self.page,
+            self.orchestrator,
+            _on_login_success,
+            allow_cancel=True,
+        )
+
+    async def _complete_login_success(self) -> None:
+        """Switch account-owned caches and schedules after either login flow."""
+        try:
+            self._portal_client.clear_token()
+        except Exception:
+            logger.debug("Portal token clear failed after login", exc_info=True)
+
+        new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        identity_changed = new_identity != self._settings_identity
+        # Identity must flip before any account-bound background work is queued.
+        self._settings_identity = new_identity
+
+        if identity_changed:
+            try:
+                self.orchestrator.moodle_service.clear_all_caches()
+                self.orchestrator.clear_detail_cache()
+                self.orchestrator._userid_cache = None
+            except Exception:
+                logger.debug("Moodle cache clear failed after login", exc_info=True)
+
+            from core.data_cache import DataCache
+
+            cache_namespace = (
+                f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}"
+                if settings.UTH_USERNAME
+                else None
+            )
+            self._data_cache = DataCache(namespace=cache_namespace)
+
+        schedule_namespace = (
+            f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
+            if settings.UTH_USERNAME
+            else f"{settings.PORTAL_API_BASE}|anonymous"
+        )
+        self._today_schedule_coordinator.replace_cache(
+            TodayScheduleCache(namespace=schedule_namespace)
+        )
+        self._today_schedule_state = TodayScheduleViewState(ScheduleLoadStatus.IDLE)
+        component = getattr(self, "_today_schedule_component", None)
+        if component is not None:
+            component.set_state(self._today_schedule_state)
+
+        # Clear old-account reminders before the newly authenticated schedule
+        # can be reconciled and armed.
+        self._safe_run_task(
+            self._reconcile_class_schedule_notifications, (), clear_only=True
+        )
+        self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
+        await self._load_data_async()
 
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
