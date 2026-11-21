@@ -32,7 +32,7 @@ on:
         type: boolean
         default: false
   pull_request:
-    branches: [main]
+    branches: [develop, main]
     paths:
       - 'scripts/package_msix.ps1'
       - 'scripts/verify_msix_release.ps1'
@@ -204,11 +204,62 @@ jobs:
           if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
             $verifyArgs.StoreProductId = $storeProductId
           }
-          if ($env:INPUT_RUN_WACK -eq "true") {
-            $verifyArgs.RunWack = $true
-            $verifyArgs.WackReportPath = "evidence/UTHelper-$version-msstore.wack-report.xml"
-          }
           ./scripts/verify_msix_release.ps1 @verifyArgs
+
+          if ($env:INPUT_RUN_WACK -eq "true") {
+            $wackMsix = $outputMsix
+            $wackTempDir = $null
+            $importedThumbprint = $null
+            try {
+              if ($signMode -eq "none") {
+                $wackTempDir = "build/wack"
+                New-Item -ItemType Directory -Path $wackTempDir -Force | Out-Null
+                $wackMsix = "$wackTempDir/UTHelper-$version-msstore-wack.msix"
+                $wackPackArgs = @{
+                  BundleDir    = "build/windows"
+                  Version      = $msixVersion
+                  IdentityName = $identityName
+                  Publisher    = $publisher
+                  Channel      = "msstore"
+                  SignMode     = "test"
+                  Output       = $wackMsix
+                }
+                if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
+                  $wackPackArgs.StoreProductId = $storeProductId
+                }
+                ./scripts/package_msix.ps1 @wackPackArgs
+              }
+
+              $cerPath = $wackMsix + ".test-cert.cer"
+              if (Test-Path -LiteralPath $cerPath -PathType Leaf) {
+                $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
+                $importedThumbprint = $cert.Thumbprint
+                & certutil.exe -f -addstore Root $cerPath
+                if ($LASTEXITCODE -ne 0) { throw "Failed to trust test certificate for WACK" }
+              }
+
+              $wackVerifyArgs = @{
+                MsixPath       = $wackMsix
+                Channel        = "msstore"
+                IdentityName   = $identityName
+                Publisher      = $publisher
+                Version        = $msixVersion
+                RunWack        = $true
+                WackReportPath = "evidence/UTHelper-$version-msstore.wack-report.xml"
+              }
+              if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
+                $wackVerifyArgs.StoreProductId = $storeProductId
+              }
+              ./scripts/verify_msix_release.ps1 @wackVerifyArgs
+            } finally {
+              if ($importedThumbprint) {
+                & certutil.exe -delstore Root $importedThumbprint | Out-Null
+              }
+              if ($wackTempDir -and (Test-Path -LiteralPath $wackTempDir)) {
+                Remove-Item -LiteralPath $wackTempDir -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
 
       - name: Upload Microsoft Store MSIX and verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -222,11 +273,11 @@ jobs:
           if-no-files-found: error
 
       - name: Upload WACK certification report
-        if: ${{ inputs.run_wack }}
+        if: ${{ (success() || failure()) && inputs.run_wack }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         timeout-minutes: 5
         with:
           name: msstore-wack-report-${{ env.MSSTORE_VERSION }}-${{ github.sha }}
           path: evidence/UTHelper-${{ env.MSSTORE_VERSION }}-msstore.wack-report.xml
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn

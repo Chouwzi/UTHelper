@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
-from collections.abc import Callable
-from typing import Literal
+from collections.abc import Callable, Iterable, Mapping
+from typing import Literal, Protocol
 import os
 from pathlib import Path
 import sys
@@ -40,6 +40,16 @@ def is_android():
         or "android" in sys.platform.lower()
         or hasattr(sys, "_IOS_")
         or sys.platform == "ios"
+    )
+
+
+def _is_real_android() -> bool:
+    if bool(getattr(sys, "_IOS_", False)) or sys.platform == "ios":
+        return False
+    return (
+        bool(getattr(sys, "_ANDROID_", False))
+        or hasattr(sys, "getandroidapilevel")
+        or "android" in sys.platform.lower()
     )
 
 def is_windows():
@@ -90,8 +100,57 @@ _SECRET_FIELDS = {
 
 
 
+class SecretStoreBackend(Protocol):
+    def read_secret(self, key: str) -> str: ...
+    def write_secret(self, key: str, value: str) -> bool: ...
+    def snapshot_secrets(self, keys: Iterable[str]) -> dict[str, str] | None: ...
+    def restore_secrets(self, snapshot: Mapping[str, str]) -> bool: ...
+    def write_all(self, values: Mapping[str, str]) -> bool: ...
+
+
+_secret_backend: SecretStoreBackend | None = None
+_pending_plaintext_migration: dict[str, str] = {}
+
+
+def register_secret_backend(backend: SecretStoreBackend | None) -> None:
+    """Register or clear a runtime native secret storage backend (e.g. AndroidKeyStore)."""
+    global _secret_backend
+    with _settings_save_lock:
+        _secret_backend = backend
+
+
+def hydrate_secrets(values: Mapping[str, str]) -> None:
+    """Populate in-memory settings secret attributes from a secure-store mapping."""
+    with _settings_save_lock:
+        for attr, key_suffix in _SECRET_FIELDS.items():
+            if key_suffix in values:
+                raw = values[key_suffix]
+            elif attr in values:
+                raw = values[attr]
+            else:
+                continue
+            setattr(settings, attr, str(raw) if raw else "")
+
+
+def pop_pending_plaintext_migration() -> dict[str, str]:
+    """Return and clear any legacy plaintext JSON secrets captured on Android startup."""
+    with _settings_save_lock:
+        if not _pending_plaintext_migration:
+            return {}
+        pending = dict(_pending_plaintext_migration)
+        _pending_plaintext_migration.clear()
+        return pending
+
+
 def _read_secret(key: str) -> str:
-    """Đọc secret từ secure storage (keyring)."""
+    """Đọc secret từ secure storage (native backend hoặc keyring)."""
+    if _secret_backend is not None:
+        try:
+            val = _secret_backend.read_secret(key)
+            return str(val) if val else ""
+        except Exception:
+            logging.getLogger(__name__).debug("Secret backend read failed", exc_info=True)
+            return ""
     if _HAS_KEYRING:
         try:
             val = keyring.get_password(KEYRING_SERVICE_NAME, key)
@@ -111,6 +170,12 @@ def _write_secret(key: str, value: str) -> bool:
     invalidated.
     """
     _logger = logging.getLogger(__name__)
+    if _secret_backend is not None:
+        try:
+            return bool(_secret_backend.write_secret(key, value))
+        except Exception as exc:
+            _logger.warning("Native secret backend write failed: %s", type(exc).__name__)
+            return False
     if _HAS_KEYRING:
         try:
             if value:
@@ -129,7 +194,7 @@ def _write_secret(key: str, value: str) -> bool:
 
 def _has_any_secure_backend() -> bool:
     """Kiểm tra có backend nào an toàn hay không."""
-    return _HAS_KEYRING
+    return _HAS_KEYRING or (_secret_backend is not None)
 
 
 _settings_save_lock = threading.RLock()
@@ -165,7 +230,19 @@ def _notify_settings_saved() -> None:
 
 
 def _snapshot_secure_secrets() -> dict[str, str] | None:
-    """Capture all keyring values before starting a settings transaction."""
+    """Capture all secure-store values before starting a settings transaction."""
+    if _secret_backend is not None:
+        try:
+            snap = _secret_backend.snapshot_secrets(_SECRET_FIELDS.values())
+            if snap is None:
+                return None
+            return {key: str(snap.get(key, "") or "") for key in _SECRET_FIELDS.values()}
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Cannot snapshot native secure settings before save: %s",
+                type(exc).__name__,
+            )
+            return None
     if not _HAS_KEYRING:
         return None
     snapshot: dict[str, str] = {}
@@ -183,7 +260,17 @@ def _snapshot_secure_secrets() -> dict[str, str] | None:
 
 
 def _restore_secure_secrets(snapshot: dict[str, str]) -> bool:
-    """Compensate keyring mutations after a failed settings transaction."""
+    """Compensate secure-store mutations after a failed settings transaction."""
+    if _secret_backend is not None:
+        try:
+            restored = bool(_secret_backend.restore_secrets(snapshot))
+        except Exception:
+            restored = False
+        if not restored:
+            logging.getLogger(__name__).critical(
+                "Secure settings rollback was incomplete; JSON was not committed"
+            )
+        return restored
     restored = True
     for key_suffix, value in snapshot.items():
         if not _write_secret(key_suffix, value):
@@ -404,11 +491,18 @@ def load_settings() -> Settings:
         if val:
             setattr(s, attr, val)
 
-    # Tier 2 fallback: restore secrets từ JSON
+    # Tier 2 fallback: restore secrets từ JSON (trên Android chỉ giữ trong RAM để migrate)
     if not _has_any_secure_backend():
         for attr, val in json_secrets.items():
             if not getattr(s, attr, ''):
                 setattr(s, attr, val)
+        if _is_real_android():
+            with _settings_save_lock:
+                _pending_plaintext_migration.clear()
+                for attr, val in json_secrets.items():
+                    key_suffix = _SECRET_FIELDS.get(attr)
+                    if key_suffix and val:
+                        _pending_plaintext_migration[key_suffix] = val
 
     # Legacy migration
     if _HAS_KEYRING and s.UTH_USERNAME and not s.UTH_PASSWORD:
@@ -426,32 +520,60 @@ def load_settings() -> Settings:
 settings = load_settings()
 
 def save_settings() -> bool:
-    """Persist settings transactionally across keyring and JSON storage."""
+    """Persist settings transactionally across secure storage and JSON storage."""
     _logger = logging.getLogger(__name__)
     with _settings_save_lock:
         has_secure = _has_any_secure_backend()
         data = settings.model_dump()
         if not has_secure:
-            for attr in _SECRET_FIELDS:
-                value = getattr(settings, attr, "")
-                if value:
-                    data[attr] = value
-            _logger.warning(
-                "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
-            )
+            if _is_real_android():
+                has_non_empty_secret = any(
+                    bool(getattr(settings, attr, "")) for attr in _SECRET_FIELDS
+                )
+                if has_non_empty_secret:
+                    _logger.warning(
+                        "Refusing to persist plaintext secrets on Android without a secure backend"
+                    )
+                    return False
+            else:
+                for attr in _SECRET_FIELDS:
+                    value = getattr(settings, attr, "")
+                    if value:
+                        data[attr] = value
+                _logger.warning(
+                    "⚠️ CẢNH BÁO BẢO MẬT: Không tìm thấy secure storage."
+                )
 
         previous_secrets: dict[str, str] | None = None
         if has_secure:
             previous_secrets = _snapshot_secure_secrets()
             if previous_secrets is None:
                 return False
-            for attr, key_suffix in _SECRET_FIELDS.items():
-                value = getattr(settings, attr, "")
-                if previous_secrets.get(key_suffix, "") == value:
-                    continue
-                if not _write_secret(key_suffix, value):
-                    _restore_secure_secrets(previous_secrets)
-                    return False
+            if _secret_backend is not None:
+                desired_secrets = {
+                    key_suffix: getattr(settings, attr, "")
+                    for attr, key_suffix in _SECRET_FIELDS.items()
+                }
+                if desired_secrets != previous_secrets:
+                    try:
+                        wrote = bool(_secret_backend.write_all(desired_secrets))
+                    except Exception as exc:
+                        _logger.warning(
+                            "Native secret backend batch write failed: %s",
+                            type(exc).__name__,
+                        )
+                        wrote = False
+                    if not wrote:
+                        _restore_secure_secrets(previous_secrets)
+                        return False
+            else:
+                for attr, key_suffix in _SECRET_FIELDS.items():
+                    value = getattr(settings, attr, "")
+                    if previous_secrets.get(key_suffix, "") == value:
+                        continue
+                    if not _write_secret(key_suffix, value):
+                        _restore_secure_secrets(previous_secrets)
+                        return False
 
         try:
             from core.safe_file_io import SafeFileIO

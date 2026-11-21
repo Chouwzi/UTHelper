@@ -1930,8 +1930,12 @@ def make_synthetic_aab(
     dex_bytes = make_minimal_dex(dex_strings)
     xml_text = manifest_xml if manifest_xml is not None else _default_manifest_xml(package_id, chplay_compliant=True)
 
+    bundle_config_pb = (
+        b"\x0a\x08\x12\x061.18.1"
+        b"\x12\x06\x12\x04\x08\x01\x10\x02"
+    )
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_STORED) as zf:
-        zf.writestr("BundleConfig.pb", b"\x08\x01")
+        zf.writestr("BundleConfig.pb", bundle_config_pb)
         zf.writestr("base/manifest/AndroidManifest.xml", xml_text.encode("utf-8"))
         if not extra_dex_files or "base/dex/classes.dex" not in extra_dex_files:
             zf.writestr("base/dex/classes.dex", dex_bytes)

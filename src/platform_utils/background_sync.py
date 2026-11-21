@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -167,6 +170,137 @@ class AndroidBackgroundBridge:
     async def logout(self) -> None:
         if self.service:
             await self.service.logout()
+
+    async def read_app_secrets(self) -> dict[str, str]:
+        if not self.service:
+            return {}
+        read_fn = getattr(self.service, "read_app_secrets", None)
+        if not callable(read_fn):
+            return {}
+        raw = await read_fn()
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): str(v)
+            for k, v in raw.items()
+            if isinstance(k, str) and v is not None and str(v) != ""
+        }
+
+    async def write_app_secrets(self, secrets: Mapping[str, str]) -> bool:
+        if not self.service:
+            return False
+        write_fn = getattr(self.service, "write_app_secrets", None)
+        if not callable(write_fn):
+            return False
+        payload = {
+            str(k): str(v)
+            for k, v in secrets.items()
+            if isinstance(k, str) and v is not None and str(v) != ""
+        }
+        return bool(await write_fn(payload))
+
+    async def clear_app_secrets(self) -> bool:
+        if not self.service:
+            return False
+        clear_fn = getattr(self.service, "clear_app_secrets", None)
+        if not callable(clear_fn):
+            return False
+        return bool(await clear_fn())
+
+
+class AndroidSecretBackend:
+    """Thread-safe sync-to-async secret store backed by AndroidBackgroundBridge."""
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        bridge: AndroidBackgroundBridge,
+        initial_secrets: Mapping[str, str] | None = None,
+        *,
+        timeout: float = 5.0,
+        loop_thread_id: int | None = None,
+    ) -> None:
+        self._loop = loop
+        self._bridge = bridge
+        self._timeout = max(0.1, float(timeout))
+        self._loop_thread_id = (
+            loop_thread_id
+            if loop_thread_id is not None
+            else getattr(loop, "_thread_id", None)
+        )
+        self._lock = threading.RLock()
+        self._cache: dict[str, str] = {}
+        self.replace_cached_secrets(initial_secrets or {})
+
+    def replace_cached_secrets(self, values: Mapping[str, str]) -> None:
+        with self._lock:
+            self._cache = {
+                str(k): str(v)
+                for k, v in values.items()
+                if isinstance(k, str) and v is not None and str(v) != ""
+            }
+
+    def _is_on_loop_thread(self) -> bool:
+        try:
+            if asyncio.get_running_loop() is self._loop:
+                return True
+        except RuntimeError:
+            pass
+        tid = self._loop_thread_id
+        if tid is None:
+            tid = getattr(self._loop, "_thread_id", None)
+        return tid is not None and threading.get_ident() == tid
+
+    def read_secret(self, key: str) -> str:
+        with self._lock:
+            return self._cache.get(key, "")
+
+    def snapshot_secrets(self, keys: Iterable[str]) -> dict[str, str]:
+        with self._lock:
+            return {key: self._cache.get(key, "") for key in keys}
+
+    def write_all(self, values: Mapping[str, str]) -> bool:
+        normalized = {
+            str(k): str(v)
+            for k, v in values.items()
+            if isinstance(k, str) and v is not None and str(v) != ""
+        }
+        if self._is_on_loop_thread():
+            logger.warning(
+                "Refusing blocking Android secret write on the event loop thread"
+            )
+            return False
+        if self._loop.is_closed():
+            logger.warning("Android secret write failed: event loop is closed")
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self._bridge.write_app_secrets(normalized),
+            self._loop,
+        )
+        try:
+            ok = bool(future.result(timeout=self._timeout))
+        except Exception as exc:
+            future.cancel()
+            logger.warning(
+                "Android secret vault write failed: %s", type(exc).__name__
+            )
+            return False
+        if ok:
+            with self._lock:
+                self._cache = dict(normalized)
+        return ok
+
+    def write_secret(self, key: str, value: str) -> bool:
+        with self._lock:
+            updated = dict(self._cache)
+            if value:
+                updated[key] = str(value)
+            else:
+                updated.pop(key, None)
+        return self.write_all(updated)
+
+    def restore_secrets(self, snapshot: Mapping[str, str]) -> bool:
+        return self.write_all(snapshot)
 
 
 def create_android_background_bridge(page):

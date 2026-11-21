@@ -29,7 +29,7 @@ def test_manifest_registers_alarm_lifecycle_receivers():
 def test_update_provider_is_unique_and_pre_s_alarms_remain_exact():
     provider = (
         ANDROID
-        / "src/main/kotlin/com/uthelper/backgroundsync/update/UthUpdateFileProvider.kt"
+        / "variants/apk_lts/kotlin/com/uthelper/backgroundsync/update/UthUpdateFileProvider.kt"
     ).read_text(encoding="utf-8")
     alarms = (
         ANDROID
@@ -39,14 +39,41 @@ def test_update_provider_is_unique_and_pre_s_alarms_remain_exact():
     assert "class UthUpdateFileProvider : FileProvider()" in provider
     assert "Build.VERSION.SDK_INT < Build.VERSION_CODES.S" in alarms
     assert "setExactAndAllowWhileIdle" in alarms
+    assert not (ANDROID / "src/main/kotlin/com/uthelper/backgroundsync/update").exists()
+    assert not (ANDROID / "src/main/res/xml/uth_update_paths.xml").exists()
+    assert not (ANDROID / "src/test/kotlin/com/uthelper/backgroundsync/update").exists()
+    assert (ANDROID / "variants/apk_lts/res/xml/uth_update_paths.xml").is_file()
+    assert list(
+        (ANDROID / "variants/apk_lts/test/kotlin/com/uthelper/backgroundsync/update").glob("*Test.kt")
+    )
 
 
-def test_token_vault_uses_keystore_and_no_backup_storage():
+def test_token_vault_and_app_secret_vault_use_keystore_and_strict_https():
     vault = next(ANDROID.rglob("CredentialVault.kt")).read_text(encoding="utf-8")
+    trusted_uri = next(ANDROID.rglob("TrustedMoodleUri.kt")).read_text(encoding="utf-8")
+    ws_client = next(ANDROID.rglob("MoodleWsClient.kt")).read_text(encoding="utf-8")
+    dispatcher = next(ANDROID.rglob("NotificationDispatcher.kt")).read_text(encoding="utf-8")
+    plugin = next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(encoding="utf-8")
+
     assert '"AndroidKeyStore"' in vault
     assert '"AES/GCM/NoPadding"' in vault
     assert "noBackupFilesDir" in vault
     assert "SharedPreferences" not in vault
+    assert "class AppSecretVault" in vault
+    assert "uthelper_app_secrets_v1" in vault
+    assert "uth_app_secrets.json" in vault
+    assert "http://" not in vault
+    assert "normalizeTrustedOrigin" in vault
+    assert "validateActivityUri" in trusted_uri
+    assert "instanceFollowRedirects = false" in ws_client
+    assert "validateActivityUri" in dispatcher
+    assert "getLaunchIntentForPackage" in dispatcher
+    assert '"read_app_secrets"' in plugin
+    assert '"write_app_secrets"' in plugin
+    assert '"clear_app_secrets"' in plugin
+    logout_block = plugin.split('"logout" ->', 1)[1].split("else ->", 1)[0]
+    assert "CredentialVault(context).clear()" in logout_block
+    assert "AppSecretVault" not in logout_block
 
 
 def test_foreground_import_is_revision_and_submission_safe():
@@ -152,8 +179,10 @@ def test_gradle_selects_chplay_sources_and_defaults_to_apk_lts():
     assert "variants/chplay/AndroidManifest.xml" in gradle
     assert "variants/chplay/kotlin" in gradle
     assert "variants/apk_lts/kotlin" in gradle
-    assert "com/uthelper/backgroundsync/update/**" in gradle
-    assert "xml/uth_update_paths.xml" in gradle
+    assert "variants/apk_lts/res" in gradle
+    assert "variants/apk_lts/test/kotlin" in gradle
+    assert "inputs.property('uthDistributionChannel', uthDistributionChannel)" in gradle
+    assert "kotlin.exclude" not in gradle
     assert "useLegacyPackaging = false" in gradle
 
 
@@ -279,6 +308,31 @@ def test_python_service_forwards_android_update_download_identity_and_deadlines(
     asyncio.run(service.cancel_update_download(*identity))
     assert captured["name"] == "cancel_update_download"
     assert captured["timeout"] == 30
+
+
+def test_python_service_forwards_app_secret_vault_rpcs(monkeypatch):
+    from flet_uth_background_sync import AndroidBackgroundSync
+
+    service = AndroidBackgroundSync()
+    calls = []
+
+    async def invoke(name, arguments=None, timeout=None):
+        calls.append((name, arguments, timeout))
+        if name == "read_app_secrets":
+            return {"UTH_PASSWORD": "pw", "BLANK": None}
+        return True
+
+    monkeypatch.setattr(service, "_invoke_method", invoke)
+
+    secrets = asyncio.run(service.read_app_secrets())
+    assert secrets == {"UTH_PASSWORD": "pw"}
+    assert asyncio.run(service.write_app_secrets({"UTH_PASSWORD": "pw"})) is True
+    assert asyncio.run(service.clear_app_secrets()) is True
+    assert calls == [
+        ("read_app_secrets", None, 5),
+        ("write_app_secrets", {"secrets": {"UTH_PASSWORD": "pw"}}, 5),
+        ("clear_app_secrets", None, 5),
+    ]
 
 
 def test_flutter_package_registers_ios_user_notifications_adapter():

@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import flet as ft
 import pytest
@@ -1564,4 +1565,181 @@ def test_checking_event_forwards_status_to_settings_view():
     asyncio.run(controller._apply_update_event(UpdateEvent(UpdateEventKind.CHECKING)))
 
     assert statuses == ["Đang kiểm tra cập nhật..."]
+
+
+def test_android_startup_sequence_hydrates_migrates_and_scrubs_before_sync(
+    monkeypatch, tmp_path
+):
+    import json
+    import config
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120001",
+                "UTH_PASSWORD": "legacy-password",
+                "THEME": "steel_light",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+
+    loaded = config.load_settings()
+    monkeypatch.setattr(config, "settings", loaded)
+    monkeypatch.setattr(app_controller_module, "settings", loaded)
+
+    events = []
+
+    class _FakeBridge:
+        available = True
+
+        def __init__(self):
+            self.vault = {"ws_token": "vault-ws", "ws_token_origin": "https://courses.ut.edu.vn"}
+
+        async def read_app_secrets(self):
+            events.append("read_vault")
+            return dict(self.vault)
+
+        async def write_app_secrets(self, secrets):
+            events.append(("write_vault", dict(secrets)))
+            self.vault = dict(secrets)
+            return True
+
+    scheduled_tasks = []
+
+    def fake_run_task(handler, *args, **kwargs):
+        task = asyncio.create_task(handler(*args, **kwargs))
+        scheduled_tasks.append(task)
+        return task
+
+    bridge = _FakeBridge()
+    controller = AppController.__new__(AppController)
+    controller._android_background = bridge
+    controller._page_alive = app_controller_module.threading.Event()
+    controller._page_alive.set()
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=fake_run_task,
+    )
+    controller._today_schedule_coordinator = SimpleNamespace(
+        run=AsyncMock(side_effect=lambda: events.append("schedule"))
+    )
+
+    async def fake_init_bg():
+        events.append("init_bg")
+
+    async def fake_load_data(trigger="manual"):
+        events.append(("load_data", trigger))
+
+    async def fake_login():
+        events.append("login")
+
+    controller._initialize_android_background = fake_init_bg
+    controller._load_data_async = fake_load_data
+    controller._show_login_dialog = fake_login
+    controller._schedule_cached_detail_hydration = lambda _has_cache: False
+    controller._schedule_card_detail_warmup = lambda: False
+
+    async def _run():
+        await controller._startup_android_sequence(True, False)
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+    try:
+        asyncio.run(_run())
+
+        assert events[0] == "read_vault"
+        assert events[1] == (
+            "write_vault",
+            {
+                "password": "legacy-password",
+                "ws_token": "vault-ws",
+                "ws_token_origin": "https://courses.ut.edu.vn",
+            },
+        )
+        assert "init_bg" in events
+        assert ("load_data", "startup") in events
+        assert "login" not in events
+        assert controller._settings_identity == ("2251120001", "legacy-password")
+        assert loaded.MOODLE_WS_TOKEN == "vault-ws"
+        scrubbed = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "UTH_PASSWORD" not in scrubbed
+    finally:
+        config.register_secret_backend(None)
+
+
+def test_android_startup_sequence_preserves_legacy_json_when_vault_write_fails(
+    monkeypatch, tmp_path
+):
+    import json
+    import config
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120001",
+                "UTH_PASSWORD": "legacy-password",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+
+    loaded = config.load_settings()
+    monkeypatch.setattr(config, "settings", loaded)
+    monkeypatch.setattr(app_controller_module, "settings", loaded)
+
+    class _FailingBridge:
+        available = True
+
+        async def read_app_secrets(self):
+            return {}
+
+        async def write_app_secrets(self, _secrets):
+            return False
+
+    scheduled_tasks = []
+
+    def fake_run_task(handler, *args, **kwargs):
+        task = asyncio.create_task(handler(*args, **kwargs))
+        scheduled_tasks.append(task)
+        return task
+
+    controller = AppController.__new__(AppController)
+    controller._android_background = _FailingBridge()
+    controller._page_alive = app_controller_module.threading.Event()
+    controller._page_alive.set()
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=fake_run_task,
+    )
+    controller._today_schedule_coordinator = SimpleNamespace(run=AsyncMock())
+    controller._initialize_android_background = AsyncMock()
+    controller._load_data_async = AsyncMock()
+    controller._show_login_dialog = AsyncMock()
+    controller._schedule_cached_detail_hydration = lambda _has_cache: False
+    controller._schedule_card_detail_warmup = lambda: False
+
+    async def _run():
+        await controller._startup_android_sequence(False, True)
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+    try:
+        asyncio.run(_run())
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        assert raw["UTH_PASSWORD"] == "legacy-password"
+    finally:
+        config.register_secret_backend(None)
 

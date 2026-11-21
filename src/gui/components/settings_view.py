@@ -2351,6 +2351,7 @@ class SettingsView(ft.Container):
     def _on_autostart_toggle(self, _event):
         self._sync_autostart_dependency()
         self._autostart_status.value = ""
+        self._autostart_status.visible = False
         if hasattr(self, "_on_form_field_change"):
             self._on_form_field_change()
         try:
@@ -2369,6 +2370,7 @@ class SettingsView(ft.Container):
         self._sync_autostart_dependency()
         self._autostart_status.value = result.message
         self._autostart_status.color = C.SAFE if result.success else C.WARNING
+        self._autostart_status.visible = bool(result.message)
 
     async def _load_autostart_state(
         self, generation: int
@@ -2648,6 +2650,10 @@ class SettingsView(ft.Container):
                 self._sw_start_with_windows.disabled = True
                 self._autostart_status.value = "Đang kiểm tra trạng thái Windows..."
                 self._autostart_status.color = C.TEXT_SECONDARY
+                self._autostart_status.visible = True
+            else:
+                self._autostart_status.value = ""
+                self._autostart_status.visible = False
             self.update()
 
             autostart = await self._load_autostart_state(generation)
@@ -2951,7 +2957,7 @@ class SettingsView(ft.Container):
                     display_result = replace(result, enabled=actual)
                 self._apply_autostart_ui(display_result)
 
-            if not self._persist_snapshot_to_settings(persisted):
+            if not await asyncio.to_thread(self._persist_snapshot_to_settings, persisted):
                 autostart_restored = True
                 if (
                     autostart_may_need_compensation

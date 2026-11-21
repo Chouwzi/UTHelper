@@ -15,6 +15,7 @@ import com.uthelper.backgroundsync.data.UthDatabase
 import com.uthelper.backgroundsync.notification.AlarmScheduler
 import com.uthelper.backgroundsync.notification.ClassScheduleAlarmScheduler
 import com.uthelper.backgroundsync.notification.NotificationReconciler
+import com.uthelper.backgroundsync.security.AppSecretVault
 import com.uthelper.backgroundsync.security.CredentialVault
 import com.uthelper.backgroundsync.worker.BackgroundSyncScheduler
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -73,6 +74,26 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     call.argument<String>("token").orEmpty(),
                 )
                 null
+            }
+            "read_app_secrets" -> execute(result) {
+                AppSecretVault(context).readAll()
+            }
+            "write_app_secrets" -> execute(result) {
+                val raw = call.argument<Map<*, *>>("secrets") ?: emptyMap<Any, Any>()
+                val sanitized = linkedMapOf<String, String>()
+                for ((k, v) in raw) {
+                    val key = k?.toString()?.trim().orEmpty()
+                    val value = v?.toString().orEmpty()
+                    if (key.isNotEmpty() && value.isNotBlank()) {
+                        sanitized[key] = value
+                    }
+                }
+                AppSecretVault(context).writeAll(sanitized)
+                true
+            }
+            "clear_app_secrets" -> execute(result) {
+                AppSecretVault(context).clear()
+                true
             }
             "schedule_periodic" -> execute(result) {
                 val interval = call.argument<Number>("interval_minutes")?.toInt() ?: 60

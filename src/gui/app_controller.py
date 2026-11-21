@@ -43,7 +43,15 @@ from platform_utils.android_updates import (
     AndroidPackageLauncher,
     AndroidPackageVerifier,
 )
-from config import get_sync_interval_minutes, save_settings, settings
+from config import (
+    get_sync_interval_minutes,
+    hydrate_secrets,
+    pop_pending_plaintext_migration,
+    register_secret_backend,
+    save_settings,
+    settings,
+)
+from platform_utils.background_sync import AndroidSecretBackend
 from platform_utils.update_packages import (
     DownloadedPackageVerifier,
     detect_runtime_target,
@@ -286,24 +294,35 @@ class AppController:
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._pulse_critical_cards_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
-        if not needs_initial_sync:
-            hydration_started = self._schedule_cached_detail_hydration(
-                has_cached_snapshot
-            )
-            if not hydration_started:
-                self._schedule_card_detail_warmup()
-        self._safe_run_task(self._today_schedule_coordinator.run)
-        if self._android_background and self._android_background.available:
-            self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
 
         if self._update_coordinator is not None:
             self._update_coordinator.start()
 
-        if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
-            self._safe_run_task(self._show_login_dialog)
+        if (
+            platform_utils.IS_ANDROID
+            and self._android_background
+            and self._android_background.available
+        ):
+            self._safe_run_task(
+                self._startup_android_sequence,
+                has_cached_snapshot,
+                needs_initial_sync,
+            )
         else:
-            self._safe_run_task(self._load_data_async, "startup")
+            if not needs_initial_sync:
+                hydration_started = self._schedule_cached_detail_hydration(
+                    has_cached_snapshot
+                )
+                if not hydration_started:
+                    self._schedule_card_detail_warmup()
+            self._safe_run_task(self._today_schedule_coordinator.run)
+            if self._android_background and self._android_background.available:
+                self._safe_run_task(self._initialize_android_background)
+            if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
+                self._safe_run_task(self._show_login_dialog)
+            else:
+                self._safe_run_task(self._load_data_async, "startup")
 
     def _diag_screen(self, screen: str) -> None:
         recorder = getattr(self, "_diagnostic_recorder", None)
@@ -2079,6 +2098,77 @@ class AppController:
         return not has_cached_snapshot or bool(
             getattr(self, "_cache_requires_server_refresh", False)
         )
+
+    async def _startup_android_sequence(
+        self,
+        has_cached_snapshot: bool = False,
+        needs_initial_sync: bool = True,
+    ) -> None:
+        """Hydrate AndroidKeyStore secrets, migrate legacy JSON, and start sync."""
+        bridge = getattr(self, "_android_background", None)
+        if bridge and bridge.available:
+            vault_secrets: dict[str, str] = {}
+            vault_read_ok = False
+            retry_delays = (0.05, 0.1, 0.2, 0.4, 0.6, 0.65)
+            for attempt, delay in enumerate((0.0, *retry_delays)):
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                page_alive = getattr(self, "_page_alive", None)
+                if page_alive is not None and not page_alive.is_set():
+                    return
+                try:
+                    vault_secrets = await bridge.read_app_secrets()
+                    vault_read_ok = True
+                    break
+                except Exception as exc:
+                    if attempt == len(retry_delays):
+                        logger.warning(
+                            "Failed to read Android secret vault: %s",
+                            type(exc).__name__,
+                        )
+
+            if vault_read_ok:
+                backend = AndroidSecretBackend(
+                    asyncio.get_running_loop(),
+                    bridge,
+                    vault_secrets,
+                    loop_thread_id=threading.get_ident(),
+                )
+                register_secret_backend(backend)
+                hydrate_secrets(vault_secrets)
+
+                pending = pop_pending_plaintext_migration()
+                if pending:
+                    merged = {**pending, **vault_secrets}
+                    migration_ok = True
+                    if merged != vault_secrets:
+                        try:
+                            migration_ok = bool(await bridge.write_app_secrets(merged))
+                        except Exception:
+                            migration_ok = False
+                    if migration_ok:
+                        backend.replace_cached_secrets(merged)
+                        hydrate_secrets(merged)
+                        await asyncio.to_thread(save_settings)
+                    else:
+                        logger.warning(
+                            "Android secret migration did not confirm; preserving legacy JSON"
+                        )
+
+            self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+            await self._initialize_android_background()
+
+        if not needs_initial_sync:
+            hydration_started = self._schedule_cached_detail_hydration(
+                has_cached_snapshot
+            )
+            if not hydration_started:
+                self._schedule_card_detail_warmup()
+        self._safe_run_task(self._today_schedule_coordinator.run)
+        if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
+            self._safe_run_task(self._show_login_dialog)
+        else:
+            self._safe_run_task(self._load_data_async, "startup")
 
     async def _initialize_android_background(self):
         """Attach native worker settings and prefer its cache after app restart."""

@@ -115,7 +115,7 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             settings.UTH_USERNAME = username_field.value.strip()
             settings.UTH_PASSWORD = password_field.value
             orchestrator.is_logged_in = True
-            save_settings()
+            await asyncio.to_thread(save_settings)
 
             # Success feedback
             btn_login.content = ft.Row(

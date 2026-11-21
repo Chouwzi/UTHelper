@@ -42,7 +42,10 @@ _VALID_MANIFEST_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
     <PublisherDisplayName>UTHelper</PublisherDisplayName>
     <Logo>Assets\\StoreLogo.png</Logo>
   </Properties>
-  <Resources><Resource Language="vi-vn" /></Resources>
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="vi-vn" />
+  </Resources>
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
@@ -458,6 +461,15 @@ def test_package_and_verify_msix_store_end_to_end_without_repo_mutation(tmp_path
         (
             "mismatched_distribution_channel",
             lambda d: _build_staged_msix_dir(d, channel="exe_lts"),
+        ),
+        (
+            "missing_en_us_resource_language",
+            lambda d: _build_staged_msix_dir(
+                d,
+                manifest_xml=_VALID_MANIFEST_TEMPLATE.replace(
+                    '<Resource Language="en-us" />', ""
+                ),
+            ),
         ),
     ],
 )

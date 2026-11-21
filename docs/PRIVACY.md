@@ -66,20 +66,26 @@ GitHub Releases. All channels share the same local-first storage model and
 opt-out crash diagnostics rules above, with channel-specific update behavior:
 
 - **Google Play Store (`chplay`, Android `.aab`)**:
-  - **Data Safety summary**:
-    - *App info and performance → Crash logs & Diagnostics*: collected only when
-      anonymous crash diagnostics are enabled (can be disabled anytime under
-      **Settings → Privacy**), encrypted in transit over HTTPS/TLS, not linked to
-      user identity, and never shared with third parties for advertising or
-      tracking.
-    - *Account credentials and academic data*: stored locally on the device and
-      sent directly over HTTPS only to the user's configured UTH Moodle/Portal
-      domains (`courses.ut.edu.vn`, `thnn.ut.edu.vn`,
-      `portal-publicapp.ut.edu.vn`). UTHelper does not operate a developer
-      backend server and does not collect or proxy student credentials or grades.
-    - *Optional user-configured notifications*: if the user explicitly configures
-      Gmail, Discord, or Telegram integrations in Settings, notification payloads
-      are sent directly from the device to those user-chosen endpoints.
+  - The app sends credentials/session data and user-requested course activity
+    directly over HTTPS to the configured UTH Moodle/Portal endpoints
+    (`courses.ut.edu.vn`, `thnn.ut.edu.vn`, `portal-publicapp.ut.edu.vn`). It
+    does not operate a developer-hosted proxy. When enabled, sanitized crash
+    diagnostics are sent to Sentry; optional alert integrations send their
+    configured payloads to the user's chosen Gmail, Discord, or Telegram
+    endpoint.
+  - These direct transfers are inputs to, not completed answers for, Google
+    Play's Data Safety form. Review the
+    [release data-flow inventory](guides/store-distribution-submission.md#data-safety-flow-review)
+    against the signed AAB, bundled SDKs, current backend behavior, and provider
+    retention settings. The absence of a developer-hosted backend does not by
+    itself establish a “no collection” or “no sharing” answer under
+    [Google Play's Data safety guidance](https://support.google.com/googleplay/android-developer/answer/10787469).
+  - Grades and course documents fetched from UTH are handled on device and are
+    not included in the diagnostics allow-list. Check the release's bundled
+    SDKs for any other outbound route before relying on that boundary.
+  - Diagnostics can be disabled in **Settings → Privacy**. The Sentry project
+    controls remote retention; its current retention setting must be recorded
+    before enabling a production ingestion DSN.
   - **No external self-updating**: `chplay` builds strip
     `REQUEST_INSTALL_PACKAGES` and APK installer code, never poll GitHub for
     updates, and rely exclusively on Google Play for app updates.
@@ -109,9 +115,13 @@ opt-out crash diagnostics rules above, with channel-specific update behavior:
   `%APPDATA%\UTHelper\telemetry\pending`.
 - **Android (`chplay` and `apk_lts`)**: application data is stored in Android
   app-private storage resolved from `FLET_APP_STORAGE_DATA` (with fallback to
-  `FLET_APP_DATA` or `~/.uthelper` when unset). Native background sync stores
-  the Moodle Web Service credential encrypted via `AndroidKeyStore` AES-GCM
-  inside `context.noBackupFilesDir`.
+  `FLET_APP_DATA` or `~/.uthelper` when unset). Sensitive credentials and
+  integration tokens (`UTH_PASSWORD`, `MOODLE_SESSION`, `MOODLE_WS_TOKEN`,
+  `MOODLE_WS_TOKEN_ORIGIN`, `GMAIL_APP_PASSWORD`, `DISCORD_WEBHOOK_URL`, and
+  `TELEGRAM_BOT_TOKEN`) are encrypted via `AndroidKeyStore` AES-GCM inside
+  `context.noBackupFilesDir` (`CredentialVault` for native background sync and
+  `AppSecretVault` for app settings secrets), and are never persisted in
+  plaintext `settings.json`.
 
 The diagnostics queue retains at most **20 reports**, **1 MiB** total, and
 **7 days**. It is non-recursive, rejects links/reparse points, deduplicates
@@ -132,8 +142,10 @@ account is owned by UTH. You can delete all locally stored data at any time:
    target. Re-enabling affects only future delivery attempts; it does not
    recreate deleted reports.
 2. **Clear credentials**: sign out inside UTHelper Settings to remove stored
-   credentials from Windows Credential Manager (`keyring`), Android
-   `CredentialVault`, and local `settings.json`.
+   credentials from Windows Credential Manager (`keyring`) or Android
+   `AndroidKeyStore` vaults (`CredentialVault` and `AppSecretVault`); any
+   legacy plaintext entries in `settings.json` are scrubbed automatically upon
+   migration or save.
 3. **Remove all local app data**:
    - **Android (Google Play / APK LTS)**: open Android *Settings → Apps →
      UTHelper → Storage → Clear storage*, or uninstall UTHelper.

@@ -133,6 +133,17 @@ def _elf64(*aligns: int) -> bytes:
     return ehdr + phdrs
 
 
+def _bundle_config_pb(*, enabled: int | None = 1, alignment: int | None = 2) -> bytes:
+    uncompress = bytearray()
+    if enabled is not None:
+        uncompress += bytes([0x08, enabled])
+    if alignment is not None:
+        uncompress += bytes([0x10, alignment])
+    optimizations = _pb_field(2, bytes(uncompress))
+    bundletool = _pb_field(2, b"1.18.1")
+    return _pb_field(1, bundletool) + _pb_field(2, optimizations)
+
+
 def _aab(
     path: Path,
     *,
@@ -142,9 +153,15 @@ def _aab(
     channel: dict[str, object] | None = None,
     extra: dict[str, bytes] | None = None,
     extra_dex: dict[str, bytes] | None = None,
+    bundle_config: bytes | None = None,
+    include_bundle_config: bool = True,
 ) -> Path:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
-        archive.writestr("BundleConfig.pb", b"\x08\x01")
+        if include_bundle_config:
+            archive.writestr(
+                "BundleConfig.pb",
+                bundle_config if bundle_config is not None else _bundle_config_pb(),
+            )
         archive.writestr(
             "base/manifest/AndroidManifest.xml",
             (manifest if manifest is not None else _manifest()).encode(),
@@ -188,13 +205,18 @@ def _verify(aab: Path, tmp_path: Path, **overrides):
 
 def test_pyproject_is_https_only_backup_disabled_and_play_targeted():
     config = tomllib.loads(_read("pyproject.toml"))
+    dependencies = config["project"]["dependencies"]
     android = config["tool"]["flet"]["android"]
     permissions = android["permission"]
     application = android["manifest_application"]
+    gradle_props = android["gradle_properties"]
 
+    assert any(dep.startswith("httpx>=") for dep in dependencies)
     assert android["target_sdk_version"] >= 35
     assert application["usesCleartextTraffic"] == "false"
     assert application["allowBackup"] == "false"
+    assert gradle_props["kotlin.compiler.execution.strategy"] == "in-process"
+    assert gradle_props["kotlin.incremental"] == "false"
     assert "android.permission.FOREGROUND_SERVICE" not in permissions
     assert "android.permission.FOREGROUND_SERVICE_DATA_SYNC" not in permissions
     assert "android.permission.USE_EXACT_ALARM" not in permissions
@@ -206,26 +228,31 @@ def test_pyproject_is_https_only_backup_disabled_and_play_targeted():
 
 def test_build_android_script_defines_channel_matrix_and_cleanup():
     script = _read("scripts/build_android.ps1")
+    helper = _read("scripts/prepare_android_flutter_project.py")
 
     assert '[ValidateSet("apk_lts", "chplay")]' in script
     assert '[ValidateSet("apk", "aab")]' in script
+    assert "[switch]$RequireSigned" in script
+    assert "FLET_ANDROID_SIGNING_STORE_PASSWORD" in script
+    assert '$fletOptions += @("--build-version", $buildVersion, "--build-number", $buildNumber)' in script
+    assert "release_build_number" in script
     assert "--no-android-legacy-packaging" in script
     assert "--android-legacy-packaging" in script
     assert "distribution-channel.json" in script
     assert "--distribution-channel $Channel" in script
     assert "uthDistributionChannel" in script
+    assert "prepare_android_flutter_project.py" in script
     for stripped in (
-        "ApkUpdateInstaller.kt",
-        "ApkUpdateDownloadManager.kt",
         "UthUpdateFileProvider",
-        "uth_update_paths.xml",
+        "ForegroundService",
         "REQUEST_INSTALL_PACKAGES",
         "FOREGROUND_SERVICE_DATA_SYNC",
         "USE_EXACT_ALARM",
         "usesCleartextTraffic",
         "allowBackup",
+        "extractNativeLibs",
     ):
-        assert stripped in script
+        assert stripped in helper
     finally_block = script.rsplit("} finally {", 1)[1]
     assert "Remove-Item -LiteralPath $channelAssetPath" in finally_block
     assert "UTH_DISTRIBUTION_CHANNEL" in finally_block
@@ -289,12 +316,19 @@ def test_android_workflow_builds_and_verifies_both_channels():
 
     assert "channel: apk_lts" in workflow and "target: apk" in workflow
     assert "channel: chplay" in workflow and "target: aab" in workflow
+    assert "branches: [develop, main]" in workflow
+    assert "sign_upload:" in workflow
+    assert "PLAY_UPLOAD_KEYSTORE_BASE64" in workflow
+    assert "prepare_android_flutter_project.py" in workflow
+    assert "~/.gradle/init.d" not in workflow
+    assert "classes.jar" in workflow
     assert "--no-android-legacy-packaging" in workflow
     assert "--android-legacy-packaging" in workflow
     assert "scripts/verify_android_release.py" in workflow
     assert "--channel chplay" in workflow and "--allow-unsigned" in workflow
-    assert "trap 'rm -f -- src/assets/distribution-channel.json' EXIT" in workflow
-    assert "--distribution-channel \"$CHANNEL\"" in workflow
+    assert "rm -f -- src/assets/distribution-channel.json" in workflow
+    assert "trap cleanup EXIT" in workflow
+    assert '--distribution-channel "$CHANNEL"' in workflow
     assert "UNSIGNED_DIAGNOSTIC_ONLY.txt" in workflow
 
 
@@ -398,9 +432,14 @@ def test_verifier_accepts_compliant_chplay_aab(tmp_path):
         _manifest(application_attrs=""),
         _manifest(application_attrs='android:allowBackup="true"'),
         _manifest(application_attrs='android:allowBackup="false" android:usesCleartextTraffic="true"'),
+        _manifest(application_attrs='android:allowBackup="false" android:extractNativeLibs="true"'),
         _manifest(
             extra_application='<provider android:name=".update.UthUpdateFileProvider" '
             'android:authorities="com.uthelper.uthelper.uthupdates" />'
+        ),
+        _manifest(
+            extra_application='<service android:name="com.dexterous.flutterlocalnotifications.ForegroundService" '
+            'android:exported="false" android:foregroundServiceType="specialUse" />'
         ),
         _manifest(receivers=_RECEIVERS[:-1]),
     ],
@@ -428,8 +467,147 @@ def test_verifier_ignores_manifest_nodes_marked_for_removal(tmp_path):
         'android:name="android.permission.REQUEST_INSTALL_PACKAGES" tools:node="remove" />'
         "<application",
         1,
+    ).replace(
+        "</application>",
+        '<service xmlns:tools="http://schemas.android.com/tools" '
+        'android:name="com.dexterous.flutterlocalnotifications.ForegroundService" '
+        'tools:node="remove" /></application>',
+        1,
     )
     _verify(_aab(tmp_path / "removed.aab", manifest=marked), tmp_path)
+
+
+def test_verifier_rejects_missing_or_invalid_bundle_config_16kb_uncompressed(tmp_path):
+    with pytest.raises(AndroidVerificationError, match="container layout is invalid"):
+        _verify(_aab(tmp_path / "no-bundlecfg.aab", include_bundle_config=False), tmp_path)
+    with pytest.raises(AndroidVerificationError, match="uncompress_native_libraries"):
+        _verify(
+            _aab(tmp_path / "disabled.aab", bundle_config=_bundle_config_pb(enabled=0, alignment=2)),
+            tmp_path,
+        )
+    with pytest.raises(AndroidVerificationError, match="page alignment"):
+        _verify(
+            _aab(tmp_path / "align4k.aab", bundle_config=_bundle_config_pb(enabled=1, alignment=1)),
+            tmp_path,
+        )
+
+
+def test_verifier_checks_apk_zip_stored_and_16kb_offset_alignment_for_chplay(
+    tmp_path, monkeypatch
+):
+    from scripts import verify_android_release as var
+
+    sdk_dir = tmp_path / "sdk"
+    (sdk_dir / "build-tools" / "35.0.0").mkdir(parents=True)
+    (sdk_dir / "cmdline-tools" / "latest" / "bin").mkdir(parents=True)
+    for name in ("apksigner.bat", "apksigner"):
+        (sdk_dir / "build-tools" / "35.0.0" / name).write_text("shim", encoding="utf-8")
+    for name in ("apkanalyzer.bat", "apkanalyzer"):
+        (sdk_dir / "cmdline-tools" / "latest" / "bin" / name).write_text("shim", encoding="utf-8")
+
+    def fake_run(command):
+        args = [str(part) for part in command]
+        if "apksigner" in args[0]:
+            return f"Signer #1 certificate SHA-256 digest: {FINGERPRINT.lower()}"
+        if args[1:3] == ["manifest", "application-id"]:
+            return PACKAGE_ID
+        if args[1:3] == ["manifest", "version-name"]:
+            return VERSION
+        if args[1:3] == ["manifest", "version-code"]:
+            return str(BUILD_NUMBER)
+        if args[1:3] == ["manifest", "print"]:
+            return _manifest()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(var, "_run", fake_run)
+
+    # 1. Deflated .so -> rejected
+    deflated_apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    with zipfile.ZipFile(deflated_apk, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("classes.dex", _dex(("Lcom/uthelper/MainActivity;",)))
+        zf.writestr(
+            "assets/flutter_assets/app/assets/distribution-channel.json",
+            json.dumps({"channel": "chplay", "android_package_id": PACKAGE_ID}),
+        )
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            zf.writestr(f"lib/{abi}/libflutter.so", _elf64(0x4000))
+    with pytest.raises(AndroidVerificationError, match="ZIP_STORED"):
+        verify_android_release(
+            apk=deflated_apk,
+            channel="chplay",
+            version=VERSION,
+            build_number=BUILD_NUMBER,
+            package_id=PACKAGE_ID,
+            certificate_sha256=FINGERPRINT,
+            commit_sha=COMMIT_SHA,
+            workflow_run_id="1",
+            output=tmp_path / "out1.json",
+            android_home=sdk_dir,
+        )
+
+    # 2. Stored .so without 16 KB ZIP offset alignment -> rejected
+    unaligned_apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    with zipfile.ZipFile(unaligned_apk, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("classes.dex", _dex(("Lcom/uthelper/MainActivity;",)))
+        zf.writestr(
+            "assets/flutter_assets/app/assets/distribution-channel.json",
+            json.dumps({"channel": "chplay", "android_package_id": PACKAGE_ID}),
+        )
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            zf.writestr(f"lib/{abi}/libflutter.so", _elf64(0x4000))
+    with pytest.raises(AndroidVerificationError, match="not 16 KB aligned"):
+        verify_android_release(
+            apk=unaligned_apk,
+            channel="chplay",
+            version=VERSION,
+            build_number=BUILD_NUMBER,
+            package_id=PACKAGE_ID,
+            certificate_sha256=FINGERPRINT,
+            commit_sha=COMMIT_SHA,
+            workflow_run_id="1",
+            output=tmp_path / "out2.json",
+            android_home=sdk_dir,
+        )
+
+    # 3. Stored .so with exact 16 KB ZIP local header extra padding -> accepted
+    aligned_apk = tmp_path / f"UTHelper-{VERSION}.apk"
+    with zipfile.ZipFile(aligned_apk, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("classes.dex", _dex(("Lcom/uthelper/MainActivity;",)))
+        zf.writestr(
+            "assets/flutter_assets/app/assets/distribution-channel.json",
+            json.dumps({"channel": "chplay", "android_package_id": PACKAGE_ID}),
+        )
+        zf.writestr("lib/armeabi-v7a/libflutter.so", _elf64(0x4000))
+        for abi in ("arm64-v8a", "x86_64"):
+            arcname = f"lib/{abi}/libflutter.so"
+            zf.writestr(arcname, _elf64(0x4000))
+    # Rewrite with 16 KB padding on 64-bit .so entries
+    with zipfile.ZipFile(aligned_apk, "r") as src:
+        entries = [(info, src.read(info.filename)) for info in src.infolist()]
+    with zipfile.ZipFile(aligned_apk, "w", zipfile.ZIP_STORED) as dst:
+        offset = 0
+        for info, data in entries:
+            name_bytes = info.filename.encode("utf-8")
+            base_end = offset + 30 + len(name_bytes)
+            zi = zipfile.ZipInfo(info.filename)
+            zi.compress_type = zipfile.ZIP_STORED
+            if info.filename.endswith(".so") and any(a in info.filename for a in ("arm64-v8a", "x86_64")):
+                pad = (0x4000 - (base_end % 0x4000)) % 0x4000
+                zi.extra = b"\x00" * pad
+            dst.writestr(zi, data)
+            offset = base_end + len(zi.extra) + len(data)
+    verify_android_release(
+        apk=aligned_apk,
+        channel="chplay",
+        version=VERSION,
+        build_number=BUILD_NUMBER,
+        package_id=PACKAGE_ID,
+        certificate_sha256=FINGERPRINT,
+        commit_sha=COMMIT_SHA,
+        workflow_run_id="1",
+        output=tmp_path / "out3.json",
+        android_home=sdk_dir,
+    )
 
 
 @pytest.mark.parametrize(
@@ -521,19 +699,25 @@ def test_verifier_requires_matching_embedded_channel(tmp_path, channel):
 
 
 def test_verifier_reads_channel_from_nested_flet_app_zip(tmp_path):
-    nested = io.BytesIO()
-    with zipfile.ZipFile(nested, "w") as inner:
-        inner.writestr("assets/distribution-channel.json", json.dumps({"channel": "chplay"}))
-    archive = _aab(tmp_path / "nested.aab")
-    with zipfile.ZipFile(archive) as source:
-        members = {
-            n: source.read(n) for n in source.namelist() if not n.endswith("distribution-channel.json")
-        }
-    members["base/assets/flutter_assets/app/app.zip"] = nested.getvalue()
-    with zipfile.ZipFile(archive, "w") as target:
-        for name, content in members.items():
-            target.writestr(name, content)
-    _verify(archive, tmp_path)
+    for nested_member in (
+        "base/assets/app.zip",
+        "base/assets/flutter_assets/app/app.zip",
+    ):
+        nested = io.BytesIO()
+        with zipfile.ZipFile(nested, "w") as inner:
+            inner.writestr("assets/distribution-channel.json", json.dumps({"channel": "chplay"}))
+        archive = _aab(tmp_path / f"nested-{nested_member.replace('/', '_')}.aab")
+        with zipfile.ZipFile(archive) as source:
+            members = {
+                n: source.read(n)
+                for n in source.namelist()
+                if not n.endswith("distribution-channel.json")
+            }
+        members[nested_member] = nested.getvalue()
+        with zipfile.ZipFile(archive, "w") as target:
+            for name, content in members.items():
+                target.writestr(name, content)
+        _verify(archive, tmp_path)
 
 
 def test_verifier_enforces_artifact_selection_and_version_metadata(tmp_path):
@@ -593,6 +777,68 @@ def test_verifier_cli_exposes_aab_channel_and_diagnostic_flags(tmp_path):
     )
     assert done.returncode == 0, done.stderr
     assert json.loads((tmp_path / "cli.json").read_text(encoding="utf-8"))["channel"] == "chplay"
+
+
+def test_prepare_android_flutter_project_strips_chplay_and_sets_sdk36_idempotently(tmp_path):
+    from scripts.prepare_android_flutter_project import prepare_android_flutter_project
+
+    flutter_root = tmp_path / "flutter"
+    app_dir = flutter_root / "android" / "app"
+    manifest_dir = app_dir / "src" / "main"
+    manifest_dir.mkdir(parents=True)
+
+    gradle_kts = app_dir / "build.gradle.kts"
+    gradle_kts.write_text(
+        "android {\n"
+        "    compileSdk = 34\n"
+        "    packaging { jniLibs {\n"
+        "        useLegacyPackaging = true\n"
+        "    } }\n"
+        "    defaultConfig { targetSdk = 34 }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    manifest_xml = manifest_dir / "AndroidManifest.xml"
+    manifest_xml.write_text(
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <uses-permission android:name="android.permission.INTERNET" />\n'
+        '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />\n'
+        '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n'
+        '    <application android:allowBackup="true" android:usesCleartextTraffic="true">\n'
+        '        <service android:name="com.dexterous.flutterlocalnotifications.ForegroundService"\n'
+        '            android:exported="false" android:foregroundServiceType="specialUse" />\n'
+        '    </application>\n'
+        '</manifest>\n',
+        encoding="utf-8",
+    )
+
+    prepare_android_flutter_project(flutter_root, channel="chplay", target_sdk=36)
+    prepare_android_flutter_project(flutter_root, channel="chplay", target_sdk=36)
+
+    gradle_text = gradle_kts.read_text(encoding="utf-8")
+    assert "compileSdk = 36" in gradle_text
+    assert "targetSdk = 36" in gradle_text
+    assert "useLegacyPackaging = false" in gradle_text
+    assert "useLegacyPackaging = true" not in gradle_text
+
+    props = (flutter_root / "android" / "gradle.properties").read_text(encoding="utf-8")
+    assert "uthDistributionChannel=chplay" in props
+    assert "kotlin.compiler.execution.strategy=in-process" in props
+
+    manifest_text = manifest_xml.read_text(encoding="utf-8")
+    assert manifest_text.count('tools:node="remove"') == 6
+    assert 'android:allowBackup="false"' in manifest_text
+    assert 'android:usesCleartextTraffic="false"' in manifest_text
+    assert 'android:extractNativeLibs="false"' in manifest_text
+    assert 'foregroundServiceType="specialUse"' not in manifest_text
+    assert (
+        '<service android:name="com.dexterous.flutterlocalnotifications.ForegroundService" '
+        'tools:node="remove" />'
+    ) in manifest_text
+    assert (
+        '<service android:name="androidx.work.impl.foreground.SystemForegroundService" '
+        'tools:node="remove" />'
+    ) in manifest_text
 
 
 # ---------------------------------------------------------------------------

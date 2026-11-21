@@ -12,10 +12,11 @@ import math
 import os
 from pathlib import Path
 import platform
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from typing import Callable, Protocol
@@ -44,6 +45,157 @@ TRUSTED_WINDOWS_SIGNER_SHA256: frozenset[str] = frozenset(
 )
 _MSI_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
 _ORIGINAL_SUBPROCESS_RUN = subprocess.run
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _build_handoff_security_attributes():
+    import pywintypes
+    import win32api
+    import win32con
+    import win32security
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+    )
+    try:
+        user_sid = win32security.GetTokenInformation(
+            token, win32security.TokenUser
+        )[0]
+    finally:
+        win32api.CloseHandle(token)
+
+    admins_sid = win32security.CreateWellKnownSid(
+        win32security.WinBuiltinAdministratorsSid, None
+    )
+    system_sid = win32security.CreateWellKnownSid(
+        win32security.WinLocalSystemSid, None
+    )
+
+    dacl = win32security.ACL()
+    inherit_flags = (
+        win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE
+    )
+    allowed_sids: set[str] = set()
+    for sid in (user_sid, admins_sid, system_sid):
+        sid_str = win32security.ConvertSidToStringSid(sid)
+        if sid_str in allowed_sids:
+            continue
+        allowed_sids.add(sid_str)
+        dacl.AddAccessAllowedAceEx(
+            win32security.ACL_REVISION,
+            inherit_flags,
+            win32con.GENERIC_ALL,
+            sid,
+        )
+
+    descriptor = win32security.SECURITY_DESCRIPTOR()
+    descriptor.SetSecurityDescriptorDacl(1, dacl, 0)
+    descriptor.SetSecurityDescriptorControl(
+        win32security.SE_DACL_PROTECTED,
+        win32security.SE_DACL_PROTECTED,
+    )
+    attributes = pywintypes.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = descriptor
+    return attributes, dacl, allowed_sids
+
+
+def _create_secure_handoff_dir(
+    local_app_data_path: Path,
+    *,
+    acl_hook: Callable[[Path, Path], None] | None = None,
+) -> Path:
+    if not local_app_data_path.is_absolute():
+        raise OSError("LOCALAPPDATA must be an absolute path")
+    if _is_reparse_or_symlink(local_app_data_path):
+        raise OSError("Refusing symlink or reparse point in LOCALAPPDATA")
+    if local_app_data_path.exists():
+        if not local_app_data_path.is_dir():
+            raise OSError("LOCALAPPDATA is not a directory")
+    else:
+        local_app_data_path.mkdir(parents=True, exist_ok=True)
+        if _is_reparse_or_symlink(local_app_data_path):
+            raise OSError("LOCALAPPDATA became a symlink or reparse point")
+
+    uthelper_dir = local_app_data_path / "UTHelper"
+    if _is_reparse_or_symlink(uthelper_dir):
+        raise OSError("Refusing symlink or reparse point in UTHelper data dir")
+    uthelper_dir.mkdir(mode=0o700, exist_ok=True)
+    if _is_reparse_or_symlink(uthelper_dir) or not uthelper_dir.is_dir():
+        raise OSError("Unsafe UTHelper directory")
+
+    base_dir = uthelper_dir / "update_handoff"
+    if _is_reparse_or_symlink(base_dir):
+        raise OSError("Refusing symlink or reparse point in update_handoff dir")
+    handoff_dir = base_dir / f"handoff-{secrets.token_hex(12)}"
+
+    if os.name == "nt":
+        import win32file
+        import win32security
+
+        sa, dacl, allowed_sids = _build_handoff_security_attributes()
+        if base_dir.exists():
+            if not base_dir.is_dir() or _is_reparse_or_symlink(base_dir):
+                raise OSError("Unsafe update_handoff directory")
+            owner_sd = win32security.GetNamedSecurityInfo(
+                str(base_dir),
+                win32security.SE_FILE_OBJECT,
+                win32security.OWNER_SECURITY_INFORMATION,
+            )
+            owner_sid = win32security.ConvertSidToStringSid(
+                owner_sd.GetSecurityDescriptorOwner()
+            )
+            if owner_sid not in allowed_sids:
+                raise OSError("Unexpected owner on update_handoff directory")
+            win32security.SetNamedSecurityInfo(
+                str(base_dir),
+                win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION
+                | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                dacl,
+                None,
+            )
+        else:
+            win32file.CreateDirectory(str(base_dir), sa)
+        if _is_reparse_or_symlink(base_dir) or not base_dir.is_dir():
+            raise OSError("Unsafe update_handoff directory after creation")
+        win32file.CreateDirectory(str(handoff_dir), sa)
+        if _is_reparse_or_symlink(handoff_dir) or not handoff_dir.is_dir():
+            raise OSError("Unsafe handoff directory after creation")
+    else:
+        base_dir.mkdir(mode=0o700, exist_ok=True)
+        if _is_reparse_or_symlink(base_dir) or not base_dir.is_dir():
+            raise OSError("Unsafe update_handoff directory")
+        os.mkdir(handoff_dir, mode=0o700)
+        if _is_reparse_or_symlink(handoff_dir) or not handoff_dir.is_dir():
+            raise OSError("Unsafe handoff directory")
+
+    if acl_hook is not None:
+        acl_hook(base_dir, handoff_dir)
+    return handoff_dir
+
+
+def _write_exclusive_utf8(path: Path, content: str) -> None:
+    if _is_reparse_or_symlink(path):
+        raise OSError("Refusing symlink or reparse point target file")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    if _is_reparse_or_symlink(path):
+        raise OSError("Target file became a symlink or reparse point")
 
 
 class VerificationCancelled(RuntimeError):
@@ -748,6 +900,7 @@ class WindowsPackageLauncher:
             Callable[[Path, ReleasePackage, Path | None], LaunchResult] | None
         ) = None,
         relaunch_executable: Path | None = None,
+        handoff_acl_hook: Callable[[Path, Path], None] | None = None,
     ) -> None:
         timeout = float(acknowledgement_seconds)
         if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
@@ -759,6 +912,7 @@ class WindowsPackageLauncher:
         self._relaunch_executable = (
             Path(relaunch_executable) if relaunch_executable is not None else None
         )
+        self._handoff_acl_hook = handoff_acl_hook
         self._lock = threading.Lock()
         self._process: _Process | None = None
         self._active_handoff = False
@@ -916,15 +1070,26 @@ class WindowsPackageLauncher:
         primary_relaunch: Path | None,
         fallback_relaunch: Path | None,
     ) -> LaunchResult:
-        base_dir = (
-            Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
-            / "UTHelper"
-            / "update_handoff"
-        )
+        local_app_data_raw = os.environ.get("LOCALAPPDATA", "").strip()
+        if not local_app_data_raw:
+            return LaunchResult(
+                False,
+                "installer launch failed",
+                status="launch_failed",
+            )
+        local_app_data_path = Path(local_app_data_raw)
+        if not local_app_data_path.is_absolute():
+            return LaunchResult(
+                False,
+                "installer launch failed",
+                status="launch_failed",
+            )
         try:
-            base_dir.mkdir(parents=True, exist_ok=True)
-            handoff_dir = Path(tempfile.mkdtemp(prefix="handoff-", dir=str(base_dir)))
-        except OSError:
+            handoff_dir = _create_secure_handoff_dir(
+                local_app_data_path,
+                acl_hook=self._handoff_acl_hook,
+            )
+        except Exception:
             return LaunchResult(
                 False,
                 "installer launch failed",
@@ -951,9 +1116,9 @@ class WindowsPackageLauncher:
             ),
         }
         try:
-            config_path.write_text(json.dumps(config_data), encoding="utf-8")
-            install_ps1.write_text(_INSTALL_HELPER_SCRIPT, encoding="utf-8")
-            relaunch_ps1.write_text(_RELAUNCH_HELPER_SCRIPT, encoding="utf-8")
+            _write_exclusive_utf8(config_path, json.dumps(config_data))
+            _write_exclusive_utf8(install_ps1, _INSTALL_HELPER_SCRIPT)
+            _write_exclusive_utf8(relaunch_ps1, _RELAUNCH_HELPER_SCRIPT)
         except OSError:
             shutil.rmtree(handoff_dir, ignore_errors=True)
             return LaunchResult(
@@ -963,15 +1128,15 @@ class WindowsPackageLauncher:
             )
 
         system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        system32_dir = Path(system_root) / "System32"
         ps_candidate = (
-            Path(system_root)
-            / "System32"
+            system32_dir
             / "WindowsPowerShell"
             / "v1.0"
             / "powershell.exe"
         )
         ps_exe = str(ps_candidate) if ps_candidate.is_file() else "powershell.exe"
-        safe_cwd = tempfile.gettempdir()
+        safe_cwd = str(system32_dir) if system32_dir.is_dir() else system_root
         child_env = os.environ.copy()
         child_env["PSModulePath"] = str(
             Path(system_root)

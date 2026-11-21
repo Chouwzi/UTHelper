@@ -4,15 +4,31 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [develop, main]
+    paths:
+      - 'extensions/flet_uth_background_sync/**'
+      - 'pyproject.toml'
+      - 'scripts/build_android.ps1'
+      - 'scripts/prepare_android_flutter_project.py'
+      - 'scripts/verify_android_release.py'
+      - 'scripts/release_metadata.py'
+      - 'scripts/generate_public_runtime_*.py'
+      - '.github/workflows/build-android.yml'
+      - 'src/core/distribution.py'
+      - 'src/platform_utils/background_sync.py'
   workflow_dispatch:
+    inputs:
+      sign_upload:
+        description: Sign CH Play AAB with Play Upload Keystore (requires PLAY_UPLOAD_KEYSTORE_* secrets/vars)
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: build-android-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   build:
@@ -59,9 +75,46 @@ jobs:
           CHANNEL: ${{ matrix.channel }}
           BUILD_TARGET: ${{ matrix.target }}
           LEGACY_FLAG: ${{ matrix.legacy_flag }}
+          SIGN_UPLOAD_INPUT: ${{ inputs.sign_upload }}
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+          PLAY_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_UPLOAD_KEY_ALIAS: ${{ vars.PLAY_UPLOAD_KEY_ALIAS }}
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
         run: |
           set -euo pipefail
-          trap 'rm -f -- src/assets/distribution-channel.json' EXIT
+          KEYSTORE=""
+          cleanup() {
+            rm -f -- src/assets/distribution-channel.json
+            if [ -n "$KEYSTORE" ]; then
+              rm -f -- "$KEYSTORE"
+            fi
+          }
+          trap cleanup EXIT
+
+          SIGN_UPLOAD="false"
+          if [ "$CHANNEL" = "chplay" ] && [ "${SIGN_UPLOAD_INPUT:-false}" = "true" ]; then
+            SIGN_UPLOAD="true"
+          elif [ "$CHANNEL" = "chplay" ] && [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ] && [ -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}" ]; then
+            SIGN_UPLOAD="true"
+          fi
+
+          if [ "$SIGN_UPLOAD" = "true" ]; then
+            test -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}"
+            test -n "${PLAY_UPLOAD_KEYSTORE_PASSWORD:-}"
+            test -n "${PLAY_UPLOAD_KEY_PASSWORD:-}"
+            test -n "${PLAY_UPLOAD_KEY_ALIAS:-}"
+            test -n "${PLAY_UPLOAD_CERT_SHA256:-}"
+            umask 077
+            KEYSTORE="$RUNNER_TEMP/play-upload.jks"
+            printf '%s' "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+            unset PLAY_UPLOAD_KEYSTORE_BASE64
+            export FLET_ANDROID_SIGNING_KEY_STORE="$KEYSTORE"
+            export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$PLAY_UPLOAD_KEYSTORE_PASSWORD"
+            export FLET_ANDROID_SIGNING_KEY_PASSWORD="$PLAY_UPLOAD_KEY_PASSWORD"
+            export FLET_ANDROID_SIGNING_KEY_ALIAS="$PLAY_UPLOAD_KEY_ALIAS"
+          fi
+          echo "CHPLAY_SIGNED_UPLOAD=$SIGN_UPLOAD" >> "$GITHUB_ENV"
 
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
@@ -79,103 +132,14 @@ jobs:
             )
           fi
 
-          # Install Gradle init script for core library desugaring and CH Play
-          # targetSdk >= 35 / 16 KB uncompressed native library packaging.
-          mkdir -p ~/.gradle/init.d
-          cat > ~/.gradle/init.d/desugaring.gradle << 'INIT_GRADLE'
-          allprojects {
-              afterEvaluate {
-                  if (project.hasProperty('android')) {
-                      android {
-                          compileOptions {
-                              coreLibraryDesugaringEnabled true
-                          }
-                          defaultConfig {
-                              multiDexEnabled true
-                          }
-                      }
-                      dependencies {
-                          coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
-                      }
-                      if (System.getenv('UTH_DISTRIBUTION_CHANNEL') == 'chplay' && plugins.hasPlugin('com.android.application')) {
-                          android {
-                              compileSdk 36
-                              defaultConfig {
-                                  targetSdk 36
-                              }
-                              packaging {
-                                  jniLibs {
-                                      useLegacyPackaging = false
-                                  }
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-          INIT_GRADLE
-          echo "✅ Installed Gradle init script for desugaring"
-
           # First pass materializes Flet's Flutter project. The notification
-          # extension patcher then registers AlarmManager receivers/services.
+          # extension patcher and shared channel preparation then configure SDK 36,
+          # manifest removals, and 16 KB packaging before the final build pass.
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
           flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
-
-          if [ "$CHANNEL" = "chplay" ]; then
-            python - <<'PY'
-          from pathlib import Path
-          import re
-          import shutil
-
-          app_manifest = Path("build/flutter/android/app/src/main/AndroidManifest.xml")
-          if app_manifest.is_file():
-              xml = app_manifest.read_text(encoding="utf-8")
-              if "xmlns:tools=" not in xml:
-                  xml = xml.replace("<manifest", '<manifest xmlns:tools="http://schemas.android.com/tools"', 1)
-              prohibited = (
-                  "android.permission.REQUEST_INSTALL_PACKAGES",
-                  "android.permission.FOREGROUND_SERVICE",
-                  "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
-                  "android.permission.USE_EXACT_ALARM",
-              )
-              for perm in prohibited:
-                  xml = re.sub(
-                      rf"(?m)^[ \t]*<uses-permission\b[^>]*{re.escape(perm)}[^>]*/>\r?\n?",
-                      "",
-                      xml,
-                  )
-              remove_nodes = "".join(
-                  f'    <uses-permission android:name="{perm}" tools:node="remove" />\n'
-                  for perm in prohibited
-              )
-              xml = re.sub(r"(?m)^([ \t]*)<application\b", lambda m: remove_nodes + m.group(1) + "<application", xml, count=1)
-              xml = re.sub(r"(?s)[ \t]*<provider\b[^>]*UthUpdateFileProvider.*?</provider>\r?\n?", "", xml)
-              xml = re.sub(r"(?m)^[ \t]*<provider\b[^>]*UthUpdateFileProvider[^>]*/>\r?\n?", "", xml)
-              xml = xml.replace('android:usesCleartextTraffic="true"', 'android:usesCleartextTraffic="false"')
-              xml = xml.replace('android:allowBackup="true"', 'android:allowBackup="false"')
-              if "android:allowBackup=" not in xml:
-                  xml = xml.replace("<application", '<application android:allowBackup="false"', 1)
-              if "android:usesCleartextTraffic=" not in xml:
-                  xml = xml.replace("<application", '<application android:usesCleartextTraffic="false"', 1)
-              app_manifest.write_text(xml, encoding="utf-8")
-
-          plugin_root = Path("build/flutter-packages/flet_uth_background_sync/android")
-          if plugin_root.is_dir():
-              for rel in (
-                  "src/main/kotlin/com/uthelper/backgroundsync/update/ApkUpdateInstaller.kt",
-                  "src/main/kotlin/com/uthelper/backgroundsync/update/ApkUpdateDownloadManager.kt",
-                  "src/main/kotlin/com/uthelper/backgroundsync/update/UthUpdateFileProvider.kt",
-                  "src/main/kotlin/com/uthelper/backgroundsync/update/ApkLtsUpdateBridgeDelegate.kt",
-                  "src/main/res/xml/uth_update_paths.xml",
-              ):
-                  (plugin_root / rel).unlink(missing_ok=True)
-              chplay_manifest = plugin_root / "variants/chplay/AndroidManifest.xml"
-              if chplay_manifest.is_file():
-                  shutil.copyfile(chplay_manifest, plugin_root / "src/main/AndroidManifest.xml")
-          PY
-          fi
+          python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel "$CHANNEL" --target-sdk 36
 
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
@@ -192,10 +156,10 @@ jobs:
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
           ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
-            testDebugUnitTest -Pandroid.useAndroidX=true \
+            testDebugUnitTest -Pandroid.useAndroidX=true -PuthDistributionChannel=apk_lts \
             -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
 
-      - name: Compile CH Play stripped native plugin
+      - name: Test and compile CH Play stripped native plugin
         if: matrix.channel == 'chplay'
         timeout-minutes: 15
         working-directory: build/flutter/android
@@ -203,9 +167,35 @@ jobs:
           UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
-          ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
-            compileDebugKotlin -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
+          PLUGIN_DIR="../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
+          ./gradlew -p "$PLUGIN_DIR" \
+            testDebugUnitTest bundleReleaseAar -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
             -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
+          python - "$PLUGIN_DIR" <<'PY'
+          import io
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          plugin_dir = Path(sys.argv[1])
+          aar_files = sorted((plugin_dir / "build/outputs/aar").glob("*-release.aar"))
+          if not aar_files:
+              raise SystemExit("Release AAR was not built for chplay plugin")
+          with zipfile.ZipFile(aar_files[0]) as aar:
+              if "res/xml/uth_update_paths.xml" in aar.namelist():
+                  raise SystemExit("chplay AAR unexpectedly includes res/xml/uth_update_paths.xml")
+              classes_jar = aar.read("classes.jar")
+          with zipfile.ZipFile(io.BytesIO(classes_jar)) as jar:
+              leaked = [
+                  name for name in jar.namelist()
+                  if "com/uthelper/backgroundsync/update/" in name
+                  or "ApkUpdate" in name
+                  or "UthUpdateFileProvider" in name
+              ]
+          if leaked:
+              raise SystemExit(f"chplay classes.jar contains prohibited updater classes: {leaked}")
+          print(f"Verified zero updater classes in {aar_files[0].name} classes.jar")
+          PY
 
       - name: 🔎 Verify materialized native plugin dependencies
         run: |
@@ -250,25 +240,34 @@ jobs:
 
       - name: 🔎 Verify CH Play AAB compliance (16 KB ELF, DEX, manifest)
         if: matrix.channel == 'chplay'
+        env:
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
         run: |
           set -euo pipefail
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
           mapfile -t AAB_CANDIDATES < <(find build/aab -maxdepth 1 -name '*.aab' -type f | sort)
           test "${#AAB_CANDIDATES[@]}" -eq 1
-          DIAGNOSTIC_AAB="UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab"
-          mv "${AAB_CANDIDATES[0]}" "$DIAGNOSTIC_AAB"
-          python scripts/verify_android_release.py \
-            --aab "$DIAGNOSTIC_AAB" \
-            --channel chplay \
-            --allow-unsigned \
-            --version "$PROJECT_VERSION" \
-            --build-number "$BUILD_NUMBER" \
-            --package-id com.uthelper.uthelper \
-            --commit-sha "${{ github.sha }}" \
-            --workflow-run-id "${{ github.run_id }}" \
-            --architecture universal \
+
+          VERIFY_ARGS=(
+            --channel chplay
+            --version "$PROJECT_VERSION"
+            --build-number "$BUILD_NUMBER"
+            --package-id com.uthelper.uthelper
+            --commit-sha "${{ github.sha }}"
+            --workflow-run-id "${{ github.run_id }}"
+            --architecture universal
             --output "chplay-diagnostic.verification.json"
+          )
+          if [ "${CHPLAY_SIGNED_UPLOAD:-false}" = "true" ]; then
+            TARGET_AAB="UTHelper-${PROJECT_VERSION}-chplay-upload-signed.aab"
+            VERIFY_ARGS+=(--certificate-sha256 "$PLAY_UPLOAD_CERT_SHA256")
+          else
+            TARGET_AAB="UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab"
+            VERIFY_ARGS+=(--allow-unsigned)
+          fi
+          mv "${AAB_CANDIDATES[0]}" "$TARGET_AAB"
+          python scripts/verify_android_release.py --aab "$TARGET_AAB" "${VERIFY_ARGS[@]}"
 
       - name: 📤 Upload unsigned diagnostic APK (apk_lts)
         if: matrix.channel == 'apk_lts'
@@ -279,13 +278,13 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: 📤 Upload unsigned diagnostic AAB (chplay)
+      - name: 📤 Upload CH Play AAB (${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }})
         if: matrix.channel == 'chplay'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-chplay-unsigned-diagnostic-${{ github.sha }}
+          name: android-chplay-${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }}-${{ github.sha }}
           path: |
-            UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab
+            UTHelper-*.aab
             chplay-diagnostic.verification.json
           retention-days: 30
           if-no-files-found: error

@@ -38,17 +38,17 @@ android {
             if (isChplayChannel) {
                 manifest.srcFile 'variants/chplay/AndroidManifest.xml'
                 kotlin.srcDirs = ['src/main/kotlin', 'variants/chplay/kotlin']
-                kotlin.exclude 'com/uthelper/backgroundsync/update/**'
-                java.exclude 'com/uthelper/backgroundsync/update/**'
-                res.exclude 'xml/uth_update_paths.xml'
+                res.srcDirs = ['src/main/res']
             } else {
                 kotlin.srcDirs = ['src/main/kotlin', 'variants/apk_lts/kotlin']
+                res.srcDirs = ['src/main/res', 'variants/apk_lts/res']
             }
         }
         test {
             if (isChplayChannel) {
-                kotlin.exclude 'com/uthelper/backgroundsync/update/**'
-                java.exclude 'com/uthelper/backgroundsync/update/**'
+                kotlin.srcDirs = ['src/test/kotlin']
+            } else {
+                kotlin.srcDirs = ['src/test/kotlin', 'variants/apk_lts/test/kotlin']
             }
         }
     }
@@ -72,6 +72,10 @@ android {
     testOptions {
         unitTests.includeAndroidResources = true
     }
+}
+
+tasks.configureEach {
+    inputs.property('uthDistributionChannel', uthDistributionChannel)
 }
 
 tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {

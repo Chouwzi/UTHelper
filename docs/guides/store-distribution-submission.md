@@ -81,17 +81,44 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
   untracked secret).
 - **Privacy Policy URL**: host `docs/PRIVACY.md` at a stable HTTPS URL and link
   it in Play Console Store Settings and inside the app.
-- **Data Safety form**:
-  - Declare **App info and performance → Crash logs & Diagnostics**: *Collected*
-    (optional via Settings → Privacy opt-out), *Not shared* with third parties
-    for ads/tracking, *Encrypted in transit* (HTTPS), *Not linked to user
-    identity*.
-  - Provide local data & credential deletion instructions matching
-    [docs/PRIVACY.md](../PRIVACY.md).
+- **Data Safety form**: use the flow inventory below; it is not a completed
+  Play Console declaration. Provide local data and credential deletion
+  instructions matching [docs/PRIVACY.md](../PRIVACY.md).
 - **Personal Developer Account Closed Testing Gate**:
   - Personal Play Console accounts created on or after Nov 13, 2023 must run a
     **Closed Testing** track with at least **12 opted-in testers for 14
     consecutive days** before applying for Production access.
+
+### Data Safety Flow Review
+
+Google Play defines collection as transmitting data off a user's device,
+including transmission by app libraries or SDKs and collection through a
+WebView whose behavior the app controls. Ephemeral processing still belongs in
+the form response. User-initiated transfers may qualify for a sharing exception,
+but do not by themselves remove collection. Apply the current
+[Google Play Data safety guidance](https://support.google.com/googleplay/android-developer/answer/10787469)
+to the release being submitted.
+
+| Data flow | Recipient and trigger | Purpose | Required or optional | Data Safety review before submission |
+| --- | --- | --- | --- | --- |
+| Moodle/Portal sign-in and authenticated requests: account ID, credentials, session or service token | Configured UTH Moodle/Portal endpoints over HTTPS when the user signs in or requests authenticated data | App functionality and account management | Required for authenticated features; signing in is a user choice | Map the account ID and credential/session fields to the current form taxonomy. Assess collection and sharing from the actual endpoint and its role; a separate UTHelper backend is not required for an off-device transfer to be in scope. |
+| Assignment or quiz submission: answers and user-selected attachments | Configured UTH Moodle/Portal endpoint over HTTPS when the user submits | App functionality and course work | Optional, user-triggered; fields or attachments may be required by the selected task | Review `Files and docs`, `Other user-generated content`, and associated user IDs as applicable. Assess the user-initiated sharing exception separately from collection. |
+| Sanitized crash and performance diagnostics | Sentry only when diagnostics delivery is enabled; the app currently enables diagnostics by default and lets users disable them in Settings → Privacy | Troubleshooting and reliability | Optional; users can opt out | Review `Crash logs` and `Diagnostics`, any qualifying identifiers/device context, the actual SDK behavior, encryption, Sentry's processing role, and configured retention/deletion. |
+| User-configured notification integrations | Gmail, Discord, or Telegram endpoint chosen in Settings, when the configured alert is sent | Delivering reminders the user requested | Optional; requires user configuration | Inventory the exact fields and recipient for each integration, then classify them and assess collection/sharing and transport independently. |
+
+Grades and course documents fetched from UTH are displayed or cached on device;
+the diagnostics allow-list excludes grades, submissions, file contents, and
+other Moodle/Portal data. Treat that as an on-device-only path only after
+checking the signed artifact and its SDKs for any other outbound route.
+
+Before completing the form, the release owner must review the signed AAB,
+merged manifest, bundled SDKs, diagnostics configuration, actual UTH backend
+request/retention behavior, and any enabled integration. Record the selected
+Google Play data types, purpose, required/optional status, collection versus
+sharing treatment, encryption, retention, and deletion path for each flow.
+Do not infer “no collection” or “no sharing” solely from local storage, direct
+client-to-UTH requests, a user action, or the absence of a developer-hosted
+backend. The owner remains responsible for the final Console answers.
 
 ---
 

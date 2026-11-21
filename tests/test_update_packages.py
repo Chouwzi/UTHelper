@@ -673,3 +673,142 @@ def test_shell_execute_runas_configures_closehandle_types(monkeypatch):
     assert fake_close.restype == wintypes.BOOL
     assert closed_handles == [0x1234]
     assert ctypes is not None
+
+
+def test_windows_launcher_fails_closed_when_localappdata_missing_or_relative(
+    tmp_path, monkeypatch
+):
+    from platform_utils import windows_update
+
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    fake_temp = tmp_path / "shared_temp"
+    fake_temp.mkdir()
+
+    monkeypatch.setattr(windows_update.sys, "platform", "win32")
+    monkeypatch.setattr(windows_update, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(windows_update, "_shell_execute_runas", lambda *_args: 0)
+    monkeypatch.setenv("TEMP", str(fake_temp))
+    monkeypatch.setenv("TMP", str(fake_temp))
+
+    for bad_value in (None, "", "   ", "relative/localappdata"):
+        if bad_value is None:
+            monkeypatch.delenv("LOCALAPPDATA", raising=False)
+        else:
+            monkeypatch.setenv("LOCALAPPDATA", bad_value)
+        launcher = WindowsPackageLauncher(relaunch_executable=tmp_path / "UTHelper.exe")
+        result = launcher.launch(path, _candidate(path).package)
+        assert result.acknowledged is False
+        assert result.status == "launch_failed"
+        assert not (fake_temp / "UTHelper").exists()
+
+
+def test_windows_launcher_rejects_reparse_point_update_handoff_dir(
+    tmp_path, monkeypatch
+):
+    from platform_utils import windows_update
+
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    local_app_data = tmp_path / "LocalAppData"
+    handoff_parent = local_app_data / "UTHelper" / "update_handoff"
+    handoff_parent.parent.mkdir(parents=True)
+    handoff_parent.mkdir()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(windows_update.sys, "platform", "win32")
+    monkeypatch.setattr(windows_update, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(windows_update, "_shell_execute_runas", lambda *_args: 0)
+    monkeypatch.setattr(
+        windows_update,
+        "_is_reparse_or_symlink",
+        lambda p: Path(p) == handoff_parent,
+    )
+
+    launcher = WindowsPackageLauncher(relaunch_executable=tmp_path / "UTHelper.exe")
+    result = launcher.launch(path, _candidate(path).package)
+    assert result.acknowledged is False
+    assert result.status == "launch_failed"
+    assert list(handoff_parent.glob("handoff-*")) == []
+
+
+def test_windows_launcher_uses_system32_cwd_and_protected_dacl(
+    tmp_path, monkeypatch
+):
+    import os
+    from platform_utils import windows_update
+
+    path = tmp_path / "UTHelper-2.2.0.msi"
+    path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi")
+    local_app_data = tmp_path / "LocalAppData"
+    relaunch_exe = tmp_path / "UTHelper.exe"
+    relaunch_exe.write_bytes(b"MZ")
+
+    captured = {}
+    popen_calls = []
+
+    def fake_runas(file_path, params, cwd):
+        captured["runas"] = (file_path, params, cwd)
+        return 0
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((argv, kwargs))
+        return object()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(windows_update.sys, "platform", "win32")
+    monkeypatch.setattr(windows_update, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(windows_update, "_shell_execute_runas", fake_runas)
+    monkeypatch.setattr(windows_update.subprocess, "Popen", fake_popen)
+
+    launcher = WindowsPackageLauncher(relaunch_executable=relaunch_exe)
+    result = launcher.launch(path, _candidate(path).package)
+
+    assert result.acknowledged is True
+    handoff_dirs = list((local_app_data / "UTHelper" / "update_handoff").glob("handoff-*"))
+    assert len(handoff_dirs) == 1
+    handoff_dir = handoff_dirs[0]
+
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    system32_dir = Path(system_root) / "System32"
+    expected_cwd = str(system32_dir) if system32_dir.is_dir() else system_root
+    assert captured["runas"][2] == expected_cwd
+    assert popen_calls[0][1]["cwd"] == expected_cwd
+
+    if os.name == "nt":
+        import win32api
+        import win32con
+        import win32security
+
+        sd = win32security.GetNamedSecurityInfo(
+            str(handoff_dir),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+        control, _revision = sd.GetSecurityDescriptorControl()
+        assert control & win32security.SE_DACL_PROTECTED
+        dacl = sd.GetSecurityDescriptorDacl()
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+        )
+        try:
+            user_sid = win32security.ConvertSidToStringSid(
+                win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            )
+        finally:
+            win32api.CloseHandle(token)
+        admins_sid = win32security.ConvertSidToStringSid(
+            win32security.CreateWellKnownSid(
+                win32security.WinBuiltinAdministratorsSid, None
+            )
+        )
+        system_sid = win32security.ConvertSidToStringSid(
+            win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
+        )
+        ace_sids = {
+            win32security.ConvertSidToStringSid(dacl.GetAce(idx)[2])
+            for idx in range(dacl.GetAceCount())
+        }
+        assert ace_sids <= {user_sid, admins_sid, system_sid}
+        assert user_sid in ace_sids
+        assert system_sid in ace_sids

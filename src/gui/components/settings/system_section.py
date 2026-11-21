@@ -71,12 +71,14 @@ def init_system_controls(view):
         disabled=not settings.START_WITH_WINDOWS,
         on_change=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
     )
-    view._autostart_status = ft.Text("", size=11, color=C.TEXT_SECONDARY)
+    view._autostart_status = ft.Text(
+        "",
+        size=11,
+        color=C.TEXT_SECONDARY,
+        visible=False,
+    )
     view._sw_start_minimized_container = ft.Container(
-        content=ft.Column(
-            controls=[view._sw_start_minimized, view._autostart_status],
-            spacing=2,
-        ),
+        content=view._sw_start_minimized,
         padding=ft.Padding.only(left=24),
         visible=bool(settings.START_WITH_WINDOWS),
     )
@@ -141,6 +143,7 @@ def build_system_section(view) -> ft.Control:
         controls.extend([
             view._make_themed_label("Khởi động"),
             view._sw_start_with_windows,
+            view._autostart_status,
             view._sw_start_minimized_container,
             view._sw_minimize_to_tray,
             ft.Divider(height=16, color=C.BORDER),

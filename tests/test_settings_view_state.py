@@ -849,3 +849,61 @@ def test_app_controller_awaits_view_manager_settings_initialization():
         manager.show_settings.assert_awaited_once_with()
 
     asyncio.run(scenario())
+
+
+def test_system_section_keeps_autostart_status_visible_when_disabled(monkeypatch):
+    import platform_utils as pu
+    from gui.components.settings.system_section import (
+        build_system_section,
+        init_system_controls,
+    )
+    from gui.controllers.autostart_settings import AutostartUiState
+
+    monkeypatch.setattr(pu, "UI_IS_MOBILE", False)
+
+    view = SimpleNamespace(
+        _distribution_profile=None,
+        _on_autostart_toggle=lambda _e: None,
+        _on_form_field_change=lambda: None,
+        _toggle_bg_check_ui=lambda: None,
+        _make_themed_label=lambda text: _control(text),
+        _build_hint=lambda text: _control(text),
+        _sync_autostart_dependency=lambda: SettingsView._sync_autostart_dependency(view),
+    )
+    init_system_controls(view)
+    column = build_system_section(view)
+
+    assert view._autostart_status in column.controls
+    sw_idx = column.controls.index(view._sw_start_with_windows)
+    assert column.controls[sw_idx + 1] is view._autostart_status
+    assert view._sw_start_minimized_container is not view._autostart_status
+
+    SettingsView._apply_autostart_ui(
+        view,
+        AutostartUiState(
+            enabled=False,
+            editable=False,
+            success=False,
+            message="Khởi động cùng Windows đã bị tắt trong Task Manager.",
+            confirmed=True,
+        ),
+    )
+    assert view._sw_start_minimized_container.visible is False
+    assert view._autostart_status.visible is True
+    assert (
+        view._autostart_status.value
+        == "Khởi động cùng Windows đã bị tắt trong Task Manager."
+    )
+
+    SettingsView._apply_autostart_ui(
+        view,
+        AutostartUiState(
+            enabled=True,
+            editable=True,
+            success=True,
+            message="",
+            confirmed=True,
+        ),
+    )
+    assert view._sw_start_minimized_container.visible is True
+    assert view._autostart_status.visible is False

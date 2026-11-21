@@ -156,6 +156,9 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert "ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}" in workflow
     assert "ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}" in workflow
     assert "ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}" in workflow
+    assert "UTH_DISTRIBUTION_CHANNEL=apk_lts" in workflow
+    assert "--distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json" in workflow
+    assert "--channel apk_lts" in workflow
     assert 'application-id "$APK")" = "com.uthelper.uthelper"' in workflow
     assert 'version-code "$APK")" = "$BUILD_NUMBER"' in workflow
     assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"

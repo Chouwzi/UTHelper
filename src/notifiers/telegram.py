@@ -95,8 +95,15 @@ class TelegramNotifier(BaseNotifier):
             r.raise_for_status()
             logger.info(f"[Telegram] Đã gửi thông báo tổng hợp cho {len(tasks)} bài tập.")
             return True
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            logger.error("[Telegram] Lỗi khi gửi: HTTP %s", status_code)
+            return False
+        except httpx.RequestError as e:
+            logger.error("[Telegram] Lỗi kết nối: %s", type(e).__name__)
+            return False
         except Exception as e:
-            logger.error(f"[Telegram] Lỗi khi gửi: {e}")
+            logger.error("[Telegram] Lỗi khi gửi: %s", type(e).__name__)
             return False
 
     def _format_task_block(self, a) -> str:

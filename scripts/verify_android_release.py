@@ -458,7 +458,10 @@ def _read_embedded_distribution_channel(archive: zipfile.ZipFile) -> dict[str, o
     nested_zips = [
         name
         for name in archive.namelist()
-        if name.endswith("/app/app.zip") or name.endswith("flutter_assets/app/app.zip")
+        if name == "assets/app.zip"
+        or name.endswith("/assets/app.zip")
+        or name.endswith("/app/app.zip")
+        or name.endswith("flutter_assets/app/app.zip")
     ]
     for nested_name in sorted(nested_zips):
         try:
@@ -522,6 +525,13 @@ def _verify_chplay_manifest_policy(manifest_root: ET.Element) -> None:
                 raise AndroidVerificationError(
                     f"CH Play manifest contains prohibited updater provider: {provider_name}"
                 )
+        elif tag == "service":
+            service_name = (_android_attr(element, "name") or "").strip()
+            fg_type = (_android_attr(element, "foregroundServiceType") or "").strip()
+            if fg_type or "ForegroundService" in service_name:
+                raise AndroidVerificationError(
+                    f"CH Play manifest contains prohibited foreground service: {service_name or fg_type}"
+                )
 
     applications = [
         element
@@ -541,11 +551,85 @@ def _verify_chplay_manifest_policy(manifest_root: ET.Element) -> None:
         raise AndroidVerificationError(
             "CH Play manifest must not enable android:usesCleartextTraffic='true'"
         )
+    extract_native_libs = _android_attr(app, "extractNativeLibs")
+    if extract_native_libs is not None and extract_native_libs.strip().lower() == "true":
+        raise AndroidVerificationError(
+            "CH Play manifest must not enable android:extractNativeLibs='true'"
+        )
+
+
+def _verify_aab_bundle_config(archive: zipfile.ZipFile) -> None:
+    """Verify ``BundleConfig.pb`` enforces uncompressed, 16 KB-aligned native libraries."""
+    if "BundleConfig.pb" not in archive.namelist():
+        raise AndroidVerificationError("AAB is missing BundleConfig.pb")
+    raw = archive.read("BundleConfig.pb")
+    optimizations_bytes: bytes | None = None
+    for field_num, wire_type, val in _pb_iter_fields(raw):
+        if field_num == 2 and wire_type == 2 and isinstance(val, bytes):
+            optimizations_bytes = val
+            break
+    if optimizations_bytes is None:
+        raise AndroidVerificationError(
+            "AAB BundleConfig.pb is missing optimizations configuration"
+        )
+    uncompress_bytes: bytes | None = None
+    for field_num, wire_type, val in _pb_iter_fields(optimizations_bytes):
+        if field_num == 2 and wire_type == 2 and isinstance(val, bytes):
+            uncompress_bytes = val
+            break
+    if uncompress_bytes is None:
+        raise AndroidVerificationError(
+            "AAB BundleConfig.pb is missing uncompress_native_libraries optimization"
+        )
+    enabled: int | None = None
+    alignment: int | None = None
+    for field_num, wire_type, val in _pb_iter_fields(uncompress_bytes):
+        if field_num == 1 and wire_type == 0 and isinstance(val, int):
+            enabled = val
+        elif field_num == 2 and wire_type == 0 and isinstance(val, int):
+            alignment = val
+    if enabled != 1:
+        raise AndroidVerificationError(
+            "AAB BundleConfig.pb must enable uncompress_native_libraries"
+        )
+    if alignment is None or alignment < 2:
+        raise AndroidVerificationError(
+            f"AAB BundleConfig.pb native library page alignment must be >= 16 KB (alignment={alignment})"
+        )
+
+
+def _verify_apk_native_lib_zip_alignment(
+    artifact: Path,
+    archive: zipfile.ZipFile,
+    native_libs: list[tuple[str, str]],
+) -> None:
+    """Verify CH Play APKs store native libraries uncompressed and 16 KB offset-aligned."""
+    with artifact.open("rb") as raw_zip:
+        for so_name, abi in sorted(native_libs):
+            info = archive.getinfo(so_name)
+            if info.compress_type != zipfile.ZIP_STORED:
+                raise AndroidVerificationError(
+                    f"CH Play APK native library {so_name} must use ZIP_STORED"
+                )
+            raw_zip.seek(info.header_offset)
+            lfh = raw_zip.read(30)
+            if len(lfh) != 30 or lfh[:4] != b"PK\x03\x04":
+                raise AndroidVerificationError(
+                    f"CH Play APK native library {so_name} has invalid ZIP local header"
+                )
+            filename_len, extra_len = struct.unpack_from("<HH", lfh, 26)
+            data_offset = info.header_offset + 30 + filename_len + extra_len
+            if abi in _SIXTY_FOUR_BIT_ABIS and (data_offset % _ELF_16KB_ALIGN) != 0:
+                raise AndroidVerificationError(
+                    f"CH Play APK 64-bit native library {so_name} ({abi}) data offset "
+                    f"0x{data_offset:x} is not 16 KB aligned"
+                )
 
 
 def _verify_chplay_archive_contents(
     archive: zipfile.ZipFile,
     *,
+    artifact: Path,
     is_aab: bool,
     expected_package_id: str,
     native_libs: list[tuple[str, str]],
@@ -574,6 +658,10 @@ def _verify_chplay_archive_contents(
         raise AndroidVerificationError("CH Play artifact does not contain native libraries")
     for so_name, abi in sorted(native_libs):
         verify_elf_16kb_alignment(archive.read(so_name), library_name=so_name, abi=abi)
+    if is_aab:
+        _verify_aab_bundle_config(archive)
+    else:
+        _verify_apk_native_lib_zip_alignment(artifact, archive, native_libs)
 
     channel_payload = _read_embedded_distribution_channel(archive)
     if channel_payload is None:
@@ -779,7 +867,7 @@ def verify_android_release(
                 names = set(archive.namelist())
                 if (
                     "BundleConfig.pb" not in names
-                    and "base/manifest/AndroidManifest.xml" not in names
+                    or "base/manifest/AndroidManifest.xml" not in names
                 ):
                     raise AndroidVerificationError("Android AAB container layout is invalid")
                 actual_package, actual_version, actual_build_number, manifest_root = (
@@ -832,6 +920,7 @@ def verify_android_release(
             if resolved_channel == "chplay":
                 _verify_chplay_archive_contents(
                     archive,
+                    artifact=artifact,
                     is_aab=is_aab,
                     expected_package_id=package_id,
                     native_libs=native_libs,
@@ -884,6 +973,7 @@ def verify_android_release(
             "play_manifest_policy",
             "sha256",
             "target_sdk",
+            "uncompressed_native_libs",
             "version_code",
             "version_name",
         ]

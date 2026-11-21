@@ -244,6 +244,18 @@ try {
     }
 
     $logoNode = $manifestDoc.SelectSingleNode("/f:Package/f:Properties/f:Logo", $nsMgr)
+    $resourceNodes = @($manifestDoc.SelectNodes("/f:Package/f:Resources/f:Resource", $nsMgr))
+    if ($resourceNodes.Count -eq 0) {
+        throw "MSIX verification failed: Package/Resources/Resource element is missing"
+    }
+    $resourceLanguages = @(
+        $resourceNodes |
+            ForEach-Object { $_.GetAttribute("Language").Trim().ToLowerInvariant() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($resourceLanguages.Count -eq 0 -or ($resourceLanguages -notcontains "en-us") -or ($resourceLanguages -notcontains "vi-vn")) {
+        throw "MSIX verification failed: Package/Resources must declare 'en-us' and 'vi-vn' languages (found: $($resourceLanguages -join ', '))"
+    }
     $visualElements = $appNode.SelectSingleNode("uap:VisualElements", $nsMgr)
     $defaultTile = if ($null -ne $visualElements) { $visualElements.SelectSingleNode("uap:DefaultTile", $nsMgr) } else { $null }
 
@@ -335,6 +347,13 @@ try {
     $wackExecuted = $false
     $wackOverallResult = $null
     if ($RunWack) {
+        $sig = Get-AuthenticodeSignature -LiteralPath $resolvedInput
+        if ($sig.Status -eq [System.Management.Automation.SignatureStatus]::NotSigned) {
+            throw "MSIX verification failed: -RunWack requires a signed .msix package (unsigned Partner Center packages cannot be installed by appcert.exe)"
+        }
+        if ($sig.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "MSIX verification failed: -RunWack requires the MSIX signing certificate to be trusted on this machine (status=$($sig.Status))"
+        }
         $appCertPath = Resolve-AppCert
         $resolvedWackReport = if ([string]::IsNullOrWhiteSpace($WackReportPath)) {
             $resolvedInput + ".wack-report.xml"
@@ -342,6 +361,24 @@ try {
             [System.IO.Path]::GetFullPath($WackReportPath)
         }
         New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($resolvedWackReport)) -Force | Out-Null
+
+        $resetPsi = New-Object System.Diagnostics.ProcessStartInfo
+        $resetPsi.FileName = $appCertPath
+        $resetPsi.Arguments = "reset"
+        $resetPsi.UseShellExecute = $false
+        $resetProc = [System.Diagnostics.Process]::Start($resetPsi)
+        try {
+            if (-not $resetProc.WaitForExit(120 * 1000)) {
+                Stop-Process -Id $resetProc.Id -Force -ErrorAction SilentlyContinue
+                throw "MSIX verification failed: appcert.exe reset timed out"
+            }
+            if ($resetProc.ExitCode -ne 0) {
+                throw "MSIX verification failed: appcert.exe reset exited with code $($resetProc.ExitCode)"
+            }
+        }
+        finally {
+            $resetProc.Dispose()
+        }
 
         $argString = @(
             "test",
@@ -381,6 +418,7 @@ try {
     $checks = @(
         "appx_manifest_schema",
         "identity_and_version",
+        "manifest_resources",
         "capabilities_full_trust",
         "appdata_virtualization_enabled",
         "startup_task_argument_free",

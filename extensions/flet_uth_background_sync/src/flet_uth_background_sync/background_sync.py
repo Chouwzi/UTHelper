@@ -20,6 +20,28 @@ class AndroidBackgroundSync(Service):
             "set_credentials", {"base_url": base_url, "token": token}
         )
 
+    async def read_app_secrets(self) -> dict[str, str]:
+        raw = await self._invoke_method("read_app_secrets", timeout=5)
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in raw.items()
+            if isinstance(key, str) and value is not None
+        }
+
+    async def write_app_secrets(self, secrets: dict[str, str]) -> bool:
+        return bool(
+            await self._invoke_method(
+                "write_app_secrets",
+                {"secrets": {str(key): str(value) for key, value in secrets.items()}},
+                timeout=5,
+            )
+        )
+
+    async def clear_app_secrets(self) -> bool:
+        return bool(await self._invoke_method("clear_app_secrets", timeout=5))
+
     async def schedule_periodic(self, interval_minutes: int) -> dict[str, Any]:
         return await self._invoke_method(
             "schedule_periodic", {"interval_minutes": interval_minutes}

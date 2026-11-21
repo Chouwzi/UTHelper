@@ -181,3 +181,106 @@ def test_portal_client_rejected_stale_login_keeps_the_newer_token():
 
     assert client._cached_token("student") == "fresh-token"
 
+
+def test_portal_client_rejects_non_https_and_invalid_base_urls():
+    import pytest
+
+    for bad_url in (
+        "",
+        "http://portal-publicapp.ut.edu.vn/api/v1",
+        "https://user:pass@portal-publicapp.ut.edu.vn/api/v1",
+        "https://portal-publicapp.ut.edu.vn/api/v1?foo=bar",
+        "https://portal-publicapp.ut.edu.vn/api/v1#frag",
+    ):
+        with pytest.raises(ValueError):
+            PortalClient(bad_url)
+
+
+def test_portal_client_redirect_handler_blocks_cross_origin_and_http_downgrade():
+    import urllib.request
+    from email.message import Message
+    from core.portal_client import _SamePortalOriginRedirectHandler
+
+    handler = _SamePortalOriginRedirectHandler("https://portal-publicapp.ut.edu.vn")
+    original_req = urllib.request.Request(
+        "https://portal-publicapp.ut.edu.vn/api/v1/lichhoc/ngay",
+        headers={"Authorization": "Bearer jwt-token"},
+        method="GET",
+    )
+
+    for bad_target in (
+        "https://evil.example/steal",
+        "http://portal-publicapp.ut.edu.vn/api/v1/lichhoc/ngay",
+        "https://user:pass@portal-publicapp.ut.edu.vn/api/v1/lichhoc/ngay",
+    ):
+        try:
+            handler.redirect_request(
+                original_req,
+                None,
+                302,
+                "Found",
+                Message(),
+                bad_target,
+            )
+        except HTTPError as exc:
+            assert exc.code == 302
+            assert "Untrusted Portal redirect" in exc.msg
+        else:
+            raise AssertionError(f"Expected redirect rejection for {bad_target}")
+
+    same_origin_req = handler.redirect_request(
+        original_req,
+        None,
+        302,
+        "Found",
+        Message(),
+        "https://portal-publicapp.ut.edu.vn/api/v2/lichhoc/ngay",
+    )
+    assert same_origin_req is not None
+    assert (
+        same_origin_req.full_url
+        == "https://portal-publicapp.ut.edu.vn/api/v2/lichhoc/ngay"
+    )
+
+
+def test_portal_client_rejects_mismatched_response_geturl_and_oversized_payload():
+    import pytest
+    from core.portal_client import PortalProtocolError, _MAX_PORTAL_RESPONSE_BYTES
+
+    class _RedirectedResponse(_Response):
+        def geturl(self):
+            return "https://evil.example/hijacked"
+
+    client_redirect = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _RedirectedResponse(
+            {"success": True, "token": "jwt"}
+        ),
+    )
+    with pytest.raises(PortalProtocolError, match="trusted origin"):
+        client_redirect.fetch_day(date(2026, 8, 11), "student", "secret")
+
+    class _HugeResponse:
+        def __init__(self):
+            self.headers = Message()
+
+        def geturl(self):
+            return "https://portal-publicapp.ut.edu.vn/api/v1/user/login"
+
+        def read(self, amt=-1):
+            del amt
+            return b"x" * (_MAX_PORTAL_RESPONSE_BYTES + 1)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    client_huge = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _HugeResponse(),
+    )
+    with pytest.raises(PortalProtocolError, match="maximum size"):
+        client_huge.fetch_day(date(2026, 8, 11), "student", "secret")
+

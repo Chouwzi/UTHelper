@@ -6,10 +6,36 @@ param(
     [ValidateSet("universal", "arm64-v8a", "armeabi-v7a", "x86_64")]
     [string]$Architecture,
     [switch]$LegacyPackaging,
+    [switch]$RequireSigned,
     [string]$OutputDir
 )
 
 $ErrorActionPreference = "Stop"
+
+$signingVars = @(
+    "FLET_ANDROID_SIGNING_KEY_STORE",
+    "FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD",
+    "FLET_ANDROID_SIGNING_KEY_PASSWORD",
+    "FLET_ANDROID_SIGNING_KEY_ALIAS"
+)
+if (-not [string]::IsNullOrWhiteSpace($env:FLET_ANDROID_SIGNING_STORE_PASSWORD) -and
+    [string]::IsNullOrWhiteSpace($env:FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD)) {
+    throw "FLET_ANDROID_SIGNING_STORE_PASSWORD is not recognized by Flet CLI; use FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD."
+}
+$configuredSigningVars = @($signingVars | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+})
+if ($configuredSigningVars.Count -gt 0 -and $configuredSigningVars.Count -lt $signingVars.Count) {
+    $missing = @($signingVars | Where-Object { $configuredSigningVars -notcontains $_ })
+    throw "Partial FLET_ANDROID_SIGNING_* environment configuration detected; missing: $($missing -join ', ')"
+}
+if ($RequireSigned -and $configuredSigningVars.Count -ne $signingVars.Count) {
+    throw "-RequireSigned requires all 4 FLET_ANDROID_SIGNING_* environment variables ($($signingVars -join ', '))."
+}
+if ($configuredSigningVars.Count -eq $signingVars.Count -and
+    -not (Test-Path -LiteralPath $env:FLET_ANDROID_SIGNING_KEY_STORE -PathType Leaf)) {
+    throw "FLET_ANDROID_SIGNING_KEY_STORE file not found: $env:FLET_ANDROID_SIGNING_KEY_STORE"
+}
 
 if (-not $PSBoundParameters.ContainsKey("Target") -or -not $Target) {
     if ($Channel -eq "chplay") {
@@ -69,8 +95,12 @@ $env:PYTHONUTF8 = "1"
 )
 $previousGradleChannel = [Environment]::GetEnvironmentVariable("ORG_GRADLE_PROJECT_uthDistributionChannel", "Process")
 $previousEnvChannel = [Environment]::GetEnvironmentVariable("UTH_DISTRIBUTION_CHANNEL", "Process")
+$previousPythonHome = [Environment]::GetEnvironmentVariable("PYTHONHOME", "Process")
+$previousUvPythonHome = [Environment]::GetEnvironmentVariable("UV_INTERNAL__PYTHONHOME", "Process")
 [Environment]::SetEnvironmentVariable("ORG_GRADLE_PROJECT_uthDistributionChannel", $Channel, "Process")
 [Environment]::SetEnvironmentVariable("UTH_DISTRIBUTION_CHANNEL", $Channel, "Process")
+[Environment]::SetEnvironmentVariable("PYTHONHOME", $null, "Process")
+[Environment]::SetEnvironmentVariable("UV_INTERNAL__PYTHONHOME", $null, "Process")
 
 function Set-BoundedAndroidGradleConfig {
     param([Parameter(Mandatory = $true)][string]$GradlePropertiesPath)
@@ -113,99 +143,28 @@ function Set-AndroidChannelBuildConfig {
         [Parameter(Mandatory = $true)][string]$DistributionChannel
     )
 
-    $targetSdk = 36
-    $appGradleCandidates = @(
-        (Join-Path $ProjectRoot "build/flutter/android/app/build.gradle.kts"),
-        (Join-Path $ProjectRoot "build/flutter/android/app/build.gradle")
-    )
-    foreach ($gradleFile in $appGradleCandidates) {
-        if (-not (Test-Path -LiteralPath $gradleFile -PathType Leaf)) {
-            continue
-        }
-        $content = [IO.File]::ReadAllText($gradleFile)
-        $isKts = $gradleFile.EndsWith(".kts")
-        if ($isKts) {
-            $content = [Regex]::Replace($content, 'targetSdk\s*=\s*[^\r\n]+', "targetSdk = $targetSdk")
-            $content = [Regex]::Replace($content, 'compileSdk\s*=\s*[^\r\n]+', "compileSdk = $targetSdk")
-        } else {
-            $content = [Regex]::Replace($content, 'targetSdk(?:Version)?\s*=?\s*[^\r\n]+', "targetSdk = $targetSdk")
-            $content = [Regex]::Replace($content, 'compileSdk(?:Version)?\s*=?\s*[^\r\n]+', "compileSdk = $targetSdk")
-        }
-        if ($DistributionChannel -eq "chplay") {
-            $content = [Regex]::Replace($content, 'useLegacyPackaging\s*=?\s*true', 'useLegacyPackaging = false')
-        }
-        [IO.File]::WriteAllText($gradleFile, $content, [Text.UTF8Encoding]::new($false))
-    }
-
-    if ($DistributionChannel -ne "chplay") {
-        return
-    }
-
-    # Defense-in-depth stripping on materialized Flutter project & plugin copies (never modifies repo source).
-    $appManifest = Join-Path $ProjectRoot "build/flutter/android/app/src/main/AndroidManifest.xml"
-    if (Test-Path -LiteralPath $appManifest -PathType Leaf) {
-        $xml = [IO.File]::ReadAllText($appManifest)
-        if ($xml -notmatch 'xmlns:tools=') {
-            $xml = $xml -replace '<manifest\b', '<manifest xmlns:tools="http://schemas.android.com/tools"'
-        }
-        foreach ($prohibitedPerm in @(
-            "android.permission.REQUEST_INSTALL_PACKAGES",
-            "android.permission.FOREGROUND_SERVICE",
-            "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
-            "android.permission.USE_EXACT_ALARM"
-        )) {
-            $escaped = [Regex]::Escape($prohibitedPerm)
-            $xml = [Regex]::Replace($xml, "(?m)^[ \t]*<uses-permission\b[^>]*$escaped[^>]*/>\r?\n?", "")
-        }
-        $xml = [Regex]::Replace($xml, '(?s)[ \t]*<provider\b[^>]*UthUpdateFileProvider.*?</provider>\r?\n?', '')
-        $xml = [Regex]::Replace($xml, '(?m)^[ \t]*<provider\b[^>]*UthUpdateFileProvider[^>]*/>\r?\n?', '')
-        # Emit explicit tools:node="remove" markers so transitive plugin manifests cannot re-inject them.
-        $removeNodes = ""
-        foreach ($prohibitedPerm in @(
-            "android.permission.REQUEST_INSTALL_PACKAGES",
-            "android.permission.FOREGROUND_SERVICE",
-            "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
-            "android.permission.USE_EXACT_ALARM"
-        )) {
-            $removeNodes += "    <uses-permission android:name=`"$prohibitedPerm`" tools:node=`"remove`" />`n"
-        }
-        $xml = ([Regex]'(?m)^([ \t]*)<application\b').Replace($xml, ($removeNodes + '$1<application'), 1)
-        $xml = [Regex]::Replace($xml, 'android:usesCleartextTraffic="true"', 'android:usesCleartextTraffic="false"')
-        $xml = [Regex]::Replace($xml, 'android:allowBackup="true"', 'android:allowBackup="false"')
-        if ($xml -notmatch 'android:allowBackup=') {
-            $xml = $xml -replace '<application\b', '<application android:allowBackup="false"'
-        }
-        if ($xml -notmatch 'android:usesCleartextTraffic=') {
-            $xml = $xml -replace '<application\b', '<application android:usesCleartextTraffic="false"'
-        }
-        [IO.File]::WriteAllText($appManifest, $xml, [Text.UTF8Encoding]::new($false))
-    }
-
-    $materializedPlugin = Join-Path $ProjectRoot "build/flutter-packages/flet_uth_background_sync/android"
-    if (Test-Path -LiteralPath $materializedPlugin -PathType Container) {
-        foreach ($relPath in @(
-            "src/main/kotlin/com/uthelper/backgroundsync/update/ApkUpdateInstaller.kt",
-            "src/main/kotlin/com/uthelper/backgroundsync/update/ApkUpdateDownloadManager.kt",
-            "src/main/kotlin/com/uthelper/backgroundsync/update/UthUpdateFileProvider.kt",
-            "src/main/kotlin/com/uthelper/backgroundsync/update/ApkLtsUpdateBridgeDelegate.kt",
-            "src/main/res/xml/uth_update_paths.xml"
-        )) {
-            $targetFile = Join-Path $materializedPlugin $relPath
-            if (Test-Path -LiteralPath $targetFile -PathType Leaf) {
-                Remove-Item -LiteralPath $targetFile -Force
-            }
-        }
-        $chplayManifest = Join-Path $materializedPlugin "variants/chplay/AndroidManifest.xml"
-        $mainManifest = Join-Path $materializedPlugin "src/main/AndroidManifest.xml"
-        if (Test-Path -LiteralPath $chplayManifest -PathType Leaf) {
-            Copy-Item -LiteralPath $chplayManifest -Destination $mainManifest -Force
-        }
+    python (Join-Path $ProjectRoot "scripts\prepare_android_flutter_project.py") `
+        --project-root (Join-Path $ProjectRoot "build\flutter") `
+        --channel $DistributionChannel `
+        --target-sdk 36
+    if ($LASTEXITCODE -ne 0) {
+        throw "prepare_android_flutter_project.py failed with exit code $LASTEXITCODE."
     }
 }
 
 $channelAssetPath = Join-Path $projectRoot "src\assets\distribution-channel.json"
 Push-Location $projectRoot
 try {
+    $buildVersion = (python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --print-version).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Canonical release version lookup failed before initial Android build."
+    }
+    $buildNumber = (python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))").Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Canonical Android build number lookup failed before initial Android build."
+    }
+    $fletOptions += @("--build-version", $buildVersion, "--build-number", $buildNumber)
+
     python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before initial Android build."
@@ -249,5 +208,7 @@ try {
     }
     [Environment]::SetEnvironmentVariable("ORG_GRADLE_PROJECT_uthDistributionChannel", $previousGradleChannel, "Process")
     [Environment]::SetEnvironmentVariable("UTH_DISTRIBUTION_CHANNEL", $previousEnvChannel, "Process")
+    [Environment]::SetEnvironmentVariable("PYTHONHOME", $previousPythonHome, "Process")
+    [Environment]::SetEnvironmentVariable("UV_INTERNAL__PYTHONHOME", $previousUvPythonHome, "Process")
     Pop-Location
 }
