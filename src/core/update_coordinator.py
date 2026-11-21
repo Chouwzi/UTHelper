@@ -23,6 +23,28 @@ from platform_utils.update_packages import PackageLauncher, PackageVerifier
 logger = logging.getLogger(__name__)
 
 
+_NON_RETRYABLE_INSTALL_PACKAGE_ERRORS = frozenset(
+    {
+        "sha256_mismatch",
+        "size_mismatch",
+        "invalid_apk",
+        "package_mismatch",
+        "release_version_mismatch",
+        "installed_signer_mismatch",
+        "manifest_signer_mismatch",
+        "apk_signature_invalid",
+        "release_metadata_invalid",
+    }
+)
+_UNAVAILABLE_INSTALL_PACKAGE_ERRORS = frozenset(
+    {
+        "source_unavailable",
+        "installer_unavailable",
+        "Windows installer is unavailable",
+    }
+)
+
+
 class ReleaseClient(Protocol):
     def fetch_candidate(
         self,
@@ -575,17 +597,35 @@ class UpdateCoordinator:
                         reason = result.status
                     else:
                         reason = result.reason or result.status
-                    if (
-                        result.reason == "source_unavailable"
+                    invalid_staged_package = (
+                        result.reason in _NON_RETRYABLE_INSTALL_PACKAGE_ERRORS
+                        or reason in _NON_RETRYABLE_INSTALL_PACKAGE_ERRORS
+                    )
+                    unavailable_staged_package = (
+                        result.reason in _UNAVAILABLE_INSTALL_PACKAGE_ERRORS
                         or result.status == "installer_unavailable"
-                        or (
-                            not path.exists()
-                            and not getattr(
-                                self._launcher,
-                                "supports_cached_package_retry",
-                                False,
-                            )
+                        or reason in _UNAVAILABLE_INSTALL_PACKAGE_ERRORS
+                    )
+                    missing_uncacheable_package = (
+                        not path.exists()
+                        and not getattr(
+                            self._launcher,
+                            "supports_cached_package_retry",
+                            False,
                         )
+                    )
+                    if invalid_staged_package:
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning(
+                                "Failed to remove invalid staged update package",
+                                exc_info=True,
+                            )
+                    if (
+                        invalid_staged_package
+                        or unavailable_staged_package
+                        or missing_uncacheable_package
                     ):
                         with self._lock:
                             if self._ready_path == path:

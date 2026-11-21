@@ -139,21 +139,35 @@ def verify_ios_app_office_viewer_assets(
         for app_zip in app_zips:
             try:
                 with zipfile.ZipFile(app_zip) as nested:
-                    names = set(nested.namelist())
+                    members = nested.infolist()
+                    by_name: dict[str, list[zipfile.ZipInfo]] = {}
+                    for member in members:
+                        if stat.S_ISLNK(member.external_attr >> 16):
+                            raise IpaError(
+                                f"Nested app.zip ({app_zip.name}) contains unsafe symlink member: {member.filename}"
+                            )
+                        by_name.setdefault(member.filename, []).append(member)
                     for asset_name in _REQUIRED_OFFICE_VIEWER_ASSETS:
                         candidates = (
                             f"assets/office_viewer/{asset_name}",
                             f"app/assets/office_viewer/{asset_name}",
                         )
-                        matched = next((c for c in candidates if c in names), None)
-                        if matched is None:
+                        matched_infos: list[zipfile.ZipInfo] = []
+                        for candidate in candidates:
+                            matched_infos.extend(by_name.get(candidate, ()))
+                        if not matched_infos:
                             raise IpaError(
                                 f"Nested app.zip ({app_zip.name}) is missing office_viewer asset: {asset_name}"
                             )
-                        if nested.getinfo(matched).file_size <= 0:
-                            raise IpaError(
-                                f"Nested app.zip ({app_zip.name}) has empty office_viewer asset: {asset_name}"
-                            )
+                        for info in matched_infos:
+                            if info.is_dir():
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) contains unsafe office_viewer asset: {asset_name}"
+                                )
+                            if info.file_size <= 0:
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) has empty office_viewer asset: {asset_name}"
+                                )
             except (OSError, zipfile.BadZipFile) as exc:
                 raise IpaError("iOS nested app.zip is invalid") from exc
         return True

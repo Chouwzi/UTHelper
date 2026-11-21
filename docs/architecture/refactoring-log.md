@@ -2518,3 +2518,20 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2904 passed, 26 skipped** (0 failed).
   - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
   - Android Gradle (`chplay` `testDebugUnitTest bundleReleaseAar`, `classes.jar` scan: 96 classes / 0 updater leaks) and `apk_lts` unit tests (`ApkUpdateDownloadManagerTest` 5/5, `ApkUpdateInstallerTest` 9/9, `ApkUpdateInstallerFlowTest` 3/3 non-`FileProvider` tests; note the 2 pre-existing `FileProvider.getUriForFile` tests in `ApkUpdateInstallerFlowTest` hit AndroidX `core:1.17.0` `SimplePathStrategy.belongsToRoot` hardcoded `'/'` on Windows host JVM and run on Ubuntu CI).
+
+## M4 Final Integration Iteration 2: Updater Retry Loop, Null DownloadManager Cleanup & Defense-in-Depth Remediation (2026-11-22)
+
+- **Auto-Updater & Packaging Fixes**:
+  - `src/core/update_coordinator.py`: In `_perform_confirmation()`, when `INSTALL_FAILED` reports non-retryable package integrity/metadata errors (`sha256_mismatch`, `size_mismatch`, `invalid_apk`, `package_mismatch`, `release_version_mismatch`, `installed_signer_mismatch`, `manifest_signer_mismatch`, `apk_signature_invalid`, `release_metadata_invalid`), safely unlink the invalid staged file (catching `OSError`) and clear `self._ready_path = None`; also clear `self._ready_path = None` for `source_unavailable` / `installer_unavailable` / `Windows installer is unavailable` while preserving `supports_cached_package_retry` semantics for `permission_required`, `bridge_failed`, and `file_provider_unavailable`.
+  - `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/variants/apk_lts/kotlin/com/uthelper/backgroundsync/update/ApkUpdateInstaller.kt`: Updated `cleanupStaleUpdateFiles()` to return early when `DownloadManager` or `manager.query(DownloadManager.Query())` returns `null`, preventing blind deletion of active `update-*.apk` files in `ExternalFilesDir`.
+  - `src/gui/app_controller.py`: Hardened `_open_external_update_url()` to reject `0x7F..0x9F` DEL/C1 control characters, raw or percent-decoded backslashes (`\`), and percent-decoded `..` path segments.
+  - `scripts/package_unsigned_ipa.py`: Updated `verify_ios_app_office_viewer_assets()` to reject symlink members (`stat.S_ISLNK(member.external_attr >> 16)`) and directory entries inside nested `app.zip` bundles.
+- **Tests Added / Hardened**:
+  - `tests/test_update_coordinator.py`: Added parameterized invalid-package retry tests, unlink-`OSError` resilience test, `Windows installer is unavailable` test, `file_provider_unavailable` cached-retry preservation test, and tightened `test_shutdown_marks_detach_before_stop_so_completed_download_is_not_deleted` to block deterministically before `_detach_downloader()` runs.
+  - `tests/test_gui_app_controller.py`: Added DEL/C1/backslash/`%2e%2e` hostile URL assertions and full `AppController` + `UpdateCoordinator` `sha256_mismatch` -> `"Thử lại"` re-download integration test.
+  - `tests/test_package_unsigned_ipa.py`: Added `test_inspector_rejects_symlink_in_nested_app_zip`.
+  - `extensions/flet_uth_background_sync/.../ApkUpdateInstallerFlowTest.kt`: Added `preservesExternalUpdateApksWhenDownloadManagerQueryReturnsNull` (using `NullCursorShadowDownloadManager`) and `preservesExternalUpdateApksWhenDownloadManagerServiceIsNull`.
+- **Verification**:
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2918 passed, 26 skipped** (0 failed).
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - Android Gradle: `chplay` `testDebugUnitTest bundleReleaseAar` (`BUILD SUCCESSFUL`, 0 leaked updater classes) and `apk_lts` `bundleReleaseAar` + `ApkUpdateDownloadManagerTest` (5/5) + `ApkUpdateInstallerTest` (9/9) + `ApkUpdateInstallerFlowTest` (5/5 non-`FileProvider` tests including null-cursor & null-service preservation).

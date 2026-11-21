@@ -14,8 +14,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 import gui.app_controller as app_controller_module
 from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
-from core.update_coordinator import UpdateEvent, UpdateEventKind
-from core.update_models import ReleasePackage
+from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
+from core.update_models import LaunchResult, ReleasePackage
 from gui.app_controller import (
     AppController,
 )
@@ -1916,6 +1916,12 @@ def test_open_external_update_url_validates_github_releases_strictly():
         "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1#frag",
         "https://github.com/Other/Repo/releases/tag/v2.5.1",
         "https://github.com/Chouwzi/UTHelper/releases/../issues",
+        "https://github.com/Chouwzi/UTHelper/releases/%2e%2e/issues",
+        "https://github.com/Chouwzi/UTHelper/releases/%2e%2e%5cissues",
+        "https://github.com/Chouwzi/UTHelper/releases/tag\\v2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/%5cv2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1\x7f",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1\x85",
         "javascript:alert(1)",
     ):
         assert controller._open_external_update_url(bad_url) is False
@@ -1992,3 +1998,127 @@ def test_install_failed_clears_update_ready_for_mismatches_and_release_page_erro
     assert controller._update_btn.content == "Cập nhật"
     controller._request_update_download()
     assert requested == [controller._update_candidate]
+
+
+def test_app_controller_retry_after_sha256_mismatch_redownloads_with_real_coordinator(tmp_path):
+    from datetime import datetime, timezone
+    import threading
+    from core.update_models import (
+        ReleaseManifest,
+        RuntimeTarget,
+        UpdateCandidate,
+        VerificationResult,
+    )
+
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    package = ReleasePackage(
+        platform="android",
+        architecture="arm64",
+        package_type="apk",
+        install_channel="sideload",
+        url="https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
+        sha256="a" * 64,
+        size=7,
+        signer_identity="com.uthelper.uthelper",
+        certificate_fingerprint="b" * 64,
+        install_strategy={"kind": "android_package_installer"},
+    )
+    candidate = UpdateCandidate(
+        manifest=ReleaseManifest(
+            schema_version=2,
+            release_version="2.5.1",
+            minimum_supported_version="2.0.0",
+            published_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+            release_notes_url="https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+            packages=(package,),
+        ),
+        package=package,
+        automatic_install_allowed=False,
+        required_update=False,
+    )
+    controller._update_candidate = candidate
+    events_seen = []
+    ready_event = threading.Event()
+    failed_event = threading.Event()
+
+    def _sink(ev):
+        events_seen.append(ev)
+        controller._on_update_event(ev)
+        if ev.kind is UpdateEventKind.READY_TO_INSTALL:
+            ready_event.set()
+        elif ev.kind is UpdateEventKind.INSTALL_FAILED:
+            failed_event.set()
+
+    def _run_task(coro_fn, *args, **kwargs):
+        asyncio.run(coro_fn(*args, **kwargs))
+        return True
+
+    controller._safe_run_task = _run_task
+    pkg_path = tmp_path / "UTHelper-2.5.1.apk"
+
+    class _FakeDownloader:
+        def __init__(self):
+            self.calls = 0
+
+        def download(self, _package, *, cancel, progress=None):
+            del cancel, progress
+            self.calls += 1
+            pkg_path.write_bytes(b"corrupt" if self.calls == 1 else b"valid")
+            return pkg_path
+
+    class _FakeVerifier:
+        def verify(self, _path, _candidate):
+            return VerificationResult(True)
+
+    class _FakeLauncher:
+        supports_cached_package_retry = True
+
+        def __init__(self):
+            self.result = LaunchResult(False, "sha256_mismatch", status="failed")
+
+        def launch(self, _path, _package):
+            return self.result
+
+        def cancel(self):
+            return None
+
+    class _FakeClient:
+        def fetch_candidate(self, _version, _target, *, cancel=None):
+            del cancel
+            return candidate
+
+    downloader = _FakeDownloader()
+    launcher = _FakeLauncher()
+    coordinator = UpdateCoordinator(
+        client=_FakeClient(),
+        downloader=downloader,
+        verifier=_FakeVerifier(),
+        launcher=launcher,
+        target=RuntimeTarget("android", "arm64", "sideload"),
+        current_version="2.5.0",
+        event_sink=_sink,
+        automatic_enabled=False,
+    )
+    controller._update_coordinator = coordinator
+
+    try:
+        coordinator.request_download(candidate)
+        assert ready_event.wait(2.0)
+        assert downloader.calls == 1
+        assert controller._update_ready is True
+
+        coordinator.confirm_install()
+        assert failed_event.wait(2.0)
+        assert controller._update_ready is False
+        assert controller._update_btn.content == "Thử lại"
+        assert not pkg_path.exists()
+
+        ready_event.clear()
+        launcher.result = LaunchResult(True, "installer_opened", status="installer_opened")
+        controller._request_update_download()
+        assert ready_event.wait(2.0)
+        assert downloader.calls == 2
+        assert controller._update_ready is True
+    finally:
+        assert coordinator.shutdown(timeout_seconds=1.0) is True

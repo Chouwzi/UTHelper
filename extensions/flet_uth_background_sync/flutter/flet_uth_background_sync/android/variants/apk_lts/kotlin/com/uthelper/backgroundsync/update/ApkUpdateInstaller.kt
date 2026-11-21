@@ -508,18 +508,20 @@ class ApkUpdateInstaller(private val context: Context) {
         }
         try {
             val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
-            manager?.query(DownloadManager.Query())?.use { cursor ->
-                val uriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
-                val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                while (cursor.moveToNext()) {
-                    val status = if (statusCol >= 0) cursor.getInt(statusCol) else -1
+                ?: return
+            val cursor = manager.query(DownloadManager.Query()) ?: return
+            cursor.use { activeCursor ->
+                val uriCol = activeCursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                val statusCol = activeCursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                while (activeCursor.moveToNext()) {
+                    val status = if (statusCol >= 0) activeCursor.getInt(statusCol) else -1
                     if (
                         status == DownloadManager.STATUS_PENDING ||
                         status == DownloadManager.STATUS_RUNNING ||
                         status == DownloadManager.STATUS_PAUSED ||
                         status == DownloadManager.STATUS_SUCCESSFUL
                     ) {
-                        val localUri = if (uriCol >= 0) cursor.getString(uriCol) else null
+                        val localUri = if (uriCol >= 0) activeCursor.getString(uriCol) else null
                         if (!localUri.isNullOrBlank()) {
                             val uri = Uri.parse(localUri)
                             val path = uri.path

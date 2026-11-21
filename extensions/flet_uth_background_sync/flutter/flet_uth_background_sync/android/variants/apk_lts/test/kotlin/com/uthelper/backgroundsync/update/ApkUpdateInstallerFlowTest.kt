@@ -1,6 +1,7 @@
 package com.uthelper.backgroundsync.update
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.ComponentName
 import android.content.Intent
 import android.content.IntentFilter
@@ -239,6 +240,67 @@ class ApkUpdateInstallerFlowTest {
         assertFalse(staleExternalApk.exists())
         assertTrue(activeExternalApk.exists())
         assertTrue(File(cache, "update-${identity.sha256}.apk").isFile)
+    }
+
+    @Test
+    @Config(shadows = [NullCursorShadowDownloadManager::class])
+    fun preservesExternalUpdateApksWhenDownloadManagerQueryReturnsNull() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val packageFile = fixturePackage(context)
+        val identity = installIdentity(context, packageFile)
+        Shadows.shadowOf(context.packageManager).setCanRequestPackageInstalls(false)
+
+        val externalDownloads = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)!!
+        externalDownloads.mkdirs()
+        val activeExternalApk = File(externalDownloads, "update-active111.apk").apply {
+            writeBytes(byteArrayOf(9, 10, 11))
+        }
+        val otherExternalApk = File(externalDownloads, "update-other222.apk").apply {
+            writeBytes(byteArrayOf(12, 13, 14))
+        }
+
+        val result = ApkUpdateInstaller(context).verifyLocalAndOpen(
+            localPath = packageFile.absolutePath,
+            expectedSha256 = identity.sha256,
+            expectedSize = archiveBytes.size.toLong(),
+            expectedPackageId = context.packageName,
+            expectedVersionCode = identity.versionCode,
+            expectedCertificateSha256 = identity.certificateSha256,
+        )
+
+        assertEquals("permission_required", result.status)
+        assertTrue(activeExternalApk.exists())
+        assertTrue(otherExternalApk.exists())
+    }
+
+    @Test
+    fun preservesExternalUpdateApksWhenDownloadManagerServiceIsNull() {
+        val baseContext: Context = RuntimeEnvironment.getApplication()
+        val packageFile = fixturePackage(baseContext)
+        val identity = installIdentity(baseContext, packageFile)
+        Shadows.shadowOf(baseContext.packageManager).setCanRequestPackageInstalls(false)
+
+        val externalDownloads = baseContext.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)!!
+        externalDownloads.mkdirs()
+        val activeExternalApk = File(externalDownloads, "update-active111.apk").apply {
+            writeBytes(byteArrayOf(9, 10, 11))
+        }
+        val nullDownloadManagerContext = object : ContextWrapper(baseContext) {
+            override fun getSystemService(name: String): Any? =
+                if (name == Context.DOWNLOAD_SERVICE) null else super.getSystemService(name)
+        }
+
+        val result = ApkUpdateInstaller(nullDownloadManagerContext).verifyLocalAndOpen(
+            localPath = packageFile.absolutePath,
+            expectedSha256 = identity.sha256,
+            expectedSize = archiveBytes.size.toLong(),
+            expectedPackageId = baseContext.packageName,
+            expectedVersionCode = identity.versionCode,
+            expectedCertificateSha256 = identity.certificateSha256,
+        )
+
+        assertEquals("permission_required", result.status)
+        assertTrue(activeExternalApk.exists())
     }
 
     private fun fixturePackage(context: Context): File =

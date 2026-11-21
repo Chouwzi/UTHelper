@@ -19,7 +19,7 @@ from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 from core.data_orchestrator import DataOrchestrator
@@ -677,13 +677,18 @@ class AppController:
         )
 
     def _open_external_update_url(self, url: str) -> bool:
-        if not isinstance(url, str) or any(ord(ch) < 32 for ch in url):
+        if (
+            not isinstance(url, str)
+            or "\\" in url
+            or any(ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F for ch in url)
+        ):
             return False
         try:
             parsed = urlsplit(url)
             port = parsed.port
         except ValueError:
             return False
+        decoded_path = unquote(parsed.path)
         if (
             parsed.scheme.lower() != "https"
             or (parsed.hostname or "").lower() != "github.com"
@@ -692,8 +697,10 @@ class AppController:
             or parsed.password is not None
             or parsed.query
             or parsed.fragment
+            or "\\" in decoded_path
             or not parsed.path.startswith("/Chouwzi/UTHelper/releases/")
-            or ".." in parsed.path.split("/")
+            or not decoded_path.startswith("/Chouwzi/UTHelper/releases/")
+            or ".." in decoded_path.replace("\\", "/").split("/")
         ):
             return False
 
