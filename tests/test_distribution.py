@@ -315,7 +315,7 @@ def test_fallback_precedence_without_config_file(tmp_path):
             is_android=False,
             is_ios=True,
         ).channel
-        is DistributionChannel.SOURCE
+        is DistributionChannel.IOS_APP_STORE
     )
 
     def _boom():

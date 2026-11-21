@@ -100,7 +100,17 @@ def detect_runtime_target(
         )
         return RuntimeTarget("android", "arm64" if arm64 else "universal", install_channel)
     if platform_utils.IS_IOS:
-        return RuntimeTarget("ios", "arm64", "sideload")
+        profile = distribution or resolve_distribution_channel(
+            is_windows=False,
+            is_android=False,
+            is_ios=True,
+        )
+        install_channel = (
+            "app-store"
+            if profile.channel is DistributionChannel.IOS_APP_STORE
+            else "sideload"
+        )
+        return RuntimeTarget("ios", "arm64", install_channel)
     return RuntimeTarget("other", "unknown", "source")
 
 

@@ -192,14 +192,14 @@ def test_cross_platform_target_delegates_to_windows_adapter(monkeypatch):
     assert detect_runtime_target() == expected
 
 
-def test_ios_runtime_target_is_manual_sideload(monkeypatch):
+def test_ios_runtime_target_defaults_to_app_store(monkeypatch):
     import platform_utils.update_packages as update_packages
 
     monkeypatch.setattr(update_packages.platform_utils, "IS_WINDOWS", False)
     monkeypatch.setattr(update_packages.platform_utils, "IS_ANDROID", False)
     monkeypatch.setattr(update_packages.platform_utils, "IS_IOS", True)
 
-    assert detect_runtime_target() == RuntimeTarget("ios", "arm64", "sideload")
+    assert detect_runtime_target() == RuntimeTarget("ios", "arm64", "app-store")
 
 
 def test_windows_verifier_requires_chain_fingerprint_subject_and_msi_identity(tmp_path):

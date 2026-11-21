@@ -32,6 +32,8 @@ _MSSTORE_PRODUCT_ID_RE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 
 class DistributionChannel(str, Enum):
     CHPLAY = "chplay"
+    IOS_APP_STORE = "ios_app_store"
+    IOS_LTS = "ios_lts"
     APK_LTS = "apk_lts"
     MSSTORE = "msstore"
     EXE_LTS = "exe_lts"
@@ -99,6 +101,22 @@ def build_distribution_profile(
             store_web_url=f"https://play.google.com/store/apps/details?id={pkg}",
             android_package_id=pkg,
             store_product_id=None,
+        )
+    if channel is DistributionChannel.IOS_APP_STORE:
+        return DistributionProfile(
+            channel=channel,
+            supports_github_self_update=False,
+            store_url=None,
+            store_display_name="Apple App Store",
+            store_web_url=None,
+        )
+    if channel is DistributionChannel.IOS_LTS:
+        return DistributionProfile(
+            channel=channel,
+            supports_github_self_update=True,
+            store_url=None,
+            store_display_name="GitHub Releases",
+            store_web_url=None,
         )
     if channel is DistributionChannel.MSSTORE:
         pid = _validate_store_product_id(store_product_id)
@@ -277,7 +295,7 @@ def resolve_distribution_channel(
     if is_android:
         return build_distribution_profile(DistributionChannel.APK_LTS)
     if is_ios:
-        return build_distribution_profile(DistributionChannel.SOURCE)
+        return build_distribution_profile(DistributionChannel.IOS_APP_STORE)
     return build_distribution_profile(DistributionChannel.SOURCE)
 
 
