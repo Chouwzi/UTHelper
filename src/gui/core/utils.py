@@ -661,7 +661,8 @@ def html_to_markdown(html_content: str) -> str:
         safe_href = _sanitize_markdown_url(raw_href)
         if safe_href is None:
             return label
-        return f"[{label}]({safe_href})"
+        safe_label = label.replace("[", r"\[").replace("]", r"\]")
+        return f"[{safe_label}]({safe_href})"
 
     text = re.sub(r'<a\b[^>]*>(.*?)</a>', _link_repl, text, flags=re.IGNORECASE | re.DOTALL)
 

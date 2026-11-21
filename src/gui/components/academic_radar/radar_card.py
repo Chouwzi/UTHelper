@@ -111,6 +111,28 @@ class AcademicRadarCard(ft.Container):
             ("Về Đích", "Tỷ lệ hoàn thành và qua môn trong kỳ."),
             ("Trụ Vững", "Điểm của các môn nặng tín chỉ nhất."),
         ]
+        used_overlay = False
+
+        def _close_dialog(p: ft.Page, d: ft.AlertDialog) -> None:
+            if not used_overlay:
+                try:
+                    p.pop_dialog()
+                    return
+                except Exception:
+                    pass
+            d.open = False
+            try:
+                d.update()
+            except Exception:
+                try:
+                    p.update()
+                except Exception:
+                    pass
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                _close_dialog(page, dialog)
+
         dialog = ft.AlertDialog(
             modal=True,
             semantics_label="Giải thích 6 chỉ số Radar học tập",
@@ -121,27 +143,31 @@ class AcademicRadarCard(ft.Container):
                 color=C.TEXT_PRIMARY,
                 semantics_label="6 chỉ số Radar học tập",
             ),
-            content=ft.Container(
-                width=dialog_w,
-                content=ft.Column(
-                    controls=[
-                        ft.Text(
-                            f"• {name}: {desc}",
-                            size=12.5,
-                            color=C.TEXT_PRIMARY,
-                        )
-                        for name, desc in items
-                    ],
-                    spacing=8,
-                    tight=True,
-                    scroll=ft.ScrollMode.AUTO,
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    width=dialog_w,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text(
+                                f"• {name}: {desc}",
+                                size=12.5,
+                                color=C.TEXT_PRIMARY,
+                            )
+                            for name, desc in items
+                        ],
+                        spacing=8,
+                        tight=True,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
                 ),
             ),
             actions=[
                 ft.TextButton(
                     "Đóng",
                     height=44,
-                    on_click=lambda _: page.pop_dialog(),
+                    on_click=lambda _: _close_dialog(page, dialog),
                 )
             ],
             bgcolor=C.BG,
@@ -150,7 +176,15 @@ class AcademicRadarCard(ft.Container):
         try:
             page.show_dialog(dialog)
         except Exception:
-            pass
+            used_overlay = True
+            overlay = getattr(page, "overlay", None)
+            if overlay is not None:
+                overlay.append(dialog)
+                dialog.open = True
+                try:
+                    page.update()
+                except Exception:
+                    pass
 
     def _build_ui(self) -> None:
         # Data-driven rebuilds can happen after a theme preview while this view

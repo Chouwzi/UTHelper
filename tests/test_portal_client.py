@@ -413,3 +413,85 @@ def test_portal_client_accepts_case_insensitive_gzip_content_encoding():
 
     client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
     assert client.fetch_credit_progress("student", "secret") == {"canDat": 120, "hienTai": 90}
+
+
+def test_decompress_gzip_bounded_handles_multi_member_over_256kib():
+    import time
+    from core.portal_client import _MAX_PORTAL_RESPONSE_BYTES, _decompress_gzip_bounded
+
+    member_a = b"A" * (300 * 1024)
+    member_b = b"B" * 10
+    payload = gzip.compress(member_a) + gzip.compress(member_b)
+
+    t0 = time.perf_counter()
+    result = _decompress_gzip_bounded(payload, _MAX_PORTAL_RESPONSE_BYTES)
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 0.5
+    assert result == member_a + member_b
+
+
+def test_decompress_gzip_bounded_rejects_multi_member_gzip_bomb_without_oom():
+    import time
+    import tracemalloc
+    import pytest
+    from core.portal_client import (
+        PortalProtocolError,
+        _MAX_PORTAL_RESPONSE_BYTES,
+        _decompress_gzip_bounded,
+    )
+
+    member_5m = gzip.compress(b"X" * (5 * 1024 * 1024), compresslevel=9)
+    bomb = member_5m + member_5m
+
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    try:
+        with pytest.raises(PortalProtocolError, match="maximum size"):
+            _decompress_gzip_bounded(bomb, _MAX_PORTAL_RESPONSE_BYTES)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert (time.perf_counter() - t0) < 1.0
+    assert peak < 24 * 1024 * 1024
+
+
+def test_decompress_gzip_bounded_rejects_truncated_and_trailing_garbage_streams():
+    import pytest
+    from core.portal_client import (
+        PortalProtocolError,
+        _MAX_PORTAL_RESPONSE_BYTES,
+        _decompress_gzip_bounded,
+    )
+
+    ok_gz = gzip.compress(b'{"success": true, "ok": 1}')
+
+    for bad_stream in (ok_gz[:-8], ok_gz[:-1], ok_gz + b"garbage"):
+        with pytest.raises(PortalProtocolError, match="not valid gzip"):
+            _decompress_gzip_bounded(bad_stream, _MAX_PORTAL_RESPONSE_BYTES)
+
+    class _TruncatedResponse:
+        def __init__(self):
+            self.headers = Message()
+            self.headers["Content-Encoding"] = "gzip"
+
+        def geturl(self):
+            return "https://portal-publicapp.ut.edu.vn/api/v1/user/login"
+
+        def read(self, amt=-1):
+            del amt
+            return ok_gz[:-8]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _TruncatedResponse(),
+    )
+    with pytest.raises(PortalProtocolError, match="not valid gzip"):
+        client.fetch_day(date(2026, 8, 11), "student", "secret")

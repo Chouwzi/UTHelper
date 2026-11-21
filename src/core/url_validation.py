@@ -28,6 +28,70 @@ def _is_unsafe_ip(ip_str: str) -> bool:
     )
 
 
+def _parse_posix_inet_aton(host: str) -> str | None:
+    """Parse POSIX ``inet_aton`` 1..4-part decimal/octal/hex IPv4 literals."""
+    if not host or "." in (host[0], host[-1]):
+        return None
+    parts = host.split(".")
+    if not (1 <= len(parts) <= 4):
+        return None
+    values: list[int] = []
+    for part in parts:
+        if not part:
+            return None
+        lower = part.lower()
+        if lower.startswith("0x"):
+            digits = lower[2:]
+            if not digits or any(ch not in "0123456789abcdef" for ch in digits):
+                return None
+            val = int(digits, 16)
+        elif len(lower) > 1 and lower.startswith("0"):
+            if any(ch not in "01234567" for ch in lower):
+                return None
+            val = int(lower, 8)
+        else:
+            if any(ch not in "0123456789" for ch in lower):
+                return None
+            val = int(lower, 10)
+        values.append(val)
+    if len(values) == 1:
+        if values[0] > 0xFFFFFFFF:
+            return None
+        addr_int = values[0]
+    elif len(values) == 2:
+        if values[0] > 0xFF or values[1] > 0xFFFFFF:
+            return None
+        addr_int = (values[0] << 24) | values[1]
+    elif len(values) == 3:
+        if values[0] > 0xFF or values[1] > 0xFF or values[2] > 0xFFFF:
+            return None
+        addr_int = (values[0] << 24) | (values[1] << 16) | values[2]
+    else:
+        if any(val > 0xFF for val in values):
+            return None
+        addr_int = (
+            (values[0] << 24) | (values[1] << 16) | (values[2] << 8) | values[3]
+        )
+    return str(ipaddress.IPv4Address(addr_int))
+
+
+def _parse_literal_ip(host: str) -> str | None:
+    """Return canonical IP string for standard or alternative IPv4/IPv6 literals."""
+    candidate = host.split("%", 1)[0].strip("[]")
+    try:
+        ipaddress.ip_address(candidate)
+        return candidate
+    except ValueError:
+        pass
+    host_no_dot = host.rstrip(".")
+    if not host_no_dot:
+        return None
+    try:
+        return socket.inet_ntoa(socket.inet_aton(host_no_dot))
+    except OSError:
+        return _parse_posix_inet_aton(host_no_dot)
+
+
 def validate_public_https_url(
     url: object,
     *,
@@ -48,15 +112,10 @@ def validate_public_https_url(
         or host_cf.endswith(".local")
     ):
         return None
-    # Literal IP check (covers IPv4, IPv6, and IPv4-mapped IPv6).
-    try:
-        ipaddress.ip_address(host.split("%", 1)[0].strip("[]"))
-    except ValueError:
-        is_literal_ip = False
-    else:
-        is_literal_ip = True
-    if is_literal_ip:
-        if _is_unsafe_ip(host):
+    # Literal IP check (standard IPv4/IPv6, IPv4-mapped IPv6, and alt IPv4 forms).
+    literal_ip = _parse_literal_ip(host)
+    if literal_ip is not None:
+        if _is_unsafe_ip(literal_ip):
             return None
         return validated
     if not resolve_dns:

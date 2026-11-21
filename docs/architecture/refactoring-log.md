@@ -2296,3 +2296,19 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
   - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2444 passed, 26 skipped** (0 failed).
   - Playwright + Flet Web ASGI verification (`360x800`, `390x844`, `1120x850`, dark & light across `DetailView`, `ScheduleWeekView`, `CoursesView`, `GradeOverviewView`): **PASS** (`0` overflow, `0` console/page errors, `DetailView` AXTree exposes `"Mở trong ứng dụng"` without `"Mở trong trình duyệt"` and opens `InAppWebViewDialog` in-app).
+
+## M3 Part A Iteration 3b: Challenger & Secondary Reviewer Remediation (2026-11-21)
+
+- **PortalClient Multi-Member & Truncated Gzip Hardening (`src/core/portal_client.py`)**:
+  - Rewrote `_decompress_gzip_bounded()` with a zero-copy `cursor` loop checking `if decomp.eof:` **before** `decomp.unconsumed_tail` so multi-member streams exceeding `256 KiB` advance cleanly to the next member instead of looping infinitely or growing `decomp.unused_data` unboundedly, added a zero-progress guard plus strict `cursor > member_start` check, avoided calling `decomp.flush()` after `decomp.eof`, and verified `decomp.eof` after stream completion so truncated gzip streams (e.g., missing 8-byte CRC32/ISIZE trailer) raise `PortalProtocolError`.
+- **Alternative IPv4 Literal SSRF Blocking (`src/core/url_validation.py`)**:
+  - Added `_parse_literal_ip()` and pure-Python POSIX `inet_aton` fallback `_parse_posix_inet_aton()` before `resolve_dns` in `validate_public_https_url()` so decimal, octal, hex, and short 1/2/3/4-part IPv4 literals (e.g., `2130706433`, `0177.0.0.1`, `0x7f000001`, `0x7f.0.0.1`, `127.1`, `0`, `2852039166`, and trailing-dot forms) resolve to canonical dotted-quads immediately (`< 1ms`) without calling `socket.getaddrinfo`, blocking them in both `validate_public_https_url(..., resolve_dns=False)` and `InAppWebViewDialog`.
+- **UI/UX & Markdown Defense-in-Depth Polish (`src/gui/components/academic_radar/radar_card.py`, `src/gui/components/detail_view.py`, `src/gui/core/utils.py`)**:
+  - Wrapped `AcademicRadarCard._show_radar_info` dialog content in `ft.KeyboardListener(autofocus=True)` for `Escape` dismissal via `page.pop_dialog()` (with overlay fallback), matching all other `academic_radar` and `GradeOverviewView` modals.
+  - Aligned `DetailView` THNN fallback notice copy with the in-app CTA and top-right external browser button.
+  - Escaped `[` and `]` inside Markdown link labels in `html_to_markdown._link_repl`.
+- **Verification**:
+  - Added regression tests in `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_grade_overview_view.py`, and `tests/test_detail_theme.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests/test_architecture_boundaries.py tests/test_repository_governance.py -q --tb=short`: **11 passed**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2458 passed, 26 skipped** (0 failed).

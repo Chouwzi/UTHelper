@@ -108,3 +108,43 @@ def test_validate_public_https_url_checks_dns_resolution(monkeypatch):
         validate_public_https_url("https://example.com/course", resolve_dns=True)
         == "https://example.com/course"
     )
+
+
+@pytest.mark.parametrize(
+    "alt_ipv4_url",
+    (
+        "https://2130706433/",
+        "https://0177.0.0.1/",
+        "https://0x7f000001/",
+        "https://0x7f.0.0.1/",
+        "https://127.1/",
+        "https://0/",
+        "https://2852039166/latest/meta-data/",
+        "https://2130706433./",
+        "https://0x0a000001/internal",
+        "https://3232235777/router",
+    ),
+)
+def test_validate_public_https_url_blocks_alternative_ipv4_literals_without_dns(
+    monkeypatch, alt_ipv4_url
+):
+    import socket
+    import time
+
+    def _fail_getaddrinfo(*_args, **_kwargs):
+        raise AssertionError("socket.getaddrinfo must not be called for alt IPv4 literals")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fail_getaddrinfo)
+
+    t0 = time.perf_counter()
+    assert validate_public_https_url(alt_ipv4_url, resolve_dns=False) is None
+    assert validate_public_https_url(alt_ipv4_url, resolve_dns=True) is None
+    assert (time.perf_counter() - t0) < 0.05
+
+    # Also verify pure-Python POSIX inet_aton fallback when socket.inet_aton fails
+    def _fail_inet_aton(_host):
+        raise OSError("forced fallback")
+
+    monkeypatch.setattr(socket, "inet_aton", _fail_inet_aton)
+    assert validate_public_https_url(alt_ipv4_url, resolve_dns=False) is None
+    assert validate_public_https_url(alt_ipv4_url, resolve_dns=True) is None

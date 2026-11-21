@@ -26,56 +26,57 @@ def _decompress_gzip_bounded(compressed: bytes, max_bytes: int) -> bytes:
     chunks: list[bytes] = []
     total = 0
     step = 64 * 1024
-    stream = compressed
-    while stream:
-        decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        for offset in range(0, len(stream), step):
-            pending = stream[offset : offset + step]
-            while pending:
+    cursor = 0
+    length = len(compressed)
+    try:
+        while cursor < length:
+            decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            member_start = cursor
+            member_done = False
+            while cursor < length:
+                chunk_end = min(cursor + step, length)
+                pending = compressed[cursor:chunk_end]
+                cursor = chunk_end
+                while pending:
+                    remaining = max_bytes + 1 - total
+                    if remaining <= 0:
+                        raise PortalProtocolError("Portal response exceeded maximum size")
+                    out = decomp.decompress(pending, min(256 * 1024, remaining))
+                    if out:
+                        total += len(out)
+                        if total > max_bytes:
+                            raise PortalProtocolError("Portal response exceeded maximum size")
+                        chunks.append(out)
+                    if decomp.eof:
+                        cursor -= len(decomp.unused_data)
+                        if cursor <= member_start:
+                            raise PortalProtocolError("Portal response was not valid gzip")
+                        member_done = True
+                        break
+                    if decomp.unconsumed_tail:
+                        if not out and len(decomp.unconsumed_tail) >= len(pending):
+                            raise PortalProtocolError("Portal response was not valid gzip")
+                        pending = decomp.unconsumed_tail
+                    else:
+                        pending = b""
+                if member_done:
+                    break
+            if not member_done:
                 remaining = max_bytes + 1 - total
                 if remaining <= 0:
                     raise PortalProtocolError("Portal response exceeded maximum size")
-                out = decomp.decompress(pending, min(256 * 1024, remaining))
-                if out:
-                    total += len(out)
+                tail = decomp.flush(remaining)
+                if tail:
+                    total += len(tail)
                     if total > max_bytes:
                         raise PortalProtocolError("Portal response exceeded maximum size")
-                    chunks.append(out)
+                    chunks.append(tail)
                 if decomp.unconsumed_tail:
-                    pending = decomp.unconsumed_tail
-                elif decomp.eof:
-                    stream = decomp.unused_data + stream[offset + step :]
-                    break
-                else:
-                    pending = b""
-            else:
-                continue
-            break
-        else:
-            remaining = max_bytes + 1 - total
-            if remaining <= 0:
-                raise PortalProtocolError("Portal response exceeded maximum size")
-            tail = decomp.flush(remaining)
-            if tail:
-                total += len(tail)
-                if total > max_bytes:
                     raise PortalProtocolError("Portal response exceeded maximum size")
-                chunks.append(tail)
-            if decomp.unconsumed_tail:
-                raise PortalProtocolError("Portal response exceeded maximum size")
-            stream = decomp.unused_data
-            continue
-        remaining = max_bytes + 1 - total
-        if remaining <= 0:
-            raise PortalProtocolError("Portal response exceeded maximum size")
-        tail = decomp.flush(remaining)
-        if tail:
-            total += len(tail)
-            if total > max_bytes:
-                raise PortalProtocolError("Portal response exceeded maximum size")
-            chunks.append(tail)
-        if decomp.unconsumed_tail:
-            raise PortalProtocolError("Portal response exceeded maximum size")
+                if not decomp.eof:
+                    raise PortalProtocolError("Portal response was not valid gzip")
+    except zlib.error as exc:
+        raise PortalProtocolError("Portal response was not valid gzip") from exc
     return b"".join(chunks)
 
 

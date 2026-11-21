@@ -197,3 +197,35 @@ def test_academic_radar_and_grade_overview_modals_dismiss_on_escape_via_pop_dial
     assert pops5 == [True]
     s5[0].actions[0].on_click(None)
     assert pops5 == [True, True]
+
+    # 6. AcademicRadarCard._show_radar_info
+    p6, s6, pops6 = _make_page()
+    card = AcademicRadarCard(profiles=[profile], page=p6)
+    card._show_radar_info(None)
+    assert isinstance(s6[0].content, ft.KeyboardListener)
+    s6[0].content.on_key_down(SimpleNamespace(key="Enter"))
+    assert pops6 == []
+    s6[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops6 == [True]
+    s6[0].actions[0].on_click(None)
+    assert pops6 == [True, True]
+
+    # 6b. AcademicRadarCard._show_radar_info overlay fallback
+    overlay_list = []
+
+    def _raise_show_dialog(_dlg):
+        raise RuntimeError("no show_dialog")
+
+    p6_overlay = SimpleNamespace(
+        width=400,
+        height=800,
+        overlay=overlay_list,
+        show_dialog=_raise_show_dialog,
+        update=lambda: None,
+    )
+    card_overlay = AcademicRadarCard(profiles=[profile], page=p6_overlay)
+    card_overlay._show_radar_info(None)
+    assert len(overlay_list) == 1
+    assert overlay_list[0].open is True
+    overlay_list[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert overlay_list[0].open is False

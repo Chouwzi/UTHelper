@@ -133,6 +133,10 @@ def test_in_app_webview_uses_native_webview_on_android(monkeypatch):
     assert page.pop_calls == 2
     on_started(SimpleNamespace(data="https://127.0.0.1/admin"))
     assert page.pop_calls == 3
+    on_started(SimpleNamespace(data="https://2130706433/admin"))
+    assert page.pop_calls == 4
+    on_url_change(SimpleNamespace(data="https://0177.0.0.1/admin"))
+    assert page.pop_calls == 5
 
 
 def test_in_app_webview_blocks_ssrf_targets_and_redirects(monkeypatch):
@@ -150,6 +154,13 @@ def test_in_app_webview_blocks_ssrf_targets_and_redirects(monkeypatch):
         "https://[::1]/admin",
         "https://10.0.0.1/internal",
         "https://localhost/debug",
+        "https://2130706433/",
+        "https://0177.0.0.1/",
+        "https://0x7f000001/",
+        "https://0x7f.0.0.1/",
+        "https://127.1/",
+        "https://0/",
+        "https://2852039166/latest/meta-data/",
     ):
         assert InAppWebViewDialog(page, url=bad_url).show() is False
         assert _fetch_https_preview(bad_url) == ("", "")
@@ -203,3 +214,8 @@ def test_html_to_markdown_sanitizes_unsafe_links_and_images():
     assert "[SafeLink](https://courses.ut.edu.vn/mod/assign/view.php?id=9)" in md
     assert "![Logo](https://courses.ut.edu.vn/logo.png)" in md
     assert f"![Cached](cache/images/{digest}.png)" in md
+
+    escaped_md = html_to_markdown(
+        '<a href="https://courses.ut.edu.vn/x">[bracket](javascript:alert(1))</a>'
+    )
+    assert escaped_md == r"[\[bracket\](javascript:alert(1))](https://courses.ut.edu.vn/x)"
