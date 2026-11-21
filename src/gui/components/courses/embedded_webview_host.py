@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import queue
+import secrets
 import sys
 import threading
 from typing import Any, Callable, Optional
@@ -108,6 +109,7 @@ class WindowsWebView2Dock:
         on_history_changed: Optional[Callable[[bool, bool], None]] = None,
     ) -> None:
         self._page_title = page_title or "UTHelper"
+        self._profile_name = f"uth{secrets.token_hex(12)}"
         self._url = url
         self._html: Optional[str] = initial_html
         self._cookies = list(cookies or ())
@@ -454,10 +456,16 @@ class WindowsWebView2Dock:
             win_ref = wv2.CoreWebView2ControllerWindowReference.create_from_window_handle(
                 int(self._hwnd)
             )
-            ctrl_op = env.create_core_webview2_controller_async(win_ref)
+            ctrl_op = self._create_private_controller(env, win_ref)
             ctrl_op.completed = lambda cop, st: self._enqueue("_ctrl_done", (cop, st))
         except Exception as exc:
             self._fail(str(exc))
+
+    def _create_private_controller(self, environment: Any, window_ref: Any) -> Any:
+        options = environment.create_core_webview2_controller_options()
+        options.profile_name = self._profile_name
+        options.is_in_private_mode_enabled = True
+        return environment.create_core_webview2_controller_async(window_ref, options)
 
     def _handle_ctrl_done(self, op: Any) -> None:
         if self._stop_event.is_set() or not self._hwnd:
@@ -467,7 +475,6 @@ class WindowsWebView2Dock:
             core = ctrl.core_webview2
             self._controller = ctrl
             self._core = core
-            self._ready = True
             try:
                 settings_obj = getattr(core, "settings", None)
                 if settings_obj is not None:
@@ -479,7 +486,14 @@ class WindowsWebView2Dock:
                     self._cookies = list(self._cookie_provider() or ())
                 except Exception as exc:
                     logger.debug("WebView2 async cookie provider failed: %s", exc)
+                    self._fail("Không thể khôi phục phiên đăng nhập. Hãy đăng nhập lại.")
+                    return
+            if self._stop_event.is_set():
+                return
             self._inject_cookies(core)
+            if self._stop_event.is_set():
+                return
+            self._ready = True
             self._bind_events(core)
             self._apply_window_bounds()
             ctrl.is_visible = self._visible
@@ -505,6 +519,8 @@ class WindowsWebView2Dock:
         if cm is None:
             return
         for ck in self._cookies:
+            if self._stop_event.is_set():
+                return
             name = str(ck.get("name") or "")
             value = str(ck.get("value") or "")
             domain = str(ck.get("domain") or "")

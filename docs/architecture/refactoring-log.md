@@ -2085,3 +2085,14 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   64-bit process snapshots, and has positive/ambiguity regressions. Further native
   interactions are blocked by an unrelated Windows privacy-permission dialog;
   wide/mobile browser fixture and native/device acceptance remain distinct.
+
+- Follow-up review found the Windows host continued navigation after its cookie
+  provider failed or disposal occurred during authentication. It now retains the
+  successful cookie/navigation path, reports refresh failure before navigation,
+  and stops disposed work. Each pane uses a separate InPrivate profile so a prior
+  account's shared browser storage cannot supply authentication.
+- Initial Linux CI exposed an undeclared test dependency: mobile host contracts
+  import the real `flet_webview` wrapper. CI installs the pinned wrapper alongside
+  pytest; runtime platform dependency choices are unchanged. Focused host/session
+  regression suite: **27 passed**, Ruff clean; full/CI checks are rerun on the
+  follow-up commit.
