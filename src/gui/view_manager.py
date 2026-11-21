@@ -15,6 +15,7 @@ class ViewManager:
         calendar_view,
         grade_overview_view,
         controller,
+        courses_view=None,
         view_host=None,
         overlays=None,
         tab_switcher=None,
@@ -27,6 +28,7 @@ class ViewManager:
         self.settings_view = settings_view
         self.calendar_view = calendar_view
         self.grade_overview_view = grade_overview_view
+        self.courses_view = courses_view
         self.controller = controller
         self.view_host = view_host
         self.overlays = tuple(overlays or ())
@@ -34,6 +36,30 @@ class ViewManager:
         self.detail_switcher = detail_switcher
         self._empty_detail = empty_detail or ft.Container(expand=True, ignore_interactions=True)
         self._settings_navigation_generation = 0
+
+    def _sync_detail_host(self) -> None:
+        """Lớp panel chi tiết chỉ nhận thao tác khi đang thực sự hiện chi tiết.
+
+        Ở chế độ cửa sổ nhỏ/vừa lớp này phủ lên cả vùng nút của các màn khác
+        (bảng điểm, lịch, cài đặt...); nếu không tắt tương tác thì các nút bên
+        dưới (làm mới, tính GPA...) không bấm được.
+        """
+        host = getattr(self.controller, "_detail_host", None)
+        if host is None:
+            return
+        active = bool(
+            getattr(self.detail_view, "visible", False)
+            and self.detail_switcher is not None
+            and self.detail_switcher.content is self.detail_view
+        )
+        try:
+            host.ignore_interactions = not active
+        except Exception:
+            pass
+
+    def _hide_courses(self) -> None:
+        if self.courses_view is not None:
+            self.courses_view.visible = False
 
     def _dismiss_menu_if_open(self) -> None:
         dismiss = getattr(self.controller, "_dismiss_desktop_filter_menu", None)
@@ -66,6 +92,7 @@ class ViewManager:
         self.detail_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
         self.dashboard.visible = True
         self.dashboard.opacity = 1.0
         self.dashboard.offset = ft.Offset(0, 0)
@@ -73,10 +100,12 @@ class ViewManager:
             self.tab_switcher.content = self.dashboard
         else:
             self._show_only(self.dashboard)
+        self._sync_detail_host()
         
         # Đặt lại màu sắc của các nút trên thanh điều hướng về trạng thái không active
         self.controller.calendar_btn.icon_color = C.TEXT_SECONDARY
         self.controller.grades_btn.icon_color = C.TEXT_SECONDARY
+        self.controller.courses_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     def show_calendar(self, data_snapshot):
@@ -86,6 +115,7 @@ class ViewManager:
         self.detail_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
         
         self.calendar_view.show(data_snapshot)
         self.calendar_view.visible = True
@@ -95,6 +125,7 @@ class ViewManager:
             self.tab_switcher.content = self.calendar_view
         else:
             self._show_only(self.calendar_view)
+        self._sync_detail_host()
         self.controller.calendar_btn.icon_color = C.ACCENT
         self.page.update()
 
@@ -128,6 +159,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.detail_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
         self.settings_view.visible = True
         self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
@@ -135,6 +167,7 @@ class ViewManager:
             self.tab_switcher.content = self.settings_view
         else:
             self._show_only(self.settings_view)
+        self._sync_detail_host()
         # Publish immediate visual feedback before any native settings lookup.
         self.page.update()
 
@@ -149,6 +182,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.detail_view.visible = False
         self.settings_view.visible = False
+        self._hide_courses()
         self.grade_overview_view.visible = True
         self.grade_overview_view.opacity = 1.0
         self.grade_overview_view.offset = ft.Offset(0, 0)
@@ -157,11 +191,60 @@ class ViewManager:
             self.tab_switcher.content = self.grade_overview_view
         else:
             self._show_only(self.grade_overview_view)
+        self._sync_detail_host()
         # The cached grade view may have been detached while Settings previewed
         # another theme. Refresh after attaching it so Flet sends the new
         # surface colors with the next page update.
         self.grade_overview_view.update_theme()
         self.controller.grades_btn.icon_color = C.ACCENT
+        self.page.update()
+        self.controller.grades_btn.icon_color = C.ACCENT
+        self.page.update()
+
+    def show_courses_loading(self):
+        self._dismiss_menu_if_open()
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.detail_view.visible = False
+        self.settings_view.visible = False
+        self.grade_overview_view.visible = False
+        self.courses_view.visible = True
+        self.courses_view.opacity = 1.0
+        self.courses_view.offset = ft.Offset(0, 0)
+        self.courses_view.show_loading()
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.courses_view
+        else:
+            self._show_only(self.courses_view)
+        self._sync_detail_host()
+        self.controller.courses_btn.icon_color = C.ACCENT
+        self.page.update()
+
+    def show_courses_data(self, courses):
+        self.courses_view.update_courses(courses)
+        self.page.update()
+
+    def show_courses_error(self):
+        self.courses_view.show_error()
+        self.page.update()
+
+    async def close_courses(self):
+        self.courses_view.hide()
+        if self.tab_switcher is not None:
+            self.courses_view.visible = False
+            self.dashboard.visible = True
+            self.dashboard.opacity = 1.0
+            self.tab_switcher.content = self.dashboard
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+            self._show_only(self.dashboard, self.courses_view)
+            self.courses_view.opacity = 0.0
+            self.page.update()
+            await asyncio.sleep(0.18)
+            self.courses_view.visible = False
+            self._show_only(self.dashboard)
+        self.controller.courses_btn.icon_color = C.TEXT_SECONDARY
         self.page.update()
 
     def show_grades_data(self, courses_grades, grade_items):
@@ -169,9 +252,14 @@ class ViewManager:
         self.grade_overview_view.update_grades(courses_grades, grade_items)
         self.page.update()
 
-    def show_academic_radar_data(self, semesters, profiles):
+    def show_academic_radar_data(self, semesters, profiles, progress=None):
         """Cập nhật dữ liệu hồ sơ học tập Academic Radar và danh sách học phần."""
-        self.grade_overview_view.update_academic_data(semesters, profiles)
+        self.grade_overview_view.update_academic_data(semesters, profiles, progress)
+        self.page.update()
+
+    def show_credit_progress(self, progress):
+        """Cập nhật tiến độ tín chỉ ra trường (tải sau khi bảng điểm đã hiện)."""
+        self.grade_overview_view.set_credit_progress(progress)
         self.page.update()
 
     async def close_grades(self):
@@ -203,6 +291,7 @@ class ViewManager:
         self.calendar_view.visible = origin is self.calendar_view
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_courses()
 
         self.detail_view.offset = ft.Offset(0, 0)
         self.detail_view.opacity = 1.0
@@ -212,6 +301,7 @@ class ViewManager:
             self.detail_switcher.content = self.detail_view
         else:
             self._show_only(origin, self.detail_view)
+        self._sync_detail_host()
         self.page.update()
 
     def show_detail_data(self, full_data):
@@ -233,6 +323,7 @@ class ViewManager:
             destination.visible = True
             destination.opacity = 1.0
             self.detail_switcher.content = self._empty_detail
+            self._sync_detail_host()
         else:
             destination.visible = True
             if destination is self.dashboard:

@@ -205,6 +205,7 @@ class Settings(BaseModel):
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
     MOODLE_LOGIN_URL: str = "https://courses.ut.edu.vn/login/index.php"
     PORTAL_API_BASE: str = "https://portal-publicapp.ut.edu.vn/api/v1"
+    PORTAL_WEB_API_BASE: str = "https://portal.ut.edu.vn/api/v1"
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(

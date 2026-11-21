@@ -26,6 +26,7 @@ from core.portal_client import PortalClient
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
+    WeekScheduleCache,
     TodayScheduleCoordinator,
     TodayScheduleViewState,
 )
@@ -49,6 +50,7 @@ from gui.components.detail_view import DetailView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
 from gui.components.desktop_window_header import build_desktop_window_header
@@ -75,6 +77,12 @@ _SCROLL_TO_TOP_SHOW_OFFSET = 240.0
 _SCROLL_TO_TOP_HIDE_OFFSET = 96.0
 _SCROLL_TO_TOP_DURATION_MS = 300
 _DASHBOARD_SCROLL_EVENT_INTERVAL_MS = 32
+# Bố cục PC: từ độ rộng này trở lên chia 2 cột (danh sách | lịch hôm nay / chi tiết).
+_WIDE_BREAKPOINT = 980
+_SIDE_PANE_WIDTH = 440
+_RAIL_WIDTH = 88
+_LIST_MAX_WIDTH = 820
+_SINGLE_VIEW_MAX_WIDTH = 860
 
 try:
     from core.version import APP_VERSION as _APP_VERSION
@@ -214,6 +222,10 @@ class AppController:
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
         self._portal_client = PortalClient(settings.PORTAL_API_BASE)
+        # The Portal web app (lichTuan) is served from its own host.
+        self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
+        self._portal_week_lock = threading.Lock()
+        self._week_schedule_cache = WeekScheduleCache(namespace=schedule_namespace)
         self._today_schedule_coordinator = TodayScheduleCoordinator(
             fetch_day=self._portal_client.fetch_day,
             cache=TodayScheduleCache(namespace=schedule_namespace),
@@ -542,13 +554,15 @@ class AppController:
         
         # Chỉ dành cho Desktop: Cửa sổ kích thước cố định hỗ trợ khay hệ thống
         if not _is_mobile:
-            self.page.window.width        = 420
-            self.page.window.height       = 720
-            self.page.window.max_width    = 420
+            # PC: cửa sổ co giãn được. Rộng >= _WIDE_BREAKPOINT sẽ chuyển sang
+            # bố cục 2 cột; hẹp hơn vẫn dùng bố cục gọn như bản cũ.
+            self.page.window.width        = 1120
+            self.page.window.height       = 760
             self.page.window.min_width    = 420
+            self.page.window.min_height   = 560
             self.page.window.always_on_top = settings.ALWAYS_ON_TOP
-            self.page.window.resizable    = False
-            self.page.window.maximizable  = False
+            self.page.window.resizable    = True
+            self.page.window.maximizable  = True
             self.page.window.minimizable  = True
             self.page.window.title_bar_hidden = True
             self.page.window.title_bar_buttons_hidden = True
@@ -650,6 +664,261 @@ class AppController:
                         raise
                     logger.debug("Window session closed before destroy completed")
 
+    def _toggle_maximize_window(self, _event=None) -> None:
+        """Phóng to / khôi phục cửa sổ từ thanh tiêu đề tuỳ chỉnh."""
+        self.page.window.maximized = not self.page.window.maximized
+        self.page.update()
+
+    # ------------------------------------------------------------------
+    # Responsive desktop layout
+    # ------------------------------------------------------------------
+    def _with_inline_schedule(self, cards: list) -> list:
+        """Compact: lịch hôm nay nằm đầu danh sách. Wide: nằm ở cột phải."""
+        if getattr(self, "_wide_layout", False):
+            return list(cards)
+        return [self.today_schedule_panel] + list(cards)
+
+    def _build_stat_row(self) -> ft.Container:
+        """Hàng thẻ thống kê (chỉ hiện ở bố cục PC), bấm để lọc theo mức độ."""
+        self._stat_tiles = {}
+        specs = (
+            ("critical", "Khẩn cấp", lambda: C.CRITICAL),
+            ("warning", "Sắp đến hạn", lambda: C.WARNING),
+            ("safe", "An toàn", lambda: C.SAFE),
+            ("overdue", "Quá hạn", lambda: C.CRITICAL),
+        )
+        tiles = []
+        for key, label, color_fn in specs:
+            value = ft.Text("0", size=28, weight=ft.FontWeight.W_700, color=color_fn())
+            caption = ft.Text(label, size=12, color=C.TEXT_SECONDARY)
+            bar = ft.Container(width=4, height=40, bgcolor=color_fn(), border_radius=2)
+            tile = ft.Container(
+                content=ft.Row(
+                    [bar, ft.Column([value, caption], spacing=0, tight=True)],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=C.SURFACE,
+                border=ft.Border.all(1, C.BORDER),
+                border_radius=14,
+                padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                expand=True,
+                ink=True,
+                tooltip=f"Lọc: {label}",
+                on_click=lambda _e, k=key: self._safe_run_task(self._set_urgency, k),
+            )
+            self._stat_tiles[key] = (value, bar, color_fn)
+            tiles.append(tile)
+        return ft.Container(
+            content=ft.Row(tiles, spacing=12),
+            padding=ft.Padding(left=16, right=16, top=2, bottom=10),
+            visible=False,
+        )
+
+    def _update_stat_tiles(self, n_critical, n_warning, n_safe, n_overdue) -> None:
+        values = {
+            "critical": n_critical, "warning": n_warning,
+            "safe": n_safe, "overdue": n_overdue,
+        }
+        for key, (text, bar, color_fn) in self._stat_tiles.items():
+            n = values[key]
+            text.value = str(n)
+            text.color = color_fn() if n else C.TEXT_SECONDARY
+            bar.bgcolor = color_fn() if n else C.BORDER
+
+    def _build_rail(self) -> ft.Container:
+        """Thanh điều hướng dọc kiểu ứng dụng desktop (thay các nút trên header)."""
+        self._rail_items = {}
+
+        def item(key, icon, label, handler):
+            ic = ft.Icon(icon, size=24, color=C.TEXT_SECONDARY)
+            tx = ft.Text(label, size=10.5, color=C.TEXT_SECONDARY,
+                         weight=ft.FontWeight.W_600, text_align=ft.TextAlign.CENTER)
+            box = ft.Container(
+                content=ft.Column([ic, tx], spacing=4, tight=True,
+                                  horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                width=68, padding=ft.Padding.symmetric(vertical=10),
+                border_radius=14, ink=True, tooltip=label,
+                on_click=lambda _e: self._safe_run_task(handler),
+            )
+            self._rail_items[key] = (box, ic, tx)
+            return box
+
+        logo = ft.Container(
+            content=ft.Text("U", size=20, weight=ft.FontWeight.W_800, color=C.ON_ACCENT),
+            width=42, height=42, bgcolor=C.ACCENT, border_radius=13,
+            alignment=ft.Alignment(0, 0),
+        )
+        rail = ft.Container(
+            content=ft.Column(
+                controls=[
+                    logo,
+                    ft.Container(height=14),
+                    item("home", ft.Icons.DASHBOARD_ROUNDED, "Tổng quan",
+                         lambda: self._rail_navigate("home")),
+                    item("courses", ft.Icons.MENU_BOOK_ROUNDED, "Môn học",
+                         lambda: self._rail_navigate("courses")),
+                    item("calendar", ft.Icons.CALENDAR_MONTH_ROUNDED, "Lịch",
+                         lambda: self._rail_navigate("calendar")),
+                    item("grades", ft.Icons.INSIGHTS_ROUNDED, "Bảng điểm",
+                         lambda: self._rail_navigate("grades")),
+                    ft.Container(expand=True),
+                    item("refresh", ft.Icons.REFRESH_ROUNDED, "Làm mới",
+                         self._load_data_async),
+                    item("settings", ft.Icons.SETTINGS_ROUNDED, "Cài đặt",
+                         lambda: self._rail_navigate("settings")),
+                ],
+                spacing=6,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            width=_RAIL_WIDTH,
+            padding=ft.Padding.symmetric(vertical=16),
+            bgcolor=C.SURFACE,
+            border=ft.Border.only(right=ft.BorderSide(1, C.BORDER)),
+            visible=False,
+        )
+        self._rail_logo = logo
+        self._wide_header_content = ft.Row(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Text("Tổng quan", size=26, weight=ft.FontWeight.W_800,
+                                color=C.TEXT_PRIMARY),
+                        self._sync_status.control,
+                    ],
+                    spacing=4, tight=True,
+                ),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._wide_title = self._wide_header_content.controls[0].controls[0]
+        self._sync_rail_active()
+        return rail
+
+    def _current_section(self) -> str:
+        if self.settings_view.visible:
+            return "settings"
+        if self.calendar_view.visible:
+            return "calendar"
+        if self.grade_overview_view.visible:
+            return "grades"
+        if self.courses_view.visible:
+            return "courses"
+        return "home"
+
+    def _sync_rail_active(self, force_home: bool = False) -> None:
+        if not getattr(self, "_rail_items", None):
+            return
+        current = "home" if force_home else self._current_section()
+        for key, (box, ic, tx) in self._rail_items.items():
+            active = key == current
+            color = C.ACCENT if active else C.TEXT_SECONDARY
+            ic.color = color
+            tx.color = color
+            box.bgcolor = ft.Colors.with_opacity(0.14, C.ACCENT) if active else None
+        try:
+            self._rail.update()
+        except Exception:
+            pass
+
+    async def _rail_navigate(self, target: str) -> None:
+        """Chuyển mục từ thanh điều hướng: đóng view đang mở rồi mở view đích."""
+        self._dismiss_desktop_filter_menu()
+        if self.detail_view.visible:
+            await self._close_detail()
+        current = self._current_section()
+        if target == current:
+            # Bấm lại đúng mục đang mở: giữ nguyên, không quay về Tổng quan.
+            self._sync_rail_active()
+            return
+        if current == "settings":
+            if self.settings_view.has_changes():
+                # Hiện hộp thoại "Chưa lưu"; người dùng bấm lại mục sau khi xử lý.
+                await self.settings_view._handle_back(None)
+                return
+            await self._close_settings()
+        elif current == "calendar":
+            await self._close_calendar()
+        elif current == "grades":
+            await self._close_grades()
+        elif current == "courses":
+            await self._close_courses()
+        if target == "calendar":
+            await self._show_calendar()
+        elif target == "grades":
+            await self._show_grades()
+        elif target == "courses":
+            await self._show_courses()
+        elif target == "settings":
+            await self._show_settings()
+        self._sync_rail_active()
+
+    def _on_page_resize(self, _event=None) -> None:
+        try:
+            self._apply_responsive_layout()
+        except Exception:
+            logger.debug("Responsive layout update skipped", exc_info=True)
+
+    def _apply_responsive_layout(self, force: bool = False) -> None:
+        width = float(getattr(self.page, "width", None) or self.page.window.width or 0)
+        if width <= 0:
+            return
+        wide = width >= _WIDE_BREAKPOINT
+        mode_changed = wide != self._wide_layout
+        if not (force or mode_changed or getattr(self, "_last_layout_width", None) is None
+                or abs(width - self._last_layout_width) >= 1):
+            return
+        self._last_layout_width = width
+        self._wide_layout = wide
+
+        # Gutter để nội dung không bị kéo dãn quá mức trên màn hình lớn.
+        list_width = width - (_SIDE_PANE_WIDTH if wide else 0)
+        gutter = max(0.0, (list_width - _LIST_MAX_WIDTH) / 2)
+        self._content_area.padding = ft.Padding.only(left=4 + gutter, right=4 + gutter, bottom=8)
+        self._filter_container.padding = ft.Padding.only(left=gutter, right=gutter, top=4, bottom=10)
+
+        # Cài đặt giữ lề hai bên; Lịch và Bảng điểm dùng toàn bộ chiều rộng (100%).
+        single_gutter = max(0.0, (width - _SINGLE_VIEW_MAX_WIDTH) / 2)
+        self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
+        for view in (self.grade_overview_view, self.calendar_view, self.courses_view):
+            view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
+
+        # Panel chi tiết bên phải khi rộng, toàn màn hình khi hẹp.
+        host = self._detail_host
+        if wide:
+            host.left = None
+            host.width = _SIDE_PANE_WIDTH
+            self.detail_view.border = ft.Border.only(left=ft.BorderSide(1, C.BORDER))
+        else:
+            host.left = 0
+            host.width = None
+            self.detail_view.border = None
+
+        self._stat_row.padding = ft.Padding(left=16 + gutter, right=16 + gutter, top=2, bottom=10)
+        self._header_container.padding = (
+            ft.Padding(left=16 + gutter, right=16 + gutter, top=18, bottom=10)
+            if wide else self._header_compact_padding
+        )
+
+        if mode_changed:
+            self._sidebar.visible = wide
+            self._rail.visible = wide
+            self._stat_row.visible = wide
+            self._footer.visible = not wide
+            self._header_container.content = (
+                self._wide_header_content if wide else self._header_compact_content
+            )
+            self._sync_status.control.expand = not wide
+            if wide:
+                self._sidebar_column.controls = [self._sidebar_title, self.today_schedule_panel]
+            else:
+                self._sidebar_column.controls = []
+            cards = [c for c in self.cards_column.controls if c is not self.today_schedule_panel]
+            self.cards_column.controls = self._with_inline_schedule(cards)
+            with self._cards_lock:
+                self.active_cards = list(self.cards_column.controls)
+        self.page.update()
+
     def _minimize_window(self, _event=None) -> None:
         """Minimize from the custom desktop header without hiding to tray."""
         self.page.window.minimized = True
@@ -702,19 +971,24 @@ class AppController:
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
             return True
+        handled = False
         if self.settings_view.visible:
             await self.settings_view._handle_back(None)
-            return True
+            handled = True
         elif self.detail_view.visible:
             await self._close_detail()
-            return True
+            handled = True
         elif self.calendar_view.visible:
             await self._close_calendar()
-            return True
+            handled = True
         elif self.grade_overview_view.visible:
             await self._close_grades()
-            return True
-        return False
+            handled = True
+        elif self.courses_view.visible:
+            await self._close_courses()
+            handled = True
+        self._sync_rail_active()
+        return handled
 
     def _init_ui(self):
         self._skeleton_visible = True
@@ -818,6 +1092,15 @@ class AppController:
             tooltip="Bảng điểm",
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_grades
+            ),
+        )
+
+        self.courses_btn = ft.IconButton(
+            ft.Icons.MENU_BOOK_ROUNDED,
+            icon_color=C.TEXT_SECONDARY, icon_size=20,
+            tooltip="Môn học",
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._toggle_courses
             ),
         )
 
@@ -1003,15 +1286,42 @@ class AppController:
             border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
         )
 
-        self.dashboard = ft.Column(
+        self._stat_row = self._build_stat_row()
+        self._dashboard_main = ft.Column(
             controls=[
                 header,
                 self._update_banner,
+                self._stat_row,
                 self._filter_container,
                 self._content_area,
                 self._footer,
             ],
             spacing=0, expand=True,
+        )
+        # Cột phải (chỉ hiện ở chế độ rộng): lịch học hôm nay.
+        self._sidebar_title = ft.Container(
+            content=ft.Text(
+                "LỊCH HỌC HÔM NAY", size=11, weight=ft.FontWeight.W_700,
+                color=C.TEXT_SECONDARY,
+            ),
+            padding=ft.Padding.only(left=20, right=20, top=4, bottom=2),
+        )
+        self._sidebar_column = ft.Column(
+            controls=[], spacing=8, scroll=ft.ScrollMode.AUTO, expand=True,
+        )
+        self._sidebar = ft.Container(
+            content=self._sidebar_column,
+            width=_SIDE_PANE_WIDTH,
+            padding=ft.Padding.only(top=12, bottom=12),
+            bgcolor=C.BG,
+            border=ft.Border.only(left=ft.BorderSide(1, C.BORDER)),
+            visible=False,
+        )
+        self._wide_layout = False
+        self.dashboard = ft.Row(
+            controls=[self._dashboard_main, self._sidebar],
+            spacing=0, expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
@@ -1020,6 +1330,8 @@ class AppController:
             self.page,
             on_close=lambda: self._safe_run_task(self._close_calendar),
             on_open_detail=lambda data: self._safe_run_task(self._show_detail_async, data),
+            fetch_schedule_week=self._fetch_schedule_week,
+            schedule_cache=self._week_schedule_cache,
         )
         self.settings_view = SettingsView(
             self.page,
@@ -1038,9 +1350,16 @@ class AppController:
             on_close=lambda: self._safe_run_task(self._close_grades),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
             page=self.page,
+            moodle_courses_provider=self._get_moodle_course_grades,
         )
 
-        for _view in (self.detail_view, self.settings_view, self.calendar_view, self.grade_overview_view):
+        self.courses_view = CoursesView(
+            on_close=lambda: self._safe_run_task(self._close_courses),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_courses(force_refresh=True)),
+        )
+
+        for _view in (self.detail_view, self.settings_view, self.calendar_view,
+                      self.grade_overview_view, self.courses_view):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
             _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
@@ -1065,7 +1384,14 @@ class AppController:
             expand=True,
         )
 
-        main_stack_controls = [self.tab_switcher, self.detail_switcher]
+        # Ở chế độ rộng, chi tiết bài tập là panel bên phải (list vẫn thấy được).
+        self._detail_host = ft.Container(
+            content=self.detail_switcher,
+            left=0, right=0, top=0, bottom=0,
+        )
+        # Chưa mở chi tiết thì lớp này không được chặn thao tác của màn bên dưới.
+        self._detail_host.ignore_interactions = True
+        main_stack_controls = [self.tab_switcher, self._detail_host]
         overlays = []
         if not platform_utils.UI_IS_MOBILE:
             self._active_desktop_filter_menu = None
@@ -1134,6 +1460,7 @@ class AppController:
             self.calendar_view,
             self.grade_overview_view,
             self,
+            courses_view=self.courses_view,
             view_host=main_stack,
             overlays=overlays,
             tab_switcher=self.tab_switcher,
@@ -1147,18 +1474,31 @@ class AppController:
             self._app_shell = ft.SafeArea(content=main_stack, expand=True)
         else:
             self._window_header = self._build_desktop_window_header()
+            self._rail = self._build_rail()
             self._app_shell = ft.Column(
-                controls=[self._window_header, main_stack],
+                controls=[
+                    self._window_header,
+                    ft.Row(
+                        controls=[self._rail, main_stack],
+                        spacing=0,
+                        expand=True,
+                        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                ],
                 spacing=0,
                 expand=True,
             )
         self.page.add(self._app_shell)
+        if not platform_utils.UI_IS_MOBILE:
+            self.page.on_resize = self._on_page_resize
+            self._apply_responsive_layout(force=True)
 
     def _build_desktop_window_header(self) -> ft.Container:
         self._app_title.size = 13
         self._app_title.weight = ft.FontWeight.W_700
         return build_desktop_window_header(
             on_minimize=self._minimize_window,
+            on_maximize=self._toggle_maximize_window,
             on_close=lambda _: self._safe_run_task(
                 self._exit_from_window_header
             ),
@@ -1170,6 +1510,7 @@ class AppController:
         action_buttons = ft.Row(
             controls=[
                 self.calendar_btn,
+                self.courses_btn,
                 self.grades_btn,
                 self.refresh_btn,
                 self.settings_btn,
@@ -1203,6 +1544,8 @@ class AppController:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
             padding = ft.Padding.only(left=16, right=8, top=4, bottom=8)
+            self._header_compact_content = content
+            self._header_compact_padding = padding
         return ft.Container(content=content, padding=padding, bgcolor=C.BG)
 
     def _build_dashboard_filter_row(self) -> ft.Row:
@@ -1246,7 +1589,9 @@ class AppController:
         header_height = float(
             getattr(getattr(self, "_window_header", None), "height", 34) or 34
         )
-        viewport_width = float(getattr(self.page, "width", 420) or 420)
+        rail_width = float(_RAIL_WIDTH if getattr(self, "_wide_layout", False) else 0)
+        anchor_left -= rail_width
+        viewport_width = float(getattr(self.page, "width", 420) or 420) - rail_width
         popup_width = float(menu.popup_width)
         popup_left = min(
             max(8.0, anchor_left),
@@ -1510,6 +1855,7 @@ class AppController:
         self.footer_safe.color     = C.SAFE if n_safe else C.BORDER
         self.footer_overdue.value  = f"{n_overdue} quá hạn" if n_overdue else "0 quá hạn"
         self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
+        self._update_stat_tiles(n_critical, n_warning, n_safe, n_overdue)
 
         self.urgency_filter_menu.set_options(
             self._urgency_filter_options(counts["urgency"])
@@ -1577,13 +1923,20 @@ class AppController:
             
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
-        render_cards = [self.today_schedule_panel] + render_cards
+        render_cards = self._with_inline_schedule(render_cards)
             
         with self._cards_lock:
             self.active_cards = render_cards
         
         self.cards_column.controls = render_cards
         self.page.update()
+
+    def _fetch_schedule_week(self, week_anchor):
+        """Blocking Portal ``lichTuan`` fetch; runs in a worker thread."""
+        with self._portal_week_lock:
+            return self._portal_week_client.fetch_week(
+                week_anchor, settings.UTH_USERNAME, settings.UTH_PASSWORD
+            )
 
     def _request_today_schedule(self) -> None:
         coordinator = self._today_schedule_coordinator
@@ -1714,7 +2067,7 @@ class AppController:
 
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
-        render_cards = [self.today_schedule_panel] + render_cards
+        render_cards = self._with_inline_schedule(render_cards)
 
         with self._cards_lock:
             self.active_cards = render_cards
@@ -1769,25 +2122,56 @@ class AppController:
             self._render_cards_only()
         self._search_task = self._safe_run_task(_delayed_render)
 
-    async def _check_grades_background(self):
-        """PERF-OPT: Check grade changes in background (non-blocking)."""
+    def _get_moodle_course_grades(self) -> list:
+        """Danh sách môn Moodle kèm báo cáo điểm (đã lưu) để popup Bảng điểm dùng."""
         try:
-            grade_changes = await asyncio.to_thread(self.orchestrator.check_grade_changes)
-            if grade_changes and hasattr(self, 'notifier') and self.notifier:
-                await self.notifier.dispatch_grade_alert(grade_changes)
-                msg = f"\U0001f4ca {len(grade_changes)} \u0111i\u1ec3m m\u1edbi: "
-                msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
-                if len(grade_changes) > 3:
-                    msg += f" +{len(grade_changes) - 3} kh\u00e1c"
-                self.page.snack_bar = ft.SnackBar(
-                    content=ft.Text(msg, color=C.ON_SAFE),
-                    bgcolor=C.SAFE,
-                    duration=5000,
-                )
-                self.page.snack_bar.open = True
-                self.page.update()
+            return list(
+                getattr(self.orchestrator, "latest_course_grades", None)
+                or self.orchestrator.course_grade_monitor.load_cached()
+                or []
+            )
+        except Exception:
+            return []
+
+    async def _check_grades_background(self):
+        """Chạy cùng chu kỳ cập nhật Tổng quan: điểm tổng kết + điểm theo môn.
+
+        Điểm theo môn (tab Môn học) được lưu snapshot; nếu lần sau có thay đổi
+        (kể cả giá trị "-") thì gộp vào cùng một thông báo.
+        """
+        grade_changes = []
+        try:
+            grade_changes = list(await asyncio.to_thread(self.orchestrator.check_grade_changes) or [])
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
+        try:
+            courses, course_changes = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+            grade_changes.extend(course_changes or [])
+            if self.courses_view.visible and courses:
+                self.view_manager.show_courses_data(courses)
+        except Exception as e:
+            logger.debug("Course grades background failed (non-critical): %s", e)
+        await self._notify_grade_changes(grade_changes)
+
+    async def _notify_grade_changes(self, grade_changes: list) -> None:
+        if not grade_changes:
+            return
+        try:
+            if hasattr(self, 'notifier') and self.notifier:
+                await self.notifier.dispatch_grade_alert(grade_changes)
+            msg = f"\U0001f4ca {len(grade_changes)} thay \u0111\u1ed5i \u0111i\u1ec3m: "
+            msg += ", ".join(f"{c.item_name} ({c.old_grade or '-'} \u2192 {c.new_grade})" for c in grade_changes[:3])
+            if len(grade_changes) > 3:
+                msg += f" +{len(grade_changes) - 3} kh\u00e1c"
+            self.page.snack_bar = ft.SnackBar(
+                content=ft.Text(msg, color=C.ON_SAFE),
+                bgcolor=C.SAFE,
+                duration=5000,
+            )
+            self.page.snack_bar.open = True
+            self.page.update()
+        except Exception as e:
+            logger.debug("Grade notification failed (non-critical): %s", e)
 
     def _set_sync_status(self, state: str, message: str) -> None:
         component = getattr(self, "_sync_status", None)
@@ -2377,6 +2761,7 @@ class AppController:
                 "navigation", "succeeded", "user", screen="settings"
             )
         await self.view_manager.show_settings()
+        self._sync_rail_active()
 
     async def _toggle_grades(self):
         """Toggle the grade overview panel."""
@@ -2410,7 +2795,19 @@ class AppController:
             )
             if semesters:
                 profiles = service.get_radar_profiles(semesters)
-                self.view_manager.show_academic_radar_data(semesters, profiles)
+                # Hiện bảng điểm ngay, không chờ API tiến độ tín chỉ
+                self.view_manager.show_academic_radar_data(semesters, profiles, None)
+                try:
+                    progress = await asyncio.to_thread(
+                        service.load_credit_progress,
+                        username=username,
+                        password=password,
+                        force_refresh=force_refresh,
+                    )
+                    if progress is not None:
+                        self.view_manager.show_credit_progress(progress)
+                except Exception as exc:
+                    logger.warning("Credit progress load failed: %s", exc)
             else:
                 # Fallback to Moodle grades if Portal returned no semesters
                 userid = await asyncio.to_thread(
@@ -2434,6 +2831,37 @@ class AppController:
             logger.error("Academic grades fetch failed: %s", e)
             self.view_manager.show_academic_radar_data([], [])
 
+    async def _toggle_courses(self):
+        if self.courses_view.visible:
+            await self._close_courses()
+        else:
+            await self._show_courses()
+
+    async def _show_courses(self, force_refresh: bool = False):
+        """Hiện tab Môn học: các môn đang học + điểm/% tham gia cào từ grade report."""
+        self._diag_screen("courses")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="courses")
+        self.view_manager.show_courses_loading()
+        self._sync_rail_active()
+        # Hiện ngay dữ liệu đã lưu (nếu có) trong lúc tải mới.
+        cached = getattr(self.orchestrator, "latest_course_grades", None) or \
+            self.orchestrator.course_grade_monitor.load_cached()
+        if cached and not force_refresh:
+            self.view_manager.show_courses_data(cached)
+        try:
+            courses, changes = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+            self.view_manager.show_courses_data(courses)
+            await self._notify_grade_changes(changes)
+        except Exception as e:
+            logger.error("Courses fetch failed: %s", e, exc_info=True)
+            if not cached:
+                self.view_manager.show_courses_error()
+
+    async def _close_courses(self):
+        await self.view_manager.close_courses()
+        self._diag_screen("home")
+        self._sync_rail_active()
+
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
         await self.view_manager.close_grades()
@@ -2451,6 +2879,8 @@ class AppController:
         window_header = getattr(self, "_window_header", None)
         if window_header is not None:
             theme_roots.append(window_header)
+        if getattr(self, "_rail", None) is not None:
+            theme_roots.append(self._rail)
         refresh_semantic_control_colors(
             theme_roots, self._rendered_palette, current_palette
         )
@@ -2458,6 +2888,12 @@ class AppController:
 
         # Page
         self.page.bgcolor = _C.BG
+        if getattr(self, "_rail", None) is not None:
+            self._rail.bgcolor = _C.SURFACE
+            self._rail.border = ft.Border.only(right=ft.BorderSide(1, _C.BORDER))
+            self._rail_logo.bgcolor = _C.ACCENT
+            self._sidebar.border = ft.Border.only(left=ft.BorderSide(1, _C.BORDER))
+            self._sync_rail_active()
 
         self._header_container.bgcolor = _C.BG
         self._app_title.color = _C.TEXT_PRIMARY
@@ -2538,7 +2974,7 @@ class AppController:
             component.refresh_theme()
 
         # Icon buttons
-        buttons_to_update = [self.calendar_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
+        buttons_to_update = [self.calendar_btn, self.courses_btn, self.grades_btn, self.refresh_btn, self.settings_btn]
 
         for btn in buttons_to_update:
             btn.icon_color = _C.TEXT_SECONDARY
@@ -2558,7 +2994,7 @@ class AppController:
         self.settings_view.bgcolor = _C.BG
 
         # Sub-views theme update propagation
-        for view_attr in ('calendar_view', 'detail_view', 'grade_overview_view'):
+        for view_attr in ('calendar_view', 'detail_view', 'grade_overview_view', 'courses_view'):
             view_obj = getattr(self, view_attr, None)
             if view_obj and hasattr(view_obj, 'update_theme'):
                 try:
@@ -2571,6 +3007,7 @@ class AppController:
 
 
     async def _close_settings(self):
+        self._sync_rail_active(force_home=True)
         self.settings_view.cancel_pending_load()
         from gui.core.theme import load_theme_from_settings, set_page_theme
         load_theme_from_settings()
@@ -2915,6 +3352,9 @@ class AppController:
                 else f"{settings.PORTAL_API_BASE}|anonymous"
             )
             self._portal_client.clear_token()
+            self._portal_week_client.clear_token()
+            self._week_schedule_cache.set_namespace(schedule_namespace)
+            self.calendar_view.reset_schedule()
             self._today_schedule_coordinator.replace_cache(
                 TodayScheduleCache(namespace=schedule_namespace)
             )

@@ -14,6 +14,7 @@ from core.today_schedule import (
     ClassSession,
     ScheduleAuthenticationError,
     parse_portal_day,
+    parse_portal_week,
 )
 
 
@@ -197,6 +198,50 @@ class PortalClient:
             return parse_portal_day(payload, target_date)
         except ValueError as exc:
             raise PortalProtocolError("Portal schedule contract was invalid") from exc
+
+    def fetch_week(
+        self, target_date: date, username: str, password: str
+    ) -> dict[date, tuple[ClassSession, ...]]:
+        """Fetch the Monday-based week containing ``target_date`` in one call
+        (``lichhoc/lichTuan``) and group the sessions by calendar date."""
+        token = self._token or self._login(username, password)
+        query = {"date": target_date.isoformat()}
+        try:
+            payload = self._request_json(
+                "GET", "lichhoc/lichTuan", token=token, query=query
+            )
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password)
+            payload = self._request_json(
+                "GET", "lichhoc/lichTuan", token=token, query=query
+            )
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._token = refreshed_token
+        try:
+            return parse_portal_week(payload, target_date)
+        except ValueError as exc:
+            raise PortalProtocolError("Portal week contract was invalid") from exc
+
+    def fetch_credit_progress(
+        self, username: str, password: str
+    ) -> dict[str, Any] | None:
+        """Fetches graduation credit progress (``canDat`` / ``hienTai``) from Portal."""
+        token = self._token or self._login(username, password)
+        try:
+            payload = self._request_json("GET", "hoctap/tiendo", token=token)
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password)
+            payload = self._request_json("GET", "hoctap/tiendo", token=token)
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._token = refreshed_token
+        body = payload.get("body")
+        return body if isinstance(body, dict) else None
 
     def fetch_full_transcript(
         self, username: str, password: str

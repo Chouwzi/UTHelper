@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from config import get_data_dir, settings
 from core.academic_radar.calculator import calculate_radar_profile
+from core.academic_radar.gpa_planner import CreditProgress, parse_credit_progress
 from core.academic_radar.models import CourseGradeItem, RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.portal_client import PortalClient
@@ -27,6 +28,7 @@ class AcademicGradeService:
         self._portal_client = portal_client or PortalClient(settings.PORTAL_API_BASE)
         self._cache_dir = cache_dir or get_data_dir()
         self._cache_file = self._cache_dir / "portal_grades_cache.json"
+        self._progress_cache_file = self._cache_dir / "portal_progress_cache.json"
         self._normalizer = normalizer or SemesterNormalizer()
 
     def _read_cache(self) -> dict[str, Any] | None:
@@ -94,6 +96,51 @@ class AcademicGradeService:
             return self._normalizer.normalize_transcript(cache["transcript"])
 
         return []
+
+    def load_credit_progress(
+        self,
+        username: str = "",
+        password: str = "",
+        force_refresh: bool = False,
+    ) -> CreditProgress | None:
+        """Loads graduation credit progress (canDat/hienTai); daily cache, stale fallback."""
+        username = username or settings.UTH_USERNAME or settings.MOODLE_USERNAME
+        password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+
+        cache: dict[str, Any] | None = None
+        try:
+            if self._progress_cache_file.exists():
+                with open(self._progress_cache_file, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+        except Exception as exc:
+            logger.warning("Failed to read credit progress cache: %s", exc)
+
+        if not force_refresh and cache and cache.get("cached_date") == date.today().isoformat():
+            progress = parse_credit_progress(cache.get("body"))
+            if progress:
+                return progress
+
+        if username and password:
+            try:
+                body = self._portal_client.fetch_credit_progress(username, password)
+                progress = parse_credit_progress(body)
+                if progress:
+                    try:
+                        self._cache_dir.mkdir(parents=True, exist_ok=True)
+                        with open(self._progress_cache_file, "w", encoding="utf-8") as f:
+                            json.dump(
+                                {"cached_date": date.today().isoformat(), "body": body},
+                                f, ensure_ascii=False, indent=2,
+                            )
+                    except Exception as exc:
+                        logger.warning("Failed to write credit progress cache: %s", exc)
+                    return progress
+            except Exception as exc:
+                logger.warning("Portal credit progress fetch failed: %s", exc)
+
+        if cache:
+            return parse_credit_progress(cache.get("body"))
+        return None
 
     def create_semester_from_moodle_grades(
         self,

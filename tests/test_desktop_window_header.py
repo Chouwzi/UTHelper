@@ -40,11 +40,12 @@ def test_custom_header_contains_title_version_drag_minimize_and_close():
     assert header.height == 34
     assert header.bgcolor == C.BG
     assert len(drag_areas) == 1
-    assert drag_areas[0].maximizable is False
+    assert drag_areas[0].maximizable is True
     assert len(cursor_regions) == 1
     assert cursor_regions[0].mouse_cursor == ft.MouseCursor.GRAB
     assert [button.icon for button in buttons] == [
         ft.Icons.HORIZONTAL_RULE_ROUNDED,
+        ft.Icons.CROP_SQUARE_ROUNDED,
         ft.Icons.CLOSE_ROUNDED,
     ]
     assert controller._app_title in controls
@@ -61,6 +62,7 @@ def test_dashboard_desktop_header_replaces_old_title_row_with_sync_status(monkey
     controller._version_badge = ft.Container(content=ft.Text(f"v{APP_VERSION}"))
     controller.calendar_btn = ft.IconButton(ft.Icons.CALENDAR_MONTH_ROUNDED)
     controller.grades_btn = ft.IconButton(ft.Icons.INSIGHTS_ROUNDED)
+    controller.courses_btn = ft.IconButton(ft.Icons.MENU_BOOK_ROUNDED)
     controller.refresh_btn = ft.IconButton(ft.Icons.REFRESH_ROUNDED)
     controller.settings_btn = ft.IconButton(ft.Icons.SETTINGS_ROUNDED)
     monkeypatch.setattr("gui.app_controller.platform_utils.UI_IS_MOBILE", False)

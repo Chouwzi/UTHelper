@@ -842,7 +842,10 @@ def test_disconnect_invalidation_cancels_pending_load_after_initial_reveal():
 def test_app_controller_awaits_view_manager_settings_initialization():
     async def scenario():
         manager = SimpleNamespace(show_settings=AsyncMock())
-        controller = SimpleNamespace(view_manager=manager)
+        controller = SimpleNamespace(
+            view_manager=manager,
+            _sync_rail_active=lambda *a, **k: None,
+        )
 
         await AppController._show_settings(controller)
 

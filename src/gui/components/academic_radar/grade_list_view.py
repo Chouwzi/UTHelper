@@ -8,9 +8,10 @@ from gui.core.theme import C
 class AcademicGradeListView(ft.Column):
     """List of course grade cards for a semester."""
 
-    def __init__(self, courses: list[CourseGradeItem], **kwargs) -> None:
+    def __init__(self, courses: list[CourseGradeItem], on_course_click=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.courses = courses
+        self._on_course_click = on_course_click
         self.spacing = 8
         self._build_list()
 
@@ -134,10 +135,18 @@ class AcademicGradeListView(ft.Column):
                 padding=ft.Padding.symmetric(horizontal=12, vertical=10),
                 border_radius=10,
                 border=ft.Border.all(1, C.BORDER),
+                ink=True,
+                tooltip="Xem điểm thành phần",
+                on_click=lambda e, c=course: self._open_components(e, c),
             )
             cards.append(card)
 
         self.controls = cards
+
+    def _open_components(self, e: ft.ControlEvent, course: CourseGradeItem) -> None:
+        """Click vào môn học -> báo cho view cha mở popup bảng điểm thành phần."""
+        if self._on_course_click is not None:
+            self._on_course_click(e, course)
 
     def _make_mini_grade(self, label: str, value: str, is_bold: bool = False) -> ft.Container:
         return ft.Container(

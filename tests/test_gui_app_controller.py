@@ -848,15 +848,19 @@ def test_shared_back_navigation_returns_to_dashboard_from_every_child_view():
         controller.detail_view = SimpleNamespace(visible=False)
         controller.calendar_view = SimpleNamespace(visible=False)
         controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller.courses_view = SimpleNamespace(visible=False)
         controller._close_detail = AsyncMock()
         controller._close_calendar = AsyncMock()
         controller._close_grades = AsyncMock()
+        controller._close_courses = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
 
         cases = (
             (controller.settings_view, controller.settings_view._handle_back),
             (controller.detail_view, controller._close_detail),
             (controller.calendar_view, controller._close_calendar),
             (controller.grade_overview_view, controller._close_grades),
+            (controller.courses_view, controller._close_courses),
         )
         for view, handler in cases:
             view.visible = True
