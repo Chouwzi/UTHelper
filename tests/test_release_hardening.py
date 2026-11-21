@@ -794,15 +794,20 @@ def test_release_inputs_use_secrets_only_for_private_key_material():
 
 def test_validate_job_runs_full_suite_with_workspace_import_paths():
     workflow = _read(".github/workflows/release.yml")
-    assert "PYTHONPATH: src:extensions/flet_uth_background_sync/src:." in workflow
     assert (
-        "python -m pytest tests extensions/flet_uth_background_sync/tests "
+        "PYTHONPATH: src:extensions/flet_uth_quiz/src:"
+        "extensions/flet_uth_background_sync/src:."
+    ) in workflow
+    assert (
+        "python -m pytest tests extensions/flet_uth_quiz/tests "
+        "extensions/flet_uth_background_sync/tests "
         "-q --tb=short"
     ) in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
     assert 'pip install -e ".[dev,windows]"' not in workflow
     assert (
-        'pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" '
+        'pip install -e . -e extensions/flet_uth_quiz '
+        '"keyring>=25.0.0" "pytest>=9.0.3" '
         '"pytest-timeout>=2.3,<3"'
     ) in workflow
 
@@ -858,3 +863,24 @@ def test_msstore_workflow_builds_and_verifies_msix_without_mutating_lts_release(
     # GitHub LTS release workflow stays isolated from Store MSIX/AAB artifacts.
     assert ".msix" not in release_workflow
     assert ".aab" not in release_workflow
+
+
+def test_windows_flet_builds_append_msvc_coroutine_deprecation_guard():
+    define = "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+    cl_flag = f"/D{define}"
+    safe_append_marker = "$env:CL.Trim()"
+
+    for relative_path in (
+        ".github/workflows/build-msstore.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/package-benchmark.yml",
+    ):
+        content = _read(relative_path)
+        assert cl_flag in content, relative_path
+        assert safe_append_marker in content, relative_path
+        assert f"CL: {cl_flag}" not in content, relative_path
+        assert content.index(cl_flag) < content.index("flet build windows"), relative_path
+
+    windows_release_script = _read("scripts/build_windows_release.ps1")
+    assert cl_flag in windows_release_script
+    assert safe_append_marker in windows_release_script

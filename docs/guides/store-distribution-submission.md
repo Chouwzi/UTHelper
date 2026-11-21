@@ -127,8 +127,14 @@ backend. The owner remains responsible for the final Console answers.
 ### Technical Build, Visual Assets & Automated Gates
 
 1. **Build and verify the Windows Flet bundle** (same reviewed diagnostics
-   template and bundle verification as [windows-packaging.md](windows-packaging.md)):
+   template and bundle verification as [windows-packaging.md](windows-packaging.md); on VS 2026 / MSVC 14.52+, append `/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` to `$env:CL` without clobbering existing flags):
    ```powershell
+   $clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+   if ([string]::IsNullOrWhiteSpace($env:CL)) {
+     $env:CL = $clFlag
+   } elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+     $env:CL = "$($env:CL.Trim()) $clFlag"
+   }
    python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
    python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
    flet build windows --build-version <version> --build-number <build_number> --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose

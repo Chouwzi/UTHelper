@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     env:
-      PYTHONPATH: src:extensions/flet_uth_background_sync/src:.
+      PYTHONPATH: src:extensions/flet_uth_quiz/src:extensions/flet_uth_background_sync/src:.
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
@@ -38,10 +38,10 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
+        run: pip install -e . -e extensions/flet_uth_quiz "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
-        run: python -m pytest tests extensions/flet_uth_background_sync/tests -q --tb=short
+        run: python -m pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short
       - name: Validate tag ancestry and release metadata
         id: metadata
         timeout-minutes: 5
@@ -368,6 +368,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Runtime version generation failed" }
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
+          $clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+          if ([string]::IsNullOrWhiteSpace($env:CL)) {
+            $env:CL = $clFlag
+          } elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+            $env:CL = "$($env:CL.Trim()) $clFlag"
+          }
           flet build windows --build-version "$env:VERSION" --build-number "$env:BUILD_NUMBER" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
           if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed" }
           python scripts/verify_flutter_diagnostics.py --template build/support/flet-build-template-0.86.5-diagnostics.zip --project-root build/flutter

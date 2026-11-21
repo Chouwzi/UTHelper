@@ -8,6 +8,12 @@ if ($env:WIX_EULA_ACCEPTED -ne "wix7") {
     throw "WiX 7.0.0 requires explicit OSMF EULA acceptance; the owner must review and accept the WiX v7 OSMF EULA, then set WIX_EULA_ACCEPTED=wix7."
 }
 $ErrorActionPreference = "Stop"
+$clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+if ([string]::IsNullOrWhiteSpace($env:CL)) {
+    $env:CL = $clFlag
+} elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+    $env:CL = "$($env:CL.Trim()) $clFlag"
+}
 function Invoke-BoundedProcess {
     param(
         [string]$FilePath,

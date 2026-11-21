@@ -7,6 +7,7 @@ on:
     branches: [develop, main]
     paths:
       - 'extensions/flet_uth_background_sync/**'
+      - 'extensions/flet_uth_quiz/**'
       - 'pyproject.toml'
       - 'scripts/build_android.ps1'
       - 'scripts/prepare_android_flutter_project.py'
@@ -67,6 +68,7 @@ jobs:
       - name: 📦 Install project and Flet CLI
         run: |
           pip install -e ".[android-build]"
+          pip install "flet[cli]==0.86.5"
           flet --version
 
       - name: 🔨 Build Android Artifact (${{ matrix.channel }})
