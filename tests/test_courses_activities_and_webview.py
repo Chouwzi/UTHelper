@@ -835,6 +835,10 @@ def test_webview2_runtime_probe_and_zero_js_leakage_in_fallback(monkeypatch: pyt
     assert calls == ["zero_arg"]
 
     # Force fallback mode (no embedded webview) and verify Zalo / Google Meet never leak raw JS
+    monkeypatch.setattr(
+        "gui.components.courses.webview_pane.build_embedded_webview_host",
+        lambda *_args, **_kwargs: None,
+    )
     fake_page = SimpleNamespace(
         overlay=[],
         web=False,
