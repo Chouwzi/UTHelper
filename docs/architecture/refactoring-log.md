@@ -2117,3 +2117,11 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   runner's platform as Linux. The fixtures now model those boundaries explicitly;
   all eleven focused packaging/host cases pass. No production runtime was made
   unavailable to satisfy these checks.
+
+- Review against the real course activity service found that attempt states are
+  localized before reaching the course quiz view. The prior English-only check
+  could disable a resumable attempt at its limit. The view now recognizes both
+  raw and localized states and treats only known terminal states as proof of
+  exhaustion; unknown states proceed to the authoritative entry check. Three
+  positive regressions failed on the previous commit; all ten cases now pass,
+  including a service-to-view check preserving module/quiz identifiers.

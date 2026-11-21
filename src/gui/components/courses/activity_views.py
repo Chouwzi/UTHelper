@@ -1712,8 +1712,13 @@ class QuizActivityView(_BasePaneActivityView):
                 )
             )
 
-        can_resume = any(attempt.state.lower() in {"inprogress", "in_progress", "overdue"} for attempt in summary.attempts)
-        exhausted = bool(summary.max_attempts > 0 and len(summary.attempts) >= summary.max_attempts and not can_resume)
+        # This DTO also carries localized display states from the service. Only
+        # known terminal states can prove exhaustion; unknown states still use
+        # the authoritative Moodle entry check.
+        states = [" ".join(attempt.state.casefold().split()) for attempt in summary.attempts]
+        can_resume = any(state in {"inprogress", "in_progress", "overdue", "đang làm", "quá hạn"} for state in states)
+        terminal = bool(states) and all(state in {"finished", "abandoned", "đã hoàn thành", "đã hủy"} for state in states)
+        exhausted = bool(summary.max_attempts > 0 and len(states) >= summary.max_attempts and terminal)
         if self._on_start_quiz is not None or (summary.web_url and self._on_open_webview is not None):
             controls.append(
                 ft.FilledButton(
