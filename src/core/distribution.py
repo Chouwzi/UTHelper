@@ -22,12 +22,13 @@ _SOURCE_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 _PROJECT_PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
 _MAX_CONFIG_BYTES = 4096
 _ALLOWED_CONFIG_KEYS = frozenset(
-    {"schema_version", "channel", "store_product_id", "android_package_id"}
+    {"schema_version", "channel", "store_product_id", "android_package_id", "app_store_id"}
 )
 _ANDROID_PACKAGE_ID_RE = re.compile(
     r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$"
 )
 _MSSTORE_PRODUCT_ID_RE = re.compile(r"^[A-Za-z0-9]{8,32}$")
+_APP_STORE_ID_RE = re.compile(r"^[0-9]{1,20}$")
 
 
 class DistributionChannel(str, Enum):
@@ -49,6 +50,7 @@ class DistributionProfile:
     store_web_url: str | None = None
     android_package_id: str | None = None
     store_product_id: str | None = None
+    app_store_id: str | None = None
 
     @property
     def store_fallback_url(self) -> str | None:
@@ -85,11 +87,25 @@ def _validate_store_product_id(value: object) -> str | None:
     return cleaned
 
 
+def _validate_app_store_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        logger.warning("Ignoring invalid app_store_id in distribution config")
+        return None
+    cleaned = str(value).strip()
+    if not _APP_STORE_ID_RE.fullmatch(cleaned):
+        logger.warning("Ignoring invalid app_store_id in distribution config")
+        return None
+    return cleaned
+
+
 def build_distribution_profile(
     channel: DistributionChannel,
     *,
     android_package_id: str | None = None,
     store_product_id: str | None = None,
+    app_store_id: str | None = None,
 ) -> DistributionProfile:
     if channel is DistributionChannel.CHPLAY:
         pkg = _validate_android_package_id(android_package_id) or DEFAULT_ANDROID_PACKAGE_ID
@@ -103,12 +119,18 @@ def build_distribution_profile(
             store_product_id=None,
         )
     if channel is DistributionChannel.IOS_APP_STORE:
+        store_id = _validate_app_store_id(app_store_id)
         return DistributionProfile(
             channel=channel,
             supports_github_self_update=False,
-            store_url=None,
+            store_url=(
+                f"itms-apps://apps.apple.com/app/id{store_id}" if store_id else None
+            ),
             store_display_name="Apple App Store",
-            store_web_url=None,
+            store_web_url=(
+                f"https://apps.apple.com/app/id{store_id}" if store_id else None
+            ),
+            app_store_id=store_id,
         )
     if channel is DistributionChannel.IOS_LTS:
         return DistributionProfile(
@@ -163,7 +185,7 @@ def build_distribution_profile(
 
 def _load_channel_config(
     path: Path,
-) -> tuple[DistributionChannel, str | None, str | None] | None:
+) -> tuple[DistributionChannel, str | None, str | None, str | None] | None:
     try:
         if path.is_symlink():
             logger.warning("Ignoring symlink distribution channel config: %s", path)
@@ -209,7 +231,8 @@ def _load_channel_config(
 
     android_package_id = _validate_android_package_id(payload.get("android_package_id"))
     store_product_id = _validate_store_product_id(payload.get("store_product_id"))
-    return channel, android_package_id, store_product_id
+    app_store_id = _validate_app_store_id(payload.get("app_store_id"))
+    return channel, android_package_id, store_product_id, app_store_id
 
 
 def _safe_has_package_identity(
@@ -268,7 +291,7 @@ def resolve_distribution_channel(
 
     loaded = _load_channel_config(resolved_path)
     if loaded is not None:
-        channel, android_package_id, store_product_id = loaded
+        channel, android_package_id, store_product_id, app_store_id = loaded
         if (
             is_windows
             and channel in (DistributionChannel.EXE_LTS, DistributionChannel.SOURCE)
@@ -279,6 +302,7 @@ def resolve_distribution_channel(
             channel,
             android_package_id=android_package_id,
             store_product_id=store_product_id,
+            app_store_id=app_store_id,
         )
 
     if is_windows:

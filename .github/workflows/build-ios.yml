@@ -55,12 +55,13 @@ jobs:
       - name: 🔨 Build unsigned iOS simulator diagnostic
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          APP_STORE_ID: ${{ vars.APP_STORE_ID }}
         run: |
           set -euo pipefail
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel ios_app_store --distribution-output src/assets/distribution-channel.json
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel ios_app_store --distribution-output src/assets/distribution-channel.json --app-store-id "${APP_STORE_ID:-}"
           flet build ios-simulator --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
           find build/ios-simulator -type d -name '*.app' -prune -print | sort > "$RUNNER_TEMP/ios-apps.txt"
           test "$(wc -l < "$RUNNER_TEMP/ios-apps.txt" | tr -d ' ')" -eq 1

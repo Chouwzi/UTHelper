@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--distribution-output", type=Path)
     parser.add_argument("--android-package-id", default="")
     parser.add_argument("--store-product-id", default="")
+    parser.add_argument("--app-store-id", default="")
     args = parser.parse_args(argv)
     if args.require_configured and not args.sentry_dsn.strip():
         parser.error("a configured Sentry DSN is required")
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
                 channel_value,
                 android_package_id=args.android_package_id.strip() or None,
                 store_product_id=args.store_product_id.strip() or None,
+                app_store_id=args.app_store_id.strip() or None,
             )
     except (PublicConfigError, ReleaseMetadataError) as exc:
         parser.error(str(exc))

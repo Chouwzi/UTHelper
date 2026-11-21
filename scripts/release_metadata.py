@@ -29,6 +29,7 @@ _ANDROID_PACKAGE_ID = re.compile(
     r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$"
 )
 _MSSTORE_PRODUCT_ID = re.compile(r"^[A-Za-z0-9]{8,32}$")
+_APP_STORE_ID = re.compile(r"^[0-9]{1,20}$")
 
 
 class ReleaseMetadataError(ValueError):
@@ -102,6 +103,7 @@ def build_distribution_channel_payload(
     *,
     android_package_id: str | None = None,
     store_product_id: str | None = None,
+    app_store_id: str | None = None,
 ) -> dict[str, object]:
     normalized = str(channel).strip().lower()
     if normalized not in VALID_DISTRIBUTION_CHANNELS:
@@ -123,6 +125,13 @@ def build_distribution_channel_payload(
             raise ReleaseMetadataError(f"invalid store_product_id: {store_product_id!r}")
         resolved_product_id = candidate_pid
 
+    resolved_app_store_id: str | None = None
+    if app_store_id is not None and str(app_store_id).strip():
+        candidate_app_store_id = str(app_store_id).strip()
+        if not _APP_STORE_ID.fullmatch(candidate_app_store_id):
+            raise ReleaseMetadataError(f"invalid app_store_id: {app_store_id!r}")
+        resolved_app_store_id = candidate_app_store_id
+
     payload: dict[str, object] = {
         "schema_version": 1,
         "channel": normalized,
@@ -131,6 +140,8 @@ def build_distribution_channel_payload(
         payload["android_package_id"] = resolved_package_id
     if resolved_product_id is not None:
         payload["store_product_id"] = resolved_product_id
+    if resolved_app_store_id is not None:
+        payload["app_store_id"] = resolved_app_store_id
     return payload
 
 
@@ -140,12 +151,14 @@ def write_distribution_channel(
     *,
     android_package_id: str | None = None,
     store_product_id: str | None = None,
+    app_store_id: str | None = None,
 ) -> Path:
     """Atomically generate ``distribution-channel.json`` bundled by Flet/MSIX builds."""
     payload = build_distribution_channel_payload(
         channel,
         android_package_id=android_package_id,
         store_product_id=store_product_id,
+        app_store_id=app_store_id,
     )
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     output = Path(output_path)
@@ -178,6 +191,7 @@ def main() -> None:
     parser.add_argument("--channel-output", type=Path)
     parser.add_argument("--android-package-id")
     parser.add_argument("--store-product-id")
+    parser.add_argument("--app-store-id")
     parser.add_argument("--tag")
     parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
@@ -191,6 +205,7 @@ def main() -> None:
             args.channel,
             android_package_id=args.android_package_id,
             store_product_id=args.store_product_id,
+            app_store_id=args.app_store_id,
         )
         return
     if args.runtime_output is not None:

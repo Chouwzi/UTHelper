@@ -67,6 +67,10 @@ def prepare_app_bundle(app_bundle: Path) -> Path:
         raise IOSAppStorePreparationError("app Info.plist is invalid") from exc
     if not isinstance(info, dict):
         raise IOSAppStorePreparationError("app Info.plist root must be a dictionary")
+    if info.get("ITSAppUsesNonExemptEncryption") is not False:
+        raise IOSAppStorePreparationError(
+            "App Store builds must declare exempt encryption in Info.plist"
+        )
     transport_security = info.get("NSAppTransportSecurity", {})
     if not isinstance(transport_security, dict):
         raise IOSAppStorePreparationError("App Transport Security configuration is invalid")

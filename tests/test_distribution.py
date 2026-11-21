@@ -79,6 +79,30 @@ def test_msstore_profile_with_and_without_product_id():
     assert with_id.store_fallback_url == "https://apps.microsoft.com/detail/9NBLGGH4NNS1"
 
 
+def test_app_store_profile_builds_native_and_web_links_from_app_store_id():
+    profile = build_distribution_profile(
+        DistributionChannel.IOS_APP_STORE,
+        app_store_id="6750123456",
+    )
+
+    assert profile.app_store_id == "6750123456"
+    assert profile.store_url == "itms-apps://apps.apple.com/app/id6750123456"
+    assert profile.store_web_url == "https://apps.apple.com/app/id6750123456"
+    assert profile.store_fallback_url == profile.store_web_url
+
+
+@pytest.mark.parametrize("bad_app_store_id", ["abc123", "123/456", "-123", ""])
+def test_app_store_profile_rejects_invalid_store_id(bad_app_store_id):
+    profile = build_distribution_profile(
+        DistributionChannel.IOS_APP_STORE,
+        app_store_id=bad_app_store_id,
+    )
+
+    assert profile.app_store_id is None
+    assert profile.store_url is None
+    assert profile.store_web_url is None
+
+
 def test_resolve_reads_flet_assets_dir_config_for_all_channels(tmp_path):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir()
@@ -122,6 +146,16 @@ def test_resolve_reads_flet_assets_dir_config_for_all_channels(tmp_path):
     assert msstore.channel is DistributionChannel.MSSTORE
     assert msstore.supports_github_self_update is False
     assert msstore.store_url == "ms-windows-store://pdp/?ProductId=9WZDNCRFJ3TJ"
+
+    config_file.write_text(
+        json.dumps({"schema_version": 1, "channel": "ios_app_store", "app_store_id": "6750123456"}),
+        encoding="utf-8",
+    )
+    app_store = resolve_distribution_channel(
+        environ=env, is_windows=False, is_android=False, is_ios=True
+    )
+    assert app_store.store_url == "itms-apps://apps.apple.com/app/id6750123456"
+    assert app_store.store_web_url == "https://apps.apple.com/app/id6750123456"
 
     for channel_value, expected in (
         ("apk_lts", DistributionChannel.APK_LTS),
