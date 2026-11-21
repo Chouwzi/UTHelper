@@ -103,6 +103,8 @@ def test_f1_pyproject_dependencies_and_manifest_are_store_safe():
     deps = config["project"]["dependencies"]
     assert "pypdf>=7.1.1" in deps
     assert "pillow>=13.0.0" in deps
+    assert "xlrd>=2.0.2" in deps
+    assert not any(str(d).lower().startswith("olefile") for d in deps)
 
     win_opt = config["project"]["optional-dependencies"]["windows"]
     win_flet = config["tool"]["flet"]["windows"]["dependencies"]

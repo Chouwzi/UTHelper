@@ -33,14 +33,13 @@ except Exception:  # pragma: no cover
     _PILImage = None  # type: ignore[assignment]
 
 try:
-    import olefile as _olefile
-except Exception:  # pragma: no cover
-    _olefile = None  # type: ignore[assignment]
-
-try:
     import xlrd as _xlrd
+    from xlrd.compdoc import CompDoc as _CompDoc
+    from xlrd.compdoc import CompDocError as _CompDocError
 except Exception:  # pragma: no cover
     _xlrd = None  # type: ignore[assignment]
+    _CompDoc = None  # type: ignore[assignment]
+    _CompDocError = Exception  # type: ignore[assignment]
 
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _MAX_LEGACY_STREAM_BYTES = 32 * 1024 * 1024
@@ -4487,44 +4486,42 @@ def _extract_doc_clx_text(wd: bytes, tbl: bytes, flags: int) -> Optional[str]:
 
 def _convert_legacy_doc(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert legacy binary ``.doc`` documents via OLE2 ``WordDocument`` parsing."""
-    if _olefile is None:
+    if _xlrd is None or _CompDoc is None:
         return _build_notice_document(
             "docx",
             title,
-            "Thiếu thư viện olefile để đọc định dạng .doc cũ.",
+            "Thiếu thư viện xlrd để đọc định dạng .doc cũ.",
             dark_mode=dark_mode,
         )
     try:
-        with _olefile.OleFileIO(io.BytesIO(data)) as ole:
-            if not ole.exists("WordDocument"):
-                return _build_notice_document(
-                    "docx", title, "Tệp .doc không chứa luồng WordDocument.", dark_mode=dark_mode
-                )
-            wd = ole.openstream("WordDocument").read(_MAX_LEGACY_STREAM_BYTES)
-            if len(wd) < 32:
-                return _build_notice_document(
-                    "docx", title, "Tệp .doc bị hỏng hoặc rỗng.", dark_mode=dark_mode
-                )
-            w_ident, _n_fib = struct.unpack_from("<HH", wd, 0)
-            if w_ident != 0xA5EC:
-                return _build_notice_document(
-                    "docx", title, "Định dạng Word .doc không hợp lệ.", dark_mode=dark_mode
-                )
-            flags = struct.unpack_from("<H", wd, 10)[0]
-            if flags & 0x0100:
-                return _build_notice_document(
-                    "docx",
-                    title,
-                    "Tài liệu .doc được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp.",
-                    dark_mode=dark_mode,
-                )
-            table_stream_name = "1Table" if (flags & 0x0200) else "0Table"
-            tbl = (
-                ole.openstream(table_stream_name).read(_MAX_LEGACY_STREAM_BYTES)
-                if ole.exists(table_stream_name)
-                else b""
+        ole = _CompDoc(data, logfile=io.StringIO())
+        wd_raw = ole.get_named_stream("WordDocument")
+        if wd_raw is None:
+            return _build_notice_document(
+                "docx", title, "Tệp .doc không chứa luồng WordDocument.", dark_mode=dark_mode
             )
-    except Exception:
+        wd = wd_raw[:_MAX_LEGACY_STREAM_BYTES]
+        if len(wd) < 32:
+            return _build_notice_document(
+                "docx", title, "Tệp .doc bị hỏng hoặc rỗng.", dark_mode=dark_mode
+            )
+        w_ident, _n_fib = struct.unpack_from("<HH", wd, 0)
+        if w_ident != 0xA5EC:
+            return _build_notice_document(
+                "docx", title, "Định dạng Word .doc không hợp lệ.", dark_mode=dark_mode
+            )
+        flags = struct.unpack_from("<H", wd, 10)[0]
+        if flags & 0x0100:
+            return _build_notice_document(
+                "docx",
+                title,
+                "Tài liệu .doc được bảo vệ bằng mật khẩu nên chưa thể xem trực tiếp.",
+                dark_mode=dark_mode,
+            )
+        table_stream_name = "1Table" if (flags & 0x0200) else "0Table"
+        tbl_raw = ole.get_named_stream(table_stream_name)
+        tbl = tbl_raw[:_MAX_LEGACY_STREAM_BYTES] if tbl_raw is not None else b""
+    except (_CompDocError, OSError, ValueError, struct.error, IndexError, AssertionError, TypeError):
         return _build_notice_document(
             "docx", title, "Không thể đọc tệp Word .doc cũ.", dark_mode=dark_mode
         )
@@ -4635,24 +4632,25 @@ def _collect_ppt_binary_slides(stream: bytes) -> list[str]:
 
 def _convert_legacy_ppt(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert legacy binary ``.ppt`` presentations via OLE2 ``PowerPoint Document``."""
-    if _olefile is None:
+    if _xlrd is None or _CompDoc is None:
         return _build_notice_document(
             "pptx",
             title,
-            "Thiếu thư viện olefile để đọc định dạng .ppt cũ.",
+            "Thiếu thư viện xlrd để đọc định dạng .ppt cũ.",
             dark_mode=dark_mode,
         )
     try:
-        with _olefile.OleFileIO(io.BytesIO(data)) as ole:
-            if not ole.exists("PowerPoint Document"):
-                return _build_notice_document(
-                    "pptx",
-                    title,
-                    "Tệp .ppt không chứa luồng PowerPoint Document.",
-                    dark_mode=dark_mode,
-                )
-            ppt_stream = ole.openstream("PowerPoint Document").read(_MAX_LEGACY_STREAM_BYTES)
-    except Exception:
+        ole = _CompDoc(data, logfile=io.StringIO())
+        ppt_raw = ole.get_named_stream("PowerPoint Document")
+        if ppt_raw is None:
+            return _build_notice_document(
+                "pptx",
+                title,
+                "Tệp .ppt không chứa luồng PowerPoint Document.",
+                dark_mode=dark_mode,
+            )
+        ppt_stream = ppt_raw[:_MAX_LEGACY_STREAM_BYTES]
+    except (_CompDocError, OSError, ValueError, struct.error, IndexError, AssertionError, TypeError):
         return _build_notice_document(
             "pptx", title, "Không thể đọc tệp PowerPoint .ppt cũ.", dark_mode=dark_mode
         )

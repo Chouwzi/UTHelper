@@ -161,6 +161,115 @@ def _build_minimal_ole2_cfb(streams: dict[str, bytes]) -> bytes:
     return bytes(header) + b"".join(data_sectors)
 
 
+def _build_ministream_ole2_cfb(streams: dict[str, bytes]) -> bytes:
+    """Build a 512-byte-sector OLE2 CFB container placing all streams (< 4096 B) in the mini-stream."""
+    sector_size = 512
+    mini_sector_size = 64
+
+    def _pack_dir_entry(
+        name: str, obj_type: int, child_id: int, left: int, right: int, start_sec: int, size: int
+    ) -> bytes:
+        entry = bytearray(128)
+        if name:
+            encoded = (name + "\x00").encode("utf-16-le")
+            entry[: len(encoded)] = encoded
+            name_len = len(encoded)
+        else:
+            name_len = 0
+        struct.pack_into("<HBBIII", entry, 64, name_len, obj_type, 1, left, right, child_id)
+        struct.pack_into("<II", entry, 116, start_sec, size)
+        return bytes(entry)
+
+    mini_chunks: list[bytes] = []
+    ssat_entries: list[int] = []
+    stream_meta: list[tuple[str, int, int]] = []
+    for s_name, s_bytes in streams.items():
+        assert len(s_bytes) < 4096
+        if not s_bytes:
+            stream_meta.append((s_name, 0xFFFFFFFE, 0))
+            continue
+        mini_start = len(ssat_entries)
+        mini_count = (len(s_bytes) + mini_sector_size - 1) // mini_sector_size
+        padded = s_bytes.ljust(mini_count * mini_sector_size, b"\x00")
+        for idx in range(mini_count):
+            mini_chunks.append(padded[idx * mini_sector_size : (idx + 1) * mini_sector_size])
+            ssat_entries.append((mini_start + idx + 1) if idx + 1 < mini_count else 0xFFFFFFFE)
+        stream_meta.append((s_name, mini_start, len(s_bytes)))
+
+    data_sectors: list[bytes] = []
+    sscs_raw = b"".join(mini_chunks)
+    sscs_size = len(sscs_raw)
+    if sscs_size:
+        sscs_start_sec = len(data_sectors)
+        sscs_padded_len = ((sscs_size + sector_size - 1) // sector_size) * sector_size
+        sscs_padded = sscs_raw.ljust(sscs_padded_len, b"\x00")
+        for off in range(0, sscs_padded_len, sector_size):
+            data_sectors.append(sscs_padded[off : off + sector_size])
+        sscs_sec_count = sscs_padded_len // sector_size
+    else:
+        sscs_start_sec = 0xFFFFFFFE
+        sscs_sec_count = 0
+
+    if ssat_entries:
+        entries_per_sec = sector_size // 4
+        ssat_padded_count = ((len(ssat_entries) + entries_per_sec - 1) // entries_per_sec) * entries_per_sec
+        ssat_entries.extend([0xFFFFFFFF] * (ssat_padded_count - len(ssat_entries)))
+        ssat_start_sec = len(data_sectors)
+        ssat_sec_count = ssat_padded_count // entries_per_sec
+        ssat_blob = struct.pack(f"<{ssat_padded_count}I", *ssat_entries)
+        for off in range(0, len(ssat_blob), sector_size):
+            data_sectors.append(ssat_blob[off : off + sector_size])
+    else:
+        ssat_start_sec = 0xFFFFFFFE
+        ssat_sec_count = 0
+
+    dir_sec = len(data_sectors)
+    dir_entries = [
+        _pack_dir_entry(
+            "Root Entry",
+            5,
+            1 if stream_meta else 0xFFFFFFFF,
+            0xFFFFFFFF,
+            0xFFFFFFFF,
+            sscs_start_sec,
+            sscs_size,
+        )
+    ]
+    for idx, (s_name, s_start, s_size) in enumerate(stream_meta, start=1):
+        right = idx + 1 if idx < len(stream_meta) else 0xFFFFFFFF
+        dir_entries.append(_pack_dir_entry(s_name, 2, 0xFFFFFFFF, 0xFFFFFFFF, right, s_start, s_size))
+    dir_blob = b"".join(dir_entries)
+    dir_padded_len = ((len(dir_blob) + sector_size - 1) // sector_size) * sector_size
+    dir_blob = dir_blob.ljust(dir_padded_len, b"\x00")
+    dir_sec_count = len(dir_blob) // sector_size
+    for off in range(0, len(dir_blob), sector_size):
+        data_sectors.append(dir_blob[off : off + sector_size])
+
+    fat_sec = len(data_sectors)
+    fat = [0xFFFFFFFF] * (sector_size // 4)
+    for start, count in (
+        (sscs_start_sec, sscs_sec_count),
+        (ssat_start_sec, ssat_sec_count),
+        (dir_sec, dir_sec_count),
+    ):
+        for k in range(count):
+            fat[start + k] = (start + k + 1) if k + 1 < count else 0xFFFFFFFE
+    fat[fat_sec] = 0xFFFFFFFD
+    data_sectors.append(struct.pack(f"<{sector_size // 4}I", *fat))
+
+    header = bytearray(512)
+    header[:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    struct.pack_into("<HHHHHH", header, 24, 0x003E, 0x0003, 0xFFFE, 9, 6, 0)
+    struct.pack_into(
+        "<IIIIII", header, 44, 1, dir_sec, 0, 4096, ssat_start_sec, ssat_sec_count
+    )
+    struct.pack_into("<II", header, 68, 0xFFFFFFFE, 0)
+    difat = [0xFFFFFFFF] * 109
+    difat[0] = fat_sec
+    struct.pack_into("<109I", header, 76, *difat)
+    return bytes(header) + b"".join(data_sectors)
+
+
 def _tiny_png_bytes() -> bytes:
     import zlib
 
@@ -520,6 +629,87 @@ def test_legacy_ole2_doc_ppt_and_xls_converters(monkeypatch):
     xls_res = convert_document_bytes("diem.xls", xls_cfb, "xlsx")
     assert len(xls_res.sheets) == 1
     assert xls_res.sheets[0].rows == [["MSSV", "Diem"], ["22511", "9"]]
+
+
+def test_legacy_ole2_ministream_malformed_and_no_olefile(monkeypatch, capsys):
+    import sys
+
+    # Ensure olefile is never required or imported by document_converter
+    assert not hasattr(doc_mod, "_olefile")
+    monkeypatch.setitem(sys.modules, "olefile", None)
+
+    # 1. Mini-stream (< 4096 B) .doc OLE2 container
+    doc_text = "Noi dung mini stream doc\rDong thu hai."
+    doc_utf16 = doc_text.encode("utf-16-le")
+    wd = bytearray(1024)
+    struct.pack_into("<HH", wd, 0, 0xA5EC, 0x00C1)
+    struct.pack_into("<H", wd, 10, 0x0200)  # 1Table
+    struct.pack_into("<I", wd, 76, len(doc_text))
+    fc_text = 512
+    wd[fc_text : fc_text + len(doc_utf16)] = doc_utf16
+    struct.pack_into("<II", wd, 418, 0, 21)
+    plc_pcd = struct.pack("<II", 0, len(doc_text)) + struct.pack("<HIH", 0, fc_text, 0)
+    clx = struct.pack("<BI", 0x02, len(plc_pcd)) + plc_pcd
+
+    mini_doc_cfb = _build_ministream_ole2_cfb({"WordDocument": bytes(wd), "1Table": clx})
+    mini_doc_res = convert_document_bytes("mini.doc", mini_doc_cfb, "docx")
+    assert "Noi dung mini stream doc" in mini_doc_res.markdown_text
+    assert "Dong thu hai." in mini_doc_res.markdown_text
+
+    # 2. Mini-stream (< 4096 B) .ppt OLE2 container
+    ppt_payload = "Slide mini stream".encode("utf-16-le")
+    txt_atom = struct.pack("<HHI", 0x0000, 0x0FA0, len(ppt_payload)) + ppt_payload
+    slide_container = struct.pack("<HHI", 0x000F, 0x03EE, len(txt_atom)) + txt_atom
+    mini_ppt_cfb = _build_ministream_ole2_cfb({"PowerPoint Document": slide_container})
+    mini_ppt_res = convert_document_bytes("mini.ppt", mini_ppt_cfb, "pptx")
+    assert len(mini_ppt_res.slides) == 1
+    assert "Slide mini stream" in mini_ppt_res.slides[0][1]
+
+    # 3. Missing streams and malformed CFB inputs fail gracefully without stdout spam
+    missing_doc = convert_document_bytes(
+        "empty.doc", _build_minimal_ole2_cfb({"Other": b"abc"}), "docx"
+    )
+    assert "WordDocument" in missing_doc.markdown_text
+
+    missing_ppt = convert_document_bytes(
+        "empty.ppt", _build_minimal_ole2_cfb({"Other": b"abc"}), "pptx"
+    )
+    assert "PowerPoint Document" in missing_ppt.markdown_text
+
+    # Truncated CFB + corrupted sector size / non-multiple-of-512 file size (CompDoc logs warnings if stdout used)
+    truncated_header = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64
+    corrupt_cfb = bytearray(mini_doc_cfb[:-13])
+    struct.pack_into("<H", corrupt_cfb, 30, 99)  # preposterous sector size triggers CompDoc logfile warning
+    for bad_name, bad_bytes, kind in (
+        ("trunc.doc", truncated_header, "docx"),
+        ("corrupt.doc", bytes(corrupt_cfb), "docx"),
+        ("trunc.ppt", truncated_header, "pptx"),
+        ("corrupt.ppt", bytes(corrupt_cfb), "pptx"),
+    ):
+        res = convert_document_bytes(bad_name, bad_bytes, kind)
+        assert res.kind == kind
+        assert res.markdown_text
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    # 4. Enforce _MAX_LEGACY_STREAM_BYTES cap and missing-xlrd graceful fallback
+    with monkeypatch.context() as mp:
+        mp.setattr(doc_mod, "_MAX_LEGACY_STREAM_BYTES", 16)
+        capped_doc = convert_document_bytes("capped.doc", mini_doc_cfb, "docx")
+        assert capped_doc.kind == "docx"
+        assert "Noi dung mini stream doc" not in capped_doc.markdown_text
+
+        capped_ppt = convert_document_bytes("capped.ppt", mini_ppt_cfb, "pptx")
+        assert capped_ppt.kind == "pptx"
+        assert capped_ppt.slides == []
+
+    with monkeypatch.context() as mp:
+        mp.setattr(doc_mod, "_xlrd", None)
+        no_xlrd_doc = convert_document_bytes("missing_xlrd.doc", mini_doc_cfb, "docx")
+        no_xlrd_ppt = convert_document_bytes("missing_xlrd.ppt", mini_ppt_cfb, "pptx")
+        assert "xlrd" in no_xlrd_doc.markdown_text.lower()
+        assert "xlrd" in no_xlrd_ppt.markdown_text.lower()
 
 
 def _png_bytes(width: int = 12, height: int = 8) -> bytes:

@@ -2472,3 +2472,12 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - Added `exclude_semantics=True` to `CourseDetailPane._segment_semantics` pills to avoid duplicate accessible labels.
 - **Verification**:
   - Added regression tests in `tests/test_embedded_webview_window_binding.py`, `tests/test_courses_app_integration.py`, `tests/test_office_viewer_service.py`, `tests/test_courses_activities_and_webview.py`, and `tests/test_courses_reader_and_preview_server.py`.
+
+## M3 Part B Iteration 3: Packaging `compileall -b` Fix (`olefile` -> `xlrd.compdoc.CompDoc`) (2026-11-22)
+
+- **Root Cause & Dependency Removal (`pyproject.toml`, `src/core/courses/document_converter.py`)**:
+  - Removed `"olefile>=0.47"` from `[project.dependencies]` in `pyproject.toml` (its unimported Python 2 legacy module `olefile/olefile2.py` failed `python -m compileall -b` under Python 3.14 with `SyntaxError: invalid hexadecimal literal` at `0xFFFFFFFAL`, aborting `serious_python` packaging across CH Play, APK LTS, MS Store MSIX, and iOS).
+  - Replaced `_olefile.OleFileIO` in `_convert_legacy_doc()` and `_convert_legacy_ppt()` with `xlrd.compdoc.CompDoc(data, logfile=io.StringIO())`, reading each stream (`"WordDocument"`, `"1Table"`/`"0Table"`, `"PowerPoint Document"`) at most once via `get_named_stream(...)`, enforcing `[:_MAX_LEGACY_STREAM_BYTES]`, handling missing/`None` streams and `(_CompDocError, OSError, ValueError, struct.error, IndexError, AssertionError, TypeError)` cleanly, and retaining `_xlrd` optional-import fallback.
+- **Verification**:
+  - Added regular-FAT / mini-stream (`< 4096 B`) CFB, malformed CFB, `capsys` stdout-silence, `_MAX_LEGACY_STREAM_BYTES`, and no-`olefile` regressions in `tests/test_courses_pdf_and_legacy_docs.py` plus dependency guard assertions in `tests/test_courses_m1_webview_packaging.py`.
+  - Verified with full `pytest` (`2891 passed, 26 skipped`), `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and isolated Python 3.14 `compileall -b -q` across `[project.dependencies]`.
