@@ -776,7 +776,7 @@ class ScheduleWeekView(ft.Container):
                         color=C.TEXT_SECONDARY,
                         text_align=ft.TextAlign.CENTER,
                     ),
-            alignment=ft.Alignment(0, 0),
+                    alignment=ft.Alignment(0, 0),
                     padding=ft.Padding.symmetric(vertical=28),
                 )
             ]
