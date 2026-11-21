@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import html
 import os
 import re
 import secrets
@@ -35,6 +36,16 @@ _VIEWER_APP_CSP = (
     "object-src 'none'; "
     "base-uri 'none'; "
     "form-action 'none'"
+)
+_SESSION_HTML_CSP = (
+    "default-src 'self' data: blob:; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob: https:; "
+    "font-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
 )
 _VIEWER_MIME_TYPES: dict[str, str] = {
     ".html": "text/html; charset=utf-8",
@@ -120,12 +131,27 @@ def _rewrite_session_html(
 
     rewritten = _ATTR_URL_RE.sub(_replace_attr, raw_html)
     base_href = f"http://127.0.0.1:{port}{bridge_prefix}{base_dir}"
-    base_tag = f'<base href="{base_href}">'
+    base_tag = f'<base href="{html.escape(base_href, quote=True)}">'
     head_match = re.search(r"<head\b[^>]*>", rewritten, flags=re.IGNORECASE)
     if head_match is not None and "<base " not in rewritten[: head_match.end() + 200].lower():
         pos = head_match.end()
         rewritten = rewritten[:pos] + base_tag + rewritten[pos:]
     return rewritten
+
+
+def _is_same_moodle_origin_url(candidate: str, origin: str) -> bool:
+    """Return True only when ``candidate`` matches ``origin``'s scheme and netloc."""
+    try:
+        cand_parts = urlsplit(str(candidate or "").strip())
+        orig_parts = urlsplit(str(origin or "").strip())
+    except ValueError:
+        return False
+    if not cand_parts.scheme or not cand_parts.netloc or not orig_parts.scheme or not orig_parts.netloc:
+        return False
+    return (
+        cand_parts.scheme.lower() == orig_parts.scheme.lower()
+        and cand_parts.netloc.lower() == orig_parts.netloc.lower()
+    )
 
 
 def _requires_strict_csp(content_type: str) -> bool:
@@ -187,8 +213,16 @@ class _PreviewThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, server_address: tuple[str, int], handler_cls: type[BaseHTTPRequestHandler], owner: "LocalPreviewServer") -> None:
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_cls: type[BaseHTTPRequestHandler],
+        owner: "LocalPreviewServer",
+        *,
+        session_only: bool = False,
+    ) -> None:
         self.owner = owner
+        self.session_only = session_only
         super().__init__(server_address, handler_cls)
 
     def handle_error(self, request: object, client_address: object) -> None:
@@ -210,8 +244,14 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self) -> None:
+        if getattr(self.server, "session_only", False):
+            if self.path.startswith("/session/"):
+                self._serve_session(method="GET", send_body=True)
+            else:
+                self._send_empty_status(HTTPStatus.NOT_FOUND)
+            return
         if self.path.startswith("/session/"):
-            self._serve_session(method="GET", send_body=True)
+            self._send_empty_status(HTTPStatus.NOT_FOUND)
             return
         if self.path.startswith("/viewer/"):
             self._serve_viewer(send_body=True)
@@ -219,8 +259,14 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
         self._serve(send_body=True)
 
     def do_HEAD(self) -> None:
+        if getattr(self.server, "session_only", False):
+            if self.path.startswith("/session/"):
+                self._serve_session(method="HEAD", send_body=False)
+            else:
+                self._send_empty_status(HTTPStatus.NOT_FOUND)
+            return
         if self.path.startswith("/session/"):
-            self._serve_session(method="HEAD", send_body=False)
+            self._send_empty_status(HTTPStatus.NOT_FOUND)
             return
         if self.path.startswith("/viewer/"):
             self._serve_viewer(send_body=False)
@@ -228,7 +274,7 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
         self._serve(send_body=False)
 
     def do_POST(self) -> None:
-        if not self.path.startswith("/session/"):
+        if not getattr(self.server, "session_only", False) or not self.path.startswith("/session/"):
             self._send_empty_status(HTTPStatus.METHOD_NOT_ALLOWED)
             return
         self._serve_session(method="POST", send_body=True)
@@ -269,6 +315,9 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Location", redirect_url)
                 self.send_header("Content-Length", "0")
                 self.send_header("Cache-Control", "no-store, private")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.end_headers()
             except _DISCONNECT_ERRORS:
                 return
@@ -277,13 +326,19 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
             self._send_empty_status(status_code)
             return
         try:
+            final_ct = resp_ct or "application/octet-stream"
+            mime = final_ct.split(";", 1)[0].strip().lower()
             self.send_response(status_code)
-            self.send_header("Content-Type", resp_ct or "application/octet-stream")
+            self.send_header("Content-Type", final_ct)
             self.send_header("Content-Length", str(len(resp_body)))
             self.send_header("Cache-Control", "no-store, private")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
-            self.send_header("Cross-Origin-Embedder-Policy", "credentialless")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            if mime in ("text/html", "application/xhtml+xml"):
+                self.send_header("Content-Security-Policy", _SESSION_HTML_CSP)
+            elif mime == "image/svg+xml":
+                self.send_header("Content-Security-Policy", _HTML_CSP)
             self.end_headers()
             if send_body and resp_body:
                 self.wfile.write(resp_body)
@@ -419,6 +474,9 @@ class LocalPreviewServer:
         self._server: Optional[_PreviewThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._port: int = 0
+        self._session_server: Optional[_PreviewThreadingHTTPServer] = None
+        self._session_thread: Optional[threading.Thread] = None
+        self._session_port: int = 0
         self._items: OrderedDict[str, _PreviewEntry] = OrderedDict()
         self._total_bytes: int = 0
         self._bridge_token: str = secrets.token_urlsafe(24)
@@ -522,7 +580,7 @@ class LocalPreviewServer:
             query = jp.query
 
         with self._lock:
-            port = self._ensure_started_locked()
+            port = self._ensure_session_started_locked()
             token = self._bridge_token
         suffix = f"?{query}" if query else ""
         return f"http://127.0.0.1:{port}/session/{token}/{source}/{rel_path}{suffix}"
@@ -541,7 +599,7 @@ class LocalPreviewServer:
         with self._lock:
             expected_token = self._bridge_token
             client = self._session_providers.get(source)
-            port = self._port
+            port = self._session_port or self._port
 
         if not secrets.compare_digest(
             token.encode("utf-8"), expected_token.encode("utf-8")
@@ -572,7 +630,7 @@ class LocalPreviewServer:
             return HTTPStatus.BAD_GATEWAY, "text/plain", b"", ""
 
         if 300 <= status_code < 400 and final_url:
-            if final_url.lower().startswith(origin.lower()):
+            if _is_same_moodle_origin_url(final_url, origin):
                 proxied = self.build_session_bridge_url(source, final_url)
                 if proxied:
                     return HTTPStatus.FOUND, "text/plain", b"", proxied
@@ -634,6 +692,71 @@ class LocalPreviewServer:
         self._thread = thread
         self._port = port
         return port
+
+    def _ensure_session_started_locked(self) -> int:
+        if (
+            self._session_server is not None
+            and self._session_thread is not None
+            and self._session_thread.is_alive()
+            and self._session_port > 0
+        ):
+            return self._session_port
+
+        if self._session_server is not None:
+            dead_server = self._session_server
+            self._session_server = None
+            self._session_thread = None
+            self._session_port = 0
+            try:
+                dead_server.server_close()
+            except Exception:
+                pass
+
+        server = _PreviewThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _PreviewRequestHandler,
+            self,
+            session_only=True,
+        )
+        port = int(server.server_address[1])
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="UTHelper-LocalSessionBridgeServer",
+            daemon=True,
+        )
+        thread.start()
+        self._session_server = server
+        self._session_thread = thread
+        self._session_port = port
+        return port
+
+    def is_active_loopback_origin(self, url: str) -> bool:
+        """Return True when ``url`` targets an active loopback origin of this server."""
+        if not isinstance(url, str) or not url:
+            return False
+        try:
+            parsed = urlsplit(url)
+            url_port = parsed.port
+        except ValueError:
+            return False
+        if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost") or url_port is None:
+            return False
+        with self._lock:
+            main_live = (
+                self._server is not None
+                and self._thread is not None
+                and self._thread.is_alive()
+                and self._port > 0
+                and url_port == self._port
+            )
+            session_live = (
+                self._session_server is not None
+                and self._session_thread is not None
+                and self._session_thread.is_alive()
+                and self._session_port > 0
+                and url_port == self._session_port
+            )
+        return main_live or session_live
 
     def register_bytes(self, body: bytes, content_type: str) -> str:
         """Store raw bytes with a fresh token and return the loopback preview URL."""
@@ -730,25 +853,31 @@ class LocalPreviewServer:
             return HTTPStatus.OK, entry
 
     def stop(self) -> None:
-        """Idempotently shut down the loopback server and clear cached preview items."""
+        """Idempotently shut down the loopback servers and clear cached preview items."""
         with self._lock:
             server = self._server
             thread = self._thread
+            session_server = self._session_server
+            session_thread = self._session_thread
             self._server = None
             self._thread = None
             self._port = 0
+            self._session_server = None
+            self._session_thread = None
+            self._session_port = 0
             self._items.clear()
             self._total_bytes = 0
 
-        if server is not None:
-            if thread is not None and thread.is_alive():
+        for srv, thr in ((server, thread), (session_server, session_thread)):
+            if srv is not None:
+                if thr is not None and thr.is_alive():
+                    try:
+                        srv.shutdown()
+                    except Exception:
+                        pass
                 try:
-                    server.shutdown()
+                    srv.server_close()
                 except Exception:
                     pass
-            try:
-                server.server_close()
-            except Exception:
-                pass
-        if thread is not None:
-            thread.join(timeout=2.0)
+            if thr is not None:
+                thr.join(timeout=2.0)

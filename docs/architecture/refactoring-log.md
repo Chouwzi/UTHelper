@@ -79,6 +79,11 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 
 | 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
 | 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
+| 2026-11-21 | `feature/store-distribution-chplay-msstore` | Store M1 Security, Privacy & Autostart UI Hardening | Loại bỏ lưu plaintext secret trên Android trong `src/config.py` qua `SecretStoreBackend` / `AndroidSecretBackend` (`AppSecretVault` `AndroidKeyStore`) và startup migration an toàn trong `AppController._startup_android_sequence`; vệ sinh log lỗi `TelegramNotifier` / `DiscordNotifier` và bắt buộc `https://` cho webhook; pin redirect & `https://` cùng giới hạn payload 8 MiB trong `PortalClient`; siết chặt `windows_update._launch_elevated_handoff` (bỏ fallback `%TEMP%`, kiểm tra symlink/reparse point, tạo thư mục với `SE_DACL_PROTECTED`, ghi file `O_EXCL`, `System32` cwd); đưa `_autostart_status` ra ngoài `_sw_start_minimized_container` để hiển thị trạng thái StartupTask khi tắt; cập nhật `docs/PRIVACY.md`. | Đạt 270/270 owned + boundary tests (373/373 gồm packaging/UI); `ruff check src tests` pass |
+| 2026-11-21 | `feature/store-distribution-chplay-msstore` | Store M1 Integration Build & Release Gate Verification | Cập nhật 3 path `variants/apk_lts/` trong `tests/e2e_store_distribution/test_tier1_auto_update_lts.py` và `test_tier4_real_world_scenarios.py`; bổ sung loại bỏ `androidx.work.impl.foreground.SystemForegroundService` trong `scripts/prepare_android_flutter_project.py` + dọn `PYTHONHOME`/`UV_INTERNAL__PYTHONHOME` trong `scripts/build_android.ps1`; cập nhật `scripts/verify_android_release.py` đọc `assets/app.zip` (`base/assets/app.zip` trong `.aab` thực tế); build & kiểm chứng thật CH Play `UTHelper.aab` (110.7 MB, 0 `ApkUpdate*`/`UthUpdate*` trong dex, không còn `ForegroundService`, `extractNativeLibs="false"`, `BundleConfig.pb` 16 KB, `verify_android_release.py` pass 12/12 checks) và MS Store `-SignMode test` `.msix` (65.09 MB, `verify_msix_release.ps1` pass 10/10 checks không gồm WACK admin). | Full suite đạt **2188 passed, 25 skipped**; `ruff check src tests scripts extensions/flet_uth_background_sync/tests extensions/flet_uth_background_sync/src` pass |
+| 2026-11-21 | `codex/84-embedded-quiz` | Embedded Quiz M2 Integration, WebView Hardening & Bootstrap Fix | Merge `origin/develop` (`9788310`, `--no-ff`), giải quyết sạch 3 conflict (`.github/workflows/build-android.yml`, `.github/workflows/ci.yml`, `refactoring-log.md`); chặn subframe không phải `https://`/`about:blank` trên Android bằng `regexToCancelSubFramesLoading`, tắt DevTools (`isInspectable: false`), sửa rò rỉ main-frame `onCreateWindow -> false` trên Windows/iOS qua offstage cancelling sink + kiểm tra `onLoadStart`, đồng bộ origin parity `TrustedMoodleUri`, retry xóa thư mục WebView2 + `UthQuizSessionCleaner` dọn profile/cookies khi đổi tài khoản/logout, sửa treo `uv` trampoline (`PYTHONHOME`/`UV_INTERNAL__PYTHONHOME`) + timeout/low-disk/opt-out/`sys.path` rollback trong `quiz_client_bootstrap.py` & `src/main.py`, polish UX SEB/closed và guard `build-msstore.yml`/`verify_windows_bundle.py`. | **2340 passed, 25 skipped**, Ruff pass, Flutter (`flet_uth_quiz`) 23/23 pass, `verify_windows_bundle.py` pass |
+| 2026-11-21 | `codex/84-embedded-quiz` | Embedded Quiz M2 Iteration 2 Hardening | Loại bỏ các file sinh bởi Flutter (`.flutter-plugins-dependencies`, `pubspec.lock`, `.flutter-plugins`, `.packages`, plugin registrant) khỏi `_client_fingerprint()` để `py src/main.py` luôn dùng lại bản Windows client đã cache; phát hiện SEB/closed/exhausted ngay trên phản hồi POST `startattempt.php` trong `QuizPreparedEntry.enter()` và đưa `requires_safe_exam_browser` vào nhánh unavailable của `QuizPlayerView`; dọn persisted quiz sessions trong `AppController._complete_login_success` khi đổi tài khoản và player đang ẩn; siết `quizSubframeCancelRegex` (`(?![\s\S])`, `[^\x00-\x1f\x7f\\]*`, chặn `\x80-\x9f` ở authority, đối chiếu Java 21 + Dart) và thêm monotonic counter `_profileFallbackCounter` + kiểm tra live `activePaths` trong `sweepQuizProfileDirectories`. | **2348 passed, 25 skipped**, Ruff pass, Flutter (`flet_uth_quiz`) 25/25 pass, `verify_windows_bundle.py --expected-version 2.5.1` pass |
+| 2026-11-21 | `codex/84-embedded-quiz` | Embedded Quiz M2 Iteration 3 MSVC STL1011 Fix | Điều tra lỗi biên dịch Windows `STL1011` (`error C2338` trên `<experimental/coroutine>`) ở `flutter_inappwebview_windows` (`flutter_inappwebview: 6.1.5`, bản stable mới nhất; bản `6.2.0-beta.3`/`0.7.0-beta.3` vẫn dùng `cxx_std_17` và WIL `1.0.250325.1` có `#include <experimental/coroutine>` trong `wil/cppwinrt_helpers.h`). Bổ sung an toàn `/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` vào biến môi trường `CL` (append không ghi đè cờ sẵn có) trong `.github/workflows/build-msstore.yml`, `.github/workflows/release.yml`, `.github/workflows/package-benchmark.yml`, `scripts/build_windows_release.ps1` và `src/platform_utils/quiz_client_bootstrap.py` (`_with_msvc_experimental_coroutine_cl_flag`); cập nhật hướng dẫn `docs/guides/windows-packaging.md`, `docs/guides/store-distribution-submission.md` và thêm regression tests trong `tests/test_quiz_packaging.py`, `tests/test_release_hardening.py`. | **2355 passed, 25 skipped**, Ruff pass, Flutter (`flet_uth_quiz`) analyze + 25/25 pass, `ensure_windows_quiz_client` + `prepare_windows_bundle.py` + `verify_windows_bundle.py --expected-version 2.5.1` pass |
 
 
 ---
@@ -2043,6 +2048,144 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   Windows Flutter build stopped because this machine does not currently allow
   the symlinks Flutter requires for plugin builds (Developer Mode is disabled).
 
+## Store distribution M4 — Microsoft Store MSIX, verification, CI and docs (2026-11-20)
+
+- **Scope** (`feature/store-distribution-chplay-msstore`): Features #13/#14 — Microsoft Store (`msstore`) `.msix`
+  packaging, verification, CI isolation, and Store submission/privacy documentation. Decision recorded in
+  [ADR 0004](../adr/0004-multi-channel-store-and-lts-distribution.md); ADR 0003 now cross-references it and keeps
+  the exact 7-asset GitHub LTS release contract (`.aab`/`.msix` are never mixed into it).
+- **Packaging**: `scripts/generate_msix_assets.py` (Pillow, deterministic RGBA PNG tiles 44x44 / 50x50 / 150x150 /
+  310x150 from `src/assets/icon.png`, `--verify-only` mode); `scripts/package_msix.ps1` now accepts `IdentityName`,
+  `Publisher`, `StoreProductId`, `Channel`, `SignMode` (`none` for Partner Center, `test` for self-signed sideload),
+  optional `Version` (derived from `pyproject.toml` as `X.Y.Z.0`), validates inputs, stages `distribution-channel.json`
+  into the unique per-run MSIX stage (`app/assets` and `data/flutter_assets/assets`) so `src/assets/` is never mutated,
+  and always removes stage/verify directories in `finally`. Manifest keeps argument-free `windows.startupTask`
+  (`UTHelperAutostart.exe`, `UTHelperStartup`), `runFullTrust`, `internetClient`, and default AppData virtualization.
+- **Verification**: `scripts/verify_msix_release.ps1` (PowerShell 5.1 compatible) unpacks via `makeappx`, checks
+  Identity/Publisher/4-part Version/x64, capabilities, forbidden `uap10:Parameters`/`unvirtualizedResources`/disabled
+  virtualization, PE headers, PNG IHDR dimensions, `distribution-channel.json` (`channel`, allowed keys, product id),
+  optionally `-RunWack`, and emits SHA-bound JSON evidence.
+- **CI**: new `.github/workflows/build-msstore.yml` (workflow_dispatch + path-filtered PR) builds the Flet Windows
+  bundle with the reviewed diagnostics template, packages and verifies the unsigned Partner Center MSIX; `release.yml`
+  untouched.
+- **Docs**: `PRIVACY.md` (Data Safety summary, per-channel behavior, Android storage `FLET_APP_STORAGE_DATA`, data
+  deletion), `TERMS.md` (channel-neutral wording), `guides/windows-packaging.md`, new
+  `guides/store-distribution-submission.md` (CH Play, Microsoft Store/WACK/`runFullTrust` justification, LTS, deferred
+  Apple App Store roadmap), `docs/README.md` index.
+- **Tests**: new `tests/test_msstore_packaging.py` (assets, PS 5.1 AST, real `makeappx` pack/verify, 10 negative
+  verifier cases, forged ZIP, invalid params, docs alignment); `tests/test_release_hardening.py` now allows the new
+  Store workflow in the `flet build` inventory and asserts its isolation; `tests/test_release_inventory.py` unchanged.
+- **Verification**: `pytest tests/test_msstore_packaging.py tests/test_release_hardening.py
+  tests/test_release_inventory.py tests/test_architecture_boundaries.py` → 96 passed; MSIX E2E (Tier 1–4 f12/p18/s06)
+  pass; `ruff check` on M4 Python files clean; PowerShell AST parse of both scripts clean; workflow YAML parses.
+  Live Partner Center upload and WACK execution were not run in this environment.
+
+## Store distribution M5 — final verification, E2E suite and push (2026-11-20)
+
+- **Scope** (`feature/store-distribution-chplay-msstore`): integration of M0–M4 plus the 256-test opaque-box E2E suite
+  (`tests/e2e_store_distribution/`, Tiers 1–4); no further `src/` behavior changes beyond one edge-case fix.
+- **Commits**: `cf7f2a6` (M0 worktree + hotfix/2.5.1 sync), `4a02dce` (M1 channel + store suppression/UI), `8dd7583`
+  (M2 PC/Mobile LTS update fixes), `9075dcf` (M4 MSIX), `71ee99f` (M3 CH Play AAB), `67280d7` (M5 fix), `820086b`
+  (M5 E2E suite), plus this log commit.
+- **Fix in `src/`**: `AndroidPackageDownloader.has_pending_download()` raised `RuntimeError("Android update release
+  version is unavailable")` when queried before any release candidate exists; it now returns `False` (nothing to
+  resume) and never touches the native bridge. `download()` still fails closed without a version. Covered by
+  `tests/test_android_updates.py::test_pending_download_probe_is_false_without_selected_release`.
+- **E2E harness corrections** (no assertion weakened): 10 `f12` tests called `Get-Command -LiteralPath`, which Windows
+  PowerShell 5.1 resolves to `ForEach-Object` parameters instead of the script's — replaced by the positional path
+  (Tier 1 and Tier 2 helpers). `test_t4_s05` simulated a 2.5.2 MSI while the PowerShell shim reported 2.6.0 so the
+  verifier correctly rejected an "MSI identity mismatch"; the test now sets the shim version to the release under test
+  (the cold-timeout cache preservation and UAC 1223 recovery then pass against unmodified production code).
+  `test_t2_f06_null_update_candidate...` required a non-empty version with no candidate; the provider contract is
+  `str | None` (a fabricated version would corrupt the native versionCode check), so it now asserts `None | str`
+  and additionally asserts `has_pending_download(...) is False`.
+- **Verification**: `python -m pytest tests -q` → **2091 passed, 25 skipped, 0 failed** (includes all 256 E2E tests;
+  skips are pre-existing platform/tool gates); `ruff check src tests scripts` → clean;
+  `extensions/flet_uth_background_sync/tests/test_package_contract.py` → 13 passed (with the extension `src` on
+  `PYTHONPATH`; the package is not pip-installed in this environment); PowerShell 5.1 AST parse of
+  `build_android.ps1`, `package_msix.ps1`, `verify_msix_release.ps1` → 0 errors; live smoke:
+  `generate_msix_assets.py` generate + `--verify-only` (4 PNGs), `verify_android_release.py --help`,
+  `verify_msix_release.ps1` exits 1 on invalid/missing MSIX.
+- **Invariants**: no `src/assets/distribution-channel.json` in tree or index (gitignored build artifact); `core`
+  has no `gui` imports; `gui` has no `ws_functions` references; `models.py` and `.github/workflows/release.yml`
+  unchanged versus `develop` (7-asset LTS contract intact); `urllib` HTTP layer preserved.
+- **Not verifiable here**: GitHub Actions `build-android.yml` / `build-msstore.yml` runs, Play Console and Partner
+  Center submission, WACK execution, and real-device Android install.
+- **Remote**: pushed to `origin/feature/store-distribution-chplay-msstore` (see PR to `develop` per gitflow).
+
+## Store distribution integration regression fixes (2026-11-20)
+
+- Merge `origin/develop` (`a83cd29`) into the store distribution worktree and
+  resolve `tests/test_config.py` by retaining both the storage-path tests and
+  the class-schedule settings migration tests.
+- Register `ClassScheduleAlarmReceiver` in the CH Play manifest. Require it in
+  the Android release verifier, update synthetic APK/AAB fixtures, and add a
+  regression that rejects an AAB missing the class-schedule receiver.
+- Use controlled monotonic clocks in Android observer, tray-close, and
+  diagnostics retry tests to preserve timeout assertions across Windows Python
+  clock resolutions and floating-point differences.
+- Give Tier 3 and Tier 4 MSIX tests unique directories under the workspace's
+  `build` directory, preserving the packager's workspace constraint while
+  allowing concurrent test runs. Drain cancelled FakePage tasks before closing
+  the harness event loop.
+- Verification on Windows: full `tests` plus extension package-contract suite
+  passed on Python 3.12, 3.13, and 3.14, each with **2143 passed, 36 skipped**.
+  Each run includes **256 passing E2E tests**. Six Sentry SDK deprecation
+  warnings remain in each run. Ruff (`src tests scripts` and extension tests),
+  Python syntax checks, and PowerShell script AST checks passed.
+- Signed Android AAB builds, Play Console/Partner Center submission, WACK, and
+  device installation were not performed in this verification.
+
+## CI test dependency for MSIX assets (2026-11-21)
+
+- PR #100 failed during test collection because the Ubuntu test matrix did
+  not install Pillow, which the MSIX asset tests import as `PIL`. Add
+  `pillow>=12.3.0` to the test job, matching the Windows packaging minimum.
+- On Windows, test collection from `src/` and all 22 MSIX packaging tests
+  passed on Python 3.12, 3.13, and 3.14 with the CI dependencies.
+- The next Ubuntu run reached the Windows install E2E scenario and failed
+  because the registry module is unavailable on Ubuntu. Treat a missing
+  `winreg` as no install-channel marker and retain the existing bootstrapper
+  fallback. The failing E2E and a new fallback regression passed locally on
+  Python 3.12, 3.13, and 3.14 with `winreg` blocked.
+
+## MSIX runtime test host independence (2026-11-21)
+
+- PR #100's next Ubuntu run failed in the packaged MSIX autostart test because
+  it mocked package identity but left the service factory using the Linux host
+  platform. Pass `platform_name="win32"` to request the Windows backend.
+- Parameterize the test over simulated Linux and Windows hosts. The packaged
+  backend and notifier assertions remain active on both hosts.
+- Validation from `src/`: the two MSIX host cases plus 16 Windows autostart
+  tests passed on Python 3.12, 3.13, and 3.14 (18 passed per version). Ruff and
+  the working-tree diff check passed. Ubuntu CI requires the new commit.
+
+## Windows shim fixture platform boundary (2026-11-21)
+
+- PR #100's Ubuntu jobs reached a Store update-suppression test that requested
+  compiled Windows executable shims even though it expected zero process calls.
+  Observe `subprocess.Popen` directly and fail if a process is launched, so the
+  HTTP/coordinator/process suppression assertions execute on every host.
+- Guard the shared `windows_shim_env` fixture before constructing native shims
+  on non-Windows hosts. Missing compiler errors on Windows still fail normally.
+- Validation: the Store suppression test passed on Python 3.12, 3.13, and 3.14
+  with the shim compiler deliberately disabled. A simulated Linux fixture call
+  skipped before compiler lookup. All 97 Tier 2 tests passed on Windows, with
+  Ruff and the working-tree diff check clean. Ubuntu CI requires the new commit.
+
+## Store E2E subprocess keyring isolation (2026-11-21)
+
+- PR #100's Ubuntu matrix failed when the crash-reporting opt-out test saved
+  settings in a subprocess without an available keyring backend.
+- In `tests/e2e_store_distribution/harness.py`, configure the built-in no-op
+  keyring only for isolated subprocesses and give each test a private
+  `TMPDIR` for the Linux data path. The opt-out test still checks that saving
+  consent clears the pending spool and blocks new reports.
+- Reproduced the original failure with the failing keyring backend on Windows.
+  With the same parent backend after the fix, all 257 Store E2E tests passed
+  on each of Python 3.12, 3.13, and 3.14. A subprocess smoke check confirmed
+  the private Linux data path. Ruff passed. Ubuntu CI requires the new commit.
+
 ## Settings custom color picker review fixes (2026-11-18)
 
 - Keep the dialog on Flet's `show_dialog()` / `pop_dialog()` lifecycle and only
@@ -2125,3 +2268,192 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   exhaustion; unknown states proceed to the authoritative entry check. Three
   positive regressions failed on the previous commit; all ten cases now pass,
   including a service-to-view check preserving module/quiz identifiers.
+
+## Preserve class reminders after a transient timetable failure (2026-11-21)
+
+- A failed request for tomorrow's timetable was logged, then reconciliation
+  replaced the entire persisted alarm set with today's partial results. Return
+  without applying a replacement when the Portal request fails; authentication
+  failures still clear reminders for the previous account, and a successful
+  empty timetable still clears the schedule.
+- Added Windows and Android-bridge regression cases for transient failure and
+  strengthened the Android positive case to include both today and tomorrow.
+- Validation on Python 3.14.3: full suite `2150 passed, 25 skipped`; focused
+  notifier/schedule/store suite `192 passed`; Ruff 0.17.6 passed. Android
+  packaged-artifact and device validation remain pending local SDK licensing
+  and device/emulator availability.
+
+## Store M1 security, privacy, and autostart UI hardening (2026-11-21)
+
+- **Android Fail-Closed Secrets & `AndroidKeyStore` Hydration (`src/config.py`, `src/platform_utils/background_sync.py`, `src/gui/app_controller.py`, `src/gui/components/settings_view.py`, `src/gui/components/login_dialog.py`)**:
+  - Added `_is_real_android()` (excluding iOS), `SecretStoreBackend` protocol, `register_secret_backend()`, `hydrate_secrets()`, and `pop_pending_plaintext_migration()` in `src/config.py` with zero `gui`/`flet` imports.
+  - Updated `load_settings()` and `save_settings()` so real Android never writes `_SECRET_FIELDS` in plaintext to `settings.json` (failing closed when no secure backend is registered and secrets are non-empty, while stashing legacy `settings.json` secrets in RAM only until `AppSecretVault` confirms write and scrubs `settings.json`). Preserved desktop/test `keyring` fallback.
+  - Added `read_app_secrets`, `write_app_secrets`, `clear_app_secrets` on `AndroidBackgroundBridge` plus `AndroidSecretBackend` (thread-safe `run_coroutine_threadsafe`, failing closed on the event loop thread), wired `AppController._startup_android_sequence()`, and offloaded async `save_settings` / `_persist_snapshot_to_settings` calls with `asyncio.to_thread`.
+- **Notifier Log Sanitization (`src/notifiers/telegram.py`, `src/notifiers/discord.py`)**:
+  - Replaced raw `str(e)` error logging with `HTTP <status_code>` for `httpx.HTTPStatusError` and `type(e).__name__` for `httpx.RequestError` / `Exception` (no `exc_info=True`), preventing Telegram bot tokens and Discord webhook URLs from leaking into logs; enforced `https://` + non-empty netloc for `DISCORD_WEBHOOK_URL`.
+- **`PortalClient` HTTPS & Redirect Pinning (`src/core/portal_client.py`)**:
+  - Enforced `https://` `base_url` without userinfo/query/fragment in `__init__`, added `_SamePortalOriginRedirectHandler` for the default `urllib` opener, verified final `response.geturl()` origin, and capped response payload size at 8 MiB.
+- **Windows Elevated Handoff Hardening (`src/platform_utils/windows_update.py`)**:
+  - Removed the `tempfile.gettempdir()` fallback when `LOCALAPPDATA` is unset/blank/relative, added symlink and `FILE_ATTRIBUTE_REPARSE_POINT` guards on `LOCALAPPDATA`/`UTHelper`/`update_handoff`/`handoff-*`/files, created `update_handoff` and `handoff-*` with `SE_DACL_PROTECTED` (`CurrentUser`, `Administrators`, `SYSTEM` only) via `pywin32` on `os.name == "nt"` (`0o700` on POSIX CI), wrote handoff files via `os.O_WRONLY | os.O_CREAT | os.O_EXCL`, and switched elevated `safe_cwd` to `%SystemRoot%\System32`.
+- **`SettingsView` Autostart Status Visibility (`src/gui/components/settings/system_section.py`, `src/gui/components/settings_view.py`)**:
+  - Moved `view._autostart_status` out of `view._sw_start_minimized_container` directly below `view._sw_start_with_windows` and managed `visible` explicitly so `DISABLED_BY_USER`, `DISABLED_BY_POLICY`, and `ERROR` states remain visible when `START_WITH_WINDOWS` is `False`.
+- **Documentation (`docs/PRIVACY.md`)**:
+  - Updated Android storage and credential clearing sections to document `CredentialVault` + `AppSecretVault` (`AndroidKeyStore` AES-GCM in `context.noBackupFilesDir`) and automatic scrubbing of legacy `settings.json` secrets.
+- **Validation**: targeted suite (`test_config*`, `test_background_sync_bridge`, `test_portal_client`, `test_notifiers`, `test_update_packages`, `test_windows_autostart`, `test_gui_app_controller`, `test_settings_view_state`, `test_diagnostic_logging`, `test_architecture_boundaries`, `test_settings_grid_navigation`, `test_settings_autostart_ui`, `test_msstore_packaging`, `test_chplay_packaging`) passed (`373 passed`); `ruff check src tests` passed.
+
+## Store M1 integration build and release verification (2026-11-21)
+
+- **E2E `variants/apk_lts/` Path Alignment (`tests/e2e_store_distribution/test_tier1_auto_update_lts.py`, `test_tier4_real_world_scenarios.py`)**:
+  - Updated the 3 test assertions inspecting `ApkUpdateInstaller.kt` and `ApkUpdateInstallerFlowTest.kt` to point at `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/variants/apk_lts/...`.
+- **Real CH Play `.aab` Build & Verifier Fixes (`scripts/prepare_android_flutter_project.py`, `scripts/build_android.ps1`, `scripts/verify_android_release.py`, `tests/test_chplay_packaging.py`)**:
+  - Added `androidx.work.impl.foreground.SystemForegroundService` `tools:node="remove"` alongside `com.dexterous.flutterlocalnotifications.ForegroundService` in `prepare_android_flutter_project.py` (observed in real `UTHelper.aab` merged manifest from `work-runtime-ktx`).
+  - Saved/cleared `PYTHONHOME` and `UV_INTERNAL__PYTHONHOME` inside `scripts/build_android.ps1` so `uv`-managed virtualenvs do not leak Python 3.13 `PYTHONHOME` into `serious_python`'s bundled Python 3.14.6 subprocess.
+  - Updated `_read_embedded_distribution_channel` in `scripts/verify_android_release.py` to also inspect `assets/app.zip` / `*/assets/app.zip` (`base/assets/app.zip` in real `.aab` builds), with regression coverage in `tests/test_chplay_packaging.py`.
+  - Built real universal CH Play `UTHelper.aab` (110.7 MB, SHA-256 `99451fa3bac89625fc5c65b68f8bcf3169b2c007e719968883b49ad11f6a03be`) and verified with `verify_android_release.py --allow-unsigned` (`12/12` checks passed: `0` updater classes in `base/dex/classes*.dex`, no `ForegroundService`, `extractNativeLibs="false"`, `BundleConfig.pb` 16 KB `uncompress_native_libraries`).
+- **Local MS Store `.msix` Packaging Check**:
+  - Built Windows app bundle via `flet build windows` + `prepare_windows_bundle.py` + `verify_windows_bundle.py`, packaged `UTHelper-2.5.1-msstore-test.msix` (65,093,259 bytes, SHA-256 `862a9e787aea4e200eb4dcc70e9051ca1ff6540baf04cdb8827c0ec1e13ff664`) via `scripts/package_msix.ps1 -SignMode test`, and passed `scripts/verify_msix_release.ps1` (`10/10` non-WACK checks: `makeappx_unpack`, `appx_manifest_schema`, `identity_and_version`, `manifest_resources`, `capabilities_full_trust`, `appdata_virtualization_enabled`, `startup_task_argument_free`, `pe_executables`, `visual_asset_dimensions`, `distribution_channel_msstore`; `appcert.exe` WACK requires admin and runs in Windows CI).
+- **Final Combined Validation**:
+  - `pytest tests extensions/flet_uth_background_sync/tests -q --tb=short` (with `PYTHONPATH=src;extensions/flet_uth_background_sync/src;.`): **2188 passed, 25 skipped** (6 upstream `sentry_sdk` deprecation warnings).
+  - `ruff check src tests scripts extensions/flet_uth_background_sync/tests extensions/flet_uth_background_sync/src`: **All checks passed!**.
+  - Cleaned all temporary `build/` and `E:\tmp_uth_build\` verification artifacts.
+
+## Quiz WebView review follow-up (2026-11-21)
+
+- Publish the quiz recovery controls when mounting fails, and close a prepared
+  Moodle entry on a worker thread during reauthentication so the UI loop stays
+  responsive. Recheck visibility and generation before mounting the retry.
+- Allow HTTPS subframes, including cross-origin media, and `about:blank`; reject
+  HTTP and non-network schemes inside frames without changing the main-frame
+  same-origin rule.
+- Add the quiz Python extension suite to release-source validation.
+- Verification: `tests/test_quiz_player_ui.py` and
+  `tests/test_release_hardening.py` passed (79 tests); scoped Ruff check passed;
+  Flutter analysis was clean and Flutter tests passed (18 tests). No live quiz
+  attempt or native WebView UI was used.
+
+## Quiz M2 integration, WebView isolation & source bootstrap hardening (2026-11-21)
+
+- **Post-M1 `origin/develop` Merge (`dc21a53`)**:
+  - Merged `origin/develop` (`9788310`) into `codex/84-embedded-quiz` with `--no-ff`, retaining M1 Store/CH Play/MSIX/AndroidKeyStore hardening alongside M2 `flet_uth_quiz` and adding `'extensions/flet_uth_quiz/**'` to `.github/workflows/build-android.yml` and `.github/workflows/build-msstore.yml` PR `paths:` (plus `'pyproject.toml'` in `build-msstore.yml`).
+- **Native WebView Security & Isolation (`extensions/flet_uth_quiz/`)**:
+  - Configured `regexToCancelSubFramesLoading` (`quizSubframeCancelRegex`) and `isInspectable: false` in `createQuizWebViewSettings()` (`quiz_webview_settings.dart`), verified against Android's `java.util.regex.Pattern.compile`.
+  - Fixed Windows/iOS `onCreateWindow -> false` main-frame leak (`quiz_player_control.dart`, `quiz_popup_policy.dart`) by adopting blocked (`invalid`/`limitReached`/`external`) popups into an offstage auto-disposing `InAppWebView` sink on Windows/iOS (`shouldAdoptBlockedPopupToCancel`), paired with `onLoadStart` main-frame origin enforcement (`_enforceLoadOrigin`).
+  - Aligned `parseQuizBaseUri`, `classifyQuizPopupRequest`, `allowsQuizSubframeNavigation`, and `UthQuizPlayer.__post_init__` with `TrustedMoodleUri` (rejecting backslashes, control chars, `userInfo`, explicit `:port` including `:443`, and non-`https` when `require_session=True`).
+  - Added backoff retry (`100ms`/`250ms`/`500ms`) + unique-suffix fallback + stale-profile sweep (`quiz_profile_storage.dart`), plus `UthQuizSessionCleaner` Flet service (`quiz_session_cleaner.dart`, `extension.dart`, `quiz_player_view.py`, `app_controller.py`) to purge Windows WebView2 profiles and mobile cookies/WebStorage on logout or credential change.
+- **Source Bootstrap, UX Polish & Bundle Verification**:
+  - Hardened `src/platform_utils/quiz_client_bootstrap.py` and `src/main.py`: cleared `uv`-injected `PYTHONHOME`/`UV_INTERNAL__PYTHONHOME` inside the child process before importing `flet_cli`, set `PYTHONUTF8=1`, `PYTHONNOUSERSITE=1`, `PIP_DEFAULT_TIMEOUT=20`, `PIP_RETRIES=3`, popped `PYTHONPATH`, added 600s `timeout`, `UTHELPER_SKIP_QUIZ_CLIENT_BUILD` opt-out, 1.5 GB disk guard, `sys.path` rollback on failure, and `FLET_DISPLAY_URL_PREFIX` cwd guard.
+  - Updated `DetailView._on_quiz_entry_unavailable` (`detail_view.py`) to swap `_quiz_open_btn` back to `_open_btn` on `requires_safe_exam_browser` and `quiz_closed`, and added `"mật khẩu không chính xác"` / `"invalid password"` to `src/core/quiz_entry.py`.
+  - Updated `scripts/verify_windows_bundle.py` (and `tests/test_windows_bundle_verifier.py`) to require `flutter_inappwebview_windows_plugin.dll`, `WebView2Loader.dll`, and `site-packages/flet_uth_quiz`.
+- **Verification**:
+  - `pytest tests/ extensions/flet_uth_quiz/tests/ extensions/flet_uth_background_sync/tests/ -q --tb=short`: **2340 passed, 25 skipped** (6 upstream `sentry_sdk` deprecation warnings).
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `flutter analyze --no-pub && flutter test --no-pub` (`extensions/flet_uth_quiz/flutter/flet_uth_quiz`): **No issues found!**, **23/23 tests passed!**.
+  - Built real Windows client via `quiz_client_bootstrap.ensure_windows_quiz_client(Path('.'))`, prepared & verified `build/windows` via `prepare_windows_bundle.py` + `verify_windows_bundle.py` (**passed**). Live quiz `784921` was left untouched (1 attempt remaining).
+
+## Responsive class schedule review (2026-11-21)
+
+- Replaced the fixed-width, horizontally scrolling timetable with a one-day
+  agenda below 920 px and seven day columns on wider screens. The agenda and
+  week view retain date selection across reflow and use day or week navigation
+  according to the current width.
+- Schedule summaries show the session time, subject, class code, and room. The
+  existing detail view continues to carry lecturer, campus, notes, outline, and
+  Portal/Zoom links. Portal fetch, cache, account namespace, refresh, and
+  notification paths were left intact.
+- Headless Chrome against the Flet WebRenderer at 390×844 and 1120×850 showed
+  no horizontal page overflow. Synthetic fixture captures covered long course
+  and room names, next-day keyboard navigation, empty day/week, loading, and
+  light/dark themes. The detail dialog closed on Escape and restored focus to
+  its invoking action. Chromium exposed the dialog as `alertdialog` with an
+  empty accessible name even though its title is present in the semantics text;
+  that Flet web semantics limitation remains. Native/device visual acceptance
+  was not recorded because a Windows system permission dialog occluded native
+  captures.
+- Focused source regressions: **74 passed**. The first full-suite run reported
+  1,697 passed, 25 skipped, and one settings-test fixture failure; the fixture
+  now models both Portal clients and the schedule cache, and its focused test
+  passes. The full suite was not rerun after that fixture repair. Ruff is not
+  installed in the local environment.
+
+## M3 Part A: PR #99 hardening, in-app WebView default, and schedule/courses/radar UX & accessibility (2026-11-21)
+
+- **Gitflow Merge & Repo Hygiene**:
+  - Merged `origin/develop` (`1af2fef`, post-M1 + M2) into `feature/Lich-hoc` with `--no-ff` (`0470b52`), preserving all M1 Store/Security (`SecretStoreBackend`, `AndroidKeyStore`, `distribution.py`, `android_updates.py`, `PortalClient` origin/8 MiB hardening, `_startup_android_sequence`, transient-failure reminder guard) and M2 Quiz (`QuizSessionLease`, `QuizPlayerView`, `quiz_client_bootstrap`, `FLET_FORCE_WEB_SERVER`, `extensions/flet_uth_quiz`) work, keeping both `'courses_view'` and `'quiz_player_view'` in `AppController._rebuild_colors` and retaining all prior log entries.
+  - Removed 4 stray tracked files at repository root (`cd`, `git`, `py`, `COMMAND_BUILD.md`).
+  - Fixed `packaging/windows/Package.wxs:42` (`DesktopShortcut` `<RegistryValue Root="HKCU" ...>`) so per-user MSIX/WiX shortcut registration matches `InstallScope="perUser"` without requiring HKLM elevation.
+- **Security, Token Isolation, Session/Cache & PR #99 Fixes**:
+  - Added `src/core/url_validation.py` (`validate_https_url`, `is_trusted_uth_lms_url`) enforcing strict `https://`, clean host, no embedded credentials, no control characters, and trusted UTH origins for LMS links.
+  - Refactored `PortalClient.fetch_week` and `fetch_credit_progress` (`src/core/portal_client.py`) to use `_current_generation()`, `_cached_token(username)`, `_login(...)`, and `_store_token(...)` with M1's `_SamePortalOriginRedirectHandler` and `_MAX_PORTAL_RESPONSE_BYTES`.
+  - Wrapped `MoodleClient.fetch_grade_report_html` (`src/core/client.py`) in `with self._session_lock:`, added `_session_owner` / `clear_session()` / `_reset_session_if_account_changed()`, and exposed `fetch_grade_report_html` / `last_grade_report_error` on `MoodleService` (`src/core/moodle_service.py`, `src/core/data_orchestrator.py`, `src/core/course_grades_service.py`) so `CourseGradesService` never reaches into `orchestrator.client`.
+  - Namespaced `CourseGradeMonitor` (`course_grades_snapshot_<digest>.json`, single grade-change alert vs duplicate `%` alert) and `AcademicGradeService` (`portal_grades_cache_<digest>.json`, `portal_progress_cache_<digest>.json`, `SafeFileIO`, username redacted from `logger.info`), fixed `"heSo"` proportional factor conversion in `normalizer.py`, and deduplicated retaken courses by highest `credit_grade` in `gpa_planner.py`.
+  - Guarded `_portal_week_client`, `_week_schedule_cache`, and `calendar_view.reset_schedule` with `getattr(...)` across `_complete_login_success` and `_on_settings_saved` in `src/gui/app_controller.py`; eliminated redundant N+1 HTML grade scraping in `_check_grades_background`; fixed `ScheduleWeekView._prefetch_async` generation checks inside loop and post-sleep and cleared `_weeks`/`_live_at` on `ScheduleAuthenticationError`.
+- **In-App WebView Default & Explicit External Opt-Out**:
+  - Added `src/gui/components/in_app_webview.py` (`InAppWebViewDialog` + `supports_native_webview`) and `flet-webview==0.86.5` in `pyproject.toml` (`[tool.flet.android.dependencies]` / `ios.dependencies`). Native `flet_webview.WebView` opens on Android/iOS/macOS; Windows/Web uses a bounded HTTPS preview reader with an explicit `"Mở bằng trình duyệt ngoài"` opt-out button (never silently launching the external browser).
+  - Routed `ScheduleWeekView`, `CalendarView`, `DetailView` (`"Mở trong ứng dụng"`, Markdown links, and post-submission links), and `AppController` links through `on_open_url` by default with explicit `Icons.OPEN_IN_NEW_ROUNDED` external opt-out buttons (`44x44`, `ft.Semantics`), keeping `UthQuizPlayer` same-origin quiz pinning intact.
+- **Responsive Layout, Theme Propagation & Accessibility**:
+  - Updated `ScheduleWeekView` (`update_theme`, `_initial_layout_width` subtracting `_RAIL_WIDTH`, responsive clamped `_show_outline` & `_show_session_details` modals with `modal=True`, `semantics_label`, `Escape`, focus restore, `height=44` retry), `CalendarView` (skip `_render_week()` in `"schedule"` mode, `height=44` mode pills, `expand=True` week strip cells), `CoursesView` & `ViewManager` (`update_theme()`, compact 3-tile summary bar via `expand=True` + tightened padding/2-line labels, `set_stale_notice()`), `GradeOverviewView` & `academic_radar/*` (`<404px` dynamic radar chart scaling, clamped scrollable modals/sheets, explicit error retry, info dialog), `DesktopWindowHeader`, `TodaySchedulePanel`, `DetailView`, and `AppController` (`_sync_rail_active()` on Calendar/Grades close, mobile `44x44` header targets).
+  - **Flet Web Semantics Note**: Verified in Chromium (`Flet 0.86.5` WebRenderer) that `AlertDialog(..., semantics_label=...)` maps the inner dialog surface to `SemanticsRole.alertDialog` (`dhB`) alongside an outer `namesRoute` semantics node carrying the label; pairing `semantics_label` on both `AlertDialog` and its `title` ensures assistive tech announces the dialog title cleanly.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2423 passed, 26 skipped** (0 failed).
+  - Playwright + Flet ASGI Web verification (`360x800`, `390x844`, `1120x850`, dark `midnight_blue` & light `steel_light`): **PASS** (`0` console/page errors, `0` horizontal overflow across Schedule, Session Details, Outline, Calendar, Courses, Grades, Detail, and `InAppWebViewDialog`; `Escape` dismisses modals and `InAppWebViewDialog` opens in-app without leaving the page; `trình duyệt ngoài` icon buttons exposed in Chromium AXTree).
+
+## M3 Part A Iteration 2b: Verifier & Challenger Remediation (2026-11-21)
+
+- **ScheduleWeekView Prefetch & Resize Shrink (`src/gui/components/schedule_week_view.py`)**:
+  - Tracked `_prefetch_task` and `_prefetch_generation` so `reset()` cancels any running prefetch task, clears `_prefetching` / `_prefetch_generation`, and restarts the 9-week `±4` background prefetch immediately when `visible=True`, while `finally:` only clears state when `_prefetch_generation in (None, generation)`.
+  - Updated `_on_size_change()` to re-render on any shrink in wide mode (`width < previous_width` and `width >= 920`) or width delta `>= 8px`.
+- **PortalClient Streaming Gzip Bomb Protection (`src/core/portal_client.py`)**:
+  - Replaced single-shot `gzip.decompress(raw)` with `_decompress_gzip_bounded()` using `zlib.decompressobj(16 + zlib.MAX_WBITS)` in bounded chunks (`step = 64 KiB`, output slice `min(256 KiB, remaining)`), aborting immediately at `_MAX_PORTAL_RESPONSE_BYTES` (`8 MiB`) and matching `Content-Encoding` case-insensitively (`"gzip" in ...lower()`).
+- **In-App WebView SSRF & Markdown URI Sanitization (`src/core/url_validation.py`, `src/gui/components/in_app_webview.py`, `src/gui/core/utils.py`)**:
+  - Added `validate_public_https_url()` in `src/core/url_validation.py` rejecting `localhost`, `.localhost`, `.local`, literal unsafe IPs, and DNS-resolved loopback/private/link-local/multicast/unspecified/reserved/non-global IPs (`ipaddress.ip_address` + `socket.getaddrinfo`, including IPv4-mapped IPv6). Wired into `InAppWebViewDialog`, `_fetch_https_preview`, and `_HttpsOnlyRedirectHandler`.
+  - Added case-insensitive `on_page_started` and `on_url_change` scheme/host validation on native `flet_webview.WebView` that closes the dialog if an untrusted URL appears.
+  - Sanitized `<a href=...>` and `<img src=...>` in `html_to_markdown()` so only clean `http://`/`https://` URLs (plus internal `cache/images/<sha256>.<ext>` assets for cached Moodle images) are emitted as Markdown links/images, stripping `javascript:`, `data:`, `vbscript:`, and `file:` URIs to plain text.
+- **DetailView Copy, Academic Radar Modal Escape & Code Hygiene**:
+  - Aligned `DetailView.update_detail()` CTA text (`"Mở trong ứng dụng"`) and non-SEB/non-THNN notice strings with the in-app WebView default while keeping `_header_open_btn` labeled `"Mở bằng trình duyệt ngoài"`.
+  - Added `Escape` `KeyboardListener` and `page.pop_dialog()` dismissal (with overlay fallback) to `GradeOverviewView._show_planner_dialog`, `ExpectedGradeDialog`, `GpaDetailSheet`, `show_course_components_dialog`, and `MetricDetailSheet`.
+  - Removed the dead 2-mode branch in `CalendarView.update_theme` and duplicate `grades_btn` update in `ViewManager.show_grades`.
+  - Added `subject_code` (`maHocPhan`) to `CourseGradeItem` / `SemesterNormalizer` so `cumulative_gpa4` and `calculate_overall_gpa` deduplicate retaken courses across different `maLopHocPhan` sections.
+- **Verification**:
+  - Added regression tests across `tests/test_schedule_week_view.py`, `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_detail_theme.py`, `tests/test_grade_overview_view.py`, `tests/test_academic_radar_service.py`, and updated `tests/test_submission_race_condition.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2444 passed, 26 skipped** (0 failed).
+  - Playwright + Flet Web ASGI verification (`360x800`, `390x844`, `1120x850`, dark & light across `DetailView`, `ScheduleWeekView`, `CoursesView`, `GradeOverviewView`): **PASS** (`0` overflow, `0` console/page errors, `DetailView` AXTree exposes `"Mở trong ứng dụng"` without `"Mở trong trình duyệt"` and opens `InAppWebViewDialog` in-app).
+
+## M3 Part A Iteration 3b: Challenger & Secondary Reviewer Remediation (2026-11-21)
+
+- **PortalClient Multi-Member & Truncated Gzip Hardening (`src/core/portal_client.py`)**:
+  - Rewrote `_decompress_gzip_bounded()` with a zero-copy `cursor` loop checking `if decomp.eof:` **before** `decomp.unconsumed_tail` so multi-member streams exceeding `256 KiB` advance cleanly to the next member instead of looping infinitely or growing `decomp.unused_data` unboundedly, added a zero-progress guard plus strict `cursor > member_start` check, avoided calling `decomp.flush()` after `decomp.eof`, and verified `decomp.eof` after stream completion so truncated gzip streams (e.g., missing 8-byte CRC32/ISIZE trailer) raise `PortalProtocolError`.
+- **Alternative IPv4 Literal SSRF Blocking (`src/core/url_validation.py`)**:
+  - Added `_parse_literal_ip()` and pure-Python POSIX `inet_aton` fallback `_parse_posix_inet_aton()` before `resolve_dns` in `validate_public_https_url()` so decimal, octal, hex, and short 1/2/3/4-part IPv4 literals (e.g., `2130706433`, `0177.0.0.1`, `0x7f000001`, `0x7f.0.0.1`, `127.1`, `0`, `2852039166`, and trailing-dot forms) resolve to canonical dotted-quads immediately (`< 1ms`) without calling `socket.getaddrinfo`, blocking them in both `validate_public_https_url(..., resolve_dns=False)` and `InAppWebViewDialog`.
+- **UI/UX & Markdown Defense-in-Depth Polish (`src/gui/components/academic_radar/radar_card.py`, `src/gui/components/detail_view.py`, `src/gui/core/utils.py`)**:
+  - Wrapped `AcademicRadarCard._show_radar_info` dialog content in `ft.KeyboardListener(autofocus=True)` for `Escape` dismissal via `page.pop_dialog()` (with overlay fallback), matching all other `academic_radar` and `GradeOverviewView` modals.
+  - Aligned `DetailView` THNN fallback notice copy with the in-app CTA and top-right external browser button.
+  - Escaped `[` and `]` inside Markdown link labels in `html_to_markdown._link_repl`.
+- **Verification**:
+  - Added regression tests in `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_grade_overview_view.py`, and `tests/test_detail_theme.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests/test_architecture_boundaries.py tests/test_repository_governance.py -q --tb=short`: **11 passed**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2458 passed, 26 skipped** (0 failed).
+
+## M3 Part B Iteration 1b: Merge `origin/develop`, Cross-Feature Integration, Security & UX Remediation (2026-11-22)
+
+- **Merge & Packaging / CI Parity (`pyproject.toml`, `.github/workflows/`, `scripts/verify_*`)**:
+  - Merged `origin/develop` (`08efdbed`) into `codex/courses-mobile-review` via `--no-ff` merge commit, preserving M1 (`DistributionProfile`, AndroidKeyStore secret vault, CH Play stripping & 16 KB alignment), M2 (`QuizPlayerView`, `flet_uth_quiz`, `quiz_client_bootstrap.py`), and M3A (`ScheduleWeekView`, `InAppWebViewDialog`, `url_validation.py`, `PortalClient` generation-guarded tokens & bounded gzip, `CourseGradeMonitor`, `GradeOverviewView`, `DesktopWindowHeader` semantics, `calendar_view.py` 44×44dp/semantics) alongside M3B (`AdaptiveNavShell`, `CoursesCoordinator`, offline `office_viewer/`, `WindowsOfficeBridge`, `EmbeddedWebViewHost`).
+  - Restored `network_security_config.xml` at `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/src/main/res/xml/network_security_config.xml` and removed the misplaced directory-rename path.
+  - Kept `version = "2.5.1"`, `httpx>=0.28.1`, `flet-uth-quiz==0.1.0`, `target_sdk_version = 36`, Android `allowBackup="false"`, `usesCleartextTraffic="false"`, `networkSecurityConfig="@xml/network_security_config"`, and deduplicated `pillow>=13.0.0` to core dependencies.
+  - Added `'src/assets/office_viewer/**'` triggers to `build-android.yml` & `build-msstore.yml` and extended `scripts/verify_windows_bundle.py`, `scripts/verify_msix_release.ps1`, and `scripts/verify_android_release.py` to assert the 9 core `office_viewer/` static assets.
+- **Core Client & Portal Parity (`src/core/portal_client.py`, `src/core/client.py`)**:
+  - Updated `PortalClient.fetch_current_semester_courses()` to use `_current_generation()`, `_cached_token(username)`, `_store_token(..., generation)`, and 401 retry parity with `fetch_day`/`fetch_week`.
+  - Retained `urllib` in `src/core/client.py` and guarded M3B session helpers (`get_sesskey`, `get_session_cookies`, `submit_session_form`, `open_session_raw`, `open_session_url`, `download_session_file`) under `self._session_lock` and `self._reset_session_if_account_changed()`, plus bounded `max_bytes` in `download_file()`.
+- **Cross-Feature Integration Wiring (`src/gui/app_controller.py`, `src/gui/view_manager.py`, `src/gui/components/grade_overview_view.py`, `src/gui/controllers/courses_coordinator.py`)**:
+  - Wired `Courses <-> Quiz` (`on_start_quiz=self._start_course_quiz`, `_on_quiz_player_closed`, `_on_course_quiz_entry_unavailable`, mobile `nav_shell.set_immersive(True)` handling unmounted `bar.page` safely, `QuizPlayerView.request_close` on nav switch & exit, and account-switch cleanup across `quiz_player_view`, `course_grade_monitor`, and `courses_coord`).
+  - Wired `GradeOverviewView` `"Môn học"` (`on_open_courses`) -> `course_grades_view` (`CoursesView`) via `ViewManager` without altering the `"grades"` rail state, and fixed `_header_compact_padding` initialization in `_build_header_container()` for mobile layout startup.
+- **Security & UX Hardening (`local_preview_server.py`, `embedded_webview_host.py`, `webview_pane.py`, `courses_state.py`, `windows_office_bridge.py`, `office_viewer_service.py`, `pptx_host.js`, `document_reader_view.py`, `course_detail_pane.py`)**:
+  - Isolated `/session/` onto its own loopback HTTP server port separate from `/viewer/`, added `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy: same-origin`, and `_SESSION_HTML_CSP` on `_serve_session()` and 302 redirects, escaped `<base href>`, and replaced `startswith` with `_is_same_moodle_origin_url()`.
+  - Enforced `url_validation`-aligned HTTPS / active-loopback URL validation (`safe_http_url`, `_validate_webview_url`), `flet_webview` `prevent_links` + start/change URL checks, `WindowsWebView2Dock` `navigation_starting` scheme cancellation, `/viewer/` popup lockout, `are_dev_tools_enabled = False`, `are_host_objects_allowed = False`, `_lock`-protected `_pending_scripts`/disposal, mid-init `ctrl.close()`, stale `uth*` profile cleanup, HTTPS `is_secure = True` cookie promotion, `SetWindowLongPtrW.argtypes`/`restype`, and `CoursesWebViewPane` Flet-thread marshaling + removal of the redundant `80.0` bottom inset.
+  - Added `WaitForSingleObject(handle, 3000)`, `TemporaryDirectory(..., ignore_cleanup_errors=True)`, and System32 PowerShell preference in `windows_office_bridge.py`; rejected ZIP symlinks/special files and forged central-directory XML expansion in `office_viewer_service.py`; stripped `animate`/`set` and `data:image/svg+xml` hrefs in `pptx_host.js` while retaining `<foreignObject>` slide text rendering.
+  - Wired `on_error` Tier B native fallback in `DocumentReaderView._build_webview`, skipped redundant `PdfDocumentSession.render_page_png(0)` when `pdf_in_webview=True`, hid `_night_btn` for WebView2 PDFs, added `DocumentReaderView.handle_key_event` (`Esc`/page/search), switched `CourseDetailPane` Moodle WebView triggers to `LANGUAGE_ROUNDED`, and wrapped `_segment_pills` content in `ft.Semantics`.
+- **Verification**:
+  - Added regression tests across `tests/test_courses_app_integration.py`, `tests/test_courses_reader_and_preview_server.py`, `tests/test_embedded_webview_session_isolation.py`, `tests/test_office_viewer_service.py`, `tests/test_chplay_packaging.py`, and `tests/test_msstore_packaging.py`, and updated `tests/test_release_hardening.py` and `tests/test_gui_app_controller.py`.
+  - Verified with full `pytest`, `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and `flutter analyze && flutter test` on `flet_uth_quiz`.

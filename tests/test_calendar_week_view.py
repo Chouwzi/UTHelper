@@ -11,7 +11,7 @@ import pytest
 import flet as ft
 
 from gui.components.calendar_navigation import MonthAnchor, month_slot_anchors
-from gui.components.calendar_view import CalendarView, _s
+from gui.components.calendar_view import CalendarView
 
 
 def _page_stub():
@@ -339,7 +339,7 @@ def test_release_frame_preview_keeps_activity_dot_and_count_badge():
     count_marker_row = dated_cells[19].content.controls[-1]
 
     assert len(single_marker_row.controls) == 1
-    assert single_marker_row.controls[0].width == _s(6)
+    assert single_marker_row.controls[0].width == 6
     assert count_marker_row.controls[0].content.value == "3"
 
 
@@ -529,11 +529,11 @@ def test_data_refresh_rebuilds_all_three_period_pages():
 def test_period_pager_has_bounded_height_for_each_view_mode():
     view = CalendarView(_page_stub())
 
-    assert view._period_pager.height == _s(316)
+    assert view._period_pager.height == 316
 
     view._toggle_view_mode("week")
 
-    assert view._period_pager.height == _s(88)
+    assert view._period_pager.height == 88
 
 
 def test_month_period_page_uses_count_badge_for_three_or_more_deadlines():
@@ -599,7 +599,7 @@ def test_mode_switch_publishes_week_pager_in_the_same_ui_frame():
     view._toggle_view_mode("week")
 
     assert observations
-    assert observations[-1] == (_s(88), view._week_start)
+    assert observations[-1] == (88, view._week_start)
 
 
 def test_month_date_click_repaints_the_mounted_period_cell_immediately():
@@ -739,6 +739,40 @@ class TestWeekViewDataLogic:
         submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
         count = sum(1 for a in acts if a.get("submission_status", "") in submitted_statuses)
         assert count == 3
+
+
+def test_calendar_view_skips_week_render_in_schedule_mode_and_uses_responsive_cells():
+    from gui.components.calendar_view import CalendarView
+
+    page = SimpleNamespace(
+        width=360,
+        height=740,
+        dialogs=[],
+        show_dialog=lambda _d: None,
+        update=lambda: None,
+    )
+    opened = []
+    cal = CalendarView(
+        page,
+        on_open_url=lambda u, t: opened.append((u, t)),
+        on_open_external=lambda u: opened.append(("ext", u)),
+    )
+    render_calls = []
+    cal._render_week = lambda: render_calls.append("render")
+
+    cal._toggle_view_mode("schedule")
+    render_calls.clear()
+    cal.update_data([])
+    cal.update_theme()
+
+    assert render_calls == []
+    assert cal._mode_schedule_btn.height == 44
+    assert cal._mode_month_btn.height == 44
+    assert cal._mode_week_btn.height == 44
+    cell = cal._make_week_cell(0)
+    assert cell.expand is True
+    assert cal._schedule_view._on_open_url is not None
+    assert cal._schedule_view._on_open_external is not None
 
 
 if __name__ == "__main__":

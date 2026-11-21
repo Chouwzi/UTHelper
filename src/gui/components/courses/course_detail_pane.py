@@ -344,6 +344,16 @@ class CourseDetailPane(ft.Container):
                 text_align=ft.TextAlign.CENTER,
             ),
         ]
+        _default_titles = ["Nội dung", "Tài liệu", "Điểm môn"]
+        self._segment_semantics: list[ft.Semantics] = [
+            ft.Semantics(
+                label=_default_titles[i],
+                button=True,
+                selected=(i == 0),
+                content=self._segment_labels[i],
+            )
+            for i in range(3)
+        ]
         self._segment_pills: list[ft.Container] = [
             ft.Container(
                 expand=True,
@@ -354,7 +364,7 @@ class CourseDetailPane(ft.Container):
                 animate=ft.Animation(170, ft.AnimationCurve.EASE_OUT_CUBIC),
                 ink=True,
                 on_click=lambda _e, idx=i: self._on_segment_tap(idx),
-                content=self._segment_labels[i],
+                content=self._segment_semantics[i],
             )
             for i in range(3)
         ]
@@ -448,7 +458,10 @@ class CourseDetailPane(ft.Container):
             is_active = i == active_idx
             pill = self._segment_pills[i]
             lbl = self._segment_labels[i]
+            sem = self._segment_semantics[i]
             lbl.value = base_titles[i]
+            sem.label = base_titles[i]
+            sem.selected = is_active
             lbl.weight = ft.FontWeight.W_600 if is_active else ft.FontWeight.W_500
             lbl.color = C.TEXT_PRIMARY if is_active else C.TEXT_SECONDARY
             pill.bgcolor = C.SURFACE if is_active else None
@@ -570,7 +583,7 @@ class CourseDetailPane(ft.Container):
                 ),
                 self._expand_btn,
                 ft.IconButton(
-                    icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                    icon=ft.Icons.LANGUAGE_ROUNDED,
                     icon_color=C.TEXT_SECONDARY,
                     icon_size=20,
                     tooltip="Mở khóa học trên Moodle Web",
@@ -1504,7 +1517,7 @@ class CourseDetailPane(ft.Container):
                     padding=ft.Padding.only(top=2),
                     content=ft.TextButton(
                         content="Mở bảng điểm gốc trên Moodle",
-                        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                        icon=ft.Icons.LANGUAGE_ROUNDED,
                         on_click=lambda _e, url=grades_url: (
                             self._on_launch_url(url) if callable(self._on_launch_url) else None
                         ),
@@ -1536,7 +1549,7 @@ class CourseDetailPane(ft.Container):
                         ),
                         ft.OutlinedButton(
                             content="Xem điểm trên Moodle",
-                            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                            icon=ft.Icons.LANGUAGE_ROUNDED,
                             on_click=lambda _e, url=grades_url: (
                                 self._on_launch_url(url) if callable(self._on_launch_url) else None
                             ),

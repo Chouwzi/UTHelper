@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import Any, Callable, Optional
@@ -22,6 +23,7 @@ from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     WindowsWebView2Dock,
     _is_flet_webview_platform,
+    _safe_control_page,
     _webview2_runtime_available,
     build_embedded_webview_host,
 )
@@ -373,6 +375,29 @@ class CoursesWebViewPane(ft.Container):
 
         self._show_html_fallback_or_card()
 
+    def _marshal_ui(self, fn: Callable[[], None]) -> None:
+        if self._disposed:
+            return
+        page = _safe_control_page(self)
+        if page is None or not callable(getattr(page, "run_task", None)):
+            fn()
+            return
+        try:
+            asyncio.get_running_loop()
+            fn()
+            return
+        except RuntimeError:
+            pass
+
+        async def _apply() -> None:
+            if not self._disposed:
+                fn()
+
+        try:
+            page.run_task(_apply)
+        except Exception:
+            fn()
+
     def _set_nav_loading(self, loading: bool) -> None:
         if self._disposed:
             return
@@ -380,51 +405,61 @@ class CoursesWebViewPane(ft.Container):
         safe_control_update(self._nav_progress)
 
     def _on_host_loading_changed(self, loading: bool) -> None:
-        if self._disposed:
-            return
-        self._nav_progress.visible = bool(loading)
-        safe_control_update(self._nav_progress)
+        def _apply() -> None:
+            self._nav_progress.visible = bool(loading)
+            safe_control_update(self._nav_progress)
+
+        self._marshal_ui(_apply)
 
     def _on_history_changed(self, can_back: bool, can_forward: bool) -> None:
-        if self._disposed:
-            return
-        self._wv_back_btn.disabled = not bool(can_back)
-        self._wv_fwd_btn.disabled = not bool(can_forward)
-        safe_control_update(self._wv_back_btn)
-        safe_control_update(self._wv_fwd_btn)
+        def _apply() -> None:
+            self._wv_back_btn.disabled = not bool(can_back)
+            self._wv_fwd_btn.disabled = not bool(can_forward)
+            safe_control_update(self._wv_back_btn)
+            safe_control_update(self._wv_fwd_btn)
+
+        self._marshal_ui(_apply)
 
     def _on_native_title(self, title: str) -> None:
-        if title and not self._disposed:
+        if not title:
+            return
+
+        def _apply() -> None:
             self._title_text.value = title
             safe_control_update(self._title_text)
 
+        self._marshal_ui(_apply)
+
     def _on_native_url_or_bridge(self, url: str) -> None:
-        if not url or self._disposed:
+        if not url or "/session/" in url:
             return
-        if "/session/" in url:
-            return
-        self._url = url
-        self._subtitle_text.value = self._short_subtitle(url)
-        self._sync_external_visibility()
-        safe_control_update(self._subtitle_text)
-        safe_control_update(self._ext_btn)
+
+        def _apply() -> None:
+            self._url = url
+            self._subtitle_text.value = self._short_subtitle(url)
+            self._sync_external_visibility()
+            safe_control_update(self._subtitle_text)
+            safe_control_update(self._ext_btn)
+
+        self._marshal_ui(_apply)
 
     def _on_host_error(self, reason: str) -> None:
-        if self._disposed:
-            return
-        self._set_nav_loading(False)
-        host = self._host
-        if host is not None and host.backend == "webview2":
-            dock = host.dock
-            if dock is None or not getattr(dock, "_ready", False):
-                self._host = None
-                self._dock = None
-                host.dispose()
-                if not self._disposed:
-                    self._show_html_fallback_or_card()
-                    safe_control_update(self)
-                return
-        logger.debug("EmbeddedWebViewHost error: %s", reason)
+        def _apply() -> None:
+            self._set_nav_loading(False)
+            host = self._host
+            if host is not None and host.backend == "webview2":
+                dock = host.dock
+                if dock is None or not getattr(dock, "_ready", False):
+                    self._host = None
+                    self._dock = None
+                    host.dispose()
+                    if not self._disposed:
+                        self._show_html_fallback_or_card()
+                        safe_control_update(self)
+                    return
+            logger.debug("EmbeddedWebViewHost error: %s", reason)
+
+        self._marshal_ui(_apply)
 
     def _show_html_fallback_or_card(self) -> None:
         self._body_host.content = ft.Container(
@@ -686,7 +721,15 @@ class CoursesWebViewPane(ft.Container):
         self._expand_btn.visible = self._show_expand_toggle
         safe_control_update(self._expand_btn)
 
-    def sync_bounds(self, left: float, top: float, width: float, height: float) -> None:
+    def sync_bounds(
+        self,
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+        *,
+        nav_bottom_inset: float = 0.0,
+    ) -> None:
         self._pane_width = max(240.0, float(width))
         changed = self._apply_responsive_chrome()
         if changed:
@@ -695,7 +738,7 @@ class CoursesWebViewPane(ft.Container):
             return
         header_h = 55.0
         mobile_bar_h = 44.0 if self._mobile_nav_bar.visible else 0.0
-        bottom_inset = (80.0 if left <= 1.0 and width < 600.0 else 0.0) + mobile_bar_h
+        bottom_inset = max(0.0, float(nav_bottom_inset)) + mobile_bar_h
         if self._host is not None:
             self._host.sync_bounds(
                 left,

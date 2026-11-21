@@ -96,3 +96,39 @@ def test_office_webview_adapter_is_mounted_as_control_and_disposed():
         reader.dispose()
         server.stop()
     host.dispose.assert_called_once()
+
+
+def test_office_package_rejects_symlinks_case_insensitive_xml_and_forged_zip_sizes():
+    import stat
+
+    original = build_docx_bytes(paragraphs=["Safe doc"])
+
+    # 1. Symlink entry inside ZIP is rejected
+    out_sym = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as src, zipfile.ZipFile(out_sym, "w") as dst:
+        for entry in src.infolist():
+            dst.writestr(entry, src.read(entry))
+        sym_info = zipfile.ZipInfo("word/secret_link.txt")
+        sym_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        dst.writestr(sym_info, b"C:/Windows/win.ini")
+    assert not is_supported_office_package(out_sym.getvalue(), "doc.docx")
+
+    # 2. Forged ZIP central-directory header claiming small file_size while stream > 16 MiB is rejected
+    forged_buf = io.BytesIO()
+    with zipfile.ZipFile(forged_buf, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        dst.writestr("[Content_Types].xml", "<Types/>")
+        dst.writestr("word/document.xml", "<w:document/>")
+        dst.writestr("word/CUSTOM.XML", b"a" * (16 * 1024 * 1024 + 128))
+    raw_forged = bytearray(forged_buf.getvalue())
+    assert not is_supported_office_package(bytes(raw_forged), "bomb.docx")
+
+
+def test_pptx_host_sanitizes_smil_and_svg_data_href_while_preserving_foreign_object():
+    from pathlib import Path
+
+    pptx_host_js = (
+        Path(__file__).resolve().parents[1] / "src" / "assets" / "office_viewer" / "pptx_host.js"
+    ).read_text(encoding="utf-8")
+    assert "animate, set" in pptx_host_js
+    assert "data:image\\/svg\\+xml" in pptx_host_js
+    assert "foreignObject" not in pptx_host_js.split("querySelectorAll(", 1)[1].split(")", 1)[0]

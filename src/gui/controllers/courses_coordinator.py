@@ -265,6 +265,18 @@ class CoursesCoordinator:
             self._initial_loaded = False
             raise
 
+    def reset_for_account_switch(self, namespace: Optional[str] = None) -> None:
+        """Reset catalog load state, cache namespace, and overlays on account change."""
+        self._attachment_load_seq += 1
+        self._initial_loaded = False
+        if namespace:
+            cache_store = getattr(self.catalog_service, "_cache_store", None)
+            set_ns = getattr(cache_store, "set_namespace", None)
+            if callable(set_ns):
+                set_ns(namespace)
+        if hasattr(self.courses_view, "reset_for_account_switch"):
+            self.courses_view.reset_for_account_switch()
+
     def _client_for(self, source: CourseSource) -> Any:
         return self._thnn_client if source == "thnn" else self._courses_client
 
@@ -425,7 +437,7 @@ class CoursesCoordinator:
         )
         self.courses_view.push_overlay(pane, tag=tag or f"webview:{abs(hash(safe_url))}")
 
-    def _handle_course_url_action(self, url: str) -> None:
+    def _handle_course_url_action(self, url: str, title: str = "") -> None:
         safe_url = safe_http_url(url)
         if not safe_url:
             return
@@ -437,9 +449,12 @@ class CoursesCoordinator:
             if "thnn.ut.edu.vn" in safe_url.lower()
             else (selected.source if selected is not None else "courses")
         )
+        pane_title = str(title or "").strip() or (
+            (selected.display_name or selected.fullname) if selected is not None else "Moodle Web"
+        )
         self.open_in_app_webview(
             source,
-            (selected.display_name or selected.fullname) if selected is not None else "Moodle Web",
+            pane_title,
             safe_url,
         )
 
@@ -861,15 +876,21 @@ class CoursesCoordinator:
                         dark_mode=False,
                     )
                 elif att.preview_kind == "pdf":
-                    pdf_dir = getattr(self.preview_cache, "cache_dir", None)
+                    pdf_in_webview = (
+                        isinstance(self._page, ft.Page)
+                        and self._page.platform == ft.PagePlatform.WINDOWS
+                        and not self._page.web
+                    )
+                    if not pdf_in_webview:
+                        pdf_dir = getattr(self.preview_cache, "cache_dir", None)
 
-                    def _warm_pdf() -> PdfDocumentSession:
-                        sess = PdfDocumentSession(raw, cache_dir=pdf_dir)
-                        if sess.supported and sess.can_render_images and sess.page_count > 0:
-                            sess.render_page_png(0, scale=1.6, dark_mode=False)
-                        return sess
+                        def _warm_pdf() -> PdfDocumentSession:
+                            sess = PdfDocumentSession(raw, cache_dir=pdf_dir)
+                            if sess.supported and sess.can_render_images and sess.page_count > 0:
+                                sess.render_page_png(0, scale=1.6, dark_mode=False)
+                            return sess
 
-                    preopened_pdf = await asyncio.to_thread(_warm_pdf)
+                        preopened_pdf = await asyncio.to_thread(_warm_pdf)
 
             if req_seq != self._attachment_load_seq or loading_overlay._disposed:
                 if preopened_pdf is not None:

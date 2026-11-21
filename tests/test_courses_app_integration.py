@@ -907,3 +907,150 @@ def test_settings_view_cache_stats_and_clear_handles_courses_and_preview_caches(
     cleared_stats = view._debug_cache_stats.value or ""
     assert "Cache xem trước tài liệu: trống" in cleared_stats
     assert "Cache môn học: trống" in cleared_stats
+
+
+# ---------------------------------------------------------------------------
+# 6. M3B Integration Wiring: Courses <-> Quiz & GradeOverview <-> course_grades_view
+# ---------------------------------------------------------------------------
+
+
+def test_grade_overview_open_courses_routes_to_course_grades_view_preserving_grades_rail():
+    async def _run() -> None:
+        from gui.components.grade_overview_view import GradeOverviewView
+
+        opened_courses = Mock()
+        grade_view = GradeOverviewView(on_open_courses=opened_courses)
+        courses_btn = grade_view._courses_btn
+        assert courses_btn is not None
+        assert courses_btn.height == 44
+        courses_btn.on_click(None)
+        opened_courses.assert_called_once()
+
+        destinations: list[str] = []
+        page = _FakePage(width=1200)
+        dash = _FakeControl(visible=False)
+        detail = _FakeControl(visible=False)
+        settings_v = _FakeControl(visible=False)
+        cal = _FakeControl(visible=False)
+        grade_overview = _FakeControl(visible=True)
+        grade_overview.show_loading = Mock()
+        courses = _FakeControl(visible=False)
+        course_grades_view = _FakeControl(visible=False)
+        course_grades_view.show_loading = Mock()
+        course_grades_view.show_courses = Mock()
+        fake_ctrl = _FakeController()
+
+        vm = ViewManager(
+            page,
+            dash,
+            detail,
+            settings_v,
+            cal,
+            grade_overview,
+            fake_ctrl,
+            courses_view=courses,
+            course_grades_view=course_grades_view,
+            on_destination_change=destinations.append,
+        )
+        vm.show_grades_loading()
+        assert destinations[-1] == "grades"
+
+        vm.show_course_grades_loading()
+        assert course_grades_view.visible is True
+        assert grade_overview.visible is False
+        assert destinations[-1] == "grades"
+        assert fake_ctrl.grades_btn.icon_color == C.ACCENT
+        assert fake_ctrl.courses_btn.icon_color == C.TEXT_SECONDARY
+
+        await vm.close_course_grades()
+        assert course_grades_view.visible is False
+        assert grade_overview.visible is True
+        assert destinations[-1] == "grades"
+
+    asyncio.run(_run())
+
+
+def test_courses_quiz_launch_and_close_wire_immersive_shell_and_cleanup():
+    async def _run() -> None:
+        ctrl = AppController.__new__(AppController)
+        ctrl.page = SimpleNamespace(
+            width=412,
+            height=880,
+            web=False,
+            platform=ft.PagePlatform.ANDROID,
+            update=Mock(),
+            show_dialog=Mock(),
+            pop_dialog=Mock(),
+        )
+        ctrl._mobile_back_enabled = True
+        ctrl._nav_shell = AdaptiveNavShell(on_navigate=lambda _k: None)
+        ctrl._nav_shell.apply_width(412)
+        ctrl._quiz_mode_window_state = None
+        ctrl._window_maximized = False
+        ctrl._data_lock = Mock()
+        ctrl._data_lock.__enter__ = lambda s: None
+        ctrl._data_lock.__exit__ = lambda s, *a: None
+        ctrl.all_data = []
+        ctrl.orchestrator = SimpleNamespace(invalidate_detail_cache=Mock())
+
+        reloaded: list[bool] = []
+        notice_calls: list[str] = []
+        quiz_mod = CourseModuleItem(
+            cmid=11,
+            instance_id=99,
+            modname="quiz",
+            name="Midterm Quiz",
+            section_id=1,
+            web_url="https://courses.ut.edu.vn/mod/quiz/view.php?id=11",
+        )
+        fake_quiz_overlay = SimpleNamespace(
+            _module=quiz_mod,
+            reload=lambda: reloaded.append(True),
+            set_runtime_notice=lambda msg: notice_calls.append(msg),
+        )
+        ctrl.courses_view = SimpleNamespace(
+            visible=True,
+            _overlays=[fake_quiz_overlay],
+            _compute_immersive=lambda: False,
+            set_immersive=Mock(),
+            handle_back=lambda: False,
+        )
+        ctrl._courses_coordinator = SimpleNamespace(reset_for_account_switch=Mock())
+        ctrl.quiz_player_view = SimpleNamespace(
+            visible=False,
+            clear_persisted_sessions=Mock(),
+            request_close=AsyncMock(return_value=True),
+            prepare_activity=Mock(return_value=("target", "ready")),
+            open_activity_for_account=Mock(return_value=True),
+            handle_back=lambda: False,
+        )
+
+        course = _make_course()
+        activity = ctrl._build_course_quiz_activity(course, quiz_mod)
+        ctrl._start_course_quiz(course, quiz_mod)
+        ctrl.quiz_player_view.prepare_activity.assert_called_once()
+        ctrl.quiz_player_view.open_activity_for_account.assert_called_once()
+        assert ctrl._nav_shell._immersive is True
+
+        # Simulate SEB / unavailable runtime notice
+        await ctrl._on_course_quiz_entry_unavailable(activity, "requires_safe_exam_browser")
+        assert any("Safe Exam Browser" in msg for msg in notice_calls)
+        assert ctrl._nav_shell._immersive is False
+
+        # Re-enter quiz immersive, then close quiz player -> refreshes overlay & clears immersive
+        ctrl._sync_quiz_immersive(True)
+        assert ctrl._nav_shell._immersive is True
+        ctrl.quiz_player_view.visible = False
+        await ctrl._on_quiz_player_closed(activity)
+        ctrl.orchestrator.invalidate_detail_cache.assert_called_once_with(activity["url"])
+        assert reloaded == [True]
+        assert ctrl._nav_shell._immersive is False
+
+        # Exit/nav request_close & account switch cleanup
+        assert await ctrl.quiz_player_view.request_close() is True
+        ctrl.quiz_player_view.clear_persisted_sessions()
+        ctrl._courses_coordinator.reset_for_account_switch()
+        ctrl.quiz_player_view.clear_persisted_sessions.assert_called_once()
+        ctrl._courses_coordinator.reset_for_account_switch.assert_called_once()
+
+    asyncio.run(_run())

@@ -81,6 +81,7 @@ def test_dashboard_desktop_header_replaces_old_title_row_with_sync_status(monkey
     controller._version_badge = ft.Container(content=ft.Text(f"v{APP_VERSION}"))
     controller.calendar_btn = ft.IconButton(ft.Icons.CALENDAR_MONTH_ROUNDED)
     controller.grades_btn = ft.IconButton(ft.Icons.INSIGHTS_ROUNDED)
+    controller.courses_btn = ft.IconButton(ft.Icons.MENU_BOOK_ROUNDED)
     controller.refresh_btn = ft.IconButton(ft.Icons.REFRESH_ROUNDED)
     controller.settings_btn = ft.IconButton(ft.Icons.SETTINGS_ROUNDED)
     monkeypatch.setattr("gui.app_controller.platform_utils.UI_IS_MOBILE", False)

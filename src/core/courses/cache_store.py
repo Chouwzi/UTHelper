@@ -287,6 +287,14 @@ class CourseCacheStore:
         self._mem_catalog: Optional[tuple[tuple[int, int, int], CatalogCacheSnapshot]] = None
         self._mem_details: dict[Path, tuple[tuple[int, int, int], CourseDetailSnapshot]] = {}
 
+    def set_namespace(self, namespace: str) -> None:
+        """Switch active cache namespace on account change and drop RAM caches."""
+        normalized = (str(namespace).strip().lower() if namespace else "") or "default"
+        self._digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+        self._catalog_path = self._dir / f"courses_catalog_{self._digest}.json"
+        self._mem_catalog = None
+        self._mem_details.clear()
+
     @staticmethod
     def _stat_sig(path: Path) -> Optional[tuple[int, int, int]]:
         try:

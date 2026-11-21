@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import gzip
+import inspect
 import json
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Callable
 from datetime import date
 from typing import Any
@@ -14,7 +15,94 @@ from core.today_schedule import (
     ClassSession,
     ScheduleAuthenticationError,
     parse_portal_day,
+    parse_portal_week,
 )
+
+_MAX_PORTAL_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _decompress_gzip_bounded(compressed: bytes, max_bytes: int) -> bytes:
+    """Incrementally decompress gzipped bytes while enforcing ``max_bytes``."""
+    chunks: list[bytes] = []
+    total = 0
+    step = 64 * 1024
+    cursor = 0
+    length = len(compressed)
+    try:
+        while cursor < length:
+            decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            member_start = cursor
+            member_done = False
+            while cursor < length:
+                chunk_end = min(cursor + step, length)
+                pending = compressed[cursor:chunk_end]
+                cursor = chunk_end
+                while pending:
+                    remaining = max_bytes + 1 - total
+                    if remaining <= 0:
+                        raise PortalProtocolError("Portal response exceeded maximum size")
+                    out = decomp.decompress(pending, min(256 * 1024, remaining))
+                    if out:
+                        total += len(out)
+                        if total > max_bytes:
+                            raise PortalProtocolError("Portal response exceeded maximum size")
+                        chunks.append(out)
+                    if decomp.eof:
+                        cursor -= len(decomp.unused_data)
+                        if cursor <= member_start:
+                            raise PortalProtocolError("Portal response was not valid gzip")
+                        member_done = True
+                        break
+                    if decomp.unconsumed_tail:
+                        if not out and len(decomp.unconsumed_tail) >= len(pending):
+                            raise PortalProtocolError("Portal response was not valid gzip")
+                        pending = decomp.unconsumed_tail
+                    else:
+                        pending = b""
+                if member_done:
+                    break
+            if not member_done:
+                remaining = max_bytes + 1 - total
+                if remaining <= 0:
+                    raise PortalProtocolError("Portal response exceeded maximum size")
+                tail = decomp.flush(remaining)
+                if tail:
+                    total += len(tail)
+                    if total > max_bytes:
+                        raise PortalProtocolError("Portal response exceeded maximum size")
+                    chunks.append(tail)
+                if decomp.unconsumed_tail:
+                    raise PortalProtocolError("Portal response exceeded maximum size")
+                if not decomp.eof:
+                    raise PortalProtocolError("Portal response was not valid gzip")
+    except zlib.error as exc:
+        raise PortalProtocolError("Portal response was not valid gzip") from exc
+    return b"".join(chunks)
+
+
+class _SamePortalOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, origin: str) -> None:
+        super().__init__()
+        self.origin = origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        parsed = urllib.parse.urlsplit(redirected.full_url)
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" != self.origin
+        ):
+            raise urllib.error.HTTPError(
+                redirected.full_url,
+                code,
+                "Untrusted Portal redirect",
+                headers,
+                fp,
+            )
+        return redirected
 
 
 class PortalError(RuntimeError):
@@ -47,11 +135,32 @@ class PortalClient:
         base_url: str,
         *,
         timeout: float = 15,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        raw_base = str(base_url or "").strip()
+        parsed = urllib.parse.urlsplit(raw_base)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.netloc
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "PortalClient requires an https:// base_url without userinfo, query, or fragment"
+            )
+        self._origin = f"https://{parsed.netloc.lower()}"
+        self._base_url = raw_base.rstrip("/")
         self._timeout = max(1.0, float(timeout))
-        self._opener = opener
+        if opener is None:
+            default_opener = urllib.request.build_opener(
+                _SamePortalOriginRedirectHandler(self._origin)
+            )
+            self._opener = default_opener.open
+        else:
+            self._opener = opener
         self._token = ""
         # The cached token belongs to exactly one account: after an account
         # switch a stale token must never be replayed for the new username.
@@ -134,9 +243,49 @@ class PortalClient:
         )
         try:
             with self._opener(request, timeout=self._timeout) as response:
-                raw = response.read()
-                if response.headers.get("Content-Encoding") == "gzip":
-                    raw = gzip.decompress(raw)
+                geturl = getattr(response, "geturl", None)
+                if callable(geturl):
+                    final_url = str(geturl() or "")
+                    if final_url:
+                        final_parsed = urllib.parse.urlsplit(final_url)
+                        final_origin = (
+                            f"{final_parsed.scheme.lower()}://{final_parsed.netloc.lower()}"
+                        )
+                        if (
+                            final_parsed.username is not None
+                            or final_parsed.password is not None
+                            or final_origin != self._origin
+                        ):
+                            raise PortalProtocolError(
+                                "Portal response redirected outside trusted origin"
+                            )
+                read_fn = response.read
+                try:
+                    sig = inspect.signature(read_fn)
+                    accepts_amt = any(
+                        p.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.VAR_POSITIONAL,
+                        )
+                        for p in sig.parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    accepts_amt = True
+                raw = (
+                    read_fn(_MAX_PORTAL_RESPONSE_BYTES + 1)
+                    if accepts_amt
+                    else read_fn()
+                )
+                if len(raw) > _MAX_PORTAL_RESPONSE_BYTES:
+                    raise PortalProtocolError("Portal response exceeded maximum size")
+                content_encoding = (response.headers.get("Content-Encoding") or "").lower()
+                if "gzip" in content_encoding:
+                    try:
+                        raw = _decompress_gzip_bounded(raw, _MAX_PORTAL_RESPONSE_BYTES)
+                    except zlib.error as exc:
+                        raise PortalProtocolError("Portal response was not valid gzip") from exc
         except urllib.error.HTTPError as exc:
             raise _PortalHttpError(exc.code) from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
@@ -197,6 +346,56 @@ class PortalClient:
             return parse_portal_day(payload, target_date)
         except ValueError as exc:
             raise PortalProtocolError("Portal schedule contract was invalid") from exc
+
+    def fetch_week(
+        self, target_date: date, username: str, password: str
+    ) -> dict[date, tuple[ClassSession, ...]]:
+        """Fetch the Monday-based week containing ``target_date`` in one call
+        (``lichhoc/lichTuan``) and group the sessions by calendar date."""
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
+        query = {"date": target_date.isoformat()}
+        try:
+            payload = self._request_json(
+                "GET", "lichhoc/lichTuan", token=token, query=query
+            )
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password, generation)
+            payload = self._request_json(
+                "GET", "lichhoc/lichTuan", token=token, query=query
+            )
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._store_token(refreshed_token, username, generation)
+        try:
+            return parse_portal_week(payload, target_date)
+        except ValueError as exc:
+            raise PortalProtocolError("Portal week contract was invalid") from exc
+
+    def fetch_credit_progress(
+        self, username: str, password: str
+    ) -> dict[str, Any] | None:
+        """Fetches graduation credit progress (``canDat`` / ``hienTai``) from Portal."""
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
+        try:
+            payload = self._request_json("GET", "hoctap/tiendo", token=token)
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password, generation)
+            payload = self._request_json("GET", "hoctap/tiendo", token=token)
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._store_token(refreshed_token, username, generation)
+        body = payload.get("body")
+        return body if isinstance(body, dict) else None
 
     def fetch_full_transcript(
         self, username: str, password: str
@@ -273,18 +472,22 @@ class PortalClient:
         self, username: str, password: str
     ) -> tuple[str, list[dict[str, Any]]]:
         """Fetch registered courses for the student's active semester via `/hoctap/hocky` & `/hoctap/montheoky/{idDot}`."""
-        token = self._token or self._login(username, password)
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
         try:
             hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password)
+            token = self._login(username, password, generation)
             hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
 
         refreshed_token = hk_payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
-            self._token = refreshed_token
+            token = refreshed_token
+            self._store_token(refreshed_token, username, generation)
 
         hk_list = hk_payload.get("body")
         if not isinstance(hk_list, list) or not hk_list:
@@ -308,9 +511,21 @@ class PortalClient:
             ten_dot = str(sem_entry.get("tenDot") or sem_entry.get("name") or "").strip()
             if not dot_id:
                 continue
-            mon_payload = self._request_json(
-                "GET", f"hoctap/montheoky/{dot_id}", token=token
-            )
+            try:
+                mon_payload = self._request_json(
+                    "GET", f"hoctap/montheoky/{dot_id}", token=token
+                )
+            except _PortalHttpError as exc:
+                if exc.status != 401:
+                    raise
+                token = self._login(username, password, generation)
+                mon_payload = self._request_json(
+                    "GET", f"hoctap/montheoky/{dot_id}", token=token
+                )
+            mon_refreshed = mon_payload.get("token")
+            if isinstance(mon_refreshed, str) and mon_refreshed:
+                token = mon_refreshed
+                self._store_token(mon_refreshed, username, generation)
             mon_body = mon_payload.get("body")
             if isinstance(mon_body, list) and mon_body:
                 normalized_items: list[dict[str, Any]] = []

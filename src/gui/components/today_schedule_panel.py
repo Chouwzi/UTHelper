@@ -274,13 +274,22 @@ class TodaySchedulePanel:
         return row
 
     def _surface_header(self, title: str, *, show_back: bool) -> ft.Row:
-        leading: ft.Control = ft.IconButton(
-            icon=ft.Icons.ARROW_BACK_ROUNDED,
-            icon_color=C.TEXT_SECONDARY,
-            icon_size=20,
-            tooltip="Quay lại",
-            on_click=lambda _event: self.handle_back(),
-        ) if show_back else ft.Container(width=48, height=48)
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
+        leading: ft.Control = ft.Semantics(
+            label="Quay lại",
+            button=True,
+            content=ft.IconButton(
+                icon=ft.Icons.ARROW_BACK_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                icon_size=20,
+                tooltip="Quay lại",
+                padding=0,
+                size_constraints=btn_constraints,
+                on_click=lambda _event: self.handle_back(),
+            ),
+        ) if show_back else ft.Container(width=44, height=44)
         return ft.Row(
             [
                 leading,
@@ -292,12 +301,18 @@ class TodaySchedulePanel:
                     text_align=ft.TextAlign.CENTER,
                     expand=True,
                 ),
-                ft.IconButton(
-                    icon=ft.Icons.CLOSE_ROUNDED,
-                    icon_color=C.TEXT_SECONDARY,
-                    icon_size=20,
-                    tooltip="Đóng",
-                    on_click=lambda _event: self.close_surface(),
+                ft.Semantics(
+                    label="Đóng",
+                    button=True,
+                    content=ft.IconButton(
+                        icon=ft.Icons.CLOSE_ROUNDED,
+                        icon_color=C.TEXT_SECONDARY,
+                        icon_size=20,
+                        tooltip="Đóng",
+                        padding=0,
+                        size_constraints=btn_constraints,
+                        on_click=lambda _event: self.close_surface(),
+                    ),
                 ),
             ],
             spacing=0,
@@ -533,10 +548,16 @@ class TodaySchedulePanel:
                 on_dismiss=self._on_surface_dismissed,
             )
         else:
+            surface_label = (
+                "Chi tiết lớp học"
+                if self._surface_mode == "detail"
+                else "Lịch học hôm nay"
+            )
             self._surface = ft.AlertDialog(
                 content=self._surface_content,
                 bgcolor=C.BG,
                 modal=True,
+                semantics_label=surface_label,
                 content_padding=0,
                 inset_padding=20,
                 shape=ft.RoundedRectangleBorder(radius=18),

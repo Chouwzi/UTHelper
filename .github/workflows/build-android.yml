@@ -1,24 +1,52 @@
-name: 📱 Build Android APK
+name: 📱 Build Android APK & CH Play AAB
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [develop, main]
+    paths:
+      - 'extensions/flet_uth_background_sync/**'
+      - 'extensions/flet_uth_quiz/**'
+      - 'pyproject.toml'
+      - 'scripts/build_android.ps1'
+      - 'scripts/prepare_android_flutter_project.py'
+      - 'scripts/verify_android_release.py'
+      - 'scripts/release_metadata.py'
+      - 'scripts/generate_public_runtime_*.py'
+      - '.github/workflows/build-android.yml'
+      - 'src/core/distribution.py'
+      - 'src/platform_utils/background_sync.py'
+      - 'src/assets/office_viewer/**'
   workflow_dispatch:
+    inputs:
+      sign_upload:
+        description: Sign CH Play AAB with Play Upload Keystore (requires PLAY_UPLOAD_KEYSTORE_* secrets/vars)
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: build-android-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   build:
-    name: Build Android
+    name: Build Android (${{ matrix.channel }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: apk_lts
+            target: apk
+            legacy_flag: --android-legacy-packaging
+          - channel: chplay
+            target: aab
+            legacy_flag: --no-android-legacy-packaging
 
     steps:
       - name: 📥 Checkout
@@ -41,51 +69,146 @@ jobs:
       - name: 📦 Install project and Flet CLI
         run: |
           pip install -e ".[android-build]"
+          pip install "flet[cli]==0.86.5"
           flet --version
 
-      - name: 🔨 Build APK
+      - name: 🔨 Build Android Artifact (${{ matrix.channel }})
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          CHANNEL: ${{ matrix.channel }}
+          BUILD_TARGET: ${{ matrix.target }}
+          LEGACY_FLAG: ${{ matrix.legacy_flag }}
+          SIGN_UPLOAD_INPUT: ${{ inputs.sign_upload }}
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+          PLAY_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_UPLOAD_KEY_ALIAS: ${{ vars.PLAY_UPLOAD_KEY_ALIAS }}
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
         run: |
+          set -euo pipefail
+          KEYSTORE=""
+          cleanup() {
+            rm -f -- src/assets/distribution-channel.json
+            if [ -n "$KEYSTORE" ]; then
+              rm -f -- "$KEYSTORE"
+            fi
+          }
+          trap cleanup EXIT
+
+          SIGN_UPLOAD="false"
+          if [ "$CHANNEL" = "chplay" ] && [ "${SIGN_UPLOAD_INPUT:-false}" = "true" ]; then
+            SIGN_UPLOAD="true"
+          elif [ "$CHANNEL" = "chplay" ] && [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ] && [ -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}" ]; then
+            SIGN_UPLOAD="true"
+          fi
+
+          if [ "$SIGN_UPLOAD" = "true" ]; then
+            test -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}"
+            test -n "${PLAY_UPLOAD_KEYSTORE_PASSWORD:-}"
+            test -n "${PLAY_UPLOAD_KEY_PASSWORD:-}"
+            test -n "${PLAY_UPLOAD_KEY_ALIAS:-}"
+            test -n "${PLAY_UPLOAD_CERT_SHA256:-}"
+            umask 077
+            KEYSTORE="$RUNNER_TEMP/play-upload.jks"
+            printf '%s' "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+            unset PLAY_UPLOAD_KEYSTORE_BASE64
+            export FLET_ANDROID_SIGNING_KEY_STORE="$KEYSTORE"
+            export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$PLAY_UPLOAD_KEYSTORE_PASSWORD"
+            export FLET_ANDROID_SIGNING_KEY_PASSWORD="$PLAY_UPLOAD_KEY_PASSWORD"
+            export FLET_ANDROID_SIGNING_KEY_ALIAS="$PLAY_UPLOAD_KEY_ALIAS"
+          fi
+          echo "CHPLAY_SIGNED_UPLOAD=$SIGN_UPLOAD" >> "$GITHUB_ENV"
+
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
 
-          # Install Gradle init script for core library desugaring
-          # This applies to ALL Android subprojects automatically,
-          # without needing to patch any build.gradle.kts file
-          mkdir -p ~/.gradle/init.d
-          cat > ~/.gradle/init.d/desugaring.gradle << 'INIT_GRADLE'
-          allprojects {
-              afterEvaluate {
-                  if (project.hasProperty('android')) {
-                      android {
-                          compileOptions {
-                              coreLibraryDesugaringEnabled true
-                          }
-                          defaultConfig {
-                              multiDexEnabled true
-                          }
-                      }
-                      dependencies {
-                          coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
-                      }
-                  }
-              }
-          }
-          INIT_GRADLE
-          echo "✅ Installed Gradle init script for desugaring"
+          export UTH_DISTRIBUTION_CHANNEL="$CHANNEL"
+          export ORG_GRADLE_PROJECT_uthDistributionChannel="$CHANNEL"
+
+          EXTRA_ARGS=("$LEGACY_FLAG")
+          if [ "$CHANNEL" = "chplay" ]; then
+            EXTRA_ARGS+=(
+              --android-permissions android.permission.REQUEST_INSTALL_PACKAGES=false
+              --android-permissions android.permission.FOREGROUND_SERVICE=false
+              --android-permissions android.permission.FOREGROUND_SERVICE_DATA_SYNC=false
+              --android-permissions android.permission.USE_EXACT_ALARM=false
+            )
+          fi
 
           # First pass materializes Flet's Flutter project. The notification
-          # extension patcher then registers AlarmManager receivers/services.
+          # extension patcher and shared channel preparation then configure SDK 36,
+          # manifest removals, and 16 KB packaging before the final build pass.
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose || test -d build/flutter
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
+          flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
-          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
-          flet build apk --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
+          python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel "$CHANNEL" --target-sdk 36
 
-      - name: 🔎 Verify notification manifest wiring
+          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
+          flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose
+
+      - name: Test native update and background sync contracts
+        if: matrix.channel == 'apk_lts'
+        timeout-minutes: 15
+        working-directory: build/flutter/android
+        run: |
+          # Test the source library independently: configuring the full app here
+          # would require Flet's transient serious_python packaging environment.
+          UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
+          UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
+          test -f "$UTH_EMBEDDING_JAR"
+          ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
+            testDebugUnitTest -Pandroid.useAndroidX=true -PuthDistributionChannel=apk_lts \
+            -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
+
+      - name: Test and compile CH Play stripped native plugin
+        if: matrix.channel == 'chplay'
+        timeout-minutes: 15
+        working-directory: build/flutter/android
+        run: |
+          UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
+          UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
+          test -f "$UTH_EMBEDDING_JAR"
+          PLUGIN_DIR="../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
+          ./gradlew -p "$PLUGIN_DIR" \
+            testDebugUnitTest bundleReleaseAar -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
+            -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
+          python - "$PLUGIN_DIR" <<'PY'
+          import io
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          plugin_dir = Path(sys.argv[1])
+          aar_files = sorted((plugin_dir / "build/outputs/aar").glob("*-release.aar"))
+          if not aar_files:
+              raise SystemExit("Release AAR was not built for chplay plugin")
+          with zipfile.ZipFile(aar_files[0]) as aar:
+              if "res/xml/uth_update_paths.xml" in aar.namelist():
+                  raise SystemExit("chplay AAR unexpectedly includes res/xml/uth_update_paths.xml")
+              classes_jar = aar.read("classes.jar")
+          with zipfile.ZipFile(io.BytesIO(classes_jar)) as jar:
+              leaked = [
+                  name for name in jar.namelist()
+                  if "com/uthelper/backgroundsync/update/" in name
+                  or "ApkUpdate" in name
+                  or "UthUpdateFileProvider" in name
+              ]
+          if leaked:
+              raise SystemExit(f"chplay classes.jar contains prohibited updater classes: {leaked}")
+          print(f"Verified zero updater classes in {aar_files[0].name} classes.jar")
+          PY
+
+      - name: 🔎 Verify materialized native plugin dependencies
+        run: |
+          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
+            build/flutter-packages/flet_uth_background_sync/android/build.gradle
+          grep -R -q "androidx.room:room-runtime:2.8.4" \
+            build/flutter-packages/flet_uth_background_sync/android/build.gradle
+
+      - name: 🔎 Verify apk_lts notification manifest wiring
+        if: matrix.channel == 'apk_lts'
         run: |
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
           test "${#APK_CANDIDATES[@]}" -eq 1
@@ -99,10 +222,6 @@ jobs:
           grep -q "ActionBroadcastReceiver" final-android-manifest.xml
           grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
           grep -q "RescheduleReceiver" final-android-manifest.xml
-          grep -R -q "androidx.work:work-runtime-ktx:2.11.2" \
-            build/flutter-packages/flet_uth_background_sync/android/build.gradle
-          grep -R -q "androidx.room:room-runtime:2.8.4" \
-            build/flutter-packages/flet_uth_background_sync/android/build.gradle
           DIAGNOSTIC_APK="UTHelper-${{ github.sha }}-unsigned-diagnostic.apk"
           mv "$APK" "$DIAGNOSTIC_APK"
           python - "$DIAGNOSTIC_APK" <<'PY'
@@ -122,10 +241,54 @@ jobs:
             exit 1
           fi
 
-      - name: 📤 Upload unsigned diagnostic APK
+      - name: 🔎 Verify CH Play AAB compliance (16 KB ELF, DEX, manifest)
+        if: matrix.channel == 'chplay'
+        env:
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
+          BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
+          mapfile -t AAB_CANDIDATES < <(find build/aab -maxdepth 1 -name '*.aab' -type f | sort)
+          test "${#AAB_CANDIDATES[@]}" -eq 1
+
+          VERIFY_ARGS=(
+            --channel chplay
+            --version "$PROJECT_VERSION"
+            --build-number "$BUILD_NUMBER"
+            --package-id com.uthelper.uthelper
+            --commit-sha "${{ github.sha }}"
+            --workflow-run-id "${{ github.run_id }}"
+            --architecture universal
+            --require-office-viewer
+            --output "chplay-diagnostic.verification.json"
+          )
+          if [ "${CHPLAY_SIGNED_UPLOAD:-false}" = "true" ]; then
+            TARGET_AAB="UTHelper-${PROJECT_VERSION}-chplay-upload-signed.aab"
+            VERIFY_ARGS+=(--certificate-sha256 "$PLAY_UPLOAD_CERT_SHA256")
+          else
+            TARGET_AAB="UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab"
+            VERIFY_ARGS+=(--allow-unsigned)
+          fi
+          mv "${AAB_CANDIDATES[0]}" "$TARGET_AAB"
+          python scripts/verify_android_release.py --aab "$TARGET_AAB" "${VERIFY_ARGS[@]}"
+
+      - name: 📤 Upload unsigned diagnostic APK (apk_lts)
+        if: matrix.channel == 'apk_lts'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: android-unsigned-diagnostic-${{ github.sha }}
           path: UTHelper-${{ github.sha }}-unsigned-diagnostic.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 📤 Upload CH Play AAB (${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }})
+        if: matrix.channel == 'chplay'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-chplay-${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }}-${{ github.sha }}
+          path: |
+            UTHelper-*.aab
+            chplay-diagnostic.verification.json
           retention-days: 30
           if-no-files-found: error

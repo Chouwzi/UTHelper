@@ -7,7 +7,7 @@ import inspect
 from pathlib import Path
 import re
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import flet as ft
 
@@ -158,13 +158,19 @@ class DocumentReaderView(ft.Container):
         self._office_viewer: Optional[OfficeViewerDescriptor] = None
         self._office_webview: Optional[ft.Control] = None
         self._embedded_host = None
+        self._webview_failed: bool = False
 
         size_text = format_file_size(len(self._data)) or "0 B"
+        hide_night_for_wv_pdf = bool(
+            self._kind == "pdf"
+            and self._pdf_in_webview
+            and self._webview_builder is not None
+        )
         self._night_btn = ft.IconButton(
             icon=ft.Icons.DARK_MODE_OUTLINED,
             tooltip="Chế độ đọc tối",
             icon_color=C.TEXT_SECONDARY,
-            visible=self._kind in _NIGHT_MODE_KINDS,
+            visible=(self._kind in _NIGHT_MODE_KINDS) and not hide_night_for_wv_pdf,
             on_click=self._toggle_reader_mode,
         )
         self._expand_btn = build_expand_toggle_button(
@@ -318,11 +324,55 @@ class DocumentReaderView(ft.Container):
         self._html_urls[dark_mode] = url
         return url
 
+    def _fallback_from_webview(self, _reason: str = "") -> None:
+        def _apply() -> None:
+            if self._disposed or self._webview_failed:
+                return
+            self._webview_failed = True
+            self._office_webview = None
+            self._active_webview_url = None
+            if self._embedded_host is not None:
+                try:
+                    self._embedded_host.dispose()
+                except Exception:
+                    pass
+                self._embedded_host = None
+            self._night_btn.visible = self._kind in _NIGHT_MODE_KINDS
+            self._set_body_content(self._build_body())
+            safe_control_update(self)
+
+        page = self._get_page()
+        if page is not None and callable(getattr(page, "run_task", None)):
+            try:
+                asyncio.get_running_loop()
+                _apply()
+                return
+            except RuntimeError:
+                async def _run() -> None:
+                    _apply()
+
+                try:
+                    page.run_task(_run)
+                    return
+                except Exception:
+                    pass
+        _apply()
+
     def _build_webview(self, url: str) -> Optional[ft.Control]:
-        if self._webview_builder is None:
+        if self._webview_builder is None or self._webview_failed:
             return None
         try:
-            result = self._webview_builder(url)
+            try:
+                result = self._webview_builder(url, on_error=self._fallback_from_webview)
+            except TypeError:
+                result = self._webview_builder(url)
+            dock = getattr(result, "dock", None)
+            if dock is not None and getattr(dock, "_failed", False) is True:
+                dispose_fn = getattr(result, "dispose", None)
+                if callable(dispose_fn):
+                    dispose_fn()
+                self._webview_failed = True
+                return None
             control_fn = getattr(result, "control", None)
             if callable(control_fn):
                 if self._embedded_host is not None and self._embedded_host is not result:
@@ -471,6 +521,50 @@ class DocumentReaderView(ft.Container):
         self._set_body_content(self._build_body())
         safe_control_update(self)
         return True
+
+    def handle_key_event(self, e: Any) -> bool:
+        """Handle Esc-to-close and keyboard shortcuts inside the document reader."""
+        if self._disposed:
+            return False
+        key = str(getattr(e, "key", "") or "")
+        ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
+        if key == "Escape":
+            if self.handle_back():
+                return True
+            self._handle_close()
+            return True
+        if ctrl and key.lower() == "f" and self._kind == "pdf" and not self._active_webview_url:
+            self._pdf_search_open = not self._pdf_search_open
+            self._set_body_content(self._build_body())
+            safe_control_update(self)
+            return True
+        if key in ("ArrowLeft", "Page Up", "PageUp"):
+            if self._kind == "pptx" and self._office_webview is None and self._pptx_page_index > 0:
+                self._pptx_page_index -= 1
+                self._set_body_content(self._build_body())
+                safe_control_update(self)
+                return True
+            if self._kind == "pdf" and not self._active_webview_url and self._pdf_page_index > 0:
+                self._pdf_page_index -= 1
+                self._set_body_content(self._build_body())
+                safe_control_update(self)
+                return True
+        if key in ("ArrowRight", "Page Down", "PageDown"):
+            if self._kind == "pptx" and self._office_webview is None:
+                converted = self._get_converted()
+                if self._pptx_page_index + 1 < len(converted.slides):
+                    self._pptx_page_index += 1
+                    self._set_body_content(self._build_body())
+                    safe_control_update(self)
+                    return True
+            if self._kind == "pdf" and not self._active_webview_url:
+                sess = self._ensure_pdf_session()
+                if sess.supported and self._pdf_page_index + 1 < sess.page_count:
+                    self._pdf_page_index += 1
+                    self._set_body_content(self._build_body())
+                    safe_control_update(self)
+                    return True
+        return False
 
     def _jump_to_anchor(self, list_view: ft.ListView, anchor_id: str) -> None:
         async def _do_scroll() -> None:
@@ -2794,7 +2888,11 @@ class DocumentReaderView(ft.Container):
             )
 
         if self._kind == "pdf" or self._rendered_pdf_bytes is not None:
-            if self._pdf_in_webview and self._webview_builder is not None:
+            if (
+                self._pdf_in_webview
+                and not self._webview_failed
+                and self._webview_builder is not None
+            ):
                 pdf_url = self._try_register_pdf_url()
                 webview = self._build_webview(pdf_url) if pdf_url else None
                 if webview is not None:
@@ -2807,7 +2905,7 @@ class DocumentReaderView(ft.Container):
                     f"{self._kind.upper()} · {session.page_count} trang · {size_text}"
                 )
                 return self._build_native_pdf_body(session)
-            if self._webview_builder is not None:
+            if self._webview_builder is not None and not self._webview_failed:
                 pdf_url = self._try_register_pdf_url()
                 if pdf_url:
                     wv = self._build_webview(pdf_url)
@@ -2824,7 +2922,11 @@ class DocumentReaderView(ft.Container):
             )
 
         if self._kind in {"docx", "xlsx", "csv", "pptx", "text"}:
-            if self._kind in {"docx", "pptx"} and self._webview_builder is not None:
+            if (
+                self._kind in {"docx", "pptx"}
+                and not self._webview_failed
+                and self._webview_builder is not None
+            ):
                 if self._office_viewer is None or not self._preview_server.has_active_url(self._office_viewer.blob_url):
                     self._office_viewer = prepare_office_viewer(
                         self._data, self._file_name, self._preview_server,
@@ -2838,7 +2940,11 @@ class DocumentReaderView(ft.Container):
                         self._active_webview_url = self._office_viewer.viewer_url
                         return self._office_webview
             converted = self._get_converted()
-            if converted.html_document and self._webview_builder is not None:
+            if (
+                converted.html_document
+                and not self._webview_failed
+                and self._webview_builder is not None
+            ):
                 html_url = self._try_register_html_url(
                     bool(self._dark_reader), converted.html_document
                 )

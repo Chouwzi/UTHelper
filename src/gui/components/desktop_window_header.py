@@ -66,6 +66,18 @@ def build_desktop_window_header(
         hover_color=C.SURFACE_HOVER,
         on_click=on_minimize,
     )
+    maximize = None
+    if on_maximize is not None:
+        maximize = ft.IconButton(
+            ft.Icons.CROP_SQUARE_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=15,
+            tooltip="Phóng to / Khôi phục",
+            padding=0,
+            size_constraints=button_constraints,
+            hover_color=C.SURFACE_HOVER,
+            on_click=on_maximize,
+        )
     close = ft.IconButton(
         ft.Icons.CLOSE_ROUNDED,
         icon_color=C.TEXT_SECONDARY,
@@ -96,24 +108,24 @@ def build_desktop_window_header(
             pass
 
     close.on_hover = rotate_close_on_hover
-    header_controls: list[ft.Control] = [drag_area, minimize]
-    if on_maximize is not None:
-        header_controls.append(
-            ft.IconButton(
-                ft.Icons.CROP_SQUARE_ROUNDED,
-                icon_color=C.TEXT_SECONDARY,
-                icon_size=16,
-                tooltip="Phóng to / Thu nhỏ",
-                padding=0,
-                size_constraints=button_constraints,
-                hover_color=C.SURFACE_HOVER,
-                on_click=on_maximize,
-            )
-        )
-    header_controls.append(close)
     return ft.Container(
         content=ft.Row(
-            controls=header_controls,
+            controls=[
+                drag_area,
+                ft.Semantics(label="Thu nhỏ", button=True, content=minimize),
+                *(
+                    [
+                        ft.Semantics(
+                            label="Phóng to / Khôi phục",
+                            button=True,
+                            content=maximize,
+                        )
+                    ]
+                    if maximize
+                    else []
+                ),
+                ft.Semantics(label="Thoát ứng dụng", button=True, content=close),
+            ],
             spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),

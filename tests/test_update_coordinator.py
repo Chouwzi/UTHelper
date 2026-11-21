@@ -116,10 +116,11 @@ class _Launcher:
     def __init__(self):
         self.calls = []
         self.cancel_calls = 0
+        self.result = LaunchResult(True)
 
     def launch(self, path, package):
         self.calls.append((path, package))
-        return LaunchResult(True)
+        return self.result
 
     def cancel(self):
         self.cancel_calls += 1
@@ -213,10 +214,18 @@ def test_verified_download_never_launches_until_explicit_confirmation(tmp_path):
     _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
     assert downloader.calls == 1
     assert launcher.calls == []
+    kinds = [item.kind for item in events["items"]]
+    assert kinds.index(UpdateEventKind.VERIFYING) < kinds.index(
+        UpdateEventKind.READY_TO_INSTALL
+    )
 
     coordinator.confirm_install()
     _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
     assert len(launcher.calls) == 1
+    kinds = [item.kind for item in events["items"]]
+    assert kinds.index(UpdateEventKind.INSTALLING) < kinds.index(
+        UpdateEventKind.INSTALL_LAUNCHED
+    )
     assert coordinator.shutdown(timeout_seconds=1.0) is True
 
 
@@ -256,6 +265,163 @@ def test_same_candidate_reuses_verified_download_after_confirmation_is_deferred(
     assert downloader.calls == 1
     assert launcher.calls == []
     assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_same_candidate_recheck_retains_verified_download(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, _, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.check_now()
+    _wait_for(events, UpdateEventKind.UPDATE_AVAILABLE)
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_install_failure_retry_reuses_verified_download(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    launcher.result = LaunchResult(False, "installer is unavailable", "launch_failed")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer opened", "installer_opened")
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+
+    assert downloader.calls == 1
+    assert len(launcher.calls) == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_permission_required_keeps_package_for_confirmed_retry(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    launcher.result = LaunchResult(
+        False,
+        "Allow installing apps to continue",
+        "permission_required",
+    )
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_PERMISSION_REQUIRED)
+    assert events["items"][-1].message == "Allow installing apps to continue"
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer opened", "installer_opened")
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+
+    assert downloader.calls == 1
+    assert len(launcher.calls) == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_existing_download_is_observed_after_update_check_without_duplicate_queue(
+    tmp_path,
+):
+    coordinator, _, downloader, _, events = _coordinator(tmp_path)
+    pending_calls = []
+    downloader.block = True
+    downloader.has_pending_download = lambda package: pending_calls.append(package) or True
+
+    coordinator.start()
+    _wait_for(events, UpdateEventKind.UPDATE_AVAILABLE)
+    assert downloader.started.wait(1.0)
+    candidate = _candidate()
+    for _ in range(5):
+        coordinator.request_download(candidate)
+
+    assert downloader.calls == 1
+    assert pending_calls == [candidate.package]
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+    assert downloader.cancelled.wait(1.0)
+
+
+def test_explicit_download_cancellation_allows_a_cached_candidate_retry(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, _, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    downloader.block = True
+    coordinator.request_download(candidate)
+    assert downloader.started.wait(1.0)
+    coordinator.cancel_download()
+    _wait_for(events, UpdateEventKind.CANCELLED)
+
+    downloader.block = False
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    assert downloader.calls == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_shutdown_detaches_durable_download_and_preserves_completed_path(tmp_path):
+    class _DetachableDownloader(_Downloader):
+        def __init__(self, path):
+            super().__init__(path)
+            self.detached = threading.Event()
+
+        def has_pending_download(self, _package):
+            return True
+
+        def detach(self):
+            self.detached.set()
+
+        def download(self, package, *, cancel, progress=None):
+            self.calls += 1
+            self.started.set()
+            assert cancel.wait(2.0)
+            assert self.detached.is_set()
+            self.path.write_bytes(b"payload")
+            return self.path
+
+    coordinator, _, _, _, _ = _coordinator(tmp_path)
+    downloader = _DetachableDownloader(tmp_path / "UTHelper.msi")
+    coordinator._downloader = downloader
+    coordinator.start()
+    assert downloader.started.wait(1.0)
+
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+    assert downloader.detached.is_set()
+    assert downloader.path.is_file()
 
 
 def test_confirmation_reverifies_retained_package_before_installer_handoff(tmp_path):
@@ -443,3 +609,323 @@ def test_shutdown_wins_over_an_automatic_check_waiting_in_the_queue(tmp_path):
 
     assert result == [True]
     assert client.calls == 0
+
+
+def test_confirmation_retry_reuses_native_cache_when_downloaded_path_missing(tmp_path):
+    candidate = _candidate(platform="android")
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    launcher.supports_cached_package_retry = True
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    launcher.result = LaunchResult(False, "Allow installing apps", "permission_required")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_PERMISSION_REQUIRED)
+
+    # Simulate Android DownloadManager clearing external file while native
+    # verified_updates cache still retains the verified APK.
+    downloader.path.unlink()
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer_opened", "installer_opened")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+
+    assert len(launcher.calls) == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_confirmation_clears_ready_path_when_native_reports_source_unavailable(tmp_path):
+    candidate = _candidate(platform="android")
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    launcher.supports_cached_package_retry = True
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    downloader.path.unlink()
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(False, "source_unavailable", status="failed")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert events["items"][-1].message == "source_unavailable"
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_transient_verification_result_preserves_downloaded_package(tmp_path):
+    from platform_utils.windows_update import TransientVerificationResult
+
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.test_verifier.result = TransientVerificationResult(
+        False,
+        "Windows package verification timed out",
+        retryable=True,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.FAILED)
+    assert downloader.path.is_file()
+
+    # Subsequent confirmation with transient verification timeout also preserves file.
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.test_verifier.result = VerificationResult(True)
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.test_verifier.result = TransientVerificationResult(
+        False,
+        "Windows package verification timed out",
+        retryable=True,
+    )
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.FAILED)
+    assert downloader.path.is_file()
+    assert launcher.calls == []
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_shutdown_interrupts_cancellable_client_and_verifier_quickly(tmp_path):
+    import time
+
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    class SlowCancellableClient:
+        def fetch_candidate(self, _current, _target, *, cancel=None):
+            started.set()
+            if cancel is not None:
+                cancel.wait(5.0)
+            else:
+                cancelled.wait(5.0)
+            raise RuntimeError("cancelled")
+
+        def cancel(self):
+            cancelled.set()
+
+    state, sink = _event_sink()
+    coordinator = UpdateCoordinator(
+        client=SlowCancellableClient(),
+        downloader=_Downloader(tmp_path / "UTHelper.msi"),
+        verifier=_Verifier(),
+        launcher=_Launcher(),
+        target=RuntimeTarget("windows", "x64", "msi"),
+        current_version="2.2.0",
+        event_sink=sink,
+        automatic_enabled=True,
+    )
+    coordinator.start()
+    assert started.wait(1.0)
+
+    t0 = time.monotonic()
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+    assert time.monotonic() - t0 < 0.5
+    assert cancelled.is_set()
+    assert not any(ev.kind is UpdateEventKind.FAILED for ev in state["items"])
+
+
+def test_confirmation_preserves_ready_path_on_transient_bridge_failure_when_cached_retry_supported(
+    tmp_path,
+):
+    candidate = _candidate(platform="android")
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    launcher.supports_cached_package_retry = True
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    # Simulate external DownloadManager file cleanup followed by transient bridge failure.
+    downloader.path.unlink()
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(
+        False,
+        "Android installer service failed",
+        status="bridge_failed",
+    )
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert events["items"][-1].message == "bridge_failed"
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer_opened", status="installer_opened")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+
+    assert downloader.calls == 1
+    assert len(launcher.calls) == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def _start_stalling_server(
+    *,
+    body_prefix: bytes,
+    content_length: int,
+    entered: threading.Event,
+    release: threading.Event,
+):
+    import http.server
+
+    class StallingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(content_length))
+            self.end_headers()
+            self.wfile.write(body_prefix)
+            self.wfile.flush()
+            entered.set()
+            release.wait(5.0)
+
+        def log_message(self, *_args):
+            return None
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StallingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_shutdown_unblocks_real_stalled_http_release_check_promptly(tmp_path):
+    import time
+    from core.update_checker import GitHubReleaseClient
+
+    entered = threading.Event()
+    release = threading.Event()
+    server, server_thread = _start_stalling_server(
+        body_prefix=b'{"tag_name":',
+        content_length=4096,
+        entered=entered,
+        release=release,
+    )
+    port = server.server_address[1]
+    client = GitHubReleaseClient(releases_url=f"http://127.0.0.1:{port}/latest")
+    state, sink = _event_sink()
+    coordinator = UpdateCoordinator(
+        client=client,
+        downloader=_Downloader(tmp_path / "UTHelper.msi"),
+        verifier=_Verifier(),
+        launcher=_Launcher(),
+        target=RuntimeTarget("windows", "x64", "msi"),
+        current_version="2.2.0",
+        event_sink=sink,
+        automatic_enabled=True,
+    )
+    try:
+        coordinator.start()
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with client._lock:
+                if client._active_responses:
+                    break
+            threading.Event().wait(0.01)
+
+        started = time.monotonic()
+        joined = coordinator.shutdown(timeout_seconds=0.5)
+        elapsed = time.monotonic() - started
+
+        assert joined is True
+        assert elapsed < 0.5
+        assert not any(ev.kind is UpdateEventKind.FAILED for ev in state["items"])
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1.0)
+
+
+def test_shutdown_unblocks_real_stalled_http_download_promptly(tmp_path):
+    import time
+    from core.update_checker import VerifiedDownloader
+
+    entered = threading.Event()
+    release = threading.Event()
+    server, server_thread = _start_stalling_server(
+        body_prefix=b"partial-installer",
+        content_length=4096,
+        entered=entered,
+        release=release,
+    )
+    port = server.server_address[1]
+    package = ReleasePackage(
+        platform="windows",
+        architecture="x64",
+        package_type="msi",
+        install_channel="bootstrapper",
+        url=f"http://127.0.0.1:{port}/UTHelper.msi",
+        sha256="a" * 64,
+        size=4096,
+        signer_identity="UTHelper",
+        certificate_fingerprint="b" * 64,
+        install_strategy={"kind": "msi", "product": "UTHelper"},
+    )
+    manifest = ReleaseManifest(
+        schema_version=2,
+        release_version="2.3.0",
+        minimum_supported_version="2.0.0",
+        published_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+        release_notes_url="https://github.com/Chouwzi/UTHelper/releases/tag/v2.3.0",
+        packages=(package,),
+    )
+    candidate = UpdateCandidate(
+        manifest=manifest,
+        package=package,
+        automatic_install_allowed=True,
+        required_update=False,
+    )
+    downloader = VerifiedDownloader(cache_dir=tmp_path)
+    state, sink = _event_sink()
+    coordinator = UpdateCoordinator(
+        client=_Client(candidate),
+        downloader=downloader,
+        verifier=_Verifier(),
+        launcher=_Launcher(),
+        target=RuntimeTarget("windows", "x64", "bootstrapper"),
+        current_version="2.2.0",
+        event_sink=sink,
+        automatic_enabled=False,
+    )
+    try:
+        coordinator.request_download(candidate)
+        assert entered.wait(2.0)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with downloader._lock:
+                if downloader._active_responses:
+                    break
+            threading.Event().wait(0.01)
+
+        started = time.monotonic()
+        joined = coordinator.shutdown(timeout_seconds=0.5)
+        elapsed = time.monotonic() - started
+
+        assert joined is True
+        assert elapsed < 0.5
+        assert not any(ev.kind is UpdateEventKind.FAILED for ev in state["items"])
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1.0)

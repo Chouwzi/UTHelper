@@ -5,8 +5,10 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -16,8 +18,10 @@ from core.update_coordinator import UpdateEvent, UpdateEventKind
 from core.update_models import ReleasePackage
 from gui.app_controller import (
     AppController,
-    _AndroidPackageLauncher,
-    _android_release_build_number,
+)
+from platform_utils.android_updates import (
+    AndroidPackageLauncher as _AndroidPackageLauncher,
+    android_release_build_number as _android_release_build_number,
 )
 from gui.components.activity_card import ActivityCard
 from gui.components.today_schedule_panel import TodaySchedulePanel
@@ -471,12 +475,12 @@ def test_reconcile_identity_is_captured_at_task_creation_not_after_lock(monkeypa
     assert len(fetch_log) == 2  # blocker fetched; stale aborted before fetch
 
 
-def _portal_session(*, hours_from_now: float = 5.0):
+def _portal_session(*, hours_from_now: float = 5.0, session_id: str = "session-1"):
     from core.today_schedule import ClassSession
 
     start = datetime.now() + timedelta(hours=hours_from_now)
     return ClassSession(
-        session_id="session-1",
+        session_id=session_id,
         subject="Mạng máy tính",
         course_code="CN123",
         start_at=start,
@@ -559,6 +563,75 @@ def test_reconcile_auth_failure_clears_the_previously_armed_schedule(monkeypatch
     assert applied == [()]
 
 
+@pytest.mark.parametrize("use_android_bridge", [False, True], ids=["windows", "android"])
+def test_reconcile_transient_tomorrow_failure_preserves_armed_schedule(
+    monkeypatch, use_android_bridge
+):
+    """An incomplete timetable must not replace the last complete alarm set."""
+    from unittest.mock import AsyncMock
+
+    from notifiers.manager import NotificationManager
+
+    _class_reconcile_settings(monkeypatch, username="student-01", password="secret")
+
+    async def fetch_day(_credentials):
+        raise OSError("temporary Portal outage")
+
+    applied = []
+    manager = NotificationManager(tray_app=None)
+    manager.notifiers.append(
+        SimpleNamespace(reconcile_class_schedule_reminders=lambda reminders: applied.append(reminders))
+    )
+    bridge = (
+        SimpleNamespace(
+            available=True,
+            schedule_class_sessions=AsyncMock(
+                return_value={"scheduled": 1, "cancelled": 0}
+            ),
+        )
+        if use_android_bridge
+        else None
+    )
+
+    asyncio.run(
+        manager.reconcile_class_schedule_notifications(
+            (_portal_session(),),
+            fetch_day=fetch_day,
+            android_bridge=bridge,
+        )
+    )
+
+    assert applied == []
+    if bridge is not None:
+        bridge.schedule_class_sessions.assert_not_awaited()
+
+
+def test_reconcile_successful_empty_timetable_clears_armed_schedule(monkeypatch):
+    """A valid empty response remains authoritative and must clear old alarms."""
+    from unittest.mock import AsyncMock
+
+    from notifiers.manager import NotificationManager
+
+    _class_reconcile_settings(monkeypatch, username="student-01", password="secret")
+    bridge = SimpleNamespace(
+        available=True,
+        schedule_class_sessions=AsyncMock(
+            return_value={"scheduled": 0, "cancelled": 2}
+        ),
+    )
+    manager = NotificationManager(tray_app=None)
+
+    asyncio.run(
+        manager.reconcile_class_schedule_notifications(
+            (),
+            fetch_day=AsyncMock(return_value=()),
+            android_bridge=bridge,
+        )
+    )
+
+    bridge.schedule_class_sessions.assert_awaited_once_with([], enabled=True)
+
+
 def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
     monkeypatch,
 ):
@@ -568,6 +641,8 @@ def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
     from notifiers.manager import NotificationManager
 
     _class_reconcile_settings(monkeypatch, username="student-01", password="secret")
+    today = _portal_session(hours_from_now=5)
+    tomorrow = _portal_session(hours_from_now=28, session_id="session-tomorrow")
 
     bridge = SimpleNamespace(
         available=True,
@@ -585,8 +660,8 @@ def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
 
     asyncio.run(
         manager.reconcile_class_schedule_notifications(
-            (_portal_session(),),
-            fetch_day=AsyncMock(return_value=()),
+            (today,),
+            fetch_day=AsyncMock(return_value=(tomorrow,)),
             android_bridge=bridge,
         )
     )
@@ -595,10 +670,13 @@ def test_reconcile_pushes_payload_to_android_bridge_without_windows_fallback(
     bridge.schedule_class_sessions.assert_awaited_once()
     (payload,) = bridge.schedule_class_sessions.await_args.args
     assert bridge.schedule_class_sessions.await_args.kwargs == {"enabled": True}
-    assert len(payload) == 1
-    assert payload[0]["subject"] == "Mạng máy tính"
-    assert payload[0]["delivery_mode"] == "in_person"
-    assert payload[0]["room"] == "F.302"
+    assert {item["session_id"] for item in payload} == {
+        "session-1",
+        "session-tomorrow",
+    }
+    assert all(item["subject"] == "Mạng máy tính" for item in payload)
+    assert all(item["delivery_mode"] == "in_person" for item in payload)
+    assert all(item["room"] == "F.302" for item in payload)
 
 
 def test_clear_only_reconcile_survives_the_account_switch_that_follows_it(monkeypatch):
@@ -682,6 +760,9 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     controller.orchestrator = None
     controller._data_cache = None
     controller._portal_client = SimpleNamespace(clear_token=Mock())
+    controller._portal_week_client = SimpleNamespace(clear_token=Mock())
+    controller._week_schedule_cache = SimpleNamespace(set_namespace=Mock())
+    controller.calendar_view = SimpleNamespace(reset_schedule=Mock())
     coordinator = SimpleNamespace(
         replace_cache=Mock(), ensure_today=Mock(), refresh=Mock()
     )
@@ -718,6 +799,12 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     # namespace happens to hold (ensure_today would publish it as READY).
     assert scheduled[1][0] is coordinator.refresh
     assert scheduled[1][1] == ("credentials_changed",)
+    controller._portal_client.clear_token.assert_called_once()
+    controller._portal_week_client.clear_token.assert_called_once()
+    controller._week_schedule_cache.set_namespace.assert_called_once_with(
+        f"{settings.PORTAL_API_BASE}|new-user"
+    )
+    controller.calendar_view.reset_schedule.assert_called_once()
     coordinator.ensure_today.assert_not_called()
     coordinator.replace_cache.assert_called_once()
 
@@ -848,13 +935,18 @@ def test_shared_back_navigation_returns_to_dashboard_from_every_child_view():
         controller.detail_view = SimpleNamespace(visible=False)
         controller.calendar_view = SimpleNamespace(visible=False)
         controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller.course_grades_view = SimpleNamespace(visible=False)
+        controller.courses_view = SimpleNamespace(visible=False)
         controller._close_detail = AsyncMock()
         controller._close_calendar = AsyncMock()
         controller._close_grades = AsyncMock()
+        controller._close_course_grades = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
 
         cases = (
             (controller.settings_view, controller.settings_view._handle_back),
             (controller.detail_view, controller._close_detail),
+            (controller.course_grades_view, controller._close_course_grades),
             (controller.calendar_view, controller._close_calendar),
             (controller.grade_overview_view, controller._close_grades),
         )
@@ -907,8 +999,10 @@ def test_android_launcher_forwards_verified_local_path_identity_version_and_sign
             pass
 
     def run_task(handler, *args):
-        asyncio.run(handler(*args))
-        return object()
+        from concurrent.futures import Future
+        result = Future()
+        result.set_result(asyncio.run(handler(*args)))
+        return result
 
     package = ReleasePackage(
         platform="android",
@@ -948,6 +1042,7 @@ def test_update_confirmation_uses_required_windows_affirmative_copy(monkeypatch)
     controller._show_update_confirmation()
 
     assert shown[0].actions[1].content == "Cài đặt và thoát"
+    assert shown[0].modal is False  # Escape remains a safe dismissal action.
 
 
 def test_update_confirmation_explains_ios_sideload_and_resigning(monkeypatch):
@@ -991,8 +1086,8 @@ def test_update_download_replaces_stale_available_copy_with_progress_state():
         )
     )
 
-    assert controller._update_text.value == "Đang tải và xác minh v2.3.0..."
-    assert controller._update_btn.content == "Đang tải và xác minh..."
+    assert controller._update_text.value == "Đang tải v2.3.0 · 0%"
+    assert controller._update_btn.content == "Đang tải"
     assert controller._update_btn.disabled is True
     assert controller._update_progress.visible is True
 
@@ -1042,18 +1137,20 @@ def test_android_install_banner_waits_for_native_installer_confirmation(monkeypa
 
     asyncio.run(
         controller._apply_update_event(
-            UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+            UpdateEvent(UpdateEventKind.INSTALLING, controller._update_candidate)
         )
     )
 
     assert controller._update_banner.visible is True
-    assert controller._update_text.value == "Đang mở trình cài đặt Android..."
-    assert controller._update_btn.content == "Đang mở..."
+    assert controller._update_text.value == "Đang mở trình cài đặt…"
+    assert controller._update_btn.content == "Đang mở"
     assert controller._update_btn.disabled is True
 
-    controller._on_android_update_result({"status": "installer_opened"})
-
-    assert controller._update_banner.visible is False
+    asyncio.run(controller._apply_update_event(
+        UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+    ))
+    assert controller._update_text.value == "Đã mở trình cài đặt"
+    assert controller._update_btn.disabled is False
 
 
 def test_show_snackbar_uses_page_overlay_when_available():
@@ -1073,3 +1170,725 @@ def test_show_snackbar_uses_page_overlay_when_available():
     assert isinstance(overlay_controls[0], ft.SnackBar)
     assert overlay_controls[0].open is True
     assert dialogs == []
+
+
+def test_download_ready_keeps_app_usable_until_explicit_install_click():
+    controller = _update_event_controller()
+    dialogs = []
+    controller._show_update_confirmation = lambda: dialogs.append("confirm")
+    asyncio.run(controller._apply_update_event(
+        UpdateEvent(UpdateEventKind.READY_TO_INSTALL, controller._update_candidate)
+    ))
+    assert dialogs == []
+    assert controller._update_btn.content == "Cài đặt"
+    controller._request_update_download()
+    assert dialogs == ["confirm"]
+
+
+def test_permission_retry_confirms_cached_package_without_downloading():
+    controller = _update_event_controller()
+    dialogs = []
+    controller._show_update_confirmation = lambda: dialogs.append("confirm")
+    # No downloader is installed: this action must go directly to confirmation.
+    asyncio.run(controller._apply_update_event(
+        UpdateEvent(UpdateEventKind.INSTALL_PERMISSION_REQUIRED, controller._update_candidate)
+    ))
+    assert "Cho phép cài" in controller._update_text.value
+    assert controller._update_btn.disabled is False
+    controller._request_update_download()
+    assert dialogs == ["confirm"]
+
+
+def test_install_failure_is_distinct_from_download_failure():
+    controller = _update_event_controller()
+    asyncio.run(controller._apply_update_event(UpdateEvent(
+        UpdateEventKind.INSTALL_FAILED, controller._update_candidate,
+        message="installed_signer_mismatch",
+    )))
+    assert controller._update_text.value == "Chữ ký bản cập nhật không khớp ứng dụng đang cài."
+    assert controller._update_btn.disabled is False
+    controller._update_candidate.manifest.release_notes_url = "https://github.com/Chouwzi/UTHelper/releases/tag/v2.3.0"
+    opened = []
+    controller._open_external_update_url = opened.append
+    assert controller._update_btn.content == "Bản phát hành"
+    controller._request_update_download()
+    assert opened == [controller._update_candidate.manifest.release_notes_url]
+
+
+def test_download_state_remains_available_in_settings():
+    controller = _update_event_controller()
+    statuses = []
+    controller.settings_view.set_update_status = lambda *args, **kwargs: statuses.append((args, kwargs))
+    asyncio.run(controller._apply_update_event(UpdateEvent(
+        UpdateEventKind.DOWNLOAD_PROGRESS, controller._update_candidate, progress=0.42,
+    )))
+    assert statuses[0][0] == ("Đang tải v2.3.0 · 42%",)
+    assert statuses[0][1]["progress"] == 0.42
+    assert statuses[0][1]["action_label"] is None
+
+
+def test_store_channel_suppresses_update_coordinator_and_github_client(monkeypatch):
+    import pytest
+    from core.distribution import DistributionChannel, build_distribution_profile
+
+    for channel in (DistributionChannel.CHPLAY, DistributionChannel.MSSTORE):
+        monkeypatch.setattr(
+            app_controller_module,
+            "resolve_distribution_channel",
+            lambda c=channel: build_distribution_profile(c),
+        )
+        monkeypatch.setattr(
+            app_controller_module,
+            "GitHubReleaseClient",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("GitHubReleaseClient must not be instantiated on Store channels")
+            ),
+        )
+        monkeypatch.setattr(
+            app_controller_module,
+            "UpdateCoordinator",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("UpdateCoordinator must not be instantiated on Store channels")
+            ),
+        )
+        monkeypatch.setattr(
+            app_controller_module,
+            "detect_runtime_target",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("detect_runtime_target should not be called when self-update is disabled")
+            ),
+        )
+
+        controller = _update_event_controller()
+        controller._distribution_profile = build_distribution_profile(channel)
+        controller._update_coordinator = controller._create_update_coordinator()
+        assert controller._update_coordinator is None
+
+        controller._check_updates_now()
+        controller._cancel_update_download()
+        controller._request_update_download()
+        controller._show_update_confirmation()
+        controller._on_update_event(
+            UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+        )
+        asyncio.run(
+            controller._apply_update_event(
+                UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+            )
+        )
+        assert controller._update_banner.visible is False
+
+        controller.activation_broker = None
+        controller.settings_view = SimpleNamespace(cancel_pending_load=lambda: None)
+        controller._prefetch_cancel_event = SimpleNamespace(set=lambda: None)
+        controller._page_alive = SimpleNamespace(clear=lambda: None)
+        controller.orchestrator = SimpleNamespace(client=SimpleNamespace(close=lambda: None))
+        controller._on_disconnect(None)
+
+
+def test_lts_and_source_channels_keep_update_coordinator_active(monkeypatch):
+    from core.distribution import DistributionChannel, build_distribution_profile
+    from core.update_models import RuntimeTarget
+
+    for channel in (
+        DistributionChannel.APK_LTS,
+        DistributionChannel.EXE_LTS,
+        DistributionChannel.SOURCE,
+    ):
+        controller = AppController.__new__(AppController)
+        controller._distribution_profile = build_distribution_profile(channel)
+        controller._android_background = None
+        controller._update_candidate = None
+        monkeypatch.setattr(
+            app_controller_module,
+            "detect_runtime_target",
+            lambda: RuntimeTarget("other", "unknown", "source"),
+        )
+        coordinator = controller._create_update_coordinator()
+        assert coordinator is not None
+
+
+def test_open_store_url_uses_external_launch_and_https_fallback(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class FakeUrlLauncher:
+        async def launch_url(self, url, *, mode=None, **_kwargs):
+            calls.append((url, mode))
+            if url.startswith("market://"):
+                raise RuntimeError("no market handler")
+
+    monkeypatch.setattr(app_controller_module.ft, "UrlLauncher", FakeUrlLauncher)
+
+    controller = AppController.__new__(AppController)
+
+    def run_task(handler, *args):
+        asyncio.run(handler(*args))
+        return object()
+
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=run_task,
+    )
+
+    ok = controller._open_store_url(
+        "market://details?id=com.uthelper.uthelper",
+        "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+    )
+    assert ok is True
+    assert calls == [
+        ("market://details?id=com.uthelper.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
+        (
+            "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+            ft.LaunchMode.EXTERNAL_APPLICATION,
+        ),
+    ]
+
+    assert controller._open_store_url("javascript:alert(1)") is False
+
+
+def test_run_page_task_propagates_exceptions_and_handles_missing_session():
+    controller = AppController.__new__(AppController)
+    reported = []
+    controller._unhandled_error_reporter = reported.append
+
+    controller.page = SimpleNamespace(session=None)
+    assert controller._run_page_task(lambda: None) is None
+
+    def run_task(handler):
+        from concurrent.futures import Future
+
+        fut = Future()
+        try:
+            fut.set_result(asyncio.run(handler()))
+        except BaseException as exc:
+            fut.set_exception(exc)
+        return fut
+
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=run_task,
+    )
+
+    async def boom():
+        raise TimeoutError("bridge timeout")
+
+    future = controller._run_page_task(boom)
+    assert future is not None
+    import pytest
+
+    with pytest.raises(TimeoutError, match="bridge timeout"):
+        future.result(timeout=1.0)
+    assert reported == []
+
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=lambda _handler: None,
+    )
+    assert controller._run_page_task(boom) is None
+
+
+def test_create_update_coordinator_android_uses_run_page_task_verifier_and_safe_version(
+    monkeypatch,
+):
+    from core.distribution import DistributionChannel, build_distribution_profile
+    from core.update_models import RuntimeTarget
+    from platform_utils.android_updates import AndroidPackageVerifier
+
+    controller = AppController.__new__(AppController)
+    controller._distribution_profile = build_distribution_profile(
+        DistributionChannel.APK_LTS
+    )
+    controller._android_background = SimpleNamespace(available=True)
+    controller._update_candidate = None
+    controller.page = SimpleNamespace(session=None)
+
+    monkeypatch.setattr(
+        app_controller_module,
+        "detect_runtime_target",
+        lambda: RuntimeTarget("android", "arm64", "sideload"),
+    )
+
+    coordinator = controller._create_update_coordinator()
+    assert coordinator is not None
+    assert isinstance(coordinator._verifier, AndroidPackageVerifier)
+    assert coordinator._launcher._native.task_runner == controller._run_page_task
+    assert coordinator._downloader._native.task_runner == controller._run_page_task
+    # Must return None safely without AttributeError when candidate is None.
+    assert controller._current_update_release_version() is None
+    pkg = ReleasePackage(
+        "android",
+        "arm64",
+        "apk",
+        "sideload",
+        "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
+        "a" * 64,
+        10,
+        "com.uthelper.uthelper",
+        "b" * 64,
+        {"kind": "android_package_installer"},
+    )
+    launch_res = coordinator._launcher.launch(Path("UTHelper.apk"), pkg)
+    assert launch_res.acknowledged is False
+    assert launch_res.status == "bridge_failed"
+
+
+def test_install_failed_source_unavailable_resets_ready_to_redownload():
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    requested = []
+    controller._update_coordinator = SimpleNamespace(
+        request_download=lambda candidate: requested.append(candidate)
+    )
+    controller._show_update_confirmation = lambda: requested.append("confirm")
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.INSTALL_FAILED,
+                controller._update_candidate,
+                message="source_unavailable",
+            )
+        )
+    )
+
+    assert controller._update_ready is False
+    controller._request_update_download()
+    assert requested == [controller._update_candidate]
+
+
+def test_update_install_error_message_maps_windows_tokens_and_reasons():
+    from gui.app_controller import _update_install_error_message
+
+    generic = "Không mở được trình cài đặt. Hãy thử lại."
+    for key in (
+        "uac_cancelled",
+        "installer cancelled by user",
+        "installer_busy",
+        "another Windows installation is in progress",
+        "installer_unavailable",
+        "Windows installer is unavailable",
+        "strategy_not_allowed",
+        "installer strategy is not allowed",
+        "installer_already_running",
+        "an installer is already running",
+        "launch_failed",
+        "installer launch failed",
+        "installer_rejected",
+        "installer rejected",
+        "file_in_use",
+        "install_timeout",
+        "relaunch_failed",
+    ):
+        assert _update_install_error_message(key) != generic
+
+
+def test_windows_install_failed_strategy_and_timeout_ui_states():
+    controller = _update_event_controller()
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.INSTALL_FAILED,
+                controller._update_candidate,
+                message="installer strategy is not allowed",
+            )
+        )
+    )
+    assert controller._update_open_release_page is True
+    assert controller._update_btn.content == "Bản phát hành"
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.FAILED,
+                controller._update_candidate,
+                message="Windows package verification timed out",
+            )
+        )
+    )
+    assert "quá thời gian" in controller._update_text.value
+
+
+def test_windows_install_launched_runs_idempotent_shutdown_before_window_destroy(
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    order = []
+    controller = _update_event_controller()
+    controller._exit_cleanup_lock = __import__("threading").Lock()
+    controller._exit_cleanup_done = False
+    controller.activation_broker = SimpleNamespace(
+        close=lambda timeout_seconds=1.0: order.append(("broker", timeout_seconds))
+    )
+    controller.tray = SimpleNamespace(
+        close=lambda timeout_seconds=1.0: order.append(("tray", timeout_seconds))
+    )
+    controller._sync_coordinator = SimpleNamespace(close=lambda: order.append("sync"))
+    controller._today_schedule_coordinator = SimpleNamespace(
+        close=lambda: order.append("schedule")
+    )
+    controller._update_coordinator = SimpleNamespace(
+        shutdown=lambda timeout_seconds=1.0: order.append(("update", timeout_seconds))
+    )
+    controller.orchestrator = SimpleNamespace(
+        client=SimpleNamespace(close=lambda: order.append("client"))
+    )
+    controller.settings_view = SimpleNamespace(
+        _check_update_btn=None,
+        cancel_pending_load=lambda: order.append("settings"),
+    )
+    controller._page_alive = SimpleNamespace(clear=lambda: order.append("page_alive"))
+    controller._prefetch_cancel_event = SimpleNamespace(
+        set=lambda: order.append("prefetch")
+    )
+
+    async def destroy():
+        order.append("destroy")
+
+    controller.page = SimpleNamespace(
+        update=lambda: None,
+        window=SimpleNamespace(destroy=AsyncMock(side_effect=destroy)),
+    )
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", False)
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.INSTALL_LAUNCHED, controller._update_candidate)
+        )
+    )
+
+    assert "destroy" in order
+    destroy_idx = order.index("destroy")
+    assert order.index(("broker", 1.0)) < destroy_idx
+    assert order.index(("tray", 1.0)) < destroy_idx
+    assert order.index(("update", 1.0)) < destroy_idx
+    assert order.index("client") < destroy_idx
+
+    before_disconnect = list(order)
+    controller._on_disconnect(None)
+    assert order == before_disconnect
+
+
+def test_checking_event_forwards_status_to_settings_view():
+    controller = _update_event_controller()
+    statuses = []
+    controller.settings_view.set_update_status = lambda msg, **_kw: statuses.append(msg)
+
+    asyncio.run(controller._apply_update_event(UpdateEvent(UpdateEventKind.CHECKING)))
+
+    assert statuses == ["Đang kiểm tra cập nhật..."]
+
+
+def test_android_startup_sequence_hydrates_migrates_and_scrubs_before_sync(
+    monkeypatch, tmp_path
+):
+    import json
+    import config
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120001",
+                "UTH_PASSWORD": "legacy-password",
+                "THEME": "steel_light",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+
+    loaded = config.load_settings()
+    monkeypatch.setattr(config, "settings", loaded)
+    monkeypatch.setattr(app_controller_module, "settings", loaded)
+
+    events = []
+
+    class _FakeBridge:
+        available = True
+
+        def __init__(self):
+            self.vault = {"ws_token": "vault-ws", "ws_token_origin": "https://courses.ut.edu.vn"}
+
+        async def read_app_secrets(self):
+            events.append("read_vault")
+            return dict(self.vault)
+
+        async def write_app_secrets(self, secrets):
+            events.append(("write_vault", dict(secrets)))
+            self.vault = dict(secrets)
+            return True
+
+    scheduled_tasks = []
+
+    def fake_run_task(handler, *args, **kwargs):
+        task = asyncio.create_task(handler(*args, **kwargs))
+        scheduled_tasks.append(task)
+        return task
+
+    bridge = _FakeBridge()
+    controller = AppController.__new__(AppController)
+    controller._android_background = bridge
+    controller._page_alive = app_controller_module.threading.Event()
+    controller._page_alive.set()
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=fake_run_task,
+    )
+    controller._today_schedule_coordinator = SimpleNamespace(
+        run=AsyncMock(side_effect=lambda: events.append("schedule"))
+    )
+
+    async def fake_init_bg():
+        events.append("init_bg")
+
+    async def fake_load_data(trigger="manual"):
+        events.append(("load_data", trigger))
+
+    async def fake_login():
+        events.append("login")
+
+    controller._initialize_android_background = fake_init_bg
+    controller._load_data_async = fake_load_data
+    controller._show_login_dialog = fake_login
+    controller._schedule_cached_detail_hydration = lambda _has_cache: False
+    controller._schedule_card_detail_warmup = lambda: False
+
+    async def _run():
+        await controller._startup_android_sequence(True, False)
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+    try:
+        asyncio.run(_run())
+
+        assert events[0] == "read_vault"
+        assert events[1] == (
+            "write_vault",
+            {
+                "password": "legacy-password",
+                "ws_token": "vault-ws",
+                "ws_token_origin": "https://courses.ut.edu.vn",
+            },
+        )
+        assert "init_bg" in events
+        assert ("load_data", "startup") in events
+        assert "login" not in events
+        assert controller._settings_identity == ("2251120001", "legacy-password")
+        assert loaded.MOODLE_WS_TOKEN == "vault-ws"
+        scrubbed = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "UTH_PASSWORD" not in scrubbed
+    finally:
+        config.register_secret_backend(None)
+
+
+def test_android_startup_sequence_preserves_legacy_json_when_vault_write_fails(
+    monkeypatch, tmp_path
+):
+    import json
+    import config
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120001",
+                "UTH_PASSWORD": "legacy-password",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+
+    loaded = config.load_settings()
+    monkeypatch.setattr(config, "settings", loaded)
+    monkeypatch.setattr(app_controller_module, "settings", loaded)
+
+    class _FailingBridge:
+        available = True
+
+        async def read_app_secrets(self):
+            return {}
+
+        async def write_app_secrets(self, _secrets):
+            return False
+
+    scheduled_tasks = []
+
+    def fake_run_task(handler, *args, **kwargs):
+        task = asyncio.create_task(handler(*args, **kwargs))
+        scheduled_tasks.append(task)
+        return task
+
+    controller = AppController.__new__(AppController)
+    controller._android_background = _FailingBridge()
+    controller._page_alive = app_controller_module.threading.Event()
+    controller._page_alive.set()
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=fake_run_task,
+    )
+    controller._today_schedule_coordinator = SimpleNamespace(run=AsyncMock())
+    controller._initialize_android_background = AsyncMock()
+    controller._load_data_async = AsyncMock()
+    controller._show_login_dialog = AsyncMock()
+    controller._schedule_cached_detail_hydration = lambda _has_cache: False
+    controller._schedule_card_detail_warmup = lambda: False
+
+    async def _run():
+        await controller._startup_android_sequence(False, True)
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+
+    try:
+        asyncio.run(_run())
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        assert raw["UTH_PASSWORD"] == "legacy-password"
+    finally:
+        config.register_secret_backend(None)
+
+
+def test_complete_login_success_resets_schedule_and_course_grade_state():
+    import config
+
+    calls = []
+    controller = AppController.__new__(AppController)
+    controller._portal_client = SimpleNamespace(clear_token=lambda: calls.append("clear_portal_day"))
+    controller._portal_week_client = SimpleNamespace(clear_token=lambda: calls.append("clear_portal_week"))
+    controller._week_schedule_cache = SimpleNamespace(
+        set_namespace=lambda ns: calls.append(("cache_ns", ns))
+    )
+    controller.calendar_view = SimpleNamespace(reset_schedule=lambda: calls.append("reset_schedule"))
+    controller._settings_identity = ("old_user", "old_pw")
+    controller.orchestrator = SimpleNamespace(
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: calls.append("clear_moodle")),
+        clear_detail_cache=lambda: calls.append("clear_detail"),
+        _userid_cache=99,
+        client=SimpleNamespace(clear_session=lambda: calls.append("clear_client_session")),
+        thnn_client=SimpleNamespace(clear_session=lambda: calls.append("clear_thnn_session")),
+        course_grade_monitor=SimpleNamespace(
+            set_namespace=lambda ns: calls.append(("grade_ns", ns))
+        ),
+        latest_course_grades=["stale"],
+    )
+    controller.quiz_player_view = SimpleNamespace(visible=False)
+    controller._today_schedule_coordinator = SimpleNamespace(
+        replace_cache=lambda c: calls.append(("today_cache", c._path.name)),
+        refresh="refresh_fn",
+    )
+    controller._today_schedule_component = SimpleNamespace(
+        set_state=lambda s: calls.append(("today_state", s.status))
+    )
+    controller._load_data_async = AsyncMock()
+    controller._safe_run_task = lambda fn, *args, **kwargs: calls.append(("task", getattr(fn, "__name__", str(fn)), args, kwargs))
+
+    old_user, old_pass = config.settings.UTH_USERNAME, config.settings.UTH_PASSWORD
+    try:
+        config.settings.UTH_USERNAME = "student99"
+        config.settings.UTH_PASSWORD = "pw"
+        asyncio.run(controller._complete_login_success())
+    finally:
+        config.settings.UTH_USERNAME = old_user
+        config.settings.UTH_PASSWORD = old_pass
+
+    assert "clear_portal_day" in calls
+    assert "clear_portal_week" in calls
+    assert ("cache_ns", f"{config.settings.PORTAL_API_BASE}|student99") in calls
+    assert "reset_schedule" in calls
+    assert ("grade_ns", f"{config.settings.MOODLE_BASE_URL}|student99") in calls
+    assert "clear_client_session" in calls
+    assert "clear_thnn_session" in calls
+    assert controller.orchestrator.latest_course_grades == []
+
+
+def test_check_grades_background_skips_n_plus_1_html_scrape_when_courses_hidden():
+    ws_calls = []
+    html_calls = []
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(
+        check_grade_changes=lambda: ws_calls.append(True) or [],
+        refresh_course_grades=lambda: html_calls.append(True) or ([], []),
+    )
+    controller.notifier = SimpleNamespace(dispatch_grade_alert=AsyncMock())
+    controller.courses_view = SimpleNamespace(visible=False)
+
+    asyncio.run(controller._check_grades_background())
+    assert ws_calls == [True]
+    assert html_calls == []
+
+
+def test_close_calendar_and_grades_sync_rail_active_and_show_grades_reports_error():
+    syncs = []
+    errors = []
+    controller = AppController.__new__(AppController)
+    controller.view_manager = SimpleNamespace(
+        close_calendar=AsyncMock(side_effect=lambda: syncs.append("close_cal")),
+        close_grades=AsyncMock(side_effect=lambda: syncs.append("close_grades")),
+        show_grades_loading=lambda: syncs.append("loading"),
+        show_grades_error=lambda msg: errors.append(msg),
+    )
+    controller._diag_screen = lambda s: syncs.append(("screen", s))
+    controller._diag_breadcrumb = lambda *args, **kwargs: None
+    controller._sync_rail_active = lambda: syncs.append("sync_rail")
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=MagicMock(side_effect=RuntimeError("Portal down"))
+    )
+
+    asyncio.run(controller._close_calendar())
+    asyncio.run(controller._close_grades())
+    asyncio.run(controller._show_grades(force_refresh=False))
+
+    assert "close_cal" in syncs
+    assert "close_grades" in syncs
+    assert syncs.count("sync_rail") == 3
+    assert len(errors) == 1
+    assert "Portal" in errors[0]
+
+
+def test_detail_view_routes_links_in_app_by_default_and_external_opt_out():
+    from gui.components.detail_view import DetailView
+
+    in_app = []
+    external = []
+    page = SimpleNamespace(
+        width=390,
+        height=800,
+        dialogs=[],
+        show_dialog=lambda _d: None,
+        update=lambda: None,
+    )
+    view = DetailView(
+        page,
+        lambda: None,
+        on_open_url=lambda u, t: in_app.append((u, t)),
+        on_open_external=lambda u: external.append(u),
+    )
+    view._current_url = "https://courses.ut.edu.vn/mod/assign/view.php?id=55"
+    view._current_data = {"title": "Bài tập 1"}
+
+    asyncio.run(view._open_in_app(None))
+    asyncio.run(view._open_external(None))
+    asyncio.run(
+        view._handle_link_tap(
+            SimpleNamespace(data="https://courses.ut.edu.vn/mod/page/view.php?id=9")
+        )
+    )
+    asyncio.run(
+        view._handle_link_tap(SimpleNamespace(data="http://courses.ut.edu.vn/insecure"))
+    )
+
+    assert in_app == [
+        ("https://courses.ut.edu.vn/mod/assign/view.php?id=55", "Bài tập 1"),
+        ("https://courses.ut.edu.vn/mod/page/view.php?id=9", "Bài tập 1"),
+    ]
+    assert external == ["https://courses.ut.edu.vn/mod/assign/view.php?id=55"]

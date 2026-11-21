@@ -945,7 +945,19 @@ class QuizActivityView(_BasePaneActivityView):
         self._review_cache: dict[int, QuizAttemptReviewReport] = {}
         self._review_filter: str = "all"
         self._review_search: str = ""
+        self._runtime_notice: str = ""
         self._load_async()
+
+    def reload(self) -> None:
+        """Reload quiz summary and attempt history from Moodle."""
+        self._runtime_notice = ""
+        self._load_async()
+
+    def set_runtime_notice(self, message: str) -> None:
+        """Display or clear an inline runtime notice on the quiz summary."""
+        self._runtime_notice = str(message or "").strip()
+        if self._summary is not None and not self._in_review:
+            self._render_quiz(self._summary)
 
     def handle_back(self) -> bool:
         """Step back from attempt review to quiz summary before closing overlay."""
@@ -1703,6 +1715,14 @@ class QuizActivityView(_BasePaneActivityView):
                 ),
             )
         )
+
+        if self._runtime_notice:
+            controls.append(
+                build_offline_banner(
+                    self._runtime_notice,
+                    icon=ft.Icons.INFO_OUTLINE_ROUNDED,
+                )
+            )
 
         if summary.prevent_reasons:
             controls.append(

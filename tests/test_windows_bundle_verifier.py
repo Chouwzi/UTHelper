@@ -22,6 +22,8 @@ def _write_valid_bundle(root: Path) -> None:
     (root / "UTHelperAutostart.exe").write_bytes(b"MZ")
     (root / "python314.dll").write_bytes(b"dll")
     (root / "flutter_windows.dll").write_bytes(b"dll")
+    (root / "flutter_inappwebview_windows_plugin.dll").write_bytes(b"dll")
+    (root / "WebView2Loader.dll").write_bytes(b"dll")
     (
         root
         / "site-packages"
@@ -35,9 +37,27 @@ def _write_valid_bundle(root: Path) -> None:
     (
         root / "site-packages" / "pywin32_system32" / "pywintypes314.dll"
     ).write_bytes(b"dll")
+    quiz_pkg = root / "site-packages" / "flet_uth_quiz"
+    quiz_pkg.mkdir()
+    (quiz_pkg / "__init__.pyc").write_bytes(b"pyc")
+    (quiz_pkg / "quiz_player.pyc").write_bytes(b"pyc")
     (root / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
     (root / "app" / "main.pyc").write_bytes(b"pyc")
     (root / "app" / "assets" / "release-version").write_bytes(b"2.2.11\n")
+    office_dir = root / "app" / "assets" / "office_viewer"
+    office_dir.mkdir(parents=True)
+    for asset_name in (
+        "docx_host.html",
+        "docx_host.js",
+        "docx-preview.min.js",
+        "jszip.min.js",
+        "pptx_host.html",
+        "pptx_host.js",
+        "pptx_engine.js",
+        "viewer.css",
+        "viewer_common.js",
+    ):
+        (office_dir / asset_name).write_bytes(b"asset")
 
 
 def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
@@ -54,6 +74,11 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
         ("UTHelperAutostart.exe", "UTHelperAutostart.exe"),
         ("python314.dll", "Python runtime DLL"),
         ("flutter_windows.dll", "Flutter runtime DLL"),
+        (
+            "flutter_inappwebview_windows_plugin.dll",
+            "flutter_inappwebview_windows_plugin.dll",
+        ),
+        ("WebView2Loader.dll", "WebView2Loader.dll"),
         ("Lib/encodings/__init__.pyc", "filesystem encodings"),
         ("app/main.pyc", "compiled application entry"),
         ("app/assets/release-version", "packaged release version"),
@@ -68,6 +93,10 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
         ("site-packages/win32/lib/winerror.pyc", "winerror"),
         ("site-packages/win32/lib/pywintypes.pyc", "pywintypes loader"),
         ("site-packages/pywin32_system32/pywintypes314.dll", "pywintypes"),
+        ("site-packages/flet_uth_quiz/__init__.pyc", "flet_uth_quiz"),
+        ("site-packages/flet_uth_quiz/quiz_player.pyc", "flet_uth_quiz"),
+        ("app/assets/office_viewer/docx_host.html", "office_viewer"),
+        ("app/assets/office_viewer/pptx_engine.js", "office_viewer"),
     ],
 )
 def test_missing_runtime_artifact_fails_closed(tmp_path, relative_path, message):

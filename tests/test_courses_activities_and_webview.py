@@ -379,8 +379,10 @@ def test_local_preview_server_authenticated_session_bridge_get_post_and_ssrf_gua
         with urllib.request.urlopen(bridge_url, timeout=5) as resp:
             assert resp.status == 200
             assert resp.headers.get("X-Frame-Options") is None
-            assert resp.headers.get("Cross-Origin-Resource-Policy") == "cross-origin"
-            assert resp.headers.get("Cross-Origin-Embedder-Policy") == "credentialless"
+            assert resp.headers.get("Cross-Origin-Resource-Policy") == "same-origin"
+            assert resp.headers.get("Referrer-Policy") == "no-referrer"
+            assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+            assert "Content-Security-Policy" in resp.headers
             body = resp.read().decode("utf-8")
             assert "<base " in body
             assert "/session/" in body

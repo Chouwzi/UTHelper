@@ -646,7 +646,7 @@ def test_assignment_always_mounts_status_control_before_snapshot(details):
         (
             lambda: None,
             456,
-            "Không thể kết nối Moodle trong ứng dụng. Hãy mở bài tập trong trình duyệt.",
+            "Không thể kết nối Moodle trong ứng dụng. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
         ),
     ],
 )
@@ -665,7 +665,7 @@ def test_assignment_without_native_context_explains_browser_fallback(
     )
 
     assert view._submission_status_value.value == reason
-    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._cta_text.value == "Mở trong ứng dụng"
     assert callable(view._open_btn.on_click)
     assert view._submission_area.visible is False
     assert view._pick_btn.visible is False
@@ -716,37 +716,37 @@ def test_assignment_without_course_id_resolves_native_submission_context() -> No
         (
             "https://courses.ut.edu.vn/mod/quiz/view.php?id=123",
             456,
-            "Đường dẫn này không phải bài tập Moodle. Hãy mở trong trình duyệt.",
+            "Đường dẫn này không phải bài tập Moodle. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             "unknown",
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             0,
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             -1,
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             1.5,
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             "1.5",
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
     ],
@@ -827,9 +827,9 @@ def test_thnn_assignment_with_courses_client_uses_browser_fallback():
 
     assert view._submission_status_value.value == (
         "Moodle cho trang bài tập này chưa được cấu hình. "
-        "Hãy mở bài tập trong trình duyệt."
+        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
     )
-    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._cta_text.value == "Mở trong ứng dụng"
     assert view._submission_area.visible is False
     page.run_task.assert_not_called()
 
@@ -939,7 +939,7 @@ def test_app_controller_rejects_current_client_after_configured_moodle_site_chan
             }
         )
 
-    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._cta_text.value == "Mở trong ứng dụng"
     assert view._submission_area.visible is False
     page.run_task.assert_not_called()
 
@@ -964,7 +964,7 @@ def test_bound_client_without_workflow_factory_uses_immediate_browser_fallback()
 
     assert view._submission_status_value.value == (
         "Moodle cho trang bài tập này chưa được cấu hình. "
-        "Hãy mở bài tập trong trình duyệt."
+        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
     )
     page.run_task.assert_not_called()
 
@@ -1122,25 +1122,13 @@ async def test_app_controller_submission_race_condition():
         mp.setattr("config.settings.UTH_USERNAME", "test_user")
         mp.setattr("config.settings.UTH_PASSWORD", "test_pass")
         mp.setattr("config.settings.BACKGROUND_CHECK_ANDROID", False)
-        
+        mp.setattr("config.settings.AUTO_UPDATE_ENABLED", False)
+
         controller = AppController(page)
-        
-        # Thiết lập dữ liệu ban đầu
-        url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
-        controller.all_data = [
-            {
-                "url": url,
-                "title": "Bài tập test",
-                "submission_status": "Chưa nộp",
-                "deadline": "2026-12-31 23:59:59"
-            }
-        ]
-        
-        # Giả lập Moodle API trả về trạng thái cũ "Chưa nộp" chậm hơn
-        # Mock orchestrator.get_latest_activities_async
-        async def mock_get_latest():
-            await asyncio.sleep(0.1) # Trễ mạng
-            return [
+        try:
+            # Thiết lập dữ liệu ban đầu
+            url = "https://courses.ut.edu.vn/mod/assign/view.php?id=123"
+            controller.all_data = [
                 {
                     "url": url,
                     "title": "Bài tập test",
@@ -1148,27 +1136,42 @@ async def test_app_controller_submission_race_condition():
                     "deadline": "2026-12-31 23:59:59"
                 }
             ]
-        
-        controller.orchestrator.get_latest_activities_async = mock_get_latest
-        async def mock_outcome():
-            from core.sync_coordinator import FetchOutcome
 
-            return FetchOutcome.complete(await mock_get_latest())
+            # Giả lập Moodle API trả về trạng thái cũ "Chưa nộp" chậm hơn
+            # Mock orchestrator.get_latest_activities_async
+            async def mock_get_latest():
+                await asyncio.sleep(0.1) # Trễ mạng
+                return [
+                    {
+                        "url": url,
+                        "title": "Bài tập test",
+                        "submission_status": "Chưa nộp",
+                        "deadline": "2026-12-31 23:59:59"
+                    }
+                ]
 
-        controller.orchestrator.fetch_activity_outcome_async = mock_outcome
-        
-        # 1. Kích hoạt cập nhật ngầm (sẽ gọi mock_get_latest)
-        refresh_task = asyncio.create_task(controller._load_data_async())
-        
-        # Chờ 0.02s để luồng ngầm đã bắt đầu thời gian fetch
-        await asyncio.sleep(0.02)
-        
-        # 2. Người dùng nộp bài tập (trạng thái chuyển thành "Đã nộp")
-        controller._on_activity_status_changed(url, "Đã nộp")
-        assert controller.all_data[0]["submission_status"] == "submitted"
-        
-        # 3. Chờ tiến trình fetch nền hoàn thành hoàn toàn
-        await refresh_task
-        
-        # 4. Kiểm tra xem Smart Merge có hoạt động chính xác để giữ trạng thái "Đã nộp" hay không
-        assert controller.all_data[0]["submission_status"] == "submitted"
+            controller.orchestrator.get_latest_activities_async = mock_get_latest
+            async def mock_outcome():
+                from core.sync_coordinator import FetchOutcome
+
+                return FetchOutcome.complete(await mock_get_latest())
+
+            controller.orchestrator.fetch_activity_outcome_async = mock_outcome
+
+            # 1. Kích hoạt cập nhật ngầm (sẽ gọi mock_get_latest)
+            refresh_task = asyncio.create_task(controller._load_data_async())
+
+            # Chờ 0.02s để luồng ngầm đã bắt đầu thời gian fetch
+            await asyncio.sleep(0.02)
+
+            # 2. Người dùng nộp bài tập (trạng thái chuyển thành "Đã nộp")
+            controller._on_activity_status_changed(url, "Đã nộp")
+            assert controller.all_data[0]["submission_status"] == "submitted"
+
+            # 3. Chờ tiến trình fetch nền hoàn thành hoàn toàn
+            await refresh_task
+
+            # 4. Kiểm tra xem Smart Merge có hoạt động chính xác để giữ trạng thái "Đã nộp" hay không
+            assert controller.all_data[0]["submission_status"] == "submitted"
+        finally:
+            controller._on_disconnect(None)

@@ -64,6 +64,7 @@ def test_view_manager_preserves_persistent_overlays_after_navigation():
     controller = SimpleNamespace(
         calendar_btn=SimpleNamespace(icon_color=None),
         grades_btn=SimpleNamespace(icon_color=None),
+        courses_btn=SimpleNamespace(icon_color=None),
         _dismiss_desktop_filter_menu=lambda: dismiss_called.append("dismiss"),
     )
     host = SimpleNamespace(controls=[])
@@ -248,6 +249,7 @@ def test_view_manager_with_tab_and_detail_switchers():
     controller = SimpleNamespace(
         calendar_btn=SimpleNamespace(icon_color=None),
         grades_btn=SimpleNamespace(icon_color=None),
+        courses_btn=SimpleNamespace(icon_color=None),
         _dismiss_desktop_filter_menu=lambda: None,
     )
     empty_detail = ft.Container(expand=True, ignore_interactions=True)

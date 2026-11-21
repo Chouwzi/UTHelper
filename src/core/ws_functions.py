@@ -485,6 +485,14 @@ def _get_quiz_detail(
     
     if not quiz_data:
         return details
+
+    quiz_security = {
+        field: quiz_data[field]
+        for field in ("browsersecurity", "activerulenames")
+        if field in quiz_data
+    }
+    if quiz_security:
+        details["quiz_security"] = quiz_security
     
     # Mô tả
     details['description_html'] = quiz_data.get('intro', '') or ''
@@ -511,6 +519,20 @@ def _get_quiz_detail(
     if quiz_id:
         attempts = get_quiz_attempts(call_api, quiz_id)
         if attempts is not None:
+            known_states = {"finished", "inprogress", "overdue", "abandoned"}
+            if quiz_data.get("coursemodule") == cmid and isinstance(attempts, list) and all(
+                isinstance(attempt, dict) and attempt.get("state") in known_states
+                for attempt in attempts
+            ):
+                details["quiz_has_unfinished_attempt"] = any(
+                    attempt["state"] in {"inprogress", "overdue"}
+                    for attempt in attempts
+                )
+                limit = quiz_data.get("attempts")
+                if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0:
+                    details["quiz_attempts_remaining"] = (
+                        max(0, limit - len(attempts)) if limit else None
+                    )
             if not attempts:
                 # An authoritative empty list is different from an API error:
                 # the student has not started this quiz yet.

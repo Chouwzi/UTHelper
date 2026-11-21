@@ -11,9 +11,11 @@ import os
 from pathlib import Path
 import queue
 import secrets
+import shutil
 import sys
 import threading
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 import flet as ft
 
@@ -25,6 +27,58 @@ from gui.view_models.courses_state import safe_http_url
 logger = logging.getLogger(__name__)
 
 _UTH_MSG_PREFIX = "__UTH_MSG__:"
+_DANGEROUS_WEBVIEW_SCHEMES = frozenset({"file", "javascript", "data", "intent", "vbscript", "ms-appx"})
+
+
+def _extract_loopback_port(url: str) -> Optional[int]:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "http":
+        return None
+    host = (parsed.hostname or "").rstrip(".").casefold()
+    if host not in ("127.0.0.1", "localhost") or port is None or not (1 <= port <= 65535):
+        return None
+    return int(port)
+
+
+def _validate_webview_url(
+    url: object,
+    *,
+    allowed_loopback_ports: Optional[set[int]] = None,
+    allow_any_loopback: bool = False,
+) -> str:
+    """Validate an embedded WebView URL against strict HTTPS or active loopback rules."""
+    cleaned = safe_http_url(url, allow_loopback=True)
+    if not cleaned:
+        return ""
+    port = _extract_loopback_port(cleaned)
+    if port is not None:
+        if allow_any_loopback:
+            return cleaned
+        if allowed_loopback_ports is not None and port in allowed_loopback_ports:
+            return cleaned
+        return ""
+    return safe_http_url(cleaned, allow_loopback=False)
+
+
+def _sweep_stale_profiles(profile_root: Path, *, active_profile: str) -> None:
+    """Best-effort cleanup of stale ``uth*`` per-pane WebView2 profile directories."""
+    for base in (profile_root, profile_root / "EBWebView"):
+        if not base.is_dir():
+            continue
+        try:
+            for entry in base.iterdir():
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if not name.startswith("uth") or name == active_profile:
+                    continue
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def _safe_control_page(control: Any) -> Any:
@@ -125,6 +179,7 @@ class WindowsWebView2Dock:
         self._on_history_changed = on_history_changed
 
         self._cmd_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._ready = False
         self._failed = False
@@ -132,6 +187,10 @@ class WindowsWebView2Dock:
         self._can_go_back = False
         self._can_go_forward = False
         self._pending_scripts: list[tuple[str, Any, Any]] = []
+        self._allowed_loopback_ports: set[int] = set()
+        init_loop_port = _extract_loopback_port(url)
+        if init_loop_port is not None:
+            self._allowed_loopback_ports.add(init_loop_port)
         self._bounds_dip: tuple[float, float, float, float] = (410.0, 90.0, 640.0, 480.0)
         self._bottom_inset_dip: float = 0.0
         self._hwnd: int = 0
@@ -152,10 +211,63 @@ class WindowsWebView2Dock:
         )
         self._thread.start()
 
+    def _is_viewer_locked(self) -> bool:
+        if self._html is not None:
+            return True
+        if not self._url:
+            return False
+        try:
+            return urlsplit(self._url).path.startswith("/viewer/")
+        except ValueError:
+            return False
+
+    def _viewer_prefix(self) -> str:
+        if not self._url:
+            return ""
+        try:
+            parts = urlsplit(self._url)
+            segs = [s for s in parts.path.split("/") if s]
+            if len(segs) >= 2 and segs[0] == "viewer":
+                return f"{parts.scheme.lower()}://{parts.netloc.lower()}/viewer/{segs[1]}/"
+        except ValueError:
+            pass
+        return ""
+
+    def _is_navigation_uri_allowed(self, uri: str) -> bool:
+        raw = str(uri or "").strip()
+        if not raw:
+            return True
+        try:
+            parsed = urlsplit(raw)
+        except ValueError:
+            return False
+        scheme = parsed.scheme.lower()
+        if scheme in _DANGEROUS_WEBVIEW_SCHEMES:
+            return False
+        if self._is_viewer_locked():
+            if raw.lower() == "about:blank":
+                return True
+            if scheme == "blob":
+                return True
+            prefix = self._viewer_prefix()
+            return bool(prefix and raw.lower().startswith(prefix))
+        return bool(
+            _validate_webview_url(
+                raw,
+                allowed_loopback_ports=self._allowed_loopback_ports,
+            )
+        )
+
     def navigate(self, url: str) -> None:
+        safe_url = _validate_webview_url(
+            url,
+            allowed_loopback_ports=self._allowed_loopback_ports,
+        )
+        if not safe_url:
+            return
         self._html = None
-        self._url = url
-        self._enqueue("navigate", url)
+        self._url = safe_url
+        self._enqueue("navigate", safe_url)
 
     def load_html(self, html: str) -> None:
         self._html = html
@@ -211,9 +323,10 @@ class WindowsWebView2Dock:
         self._enqueue("bounds", self._bounds_dip)
 
     def dispose(self) -> None:
-        if self._stop_event.is_set():
-            return
-        self._stop_event.set()
+        with self._lock:
+            if self._stop_event.is_set():
+                return
+            self._stop_event.set()
         self._resolve_pending_scripts()
         self._enqueue("dispose", None)
         if self._thread_id and sys.platform == "win32":
@@ -231,8 +344,9 @@ class WindowsWebView2Dock:
                 pass
 
     def _resolve_pending_scripts(self) -> None:
-        pending = list(self._pending_scripts)
-        self._pending_scripts.clear()
+        with self._lock:
+            pending = list(self._pending_scripts)
+            self._pending_scripts.clear()
         for _script, loop, fut in pending:
             try:
                 loop.call_soon_threadsafe(
@@ -425,7 +539,14 @@ class WindowsWebView2Dock:
             None,
         )
         try:
-            ctypes.windll.user32.SetWindowLongPtrW(
+            user32 = ctypes.windll.user32
+            user32.SetWindowLongPtrW.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_void_p,
+            ]
+            user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+            user32.SetWindowLongPtrW(
                 int(hwnd), -8, ctypes.c_void_p(int(self._parent_hwnd))
             )
         except Exception:
@@ -434,8 +555,10 @@ class WindowsWebView2Dock:
         self._apply_window_bounds()
 
         local_app = os.environ.get("LOCALAPPDATA") or str(Path.home())
-        user_data_dir = str(Path(local_app) / "UTHelper" / "webview2_profile")
-        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+        profile_root = Path(local_app) / "UTHelper" / "webview2_profile"
+        profile_root.mkdir(parents=True, exist_ok=True)
+        _sweep_stale_profiles(profile_root, active_profile=self._profile_name)
+        user_data_dir = str(profile_root)
 
         env_op = wv2.CoreWebView2Environment.create_with_options_async(
             "", user_data_dir, None
@@ -470,8 +593,15 @@ class WindowsWebView2Dock:
     def _handle_ctrl_done(self, op: Any) -> None:
         if self._stop_event.is_set() or not self._hwnd:
             return
+        ctrl: Any = None
         try:
             ctrl = op.get_results()
+            if self._stop_event.is_set() or not self._hwnd:
+                try:
+                    ctrl.close()
+                except Exception:
+                    pass
+                return
             core = ctrl.core_webview2
             self._controller = ctrl
             self._core = core
@@ -479,6 +609,8 @@ class WindowsWebView2Dock:
                 settings_obj = getattr(core, "settings", None)
                 if settings_obj is not None:
                     settings_obj.is_status_bar_enabled = False
+                    settings_obj.are_dev_tools_enabled = False
+                    settings_obj.are_host_objects_allowed = False
             except Exception:
                 pass
             if not self._cookies and callable(self._cookie_provider):
@@ -489,9 +621,21 @@ class WindowsWebView2Dock:
                     self._fail("Không thể khôi phục phiên đăng nhập. Hãy đăng nhập lại.")
                     return
             if self._stop_event.is_set():
+                try:
+                    ctrl.close()
+                except Exception:
+                    pass
+                self._controller = None
+                self._core = None
                 return
             self._inject_cookies(core)
             if self._stop_event.is_set():
+                try:
+                    ctrl.close()
+                except Exception:
+                    pass
+                self._controller = None
+                self._core = None
                 return
             self._ready = True
             self._bind_events(core)
@@ -506,11 +650,11 @@ class WindowsWebView2Dock:
                 core.navigate_to_string(self._html)
             elif self._url:
                 core.navigate(self._url)
-            if self._pending_scripts:
+            with self._lock:
                 queued = list(self._pending_scripts)
                 self._pending_scripts.clear()
-                for script, loop, fut in queued:
-                    self._exec_js_on_core(script, loop, fut)
+            for script, loop, fut in queued:
+                self._exec_js_on_core(script, loop, fut)
         except Exception as exc:
             self._fail(str(exc))
 
@@ -530,7 +674,8 @@ class WindowsWebView2Dock:
             try:
                 cookie_obj = cm.create_cookie(name, value, domain, path)
                 try:
-                    cookie_obj.is_secure = bool(ck.get("secure", False))
+                    is_https = str(self._url or "").lower().startswith("https://")
+                    cookie_obj.is_secure = bool(ck.get("secure", False)) or is_https
                     cookie_obj.is_http_only = bool(ck.get("httpOnly", False))
                 except Exception:
                     pass
@@ -560,11 +705,18 @@ class WindowsWebView2Dock:
                 else None
             )
 
-            core.add_navigation_starting(
-                lambda _s, _a: self._on_loading_changed(True)
-                if self._on_loading_changed
-                else None
-            )
+            def _on_nav_starting(_sender: Any, args: Any) -> None:
+                uri = str(getattr(args, "uri", "") or "")
+                if uri and not self._is_navigation_uri_allowed(uri):
+                    try:
+                        args.cancel = True
+                    except Exception:
+                        pass
+                    return
+                if self._on_loading_changed:
+                    self._on_loading_changed(True)
+
+            core.add_navigation_starting(_on_nav_starting)
 
             def _on_nav_completed(_sender: Any, args: Any) -> None:
                 if self._on_loading_changed:
@@ -604,11 +756,16 @@ class WindowsWebView2Dock:
                 core.add_web_message_received(_on_web_msg)
 
             def _on_new_window(_sender: Any, args: Any) -> None:
-                uri = safe_http_url(str(getattr(args, "uri", "") or ""))
                 try:
                     args.handled = True
                 except Exception:
                     pass
+                if self._is_viewer_locked():
+                    return
+                uri = _validate_webview_url(
+                    str(getattr(args, "uri", "") or ""),
+                    allowed_loopback_ports=self._allowed_loopback_ports,
+                )
                 if uri:
                     core.navigate(uri)
 
@@ -731,15 +888,20 @@ class WindowsWebView2Dock:
             elif action == "_ctrl_done":
                 self._handle_ctrl_done(payload[0])
             elif action == "navigate" and self._core is not None and payload:
-                self._core.navigate(str(payload))
+                nav_url = str(payload)
+                if self._is_navigation_uri_allowed(nav_url):
+                    self._core.navigate(nav_url)
             elif action == "load_html" and self._core is not None:
                 self._core.navigate_to_string(str(payload or ""))
             elif action == "eval_js":
                 script, loop, fut = payload
                 if self._core is None:
-                    if not self._stop_event.is_set() and not self._failed:
-                        self._pending_scripts.append((script, loop, fut))
-                    else:
+                    enqueued = False
+                    with self._lock:
+                        if not self._stop_event.is_set() and not self._failed:
+                            self._pending_scripts.append((script, loop, fut))
+                            enqueued = True
+                    if not enqueued:
                         try:
                             loop.call_soon_threadsafe(
                                 lambda f=fut: None if f.done() else f.set_result(None)
@@ -794,6 +956,14 @@ class WindowsWebView2Dock:
             except Exception:
                 pass
             self._hwnd = 0
+        try:
+            local_app = os.environ.get("LOCALAPPDATA") or str(Path.home())
+            profile_root = Path(local_app) / "UTHelper" / "webview2_profile"
+            for candidate in (profile_root / self._profile_name, profile_root / "EBWebView" / self._profile_name):
+                if candidate.is_dir():
+                    shutil.rmtree(candidate, ignore_errors=True)
+        except Exception:
+            pass
 
 
 class _FletWebViewSlot(ft.Container):
@@ -837,6 +1007,10 @@ class EmbeddedWebViewHost:
         self._backend = backend
         self._page = page
         self._url = url
+        self._allowed_loopback_ports: set[int] = set()
+        init_loop_port = _extract_loopback_port(url)
+        if init_loop_port is not None:
+            self._allowed_loopback_ports.add(init_loop_port)
         self._wv = webview_control
         self._dock = dock
         self._on_ready = on_ready
@@ -964,9 +1138,18 @@ class EmbeddedWebViewHost:
     def _handle_flet_page_started(self, e: Any) -> None:
         if self._disposed:
             return
+        url = str(getattr(e, "data", "") or "")
+        if url and not _validate_webview_url(
+            url,
+            allowed_loopback_ports=self._allowed_loopback_ports,
+        ):
+            if self._on_loading_changed is not None:
+                self._on_loading_changed(False)
+            if self._on_error is not None:
+                self._on_error(f"Blocked disallowed WebView URL: {url}")
+            return
         if self._on_loading_changed is not None:
             self._on_loading_changed(True)
-        url = str(getattr(e, "data", "") or "")
         if url and self._on_url_changed is not None:
             self._on_url_changed(url)
         self._schedule_history_refresh()
@@ -1005,6 +1188,13 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         url = str(getattr(e, "data", "") or "")
+        if url and not _validate_webview_url(
+            url,
+            allowed_loopback_ports=self._allowed_loopback_ports,
+        ):
+            if self._on_error is not None:
+                self._on_error(f"Blocked disallowed WebView URL: {url}")
+            return
         if url:
             self._url = url
         if url and self._on_url_changed is not None:
@@ -1048,7 +1238,10 @@ class EmbeddedWebViewHost:
     def navigate(self, url: str) -> None:
         if self._disposed:
             return
-        safe_url = safe_http_url(url)
+        safe_url = _validate_webview_url(
+            url,
+            allowed_loopback_ports=self._allowed_loopback_ports,
+        )
         if not safe_url:
             return
         self._url = safe_url
@@ -1241,7 +1434,7 @@ def build_embedded_webview_host(
     """Build a platform-appropriate ``EmbeddedWebViewHost``, or ``None`` if unsupported."""
     safe_url = ""
     if url:
-        safe_url = safe_http_url(url)
+        safe_url = _validate_webview_url(url, allow_any_loopback=True)
         if not safe_url:
             return None
     if not safe_url and html is None:
@@ -1251,9 +1444,13 @@ def build_embedded_webview_host(
         try:
             import flet_webview as fwv
 
+            prevent_links = ["javascript:", "file:", "data:", "intent:"]
+            if _extract_loopback_port(safe_url) is None:
+                prevent_links.append("http://")
             holder: dict[str, EmbeddedWebViewHost] = {}
             wv = fwv.WebView(
                 url=safe_url or None,
+                prevent_links=prevent_links,
                 bgcolor=bgcolor or C.BG,
                 expand=True,
                 on_page_started=lambda e: holder["host"]._handle_flet_page_started(e)

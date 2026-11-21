@@ -16,6 +16,17 @@ class BundleVerificationError(RuntimeError):
 
 _NUMERIC_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _RUNTIME_VERSION_PATH = Path("app") / "assets" / "release-version"
+_REQUIRED_OFFICE_VIEWER_ASSETS = (
+    "docx_host.html",
+    "docx_host.js",
+    "docx-preview.min.js",
+    "jszip.min.js",
+    "pptx_host.html",
+    "pptx_host.js",
+    "pptx_engine.js",
+    "viewer.css",
+    "viewer_common.js",
+)
 
 
 def _read_runtime_version(path: Path) -> str | None:
@@ -56,6 +67,10 @@ def inspect_bundle(
         issues.append("Python runtime DLL is missing")
     if not (root / "flutter_windows.dll").is_file():
         issues.append("Flutter runtime DLL is missing")
+    if not (root / "flutter_inappwebview_windows_plugin.dll").is_file():
+        issues.append("flutter_inappwebview_windows_plugin.dll is missing")
+    if not (root / "WebView2Loader.dll").is_file():
+        issues.append("WebView2Loader.dll is missing")
 
     encodings = root / "Lib" / "encodings"
     if not encodings.is_dir() or not any(encodings.glob("__init__.py*")):
@@ -71,6 +86,11 @@ def inspect_bundle(
         issues.append(
             f"packaged release version mismatch: {runtime_version} != {expected_version}"
         )
+    office_viewer_dir = app_dir / "assets" / "office_viewer"
+    for asset_name in _REQUIRED_OFFICE_VIEWER_ASSETS:
+        asset_path = office_viewer_dir / asset_name
+        if not asset_path.is_file() or asset_path.stat().st_size <= 0:
+            issues.append(f"packaged office_viewer asset is missing: {asset_name}")
 
     site_packages = root / "site-packages"
     if not site_packages.is_dir():
@@ -93,6 +113,13 @@ def inspect_bundle(
                 issues.append(f"packaged {label} module is missing")
         if not any((site_packages / "pywin32_system32").glob("pywintypes3*.dll")):
             issues.append("packaged pywintypes runtime is missing")
+        quiz_pkg = site_packages / "flet_uth_quiz"
+        if (
+            not quiz_pkg.is_dir()
+            or not any(quiz_pkg.glob("__init__.py*"))
+            or not any(quiz_pkg.glob("quiz_player.py*"))
+        ):
+            issues.append("packaged flet_uth_quiz extension is missing")
 
     return tuple(issues)
 

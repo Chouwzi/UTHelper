@@ -86,6 +86,8 @@ def _stop_owned_exporter(pid_file: Path, started_at: float, expected_name: str) 
         kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
         kernel.GetProcessTimes.argtypes = [wintypes.HANDLE, *[ctypes.POINTER(wintypes.FILETIME)] * 4]
         kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         handle = kernel.OpenProcess(0x1000 | 0x0001, False, pid)
         if not handle:
@@ -99,6 +101,7 @@ def _stop_owned_exporter(pid_file: Path, started_at: float, expected_name: str) 
             created_at = ((created.dwHighDateTime << 32) | created.dwLowDateTime) / 10_000_000 - 11_644_473_600
             if valid_path and valid_time and Path(path.value).name.lower() == expected_name and created_at >= started_at:
                 kernel.TerminateProcess(handle, 1)
+                kernel.WaitForSingleObject(handle, 3000)
         finally:
             kernel.CloseHandle(handle)
     except Exception:
@@ -116,7 +119,14 @@ def _render_office_pdf(data: bytes, file_name: str, *, timeout: float) -> bytes 
     if sys.platform != "win32" or not is_supported_office_package(data, file_name):
         return None
     # Only desktop sessions can host Office COM; Android/web retain offline previews.
-    powershell = shutil.which("powershell.exe")
+    system_ps = (
+        Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    powershell = str(system_ps) if system_ps.is_file() else shutil.which("powershell.exe")
     if powershell is None:
         return None
     extension = Path(file_name).suffix.lower()
@@ -129,7 +139,7 @@ def _render_office_pdf(data: bytes, file_name: str, *, timeout: float) -> bytes 
             pass
     except (ImportError, OSError):
         return None
-    with tempfile.TemporaryDirectory(prefix="uth-office-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="uth-office-", ignore_cleanup_errors=True) as temp_dir:
         root = Path(temp_dir)
         input_path, output_path, pid_path = root / f"document{extension}", root / "preview.pdf", root / "office.pid"
         input_path.write_bytes(data)

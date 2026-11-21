@@ -551,6 +551,20 @@ class CoursesTabView(ft.Container):
         if update:
             self._safe_update()
 
+    def reset_for_account_switch(self) -> None:
+        """Clear overlays and cached course state when the signed-in account changes."""
+        self._catalog_request_seq += 1
+        self._detail_request_seq += 1
+        self._grade_request_seq += 1
+        self._module_open_seq += 1
+        self._user_chose_semester = False
+        self.clear_overlays(update=False)
+        self._state = CoursesState(
+            layout_mode=self._layout_mode,
+            viewport_height=self._current_height,
+        )
+        self._render()
+
     def handle_back(self) -> bool:
         """Delegate back to top overlay sub-stack, dismiss overlay, collapse 2+3 expand, or exit mobile detail."""
         if self._overlays:

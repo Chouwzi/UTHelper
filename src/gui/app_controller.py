@@ -7,6 +7,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import flet as ft
+from concurrent.futures import Future
 from datetime import datetime
 from core.time_utils import parse_datetime
 import asyncio
@@ -18,8 +19,8 @@ from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from packaging.version import InvalidVersion, Version
 
 from core.data_orchestrator import DataOrchestrator
 from core.courses.activity_service import CourseActivityService
@@ -27,15 +28,17 @@ from core.courses.archive_service import ArchiveService
 from core.courses.cache_store import CourseCacheStore
 from core.courses.catalog_service import CourseCatalogService
 from core.courses.local_preview_server import LocalPreviewServer
-from core.courses.models import CourseModuleItem
+from core.courses.models import CourseModuleItem, CourseSummary
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.providers import CoursesWsProvider, ThnnCourseProvider
+from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
 from core.portal_client import PortalClient
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
+    WeekScheduleCache,
     TodayScheduleCoordinator,
     TodayScheduleViewState,
 )
@@ -46,7 +49,20 @@ from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_t
 from core.update_checker import GitHubReleaseClient, VerifiedDownloader
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
-from config import get_sync_interval_minutes, save_settings, settings
+from platform_utils.android_updates import (
+    AndroidPackageDownloader,
+    AndroidPackageLauncher,
+    AndroidPackageVerifier,
+)
+from config import (
+    get_sync_interval_minutes,
+    hydrate_secrets,
+    pop_pending_plaintext_migration,
+    register_secret_backend,
+    save_settings,
+    settings,
+)
+from platform_utils.background_sync import AndroidSecretBackend
 from platform_utils.update_packages import (
     DownloadedPackageVerifier,
     detect_runtime_target,
@@ -56,9 +72,11 @@ from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
+from gui.components.quiz_player_view import QuizPlayerView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
 from gui.components.desktop_window_header import build_desktop_window_header
@@ -88,6 +106,12 @@ _SCROLL_TO_TOP_SHOW_OFFSET = 240.0
 _SCROLL_TO_TOP_HIDE_OFFSET = 96.0
 _SCROLL_TO_TOP_DURATION_MS = 300
 _DASHBOARD_SCROLL_EVENT_INTERVAL_MS = 32
+# Bố cục PC: từ độ rộng này trở lên chia 2 cột (danh sách | lịch hôm nay / chi tiết).
+_WIDE_BREAKPOINT = 980
+_SIDE_PANE_WIDTH = 440
+_RAIL_WIDTH = 88
+_LIST_MAX_WIDTH = 820
+_SINGLE_VIEW_MAX_WIDTH = 860
 
 try:
     from core.version import APP_VERSION as _APP_VERSION
@@ -104,26 +128,6 @@ def _save_setting(key: str, value):
         logging.getLogger(__name__).warning(f"Failed to save setting {key}: {e}")
 
 
-def _android_release_build_number(version: str) -> int:
-    """Derive the Flet Android build number from a strict X.Y.Z version."""
-    try:
-        parsed = Version(version)
-    except InvalidVersion as exc:
-        raise ValueError("invalid Android release version") from exc
-    if (
-        str(parsed) != version
-        or len(parsed.release) != 3
-        or parsed.pre
-        or parsed.post
-        or parsed.dev
-        or parsed.local
-        or any(part < 0 or part > 999 for part in parsed.release)
-    ):
-        raise ValueError("Android release version must be numeric X.Y.Z")
-    major, minor, patch = parsed.release
-    return major * 1_000_000 + minor * 1_000 + patch
-
-
 class _UnavailablePackageLauncher:
     def launch(self, _path: Path, _package: ReleasePackage) -> LaunchResult:
         return LaunchResult(False, "installer is unavailable on this platform")
@@ -132,65 +136,70 @@ class _UnavailablePackageLauncher:
         return None
 
 
-class _AndroidPackageLauncher:
-    """Thin adapter from the synchronous coordinator to the native bridge."""
-
-    PACKAGE_ID = "com.uthelper.uthelper"
-
-    def __init__(self, bridge, task_runner, release_version_provider, result_sink=None):
-        self._bridge = bridge
-        self._task_runner = task_runner
-        self._release_version_provider = release_version_provider
-        self._result_sink = result_sink
-
-    def launch(self, path: Path, package: ReleasePackage) -> LaunchResult:
-        if (
-            package.platform != "android"
-            or package.package_type != "apk"
-            or self._bridge is None
-            or not self._bridge.available
-        ):
-            return LaunchResult(False, "Android installer bridge is unavailable")
-        try:
-            version_code = _android_release_build_number(
-                self._release_version_provider()
-            )
-            task = self._task_runner(self._install, Path(path), package, version_code)
-        except (RuntimeError, TypeError, ValueError):
-            logger.warning("Android installer scheduling failed", exc_info=True)
-            return LaunchResult(False, "Android installer scheduling failed")
-        return LaunchResult(task is not None, "Android installer scheduled")
-
-    async def _install(
-        self,
-        path: Path,
-        package: ReleasePackage,
-        version_code: int,
-    ) -> None:
-        try:
-            result = await self._bridge.install_update(
-                str(path),
-                package.sha256,
-                package.size,
-                self.PACKAGE_ID,
-                version_code,
-                package.certificate_fingerprint,
-            )
-        except Exception:
-            logger.warning("Android installer bridge failed", exc_info=True)
-            result = {"status": "bridge_failed"}
-        if self._result_sink is not None:
-            self._result_sink(result)
-        if result.get("status") not in {"installer_opened", "permission_required"}:
-            logger.warning("Android installer rejected update: %s", result.get("status"))
-
-    def cancel(self) -> None:
-        if self._bridge is None or not self._bridge.available:
-            return
-        try:
-            self._task_runner(self._bridge.cancel_update)
-        except (RuntimeError, TypeError):
-            logger.debug("Android installer cancellation scheduling failed", exc_info=True)
+def _update_install_error_message(status: str) -> str:
+    normalized = str(status or "").strip()
+    messages = {
+        "invalid_apk": "Không đọc được gói cập nhật. Hãy tải lại.",
+        "package_mismatch": "Gói cập nhật không dành cho ứng dụng này.",
+        "release_version_mismatch": "Phiên bản gói cập nhật không hợp lệ.",
+        "installed_signer_mismatch": "Chữ ký bản cập nhật không khớp ứng dụng đang cài.",
+        "manifest_signer_mismatch": "Chữ ký gói cập nhật không hợp lệ.",
+        "apk_signature_invalid": "Không xác minh được chữ ký gói cập nhật.",
+        "release_metadata_invalid": "Thông tin bản cập nhật không hợp lệ.",
+        "archive_identity_unavailable": "Không đọc được định danh gói cập nhật. Hãy thử lại.",
+        "source_unavailable": "Không tìm thấy gói đã tải. Hãy tải lại.",
+        "verification_timeout": "Xác minh bản cập nhật quá lâu. Hãy thử lại.",
+        "package_staging_failed": "Không chuẩn bị được gói cài đặt. Hãy kiểm tra bộ nhớ rồi thử lại.",
+        "update_verification_failed": "Không xác minh được gói cập nhật. Hãy thử lại.",
+        "sha256_mismatch": "Gói cập nhật bị hỏng. Hãy tải lại.",
+        "size_mismatch": "Gói cập nhật chưa đầy đủ. Hãy tải lại.",
+        "already_installed": "Bản cập nhật này đã được cài đặt.",
+        "package_installer_unavailable": "Không tìm thấy trình cài đặt trên thiết bị.",
+        "file_provider_unavailable": "Không chuyển được gói tới trình cài đặt. Hãy thử lại.",
+        "permission_settings_unavailable": "Không mở được quyền cài ứng dụng. Hãy kiểm tra Cài đặt Android.",
+        # Windows / cross-platform launcher tokens and reasons
+        "installer_unavailable": "Không tìm thấy tệp cài đặt. Hãy tải lại.",
+        "Windows installer is unavailable": "Không tìm thấy tệp cài đặt. Hãy tải lại.",
+        "platform_unavailable": "Nền tảng hiện tại chưa hỗ trợ cài đặt tự động.",
+        "installer is unavailable on this platform": "Nền tảng hiện tại chưa hỗ trợ cài đặt tự động.",
+        "strategy_not_allowed": "Phương thức cài đặt không hợp lệ. Hãy tải từ trang phát hành.",
+        "installer_strategy_not_allowed": "Phương thức cài đặt không hợp lệ. Hãy tải từ trang phát hành.",
+        "installer strategy is not allowed": "Phương thức cài đặt không hợp lệ. Hãy tải từ trang phát hành.",
+        "uac_cancelled": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "uac_denied": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_cancelled": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer cancelled by user": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_exit_1223": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_exit_1602": "Bạn đã hủy cấp quyền cài đặt cập nhật. Nhấn Thử lại khi sẵn sàng.",
+        "installer_busy": "Đang có một trình cài đặt Windows khác chạy. Hãy đợi hoàn tất rồi thử lại.",
+        "another Windows installation is in progress": "Đang có một trình cài đặt Windows khác chạy. Hãy đợi hoàn tất rồi thử lại.",
+        "installer_exit_1618": "Đang có một trình cài đặt Windows khác chạy. Hãy đợi hoàn tất rồi thử lại.",
+        "installer_already_running": "Trình cài đặt đang chạy. Vui lòng hoàn tất quá trình hiện tại.",
+        "an installer is already running": "Trình cài đặt đang chạy. Vui lòng hoàn tất quá trình hiện tại.",
+        "file_in_use": "Tệp ứng dụng đang được sử dụng. Hãy đóng tiến trình khác rồi thử lại.",
+        "installer_file_in_use": "Tệp ứng dụng đang được sử dụng. Hãy đóng tiến trình khác rồi thử lại.",
+        "installer_exit_1603": "Tệp ứng dụng đang được sử dụng. Hãy đóng tiến trình khác rồi thử lại.",
+        "launch_failed": "Không thể khởi chạy trình cài đặt Windows. Hãy thử lại.",
+        "installer_launch_failed": "Không thể khởi chạy trình cài đặt Windows. Hãy thử lại.",
+        "installer launch failed": "Không thể khởi chạy trình cài đặt Windows. Hãy thử lại.",
+        "bridge_failed": "Không kết nối được dịch vụ cài đặt cập nhật. Hãy thử lại.",
+        "installer_rejected": "Trình cài đặt Windows đã thoát với mã lỗi. Hãy thử lại.",
+        "installer rejected": "Trình cài đặt Windows đã thoát với mã lỗi. Hãy thử lại.",
+        "install_timeout": "Trình cài đặt phản hồi quá lâu. Hãy thử lại.",
+        "launch_timeout": "Trình cài đặt phản hồi quá lâu. Hãy thử lại.",
+        "installer_timeout": "Trình cài đặt phản hồi quá lâu. Hãy thử lại.",
+        "relaunch_failed": "Cập nhật hoàn tất nhưng không tự mở lại được ứng dụng.",
+    }
+    if normalized in messages:
+        return messages[normalized]
+    lowered = normalized.lower()
+    if "1223" in lowered or "1602" in lowered or "uac" in lowered or "cancel" in lowered:
+        return messages["uac_cancelled"]
+    if "1618" in lowered:
+        return messages["installer_busy"]
+    if "1603" in lowered:
+        return messages["file_in_use"]
+    return "Không mở được trình cài đặt. Hãy thử lại."
 
 
 class AppController:
@@ -210,6 +219,8 @@ class AppController:
         self._diagnostic_recorder = diagnostic_recorder
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
+        self._exit_cleanup_lock = threading.Lock()
+        self._exit_cleanup_done = False
         self._page_alive = threading.Event()
         self._page_alive.set()
         
@@ -227,6 +238,10 @@ class AppController:
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
         self._portal_client = PortalClient(settings.PORTAL_API_BASE)
+        # The Portal web app (lichTuan) is served from its own host.
+        self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
+        self._portal_week_lock = threading.Lock()
+        self._week_schedule_cache = WeekScheduleCache(namespace=schedule_namespace)
         self._today_schedule_coordinator = TodayScheduleCoordinator(
             fetch_day=self._portal_client.fetch_day,
             cache=TodayScheduleCache(namespace=schedule_namespace),
@@ -276,6 +291,7 @@ class AppController:
         self._scroll_to_top_in_progress = False
 
         self._init_window()
+        self._distribution_profile = resolve_distribution_channel()
         self._update_candidate = None
         self._manual_update_check_requested = False
         self._update_coordinator = self._create_update_coordinator()
@@ -305,23 +321,35 @@ class AppController:
         self._safe_run_task(self._countdown_loop_async)
         self._safe_run_task(self._pulse_critical_cards_loop_async)
         self._safe_run_task(self._sync_coordinator.run)
-        if not needs_initial_sync:
-            hydration_started = self._schedule_cached_detail_hydration(
-                has_cached_snapshot
-            )
-            if not hydration_started:
-                self._schedule_card_detail_warmup()
-        self._safe_run_task(self._today_schedule_coordinator.run)
-        if self._android_background and self._android_background.available:
-            self._safe_run_task(self._initialize_android_background)
         self._tray_balloon_shown = False  # H-01: only show once
 
-        self._update_coordinator.start()
+        if self._update_coordinator is not None:
+            self._update_coordinator.start()
 
-        if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
-            self._safe_run_task(self._show_login_dialog)
+        if (
+            platform_utils.IS_ANDROID
+            and self._android_background
+            and self._android_background.available
+        ):
+            self._safe_run_task(
+                self._startup_android_sequence,
+                has_cached_snapshot,
+                needs_initial_sync,
+            )
         else:
-            self._safe_run_task(self._load_data_async, "startup")
+            if not needs_initial_sync:
+                hydration_started = self._schedule_cached_detail_hydration(
+                    has_cached_snapshot
+                )
+                if not hydration_started:
+                    self._schedule_card_detail_warmup()
+            self._safe_run_task(self._today_schedule_coordinator.run)
+            if self._android_background and self._android_background.available:
+                self._safe_run_task(self._initialize_android_background)
+            if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
+                self._safe_run_task(self._show_login_dialog)
+            else:
+                self._safe_run_task(self._load_data_async, "startup")
 
     def _diag_screen(self, screen: str) -> None:
         recorder = getattr(self, "_diagnostic_recorder", None)
@@ -357,36 +385,129 @@ class AppController:
 
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
+
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "user", screen="login")
+
         async def _on_login_success():
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             # UX-5: Show success snackbar after dialog closes
             self._show_snackbar("Đăng nhập thành công! Đang tải dữ liệu...", ft.Icons.CHECK_CIRCLE_ROUNDED, C.SAFE)
-            self._portal_client.clear_token()
-            # Flip identity and the schedule cache BEFORE any task is queued:
-            # otherwise the first reminder reconcile after login compares
-            # against the old identity and is mistaken for an account change.
-            self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
-            schedule_namespace = (
-                f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
-                if settings.UTH_USERNAME
-                else f"{settings.PORTAL_API_BASE}|anonymous"
-            )
-            self._today_schedule_coordinator.replace_cache(
-                TodayScheduleCache(namespace=schedule_namespace)
-            )
-            # Tear down the PREVIOUS account's armed class reminders before the
-            # new snapshot is fetched: running refresh("login") first would let
-            # the fresh schedule land and only afterwards be wiped by the
-            # older clear. Ordering the tasks here is what makes the swap safe.
-            self._safe_run_task(
-                self._reconcile_class_schedule_notifications, (), clear_only=True
-            )
-            self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
-            await self._load_data_async()
+            await self._complete_login_success()
+
         await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+
+    async def _show_quiz_auth_dialog(self, retry_callback):
+        """Reuse the app credential dialog, then retry Moodle session setup."""
+        from gui.components.login_dialog import show_login_dialog
+
+        self._diag_screen("login")
+        self._diag_breadcrumb("login", "started", "quiz_player", screen="login")
+
+        async def _on_login_success():
+            self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
+            self._diag_screen("home")
+            await self._complete_login_success()
+            await retry_callback()
+
+        await show_login_dialog(
+            self.page,
+            self.orchestrator,
+            _on_login_success,
+            allow_cancel=True,
+        )
+
+    async def _complete_login_success(self) -> None:
+        """Switch account-owned caches and schedules after either login flow."""
+        try:
+            self._portal_client.clear_token()
+        except Exception:
+            logger.debug("Portal token clear failed after login", exc_info=True)
+        portal_week_client = getattr(self, "_portal_week_client", None)
+        if portal_week_client is not None:
+            try:
+                portal_week_client.clear_token()
+            except Exception:
+                logger.debug("Portal week token clear failed after login", exc_info=True)
+
+        new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+        identity_changed = new_identity != self._settings_identity
+        # Identity must flip before any account-bound background work is queued.
+        self._settings_identity = new_identity
+
+        if identity_changed:
+            try:
+                self.orchestrator.moodle_service.clear_all_caches()
+                self.orchestrator.clear_detail_cache()
+                self.orchestrator._userid_cache = None
+                for client_attr in ("client", "thnn_client"):
+                    client_obj = getattr(self.orchestrator, client_attr, None)
+                    clear_session = getattr(client_obj, "clear_session", None)
+                    if callable(clear_session):
+                        clear_session()
+                grade_monitor = getattr(self.orchestrator, "course_grade_monitor", None)
+                set_grade_ns = getattr(grade_monitor, "set_namespace", None)
+                if callable(set_grade_ns):
+                    set_grade_ns(f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}")
+                if hasattr(self.orchestrator, "latest_course_grades"):
+                    self.orchestrator.latest_course_grades = []
+            except Exception:
+                logger.debug("Moodle cache clear failed after login", exc_info=True)
+
+            from core.data_cache import DataCache
+
+            cache_namespace = (
+                f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}"
+                if settings.UTH_USERNAME
+                else None
+            )
+            self._data_cache = DataCache(namespace=cache_namespace)
+            quiz_player_view = getattr(self, "quiz_player_view", None)
+            clear_quiz_sessions = getattr(
+                quiz_player_view, "clear_persisted_sessions", None
+            )
+            if (
+                callable(clear_quiz_sessions)
+                and not getattr(quiz_player_view, "visible", False)
+            ):
+                self._safe_run_task(clear_quiz_sessions)
+            courses_coord = getattr(self, "_courses_coordinator", None)
+            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
+            if callable(reset_courses):
+                courses_ns = (
+                    f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+                )
+                reset_courses(courses_ns)
+
+        schedule_namespace = (
+            f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
+            if settings.UTH_USERNAME
+            else f"{settings.PORTAL_API_BASE}|anonymous"
+        )
+        week_cache = getattr(self, "_week_schedule_cache", None)
+        set_week_ns = getattr(week_cache, "set_namespace", None)
+        if callable(set_week_ns):
+            set_week_ns(schedule_namespace)
+        calendar_view = getattr(self, "calendar_view", None)
+        reset_schedule = getattr(calendar_view, "reset_schedule", None)
+        if callable(reset_schedule):
+            reset_schedule()
+        self._today_schedule_coordinator.replace_cache(
+            TodayScheduleCache(namespace=schedule_namespace)
+        )
+        self._today_schedule_state = TodayScheduleViewState(ScheduleLoadStatus.IDLE)
+        component = getattr(self, "_today_schedule_component", None)
+        if component is not None:
+            component.set_state(self._today_schedule_state)
+
+        # Clear old-account reminders before the newly authenticated schedule
+        # can be reconciled and armed.
+        self._safe_run_task(
+            self._reconcile_class_schedule_notifications, (), clear_only=True
+        )
+        self._safe_run_task(self._today_schedule_coordinator.refresh, "login")
+        await self._load_data_async()
 
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
@@ -433,8 +554,86 @@ class AppController:
 
         return self.page.run_task(guarded_task)
 
-    def _create_update_coordinator(self) -> UpdateCoordinator:
+    def _run_page_task(self, handler, *args, **kwargs) -> Future | None:
+        if not hasattr(self.page, "session") or self.page.session is None:
+            return None
+        if not hasattr(self.page.session, "connection") or self.page.session.connection is None:
+            return None
+
+        result_future: Future = Future()
+
+        async def _runner():
+            try:
+                value = await handler(*args, **kwargs)
+            except asyncio.CancelledError:
+                if not result_future.done():
+                    result_future.cancel()
+                raise
+            except BaseException as exc:
+                if not result_future.done():
+                    result_future.set_exception(exc)
+                return None
+            if not result_future.done():
+                result_future.set_result(value)
+            return value
+
+        task_future = self.page.run_task(_runner)
+        if task_future is None:
+            return None
+        cancel_task = getattr(task_future, "cancel", None)
+        add_done_callback = getattr(task_future, "add_done_callback", None)
+        if callable(cancel_task):
+            def _propagate_cancel(done_future):
+                if done_future.cancelled():
+                    try:
+                        cancel_task()
+                    except Exception:
+                        pass
+
+            result_future.add_done_callback(_propagate_cancel)
+        if callable(add_done_callback):
+            def _sync_task_done(done_task):
+                if result_future.done():
+                    return
+                try:
+                    if done_task.cancelled():
+                        result_future.cancel()
+                        return
+                    exc = done_task.exception()
+                    if exc is not None:
+                        result_future.set_exception(exc)
+                    else:
+                        result_future.set_result(done_task.result())
+                except BaseException:
+                    pass
+
+            add_done_callback(_sync_task_done)
+        return result_future
+
+    def _current_update_release_version(self) -> str | None:
+        coordinator = getattr(self, "_update_coordinator", None)
+        candidate = None
+        if coordinator is not None and callable(
+            getattr(coordinator, "current_candidate", None)
+        ):
+            candidate = coordinator.current_candidate()
+        if candidate is None:
+            candidate = getattr(self, "_update_candidate", None)
+        manifest = getattr(candidate, "manifest", None)
+        version = getattr(manifest, "release_version", None)
+        return str(version) if version else None
+
+    def _get_distribution_profile(self) -> DistributionProfile:
+        profile = getattr(self, "_distribution_profile", None)
+        if profile is not None:
+            return profile
+        return resolve_distribution_channel()
+
+    def _create_update_coordinator(self) -> UpdateCoordinator | None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return None
         target = detect_runtime_target()
+        downloader = VerifiedDownloader()
         if target.platform == "windows":
             from platform_utils.windows_update import (
                 WindowsPackageLauncher,
@@ -444,19 +643,23 @@ class AppController:
             verifier = WindowsPackageVerifier()
             launcher = WindowsPackageLauncher()
         elif target.platform == "android":
-            verifier = DownloadedPackageVerifier()
-            launcher = _AndroidPackageLauncher(
+            verifier = AndroidPackageVerifier()
+            launcher = AndroidPackageLauncher(
                 self._android_background,
-                self._safe_run_task,
-                lambda: self._update_candidate.manifest.release_version,
-                self._on_android_update_result,
+                self._run_page_task,
+                self._current_update_release_version,
+            )
+            downloader = AndroidPackageDownloader(
+                self._android_background,
+                self._run_page_task,
+                self._current_update_release_version,
             )
         else:
             verifier = DownloadedPackageVerifier()
             launcher = _UnavailablePackageLauncher()
         return UpdateCoordinator(
             GitHubReleaseClient(),
-            VerifiedDownloader(),
+            downloader,
             verifier,
             launcher,
             target,
@@ -473,37 +676,70 @@ class AppController:
 
         return self._safe_run_task(_open) is not None
 
+    def _open_store_url(
+        self,
+        url: str,
+        fallback_url: str | None = None,
+    ) -> bool:
+        allowed_schemes = {"market", "ms-windows-store", "https"}
+        if urlsplit(url).scheme.lower() not in allowed_schemes:
+            return False
+        safe_fallback = (
+            fallback_url
+            if fallback_url and urlsplit(fallback_url).scheme.lower() == "https"
+            else None
+        )
+
+        async def _launch_single(target: str) -> None:
+            try:
+                await ft.UrlLauncher().launch_url(
+                    target,
+                    mode=ft.LaunchMode.EXTERNAL_APPLICATION,
+                )
+                return
+            except RuntimeError as exc:
+                if "must be added to the page first" not in str(exc):
+                    raise
+                launch_fn = getattr(self.page, "launch_url", None)
+                if (
+                    not callable(launch_fn)
+                    or getattr(launch_fn, "__func__", None) is ft.Page.launch_url
+                ):
+                    raise
+                await launch_fn(target)
+
+        async def _open() -> None:
+            try:
+                await _launch_single(url)
+            except Exception:
+                if safe_fallback:
+                    try:
+                        await _launch_single(safe_fallback)
+                        return
+                    except Exception:
+                        logger.warning(
+                            "Failed to open store fallback URL",
+                            exc_info=True,
+                        )
+                        return
+                logger.warning("Failed to open store URL", exc_info=True)
+
+        return self._safe_run_task(_open) is not None
+
+    def _cancel_update_download(self) -> None:
+        coordinator = getattr(self, "_update_coordinator", None)
+        if coordinator is not None:
+            coordinator.cancel_download()
+
     def _check_updates_now(self) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        coordinator = getattr(self, "_update_coordinator", None)
+        if coordinator is None:
+            return
         self._diag_breadcrumb("update_check", "started", "github")
         self._manual_update_check_requested = True
-        self._update_coordinator.check_now()
-
-    def _on_android_update_result(self, result: dict) -> None:
-        status = result.get("status")
-        if status == "installer_opened":
-            self._diag_breadcrumb("update_install", "succeeded", "android")
-            self._update_banner.visible = False
-            self.page.update()
-        elif status == "permission_required":
-            self._update_banner.visible = True
-            self._update_btn.disabled = False
-            self._update_btn.content = "Mở trình cài đặt"
-            self._show_snackbar(
-                "Hãy cho phép cài ứng dụng rồi nhấn Cập nhật lại",
-                ft.Icons.SECURITY_ROUNDED,
-                C.WARNING,
-            )
-            self.page.update()
-        else:
-            self._update_banner.visible = True
-            self._update_btn.disabled = False
-            self._update_btn.content = "Thử lại"
-            self._show_snackbar(
-                "Android đã từ chối gói cập nhật",
-                ft.Icons.ERROR_OUTLINE_ROUNDED,
-                C.CRITICAL,
-            )
-            self.page.update()
+        coordinator.check_now()
 
     def _submission_workflow_factory(self, client):
         """Build a fresh workflow only for the orchestrator's current client."""
@@ -556,6 +792,8 @@ class AppController:
         
         # Chỉ dành cho Desktop: Cửa sổ kích thước linh hoạt hỗ trợ khay hệ thống
         if not _is_mobile:
+            # PC: cửa sổ co giãn được. Rộng >= _WIDE_BREAKPOINT sẽ chuyển sang
+            # bố cục 2 cột; hẹp hơn vẫn dùng bố cục gọn như bản cũ.
             self.page.window.width         = 1120
             self.page.window.height        = 760
             self.page.window.min_width     = 420
@@ -656,20 +894,205 @@ class AppController:
                         import logging as _fb_log
                         _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
             else:
-                try:
-                    await self.page.window.destroy()
-                except RuntimeError as exc:
-                    # The host can close its Flet session between the close
-                    # event and the native destroy RPC. That is a completed
-                    # shutdown, not an application failure.
-                    if str(exc) != "Session closed":
-                        raise
-                    logger.debug("Window session closed before destroy completed")
+                await self._request_window_exit()
 
-    def _minimize_window(self, _event=None) -> None:
-        """Minimize from the custom desktop header without hiding to tray."""
-        self.page.window.minimized = True
+    def _toggle_maximize_window(self, _event=None) -> None:
+        """Phóng to / khôi phục cửa sổ từ thanh tiêu đề tuỳ chỉnh."""
+        self.page.window.maximized = not self.page.window.maximized
         self.page.update()
+
+    # ------------------------------------------------------------------
+    # Responsive desktop layout
+    # ------------------------------------------------------------------
+    def _with_inline_schedule(self, cards: list) -> list:
+        """Compact: lịch hôm nay nằm đầu danh sách. Wide: nằm ở cột phải."""
+        if getattr(self, "_wide_layout", False):
+            return list(cards)
+        return [self.today_schedule_panel] + list(cards)
+
+    def _build_stat_row(self) -> ft.Container:
+        """Hàng thẻ thống kê (chỉ hiện ở bố cục PC), bấm để lọc theo mức độ."""
+        self._stat_tiles = {}
+        specs = (
+            ("critical", "Khẩn cấp", lambda: C.CRITICAL),
+            ("warning", "Sắp đến hạn", lambda: C.WARNING),
+            ("safe", "An toàn", lambda: C.SAFE),
+            ("overdue", "Quá hạn", lambda: C.CRITICAL),
+        )
+        tiles = []
+        for key, label, color_fn in specs:
+            value = ft.Text("0", size=28, weight=ft.FontWeight.W_700, color=color_fn())
+            caption = ft.Text(label, size=12, color=C.TEXT_SECONDARY)
+            bar = ft.Container(width=4, height=40, bgcolor=color_fn(), border_radius=2)
+            tile = ft.Container(
+                content=ft.Row(
+                    [bar, ft.Column([value, caption], spacing=0, tight=True)],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=C.SURFACE,
+                border=ft.Border.all(1, C.BORDER),
+                border_radius=14,
+                padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                expand=True,
+                ink=True,
+                tooltip=f"Lọc: {label}",
+                on_click=lambda _e, k=key: self._safe_run_task(self._set_urgency, k),
+            )
+            self._stat_tiles[key] = (value, bar, color_fn)
+            tiles.append(tile)
+        return ft.Container(
+            content=ft.Row(tiles, spacing=12),
+            padding=ft.Padding(left=16, right=16, top=2, bottom=10),
+            visible=False,
+        )
+
+    def _update_stat_tiles(self, n_critical, n_warning, n_safe, n_overdue) -> None:
+        values = {
+            "critical": n_critical, "warning": n_warning,
+            "safe": n_safe, "overdue": n_overdue,
+        }
+        for key, (text, bar, color_fn) in self._stat_tiles.items():
+            n = values[key]
+            text.value = str(n)
+            text.color = color_fn() if n else C.TEXT_SECONDARY
+            bar.bgcolor = color_fn() if n else C.BORDER
+
+    def _build_rail(self) -> ft.Container:
+        """Thanh điều hướng dọc kiểu ứng dụng desktop (thay các nút trên header)."""
+        self._rail_items = {}
+
+        def item(key, icon, label, handler):
+            ic = ft.Icon(icon, size=24, color=C.TEXT_SECONDARY)
+            tx = ft.Text(label, size=10.5, color=C.TEXT_SECONDARY,
+                         weight=ft.FontWeight.W_600, text_align=ft.TextAlign.CENTER)
+            box = ft.Container(
+                content=ft.Column([ic, tx], spacing=4, tight=True,
+                                  horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                width=68, padding=ft.Padding.symmetric(vertical=10),
+                border_radius=14, ink=True, tooltip=label,
+                on_click=lambda _e: self._safe_run_task(handler),
+            )
+            self._rail_items[key] = (box, ic, tx)
+            return box
+
+        logo = ft.Container(
+            content=ft.Text("U", size=20, weight=ft.FontWeight.W_800, color=C.ON_ACCENT),
+            width=42, height=42, bgcolor=C.ACCENT, border_radius=13,
+            alignment=ft.Alignment(0, 0),
+        )
+        rail = ft.Container(
+            content=ft.Column(
+                controls=[
+                    logo,
+                    ft.Container(height=14),
+                    item("home", ft.Icons.DASHBOARD_ROUNDED, "Tổng quan",
+                         lambda: self._rail_navigate("home")),
+                    item("courses", ft.Icons.MENU_BOOK_ROUNDED, "Môn học",
+                         lambda: self._rail_navigate("courses")),
+                    item("calendar", ft.Icons.CALENDAR_MONTH_ROUNDED, "Lịch",
+                         lambda: self._rail_navigate("calendar")),
+                    item("grades", ft.Icons.INSIGHTS_ROUNDED, "Bảng điểm",
+                         lambda: self._rail_navigate("grades")),
+                    ft.Container(expand=True),
+                    item("refresh", ft.Icons.REFRESH_ROUNDED, "Làm mới",
+                         self._load_data_async),
+                    item("settings", ft.Icons.SETTINGS_ROUNDED, "Cài đặt",
+                         lambda: self._rail_navigate("settings")),
+                ],
+                spacing=6,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            width=_RAIL_WIDTH,
+            padding=ft.Padding.symmetric(vertical=16),
+            bgcolor=C.SURFACE,
+            border=ft.Border.only(right=ft.BorderSide(1, C.BORDER)),
+            visible=False,
+        )
+        self._rail_logo = logo
+        self._wide_header_content = ft.Row(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Text("Tổng quan", size=26, weight=ft.FontWeight.W_800,
+                                color=C.TEXT_PRIMARY),
+                        self._sync_status.control,
+                    ],
+                    spacing=4, tight=True,
+                ),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._wide_title = self._wide_header_content.controls[0].controls[0]
+        self._sync_rail_active()
+        return rail
+
+    def _current_section(self) -> str:
+        if getattr(getattr(self, "settings_view", None), "visible", False):
+            return "settings"
+        if getattr(getattr(self, "calendar_view", None), "visible", False):
+            return "calendar"
+        if getattr(getattr(self, "grade_overview_view", None), "visible", False) or getattr(
+            getattr(self, "course_grades_view", None), "visible", False
+        ):
+            return "grades"
+        if getattr(getattr(self, "courses_view", None), "visible", False):
+            return "courses"
+        return "home"
+
+    def _sync_rail_active(self, force_home: bool = False) -> None:
+        current = "home" if force_home else self._current_section()
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is not None and hasattr(nav_shell, "set_active"):
+            nav_shell.set_active(current)
+        if not getattr(self, "_rail_items", None):
+            return
+        for key, (box, ic, tx) in self._rail_items.items():
+            active = key == current
+            color = C.ACCENT if active else C.TEXT_SECONDARY
+            ic.color = color
+            tx.color = color
+            box.bgcolor = ft.Colors.with_opacity(0.14, C.ACCENT) if active else None
+        rail = getattr(self, "_rail", None)
+        if rail is not None:
+            try:
+                rail.update()
+            except Exception:
+                pass
+
+    async def _rail_navigate(self, target: str) -> None:
+        """Chuyển mục từ thanh điều hướng: đóng view đang mở rồi mở view đích."""
+        self._dismiss_desktop_filter_menu()
+        if getattr(getattr(self, "detail_view", None), "visible", False):
+            await self._close_detail()
+        if getattr(getattr(self, "course_grades_view", None), "visible", False):
+            await self._close_course_grades()
+        current = self._current_section()
+        if target == current:
+            # Bấm lại đúng mục đang mở: giữ nguyên, không quay về Tổng quan.
+            self._sync_rail_active()
+            return
+        if current == "settings":
+            if self.settings_view.has_changes():
+                # Hiện hộp thoại "Chưa lưu"; người dùng bấm lại mục sau khi xử lý.
+                await self.settings_view._handle_back(None)
+                return
+            await self._close_settings()
+        elif current == "calendar":
+            await self._close_calendar()
+        elif current == "grades":
+            await self._close_grades()
+        elif current == "courses":
+            await self._close_courses()
+        if target == "calendar":
+            await self._show_calendar()
+        elif target == "grades":
+            await self._show_grades()
+        elif target == "courses":
+            await self._show_courses()
+        elif target == "settings":
+            await self._show_settings()
+        self._sync_rail_active()
 
     def _toggle_maximize_window(self, _event=None) -> None:
         """Toggle desktop maximized window state from the custom header."""
@@ -679,8 +1102,12 @@ class AppController:
         window.maximized = not bool(getattr(window, "maximized", False))
         self.page.update()
 
-    async def _exit_from_window_header(self, _event=None) -> None:
-        """The custom close button is an explicit application-exit action."""
+    def _minimize_window(self, _event=None) -> None:
+        """Minimize from the custom desktop header without hiding to tray."""
+        self.page.window.minimized = True
+        self.page.update()
+
+    async def _destroy_window(self) -> None:
         try:
             await self.page.window.destroy()
         except RuntimeError as exc:
@@ -688,14 +1115,40 @@ class AppController:
                 raise
             logger.debug("Window session closed before custom exit completed")
 
+    async def _request_window_exit(self) -> None:
+        """Confirm a window exit while a Moodle quiz page is mounted."""
+        player_view = getattr(self, "quiz_player_view", None)
+        if player_view is not None and player_view.visible:
+            player_view.request_close(
+                after_close=self._destroy_window,
+                title="Thoát ứng dụng?",
+                action_label="Thoát",
+            )
+            return
+        await self._destroy_window()
+
+    async def _exit_from_window_header(self, _event=None) -> None:
+        """The custom close button follows the same safe exit path."""
+        await self._request_window_exit()
+
     async def _on_keyboard_event(self, e):
         """Handle Escape back navigation and Ctrl+K / search focus shortcuts."""
         key = str(getattr(e, "key", "") or "")
+        courses_view = getattr(self, "courses_view", None)
+        detail_open = bool(getattr(getattr(self, "detail_view", None), "visible", False))
+        if (
+            courses_view is not None
+            and getattr(courses_view, "visible", False)
+            and not detail_open
+        ):
+            overlays = getattr(courses_view, "_overlays", None)
+            if overlays:
+                key_handler = getattr(overlays[-1], "handle_key_event", None)
+                if callable(key_handler) and key_handler(e):
+                    return
         if key == "Escape":
             await self._navigate_back()
             return
-        courses_view = getattr(self, "courses_view", None)
-        detail_open = bool(getattr(getattr(self, "detail_view", None), "visible", False))
         if (
             courses_view is not None
             and getattr(courses_view, "visible", False)
@@ -748,6 +1201,9 @@ class AppController:
 
     async def _navigate_back(self) -> bool:
         """Shared back-navigation logic. Returns True if a view was closed."""
+        quiz_player_view = getattr(self, "quiz_player_view", None)
+        if quiz_player_view is not None and quiz_player_view.handle_back():
+            return True
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
             return True
@@ -757,26 +1213,34 @@ class AppController:
             and getattr(getattr(self, "view_manager", None), "_detail_origin", None)
             is courses_view
         )
+        courses_handle_back = getattr(courses_view, "handle_back", None)
         if (
             courses_view is not None
             and getattr(courses_view, "visible", False)
             and not detail_over_courses
-            and courses_view.handle_back()
+            and callable(courses_handle_back)
+            and courses_handle_back()
         ):
             return True
+        handled = False
+        course_grades_view = getattr(self, "course_grades_view", None)
         if self.settings_view.visible:
             await self.settings_view._handle_back(None)
-            return True
+            handled = True
         elif self.detail_view.visible:
             await self._close_detail()
-            return True
+            handled = True
+        elif course_grades_view is not None and course_grades_view.visible:
+            await self._close_course_grades()
+            handled = True
         elif self.calendar_view.visible:
             await self._close_calendar()
-            return True
+            handled = True
         elif self.grade_overview_view.visible:
             await self._close_grades()
-            return True
-        return False
+            handled = True
+        self._sync_rail_active()
+        return handled
 
     def _init_ui(self):
         self._skeleton_visible = True
@@ -864,10 +1328,15 @@ class AppController:
         )
 
     def _init_header_controls(self):
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
         self.calendar_btn = ft.IconButton(
             ft.Icons.CALENDAR_MONTH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Lịch",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_calendar
             ),
@@ -876,6 +1345,8 @@ class AppController:
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Làm mới",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._load_data_async
             ),
@@ -884,6 +1355,8 @@ class AppController:
             ft.Icons.SETTINGS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Cài đặt",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._show_settings
             ),
@@ -892,6 +1365,8 @@ class AppController:
             ft.Icons.INSIGHTS_ROUNDED,
             icon_color=C.TEXT_SECONDARY, icon_size=20,
             tooltip="Bảng điểm",
+            padding=0,
+            size_constraints=btn_constraints,
             on_click=lambda _event: self._run_dashboard_header_action(
                 self._toggle_grades
             ),
@@ -902,19 +1377,15 @@ class AppController:
         self._safe_run_task(handler)
 
     def _init_banner_and_states(self):
-        self._update_icon = ft.Icon(
-            ft.Icons.SYSTEM_UPDATE_ROUNDED, size=16, color=C.UPDATE
-        )
         self._update_text = ft.Text(
             "Có phiên bản mới!",
             size=12,
-            color=C.UPDATE,
+            color=C.TEXT_PRIMARY,
             weight=ft.FontWeight.W_500,
             expand=True,
         )
         self._update_progress = ft.ProgressBar(
             value=0,
-            width=0,
             height=3,
             color=C.UPDATE,
             bgcolor=C.BORDER,
@@ -922,13 +1393,21 @@ class AppController:
         )
         self._update_btn = ft.TextButton(
             "Cập nhật",
-            icon=ft.Icons.DOWNLOAD_ROUNDED,
-            style=ft.ButtonStyle(color=C.UPDATE),
+            style=ft.ButtonStyle(
+                color=C.TEXT_PRIMARY, shape=ft.RoundedRectangleBorder(radius=8),
+            ),
             on_click=self._request_update_download,
+        )
+        self._update_cancel_btn = ft.TextButton(
+            "Hủy tải", visible=False,
+            style=ft.ButtonStyle(
+                color=C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=lambda _event: self._cancel_update_download(),
         )
         self._update_banner = ft.Container(
             content=ft.Column([
-                ft.Row([self._update_icon, self._update_text, self._update_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([self._update_text, self._update_btn, self._update_cancel_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self._update_progress,
             ], spacing=2, tight=True),
             bgcolor=C.SURFACE_ELEVATED,
@@ -1079,24 +1558,72 @@ class AppController:
             border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
         )
 
-        self.dashboard = ft.Column(
+        self._stat_row = self._build_stat_row()
+        self._dashboard_main = ft.Column(
             controls=[
                 header,
                 self._update_banner,
+                self._stat_row,
                 self._filter_container,
                 self._content_area,
                 self._footer,
             ],
             spacing=0, expand=True,
+        )
+        # Cột phải (chỉ hiện ở chế độ rộng): lịch học hôm nay.
+        self._sidebar_title = ft.Container(
+            content=ft.Text(
+                "LỊCH HỌC HÔM NAY", size=11, weight=ft.FontWeight.W_700,
+                color=C.TEXT_SECONDARY,
+            ),
+            padding=ft.Padding.only(left=20, right=20, top=4, bottom=2),
+        )
+        self._sidebar_column = ft.Column(
+            controls=[], spacing=8, scroll=ft.ScrollMode.AUTO, expand=True,
+        )
+        self._sidebar = ft.Container(
+            content=self._sidebar_column,
+            width=_SIDE_PANE_WIDTH,
+            padding=ft.Padding.only(top=12, bottom=12),
+            bgcolor=C.BG,
+            border=ft.Border.only(left=ft.BorderSide(1, C.BORDER)),
+            visible=False,
+        )
+        self._wide_layout = False
+        self.dashboard = ft.Row(
+            controls=[self._dashboard_main, self._sidebar],
+            spacing=0, expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
-        self.detail_view   = DetailView(self.page, on_close=lambda: self._safe_run_task(self._close_detail), get_client=lambda: self.orchestrator.client, on_status_changed=self._on_activity_status_changed, submission_workflow_factory=self._submission_workflow_factory)
+        self.quiz_player_view = QuizPlayerView(
+            self.page,
+            on_closed=self._on_quiz_player_closed,
+            account_id_provider=lambda: settings.UTH_USERNAME,
+            on_auth_required=self._show_quiz_auth_dialog,
+        )
+        self.detail_view   = DetailView(
+            self.page,
+            on_close=lambda: self._safe_run_task(self._close_detail),
+            get_client=lambda: self.orchestrator.client,
+            on_status_changed=self._on_activity_status_changed,
+            submission_workflow_factory=self._submission_workflow_factory,
+            quiz_player_view=self.quiz_player_view,
+            get_quiz_account_id=lambda: settings.UTH_USERNAME,
+            on_open_url=self._open_url_in_app,
+            on_open_external=self._open_url_external,
+        )
         self.calendar_view = CalendarView(
             self.page,
             on_close=lambda: self._safe_run_task(self._close_calendar),
             on_open_detail=lambda data: self._safe_run_task(self._show_detail_async, data),
+            fetch_schedule_week=self._fetch_schedule_week,
+            schedule_cache=self._week_schedule_cache,
+            on_open_url=self._open_url_in_app,
+            on_open_external=self._open_url_external,
         )
+        supports_self_update = self._get_distribution_profile().supports_github_self_update
         self.settings_view = SettingsView(
             self.page,
             self.orchestrator,
@@ -1108,12 +1635,26 @@ class AppController:
             on_test_discord=self._on_test_discord,
             on_test_mail=self._on_test_mail,
             on_theme_preview=self._rebuild_colors,
-            on_check_update=self._check_updates_now,
+            on_check_update=self._check_updates_now if supports_self_update else None,
+            on_update_action=(
+                self._request_update_download if supports_self_update else None
+            ),
+            on_cancel_update=(
+                self._cancel_update_download if supports_self_update else None
+            ),
+            distribution_profile=self._get_distribution_profile(),
+            on_open_store_url=self._open_store_url,
         )
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
             page=self.page,
+            moodle_courses_provider=self._get_moodle_course_grades,
+            on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
+        )
+        self.course_grades_view = CoursesView(
+            on_close=lambda: self._safe_run_task(self._close_course_grades),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_course_grades(force_refresh=True)),
         )
 
         courses_namespace = (
@@ -1166,6 +1707,7 @@ class AppController:
             on_assignment_status_changed=self._on_activity_status_changed,
             submission_workflow_factory=self._submission_workflow_factory,
             all_assignments_provider=self._snapshot_all_data,
+            on_start_quiz=self._start_course_quiz,
         )
         self.courses_view = self._courses_coordinator.courses_view
         self.courses_view.visible = False
@@ -1178,6 +1720,7 @@ class AppController:
             self.calendar_view,
             self.grade_overview_view,
             self.courses_view,
+            self.course_grades_view,
         ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
@@ -1203,7 +1746,14 @@ class AppController:
             expand=True,
         )
 
-        main_stack_controls = [self.tab_switcher, self.detail_switcher]
+        # Ở chế độ rộng, chi tiết bài tập là panel bên phải (list vẫn thấy được).
+        self._detail_host = ft.Container(
+            content=self.detail_switcher,
+            left=0, right=0, top=0, bottom=0,
+        )
+        # Chưa mở chi tiết thì lớp này không được chặn thao tác của màn bên dưới.
+        self._detail_host.ignore_interactions = True
+        main_stack_controls = [self.tab_switcher, self._detail_host]
         overlays = []
         if not platform_utils.UI_IS_MOBILE:
             self._active_desktop_filter_menu = None
@@ -1259,6 +1809,8 @@ class AppController:
                 self._desktop_filter_popup_host,
             ]
             main_stack_controls.extend(overlays)
+        overlays.append(self.quiz_player_view)
+        main_stack_controls.append(self.quiz_player_view)
         main_stack = ft.Stack(
             controls=main_stack_controls,
             expand=True,
@@ -1272,12 +1824,13 @@ class AppController:
             self.calendar_view,
             self.grade_overview_view,
             self,
+            courses_view=self.courses_view,
+            course_grades_view=self.course_grades_view,
             view_host=main_stack,
             overlays=overlays,
             tab_switcher=self.tab_switcher,
             detail_switcher=self.detail_switcher,
             empty_detail=self._empty_detail,
-            courses_view=self.courses_view,
             on_destination_change=self._nav_shell.set_active,
         )
         body_with_rail = ft.Row(
@@ -1291,7 +1844,26 @@ class AppController:
             spacing=0,
             expand=True,
         )
-        self._apply_responsive_layout()
+        self._wide_header_content = ft.Row(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            "Tổng quan",
+                            size=26,
+                            weight=ft.FontWeight.W_800,
+                            color=C.TEXT_PRIMARY,
+                        ),
+                        self._sync_status.control,
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._wide_title = self._wide_header_content.controls[0].controls[0]
+        self._apply_responsive_layout(force=True)
         self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
         self.page.controls.clear()
@@ -1305,6 +1877,9 @@ class AppController:
                 expand=True,
             )
         self.page.add(self._app_shell)
+        if not platform_utils.UI_IS_MOBILE:
+            self.page.on_resize = self._on_page_resize
+            self._apply_responsive_layout(force=True)
 
     def _on_courses_immersive_changed(self, immersive: bool) -> None:
         nav_shell = getattr(self, "_nav_shell", None)
@@ -1362,7 +1937,10 @@ class AppController:
         return 760.0
 
     def _apply_responsive_layout(
-        self, width: float | None = None, height: float | None = None
+        self,
+        width: float | None = None,
+        height: float | None = None,
+        force: bool = False,
     ) -> None:
         resolved_width = self._current_page_width(width)
         resolved_height = self._current_page_height(height)
@@ -1380,18 +1958,81 @@ class AppController:
             if hasattr(courses_view, "set_viewport_height"):
                 courses_view.set_viewport_height(resolved_height)
 
-    def _on_page_resize(self, e) -> None:
-        width = getattr(e, "width", None)
-        if width is None:
-            width = getattr(self.page, "width", None)
-        height = getattr(e, "height", None)
-        if height is None:
-            height = getattr(self.page, "height", None)
-        self._apply_responsive_layout(width, height=height)
+        content_area = getattr(self, "_content_area", None)
+        if content_area is None or not hasattr(self, "_wide_layout"):
+            return
+
+        wide = (not platform_utils.UI_IS_MOBILE) and content_width >= _WIDE_BREAKPOINT
+        mode_changed = wide != self._wide_layout
+        if not (
+            force
+            or mode_changed
+            or getattr(self, "_last_layout_width", None) is None
+            or abs(content_width - self._last_layout_width) >= 1
+        ):
+            return
+        self._last_layout_width = content_width
+        self._wide_layout = wide
+
+        list_width = content_width - (_SIDE_PANE_WIDTH if wide else 0)
+        gutter = max(0.0, (list_width - _LIST_MAX_WIDTH) / 2)
+        content_area.padding = ft.Padding.only(left=4 + gutter, right=4 + gutter, bottom=8)
+        self._filter_container.padding = ft.Padding.only(left=gutter, right=gutter, top=4, bottom=10)
+
+        single_gutter = max(0.0, (content_width - _SINGLE_VIEW_MAX_WIDTH) / 2)
+        self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
+        for view in (
+            getattr(self, "grade_overview_view", None),
+            getattr(self, "calendar_view", None),
+            courses_view,
+            getattr(self, "course_grades_view", None),
+        ):
+            if view is not None:
+                view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
+
+        host = getattr(self, "_detail_host", None)
+        if host is not None:
+            if wide:
+                host.left = None
+                host.width = _SIDE_PANE_WIDTH
+                self.detail_view.border = ft.Border.only(left=ft.BorderSide(1, C.BORDER))
+            else:
+                host.left = 0
+                host.width = None
+                self.detail_view.border = None
+
+        self._stat_row.padding = ft.Padding(left=16 + gutter, right=16 + gutter, top=2, bottom=10)
+        self._header_container.padding = (
+            ft.Padding(left=16 + gutter, right=16 + gutter, top=18, bottom=10)
+            if wide
+            else self._header_compact_padding
+        )
+
+        if mode_changed:
+            self._sidebar.visible = wide
+            self._stat_row.visible = wide
+            self._footer.visible = not wide
+            self._header_container.content = (
+                self._wide_header_content if wide else self._header_compact_content
+            )
+            self._sync_status.control.expand = not wide
+            if wide:
+                self._sidebar_column.controls = [self._sidebar_title, self.today_schedule_panel]
+            else:
+                self._sidebar_column.controls = []
+            cards = [c for c in self.cards_column.controls if c is not self.today_schedule_panel]
+            self.cards_column.controls = self._with_inline_schedule(cards)
+            with self._cards_lock:
+                self.active_cards = list(self.cards_column.controls)
+
+    def _on_page_resize(self, e=None) -> None:
+        width = getattr(e, "width", None) if e is not None else None
+        height = getattr(e, "height", None) if e is not None else None
         try:
+            self._apply_responsive_layout(width, height=height)
             self.page.update()
         except Exception:
-            pass
+            logger.debug("Responsive layout update skipped", exc_info=True)
 
     def _launch_safe_url(self, url: str) -> None:
         safe = safe_http_url(url)
@@ -1459,6 +2100,19 @@ class AppController:
         self._show_detail(activity_data)
 
     async def _navigate_destination(self, key: str) -> None:
+        player_view = getattr(self, "quiz_player_view", None)
+        if player_view is not None and getattr(player_view, "visible", False):
+            self._sync_rail_active()
+            try:
+                self.page.update()
+            except Exception:
+                pass
+            player_view.request_close(
+                after_close=lambda k=key: self._safe_run_task(
+                    self._navigate_destination, k
+                )
+            )
+            return
         if key == "home":
             self.view_manager.show_dashboard()
             self._diag_screen("home")
@@ -1494,33 +2148,77 @@ class AppController:
             version_control=self._version_badge,
         )
 
+    def _open_url_in_app(self, url: str, title: str = "") -> None:
+        from core.url_validation import validate_https_url
+        from gui.components.in_app_webview import InAppWebViewDialog
+
+        validated = validate_https_url(url)
+        if validated is None:
+            logger.warning("Blocked invalid or non-HTTPS URL")
+            return
+        InAppWebViewDialog(
+            self.page,
+            url=validated,
+            title=title,
+            on_open_external=self._open_url_external,
+        ).show()
+
+    def _open_url_external(self, url: str) -> None:
+        from core.url_validation import validate_https_url
+
+        validated = validate_https_url(url)
+        if validated is None:
+            logger.warning("Blocked invalid or non-HTTPS external URL")
+            return
+
+        async def _launch() -> None:
+            try:
+                await ft.UrlLauncher().launch_url(validated)
+            except Exception:
+                logger.debug("External URL launch failed", exc_info=True)
+
+        self._safe_run_task(_launch)
+
     def _build_dashboard_header(self) -> ft.Container:
+        def _wrap_header_btn(btn: ft.Control, fallback_label: str) -> ft.Control:
+            label = getattr(btn, "tooltip", None) or fallback_label
+            return ft.Semantics(label=label, button=True, content=btn)
+
         action_buttons = ft.Row(
             controls=[
-                self.calendar_btn,
-                self.grades_btn,
-                self.refresh_btn,
-                self.settings_btn,
+                _wrap_header_btn(self.calendar_btn, "Lịch"),
+                _wrap_header_btn(self.courses_btn, "Môn học"),
+                _wrap_header_btn(self.grades_btn, "Bảng điểm"),
+                _wrap_header_btn(self.refresh_btn, "Làm mới"),
+                _wrap_header_btn(self.settings_btn, "Cài đặt"),
             ],
             spacing=0,
+            tight=True,
         )
         if platform_utils.UI_IS_MOBILE:
+            self._app_title.max_lines = 1
+            self._app_title.overflow = ft.TextOverflow.ELLIPSIS
             title_group = ft.Row(
                 controls=[self._app_title, self._version_badge],
-                spacing=6,
+                spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                expand=True,
             )
             content = ft.Column(
                 controls=[
                     ft.Row(
                         controls=[title_group, action_buttons],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=4,
                     ),
                     self._sync_status.control,
                 ],
                 spacing=4,
             )
-            padding = ft.Padding.only(left=16, right=8, top=25, bottom=8)
+            padding = ft.Padding.only(left=12, right=4, top=20, bottom=8)
+            self._header_compact_content = content
+            self._header_compact_padding = padding
         else:
             self._sync_status.control.expand = True
             self.status_text.no_wrap = True
@@ -1531,6 +2229,8 @@ class AppController:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
             padding = ft.Padding.only(left=16, right=8, top=4, bottom=8)
+            self._header_compact_content = content
+            self._header_compact_padding = padding
         return ft.Container(content=content, padding=padding, bgcolor=C.BG)
 
     def _build_dashboard_filter_row(self) -> ft.Row:
@@ -1846,6 +2546,7 @@ class AppController:
         self.footer_safe.color     = C.SAFE if n_safe else C.BORDER
         self.footer_overdue.value  = f"{n_overdue} quá hạn" if n_overdue else "0 quá hạn"
         self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
+        self._update_stat_tiles(n_critical, n_warning, n_safe, n_overdue)
 
         self.urgency_filter_menu.set_options(
             self._urgency_filter_options(counts["urgency"])
@@ -1913,13 +2614,20 @@ class AppController:
             
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
-        render_cards = [self.today_schedule_panel] + render_cards
+        render_cards = self._with_inline_schedule(render_cards)
             
         with self._cards_lock:
             self.active_cards = render_cards
         
         self.cards_column.controls = render_cards
         self.page.update()
+
+    def _fetch_schedule_week(self, week_anchor):
+        """Blocking Portal ``lichTuan`` fetch; runs in a worker thread."""
+        with self._portal_week_lock:
+            return self._portal_week_client.fetch_week(
+                week_anchor, settings.UTH_USERNAME, settings.UTH_PASSWORD
+            )
 
     def _request_today_schedule(self) -> None:
         coordinator = self._today_schedule_coordinator
@@ -2050,7 +2758,7 @@ class AppController:
 
         render_cards = current_cards[:len(filtered_items)]
         self._reusable_cards = current_cards
-        render_cards = [self.today_schedule_panel] + render_cards
+        render_cards = self._with_inline_schedule(render_cards)
 
         with self._cards_lock:
             self.active_cards = render_cards
@@ -2105,25 +2813,59 @@ class AppController:
             self._render_cards_only()
         self._search_task = self._safe_run_task(_delayed_render)
 
-    async def _check_grades_background(self):
-        """PERF-OPT: Check grade changes in background (non-blocking)."""
+    def _get_moodle_course_grades(self) -> list:
+        """Danh sách môn Moodle kèm báo cáo điểm (đã lưu) để popup Bảng điểm dùng."""
         try:
-            grade_changes = await asyncio.to_thread(self.orchestrator.check_grade_changes)
-            if grade_changes and hasattr(self, 'notifier') and self.notifier:
-                await self.notifier.dispatch_grade_alert(grade_changes)
-                msg = f"\U0001f4ca {len(grade_changes)} \u0111i\u1ec3m m\u1edbi: "
-                msg += ", ".join(f"{c.item_name} ({c.new_grade})" for c in grade_changes[:3])
-                if len(grade_changes) > 3:
-                    msg += f" +{len(grade_changes) - 3} kh\u00e1c"
-                self.page.snack_bar = ft.SnackBar(
-                    content=ft.Text(msg, color=C.ON_SAFE),
-                    bgcolor=C.SAFE,
-                    duration=5000,
-                )
-                self.page.snack_bar.open = True
-                self.page.update()
+            return list(
+                getattr(self.orchestrator, "latest_course_grades", None)
+                or self.orchestrator.course_grade_monitor.load_cached()
+                or []
+            )
+        except Exception:
+            return []
+
+    async def _check_grades_background(self):
+        """Chạy cùng chu kỳ cập nhật Tổng quan qua GradeMonitor (WS nhẹ).
+
+        Tránh cào HTML N+1 cho toàn bộ môn học trên mỗi chu kỳ đồng bộ nền
+        và tránh phát trùng thông báo khi tab Môn học không đang mở.
+        """
+        grade_changes = []
+        try:
+            grade_changes = list(await asyncio.to_thread(self.orchestrator.check_grade_changes) or [])
         except Exception as e:
             logger.debug("Grade check background failed (non-critical): %s", e)
+
+        courses_view = getattr(self, "courses_view", None)
+        if courses_view is not None and getattr(courses_view, "visible", False):
+            try:
+                courses, _ = await asyncio.to_thread(self.orchestrator.refresh_course_grades)
+                if courses:
+                    self.view_manager.show_courses_data(courses)
+            except Exception as e:
+                logger.debug("Course grades background refresh failed (non-critical): %s", e)
+
+        await self._notify_grade_changes(grade_changes)
+
+    async def _notify_grade_changes(self, grade_changes: list) -> None:
+        if not grade_changes:
+            return
+        try:
+            if hasattr(self, 'notifier') and self.notifier:
+                await self.notifier.dispatch_grade_alert(grade_changes)
+            msg = f"\U0001f4ca {len(grade_changes)} thay \u0111\u1ed5i \u0111i\u1ec3m: "
+            msg += ", ".join(f"{c.item_name} ({c.old_grade or '-'} \u2192 {c.new_grade})" for c in grade_changes[:3])
+            if len(grade_changes) > 3:
+                msg += f" +{len(grade_changes) - 3} kh\u00e1c"
+            self.page.snack_bar = ft.SnackBar(
+                content=ft.Text(msg, color=C.ON_SAFE),
+                bgcolor=C.SAFE,
+                duration=5000,
+            )
+            self.page.snack_bar.open = True
+            self.page.update()
+        except Exception as e:
+            logger.debug("Grade notification failed (non-critical): %s", e)
 
     def _set_sync_status(self, state: str, message: str) -> None:
         component = getattr(self, "_sync_status", None)
@@ -2291,6 +3033,77 @@ class AppController:
         return not has_cached_snapshot or bool(
             getattr(self, "_cache_requires_server_refresh", False)
         )
+
+    async def _startup_android_sequence(
+        self,
+        has_cached_snapshot: bool = False,
+        needs_initial_sync: bool = True,
+    ) -> None:
+        """Hydrate AndroidKeyStore secrets, migrate legacy JSON, and start sync."""
+        bridge = getattr(self, "_android_background", None)
+        if bridge and bridge.available:
+            vault_secrets: dict[str, str] = {}
+            vault_read_ok = False
+            retry_delays = (0.05, 0.1, 0.2, 0.4, 0.6, 0.65)
+            for attempt, delay in enumerate((0.0, *retry_delays)):
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                page_alive = getattr(self, "_page_alive", None)
+                if page_alive is not None and not page_alive.is_set():
+                    return
+                try:
+                    vault_secrets = await bridge.read_app_secrets()
+                    vault_read_ok = True
+                    break
+                except Exception as exc:
+                    if attempt == len(retry_delays):
+                        logger.warning(
+                            "Failed to read Android secret vault: %s",
+                            type(exc).__name__,
+                        )
+
+            if vault_read_ok:
+                backend = AndroidSecretBackend(
+                    asyncio.get_running_loop(),
+                    bridge,
+                    vault_secrets,
+                    loop_thread_id=threading.get_ident(),
+                )
+                register_secret_backend(backend)
+                hydrate_secrets(vault_secrets)
+
+                pending = pop_pending_plaintext_migration()
+                if pending:
+                    merged = {**pending, **vault_secrets}
+                    migration_ok = True
+                    if merged != vault_secrets:
+                        try:
+                            migration_ok = bool(await bridge.write_app_secrets(merged))
+                        except Exception:
+                            migration_ok = False
+                    if migration_ok:
+                        backend.replace_cached_secrets(merged)
+                        hydrate_secrets(merged)
+                        await asyncio.to_thread(save_settings)
+                    else:
+                        logger.warning(
+                            "Android secret migration did not confirm; preserving legacy JSON"
+                        )
+
+            self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
+            await self._initialize_android_background()
+
+        if not needs_initial_sync:
+            hydration_started = self._schedule_cached_detail_hydration(
+                has_cached_snapshot
+            )
+            if not hydration_started:
+                self._schedule_card_detail_warmup()
+        self._safe_run_task(self._today_schedule_coordinator.run)
+        if not settings.UTH_USERNAME or not settings.UTH_PASSWORD:
+            self._safe_run_task(self._show_login_dialog)
+        else:
+            self._safe_run_task(self._load_data_async, "startup")
 
     async def _initialize_android_background(self):
         """Attach native worker settings and prefer its cache after app restart."""
@@ -2616,6 +3429,182 @@ class AppController:
             else:
                 self._diag_screen("home")
 
+    def _active_course_quiz_overlay(self, activity: dict | None = None):
+        courses_view = getattr(self, "courses_view", None)
+        overlays = getattr(courses_view, "_overlays", None)
+        if not overlays:
+            return None
+        top = overlays[-1]
+        if not hasattr(top, "set_runtime_notice") or not hasattr(top, "reload"):
+            return None
+        if isinstance(activity, dict):
+            mod = getattr(top, "_module", None)
+            cmid = activity.get("cmid")
+            mod_cmid = getattr(mod, "cmid", None)
+            if cmid and mod_cmid and int(cmid) != int(mod_cmid):
+                return None
+        return top
+
+    def _sync_quiz_immersive(self, active: bool) -> None:
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is None or not hasattr(nav_shell, "set_immersive"):
+            return
+        if active:
+            nav_shell.set_immersive(True)
+        else:
+            courses_view = getattr(self, "courses_view", None)
+            keep_immersive = False
+            if courses_view is not None and getattr(courses_view, "visible", False):
+                comp = getattr(courses_view, "_compute_immersive", None)
+                if callable(comp):
+                    keep_immersive = bool(comp())
+            nav_shell.set_immersive(keep_immersive)
+        bar = getattr(nav_shell, "bar", None)
+        if bar is not None:
+            try:
+                if getattr(bar, "page", None) is not None:
+                    bar.update()
+            except Exception:
+                pass
+
+    def _build_course_quiz_activity(
+        self, course: CourseSummary, mod: CourseModuleItem
+    ) -> dict:
+        origin = (
+            "https://thnn.ut.edu.vn"
+            if course.source == "thnn"
+            else "https://courses.ut.edu.vn"
+        )
+        url = (
+            safe_http_url(mod.web_url)
+            or safe_http_url(mod.url)
+            or (f"{origin}/mod/quiz/view.php?id={mod.cmid}" if mod.cmid else "")
+        )
+        activity: dict = {}
+        for item in self._snapshot_all_data():
+            if (url and item.get("url") == url) or (
+                mod.cmid
+                and item.get("cmid") == mod.cmid
+                and item.get("course_id") == course.id
+            ):
+                activity = dict(item)
+                break
+        activity.setdefault("title", mod.name or "Bài kiểm tra")
+        activity.setdefault("course", course.display_name or course.fullname)
+        activity.setdefault("course_id", course.id)
+        activity.setdefault("cmid", mod.cmid)
+        activity["type"] = "quiz"
+        activity["site_identity"] = course.source
+        if url:
+            activity["url"] = url
+        return activity
+
+    def _start_course_quiz(self, course: CourseSummary, mod: CourseModuleItem) -> None:
+        player_view = getattr(self, "quiz_player_view", None)
+        activity = self._build_course_quiz_activity(course, mod)
+        url = str(activity.get("url") or "")
+        if player_view is None:
+            if url and getattr(self, "_courses_coordinator", None) is not None:
+                self._courses_coordinator.open_in_app_webview(
+                    course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
+                )
+            return
+        if getattr(player_view, "visible", False):
+            return
+
+        account_id = getattr(settings, "UTH_USERNAME", "") or ""
+        target, state = player_view.prepare_activity(activity, account_id)
+        if state == "missing_account":
+            request_auth = getattr(player_view, "request_app_auth", None)
+            if callable(request_auth):
+                self._safe_run_task(
+                    request_auth,
+                    lambda c=course, m=mod: self._start_course_quiz(c, m),
+                )
+            return
+        if state == "requires_safe_exam_browser":
+            overlay = self._active_course_quiz_overlay(activity)
+            if overlay is not None:
+                overlay.set_runtime_notice(
+                    "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt ngoài."
+                )
+            if url:
+                self._open_url_external(url)
+            return
+        if target is None or state in {"player_unavailable", "unsupported_runtime"}:
+            if url and getattr(self, "_courses_coordinator", None) is not None:
+                self._courses_coordinator.open_in_app_webview(
+                    course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
+                )
+            return
+
+        self._sync_quiz_immersive(True)
+        opened = player_view.open_activity_for_account(
+            target,
+            activity,
+            account_id,
+            on_entry_unavailable=self._on_course_quiz_entry_unavailable,
+        )
+        if not opened and not getattr(player_view, "visible", False):
+            self._sync_quiz_immersive(False)
+            if url and getattr(self, "_courses_coordinator", None) is not None:
+                self._courses_coordinator.open_in_app_webview(
+                    course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
+                )
+
+    async def _on_course_quiz_entry_unavailable(
+        self, activity: dict | None, reason: str
+    ) -> None:
+        self._sync_quiz_immersive(False)
+        overlay = self._active_course_quiz_overlay(activity if isinstance(activity, dict) else None)
+        messages = {
+            "quiz_closed": "Bài kiểm tra hiện đã đóng.",
+            "quiz_unavailable": "Bài kiểm tra hiện không thể mở.",
+            "unsupported_action": "Bài kiểm tra hiện không thể mở trong ứng dụng.",
+            "requires_safe_exam_browser": "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt.",
+            "entry_in_progress": "Bài kiểm tra đang được thực hiện.",
+            "entry_not_opened": "Không thể mở lượt làm bài.",
+            "attempts_exhausted": "Bạn đã sử dụng hết số lượt làm bài.",
+        }
+        msg = messages.get(
+            reason,
+            "Không thể mở bài kiểm tra trực tiếp. Hãy tải lại hoặc mở trang web.",
+        )
+        if overlay is not None:
+            if reason == "attempts_exhausted":
+                overlay.reload()
+            overlay.set_runtime_notice(msg)
+
+    async def _on_quiz_player_closed(self, activity: dict | None) -> None:
+        """Refresh quiz state from Moodle after the native player is released."""
+        self._sync_quiz_immersive(False)
+        if not isinstance(activity, dict):
+            return
+        url = activity.get("url")
+        if not isinstance(url, str) or not url:
+            return
+        try:
+            # The following detail load must ask Moodle for the latest attempt
+            # state; a player close does not prove that an attempt was submitted.
+            self.orchestrator.invalidate_detail_cache(url)
+            if (
+                getattr(self, "detail_view", None) is not None
+                and self.detail_view.visible
+                and self.detail_view._current_url == url
+            ):
+                await self._show_detail_async(dict(activity))
+            if getattr(getattr(self, "courses_view", None), "visible", False):
+                overlay = self._active_course_quiz_overlay(activity)
+                if overlay is not None:
+                    overlay.reload()
+        except Exception:
+            logger.exception("Quiz detail refresh failed after player close")
+        finally:
+            detail_view = getattr(self, "detail_view", None)
+            focus_opener = getattr(detail_view, "focus_quiz_opener", None)
+            if callable(focus_opener):
+                await focus_opener()
+
     def _set_scroll_to_top_visible(self, visible: bool) -> bool:
         """Update the floating affordance without rebuilding the card list."""
         if visible == self._scroll_to_top_visible:
@@ -2707,11 +3696,13 @@ class AppController:
         with self._data_lock:
             data_snapshot = list(self.all_data)
         self.view_manager.show_calendar(data_snapshot)
+        self._sync_rail_active()
 
     async def _close_calendar(self):
         """Return from calendar to dashboard."""
         await self.view_manager.close_calendar()
         self._diag_screen("home")
+        self._sync_rail_active()
 
     async def _show_settings(self):
         if hasattr(self, "_diag_screen"):
@@ -2720,6 +3711,7 @@ class AppController:
                 "navigation", "succeeded", "user", screen="settings"
             )
         await self.view_manager.show_settings()
+        self._sync_rail_active()
 
     async def _toggle_grades(self):
         """Toggle the grade overview panel."""
@@ -2733,6 +3725,7 @@ class AppController:
         self._diag_screen("grades")
         self._diag_breadcrumb("navigation", "succeeded", "user", screen="grades")
         self.view_manager.show_grades_loading()
+        self._sync_rail_active()
 
         # Load academic radar data from daily cache / Portal in background thread
         try:
@@ -2753,7 +3746,19 @@ class AppController:
             )
             if semesters:
                 profiles = service.get_radar_profiles(semesters)
-                self.view_manager.show_academic_radar_data(semesters, profiles)
+                # Hiện bảng điểm ngay, không chờ API tiến độ tín chỉ
+                self.view_manager.show_academic_radar_data(semesters, profiles, None)
+                try:
+                    progress = await asyncio.to_thread(
+                        service.load_credit_progress,
+                        username=username,
+                        password=password,
+                        force_refresh=force_refresh,
+                    )
+                    if progress is not None:
+                        self.view_manager.show_credit_progress(progress)
+                except Exception as exc:
+                    logger.warning("Credit progress load failed: %s", exc)
             else:
                 # Fallback to Moodle grades if Portal returned no semesters
                 userid = await asyncio.to_thread(
@@ -2775,12 +3780,64 @@ class AppController:
                     self.view_manager.show_academic_radar_data([], [])
         except Exception as e:
             logger.error("Academic grades fetch failed: %s", e)
-            self.view_manager.show_academic_radar_data([], [])
+            self.view_manager.show_grades_error(
+                "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
+            )
+
+    async def _show_course_grades(self, force_refresh: bool = False):
+        """Mở danh sách môn & điểm/chuyên cần từ màn hình Bảng điểm."""
+        self._diag_screen("course_grades")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="course_grades")
+        self.view_manager.show_course_grades_loading()
+        cached = getattr(self.orchestrator, "latest_course_grades", None) or (
+            self.orchestrator.course_grade_monitor.load_cached()
+        )
+        if cached and not force_refresh:
+            self.view_manager.show_course_grades_data(cached)
+        try:
+            courses, changes = await asyncio.to_thread(
+                self.orchestrator.refresh_course_grades
+            )
+            self.view_manager.show_course_grades_data(courses)
+            if changes:
+                await self._notify_grade_changes(changes)
+        except Exception as e:
+            logger.error("Course grades fetch failed: %s", e, exc_info=True)
+            if cached:
+                self.view_manager.show_course_grades_stale_notice(
+                    "Không thể làm mới danh sách môn · đang hiển thị dữ liệu đã lưu."
+                )
+            else:
+                self.view_manager.show_course_grades_error()
+
+    async def _close_course_grades(self):
+        """Đóng danh sách điểm môn và quay về màn hình Bảng điểm."""
+        await self.view_manager.close_course_grades()
+        self._diag_screen("grades")
+        self._sync_rail_active()
+
+    async def _toggle_courses(self):
+        if self.courses_view.visible:
+            await self._close_courses()
+        else:
+            await self._show_courses()
+
+    async def _show_courses(self, force_refresh: bool = False):
+        """Mở tab Môn học hợp nhất (Courses & THNN)."""
+        del force_refresh
+        await self._navigate_destination("courses")
+        self._sync_rail_active()
+
+    async def _close_courses(self):
+        self.view_manager.show_dashboard()
+        self._diag_screen("home")
+        self._sync_rail_active()
 
     async def _close_grades(self):
         """Close grade overview and return to dashboard."""
         await self.view_manager.close_grades()
         self._diag_screen("home")
+        self._sync_rail_active()
 
     def _rebuild_colors(self):
         """Repaint ALL existing controls with current C values for live theme switching.
@@ -2801,6 +3858,9 @@ class AppController:
 
         # Page
         self.page.bgcolor = _C.BG
+        if getattr(self, "_sidebar", None) is not None:
+            self._sidebar.border = ft.Border.only(left=ft.BorderSide(1, _C.BORDER))
+        self._sync_rail_active()
 
         self._header_container.bgcolor = _C.BG
         self._app_title.color = _C.TEXT_PRIMARY
@@ -2905,11 +3965,19 @@ class AppController:
         # Update banner is a semantic elevated surface, not a fixed brown card.
         self._update_banner.bgcolor = _C.SURFACE_ELEVATED
         self._update_banner.border = ft.Border.all(1, _C.UPDATE)
-        self._update_icon.color = _C.UPDATE
-        self._update_text.color = _C.UPDATE
+        self._update_text.color = _C.TEXT_PRIMARY
         self._update_progress.color = _C.UPDATE
         self._update_progress.bgcolor = _C.BORDER
-        self._update_btn.style = ft.ButtonStyle(color=_C.UPDATE)
+        update_btn = getattr(self, "_update_btn", None)
+        if update_btn is not None:
+            update_btn.style = ft.ButtonStyle(
+                color=_C.TEXT_PRIMARY, shape=ft.RoundedRectangleBorder(radius=8),
+            )
+        update_cancel_btn = getattr(self, "_update_cancel_btn", None)
+        if update_cancel_btn is not None:
+            update_cancel_btn.style = ft.ButtonStyle(
+                color=_C.TEXT_SECONDARY, shape=ft.RoundedRectangleBorder(radius=8),
+            )
 
         # Settings view bgcolor
         self.settings_view.bgcolor = _C.BG
@@ -2920,6 +3988,8 @@ class AppController:
             "detail_view",
             "grade_overview_view",
             "courses_view",
+            "course_grades_view",
+            "quiz_player_view",
         ):
             view_obj = getattr(self, view_attr, None)
             if view_obj and hasattr(view_obj, "update_theme"):
@@ -2940,6 +4010,7 @@ class AppController:
 
 
     async def _close_settings(self):
+        self._sync_rail_active(force_home=True)
         self.settings_view.cancel_pending_load()
         from gui.core.theme import load_theme_from_settings, set_page_theme
         load_theme_from_settings()
@@ -3080,24 +4151,58 @@ class AppController:
         EmailNotifier().notify([dummy])
 
     def _on_update_event(self, event: UpdateEvent) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        if event.candidate is not None:
+            if event.candidate != self._update_candidate:
+                self._update_ready = False
+            self._update_candidate = event.candidate
         self._safe_run_task(self._apply_update_event, event)
 
     def _request_update_download(self, _event=None) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
         candidate = getattr(self, "_update_candidate", None)
         if candidate is not None:
-            self._update_coordinator.request_download(candidate)
+            if getattr(self, "_update_open_release_page", False):
+                self._open_external_update_url(candidate.manifest.release_notes_url)
+            elif getattr(self, "_update_ready", False):
+                self._show_update_confirmation()
+            else:
+                coordinator = getattr(self, "_update_coordinator", None)
+                if coordinator is not None:
+                    coordinator.request_download(candidate)
 
     async def _apply_update_event(self, event: UpdateEvent) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            banner = getattr(self, "_update_banner", None)
+            if banner is not None:
+                banner.visible = False
+            return
         candidate = event.candidate
         if candidate is not None:
             self._update_candidate = candidate
+            if event.kind is not UpdateEventKind.INSTALL_FAILED:
+                self._update_open_release_page = False
         check_button = getattr(self.settings_view, "_check_update_btn", None)
+        cancel_button = getattr(self, "_update_cancel_btn", None)
+        self._update_btn.visible = event.kind not in {
+            UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS,
+            UpdateEventKind.VERIFYING, UpdateEventKind.INSTALLING,
+        }
+        if cancel_button is not None:
+            cancel_button.visible = event.kind in {
+                UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS,
+            }
         if event.kind is UpdateEventKind.CHECKING:
             self._diag_breadcrumb("update_check", "started", "github")
             if check_button is not None:
                 check_button.disabled = True
                 check_button.content = "Đang kiểm tra..."
         elif event.kind is UpdateEventKind.UP_TO_DATE:
+            self._update_ready = False
+            self._update_candidate = None
+            self._update_banner.visible = False
             self._diag_breadcrumb("update_check", "succeeded", "github")
             if check_button is not None:
                 check_button.disabled = False
@@ -3115,26 +4220,29 @@ class AppController:
             if check_button is not None:
                 check_button.disabled = False
                 check_button.content = "Kiểm tra ngay"
-            self._update_icon.name = ft.Icons.SYSTEM_UPDATE_ROUNDED
-            self._update_icon.color = C.UPDATE
             self._update_text.value = (
-                f"Phiên bản mới v{candidate.manifest.release_version} đã sẵn sàng!"
+                f"Có bản cập nhật v{candidate.manifest.release_version}"
             )
             self._update_btn.visible = True
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
-            self._update_btn.icon = ft.Icons.DOWNLOAD_ROUNDED
+            self._update_btn.icon = None
             self._update_progress.visible = False
             self._update_banner.visible = True
+            if getattr(self, "_update_ready", False):
+                self._update_text.value = "Đã tải xong bản cập nhật"
+                self._update_btn.content = "Cài đặt"
         elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
             if event.kind is UpdateEventKind.DOWNLOADING:
                 self._diag_breadcrumb("update_download", "started", "github")
             if candidate is not None:
                 self._update_text.value = (
-                    f"Đang tải và xác minh v{candidate.manifest.release_version}..."
+                    f"Đang tải v{candidate.manifest.release_version} · {int((event.progress or 0) * 100)}%"
                 )
             self._update_btn.disabled = True
-            self._update_btn.content = "Đang tải và xác minh..."
+            self._update_ready = False
+            self._update_btn.content = "Đang tải"
+            self._update_banner.visible = True
             self._update_progress.visible = True
             self._update_progress.value = event.progress or 0.0
         elif event.kind in {
@@ -3143,9 +4251,53 @@ class AppController:
         }:
             self._diag_breadcrumb("update_download", "succeeded", "github")
             self._update_btn.disabled = False
-            self._update_btn.content = "Cập nhật"
+            self._update_ready = True
+            self._update_btn.content = "Cài đặt" if event.kind is UpdateEventKind.READY_TO_INSTALL else "Mở trang tải"
+            self._update_text.value = "Đã tải xong bản cập nhật" if event.kind is UpdateEventKind.READY_TO_INSTALL else "Có bản cập nhật"
             self._update_progress.visible = False
-            self._show_update_confirmation()
+            self._update_banner.visible = True
+        elif event.kind is UpdateEventKind.VERIFYING:
+            self._update_text.value = "Đang xác minh bản cập nhật…"
+            self._update_btn.content = "Đang xác minh"
+            self._update_btn.disabled = True
+            self._update_progress.visible = True
+            self._update_progress.value = None
+        elif event.kind is UpdateEventKind.INSTALLING:
+            self._diag_breadcrumb("update_install", "started", "os")
+            self._update_text.value = "Đang mở trình cài đặt…"
+            self._update_btn.content = "Đang mở"
+            self._update_btn.disabled = True
+        elif event.kind is UpdateEventKind.INSTALL_PERMISSION_REQUIRED:
+            self._update_ready = True
+            self._update_banner.visible = True
+            self._update_text.value = "Cho phép cài ứng dụng, rồi quay lại và nhấn Cài đặt."
+            self._update_btn.content = "Cài đặt"
+            self._update_btn.disabled = False
+            self._update_progress.visible = False
+        elif event.kind is UpdateEventKind.INSTALL_FAILED:
+            self._diag_breadcrumb("update_install", "failed", "os")
+            self._update_ready = event.message not in {
+                "source_unavailable",
+                "Windows installer is unavailable",
+                "installer_unavailable",
+            }
+            self._update_banner.visible = True
+            self._update_text.value = _update_install_error_message(event.message)
+            self._update_btn.content = "Thử lại"
+            self._update_open_release_page = event.message in {
+                "installed_signer_mismatch", "manifest_signer_mismatch",
+                "apk_signature_invalid", "release_metadata_invalid",
+                "package_mismatch", "release_version_mismatch", "invalid_apk",
+                "installer strategy is not allowed",
+                "strategy_not_allowed",
+                "installer_strategy_not_allowed",
+                "installer is unavailable on this platform",
+                "platform_unavailable",
+            }
+            if self._update_open_release_page:
+                self._update_btn.content = "Bản phát hành"
+            self._update_btn.disabled = False
+            self._update_progress.visible = False
         elif event.kind is UpdateEventKind.FAILED:
             if candidate is None:
                 self._diag_breadcrumb("update_check", "failed", "github")
@@ -3162,6 +4314,7 @@ class AppController:
                         C.CRITICAL,
                     )
             else:
+                self._update_ready = False
                 self._diag_breadcrumb("update_download", "failed", "github")
                 should_notify = self._update_banner.visible
                 self._manual_update_check_requested = False
@@ -3175,6 +4328,15 @@ class AppController:
                     "Không thể tải hoặc xác minh "
                     f"v{candidate.manifest.release_version}. Hãy thử lại."
                 )
+                if "insufficient_space" in event.message:
+                    self._update_text.value = "Không đủ dung lượng. Hãy giải phóng bộ nhớ rồi thử lại."
+                elif "storage_unavailable" in event.message:
+                    self._update_text.value = "Không truy cập được bộ nhớ tải về. Hãy thử lại."
+                elif (
+                    "timed out" in event.message.lower()
+                    or "verification_timeout" in event.message.lower()
+                ):
+                    self._update_text.value = "Xác minh bản cập nhật bị quá thời gian. Hãy thử lại."
                 if should_notify:
                     self._show_snackbar(
                         "Không thể tải hoặc xác minh bản cập nhật",
@@ -3182,53 +4344,82 @@ class AppController:
                         C.CRITICAL,
                     )
         elif event.kind is UpdateEventKind.CANCELLED:
+            self._update_ready = False
+            self._update_text.value = "Đã hủy tải bản cập nhật"
             self._diag_breadcrumb("update_download", "cancelled", "user")
             self._update_btn.disabled = False
             self._update_btn.content = "Cập nhật"
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_LAUNCHED:
-            if platform_utils.IS_ANDROID:
-                self._diag_breadcrumb("update_install", "started", "android")
-                self._update_text.value = "Đang mở trình cài đặt Android..."
-                self._update_btn.content = "Đang mở..."
-                self._update_btn.disabled = True
-                self._update_banner.visible = True
-            else:
-                self._diag_breadcrumb("update_install", "succeeded", "os")
-                self._update_banner.visible = False
+            self._diag_breadcrumb("update_install", "succeeded", "os")
+            self._update_text.value = "Đã mở trình cài đặt"
+            self._update_btn.content = "Mở lại"
+            self._update_btn.disabled = False
+            self._update_banner.visible = platform_utils.IS_ANDROID
+        status_setter = getattr(self.settings_view, "set_update_status", None)
+        if callable(status_setter) and candidate is not None:
+            status_setter(
+                self._update_text.value,
+                progress=self._update_progress.value,
+                show_progress=self._update_progress.visible,
+                action_label=self._update_btn.content if not self._update_btn.disabled else None,
+                can_cancel=bool(cancel_button and cancel_button.visible),
+            )
+        elif callable(status_setter):
+            if event.kind is UpdateEventKind.CHECKING:
+                status_setter("Đang kiểm tra cập nhật...")
+            elif event.kind is UpdateEventKind.UP_TO_DATE:
+                status_setter("Bạn đang dùng phiên bản mới nhất")
+            elif event.kind is UpdateEventKind.FAILED:
+                status_setter("Không thể kiểm tra cập nhật. Hãy kiểm tra mạng và thử lại.")
         self.page.update()
         if event.kind is UpdateEventKind.INSTALL_LAUNCHED and platform_utils.IS_WINDOWS:
-            await self.page.window.destroy()
+            await asyncio.to_thread(self._shutdown_for_exit)
+            try:
+                await self.page.window.destroy()
+            except RuntimeError as exc:
+                if "Session closed" not in str(exc):
+                    raise
 
     def _show_update_confirmation(self) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
         if platform_utils.IS_WINDOWS:
             affirmative = "Cài đặt và thoát"
+            content = "Ứng dụng sẽ đóng để cài bản cập nhật."
         elif platform_utils.IS_ANDROID:
             affirmative = "Mở trình cài đặt"
+            content = "Mở trình cài đặt Android cho bản cập nhật đã tải?"
         else:
             affirmative = "Mở trang tải IPA"
+            content = (
+                "Tải IPA trên máy tính, sau đó ký lại bằng cùng Apple ID và bundle ID "
+                "qua Sideloadly/AltStore. Chứng thực cá nhân có thể cần được làm mới "
+                "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
+            )
 
         def cancel(_event):
             self.page.pop_dialog()
 
         def confirm(_event):
             self.page.pop_dialog()
-            self._update_coordinator.confirm_install()
+            coordinator = getattr(self, "_update_coordinator", None)
+            if coordinator is not None:
+                coordinator.confirm_install()
 
-        content = (
-            "Tải IPA trên máy tính, sau đó ký lại bằng cùng Apple ID và bundle ID "
-            "qua Sideloadly/AltStore. Chứng thực cá nhân có thể cần được làm mới "
-            "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
-            if not platform_utils.IS_WINDOWS and not platform_utils.IS_ANDROID
-            else "UTHelper sẽ chỉ mở trình cài đặt sau khi bạn xác nhận."
-        )
         dialog = ft.AlertDialog(
-            modal=True,
+            modal=False,
             title=ft.Text("Xác nhận cập nhật"),
             content=ft.Text(content),
             actions=[
-                ft.TextButton("Hủy", on_click=cancel),
-                ft.TextButton(affirmative, on_click=confirm),
+                ft.TextButton(
+                    "Hủy", on_click=cancel, autofocus=True,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+                ),
+                ft.TextButton(
+                    affirmative, on_click=confirm,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+                ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
             bgcolor=C.BG,
@@ -3267,6 +4458,17 @@ class AppController:
                 self.orchestrator.clear_detail_cache()
                 self.orchestrator._userid_cache = None
                 self.orchestrator.is_logged_in = False
+                for client_attr in ("client", "thnn_client"):
+                    client_obj = getattr(self.orchestrator, client_attr, None)
+                    clear_session = getattr(client_obj, "clear_session", None)
+                    if callable(clear_session):
+                        clear_session()
+                grade_monitor = getattr(self.orchestrator, "course_grade_monitor", None)
+                set_grade_ns = getattr(grade_monitor, "set_namespace", None)
+                if callable(set_grade_ns):
+                    set_grade_ns(f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME}")
+                if hasattr(self.orchestrator, "latest_course_grades"):
+                    self.orchestrator.latest_course_grades = []
             except Exception:
                 import logging as _fb_log
                 _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -3284,6 +4486,17 @@ class AppController:
                 else f"{settings.PORTAL_API_BASE}|anonymous"
             )
             self._portal_client.clear_token()
+            portal_week_client = getattr(self, "_portal_week_client", None)
+            if portal_week_client is not None:
+                portal_week_client.clear_token()
+            week_cache = getattr(self, "_week_schedule_cache", None)
+            set_week_ns = getattr(week_cache, "set_namespace", None)
+            if callable(set_week_ns):
+                set_week_ns(schedule_namespace)
+            calendar_view = getattr(self, "calendar_view", None)
+            reset_schedule = getattr(calendar_view, "reset_schedule", None)
+            if callable(reset_schedule):
+                reset_schedule()
             self._today_schedule_coordinator.replace_cache(
                 TodayScheduleCache(namespace=schedule_namespace)
             )
@@ -3291,6 +4504,19 @@ class AppController:
                 ScheduleLoadStatus.IDLE
             )
             self._today_schedule_component.set_state(self._today_schedule_state)
+            quiz_player_view = getattr(self, "quiz_player_view", None)
+            clear_quiz_sessions = getattr(
+                quiz_player_view, "clear_persisted_sessions", None
+            )
+            if callable(clear_quiz_sessions):
+                self._safe_run_task(clear_quiz_sessions)
+            courses_coord = getattr(self, "_courses_coordinator", None)
+            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
+            if callable(reset_courses):
+                courses_ns = (
+                    f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+                )
+                reset_courses(courses_ns)
             self._safe_run_task(
                 self._reconcile_class_schedule_notifications, (), clear_only=True
             )
@@ -3554,22 +4780,37 @@ class AppController:
             except Exception:
                 logger.warning("Countdown refresh failed", exc_info=True)
 
-    def _on_disconnect(self, e):
+    def _shutdown_for_exit(self) -> None:
+        lock = getattr(self, "_exit_cleanup_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._exit_cleanup_lock = lock
+        with lock:
+            if getattr(self, "_exit_cleanup_done", False):
+                return
+            self._exit_cleanup_done = True
+
         view_manager = getattr(self, "view_manager", None)
         if view_manager is not None:
             view_manager.cancel_pending_settings_navigation()
         else:
             settings_view = getattr(self, "settings_view", None)
-            if settings_view is not None:
-                settings_view.cancel_pending_load()
-        if self.activation_broker is not None:
-            self.activation_broker.close(timeout_seconds=1.0)
+            cancel_load = getattr(settings_view, "cancel_pending_load", None)
+            if callable(cancel_load):
+                cancel_load()
+        activation_broker = getattr(self, "activation_broker", None)
+        if activation_broker is not None:
+            activation_broker.close(timeout_seconds=1.0)
         tray = getattr(self, "tray", None)
         if tray is not None:
             tray.close(timeout_seconds=1.0)
-        self._page_alive.clear()
+        page_alive = getattr(self, "_page_alive", None)
+        if page_alive is not None:
+            page_alive.clear()
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
-        self._prefetch_cancel_event.set()
+        prefetch_cancel = getattr(self, "_prefetch_cancel_event", None)
+        if prefetch_cancel is not None:
+            prefetch_cancel.set()
         detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
             detail_warm_cancel.set()
@@ -3581,18 +4822,24 @@ class AppController:
             schedule_coordinator.close()
         update_coordinator = getattr(self, "_update_coordinator", None)
         if update_coordinator is not None:
-            update_coordinator.shutdown(timeout_seconds=5.0)
+            update_coordinator.shutdown(timeout_seconds=1.0)
         courses_coord = getattr(self, "_courses_coordinator", None)
         if courses_coord is not None:
             try:
                 courses_coord.close()
             except Exception:
                 logger.debug("Ignored courses coordinator close error", exc_info=True)
-        try:
-            self.orchestrator.client.close()
-        except Exception:
-            import logging as _fb_log
-            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+        orchestrator = getattr(self, "orchestrator", None)
+        client = getattr(orchestrator, "client", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+    def _on_disconnect(self, e):
+        self._shutdown_for_exit()
 
 def main(page: ft.Page):
     """Stub main function to support Flet Preview on this file directly."""

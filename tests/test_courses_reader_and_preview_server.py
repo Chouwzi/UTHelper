@@ -1283,3 +1283,115 @@ def test_archive_explorer_jump_to_bounds_error_icon_theme_and_targz():
     assert explorer.bgcolor == C.BG
     icons_after = [c.icon for c in _walk_controls(explorer._banner_host) if isinstance(c, ft.Icon)]
     assert ft.Icons.ERROR_OUTLINE_ROUNDED in icons_after
+
+
+def test_session_bridge_isolates_origin_adds_security_headers_and_rejects_prefix_bypass():
+    class _RedirectTrickClient:
+        moodle_site_origin = "https://courses.ut.edu.vn"
+
+        def open_session_raw(self, url: str, **_kwargs):
+            if "prefix-bypass" in url:
+                return 302, "https://courses.ut.edu.vn.evil.example/steal", "text/plain", b""
+            if "valid-bounce" in url:
+                return 302, "https://courses.ut.edu.vn/mod/page/view.php?id=9", "text/plain", b""
+            return 200, url, "text/html; charset=utf-8", b"<html><head></head><body>ok</body></html>"
+
+    srv = LocalPreviewServer()
+    try:
+        srv.register_session_provider("courses", _RedirectTrickClient())
+        viewer_blob = srv.register_bytes(b"hello", "text/plain")
+        bridge_url = srv.build_session_bridge_url(
+            "courses", "https://courses.ut.edu.vn/mod/quiz/view.php?id=1"
+        )
+        assert bridge_url is not None
+        assert urlsplit(bridge_url).port != urlsplit(viewer_blob).port
+
+        # Session server rejects viewer paths; main server rejects session paths
+        session_port = urlsplit(bridge_url).port
+        status_cross, _, _ = _http_request(
+            f"http://127.0.0.1:{session_port}{urlsplit(viewer_blob).path}?{urlsplit(viewer_blob).query}"
+        )
+        assert status_cross == 404
+        status_main, _, _ = _http_request(
+            f"http://127.0.0.1:{srv.port}{urlsplit(bridge_url).path}"
+        )
+        assert status_main == 404
+
+        # Redirect to lookalike origin (courses.ut.edu.vn.evil.example) is rejected with 403
+        bypass_url = srv.build_session_bridge_url(
+            "courses", "https://courses.ut.edu.vn/prefix-bypass"
+        )
+        assert bypass_url is not None
+        status_bypass, _, _ = _http_request(bypass_url)
+        assert status_bypass == 403
+
+        # Valid same-origin 302 redirect carries Referrer-Policy, nosniff, and CORP: same-origin
+        conn = http.client.HTTPConnection("127.0.0.1", session_port, timeout=5)
+        try:
+            bounce_url = srv.build_session_bridge_url(
+                "courses", "https://courses.ut.edu.vn/valid-bounce"
+            )
+            assert bounce_url is not None
+            conn.request("GET", urlsplit(bounce_url).path)
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.status == 302
+            assert resp.getheader("Referrer-Policy") == "no-referrer"
+            assert resp.getheader("X-Content-Type-Options") == "nosniff"
+            assert resp.getheader("Cross-Origin-Resource-Policy") == "same-origin"
+        finally:
+            conn.close()
+    finally:
+        srv.stop()
+
+
+def test_document_reader_webview_error_falls_back_to_native_and_handles_escape():
+    from types import SimpleNamespace
+
+    from tests.e2e_courses.builders import build_pdf_bytes
+
+    pdf_bytes = build_pdf_bytes(["Fallback Page 1"])
+    srv = LocalPreviewServer()
+    captured: dict[str, object] = {}
+    closed: list[bool] = []
+
+    def _builder(url: str, *, on_error=None):
+        captured["url"] = url
+        captured["on_error"] = on_error
+        ctrl = ft.Container(expand=True, data="wv")
+        return SimpleNamespace(
+            control=lambda: ctrl,
+            sync_bounds=lambda *_a, **_kw: None,
+            suspend=lambda: None,
+            resume=lambda: None,
+            dispose=Mock(),
+        )
+
+    reader = DocumentReaderView(
+        file_name="handout.pdf",
+        data=pdf_bytes,
+        kind="pdf",
+        preview_server=srv,
+        on_close=lambda: closed.append(True),
+        on_save=lambda *_: None,
+        on_open_external=lambda *_: None,
+        webview_builder=_builder,
+        pdf_in_webview=True,
+    )
+    try:
+        # Night mode toggle is hidden while PDF renders inside WebView2
+        assert reader._night_btn.visible is False
+        assert callable(captured.get("on_error"))
+
+        # Async WebView2 error falls back cleanly to Tier B native PDF renderer & restores night toggle
+        captured["on_error"]("WebView2 crashed")  # type: ignore[misc]
+        assert reader._webview_failed is True
+        assert reader._night_btn.visible is True
+        assert reader._active_webview_url is None
+
+        # Esc closes the reader
+        assert reader.handle_key_event(SimpleNamespace(key="Escape")) is True
+        assert closed == [True]
+    finally:
+        reader.dispose()
+        srv.stop()

@@ -20,6 +20,7 @@ from core.courses.models import (
 )
 from core.courses.providers import is_synthetic_moodle_attachment
 from core.html_compat import BS4_PARSER
+from core.url_validation import validate_public_https_url
 
 CoursesLayoutMode = Literal["mobile", "tablet_portrait", "wide"]
 COMPACT_HEIGHT_BREAKPOINT = 500.0
@@ -103,22 +104,33 @@ def format_file_size(num_bytes: int) -> str:
     return f"{size / (1024 ** 3):.1f} GB"
 
 
-def safe_http_url(url: object) -> str:
-    """Return stripped URL only if it is a valid http/https URL without control chars."""
+def safe_http_url(url: object, *, allow_loopback: bool = False) -> str:
+    """Return stripped URL only when it is a safe public HTTPS (or allowed loopback) URL."""
     if not isinstance(url, str):
         return ""
     cleaned = url.strip()
-    if not cleaned or any(
+    if not cleaned or "\\" in cleaned or any(
         ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in cleaned
     ):
         return ""
     try:
         parsed = urlsplit(cleaned)
+        port = parsed.port
     except ValueError:
         return ""
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+    if parsed.username is not None or parsed.password is not None:
         return ""
-    return cleaned
+    scheme = parsed.scheme.lower()
+    if scheme == "http":
+        if not allow_loopback:
+            return ""
+        host = (parsed.hostname or "").rstrip(".").casefold()
+        if host not in ("127.0.0.1", "localhost") or port is None or not (1 <= port <= 65535):
+            return ""
+        return cleaned
+    if scheme != "https":
+        return ""
+    return validate_public_https_url(cleaned, resolve_dns=False) or ""
 
 
 def compute_course_origin(course: CourseSummary) -> str:

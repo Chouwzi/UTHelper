@@ -92,3 +92,86 @@ def test_http_popup_stays_in_the_current_app_webview():
     popup(core, event)
     assert event.handled is True
     core.navigate.assert_called_once_with(event.uri)
+
+
+def test_webview_security_guards_schemes_viewer_popups_devtools_cookies_and_bounds(monkeypatch):
+    from gui.components.courses import webview_pane as webview_pane_mod
+    from gui.components.courses.embedded_webview_host import (
+        _validate_webview_url,
+        build_embedded_webview_host,
+    )
+    from gui.components.courses.webview_pane import CoursesWebViewPane
+    from gui.view_models.courses_state import safe_http_url
+
+    assert safe_http_url("http://evil.example/a") == ""
+    assert safe_http_url("https://127.0.0.1/steal") == ""
+    assert safe_http_url("https://courses.ut.edu.vn/mod/page/view.php?id=1")
+    assert _validate_webview_url("http://127.0.0.1:45678/viewer/tok/docx_host.html", allowed_loopback_ports={45678})
+    assert _validate_webview_url("http://127.0.0.1:99999/other", allowed_loopback_ports={45678}) == ""
+    assert _validate_webview_url("http://127.0.0.1:45678/other", allowed_loopback_ports=set()) == ""
+    assert build_embedded_webview_host("http://evil.example/plain") is None
+
+    # Disallowed navigation schemes are cancelled; viewer popups are blocked; dev tools & host objects disabled
+    dock = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="http://127.0.0.1:45678/viewer/tok/docx_host.html",
+    )
+    core = Mock()
+    dock._bind_events(core)
+    nav_start = core.add_navigation_starting.call_args.args[0]
+    for bad_uri in ("file:///C:/secret.txt", "javascript:alert(1)", "data:text/html,x", "intent://foo", "https://evil.example/"):
+        nav_ev = SimpleNamespace(uri=bad_uri, cancel=False)
+        nav_start(core, nav_ev)
+        assert nav_ev.cancel is True
+
+    popup = core.add_new_window_requested.call_args.args[0]
+    popup_ev = SimpleNamespace(uri="https://courses.ut.edu.vn/mod/page/view.php?id=7", handled=False)
+    popup(core, popup_ev)
+    assert popup_ev.handled is True
+    core.navigate.assert_not_called()
+
+    # Mid-init disposal closes newly created controller cleanly and HTTPS promotes secure cookies
+    dock2 = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://courses.ut.edu.vn/course/view.php?id=1",
+        cookies=[{"name": "MoodleSession", "value": "x", "domain": "courses.ut.edu.vn", "secure": False}],
+    )
+    dock2._hwnd = 1
+    cm = Mock()
+    cookie_obj = SimpleNamespace(is_secure=False, is_http_only=False)
+    cm.create_cookie.return_value = cookie_obj
+    core2 = SimpleNamespace(cookie_manager=cm)
+    dock2._inject_cookies(core2)
+    assert cookie_obj.is_secure is True
+
+    ctrl_closed = Mock()
+    ctrl_closed.core_webview2 = Mock()
+
+    def _dispose_mid_init():
+        dock2._stop_event.set()
+        return ctrl_closed
+
+    dock2._handle_ctrl_done(SimpleNamespace(get_results=_dispose_mid_init))
+    ctrl_closed.close.assert_called_once()
+
+    # CoursesWebViewPane.sync_bounds does not apply redundant 80px inset on narrow screens
+    fake_host = Mock()
+    fake_host.backend = "webview2"
+    fake_host.dock = None
+    fake_host.control.return_value = SimpleNamespace()
+    monkeypatch.setattr(webview_pane_mod, "build_embedded_webview_host", lambda *_a, **_kw: fake_host)
+    pane = CoursesWebViewPane(
+        page=None,
+        source="courses",
+        title="Web",
+        url="https://courses.ut.edu.vn/",
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    pane.sync_bounds(0.0, 36.0, 420.0, 700.0)
+    _, _, _, _, passed_kwargs = (
+        *fake_host.sync_bounds.call_args.args,
+        fake_host.sync_bounds.call_args.kwargs,
+    )
+    assert passed_kwargs["bottom_inset"] == (44.0 if pane._mobile_nav_bar.visible else 0.0)
+    pane.dispose()

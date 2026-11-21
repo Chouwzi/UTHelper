@@ -106,7 +106,7 @@ def test_f1_pyproject_dependencies_and_manifest_are_store_safe():
 
     win_opt = config["project"]["optional-dependencies"]["windows"]
     win_flet = config["tool"]["flet"]["windows"]["dependencies"]
-    for pkg in ("pillow>=12.3.0", "lxml>=6.1.0", "pypdfium2>=5.9.0"):
+    for pkg in ("lxml>=6.1.0", "pypdfium2>=5.9.0", "webview2-Microsoft.Web.WebView2.Core==3.2.1"):
         assert pkg in win_opt
         assert pkg in win_flet
 
@@ -117,7 +117,7 @@ def test_f1_pyproject_dependencies_and_manifest_are_store_safe():
     manifest_app = config["tool"]["flet"]["android"]["manifest_application"]
     assert manifest_app.get("allowBackup") == "false"
     assert manifest_app.get("networkSecurityConfig") == "@xml/network_security_config"
-    assert "usesCleartextTraffic" not in manifest_app
+    assert manifest_app.get("usesCleartextTraffic") in (None, "false")
 
 
 def test_f1_android_network_security_config_permits_loopback_only():

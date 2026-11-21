@@ -13,10 +13,11 @@
       const svg = UthPptx.renderSlideToSvg(presentation, slides[index]);
       const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
       if (parsed.querySelector("parsererror")) throw new Error("Không hiển thị được trang chiếu.");
-      for (const node of parsed.querySelectorAll("script, iframe, object, embed")) node.remove();
+      for (const node of parsed.querySelectorAll("script, iframe, object, embed, animate, set")) node.remove();
       for (const node of parsed.querySelectorAll("*")) {
         for (const attr of [...node.attributes]) {
-          if (/^on/i.test(attr.name) || (/href$/i.test(attr.name) && !/^(#|data:image\/|blob:)/i.test(attr.value))) node.removeAttribute(attr.name);
+          const val = String(attr.value || "");
+          if (/^on/i.test(attr.name) || (/href$/i.test(attr.name) && (!/^(#|data:image\/|blob:)/i.test(val) || /^data:image\/svg\+xml/i.test(val)))) node.removeAttribute(attr.name);
         }
       }
       host.replaceChildren(document.importNode(parsed.documentElement, true));
