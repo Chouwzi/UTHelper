@@ -278,6 +278,12 @@ def test_summary_detail_action_preserves_full_session_content():
     buttons[0].on_click(None)
 
     dialog = view._page_ref.show_dialog.call_args.args[0]
+    assert dialog.semantics_label == "Chi tiết buổi học"
+    assert isinstance(dialog.content, ft.KeyboardListener)
+    dialog.content.on_key_down(SimpleNamespace(key="Enter"))
+    view._page_ref.pop_dialog.assert_not_called()
+    dialog.content.on_key_down(SimpleNamespace(key="Escape"))
+    view._page_ref.pop_dialog.assert_called_once()
     details = _text_values(dialog)
     action_labels = [
         item.content
@@ -304,13 +310,16 @@ def test_narrow_navigation_controls_keep_accessible_names_and_touch_targets():
         (view._today_btn, "Hôm nay"),
         (view._refresh_btn, "Tải lại lịch học"),
     ):
-        assert button.tooltip == label
+        assert button.content == label
         assert button.width >= 44
         assert button.height >= 44
 
 
 def test_week_navigation_still_moves_a_full_week_on_desktop():
     view = _view(1120)
+
+    assert view._prev_btn.content == "Tuần trước"
+    assert view._next_btn.content == "Tuần sau"
 
     view._next_btn.on_click(None)
 

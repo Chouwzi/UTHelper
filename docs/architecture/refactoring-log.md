@@ -2002,3 +2002,28 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
+
+## Responsive class schedule review (2026-11-21)
+
+- Replaced the fixed-width, horizontally scrolling timetable with a one-day
+  agenda below 920 px and seven day columns on wider screens. The agenda and
+  week view retain date selection across reflow and use day or week navigation
+  according to the current width.
+- Schedule summaries show the session time, subject, class code, and room. The
+  existing detail view continues to carry lecturer, campus, notes, outline, and
+  Portal/Zoom links. Portal fetch, cache, account namespace, refresh, and
+  notification paths were left intact.
+- Headless Chrome against the Flet WebRenderer at 390×844 and 1120×850 showed
+  no horizontal page overflow. Synthetic fixture captures covered long course
+  and room names, next-day keyboard navigation, empty day/week, loading, and
+  light/dark themes. The detail dialog closed on Escape and restored focus to
+  its invoking action. Chromium exposed the dialog as `alertdialog` with an
+  empty accessible name even though its title is present in the semantics text;
+  that Flet web semantics limitation remains. Native/device visual acceptance
+  was not recorded because a Windows system permission dialog occluded native
+  captures.
+- Focused source regressions: **74 passed**. The first full-suite run reported
+  1,697 passed, 25 skipped, and one settings-test fixture failure; the fixture
+  now models both Portal clients and the schedule cache, and its focused test
+  passes. The full suite was not rerun after that fixture repair. Ruff is not
+  installed in the local environment.

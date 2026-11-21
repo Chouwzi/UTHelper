@@ -83,40 +83,32 @@ class ScheduleWeekView(ft.Container):
         self._week_label = ft.Text(
             "", size=14, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
         )
-        self._prev_btn = ft.IconButton(
-            ft.Icons.CHEVRON_LEFT_ROUNDED,
-            icon_color=C.TEXT_SECONDARY,
-            icon_size=20,
-            width=48,
+        self._prev_btn = ft.TextButton(
+            "Tuần trước",
+            width=94,
             height=48,
-            tooltip="Tuần trước",
+            style=_text_action_style(C.TEXT_SECONDARY),
             on_click=lambda _: self._navigate(-1),
         )
-        self._next_btn = ft.IconButton(
-            ft.Icons.CHEVRON_RIGHT_ROUNDED,
-            icon_color=C.TEXT_SECONDARY,
-            icon_size=20,
-            width=48,
+        self._next_btn = ft.TextButton(
+            "Tuần sau",
+            width=86,
             height=48,
-            tooltip="Tuần sau",
+            style=_text_action_style(C.TEXT_SECONDARY),
             on_click=lambda _: self._navigate(1),
         )
-        self._today_btn = ft.IconButton(
-            ft.Icons.TODAY_ROUNDED,
-            icon_color=C.ACCENT,
-            icon_size=18,
-            width=48,
+        self._today_btn = ft.TextButton(
+            "Hôm nay",
+            width=82,
             height=48,
-            tooltip="Hôm nay",
+            style=_text_action_style(C.ACCENT),
             on_click=lambda _: self._go(date.today()),
         )
-        self._refresh_btn = ft.IconButton(
-            ft.Icons.REFRESH_ROUNDED,
-            icon_color=C.TEXT_SECONDARY,
-            icon_size=18,
-            width=48,
+        self._refresh_btn = ft.TextButton(
+            "Tải lại lịch học",
+            width=126,
             height=48,
-            tooltip="Tải lại lịch học",
+            style=_text_action_style(C.TEXT_SECONDARY),
             on_click=lambda _: self._reload(),
         )
         self._nav_row = ft.Row(
@@ -390,13 +382,12 @@ class ScheduleWeekView(ft.Container):
                 f"{_WEEKDAYS_LONG[self._selected.weekday()]}, "
                 f"{self._selected:%d/%m/%Y}"
             )
-            self._prev_btn.tooltip = "Ngày trước"
-            self._next_btn.tooltip = "Ngày sau"
+            self._prev_btn.content = "Ngày trước"
+            self._next_btn.content = "Ngày sau"
         else:
             self._week_label.value = f"{monday:%d/%m} – {sunday:%d/%m/%Y}"
-            self._prev_btn.tooltip = "Tuần trước"
-            self._next_btn.tooltip = "Tuần sau"
-        self._refresh_btn.tooltip = "Tải lại lịch học"
+            self._prev_btn.content = "Tuần trước"
+            self._next_btn.content = "Tuần sau"
         self._render_status(monday)
         if monday in self._weeks:
             if narrow:
@@ -678,7 +669,9 @@ class ScheduleWeekView(ft.Container):
             width=88 if narrow else 80,
             tooltip="Chi tiết buổi học",
             style=_text_action_style(),
-            on_click=lambda _event, item=session: self._show_session_details(item),
+            on_click=lambda _event, item=session: self._show_session_details(
+                item, return_focus=details_button
+            ),
         )
         return ft.Container(
             content=ft.Column([summary, details_button], spacing=4),
@@ -688,22 +681,39 @@ class ScheduleWeekView(ft.Container):
             border_radius=8,
         )
 
-    def _show_session_details(self, session: ClassSession) -> None:
+    def _show_session_details(
+        self, session: ClassSession, *, return_focus: ft.Control | None = None
+    ) -> None:
         width = max(280.0, min(520.0, self._layout_width - 48))
+
+        def _on_key_down(event) -> None:
+            if event.key == "Escape":
+                self._page_ref.pop_dialog()
+
+        async def _restore_focus(_event=None) -> None:
+            if return_focus is not None:
+                await return_focus.focus()
+
         dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Chi tiết buổi học",
             title=ft.Text(
                 "Chi tiết buổi học",
                 size=16,
                 weight=ft.FontWeight.W_600,
                 color=C.TEXT_PRIMARY,
+                semantics_label="Chi tiết buổi học",
             ),
-            content=ft.Column(
-                [self._session_card(session, datetime.now())],
-                width=width,
-                height=460,
-                spacing=0,
-                scroll=ft.ScrollMode.AUTO,
+            content=ft.KeyboardListener(
+                content=ft.Column(
+                    [self._session_card(session, datetime.now())],
+                    width=width,
+                    height=460,
+                    spacing=0,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                autofocus=True,
+                on_key_down=_on_key_down,
             ),
             actions=[
                 ft.TextButton(
@@ -715,6 +725,7 @@ class ScheduleWeekView(ft.Container):
             ],
             bgcolor=C.SURFACE,
             shape=ft.RoundedRectangleBorder(radius=14),
+            on_dismiss=_restore_focus,
         )
         try:
             self._page_ref.show_dialog(dialog)
