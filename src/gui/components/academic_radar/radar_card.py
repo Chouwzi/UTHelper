@@ -94,6 +94,98 @@ class AcademicRadarCard(ft.Container):
         if p is not None:
             MetricDetailSheet.show(p, metric)
 
+    def _show_radar_info(self, _event=None) -> None:
+        page = self._get_page()
+        if page is None:
+            return
+        try:
+            page_w = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        dialog_w = max(260.0, min(400.0, page_w - 64.0)) if page_w > 0 else 360.0
+        items = [
+            ("Tổng Lực", "Điểm trung bình có trọng số tín chỉ trong học kỳ."),
+            ("Nền Tảng", "Đánh giá điểm quá trình / chuyên cần."),
+            ("Bứt Phá", "Tỷ lệ môn đạt mức giỏi - xuất sắc."),
+            ("Giữ Nhịp", "Độ ổn định giữa điểm quá trình và điểm thi."),
+            ("Về Đích", "Tỷ lệ hoàn thành và qua môn trong kỳ."),
+            ("Trụ Vững", "Điểm của các môn nặng tín chỉ nhất."),
+        ]
+        used_overlay = False
+
+        def _close_dialog(p: ft.Page, d: ft.AlertDialog) -> None:
+            if not used_overlay:
+                try:
+                    p.pop_dialog()
+                    return
+                except Exception:
+                    pass
+            d.open = False
+            try:
+                d.update()
+            except Exception:
+                try:
+                    p.update()
+                except Exception:
+                    pass
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                _close_dialog(page, dialog)
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            semantics_label="Giải thích 6 chỉ số Radar học tập",
+            title=ft.Text(
+                "6 chỉ số Radar học tập",
+                size=16,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+                semantics_label="6 chỉ số Radar học tập",
+            ),
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    width=dialog_w,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text(
+                                f"• {name}: {desc}",
+                                size=12.5,
+                                color=C.TEXT_PRIMARY,
+                            )
+                            for name, desc in items
+                        ],
+                        spacing=8,
+                        tight=True,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    "Đóng",
+                    height=44,
+                    on_click=lambda _: _close_dialog(page, dialog),
+                )
+            ],
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+        try:
+            page.show_dialog(dialog)
+        except Exception:
+            used_overlay = True
+            overlay = getattr(page, "overlay", None)
+            if overlay is not None:
+                overlay.append(dialog)
+                dialog.open = True
+                try:
+                    page.update()
+                except Exception:
+                    pass
+
     def _build_ui(self) -> None:
         # Data-driven rebuilds can happen after a theme preview while this view
         # is detached. Reapply the root surface as well as child control colors.
@@ -105,12 +197,28 @@ class AcademicRadarCard(ft.Container):
             return
 
         # 1. Header: Title & Semester Selector
+        info_btn = ft.Semantics(
+            label="Giải thích 6 chỉ số Radar học tập",
+            button=True,
+            content=ft.IconButton(
+                icon=ft.Icons.INFO_OUTLINE_ROUNDED,
+                icon_size=18,
+                icon_color=C.TEXT_SECONDARY,
+                tooltip="Giải thích 6 chỉ số Radar học tập",
+                padding=0,
+                size_constraints=ft.BoxConstraints(
+                    min_width=44, max_width=44, min_height=44, max_height=44
+                ),
+                on_click=self._show_radar_info,
+            ),
+        )
         title = ft.Row(
             controls=[
                 ft.Text("Hồ sơ học tập", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
-                ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=16, color=C.TEXT_SECONDARY),
+                info_btn,
             ],
-            spacing=6,
+            spacing=2,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         semester_options = [
@@ -161,12 +269,19 @@ class AcademicRadarCard(ft.Container):
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
-        # 2. Radar Chart
+        # 2. Radar Chart (scale cleanly on 360-390px mobile viewports)
+        page = self._get_page()
+        try:
+            page_w = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        chart_width = max(250.0, min(340.0, page_w - 64.0)) if page_w > 0 else 340.0
         self._radar_chart = AcademicRadarChart(
             profile=profile,
             previous_profile=self.previous_profile,
             is_comparing=self._is_comparing,
             on_metric_tap=self._on_metric_click,
+            width=chart_width,
             alignment=ft.Alignment(0, 0),
         )
 

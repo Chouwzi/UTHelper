@@ -44,3 +44,59 @@ def test_detail_theme_refresh_does_not_depend_on_content_tree_indexes():
         assert view._deadline_label.color == C.TEXT_SECONDARY
     finally:
         apply_theme("midnight_blue")
+
+
+def test_detail_view_update_detail_preserves_in_app_cta_label():
+    page = SimpleNamespace(overlay=[], update=lambda: None, run_task=lambda *_a, **_k: None)
+    view = DetailView(page, lambda: None)
+
+    for activity in (
+        {
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=10",
+            "course_id": 1,
+            "type": "assignment",
+            "submission_status": "new",
+            "details": {},
+        },
+        {
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=11",
+            "course_id": 1,
+            "type": "assignment",
+            "site_identity": "thnn",
+            "details": {},
+        },
+        {
+            "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=12",
+            "course_id": 1,
+            "type": "quiz",
+            "details": {},
+        },
+        {
+            "url": "https://courses.ut.edu.vn/mod/forum/view.php?id=13",
+            "course_id": 1,
+            "type": "other",
+            "details": {},
+        },
+    ):
+        view.update_detail(activity)
+        assert view._cta_text.value == "Mở trong ứng dụng"
+        assert view._open_btn.content.label == "Mở trong ứng dụng"
+        assert view._header_open_btn.tooltip == "Mở bằng trình duyệt ngoài"
+
+
+def test_detail_view_thnn_notice_aligns_with_in_app_and_top_right_external_btn():
+    page = SimpleNamespace(overlay=[], update=lambda: None, run_task=lambda *_a, **_k: None)
+    view = DetailView(page, lambda: None)
+    view.update_detail(
+        {
+            "url": "https://thnn.ut.edu.vn/mod/assign/view.php?id=11",
+            "course_id": 1,
+            "type": "assignment",
+            "site_identity": "thnn",
+            "details": {},
+        }
+    )
+    notice = view._submission_status_value.value
+    assert "Vui lòng mở trong trình duyệt" not in notice
+    assert "nút ở góc trên" in notice
+    assert "trình duyệt ngoài" in notice

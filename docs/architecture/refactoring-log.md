@@ -2226,3 +2226,89 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
   - `flutter analyze --no-pub && flutter test --no-pub` (`extensions/flet_uth_quiz/flutter/flet_uth_quiz`): **No issues found!**, **23/23 tests passed!**.
   - Built real Windows client via `quiz_client_bootstrap.ensure_windows_quiz_client(Path('.'))`, prepared & verified `build/windows` via `prepare_windows_bundle.py` + `verify_windows_bundle.py` (**passed**). Live quiz `784921` was left untouched (1 attempt remaining).
+
+## Responsive class schedule review (2026-11-21)
+
+- Replaced the fixed-width, horizontally scrolling timetable with a one-day
+  agenda below 920 px and seven day columns on wider screens. The agenda and
+  week view retain date selection across reflow and use day or week navigation
+  according to the current width.
+- Schedule summaries show the session time, subject, class code, and room. The
+  existing detail view continues to carry lecturer, campus, notes, outline, and
+  Portal/Zoom links. Portal fetch, cache, account namespace, refresh, and
+  notification paths were left intact.
+- Headless Chrome against the Flet WebRenderer at 390×844 and 1120×850 showed
+  no horizontal page overflow. Synthetic fixture captures covered long course
+  and room names, next-day keyboard navigation, empty day/week, loading, and
+  light/dark themes. The detail dialog closed on Escape and restored focus to
+  its invoking action. Chromium exposed the dialog as `alertdialog` with an
+  empty accessible name even though its title is present in the semantics text;
+  that Flet web semantics limitation remains. Native/device visual acceptance
+  was not recorded because a Windows system permission dialog occluded native
+  captures.
+- Focused source regressions: **74 passed**. The first full-suite run reported
+  1,697 passed, 25 skipped, and one settings-test fixture failure; the fixture
+  now models both Portal clients and the schedule cache, and its focused test
+  passes. The full suite was not rerun after that fixture repair. Ruff is not
+  installed in the local environment.
+
+## M3 Part A: PR #99 hardening, in-app WebView default, and schedule/courses/radar UX & accessibility (2026-11-21)
+
+- **Gitflow Merge & Repo Hygiene**:
+  - Merged `origin/develop` (`1af2fef`, post-M1 + M2) into `feature/Lich-hoc` with `--no-ff` (`0470b52`), preserving all M1 Store/Security (`SecretStoreBackend`, `AndroidKeyStore`, `distribution.py`, `android_updates.py`, `PortalClient` origin/8 MiB hardening, `_startup_android_sequence`, transient-failure reminder guard) and M2 Quiz (`QuizSessionLease`, `QuizPlayerView`, `quiz_client_bootstrap`, `FLET_FORCE_WEB_SERVER`, `extensions/flet_uth_quiz`) work, keeping both `'courses_view'` and `'quiz_player_view'` in `AppController._rebuild_colors` and retaining all prior log entries.
+  - Removed 4 stray tracked files at repository root (`cd`, `git`, `py`, `COMMAND_BUILD.md`).
+  - Fixed `packaging/windows/Package.wxs:42` (`DesktopShortcut` `<RegistryValue Root="HKCU" ...>`) so per-user MSIX/WiX shortcut registration matches `InstallScope="perUser"` without requiring HKLM elevation.
+- **Security, Token Isolation, Session/Cache & PR #99 Fixes**:
+  - Added `src/core/url_validation.py` (`validate_https_url`, `is_trusted_uth_lms_url`) enforcing strict `https://`, clean host, no embedded credentials, no control characters, and trusted UTH origins for LMS links.
+  - Refactored `PortalClient.fetch_week` and `fetch_credit_progress` (`src/core/portal_client.py`) to use `_current_generation()`, `_cached_token(username)`, `_login(...)`, and `_store_token(...)` with M1's `_SamePortalOriginRedirectHandler` and `_MAX_PORTAL_RESPONSE_BYTES`.
+  - Wrapped `MoodleClient.fetch_grade_report_html` (`src/core/client.py`) in `with self._session_lock:`, added `_session_owner` / `clear_session()` / `_reset_session_if_account_changed()`, and exposed `fetch_grade_report_html` / `last_grade_report_error` on `MoodleService` (`src/core/moodle_service.py`, `src/core/data_orchestrator.py`, `src/core/course_grades_service.py`) so `CourseGradesService` never reaches into `orchestrator.client`.
+  - Namespaced `CourseGradeMonitor` (`course_grades_snapshot_<digest>.json`, single grade-change alert vs duplicate `%` alert) and `AcademicGradeService` (`portal_grades_cache_<digest>.json`, `portal_progress_cache_<digest>.json`, `SafeFileIO`, username redacted from `logger.info`), fixed `"heSo"` proportional factor conversion in `normalizer.py`, and deduplicated retaken courses by highest `credit_grade` in `gpa_planner.py`.
+  - Guarded `_portal_week_client`, `_week_schedule_cache`, and `calendar_view.reset_schedule` with `getattr(...)` across `_complete_login_success` and `_on_settings_saved` in `src/gui/app_controller.py`; eliminated redundant N+1 HTML grade scraping in `_check_grades_background`; fixed `ScheduleWeekView._prefetch_async` generation checks inside loop and post-sleep and cleared `_weeks`/`_live_at` on `ScheduleAuthenticationError`.
+- **In-App WebView Default & Explicit External Opt-Out**:
+  - Added `src/gui/components/in_app_webview.py` (`InAppWebViewDialog` + `supports_native_webview`) and `flet-webview==0.86.5` in `pyproject.toml` (`[tool.flet.android.dependencies]` / `ios.dependencies`). Native `flet_webview.WebView` opens on Android/iOS/macOS; Windows/Web uses a bounded HTTPS preview reader with an explicit `"Mở bằng trình duyệt ngoài"` opt-out button (never silently launching the external browser).
+  - Routed `ScheduleWeekView`, `CalendarView`, `DetailView` (`"Mở trong ứng dụng"`, Markdown links, and post-submission links), and `AppController` links through `on_open_url` by default with explicit `Icons.OPEN_IN_NEW_ROUNDED` external opt-out buttons (`44x44`, `ft.Semantics`), keeping `UthQuizPlayer` same-origin quiz pinning intact.
+- **Responsive Layout, Theme Propagation & Accessibility**:
+  - Updated `ScheduleWeekView` (`update_theme`, `_initial_layout_width` subtracting `_RAIL_WIDTH`, responsive clamped `_show_outline` & `_show_session_details` modals with `modal=True`, `semantics_label`, `Escape`, focus restore, `height=44` retry), `CalendarView` (skip `_render_week()` in `"schedule"` mode, `height=44` mode pills, `expand=True` week strip cells), `CoursesView` & `ViewManager` (`update_theme()`, compact 3-tile summary bar via `expand=True` + tightened padding/2-line labels, `set_stale_notice()`), `GradeOverviewView` & `academic_radar/*` (`<404px` dynamic radar chart scaling, clamped scrollable modals/sheets, explicit error retry, info dialog), `DesktopWindowHeader`, `TodaySchedulePanel`, `DetailView`, and `AppController` (`_sync_rail_active()` on Calendar/Grades close, mobile `44x44` header targets).
+  - **Flet Web Semantics Note**: Verified in Chromium (`Flet 0.86.5` WebRenderer) that `AlertDialog(..., semantics_label=...)` maps the inner dialog surface to `SemanticsRole.alertDialog` (`dhB`) alongside an outer `namesRoute` semantics node carrying the label; pairing `semantics_label` on both `AlertDialog` and its `title` ensures assistive tech announces the dialog title cleanly.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2423 passed, 26 skipped** (0 failed).
+  - Playwright + Flet ASGI Web verification (`360x800`, `390x844`, `1120x850`, dark `midnight_blue` & light `steel_light`): **PASS** (`0` console/page errors, `0` horizontal overflow across Schedule, Session Details, Outline, Calendar, Courses, Grades, Detail, and `InAppWebViewDialog`; `Escape` dismisses modals and `InAppWebViewDialog` opens in-app without leaving the page; `trình duyệt ngoài` icon buttons exposed in Chromium AXTree).
+
+## M3 Part A Iteration 2b: Verifier & Challenger Remediation (2026-11-21)
+
+- **ScheduleWeekView Prefetch & Resize Shrink (`src/gui/components/schedule_week_view.py`)**:
+  - Tracked `_prefetch_task` and `_prefetch_generation` so `reset()` cancels any running prefetch task, clears `_prefetching` / `_prefetch_generation`, and restarts the 9-week `±4` background prefetch immediately when `visible=True`, while `finally:` only clears state when `_prefetch_generation in (None, generation)`.
+  - Updated `_on_size_change()` to re-render on any shrink in wide mode (`width < previous_width` and `width >= 920`) or width delta `>= 8px`.
+- **PortalClient Streaming Gzip Bomb Protection (`src/core/portal_client.py`)**:
+  - Replaced single-shot `gzip.decompress(raw)` with `_decompress_gzip_bounded()` using `zlib.decompressobj(16 + zlib.MAX_WBITS)` in bounded chunks (`step = 64 KiB`, output slice `min(256 KiB, remaining)`), aborting immediately at `_MAX_PORTAL_RESPONSE_BYTES` (`8 MiB`) and matching `Content-Encoding` case-insensitively (`"gzip" in ...lower()`).
+- **In-App WebView SSRF & Markdown URI Sanitization (`src/core/url_validation.py`, `src/gui/components/in_app_webview.py`, `src/gui/core/utils.py`)**:
+  - Added `validate_public_https_url()` in `src/core/url_validation.py` rejecting `localhost`, `.localhost`, `.local`, literal unsafe IPs, and DNS-resolved loopback/private/link-local/multicast/unspecified/reserved/non-global IPs (`ipaddress.ip_address` + `socket.getaddrinfo`, including IPv4-mapped IPv6). Wired into `InAppWebViewDialog`, `_fetch_https_preview`, and `_HttpsOnlyRedirectHandler`.
+  - Added case-insensitive `on_page_started` and `on_url_change` scheme/host validation on native `flet_webview.WebView` that closes the dialog if an untrusted URL appears.
+  - Sanitized `<a href=...>` and `<img src=...>` in `html_to_markdown()` so only clean `http://`/`https://` URLs (plus internal `cache/images/<sha256>.<ext>` assets for cached Moodle images) are emitted as Markdown links/images, stripping `javascript:`, `data:`, `vbscript:`, and `file:` URIs to plain text.
+- **DetailView Copy, Academic Radar Modal Escape & Code Hygiene**:
+  - Aligned `DetailView.update_detail()` CTA text (`"Mở trong ứng dụng"`) and non-SEB/non-THNN notice strings with the in-app WebView default while keeping `_header_open_btn` labeled `"Mở bằng trình duyệt ngoài"`.
+  - Added `Escape` `KeyboardListener` and `page.pop_dialog()` dismissal (with overlay fallback) to `GradeOverviewView._show_planner_dialog`, `ExpectedGradeDialog`, `GpaDetailSheet`, `show_course_components_dialog`, and `MetricDetailSheet`.
+  - Removed the dead 2-mode branch in `CalendarView.update_theme` and duplicate `grades_btn` update in `ViewManager.show_grades`.
+  - Added `subject_code` (`maHocPhan`) to `CourseGradeItem` / `SemesterNormalizer` so `cumulative_gpa4` and `calculate_overall_gpa` deduplicate retaken courses across different `maLopHocPhan` sections.
+- **Verification**:
+  - Added regression tests across `tests/test_schedule_week_view.py`, `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_detail_theme.py`, `tests/test_grade_overview_view.py`, `tests/test_academic_radar_service.py`, and updated `tests/test_submission_race_condition.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2444 passed, 26 skipped** (0 failed).
+  - Playwright + Flet Web ASGI verification (`360x800`, `390x844`, `1120x850`, dark & light across `DetailView`, `ScheduleWeekView`, `CoursesView`, `GradeOverviewView`): **PASS** (`0` overflow, `0` console/page errors, `DetailView` AXTree exposes `"Mở trong ứng dụng"` without `"Mở trong trình duyệt"` and opens `InAppWebViewDialog` in-app).
+
+## M3 Part A Iteration 3b: Challenger & Secondary Reviewer Remediation (2026-11-21)
+
+- **PortalClient Multi-Member & Truncated Gzip Hardening (`src/core/portal_client.py`)**:
+  - Rewrote `_decompress_gzip_bounded()` with a zero-copy `cursor` loop checking `if decomp.eof:` **before** `decomp.unconsumed_tail` so multi-member streams exceeding `256 KiB` advance cleanly to the next member instead of looping infinitely or growing `decomp.unused_data` unboundedly, added a zero-progress guard plus strict `cursor > member_start` check, avoided calling `decomp.flush()` after `decomp.eof`, and verified `decomp.eof` after stream completion so truncated gzip streams (e.g., missing 8-byte CRC32/ISIZE trailer) raise `PortalProtocolError`.
+- **Alternative IPv4 Literal SSRF Blocking (`src/core/url_validation.py`)**:
+  - Added `_parse_literal_ip()` and pure-Python POSIX `inet_aton` fallback `_parse_posix_inet_aton()` before `resolve_dns` in `validate_public_https_url()` so decimal, octal, hex, and short 1/2/3/4-part IPv4 literals (e.g., `2130706433`, `0177.0.0.1`, `0x7f000001`, `0x7f.0.0.1`, `127.1`, `0`, `2852039166`, and trailing-dot forms) resolve to canonical dotted-quads immediately (`< 1ms`) without calling `socket.getaddrinfo`, blocking them in both `validate_public_https_url(..., resolve_dns=False)` and `InAppWebViewDialog`.
+- **UI/UX & Markdown Defense-in-Depth Polish (`src/gui/components/academic_radar/radar_card.py`, `src/gui/components/detail_view.py`, `src/gui/core/utils.py`)**:
+  - Wrapped `AcademicRadarCard._show_radar_info` dialog content in `ft.KeyboardListener(autofocus=True)` for `Escape` dismissal via `page.pop_dialog()` (with overlay fallback), matching all other `academic_radar` and `GradeOverviewView` modals.
+  - Aligned `DetailView` THNN fallback notice copy with the in-app CTA and top-right external browser button.
+  - Escaped `[` and `]` inside Markdown link labels in `html_to_markdown._link_repl`.
+- **Verification**:
+  - Added regression tests in `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_grade_overview_view.py`, and `tests/test_detail_theme.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests/test_architecture_boundaries.py tests/test_repository_governance.py -q --tb=short`: **11 passed**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2458 passed, 26 skipped** (0 failed).

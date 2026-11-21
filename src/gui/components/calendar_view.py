@@ -34,6 +34,7 @@ from gui.components.calendar_navigation import (
     shift_week,
     week_slot_anchors,
 )
+from gui.components.schedule_week_view import ScheduleWeekView
 from gui.core.theme import (
     C,
     on_color,
@@ -71,6 +72,10 @@ class CalendarView(ft.Container):
         page: ft.Page,
         on_close: Optional[Callable] = None,
         on_open_detail: Optional[Callable] = None,
+        fetch_schedule_week: Optional[Callable] = None,
+        schedule_cache: Optional[Any] = None,
+        on_open_url: Optional[Callable[[str, str], None]] = None,
+        on_open_external: Optional[Callable[[str], None]] = None,
     ):
         super().__init__(expand=True, visible=False, bgcolor=C.BG)
         self._page_ref = page
@@ -88,6 +93,14 @@ class CalendarView(ft.Container):
         self._week_start: date = today - timedelta(days=today.weekday())  # Monday
         self._selected_date: Optional[date] = today  # full date for week view
 
+        self._schedule_view = ScheduleWeekView(
+            page,
+            fetch_schedule_week,
+            schedule_cache,
+            on_open_url=on_open_url,
+            on_open_external=on_open_external,
+        )
+
         self._build_ui()
         self._rendered_palette = semantic_palette()
 
@@ -95,17 +108,28 @@ class CalendarView(ft.Container):
     def _build_ui(self):
         # Month navigation header
         self._month_label = ft.Text(
-            "", size=16, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY,
+            "",
+            size=15,
+            weight=ft.FontWeight.W_600,
+            color=C.TEXT_PRIMARY,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            text_align=ft.TextAlign.CENTER,
         )
         # Month summary (CV-05)
         self._month_summary = ft.Text(
             "", size=10, color=C.TEXT_SECONDARY,
+        )
+        icon_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
         )
         self._back_btn = ft.IconButton(
             ft.Icons.ARROW_BACK_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
             icon_size=18,
             tooltip="Quay lại",
+            padding=0,
+            size_constraints=icon_constraints,
             on_click=lambda _: self._on_close() if self._on_close else None,
         )
         self._previous_btn = ft.IconButton(
@@ -113,6 +137,8 @@ class CalendarView(ft.Container):
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Trước",
+            padding=0,
+            size_constraints=icon_constraints,
             on_click=self._on_previous_period,
         )
         self._next_btn = ft.IconButton(
@@ -120,6 +146,8 @@ class CalendarView(ft.Container):
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Sau",
+            padding=0,
+            size_constraints=icon_constraints,
             on_click=self._on_next_period,
         )
         self._today_btn = ft.IconButton(
@@ -127,6 +155,8 @@ class CalendarView(ft.Container):
             icon_color=C.ACCENT,
             icon_size=18,
             tooltip="Hôm nay",
+            padding=0,
+            size_constraints=icon_constraints,
             on_click=lambda _: self._go_today(),
         )
 
@@ -135,19 +165,42 @@ class CalendarView(ft.Container):
                 controls=[
                     ft.Row(
                         controls=[
-                            self._back_btn,
+                            ft.Semantics(
+                                label="Quay lại",
+                                button=True,
+                                content=self._back_btn,
+                            ),
                             ft.Row(
                                 controls=[
-                                    self._previous_btn,
-                                    self._month_label,
-                                    self._next_btn,
+                                    ft.Semantics(
+                                        label="Kỳ trước",
+                                        button=True,
+                                        content=self._previous_btn,
+                                    ),
+                                    ft.Container(
+                                        content=self._month_label,
+                                        expand=True,
+                                        alignment=ft.Alignment(0, 0),
+                                    ),
+                                    ft.Semantics(
+                                        label="Kỳ sau",
+                                        button=True,
+                                        content=self._next_btn,
+                                    ),
                                 ],
                                 spacing=0,
+                                expand=True,
                                 alignment=ft.MainAxisAlignment.CENTER,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
-                            self._today_btn,
+                            ft.Semantics(
+                                label="Hôm nay",
+                                button=True,
+                                content=self._today_btn,
+                            ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     # Month summary row (CV-05)
                     ft.Container(
@@ -193,7 +246,9 @@ class CalendarView(ft.Container):
             ], spacing=4, tight=True),
             bgcolor=ft.Colors.with_opacity(0.19, C.ACCENT),
             border_radius=12,
-            padding=ft.Padding(left=14, right=14, top=5, bottom=5),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding(left=12, right=12, top=0, bottom=0),
             on_click=lambda _: self._toggle_view_mode("month"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
@@ -210,13 +265,34 @@ class CalendarView(ft.Container):
             ], spacing=4, tight=True),
             bgcolor="transparent",
             border_radius=12,
-            padding=ft.Padding(left=14, right=14, top=5, bottom=5),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding(left=12, right=12, top=0, bottom=0),
             on_click=lambda _: self._toggle_view_mode("week"),
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+        )
+        self._mode_schedule_icon = ft.Icon(
+            ft.Icons.SCHOOL_ROUNDED, size=14, color=C.TEXT_SECONDARY
+        )
+        self._mode_schedule_text = ft.Text(
+            "Lịch học", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+        )
+        self._mode_schedule_btn = ft.Container(
+            content=ft.Row(controls=[
+                self._mode_schedule_icon,
+                self._mode_schedule_text,
+            ], spacing=4, tight=True),
+            bgcolor="transparent",
+            border_radius=12,
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding(left=12, right=12, top=0, bottom=0),
+            on_click=lambda _: self._toggle_view_mode("schedule"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
         self._mode_toggle = ft.Container(
             content=ft.Row(
-                [self._mode_month_btn, self._mode_week_btn],
+                [self._mode_month_btn, self._mode_week_btn, self._mode_schedule_btn],
                 spacing=2,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
@@ -224,7 +300,7 @@ class CalendarView(ft.Container):
             border_radius=14,
             padding=ft.Padding(left=3, right=3, top=3, bottom=3),
             border=ft.Border.all(1, C.BORDER),
-            margin=ft.Margin(left=60, right=60, top=4, bottom=6),
+            margin=ft.Margin(left=12, right=12, top=4, bottom=6),
         )
 
         # Calendar grid (6 rows × 7 cols) - CV-01: denser
@@ -267,7 +343,7 @@ class CalendarView(ft.Container):
                 spacing=2,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.only(top=4, bottom=4),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
             visible=False,  # Hidden by default (month mode)
         )
 
@@ -386,6 +462,7 @@ class CalendarView(ft.Container):
                 self._mode_toggle,
                 self._period_surface,
                 detail_panel,
+                self._schedule_view,
             ],
             spacing=0,
             expand=True,
@@ -479,7 +556,7 @@ class CalendarView(ft.Container):
                 spacing=3,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.only(top=4, bottom=4),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
         )
         period = _CalendarPeriodPage(week_start, control, week_cells=cells)
         self._render_week_period_page(period)
@@ -1163,7 +1240,8 @@ class CalendarView(ft.Container):
                 spacing=1,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            width=52, height=80,
+            expand=True,
+            height=80,
             border_radius=12,
             alignment=ft.Alignment(0, 0),
             on_click=lambda e, idx=col_index: self._on_week_cell_click(idx),
@@ -1338,8 +1416,10 @@ class CalendarView(ft.Container):
         self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
-        else:
+        elif self._view_mode == "week":
             self._render_week()
+        else:
+            self._apply_schedule_header()
 
     def show(self, activities: Optional[List[Dict[str, Any]]] = None):
         if activities is not None:
@@ -1356,8 +1436,11 @@ class CalendarView(ft.Container):
         self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
-        else:
+        elif self._view_mode == "week":
             self._render_week()
+        else:
+            self._apply_schedule_header()
+            self._schedule_view.show()
 
     def hide(self):
         self.visible = False
@@ -1655,7 +1738,13 @@ class CalendarView(ft.Container):
         """Switch between month and week view."""
         if self._view_mode == mode:
             return
+        previous_mode = self._view_mode
         self._view_mode = mode
+        if mode == "schedule":
+            self._enter_schedule_mode()
+            return
+        if previous_mode == "schedule":
+            self._leave_schedule_mode()
 
         if mode == "month":
             # Update toggle styling
@@ -1697,6 +1786,52 @@ class CalendarView(ft.Container):
             self._render_month()
         else:
             self._render_week()
+        self._style_mode_buttons()
+
+    # Schedule (Portal timetable) mode
+    def _style_mode_buttons(self) -> None:
+        for mode, btn, icon, text in (
+            ("month", self._mode_month_btn, self._mode_month_icon, self._mode_month_text),
+            ("week", self._mode_week_btn, self._mode_week_icon, self._mode_week_text),
+            ("schedule", self._mode_schedule_btn, self._mode_schedule_icon, self._mode_schedule_text),
+        ):
+            active = self._view_mode == mode
+            btn.bgcolor = (
+                ft.Colors.with_opacity(0.19, C.ACCENT) if active else "transparent"
+            )
+            icon.color = C.TEXT_PRIMARY if active else C.TEXT_SECONDARY
+            text.color = C.TEXT_PRIMARY if active else C.TEXT_SECONDARY
+
+    def _apply_schedule_header(self) -> None:
+        self._month_label.value = "Lịch học"
+        self._month_summary.value = "Thời khóa biểu từ Portal"
+
+    def _set_deadline_surfaces_visible(self, visible: bool) -> None:
+        self._period_surface.visible = visible
+        self._detail_panel.visible = visible
+        # Keep the buttons in the layout (just invisible) so the centered
+        # title is not pushed against the right edge.
+        for button in (self._previous_btn, self._next_btn, self._today_btn):
+            button.opacity = 1.0 if visible else 0.0
+            button.disabled = not visible
+
+    def _enter_schedule_mode(self) -> None:
+        self._set_deadline_surfaces_visible(False)
+        self._apply_schedule_header()
+        self._style_mode_buttons()
+        self._schedule_view.show()
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    def reset_schedule(self) -> None:
+        """Drop in-memory timetable data (account/cache namespace changed)."""
+        self._schedule_view.reset()
+
+    def _leave_schedule_mode(self) -> None:
+        self._schedule_view.hide()
+        self._set_deadline_surfaces_visible(True)
 
     def _on_day_click(self, e):
         cell = e.control
@@ -1914,22 +2049,7 @@ class CalendarView(ft.Container):
         try:
             self._mode_toggle.bgcolor = C.SURFACE
             self._mode_toggle.border = ft.Border.all(1, C.BORDER)
-            
-            self._mode_month_icon.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
-            self._mode_month_text.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
-            if self._view_mode == "month":
-                self._mode_month_btn.bgcolor = ft.Colors.with_opacity(
-                    0.19, C.ACCENT
-                )
-                self._mode_week_btn.bgcolor = "transparent"
-            else:
-                self._mode_month_btn.bgcolor = "transparent"
-                self._mode_week_btn.bgcolor = ft.Colors.with_opacity(
-                    0.19, C.ACCENT
-                )
-                
-            self._mode_week_icon.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
-            self._mode_week_text.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._style_mode_buttons()
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
@@ -1955,12 +2075,15 @@ class CalendarView(ft.Container):
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":
             self._render_month()
-        else:
+        elif self._view_mode == "week":
             self._render_week()
         self._render_period_pages()
 
         # Re-render selected day details list (re-creates mini-cards with correct theme)
         self._update_day_panel()
+        self._schedule_view.update_theme()
+        if self._view_mode == "schedule":
+            self._apply_schedule_header()
 
         try:
             self.update()

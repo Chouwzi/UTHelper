@@ -97,6 +97,7 @@ dependencies = [
     "flet-android-notifications==0.10.0",
     "flet-uth-background-sync==0.1.0",
     "flet-uth-quiz==0.1.0",
+    "flet-webview==0.86.5",
 ]
 
 [tool.flet.android.dev_packages]
@@ -124,7 +125,11 @@ flet-uth-quiz = "extensions/flet_uth_quiz"
 # ── iOS-specific configuration ──
 [tool.flet.ios]
 bundle_id = "com.uthelper.UTHelper"
-dependencies = ["flet-uth-background-sync==0.1.0", "flet-uth-quiz==0.1.0"]
+dependencies = [
+    "flet-uth-background-sync==0.1.0",
+    "flet-uth-quiz==0.1.0",
+    "flet-webview==0.86.5",
+]
 
 [tool.flet.ios.dev_packages]
 flet-uth-background-sync = "extensions/flet_uth_background_sync"

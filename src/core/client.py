@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
@@ -167,7 +168,28 @@ class MoodleClient:
         self._last_call_time: float = 0.0  # Nhãn thời gian đơn điệu (monotonic)
         self._cookie_jar = CookieJar()
         self._sesskey = ""
+        self._session_owner = ""
         self._html_opener = None
+        self._session_lock = threading.RLock()
+        self.last_grade_report_error = ""
+
+    def clear_session(self) -> None:
+        """Clear the HTML session cookies, sesskey, and owning username."""
+        with self._session_lock:
+            self._cookie_jar.clear()
+            self._sesskey = ""
+            self._session_owner = ""
+
+    def _reset_session_if_account_changed(self, username: str | None = None) -> None:
+        """Drop stale HTML session cookies/sesskey when the active account changes."""
+        active_user = str(
+            username if username is not None else getattr(settings, "UTH_USERNAME", "") or ""
+        )
+        with self._session_lock:
+            if self._session_owner and active_user != self._session_owner:
+                self._cookie_jar.clear()
+                self._sesskey = ""
+                self._session_owner = ""
 
     @property
     def moodle_site_origin(self) -> str:
@@ -250,13 +272,15 @@ class MoodleClient:
         quiz_lease: QuizSessionLease | None = None,
     ) -> bool:
         """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey."""
-        if not force and self._sesskey and quiz_lease is None:
-            return True
-
         if not username:
             username = settings.UTH_USERNAME
         if not password:
             password = settings.UTH_PASSWORD
+
+        self._reset_session_if_account_changed(username)
+
+        if not force and self._sesskey and quiz_lease is None:
+            return True
 
         if not self.moodle_site_origin or not username or not password:
             self._last_login_error = "invalid_credentials"
@@ -282,6 +306,7 @@ class MoodleClient:
         try:
             self._cookie_jar.clear()
             self._sesskey = ""
+            self._session_owner = ""
 
             _, login_page = self._open_html("/login/index.php")
             parsed_login = _MoodleHtmlFormParser()
@@ -314,12 +339,14 @@ class MoodleClient:
             match = re.search(r'"sesskey":"([a-zA-Z0-9]+)"', dashboard_page)
             if match:
                 self._sesskey = match.group(1)
+                self._session_owner = str(username)
                 return True
             
             # Fallback 1: tìm biến sesskey=...
             match2 = re.search(r'sesskey=([a-zA-Z0-9]+)', dashboard_page)
             if match2:
                 self._sesskey = match2.group(1)
+                self._session_owner = str(username)
                 return True
 
             logger.error("Không trích xuất được sesskey sau khi login.")
@@ -340,12 +367,15 @@ class MoodleClient:
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle AJAX service. Trả về None nếu lỗi hoặc HTTP fail."""
-        if not self._sesskey:
-            if not self.login_session():
-                return None
+        with self._session_lock:
+            self._reset_session_if_account_changed()
+            if not self._sesskey:
+                if not self.login_session():
+                    return None
+            sesskey = self._sesskey
 
         origin = self.moodle_site_origin
-        url = f"{origin}/lib/ajax/service.php?sesskey={self._sesskey}&info={function}"
+        url = f"{origin}/lib/ajax/service.php?sesskey={sesskey}&info={function}"
         
         payload = [{
             "index": 0,
@@ -389,6 +419,39 @@ class MoodleClient:
             logger.error(f"Lỗi call_ajax_api: {e}")
             return None
 
+
+    def fetch_grade_report_html(self, course_id: int) -> Optional[str]:
+        """Tải HTML /grade/report/user/index.php?id=<course_id> bằng session đăng nhập.
+
+        Trả None nếu lỗi; lý do nằm ở ``last_grade_report_error``.
+        """
+        path = f"/grade/report/user/index.php?id={int(course_id)}"
+        self.last_grade_report_error = ""
+        for attempt in range(2):
+            with self._session_lock:  # tránh nhiều luồng cùng đăng nhập/xóa cookie
+                self._reset_session_if_account_changed()
+                if not self._sesskey and not self.login_session():
+                    self.last_grade_report_error = (
+                        f"login_session:{self._last_login_error or 'failed'}"
+                    )
+                    logger.warning("Grade report: đăng nhập session thất bại (%s)",
+                                   self._last_login_error)
+                    return None
+                try:
+                    final_url, body = self._open_html(path)
+                except Exception as exc:
+                    self.last_grade_report_error = f"http:{type(exc).__name__}:{exc}"
+                    logger.warning("Không tải được grade report môn %s: %s", course_id, exc)
+                    return None
+                if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                    # Session hết hạn -> đăng nhập lại một lần
+                    self._sesskey = ""
+                    if attempt == 0 and self.login_session(force=True):
+                        continue
+                    self.last_grade_report_error = "session_expired"
+                    return None
+                return body
+        return None
 
     def close(self):
         """Không cần cleanup - urllib không dùng connection pool."""

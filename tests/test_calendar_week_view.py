@@ -741,5 +741,39 @@ class TestWeekViewDataLogic:
         assert count == 3
 
 
+def test_calendar_view_skips_week_render_in_schedule_mode_and_uses_responsive_cells():
+    from gui.components.calendar_view import CalendarView
+
+    page = SimpleNamespace(
+        width=360,
+        height=740,
+        dialogs=[],
+        show_dialog=lambda _d: None,
+        update=lambda: None,
+    )
+    opened = []
+    cal = CalendarView(
+        page,
+        on_open_url=lambda u, t: opened.append((u, t)),
+        on_open_external=lambda u: opened.append(("ext", u)),
+    )
+    render_calls = []
+    cal._render_week = lambda: render_calls.append("render")
+
+    cal._toggle_view_mode("schedule")
+    render_calls.clear()
+    cal.update_data([])
+    cal.update_theme()
+
+    assert render_calls == []
+    assert cal._mode_schedule_btn.height == 44
+    assert cal._mode_month_btn.height == 44
+    assert cal._mode_week_btn.height == 44
+    cell = cal._make_week_cell(0)
+    assert cell.expand is True
+    assert cal._schedule_view._on_open_url is not None
+    assert cal._schedule_view._on_open_external is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

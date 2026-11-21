@@ -743,12 +743,17 @@ class NotificationManager:
 
         # BUG-14 fix: define helper class once, outside the loop
         class _GradeNotif:
-            def __init__(self, t, b, cn):
+            is_grade_alert = True
+
+            def __init__(self, t, b, cn, item="", old="", new=""):
                 self.title = t
                 self.body = b
                 self.course_name = cn
                 self.url = ""
                 self.deadline_str = ""
+                self.item_name = item
+                self.old_grade = old
+                self.new_grade = new
 
         notifications = []
         for change in grade_changes:
@@ -759,7 +764,9 @@ class NotificationManager:
             body_parts.append(f"Điểm mới: {change.new_grade}")
             body = "\n".join(body_parts)
 
-            notifications.append(_GradeNotif(title, body, change.course_name))
+            notifications.append(_GradeNotif(
+                title, body, change.course_name,
+                change.item_name, change.old_grade or "-", change.new_grade))
 
         result = DispatchResult(attempted=len(notifications))
         for notifier in self.notifiers:

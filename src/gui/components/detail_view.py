@@ -37,12 +37,14 @@ from core.submission_models import (
 )
 from core.moodle_sites import moodle_site_from_origin, moodle_site_from_url
 from core.activity_status import normalize_submission_status
+from core.url_validation import validate_https_url
 from core.use_cases.submission_workflow import (
     FinalizeSubmissionIntent,
     SelectedSubmissionFile,
     SubmissionMutationResult,
     SubmissionTarget,
 )
+from gui.components.in_app_webview import InAppWebViewDialog
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +94,18 @@ def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None, quiz_player_view=None, get_quiz_account_id=None):
+    def __init__(
+        self,
+        page: ft.Page,
+        on_close,
+        get_client=None,
+        on_status_changed=None,
+        submission_workflow_factory=None,
+        quiz_player_view=None,
+        get_quiz_account_id=None,
+        on_open_url=None,
+        on_open_external=None,
+    ):
         super().__init__()
         self._init_variables(
             page,
@@ -101,12 +114,24 @@ class DetailView(ft.Container):
             submission_workflow_factory,
             quiz_player_view,
             get_quiz_account_id,
+            on_open_url,
+            on_open_external,
         )
         self._init_controls()
         self._init_layout(on_close)
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory, quiz_player_view=None, get_quiz_account_id=None):
+    def _init_variables(
+        self,
+        page: ft.Page,
+        get_client,
+        on_status_changed,
+        submission_workflow_factory,
+        quiz_player_view=None,
+        get_quiz_account_id=None,
+        on_open_url=None,
+        on_open_external=None,
+    ):
         self._page          = page
         self.visible        = False
         self.expand         = True
@@ -118,6 +143,8 @@ class DetailView(ft.Container):
         self._submission_workflow_factory = submission_workflow_factory
         self._quiz_player_view = quiz_player_view
         self._get_quiz_account_id = get_quiz_account_id
+        self._on_open_url = on_open_url
+        self._on_open_external = on_open_external
         self._quiz_launch_target = None
         self._selected_files = []          
         self._is_uploading  = False
@@ -175,19 +202,7 @@ class DetailView(ft.Container):
 
     @staticmethod
     def _is_safe_browser_url(url) -> bool:
-        if not isinstance(url, str) or url != url.strip():
-            return False
-        try:
-            parsed = urlsplit(url)
-            _ = parsed.port
-        except (TypeError, ValueError):
-            return False
-        return (
-            parsed.scheme.lower() in ("http", "https")
-            and parsed.hostname is not None
-            and parsed.username is None
-            and parsed.password is None
-        )
+        return validate_https_url(url) is not None
 
     @classmethod
     def _is_native_submission_url(cls, url) -> bool:
@@ -300,8 +315,9 @@ class DetailView(ft.Container):
         self._edit_status = ft.Text("", size=12, visible=False)
         self._file_edit_dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Chỉnh sửa file",
             title=ft.Text("Chỉnh sửa file", size=16, weight=ft.FontWeight.BOLD,
-                          color=C.TEXT_PRIMARY),
+                          color=C.TEXT_PRIMARY, semantics_label="Chỉnh sửa file"),
             bgcolor=C.SURFACE,
             content=ft.Container(
                 content=ft.Column(controls=[
@@ -327,8 +343,9 @@ class DetailView(ft.Container):
         self._delete_confirm_text = ft.Text("", size=13, color=C.TEXT_PRIMARY)
         self._delete_confirm_dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Xác nhận xóa",
             title=ft.Text("Xác nhận xóa", size=16, weight=ft.FontWeight.BOLD,
-                          color=C.CRITICAL),
+                          color=C.CRITICAL, semantics_label="Xác nhận xóa"),
             bgcolor=C.SURFACE,
             content=ft.Container(
                 content=self._delete_confirm_text,
@@ -350,8 +367,9 @@ class DetailView(ft.Container):
 
         self._replace_confirm_dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Xác nhận thay thế",
             title=ft.Text("Xác nhận thay thế", size=16, weight=ft.FontWeight.BOLD,
-                          color=C.WARNING),
+                          color=C.WARNING, semantics_label="Xác nhận thay thế"),
             bgcolor=C.SURFACE,
             content=ft.Text(
                 "Thao tác này sẽ thay thế toàn bộ danh sách file hiện có trên Moodle.",
@@ -386,7 +404,9 @@ class DetailView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.CRITICAL),
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             border_radius=6,
             on_click=self._on_confirm_batch_delete_async,
             ink=True,
@@ -405,7 +425,9 @@ class DetailView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             border_radius=6,
             on_click=self._on_toggle_multiselect_async,
             ink=True,
@@ -424,7 +446,9 @@ class DetailView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.WARNING),
-            padding=ft.Padding.symmetric(vertical=8, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             border_radius=6,
             on_click=self._on_edit_submitted,
             ink=True,
@@ -526,7 +550,9 @@ class DetailView(ft.Container):
             bgcolor=C.BG,
             border=ft.Border.all(1, C.BORDER),
             border_radius=6,
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             on_click=self._on_mode_overwrite_async,
             ink=True,
             expand=True,
@@ -538,7 +564,9 @@ class DetailView(ft.Container):
             ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=C.ACCENT,
             border_radius=6,
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             on_click=self._on_mode_append_async,
             ink=True,
             expand=True,
@@ -594,18 +622,22 @@ class DetailView(ft.Container):
         )
 
         self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=C.ON_ACCENT)
-        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=C.ON_ACCENT,
+        self._cta_text = ft.Text("Mở trong ứng dụng", size=13, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
-            content=ft.Row(
-                controls=[self._cta_icon, self._cta_text],
-                spacing=8, alignment=ft.MainAxisAlignment.CENTER,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            content=ft.Semantics(
+                label="Mở trong ứng dụng",
+                button=True,
+                content=ft.Row(
+                    controls=[self._cta_icon, self._cta_text],
+                    spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ),
             bgcolor=C.ACCENT,
             padding=ft.Padding.symmetric(vertical=13),
             border_radius=8,
-            on_click=self._open_browser,
+            on_click=self._open_in_app,
             ink=True,
             alignment=ft.Alignment(0, 0),
         )
@@ -660,10 +692,14 @@ class DetailView(ft.Container):
         self._cutoff_row.visible = False
 
         self._header_open_btn = ft.IconButton(
-            ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+            ft.Icons.OPEN_IN_NEW_ROUNDED,
             icon_color=C.ACCENT, icon_size=20,
-            tooltip="Mở trong trình duyệt",
-            on_click=self._open_browser,
+            tooltip="Mở bằng trình duyệt ngoài",
+            padding=0,
+            size_constraints=ft.BoxConstraints(
+                min_width=44, max_width=44, min_height=44, max_height=44
+            ),
+            on_click=self._open_external,
         )
 
     def _init_layout(self, on_close):
@@ -676,6 +712,7 @@ class DetailView(ft.Container):
                 self._back_icon,
                 self._back_text,
             ], spacing=4, tight=True),
+            height=44,
             on_click=lambda _: on_close(),
             style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
         )
@@ -715,8 +752,17 @@ class DetailView(ft.Container):
         self.content = ft.Column(
             controls=[
                 ft.Container(
-                    content=ft.Row(controls=[back_btn, self._header_open_btn],
-                                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    content=ft.Row(
+                        controls=[
+                            back_btn,
+                            ft.Semantics(
+                                label="Mở bằng trình duyệt ngoài",
+                                button=True,
+                                content=self._header_open_btn,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
                     padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
                 ),
                 self._loading_bar,
@@ -925,9 +971,9 @@ class DetailView(ft.Container):
         self._submitted_area.visible = False
 
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
-            # CTA chính → mở browser (fallback)
+            # CTA chính → mở trong ứng dụng (InAppWebView)
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_text.value = "Mở trong ứng dụng"
             self._open_btn.bgcolor = C.SURFACE
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
@@ -953,7 +999,10 @@ class DetailView(ft.Container):
 
         # Load submitted files in background (for assignments)
         if is_assignment and data.get("site_identity") == "thnn":
-            submission_context_reason = "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. Vui lòng mở trong trình duyệt."
+            submission_context_reason = (
+                "Tính năng xem file và nộp bài THNN chưa được hỗ trợ trong ứng dụng. "
+                "Bạn có thể mở bằng trình duyệt ngoài bằng nút ở góc trên."
+            )
         elif is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
@@ -966,12 +1015,12 @@ class DetailView(ft.Container):
             elif not self._is_native_submission_url(url):
                 submission_context_reason = (
                     "Đường dẫn này không phải bài tập Moodle. "
-                    "Hãy mở trong trình duyệt."
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
             elif not course_context_valid:
                 submission_context_reason = (
                     "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
-                    "Hãy mở bài tập trong trình duyệt."
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
             else:
                 try:
@@ -1001,16 +1050,16 @@ class DetailView(ft.Container):
                 elif client:
                     submission_context_reason = (
                         "Moodle cho trang bài tập này chưa được cấu hình. "
-                        "Hãy mở bài tập trong trình duyệt."
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                     )
                 else:
                     submission_context_reason = (
                         "Không thể kết nối Moodle trong ứng dụng. "
-                        "Hãy mở bài tập trong trình duyệt."
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                     )
             if submission_context_reason:
                 self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._cta_text.value = "Mở trong trình duyệt"
+                self._cta_text.value = "Mở trong ứng dụng"
                 self._open_btn.bgcolor = C.SURFACE
                 self._open_btn.border = ft.Border.all(1, C.ACCENT)
                 self._cta_text.color = C.ACCENT
@@ -1018,7 +1067,7 @@ class DetailView(ft.Container):
         else:
             self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_text.value = "Mở trong ứng dụng"
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
             self._cta_text.color = C.ON_ACCENT
@@ -1067,7 +1116,8 @@ class DetailView(ft.Container):
                 self._quiz_open_btn.visible = True
             elif target is not None and player_state == "player_unavailable":
                 self._quiz_runtime_notice.value = (
-                    "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+                    "Trình xem bài chưa sẵn sàng. "
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
                 self._quiz_runtime_notice.visible = True
             elif player_state == "requires_safe_exam_browser":
@@ -1289,11 +1339,42 @@ class DetailView(ft.Container):
 
         # Chỉ thay đổi giao diện, không tự gọi update
 
+    def _open_url_in_app(self, url: str, title: str = "") -> None:
+        validated = validate_https_url(url)
+        if validated is None:
+            logger.warning("Blocked invalid or non-HTTPS URL in DetailView")
+            return
+        if callable(self._on_open_url):
+            self._on_open_url(validated, title)
+            return
+        InAppWebViewDialog(
+            self._page,
+            url=validated,
+            title=title,
+            on_open_external=lambda target: self._launch_external_sync(target),
+        ).show()
+
+    def _launch_external_sync(self, url: str) -> None:
+        validated = validate_https_url(url)
+        if validated is None:
+            return
+        if callable(self._on_open_external):
+            self._on_open_external(validated)
+            return
+
+        async def _launch() -> None:
+            try:
+                await ft.UrlLauncher().launch_url(validated)
+            except Exception as exc:
+                logger.warning("Failed to launch external url: %s", exc)
+
+        run_task = getattr(self._page, "run_task", None)
+        if callable(run_task):
+            run_task(_launch)
+
     async def _handle_link_tap(self, e):
-        try:
-            await ft.UrlLauncher().launch_url(e.data)
-        except Exception as exc:
-            logger.warning(f"Failed to launch url {e.data}: {exc}")
+        title = str(self._current_data.get("title", "") or "")
+        self._open_url_in_app(getattr(e, "data", ""), title)
 
     def show_error_banner(self):
         self._error_banner.visible = True
@@ -1313,13 +1394,21 @@ class DetailView(ft.Container):
             ], spacing=6),
         )
 
-    async def _open_browser(self, e):
-        if not self._is_safe_browser_url(self._current_url):
-            return
+    async def _open_in_app(self, e=None):
+        title = str(self._current_data.get("title", "") or "")
+        self._open_url_in_app(self._current_url, title)
 
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+    async def _open_external(self, e=None):
+        validated = validate_https_url(self._current_url)
+        if validated is None:
+            return
+        if callable(self._on_open_external):
+            self._on_open_external(validated)
+            return
+        await ft.UrlLauncher().launch_url(validated)
+
+    async def _open_browser(self, e):
+        await self._open_in_app(e)
 
     async def _open_quiz(self, _event=None):
         if self._quiz_open_btn.disabled:
@@ -1350,7 +1439,8 @@ class DetailView(ft.Container):
             self._quiz_open_btn.visible = False
             self._quiz_open_btn.disabled = False
             self._quiz_runtime_notice.value = (
-                "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+                "Trình xem bài chưa sẵn sàng. "
+                "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
             )
             self._quiz_runtime_notice.visible = True
         try:
@@ -1385,7 +1475,7 @@ class DetailView(ft.Container):
                 self._open_btn.visible = self._is_safe_browser_url(self._current_url)
             self._quiz_runtime_notice.value = messages.get(
                 reason,
-                "Không thể mở bài trong ứng dụng. Hãy thử bằng trình duyệt.",
+                "Không thể mở bài trong ứng dụng. Hãy mở trong ứng dụng hoặc thử nút mở bằng trình duyệt ngoài.",
             )
             self._quiz_runtime_notice.visible = bool(self._quiz_runtime_notice.value)
         try:
@@ -1464,11 +1554,19 @@ class DetailView(ft.Container):
                         ft.Text(f.name, size=12, color=C.TEXT_PRIMARY, expand=True,
                                 max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
-                        ft.IconButton(
-                            ft.Icons.CLOSE_ROUNDED, icon_size=14,
-                            icon_color=C.TEXT_SECONDARY,
-                            on_click=self._create_remove_handler(i),
-                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                        ft.Semantics(
+                            label="Xóa file khỏi danh sách",
+                            button=True,
+                            content=ft.IconButton(
+                                ft.Icons.CLOSE_ROUNDED, icon_size=14,
+                                icon_color=C.TEXT_SECONDARY,
+                                tooltip="Xóa file khỏi danh sách",
+                                on_click=self._create_remove_handler(i),
+                                padding=0,
+                                size_constraints=ft.BoxConstraints(
+                                    min_width=44, max_width=44, min_height=44, max_height=44
+                                ),
+                            ),
                         ),
                     ],
                     spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -2098,12 +2196,11 @@ class DetailView(ft.Container):
         )
 
     async def _on_edit_submitted(self, e):
-        """Mở trình duyệt để chỉnh sửa bài nộp."""
+        """Mở bài nộp trong ứng dụng để chỉnh sửa."""
         if not self._current_url:
             return
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        title = str(self._current_data.get("title", "") or "")
+        self._open_url_in_app(self._current_url, title)
 
     # File Edit Dialog
 

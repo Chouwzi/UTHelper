@@ -153,6 +153,8 @@ def test_hk2_official_fixture_scores_and_labels():
     assert profile.gpa_10 == 8.77
     assert profile.gpa_4 == 3.75
     assert profile.credits_earned == 18.0
+    assert profile.credits_registered is not None
+    assert profile.credits_registered >= profile.credits_earned
     assert profile.training_point == 83.0
     assert profile.classification == "Xuất sắc"
     assert profile.is_polygon_viable is True

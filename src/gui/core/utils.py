@@ -1,4 +1,6 @@
+import html as _html
 import re
+import urllib.parse as _urlparse
 from datetime import datetime
 from core.time_utils import parse_datetime
 from core.activity_status import normalize_submission_status
@@ -606,6 +608,31 @@ def pre_cache_description_images(html_content: str) -> str:
     return html_content
 
 
+_SAFE_CACHED_IMAGE_RE = re.compile(
+    r"^cache/images/[0-9a-f]{64}\.[A-Za-z0-9]{1,5}$"
+)
+
+
+def _sanitize_markdown_url(raw_url: str, *, allow_cached_image: bool = False) -> str | None:
+    """Allow only clean http(s) URLs (or internal cached Moodle image paths)."""
+    unescaped = _html.unescape(raw_url or "").strip()
+    if not unescaped:
+        return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in unescaped):
+        return None
+    if allow_cached_image and _SAFE_CACHED_IMAGE_RE.match(unescaped):
+        return unescaped
+    if "\\" in unescaped or any(ch.isspace() for ch in unescaped):
+        return None
+    try:
+        parsed = _urlparse.urlsplit(unescaped)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        return None
+    return unescaped.replace("(", "%28").replace(")", "%29")
+
+
 def html_to_markdown(html_content: str) -> str:
     """
     Chuyển đổi các thẻ HTML cơ bản từ Moodle sang cú pháp Markdown.
@@ -613,26 +640,62 @@ def html_to_markdown(html_content: str) -> str:
     if not html_content:
         return ""
 
-    text = re.sub(r'<br\s*/?>', '\n', html_content)
-    text = re.sub(r'<p[^>]*>', '\n\n', text)
-    text = re.sub(r'</p>', '\n\n', text)
+    text = re.sub(r'<br\s*/?>', '\n', html_content, flags=re.IGNORECASE)
+    text = re.sub(r'<p[^>]*>', '\n\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</p>', '\n\n', text, flags=re.IGNORECASE)
 
-    text = re.sub(r'<(b|strong)[^>]*>(.*?)</\1>', r'**\2**', text, flags=re.IGNORECASE)
-    text = re.sub(r'<(i|em)[^>]*>(.*?)</\1>', r'*\2*', text, flags=re.IGNORECASE)
+    text = re.sub(r'<(b|strong)[^>]*>(.*?)</\1>', r'**\2**', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<(i|em)[^>]*>(.*?)</\1>', r'*\2*', text, flags=re.IGNORECASE | re.DOTALL)
 
-    text = re.sub(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', r'[\2](\1)', text, flags=re.IGNORECASE)
+    def _link_repl(match):
+        tag = match.group(0)
+        label = match.group(1)
+        href_match = re.search(
+            r'''href\s*=\s*(?:"([^"]*)"|'([^']*)')''',
+            tag,
+            flags=re.IGNORECASE,
+        )
+        if not href_match:
+            return label
+        raw_href = href_match.group(1) if href_match.group(1) is not None else href_match.group(2)
+        safe_href = _sanitize_markdown_url(raw_href)
+        if safe_href is None:
+            return label
+        safe_label = label.replace("[", r"\[").replace("]", r"\]")
+        return f"[{safe_label}]({safe_href})"
+
+    text = re.sub(r'<a\b[^>]*>(.*?)</a>', _link_repl, text, flags=re.IGNORECASE | re.DOTALL)
 
     def _img_repl(match):
         tag = match.group(0)
-        src_match = re.search(r'src="([^"]+)"', tag)
+        src_match = re.search(
+            r'''src\s*=\s*(?:"([^"]*)"|'([^']*)')''',
+            tag,
+            flags=re.IGNORECASE,
+        )
         if not src_match:
             return ""
-        src = src_match.group(1)
-        alt_match = re.search(r'alt="([^"]+)"', tag)
-        alt = alt_match.group(1) if alt_match else "Hình ảnh"
-        return f"\n\n![{alt}]({src})\n\n"
-        
-    text = re.sub(r'<img[^>]+>', _img_repl, text)
+        raw_src = src_match.group(1) if src_match.group(1) is not None else src_match.group(2)
+        alt_match = re.search(
+            r'''alt\s*=\s*(?:"([^"]*)"|'([^']*)')''',
+            tag,
+            flags=re.IGNORECASE,
+        )
+        raw_alt = (
+            (alt_match.group(1) if alt_match.group(1) is not None else alt_match.group(2))
+            if alt_match
+            else ""
+        )
+        safe_src = _sanitize_markdown_url(raw_src, allow_cached_image=True)
+        if safe_src is None:
+            return raw_alt
+        safe_alt = (
+            raw_alt.replace("[", "").replace("]", "").replace("\r", " ").replace("\n", " ").strip()
+            or "Hình ảnh"
+        )
+        return f"\n\n![{safe_alt}]({safe_src})\n\n"
+
+    text = re.sub(r'<img\b[^>]*>', _img_repl, text, flags=re.IGNORECASE)
 
     text = re.sub(r'<ul[^>]*>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</ul>', '\n', text, flags=re.IGNORECASE)

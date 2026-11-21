@@ -211,27 +211,29 @@ class MetricDetailSheet:
             ],
             spacing=10,
             tight=True,
+            scroll=ft.ScrollMode.AUTO,
         )
 
-        # Dialog presentation
-        dialog = ft.AlertDialog(
-            modal=False,
-            content=ft.Container(
-                content=content_column,
-                width=380,
-                padding=16,
-            ),
-            actions=[
-                ft.TextButton(
-                    "Đóng",
-                    on_click=lambda _: _close_dialog(page, dialog),
-                )
-            ],
-            bgcolor=C.BG,
-            shape=ft.RoundedRectangleBorder(radius=16),
-        )
+        try:
+            page_w = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        try:
+            page_h = float(getattr(page, "height", 0) or 0)
+        except (TypeError, ValueError):
+            page_h = 0.0
+        dialog_w = max(260.0, min(380.0, page_w - 64.0)) if page_w > 0 else 380.0
+        max_h = max(240.0, min(520.0, page_h * 0.65)) if page_h > 0 else None
+
+        used_overlay = False
 
         def _close_dialog(p: ft.Page, d: ft.AlertDialog):
+            if not used_overlay:
+                try:
+                    p.pop_dialog()
+                    return
+                except Exception:
+                    pass
             d.open = False
             try:
                 d.update()
@@ -241,9 +243,46 @@ class MetricDetailSheet:
                 except Exception:
                     pass
 
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                _close_dialog(page, dialog)
+
+        # Dialog presentation
+        dialog = ft.AlertDialog(
+            modal=True,
+            semantics_label=f"Chi tiết chỉ số {metric.label}",
+            title=ft.Text(
+                metric.label,
+                size=15,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+                semantics_label=metric.label,
+            ),
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    content=content_column,
+                    width=dialog_w,
+                    height=max_h,
+                    padding=12,
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    "Đóng",
+                    height=44,
+                    on_click=lambda _: _close_dialog(page, dialog),
+                )
+            ],
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+
         try:
             page.show_dialog(dialog)
         except Exception:
+            used_overlay = True
             overlay = getattr(page, "overlay", None)
             if overlay is not None:
                 overlay.append(dialog)

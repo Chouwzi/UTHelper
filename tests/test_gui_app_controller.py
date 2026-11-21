@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
 import pytest
@@ -760,6 +760,9 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     controller.orchestrator = None
     controller._data_cache = None
     controller._portal_client = SimpleNamespace(clear_token=Mock())
+    controller._portal_week_client = SimpleNamespace(clear_token=Mock())
+    controller._week_schedule_cache = SimpleNamespace(set_namespace=Mock())
+    controller.calendar_view = SimpleNamespace(reset_schedule=Mock())
     coordinator = SimpleNamespace(
         replace_cache=Mock(), ensure_today=Mock(), refresh=Mock()
     )
@@ -796,6 +799,12 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     # namespace happens to hold (ensure_today would publish it as READY).
     assert scheduled[1][0] is coordinator.refresh
     assert scheduled[1][1] == ("credentials_changed",)
+    controller._portal_client.clear_token.assert_called_once()
+    controller._portal_week_client.clear_token.assert_called_once()
+    controller._week_schedule_cache.set_namespace.assert_called_once_with(
+        f"{settings.PORTAL_API_BASE}|new-user"
+    )
+    controller.calendar_view.reset_schedule.assert_called_once()
     coordinator.ensure_today.assert_not_called()
     coordinator.replace_cache.assert_called_once()
 
@@ -926,15 +935,19 @@ def test_shared_back_navigation_returns_to_dashboard_from_every_child_view():
         controller.detail_view = SimpleNamespace(visible=False)
         controller.calendar_view = SimpleNamespace(visible=False)
         controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller.courses_view = SimpleNamespace(visible=False)
         controller._close_detail = AsyncMock()
         controller._close_calendar = AsyncMock()
         controller._close_grades = AsyncMock()
+        controller._close_courses = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
 
         cases = (
             (controller.settings_view, controller.settings_view._handle_back),
             (controller.detail_view, controller._close_detail),
             (controller.calendar_view, controller._close_calendar),
             (controller.grade_overview_view, controller._close_grades),
+            (controller.courses_view, controller._close_courses),
         )
         for view, handler in cases:
             view.visible = True
@@ -1743,3 +1756,138 @@ def test_android_startup_sequence_preserves_legacy_json_when_vault_write_fails(
     finally:
         config.register_secret_backend(None)
 
+
+def test_complete_login_success_resets_schedule_and_course_grade_state():
+    import config
+
+    calls = []
+    controller = AppController.__new__(AppController)
+    controller._portal_client = SimpleNamespace(clear_token=lambda: calls.append("clear_portal_day"))
+    controller._portal_week_client = SimpleNamespace(clear_token=lambda: calls.append("clear_portal_week"))
+    controller._week_schedule_cache = SimpleNamespace(
+        set_namespace=lambda ns: calls.append(("cache_ns", ns))
+    )
+    controller.calendar_view = SimpleNamespace(reset_schedule=lambda: calls.append("reset_schedule"))
+    controller._settings_identity = ("old_user", "old_pw")
+    controller.orchestrator = SimpleNamespace(
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: calls.append("clear_moodle")),
+        clear_detail_cache=lambda: calls.append("clear_detail"),
+        _userid_cache=99,
+        client=SimpleNamespace(clear_session=lambda: calls.append("clear_client_session")),
+        thnn_client=SimpleNamespace(clear_session=lambda: calls.append("clear_thnn_session")),
+        course_grade_monitor=SimpleNamespace(
+            set_namespace=lambda ns: calls.append(("grade_ns", ns))
+        ),
+        latest_course_grades=["stale"],
+    )
+    controller.quiz_player_view = SimpleNamespace(visible=False)
+    controller._today_schedule_coordinator = SimpleNamespace(
+        replace_cache=lambda c: calls.append(("today_cache", c._path.name)),
+        refresh="refresh_fn",
+    )
+    controller._today_schedule_component = SimpleNamespace(
+        set_state=lambda s: calls.append(("today_state", s.status))
+    )
+    controller._load_data_async = AsyncMock()
+    controller._safe_run_task = lambda fn, *args, **kwargs: calls.append(("task", getattr(fn, "__name__", str(fn)), args, kwargs))
+
+    old_user, old_pass = config.settings.UTH_USERNAME, config.settings.UTH_PASSWORD
+    try:
+        config.settings.UTH_USERNAME = "student99"
+        config.settings.UTH_PASSWORD = "pw"
+        asyncio.run(controller._complete_login_success())
+    finally:
+        config.settings.UTH_USERNAME = old_user
+        config.settings.UTH_PASSWORD = old_pass
+
+    assert "clear_portal_day" in calls
+    assert "clear_portal_week" in calls
+    assert ("cache_ns", f"{config.settings.PORTAL_API_BASE}|student99") in calls
+    assert "reset_schedule" in calls
+    assert ("grade_ns", f"{config.settings.MOODLE_BASE_URL}|student99") in calls
+    assert "clear_client_session" in calls
+    assert "clear_thnn_session" in calls
+    assert controller.orchestrator.latest_course_grades == []
+
+
+def test_check_grades_background_skips_n_plus_1_html_scrape_when_courses_hidden():
+    ws_calls = []
+    html_calls = []
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(
+        check_grade_changes=lambda: ws_calls.append(True) or [],
+        refresh_course_grades=lambda: html_calls.append(True) or ([], []),
+    )
+    controller.notifier = SimpleNamespace(dispatch_grade_alert=AsyncMock())
+    controller.courses_view = SimpleNamespace(visible=False)
+
+    asyncio.run(controller._check_grades_background())
+    assert ws_calls == [True]
+    assert html_calls == []
+
+
+def test_close_calendar_and_grades_sync_rail_active_and_show_grades_reports_error():
+    syncs = []
+    errors = []
+    controller = AppController.__new__(AppController)
+    controller.view_manager = SimpleNamespace(
+        close_calendar=AsyncMock(side_effect=lambda: syncs.append("close_cal")),
+        close_grades=AsyncMock(side_effect=lambda: syncs.append("close_grades")),
+        show_grades_loading=lambda: syncs.append("loading"),
+        show_grades_error=lambda msg: errors.append(msg),
+    )
+    controller._diag_screen = lambda s: syncs.append(("screen", s))
+    controller._diag_breadcrumb = lambda *args, **kwargs: None
+    controller._sync_rail_active = lambda: syncs.append("sync_rail")
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=MagicMock(side_effect=RuntimeError("Portal down"))
+    )
+
+    asyncio.run(controller._close_calendar())
+    asyncio.run(controller._close_grades())
+    asyncio.run(controller._show_grades(force_refresh=False))
+
+    assert "close_cal" in syncs
+    assert "close_grades" in syncs
+    assert syncs.count("sync_rail") == 3
+    assert len(errors) == 1
+    assert "Portal" in errors[0]
+
+
+def test_detail_view_routes_links_in_app_by_default_and_external_opt_out():
+    from gui.components.detail_view import DetailView
+
+    in_app = []
+    external = []
+    page = SimpleNamespace(
+        width=390,
+        height=800,
+        dialogs=[],
+        show_dialog=lambda _d: None,
+        update=lambda: None,
+    )
+    view = DetailView(
+        page,
+        lambda: None,
+        on_open_url=lambda u, t: in_app.append((u, t)),
+        on_open_external=lambda u: external.append(u),
+    )
+    view._current_url = "https://courses.ut.edu.vn/mod/assign/view.php?id=55"
+    view._current_data = {"title": "Bài tập 1"}
+
+    asyncio.run(view._open_in_app(None))
+    asyncio.run(view._open_external(None))
+    asyncio.run(
+        view._handle_link_tap(
+            SimpleNamespace(data="https://courses.ut.edu.vn/mod/page/view.php?id=9")
+        )
+    )
+    asyncio.run(
+        view._handle_link_tap(SimpleNamespace(data="http://courses.ut.edu.vn/insecure"))
+    )
+
+    assert in_app == [
+        ("https://courses.ut.edu.vn/mod/assign/view.php?id=55", "Bài tập 1"),
+        ("https://courses.ut.edu.vn/mod/page/view.php?id=9", "Bài tập 1"),
+    ]
+    assert external == ["https://courses.ut.edu.vn/mod/assign/view.php?id=55"]
