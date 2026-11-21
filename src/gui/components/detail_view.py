@@ -971,9 +971,9 @@ class DetailView(ft.Container):
         self._submitted_area.visible = False
 
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
-            # CTA chính → mở browser (fallback)
+            # CTA chính → mở trong ứng dụng (InAppWebView)
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_text.value = "Mở trong ứng dụng"
             self._open_btn.bgcolor = C.SURFACE
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
@@ -1012,12 +1012,12 @@ class DetailView(ft.Container):
             elif not self._is_native_submission_url(url):
                 submission_context_reason = (
                     "Đường dẫn này không phải bài tập Moodle. "
-                    "Hãy mở trong trình duyệt."
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
             elif not course_context_valid:
                 submission_context_reason = (
                     "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
-                    "Hãy mở bài tập trong trình duyệt."
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
             else:
                 try:
@@ -1047,16 +1047,16 @@ class DetailView(ft.Container):
                 elif client:
                     submission_context_reason = (
                         "Moodle cho trang bài tập này chưa được cấu hình. "
-                        "Hãy mở bài tập trong trình duyệt."
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                     )
                 else:
                     submission_context_reason = (
                         "Không thể kết nối Moodle trong ứng dụng. "
-                        "Hãy mở bài tập trong trình duyệt."
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                     )
             if submission_context_reason:
                 self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._cta_text.value = "Mở trong trình duyệt"
+                self._cta_text.value = "Mở trong ứng dụng"
                 self._open_btn.bgcolor = C.SURFACE
                 self._open_btn.border = ft.Border.all(1, C.ACCENT)
                 self._cta_text.color = C.ACCENT
@@ -1064,7 +1064,7 @@ class DetailView(ft.Container):
         else:
             self._submission_area.visible = False
             self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_text.value = "Mở trong ứng dụng"
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
             self._cta_text.color = C.ON_ACCENT
@@ -1113,7 +1113,8 @@ class DetailView(ft.Container):
                 self._quiz_open_btn.visible = True
             elif target is not None and player_state == "player_unavailable":
                 self._quiz_runtime_notice.value = (
-                    "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+                    "Trình xem bài chưa sẵn sàng. "
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
                 self._quiz_runtime_notice.visible = True
             elif player_state == "requires_safe_exam_browser":
@@ -1435,7 +1436,8 @@ class DetailView(ft.Container):
             self._quiz_open_btn.visible = False
             self._quiz_open_btn.disabled = False
             self._quiz_runtime_notice.value = (
-                "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
+                "Trình xem bài chưa sẵn sàng. "
+                "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
             )
             self._quiz_runtime_notice.visible = True
         try:
@@ -1470,7 +1472,7 @@ class DetailView(ft.Container):
                 self._open_btn.visible = self._is_safe_browser_url(self._current_url)
             self._quiz_runtime_notice.value = messages.get(
                 reason,
-                "Không thể mở bài trong ứng dụng. Hãy thử bằng trình duyệt.",
+                "Không thể mở bài trong ứng dụng. Hãy mở trong ứng dụng hoặc thử nút mở bằng trình duyệt ngoài.",
             )
             self._quiz_runtime_notice.visible = bool(self._quiz_runtime_notice.value)
         try:

@@ -117,7 +117,15 @@ class ExpectedGradeDialog:
         for f in (current_gpa, current_credits, target_gpa, extra_credits):
             f.on_change = _recalculate
 
-        def _close(_):
+        used_overlay = False
+
+        def _close(_=None):
+            if not used_overlay:
+                try:
+                    page.pop_dialog()
+                    return
+                except Exception:
+                    pass
             dialog.open = False
             try:
                 dialog.update()
@@ -126,6 +134,10 @@ class ExpectedGradeDialog:
                     page.update()
                 except Exception:
                     pass
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                _close()
 
         try:
             page_w = float(getattr(page, "width", 0) or 0)
@@ -148,15 +160,19 @@ class ExpectedGradeDialog:
                 color=C.TEXT_PRIMARY,
                 semantics_label="Tính điểm kỳ vọng",
             ),
-            content=ft.Container(
-                content=ft.Column(
-                    [scale_dd, current_gpa, current_credits, target_gpa, extra_credits, result_box],
-                    spacing=10,
-                    tight=True,
-                    scroll=ft.ScrollMode.AUTO,
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    content=ft.Column(
+                        [scale_dd, current_gpa, current_credits, target_gpa, extra_credits, result_box],
+                        spacing=10,
+                        tight=True,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                    width=dialog_w,
+                    height=max_h,
                 ),
-                width=dialog_w,
-                height=max_h,
             ),
             actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
             bgcolor=C.BG,
@@ -165,6 +181,7 @@ class ExpectedGradeDialog:
         try:
             page.show_dialog(dialog)
         except Exception:
+            used_overlay = True
             overlay = getattr(page, "overlay", None)
             if overlay is not None:
                 overlay.append(dialog)

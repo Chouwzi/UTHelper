@@ -43,6 +43,7 @@ class CourseGradeItem:
         default_factory=lambda: CourseEligibility(status="academic")
     )
     components: tuple[ComponentScore, ...] = ()
+    subject_code: str = ""
 
 
 @dataclass(frozen=True)

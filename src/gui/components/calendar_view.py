@@ -2049,27 +2049,10 @@ class CalendarView(ft.Container):
         try:
             self._mode_toggle.bgcolor = C.SURFACE
             self._mode_toggle.border = ft.Border.all(1, C.BORDER)
-            
-            self._mode_month_icon.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
-            self._mode_month_text.color = C.TEXT_PRIMARY if self._view_mode == "month" else C.TEXT_SECONDARY
-            if self._view_mode == "month":
-                self._mode_month_btn.bgcolor = ft.Colors.with_opacity(
-                    0.19, C.ACCENT
-                )
-                self._mode_week_btn.bgcolor = "transparent"
-            else:
-                self._mode_month_btn.bgcolor = "transparent"
-                self._mode_week_btn.bgcolor = ft.Colors.with_opacity(
-                    0.19, C.ACCENT
-                )
-                
-            self._mode_week_icon.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
-            self._mode_week_text.color = C.TEXT_PRIMARY if self._view_mode == "week" else C.TEXT_SECONDARY
+            self._style_mode_buttons()
         except Exception:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-
-        self._style_mode_buttons()
 
         # Day Panel Static Info
         self._day_title.color = C.TEXT_PRIMARY

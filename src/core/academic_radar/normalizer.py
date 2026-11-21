@@ -103,6 +103,7 @@ class SemesterNormalizer:
             is_transferred=bool(raw.get("isChuyenDiem", False)),
             eligibility=eligibility,
             components=_extract_components(raw),
+            subject_code=str(raw.get("maHocPhan") or "").strip(),
         )
 
     def normalize_semester(self, raw_semester: dict[str, Any]) -> SemesterGradeData:

@@ -198,8 +198,6 @@ class ViewManager:
         self.grade_overview_view.update_theme()
         self.controller.grades_btn.icon_color = C.ACCENT
         self.page.update()
-        self.controller.grades_btn.icon_color = C.ACCENT
-        self.page.update()
 
     def show_courses_loading(self):
         self._dismiss_menu_if_open()

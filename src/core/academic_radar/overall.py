@@ -30,7 +30,7 @@ def _dedupe_best(courses: list[CourseGradeItem]) -> list[CourseGradeItem]:
     best: dict[str, CourseGradeItem] = {}
     anonymous: list[CourseGradeItem] = []
     for c in courses:
-        key = c.course_code.strip().upper()
+        key = (c.subject_code or c.course_code or "").strip().upper()
         if not key:
             anonymous.append(c)
             continue

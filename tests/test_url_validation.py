@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from core.url_validation import is_trusted_uth_lms_url, validate_https_url
+from core.url_validation import (
+    is_trusted_uth_lms_url,
+    validate_https_url,
+    validate_public_https_url,
+)
 
 
 @pytest.mark.parametrize(
@@ -62,3 +66,45 @@ def test_validate_https_url_rejects_unsafe_or_malformed(bad_url):
 )
 def test_is_trusted_uth_lms_url_pins_known_uth_hosts(url, expected):
     assert is_trusted_uth_lms_url(url) is expected
+
+
+@pytest.mark.parametrize(
+    "ssrf_url",
+    (
+        "https://127.0.0.1/secret",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/admin",
+        "https://[::ffff:127.0.0.1]/admin",
+        "https://10.0.0.1/internal",
+        "https://172.16.0.1/internal",
+        "https://192.168.1.1/router",
+        "https://0.0.0.0/",
+        "https://localhost/debug",
+        "https://api.localhost/debug",
+        "https://printer.local/",
+    ),
+)
+def test_validate_public_https_url_blocks_literal_local_and_private_targets(ssrf_url):
+    assert validate_public_https_url(ssrf_url, resolve_dns=False) is None
+    assert validate_public_https_url(ssrf_url, resolve_dns=True) is None
+
+
+def test_validate_public_https_url_checks_dns_resolution(monkeypatch):
+    import socket
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_a, **_k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))],
+    )
+    assert validate_public_https_url("https://rebind.example.com/admin", resolve_dns=True) is None
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_a, **_k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    assert (
+        validate_public_https_url("https://example.com/course", resolve_dns=True)
+        == "https://example.com/course"
+    )

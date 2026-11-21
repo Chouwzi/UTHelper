@@ -88,6 +88,8 @@ class ScheduleWeekView(ft.Container):
         self._forced: set[date] = set()            # manual reloads show a spinner
         self._hydrated = False
         self._prefetching = False
+        self._prefetch_generation: int | None = None
+        self._prefetch_task = None
         self._auth_failed = False
         self._generation = 0                       # bumped by reset()
 
@@ -206,7 +208,12 @@ class ScheduleWeekView(ft.Container):
         crossed_breakpoint = (
             previous_width < _NARROW_BREAKPOINT
         ) != (width < _NARROW_BREAKPOINT)
-        if self.visible and (crossed_breakpoint or abs(width - previous_width) >= 24):
+        shrunk_in_wide = (width < previous_width) and (width >= _NARROW_BREAKPOINT)
+        if self.visible and (
+            crossed_breakpoint
+            or shrunk_in_wide
+            or abs(width - previous_width) >= 8
+        ):
             self._render()
 
     # ------------------------------------------------------------ public API
@@ -229,6 +236,15 @@ class ScheduleWeekView(ft.Container):
         The caller switches the cache namespace first.
         """
         self._generation += 1
+        task = self._prefetch_task
+        self._prefetch_task = None
+        if task is not None and not getattr(task, "done", lambda: True)():
+            try:
+                task.cancel()
+            except Exception:
+                pass
+        self._prefetching = False
+        self._prefetch_generation = None
         self._weeks.clear()
         self._live_at.clear()
         self._errors.clear()
@@ -329,18 +345,28 @@ class ScheduleWeekView(ft.Container):
             logger.debug("Could not schedule timetable load", exc_info=True)
 
     def _start_prefetch(self) -> None:
-        if self._fetch_week is None or self._prefetching or self._auth_failed:
+        if self._fetch_week is None or self._auth_failed:
             return
+        if self._prefetching and self._prefetch_generation == self._generation:
+            return
+        generation = self._generation
         self._prefetching = True
+        self._prefetch_generation = generation
         try:
-            self._page_ref.run_task(self._prefetch_async)
+            self._prefetch_task = self._page_ref.run_task(
+                self._prefetch_async, generation
+            )
         except (AttributeError, RuntimeError, TypeError):
-            self._prefetching = False
+            if self._prefetch_generation == generation:
+                self._prefetching = False
+                self._prefetch_generation = None
+                self._prefetch_task = None
             logger.debug("Could not schedule timetable prefetch", exc_info=True)
 
-    async def _prefetch_async(self) -> None:
+    async def _prefetch_async(self, generation: int | None = None) -> None:
         """Keep the current week and 4 weeks each side warm, nearest first."""
-        generation = self._generation
+        if generation is None:
+            generation = self._generation
         try:
             for monday in WeekScheduleCache.window():
                 if generation != self._generation or self._auth_failed:
@@ -355,7 +381,10 @@ class ScheduleWeekView(ft.Container):
                 if generation != self._generation or self._auth_failed:
                     break
         finally:
-            self._prefetching = False
+            if self._prefetch_generation in (None, generation):
+                self._prefetching = False
+                self._prefetch_generation = None
+                self._prefetch_task = None
 
     async def _load_async(self, monday: date) -> None:
         generation = self._generation

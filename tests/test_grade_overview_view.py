@@ -119,3 +119,81 @@ def test_grade_overview_view_theme_update():
 
     # Should not raise exception
     view.update_theme()
+
+
+def test_academic_radar_and_grade_overview_modals_dismiss_on_escape_via_pop_dialog():
+    from core.academic_radar.overall import OverallGpa
+    from gui.components.academic_radar.course_components_dialog import (
+        show_course_components_dialog,
+    )
+    from gui.components.academic_radar.expected_grade_dialog import ExpectedGradeDialog
+    from gui.components.academic_radar.gpa_detail_sheet import GpaDetailSheet
+
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+    metric = profile.metrics["breakthrough"]
+    overall = OverallGpa(gpa_10=8.5, gpa_4=3.5, total_credits=18, semester_count=1, course_count=6)
+
+    def _make_page():
+        shown = []
+        pops = []
+        return (
+            SimpleNamespace(
+                width=400,
+                height=800,
+                dialogs=[],
+                overlay=[],
+                show_dialog=shown.append,
+                pop_dialog=lambda: pops.append(True),
+                update=lambda: None,
+            ),
+            shown,
+            pops,
+        )
+
+    # 1. MetricDetailSheet
+    p1, s1, pops1 = _make_page()
+    MetricDetailSheet.show(p1, metric)
+    assert isinstance(s1[0].content, ft.KeyboardListener)
+    s1[0].content.on_key_down(SimpleNamespace(key="Enter"))
+    assert pops1 == []
+    s1[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops1 == [True]
+
+    # 2. GpaDetailSheet
+    p2, s2, pops2 = _make_page()
+    GpaDetailSheet.show(p2, profile)
+    assert isinstance(s2[0].content, ft.KeyboardListener)
+    s2[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops2 == [True]
+    s2[0].actions[0].on_click(None)
+    assert pops2 == [True, True]
+
+    # 3. ExpectedGradeDialog
+    p3, s3, pops3 = _make_page()
+    ExpectedGradeDialog.show(p3, overall)
+    assert isinstance(s3[0].content, ft.KeyboardListener)
+    s3[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops3 == [True]
+    s3[0].actions[0].on_click(None)
+    assert pops3 == [True, True]
+
+    # 4. show_course_components_dialog
+    p4, s4, pops4 = _make_page()
+    show_course_components_dialog(p4, sem.courses[0])
+    assert isinstance(s4[0].content, ft.KeyboardListener)
+    s4[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops4 == [True]
+    s4[0].actions[0].on_click(None)
+    assert pops4 == [True, True]
+
+    # 5. GradeOverviewView._open_planner -> _show_planner_dialog
+    p5, s5, pops5 = _make_page()
+    gv = GradeOverviewView(page=p5)
+    gv.update_academic_data([sem], [profile])
+    gv._open_planner(None)
+    assert isinstance(s5[0].content, ft.KeyboardListener)
+    s5[0].content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops5 == [True]
+    s5[0].actions[0].on_click(None)
+    assert pops5 == [True, True]

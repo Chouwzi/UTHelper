@@ -350,3 +350,66 @@ def test_portal_client_clear_token_during_login_prevents_stale_token_resurrectio
     assert progress == {"ok": True}
     # Because generation incremented mid-login, stale-token must NOT be cached
     assert client._cached_token("student") == ""
+
+
+def test_portal_client_rejects_gzip_bomb_incrementally_without_expanding_full_payload():
+    import tracemalloc
+    import pytest
+    from core.portal_client import PortalProtocolError, _MAX_PORTAL_RESPONSE_BYTES
+
+    bomb_payload = gzip.compress(b" " * (32 * 1024 * 1024), compresslevel=9)
+    assert len(bomb_payload) < _MAX_PORTAL_RESPONSE_BYTES
+
+    class _BombResponse:
+        def __init__(self):
+            self.headers = Message()
+            self.headers["Content-Encoding"] = "gzip"
+
+        def geturl(self):
+            return "https://portal-publicapp.ut.edu.vn/api/v1/lichhoc/lichTuan"
+
+        def read(self, amt=-1):
+            del amt
+            return bomb_payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "tok"})
+        return _BombResponse()
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(PortalProtocolError, match="maximum size"):
+            client.fetch_week(date(2026, 8, 11), "student", "secret")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Bounded incremental decompression must abort around 8 MiB, nowhere near 32 MiB
+    assert peak < 16 * 1024 * 1024
+
+
+def test_portal_client_accepts_case_insensitive_gzip_content_encoding():
+    class _UpperGzipResponse(_Response):
+        def __init__(self, payload: dict):
+            super().__init__(payload, compressed=True)
+            del self.headers["Content-Encoding"]
+            self.headers["Content-Encoding"] = "GZIP"
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _UpperGzipResponse({"success": True, "token": "tok"})
+        return _UpperGzipResponse({"success": True, "body": {"canDat": 120, "hienTai": 90}})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+    assert client.fetch_credit_progress("student", "secret") == {"canDat": 120, "hienTai": 90}

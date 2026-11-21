@@ -388,6 +388,15 @@ class GradeOverviewView(ft.Container):
             page_w = 0.0
         body_w = max(280.0, min(440.0, page_w - 80)) if page_w else 440.0
 
+        used_overlay = False
+
+        def _close(_event=None) -> None:
+            self._close_planner(page, dialog, used_overlay=used_overlay)
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                _close()
+
         dialog = ft.AlertDialog(
             modal=True,
             semantics_label="Tính GPA mong muốn",
@@ -398,16 +407,20 @@ class GradeOverviewView(ft.Container):
                 color=C.TEXT_PRIMARY,
                 semantics_label="Tính GPA mong muốn",
             ),
-            content=ft.Container(
-                content=ft.Column(
-                    controls=[self._gpa_target_card, self._graduation_card],
-                    spacing=12,
-                    scroll=ft.ScrollMode.AUTO,
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    content=ft.Column(
+                        controls=[self._gpa_target_card, self._graduation_card],
+                        spacing=12,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                    width=body_w,
+                    height=body_h,
                 ),
-                width=body_w,
-                height=body_h,
             ),
-            actions=[ft.TextButton("Đóng", height=44, on_click=lambda _: self._close_planner(page, dialog))],
+            actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )
@@ -417,11 +430,20 @@ class GradeOverviewView(ft.Container):
             logger.info("GPA planner dialog shown")
         except Exception:
             logger.warning("page.show_dialog failed; falling back to overlay", exc_info=True)
+            used_overlay = True
             page.overlay.append(dialog)
             dialog.open = True
             page.update()
 
-    def _close_planner(self, page: ft.Page, dialog: ft.AlertDialog) -> None:
+    def _close_planner(
+        self, page: ft.Page, dialog: ft.AlertDialog, *, used_overlay: bool = False
+    ) -> None:
+        if not used_overlay:
+            try:
+                page.pop_dialog()
+                return
+            except Exception:
+                pass
         dialog.open = False
         try:
             dialog.update()

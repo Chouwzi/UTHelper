@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import gzip
 import inspect
 import json
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Callable
 from datetime import date
 from typing import Any
@@ -19,6 +19,64 @@ from core.today_schedule import (
 )
 
 _MAX_PORTAL_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _decompress_gzip_bounded(compressed: bytes, max_bytes: int) -> bytes:
+    """Incrementally decompress gzipped bytes while enforcing ``max_bytes``."""
+    chunks: list[bytes] = []
+    total = 0
+    step = 64 * 1024
+    stream = compressed
+    while stream:
+        decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        for offset in range(0, len(stream), step):
+            pending = stream[offset : offset + step]
+            while pending:
+                remaining = max_bytes + 1 - total
+                if remaining <= 0:
+                    raise PortalProtocolError("Portal response exceeded maximum size")
+                out = decomp.decompress(pending, min(256 * 1024, remaining))
+                if out:
+                    total += len(out)
+                    if total > max_bytes:
+                        raise PortalProtocolError("Portal response exceeded maximum size")
+                    chunks.append(out)
+                if decomp.unconsumed_tail:
+                    pending = decomp.unconsumed_tail
+                elif decomp.eof:
+                    stream = decomp.unused_data + stream[offset + step :]
+                    break
+                else:
+                    pending = b""
+            else:
+                continue
+            break
+        else:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                raise PortalProtocolError("Portal response exceeded maximum size")
+            tail = decomp.flush(remaining)
+            if tail:
+                total += len(tail)
+                if total > max_bytes:
+                    raise PortalProtocolError("Portal response exceeded maximum size")
+                chunks.append(tail)
+            if decomp.unconsumed_tail:
+                raise PortalProtocolError("Portal response exceeded maximum size")
+            stream = decomp.unused_data
+            continue
+        remaining = max_bytes + 1 - total
+        if remaining <= 0:
+            raise PortalProtocolError("Portal response exceeded maximum size")
+        tail = decomp.flush(remaining)
+        if tail:
+            total += len(tail)
+            if total > max_bytes:
+                raise PortalProtocolError("Portal response exceeded maximum size")
+            chunks.append(tail)
+        if decomp.unconsumed_tail:
+            raise PortalProtocolError("Portal response exceeded maximum size")
+    return b"".join(chunks)
 
 
 class _SamePortalOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -221,10 +279,12 @@ class PortalClient:
                 )
                 if len(raw) > _MAX_PORTAL_RESPONSE_BYTES:
                     raise PortalProtocolError("Portal response exceeded maximum size")
-                if response.headers.get("Content-Encoding") == "gzip":
-                    raw = gzip.decompress(raw)
-                    if len(raw) > _MAX_PORTAL_RESPONSE_BYTES:
-                        raise PortalProtocolError("Portal response exceeded maximum size")
+                content_encoding = (response.headers.get("Content-Encoding") or "").lower()
+                if "gzip" in content_encoding:
+                    try:
+                        raw = _decompress_gzip_bounded(raw, _MAX_PORTAL_RESPONSE_BYTES)
+                    except zlib.error as exc:
+                        raise PortalProtocolError("Portal response was not valid gzip") from exc
         except urllib.error.HTTPError as exc:
             raise _PortalHttpError(exc.code) from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:

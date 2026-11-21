@@ -69,6 +69,15 @@ def show_course_components_dialog(
         page_h = 0.0
     max_h = max(240.0, page_h * 0.6) if page_h else 0.0
 
+    used_overlay = False
+
+    def _on_close(_event=None) -> None:
+        _close(page, dialog, used_overlay=used_overlay)
+
+    def _on_key_down(event) -> None:
+        if getattr(event, "key", "") == "Escape":
+            _on_close()
+
     dialog = ft.AlertDialog(
         modal=True,
         semantics_label=f"Bảng điểm {course.course_name}",
@@ -81,10 +90,14 @@ def show_course_components_dialog(
             overflow=ft.TextOverflow.ELLIPSIS,
             semantics_label=course.course_name,
         ),
-        content=build_course_components_body(course, moodle_course, body_w, max_h),
+        content=ft.KeyboardListener(
+            autofocus=True,
+            on_key_down=_on_key_down,
+            content=build_course_components_body(course, moodle_course, body_w, max_h),
+        ),
         content_padding=ft.Padding.only(left=20, right=20, top=12, bottom=4),
         actions_padding=ft.Padding.only(left=16, right=16, top=0, bottom=8),
-        actions=[ft.TextButton("Đóng", height=44, on_click=lambda _: _close(page, dialog))],
+        actions=[ft.TextButton("Đóng", height=44, on_click=_on_close)],
         bgcolor=C.BG,
         shape=ft.RoundedRectangleBorder(radius=16),
     )
@@ -92,12 +105,19 @@ def show_course_components_dialog(
         page.show_dialog(dialog)
     except Exception:
         logger.warning("page.show_dialog failed; falling back to overlay", exc_info=True)
+        used_overlay = True
         page.overlay.append(dialog)
         dialog.open = True
         page.update()
 
 
-def _close(page: ft.Page, dialog: ft.AlertDialog) -> None:
+def _close(page: ft.Page, dialog: ft.AlertDialog, *, used_overlay: bool = False) -> None:
+    if not used_overlay:
+        try:
+            page.pop_dialog()
+            return
+        except Exception:
+            pass
     dialog.open = False
     try:
         dialog.update()

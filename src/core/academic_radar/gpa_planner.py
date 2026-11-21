@@ -211,7 +211,7 @@ def cumulative_gpa4(semesters: list[SemesterGradeData]) -> tuple[float | None, s
             p = _course_point4(c)
             if p is None:
                 continue
-            code = (c.course_code or "").strip().upper()
+            code = (c.subject_code or c.course_code or "").strip().upper()
             if not code:
                 anonymous.append((c.credits, p))
                 continue

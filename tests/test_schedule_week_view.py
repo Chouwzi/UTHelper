@@ -494,3 +494,99 @@ def test_schedule_prefetch_aborts_immediately_when_reset_bumps_generation(monkey
 
     # Stops after first week because reset() bumped generation during _PREFETCH_GAP_S
     assert len(calls) == 1
+
+
+def test_schedule_reset_while_visible_and_prefetching_restarts_9_week_prefetch(monkeypatch):
+    from core.today_schedule import WeekScheduleCache
+
+    async def scenario():
+        monkeypatch.setattr("gui.components.schedule_week_view._PREFETCH_GAP_S", 0.01)
+        tasks = []
+        fetch_calls = []
+        gate = asyncio.Event()
+
+        class _Page:
+            width = 1120
+            height = 844
+            window = SimpleNamespace(width=1120)
+            dialogs = []
+
+            def run_task(self, coro_fn, *args, **kwargs):
+                t = asyncio.create_task(coro_fn(*args, **kwargs))
+                tasks.append(t)
+                return t
+
+            def update(self):
+                pass
+
+            def show_dialog(self, _d):
+                pass
+
+            def pop_dialog(self):
+                pass
+
+        account = {"name": "userA"}
+
+        def _fetch_week(monday_date):
+            who = account["name"]
+            fetch_calls.append((who, monday_date))
+            return {
+                monday_date: (
+                    _session(monday_date, subject=f"{who}-class"),
+                )
+            }
+
+        view = ScheduleWeekView(page=_Page(), fetch_week=_fetch_week)
+        view.show()
+        # Let gen-0 start and enter prefetch sleep/next week
+        await asyncio.sleep(0.03)
+        assert view._prefetching is True
+
+        # Switch account and reset while visible=True and prefetch is still running
+        account["name"] = "userB"
+        view.reset()
+        gate.set()
+
+        # Wait until all scheduled tasks finish
+        while tasks:
+            pending = [t for t in tasks if not t.done()]
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        user_b_weeks = {m for who, m in fetch_calls if who == "userB"}
+        assert len(user_b_weeks) == len(WeekScheduleCache.window()) == 9
+        assert all(
+            sess.subject == "userB-class"
+            for week in view._weeks.values()
+            for sessions in week.values()
+            for sess in sessions
+        )
+
+    asyncio.run(scenario())
+
+
+def test_schedule_on_size_change_rerenders_on_small_shrink_in_wide_mode():
+    view = _view(1120)
+    render_calls = []
+    orig_render = view._render
+
+    def _spy_render():
+        render_calls.append(view._layout_width)
+        orig_render()
+
+    view._render = _spy_render
+
+    # Shrink by 12px (<24px) while staying in wide mode (>=920px)
+    view._on_size_change(SimpleNamespace(width=1108, height=844))
+
+    assert render_calls == [1108.0]
+    day_columns = [
+        item
+        for item in _walk(view._body)
+        if isinstance(item, ft.Container)
+        and isinstance(item.data, dict)
+        and item.data.get("schedule_day")
+    ]
+    used_width = sum(float(item.width or 0) for item in day_columns) + 6 * 8 + 28
+    assert used_width <= 1108

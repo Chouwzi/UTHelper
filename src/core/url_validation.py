@@ -2,9 +2,79 @@
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import urllib.parse
 
 from core.moodle_sites import moodle_site_from_url
+
+
+def _is_unsafe_ip(ip_str: str) -> bool:
+    raw = ip_str.split("%", 1)[0].strip("[]")
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or ip.is_reserved
+        or not ip.is_global
+    )
+
+
+def validate_public_https_url(
+    url: object,
+    *,
+    resolve_dns: bool = True,
+) -> str | None:
+    """Return ``url`` only when it is HTTPS and does not target local/private IPs."""
+    validated = validate_https_url(url)
+    if validated is None:
+        return None
+    parsed = urllib.parse.urlsplit(validated)
+    host = (parsed.hostname or "").strip()
+    if not host:
+        return None
+    host_cf = host.rstrip(".").casefold()
+    if (
+        host_cf == "localhost"
+        or host_cf.endswith(".localhost")
+        or host_cf.endswith(".local")
+    ):
+        return None
+    # Literal IP check (covers IPv4, IPv6, and IPv4-mapped IPv6).
+    try:
+        ipaddress.ip_address(host.split("%", 1)[0].strip("[]"))
+    except ValueError:
+        is_literal_ip = False
+    else:
+        is_literal_ip = True
+    if is_literal_ip:
+        if _is_unsafe_ip(host):
+            return None
+        return validated
+    if not resolve_dns:
+        return validated
+    port = parsed.port or 443
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    if not infos:
+        return None
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            return None
+        if _is_unsafe_ip(str(sockaddr[0])):
+            return None
+    return validated
 
 
 def validate_https_url(url: object) -> str | None:

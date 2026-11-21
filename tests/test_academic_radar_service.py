@@ -131,3 +131,57 @@ def test_cumulative_gpa4_deduplicates_retaken_courses_by_highest_grade():
     gpa, kind = cumulative_gpa4([sem1, sem2])
     assert gpa == pytest.approx(3.75)
     assert kind == "computed"
+
+
+def test_cumulative_gpa4_and_overall_deduplicate_retakes_by_mahocphan_across_sections():
+    from core.academic_radar.overall import calculate_overall_gpa
+
+    normalizer = SemesterNormalizer()
+    semesters = normalizer.normalize_transcript(
+        [
+            {
+                "id": 1,
+                "tenDot": "HK1",
+                "tongKetDot": {},
+                "diems": [
+                    {
+                        "id": 10,
+                        "maHocPhan": "0120005105",
+                        "maLopHocPhan": "012000510501",
+                        "tenMonHoc": "Triết học",
+                        "soTinChi": 3,
+                        "diemTongKet": 4.0,
+                        "diemTinChi": 1.0,
+                        "diemChu": "D",
+                    }
+                ],
+            },
+            {
+                "id": 2,
+                "tenDot": "HK2",
+                "tongKetDot": {},
+                "diems": [
+                    {
+                        "id": 20,
+                        "maHocPhan": "0120005105",
+                        "maLopHocPhan": "012000510502",
+                        "tenMonHoc": "Triết học",
+                        "soTinChi": 3,
+                        "diemTongKet": 9.0,
+                        "diemTinChi": 4.0,
+                        "diemChu": "A+",
+                    }
+                ],
+            },
+        ]
+    )
+
+    gpa4, kind = cumulative_gpa4(semesters)
+    assert gpa4 == pytest.approx(4.0)
+    assert kind == "computed"
+
+    overall = calculate_overall_gpa(semesters)
+    assert overall.course_count == 1
+    assert overall.total_credits == 3.0
+    assert overall.gpa_10 == pytest.approx(9.0)
+    assert overall.gpa_4 == pytest.approx(4.0)

@@ -13,7 +13,7 @@ from typing import Optional
 import flet as ft
 from bs4 import BeautifulSoup
 
-from core.url_validation import validate_https_url
+from core.url_validation import validate_https_url, validate_public_https_url
 from gui.core.theme import C
 from gui.core.utils import html_to_markdown
 
@@ -32,11 +32,11 @@ class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is None:
             return None
-        if validate_https_url(redirected.full_url) is None:
+        if validate_public_https_url(redirected.full_url, resolve_dns=True) is None:
             raise urllib.error.HTTPError(
                 redirected.full_url,
                 code,
-                "Blocked non-HTTPS redirect",
+                "Blocked unsafe or non-HTTPS redirect",
                 headers,
                 fp,
             )
@@ -59,7 +59,7 @@ def supports_native_webview(page: Optional[ft.Page]) -> bool:
 
 def _fetch_https_preview(url: str) -> tuple[str, str]:
     """Fetch bounded HTTPS HTML and convert it into a readable preview."""
-    validated = validate_https_url(url)
+    validated = validate_public_https_url(url, resolve_dns=True)
     if validated is None:
         return "", ""
     opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
@@ -73,7 +73,7 @@ def _fetch_https_preview(url: str) -> tuple[str, str]:
     )
     with opener.open(req, timeout=10) as resp:
         final_url = getattr(resp, "geturl", lambda: validated)()
-        if validate_https_url(final_url) is None:
+        if validate_public_https_url(final_url, resolve_dns=True) is None:
             return "", ""
         raw = resp.read(_MAX_PREVIEW_BYTES + 1)
     if len(raw) > _MAX_PREVIEW_BYTES:
@@ -102,7 +102,7 @@ class InAppWebViewDialog:
         on_open_external: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._page = page
-        self._url = validate_https_url(url) or ""
+        self._url = validate_public_https_url(url, resolve_dns=False) or ""
         self._title = (title or "").strip() or "Trình duyệt trong ứng dụng"
         self._on_open_external = on_open_external
         self._dialog: Optional[ft.AlertDialog] = None
@@ -226,17 +226,45 @@ class InAppWebViewDialog:
         if supports_native_webview(self._page):
             status_bar = ft.ProgressBar(value=0, height=2, color=C.ACCENT, bgcolor=C.BORDER)
 
+            def _extract_nav_url(e) -> str:
+                raw = getattr(e, "data", None)
+                if raw is None:
+                    raw = getattr(e, "url", "")
+                return str(raw or "").strip()
+
+            def _is_safe_native_url(nav_url: str) -> bool:
+                if not nav_url:
+                    return True
+                # Case-insensitive validation: block non-HTTPS schemes and local/private targets.
+                return (
+                    validate_https_url(nav_url) is not None
+                    and validate_public_https_url(nav_url, resolve_dns=False) is not None
+                )
+
             def _on_started(e):
-                nav_url = getattr(e, "data", "") or ""
-                if nav_url and validate_https_url(nav_url) is None:
+                nav_url = _extract_nav_url(e)
+                if nav_url and not _is_safe_native_url(nav_url):
+                    self.close()
                     return
                 status_bar.value = None
                 status_bar.visible = True
                 self._safe_update(status_bar)
 
+            def _on_url_change(e):
+                nav_url = _extract_nav_url(e)
+                if nav_url and not _is_safe_native_url(nav_url):
+                    self.close()
+                    return
+                if validate_https_url(nav_url):
+                    subtitle_label.value = urllib.parse.urlsplit(nav_url).hostname or host
+                    self._safe_update(subtitle_label)
+
             def _on_ended(e):
                 status_bar.visible = False
-                nav_url = getattr(e, "data", "") or ""
+                nav_url = _extract_nav_url(e)
+                if nav_url and not _is_safe_native_url(nav_url):
+                    self.close()
+                    return
                 if validate_https_url(nav_url):
                     subtitle_label.value = urllib.parse.urlsplit(nav_url).hostname or host
                 self._safe_update(status_bar)
@@ -248,6 +276,7 @@ class InAppWebViewDialog:
                 expand=True,
                 prevent_links=["http://", "javascript:", "file:", "data:", "intent:"],
                 on_page_started=_on_started,
+                on_url_change=_on_url_change,
                 on_page_ended=_on_ended,
             )
             body_host.content = ft.Column(
