@@ -711,6 +711,145 @@ def test_legacy_ole2_ministream_malformed_and_no_olefile(monkeypatch, capsys):
         assert "xlrd" in no_xlrd_doc.markdown_text.lower()
         assert "xlrd" in no_xlrd_ppt.markdown_text.lower()
 
+    with monkeypatch.context() as mp:
+        mp.setattr(doc_mod, "_CompDoc", None)
+        no_compdoc_doc = convert_document_bytes("missing_compdoc.doc", mini_doc_cfb, "docx")
+        no_compdoc_ppt = convert_document_bytes("missing_compdoc.ppt", mini_ppt_cfb, "pptx")
+        assert "xlrd" in no_compdoc_doc.markdown_text.lower()
+        assert "xlrd" in no_compdoc_ppt.markdown_text.lower()
+
+
+def test_legacy_ole2_adversarial_ssat_cycles_ssz_dir_cycles_and_bounded_reader(
+    monkeypatch, capsys
+):
+    import sys
+    import time
+
+    monkeypatch.setitem(sys.modules, "olefile", None)
+
+    # 1. Cyclic SSAT (SSAT[0] = 0) on mini-stream .doc, .ppt, and .xls must fail fast (< 1s)
+    wd_mini = bytearray(128)
+    struct.pack_into("<HH", wd_mini, 0, 0xA5EC, 0x00C1)
+    cyc_doc = bytearray(_build_ministream_ole2_cfb({"WordDocument": bytes(wd_mini)}))
+    doc_ssat_sec = struct.unpack_from("<i", cyc_doc, 60)[0]
+    struct.pack_into("<I", cyc_doc, 512 + doc_ssat_sec * 512, 0)
+
+    ppt_mini = struct.pack("<HHI", 0x000F, 0x03EE, 4) + b"\x00" * 64
+    cyc_ppt = bytearray(_build_ministream_ole2_cfb({"PowerPoint Document": ppt_mini}))
+    ppt_ssat_sec = struct.unpack_from("<i", cyc_ppt, 60)[0]
+    struct.pack_into("<I", cyc_ppt, 512 + ppt_ssat_sec * 512, 0)
+
+    cyc_xls = bytearray(_build_ministream_ole2_cfb({"Workbook": b"\x09\x08\x00\x00" + b"\x00" * 80}))
+    xls_ssat_sec = struct.unpack_from("<i", cyc_xls, 60)[0]
+    struct.pack_into("<I", cyc_xls, 512 + xls_ssat_sec * 512, 0)
+
+    t0 = time.monotonic()
+    res_cyc_doc = convert_document_bytes("cyc_ssat.doc", bytes(cyc_doc), "docx")
+    res_cyc_ppt = convert_document_bytes("cyc_ssat.ppt", bytes(cyc_ppt), "pptx")
+    res_cyc_xls = convert_document_bytes("cyc_ssat.xls", bytes(cyc_xls), "xlsx")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0
+    assert "Không thể đọc tệp Word .doc cũ." in res_cyc_doc.markdown_text
+    assert "Không thể đọc tệp PowerPoint .ppt cũ." in res_cyc_ppt.markdown_text
+    assert "Không thể đọc tệp Excel .xls cũ." in res_cyc_xls.markdown_text
+
+    # 2. Malformed ssz = 0, 1, 2 OLE2 headers must return notice documents (no ZeroDivisionError)
+    base_cfb = _build_ministream_ole2_cfb({"WordDocument": bytes(wd_mini)})
+    for bad_ssz in (0, 1, 2):
+        bad_hdr = bytearray(base_cfb)
+        struct.pack_into("<H", bad_hdr, 30, bad_ssz)
+        raw_hdr = bytes(bad_hdr)
+        for fn, kind, fn_direct in (
+            (f"ssz{bad_ssz}.doc", "docx", doc_mod._convert_legacy_doc),
+            (f"ssz{bad_ssz}.ppt", "pptx", doc_mod._convert_legacy_ppt),
+            (f"ssz{bad_ssz}.xls", "xlsx", doc_mod._convert_legacy_xls),
+        ):
+            pub = convert_document_bytes(fn, raw_hdr, kind)
+            direct = fn_direct(fn, raw_hdr, dark_mode=False)
+            assert pub.kind == kind and pub.markdown_text
+            assert direct.kind == kind and direct.markdown_text
+
+    # 3. Cyclic directory entry (left_DID = 1 on DID 1) must fail gracefully both publicly & directly
+    dir_cyc_doc = bytearray(base_cfb)
+    dir_sec = struct.unpack_from("<i", dir_cyc_doc, 48)[0]
+    struct.pack_into("<i", dir_cyc_doc, 512 + dir_sec * 512 + 128 + 68, 1)
+    dir_cyc_bytes = bytes(dir_cyc_doc)
+    for kind, fn_direct in (
+        ("docx", doc_mod._convert_legacy_doc),
+        ("pptx", doc_mod._convert_legacy_ppt),
+        ("xlsx", doc_mod._convert_legacy_xls),
+    ):
+        pub = convert_document_bytes("dir_cyc", dir_cyc_bytes, kind)
+        direct = fn_direct("dir_cyc", dir_cyc_bytes, dark_mode=False)
+        assert pub.kind == kind and pub.markdown_text
+        assert direct.kind == kind and direct.markdown_text
+
+    # Deeply nested PPT 0x0F containers must not raise RecursionError when called directly
+    deep_ppt = b"".join(struct.pack("<HHI", 0x000F, 0x0400, 8 * (1000 - i)) for i in range(1000))
+    deep_ppt_cfb = _build_minimal_ole2_cfb({"PowerPoint Document": deep_ppt})
+    deep_ppt_res = doc_mod._convert_legacy_ppt("deep.ppt", deep_ppt_cfb, dark_mode=False)
+    assert deep_ppt_res.kind == "pptx"
+
+    # 4. Direct _read_compdoc_stream_bounded checks: bounded read, missing stream, truncation, huge tot_size
+    mini_payload = b"A" * 180
+    valid_mini = _build_ministream_ole2_cfb({"WordDocument": mini_payload})
+    ole_ok = doc_mod._open_compdoc_safe(valid_mini)
+    assert doc_mod._read_compdoc_stream_bounded(ole_ok, "WordDocument", 1024) == mini_payload
+    assert doc_mod._read_compdoc_stream_bounded(ole_ok, "WordDocument", 50) == mini_payload[:50]
+    assert doc_mod._read_compdoc_stream_bounded(ole_ok, "DoesNotExist", 1024) is None
+
+    # Premature EOCSID truncation: tot_size = 200 but SSAT[0] = EOCSID (-2) -> raises CompDocError
+    trunc_chain = bytearray(valid_mini)
+    trunc_ssat_sec = struct.unpack_from("<i", trunc_chain, 60)[0]
+    struct.pack_into("<i", trunc_chain, 512 + trunc_ssat_sec * 512, -2)
+    ole_trunc = doc_mod._open_compdoc_safe(bytes(trunc_chain))
+    with pytest.raises(doc_mod._CompDocError):
+        doc_mod._read_compdoc_stream_bounded(ole_trunc, "WordDocument", 1024)
+
+    # Oversized tot_size = 0x7FFFFFFF & min_size_std_stream = 0x7FFFFFFF fails fast without OOM
+    huge_meta = bytearray(valid_mini)
+    struct.pack_into("<i", huge_meta, 56, 0x7FFFFFFF)
+    huge_dir_sec = struct.unpack_from("<i", huge_meta, 48)[0]
+    struct.pack_into("<i", huge_meta, 512 + huge_dir_sec * 512 + 128 + 120, 0x7FFFFFFF)
+    ole_huge = doc_mod._open_compdoc_safe(bytes(huge_meta))
+    with pytest.raises(doc_mod._CompDocError):
+        doc_mod._read_compdoc_stream_bounded(
+            ole_huge, "WordDocument", doc_mod._MAX_LEGACY_STREAM_BYTES
+        )
+
+    # Negative tot_size (-1) and out-of-bounds SSAT sector (9999) raise CompDocError
+    neg_meta = bytearray(valid_mini)
+    neg_dir_sec = struct.unpack_from("<i", neg_meta, 48)[0]
+    struct.pack_into("<i", neg_meta, 512 + neg_dir_sec * 512 + 128 + 120, -1)
+    ole_neg = doc_mod._open_compdoc_safe(bytes(neg_meta))
+    with pytest.raises(doc_mod._CompDocError):
+        doc_mod._read_compdoc_stream_bounded(ole_neg, "WordDocument", 1024)
+
+    oob_ssat = bytearray(valid_mini)
+    oob_ssat_sec = struct.unpack_from("<i", oob_ssat, 60)[0]
+    struct.pack_into("<I", oob_ssat, 512 + oob_ssat_sec * 512, 9999)
+    ole_oob = doc_mod._open_compdoc_safe(bytes(oob_ssat))
+    with pytest.raises(doc_mod._CompDocError):
+        doc_mod._read_compdoc_stream_bounded(ole_oob, "WordDocument", 1024)
+
+    # Cyclic regular FAT chain (FAT[0] = 0) raises CompDocError cleanly
+    fat_cfb = bytearray(_build_minimal_ole2_cfb({"WordDocument": b"B" * 4096}))
+    fat_sec = struct.unpack_from("<i", fat_cfb, 76)[0]
+    struct.pack_into("<I", fat_cfb, 512 + fat_sec * 512, 0)
+    ole_fat_cyc = doc_mod._open_compdoc_safe(bytes(fat_cfb))
+    with pytest.raises(doc_mod._CompDocError):
+        doc_mod._read_compdoc_stream_bounded(ole_fat_cyc, "WordDocument", 4096)
+
+    # Storage (etype=1) named WordDocument raises CompDocError cleanly in _convert_legacy_doc
+    storage_doc = bytearray(valid_mini)
+    storage_dir_sec = struct.unpack_from("<i", storage_doc, 48)[0]
+    storage_doc[512 + storage_dir_sec * 512 + 128 + 66] = 1
+    res_storage = doc_mod._convert_legacy_doc("storage.doc", bytes(storage_doc), dark_mode=False)
+    assert "Không thể đọc tệp Word .doc cũ." in res_storage.markdown_text
+
+    # Ensure zero stdout leakage across all adversarial CompDoc parses
+    assert capsys.readouterr().out == ""
+
 
 def _png_bytes(width: int = 12, height: int = 8) -> bytes:
     from PIL import Image

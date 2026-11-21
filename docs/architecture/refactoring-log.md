@@ -2481,3 +2481,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - **Verification**:
   - Added regular-FAT / mini-stream (`< 4096 B`) CFB, malformed CFB, `capsys` stdout-silence, `_MAX_LEGACY_STREAM_BYTES`, and no-`olefile` regressions in `tests/test_courses_pdf_and_legacy_docs.py` plus dependency guard assertions in `tests/test_courses_m1_webview_packaging.py`.
   - Verified with full `pytest` (`2891 passed, 26 skipped`), `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and isolated Python 3.14 `compileall -b -q` across `[project.dependencies]`.
+
+## M3 Part B Iteration 4: `CompDoc` Bounded Cycle-Safe Reader & Malformed-CFB Hardening (2026-11-22)
+
+- **Hardening (`src/core/courses/document_converter.py`)**:
+  - Added `_open_compdoc_safe()` pre-validating `len(data) >= 512`, `_OLE2_MAGIC`, and `ssz >= 3` before constructing `_CompDoc(data, logfile=io.StringIO())`, preventing `ZeroDivisionError` in `CompDoc.__init__` when `ssz < 2` (`nent == 0`) or `ssz == 2` (`nent - 1 == 0`).
+  - Replaced `ole.get_named_stream(...)` in `_convert_legacy_doc()` and `_convert_legacy_ppt()` with `_read_compdoc_stream_bounded(ole, name, _MAX_LEGACY_STREAM_BYTES)`, which validates `etype == 2`, non-negative stream/sector sizes, caps `target_bytes = min(d.tot_size, max_bytes)` before allocating, walks `SAT`/`SSAT` iteratively with a `visited` cycle set, `0 <= s < max_sid` bounds, `EOCSID` (`-2`) termination, system-sector overlap protection, and immediate exit when `remaining <= 0`.
+  - Added `_precheck_ole2_xls()` in `_convert_legacy_xls()` to reject malformed `ssz < 3` headers and cyclic `SSAT` mini-stream chains before `xlrd.open_workbook(...)`, capped `_collect_ppt_binary_slides()` recursion at `_MAX_PPT_CONTAINER_DEPTH = 64`, and added `ZeroDivisionError` and `RecursionError` to `_convert_legacy_doc()` and `_convert_legacy_ppt()` exception tuples.
+- **Verification**:
+  - Added `test_legacy_ole2_adversarial_ssat_cycles_ssz_dir_cycles_and_bounded_reader` and `_CompDoc = None` fallback coverage in `tests/test_courses_pdf_and_legacy_docs.py` (cyclic `SSAT` on `.doc`/`.ppt`/`.xls`, `ssz` 0/1/2, cyclic `left_DID`, 1000-level PPT container, premature `EOCSID`, oversized `tot_size = 0x7FFFFFFF`, negative `tot_size`, out-of-bounds `SSAT`, cyclic `SAT`, storage `etype=1`, zero stdout).
+  - Verified post-commit with full `pytest` (`2892 passed, 26 skipped`), `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and isolated Python 3.14 `compileall -b -q` across `[project.dependencies]`.

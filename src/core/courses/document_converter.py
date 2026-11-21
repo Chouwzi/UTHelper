@@ -42,7 +42,9 @@ except Exception:  # pragma: no cover
     _CompDocError = Exception  # type: ignore[assignment]
 
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_COMPDOC_EOCSID = -2
 _MAX_LEGACY_STREAM_BYTES = 32 * 1024 * 1024
+_MAX_PPT_CONTAINER_DEPTH = 64
 
 _MAX_XML_BYTES = 16 * 1024 * 1024
 _MAX_TOTAL_XML_BYTES = 48 * 1024 * 1024
@@ -4324,6 +4326,125 @@ def _format_xls_cell(sheet: object, row_idx: int, col_idx: int, datemode: int) -
     return ""
 
 
+def _open_compdoc_safe(data: bytes) -> Any:
+    """Open an OLE2 container with ``CompDoc`` after validating header sector exponents."""
+    if _CompDoc is None:
+        raise _CompDocError("xlrd.compdoc.CompDoc is unavailable")
+    if len(data) < 512:
+        raise _CompDocError("OLE2 container shorter than 512-byte header")
+    if data[:8] != _OLE2_MAGIC:
+        raise _CompDocError("Not an OLE2 compound document")
+    # ssz < 2 makes nent = (1 << ssz) // 4 == 0 (ZeroDivisionError in SAT_sectors_reqd);
+    # ssz == 2 makes nent == 1 and nent - 1 == 0 (ZeroDivisionError in expected_MSATX_sectors).
+    ssz = struct.unpack_from("<H", data, 30)[0]
+    if ssz < 3:
+        raise _CompDocError(f"Invalid OLE2 sector size exponent: {ssz}")
+    return _CompDoc(data, logfile=io.StringIO())
+
+
+def _read_compdoc_stream_bounded(
+    ole: Any,
+    name: str,
+    max_bytes: int = _MAX_LEGACY_STREAM_BYTES,
+) -> Optional[bytes]:
+    """Read a named OLE2 stream iteratively with cycle detection and byte cap."""
+    d = ole._dir_search(name.split("/"))
+    if d is None:
+        return None
+    if getattr(d, "etype", None) != 2:
+        raise _CompDocError(f"OLE2 entry {name!r} is not a user stream")
+    if (
+        d.tot_size < 0
+        or ole.sec_size <= 0
+        or ole.short_sec_size <= 0
+        or ole.min_size_std_stream < 0
+    ):
+        raise _CompDocError(f"Invalid OLE2 stream metadata for {name!r}")
+    if max_bytes <= 0:
+        return b""
+
+    target_bytes = min(d.tot_size, max_bytes)
+    if target_bytes == 0:
+        if d.first_SID < _COMPDOC_EOCSID:
+            raise _CompDocError(f"Invalid start sector {d.first_SID} for empty stream {name!r}")
+        return b""
+
+    use_sat = d.tot_size >= ole.min_size_std_stream
+    if use_sat:
+        backing = ole.mem
+        base = 512
+        table = ole.SAT
+        step_size = ole.sec_size
+        max_sid = min(len(table), max(0, int(ole.mem_data_secs)))
+    else:
+        backing = ole.SSCS
+        base = 0
+        table = ole.SSAT
+        step_size = ole.short_sec_size
+        max_sid = len(table)
+
+    # CompDoc sets SSCS = "" (empty str) when the short-stream container is empty.
+    if isinstance(backing, str):
+        raise _CompDocError(f"Empty OLE2 backing buffer for {name!r}")
+
+    seen_table = getattr(ole, "seen", ())
+    chunks: list[bytes] = []
+    visited: set[int] = set()
+    remaining = target_bytes
+    s = d.first_SID
+
+    while remaining > 0:
+        if s == _COMPDOC_EOCSID:
+            raise _CompDocError(
+                f"OLE2 stream {name!r} ended prematurely ({remaining} bytes remaining)"
+            )
+        if s < 0 or s >= max_sid:
+            raise _CompDocError(f"OLE2 stream {name!r} has invalid sector ID {s}")
+        if s in visited:
+            raise _CompDocError(f"OLE2 stream {name!r} contains a sector cycle at {s}")
+        if use_sat and s < len(seen_table) and seen_table[s] in (1, 2, 3, 4, 5):
+            raise _CompDocError(f"OLE2 stream {name!r} overlaps system sector {s}")
+        visited.add(s)
+
+        start_pos = base + s * step_size
+        grab = min(step_size, remaining)
+        if start_pos < 0 or start_pos + grab > len(backing):
+            raise _CompDocError(f"OLE2 stream {name!r} truncated at sector {s}")
+        chunks.append(bytes(backing[start_pos : start_pos + grab]))
+        remaining -= grab
+        if remaining <= 0:
+            break
+        s = table[s]
+
+    return b"".join(chunks)
+
+
+def _precheck_ole2_xls(data: bytes) -> None:
+    """Guard ``xlrd.open_workbook`` against OLE2 header ZeroDivisionError and SSAT cycles."""
+    if not data.startswith(_OLE2_MAGIC) or _CompDoc is None:
+        return
+    ole = _open_compdoc_safe(data)
+    if ole.min_size_std_stream < 0:
+        raise _CompDocError("Invalid OLE2 min_size_std_stream")
+    for qname in ("Workbook", "Book"):
+        d = ole._dir_search([qname])
+        if d is None:
+            continue
+        if getattr(d, "etype", None) != 2:
+            raise _CompDocError(f"OLE2 entry {qname!r} is not a user stream")
+        if d.tot_size < 0:
+            raise _CompDocError(f"Negative stream size for {qname!r}")
+        if d.tot_size < ole.min_size_std_stream:
+            visited: set[int] = set()
+            s = d.first_SID
+            while 0 <= s < len(ole.SSAT):
+                if s in visited:
+                    raise _CompDocError(f"OLE2 stream {qname!r} contains an SSAT cycle at {s}")
+                visited.add(s)
+                s = ole.SSAT[s]
+        break
+
+
 def _convert_legacy_xls(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
     """Convert legacy binary ``.xls`` spreadsheets using ``xlrd``."""
     if _xlrd is None:
@@ -4334,6 +4455,7 @@ def _convert_legacy_xls(title: str, data: bytes, *, dark_mode: bool) -> Converte
             dark_mode=dark_mode,
         )
     try:
+        _precheck_ole2_xls(data)
         workbook = _xlrd.open_workbook(file_contents=data, on_demand=True)
     except Exception as exc:
         err_lower = str(exc).lower()
@@ -4494,13 +4616,12 @@ def _convert_legacy_doc(title: str, data: bytes, *, dark_mode: bool) -> Converte
             dark_mode=dark_mode,
         )
     try:
-        ole = _CompDoc(data, logfile=io.StringIO())
-        wd_raw = ole.get_named_stream("WordDocument")
-        if wd_raw is None:
+        ole = _open_compdoc_safe(data)
+        wd = _read_compdoc_stream_bounded(ole, "WordDocument", _MAX_LEGACY_STREAM_BYTES)
+        if wd is None:
             return _build_notice_document(
                 "docx", title, "Tệp .doc không chứa luồng WordDocument.", dark_mode=dark_mode
             )
-        wd = wd_raw[:_MAX_LEGACY_STREAM_BYTES]
         if len(wd) < 32:
             return _build_notice_document(
                 "docx", title, "Tệp .doc bị hỏng hoặc rỗng.", dark_mode=dark_mode
@@ -4519,9 +4640,19 @@ def _convert_legacy_doc(title: str, data: bytes, *, dark_mode: bool) -> Converte
                 dark_mode=dark_mode,
             )
         table_stream_name = "1Table" if (flags & 0x0200) else "0Table"
-        tbl_raw = ole.get_named_stream(table_stream_name)
-        tbl = tbl_raw[:_MAX_LEGACY_STREAM_BYTES] if tbl_raw is not None else b""
-    except (_CompDocError, OSError, ValueError, struct.error, IndexError, AssertionError, TypeError):
+        tbl_raw = _read_compdoc_stream_bounded(ole, table_stream_name, _MAX_LEGACY_STREAM_BYTES)
+        tbl = tbl_raw if tbl_raw is not None else b""
+    except (
+        _CompDocError,
+        OSError,
+        ValueError,
+        struct.error,
+        IndexError,
+        AssertionError,
+        TypeError,
+        ZeroDivisionError,
+        RecursionError,
+    ):
         return _build_notice_document(
             "docx", title, "Không thể đọc tệp Word .doc cũ.", dark_mode=dark_mode
         )
@@ -4575,14 +4706,16 @@ def _collect_ppt_binary_slides(stream: bytes) -> list[str]:
     fallback_texts: list[str] = []
     limit = len(stream)
 
-    def _collect_atoms_in(start: int, end: int, out_parts: list[str]) -> None:
+    def _collect_atoms_in(start: int, end: int, out_parts: list[str], depth: int = 0) -> None:
+        if depth >= _MAX_PPT_CONTAINER_DEPTH:
+            return
         pos = start
         while pos + 8 <= end:
             ver_inst, rec_type, rec_len = struct.unpack_from("<HHI", stream, pos)
             payload_start = pos + 8
             payload_end = min(end, payload_start + rec_len)
             if (ver_inst & 0x0F) == 0x0F:
-                _collect_atoms_in(payload_start, payload_end, out_parts)
+                _collect_atoms_in(payload_start, payload_end, out_parts, depth + 1)
             elif rec_type == 0x0FA0:
                 txt = stream[payload_start:payload_end].decode("utf-16-le", errors="replace").strip()
                 if txt:
@@ -4593,7 +4726,9 @@ def _collect_ppt_binary_slides(stream: bytes) -> list[str]:
                     out_parts.append(txt.replace("\r", "\n"))
             pos = payload_start + max(0, rec_len)
 
-    def _walk(start: int, end: int) -> None:
+    def _walk(start: int, end: int, depth: int = 0) -> None:
+        if depth >= _MAX_PPT_CONTAINER_DEPTH:
+            return
         pos = start
         while pos + 8 <= end:
             ver_inst, rec_type, rec_len = struct.unpack_from("<HHI", stream, pos)
@@ -4603,7 +4738,7 @@ def _collect_ppt_binary_slides(stream: bytes) -> list[str]:
             if is_container:
                 if rec_type == 0x03EE:
                     parts: list[str] = []
-                    _collect_atoms_in(payload_start, payload_end, parts)
+                    _collect_atoms_in(payload_start, payload_end, parts, depth + 1)
                     if parts:
                         slides_text.append("\n".join(parts))
                 elif rec_type == 0x0FF0:
@@ -4618,12 +4753,12 @@ def _collect_ppt_binary_slides(stream: bytes) -> list[str]:
                                 fallback_texts.append("\n".join(current_parts))
                                 current_parts = []
                         elif c_rt in (0x0FA0, 0x0FA8) or (c_vi & 0x0F) == 0x0F:
-                            _collect_atoms_in(cpos, cp_end, current_parts)
+                            _collect_atoms_in(cpos, cp_end, current_parts, depth + 1)
                         cpos = cp_start + max(0, c_rl)
                     if current_parts:
                         fallback_texts.append("\n".join(current_parts))
                 else:
-                    _walk(payload_start, payload_end)
+                    _walk(payload_start, payload_end, depth + 1)
             pos = payload_start + max(0, rec_len)
 
     _walk(0, limit)
@@ -4640,17 +4775,28 @@ def _convert_legacy_ppt(title: str, data: bytes, *, dark_mode: bool) -> Converte
             dark_mode=dark_mode,
         )
     try:
-        ole = _CompDoc(data, logfile=io.StringIO())
-        ppt_raw = ole.get_named_stream("PowerPoint Document")
-        if ppt_raw is None:
+        ole = _open_compdoc_safe(data)
+        ppt_stream = _read_compdoc_stream_bounded(
+            ole, "PowerPoint Document", _MAX_LEGACY_STREAM_BYTES
+        )
+        if ppt_stream is None:
             return _build_notice_document(
                 "pptx",
                 title,
                 "Tệp .ppt không chứa luồng PowerPoint Document.",
                 dark_mode=dark_mode,
             )
-        ppt_stream = ppt_raw[:_MAX_LEGACY_STREAM_BYTES]
-    except (_CompDocError, OSError, ValueError, struct.error, IndexError, AssertionError, TypeError):
+    except (
+        _CompDocError,
+        OSError,
+        ValueError,
+        struct.error,
+        IndexError,
+        AssertionError,
+        TypeError,
+        ZeroDivisionError,
+        RecursionError,
+    ):
         return _build_notice_document(
             "pptx", title, "Không thể đọc tệp PowerPoint .ppt cũ.", dark_mode=dark_mode
         )
