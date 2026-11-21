@@ -1353,11 +1353,10 @@ class DetailView(ft.Container):
                 "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt."
             )
             self._quiz_runtime_notice.visible = True
-        if opened:
-            try:
-                self._page.update()
-            except Exception:
-                pass
+        try:
+            self._page.update()
+        except Exception:
+            pass
 
     async def _on_quiz_entry_unavailable(self, activity, reason: str):
         """Apply a confirmed attempt state while preserving browser actions."""

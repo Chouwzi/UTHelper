@@ -2002,3 +2002,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `test_tray_close_contains_stop_failure_and_reports_join_timeout`; its measured
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
+
+## Quiz WebView review follow-up (2026-11-21)
+
+- Publish the quiz recovery controls when mounting fails, and close a prepared
+  Moodle entry on a worker thread during reauthentication so the UI loop stays
+  responsive. Recheck visibility and generation before mounting the retry.
+- Allow HTTPS subframes, including cross-origin media, and `about:blank`; reject
+  HTTP and non-network schemes inside frames without changing the main-frame
+  same-origin rule.
+- Add the quiz Python extension suite to release-source validation.
+- Verification: `tests/test_quiz_player_ui.py` and
+  `tests/test_release_hardening.py` passed (79 tests); scoped Ruff check passed;
+  Flutter analysis was clean and Flutter tests passed (18 tests). No live quiz
+  attempt or native WebView UI was used.

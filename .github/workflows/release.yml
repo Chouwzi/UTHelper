@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     env:
-      PYTHONPATH: src:extensions/flet_uth_background_sync/src:.
+      PYTHONPATH: src:extensions/flet_uth_quiz/src:extensions/flet_uth_background_sync/src:.
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
@@ -38,10 +38,10 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
+        run: pip install -e . -e extensions/flet_uth_quiz "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
-        run: python -m pytest tests extensions/flet_uth_background_sync/tests -q --tb=short
+        run: python -m pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short
       - name: Validate tag ancestry and release metadata
         id: metadata
         timeout-minutes: 5

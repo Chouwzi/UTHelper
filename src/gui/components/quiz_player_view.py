@@ -1307,8 +1307,12 @@ class QuizPlayerView(ft.Container):
         if factory is None:
             self._show_mount_error("player_unavailable")
             return
-        self._close_prepared_entry(self._prepared_entry)
+        prepared = self._prepared_entry
         self._prepared_entry = None
+        if prepared is not None:
+            await asyncio.to_thread(self._close_prepared_entry, prepared)
+        if generation != self._generation or not self.visible:
+            return
         if not self._run_task(self._prepare_entry_and_prompt, generation, factory):
             self._show_mount_error("player_unavailable")
 

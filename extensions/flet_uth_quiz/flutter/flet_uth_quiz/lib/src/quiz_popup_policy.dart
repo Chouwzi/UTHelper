@@ -8,6 +8,22 @@ enum QuizPopupRequestKind {
 
 const maxQuizPopupCount = 4;
 
+bool allowsQuizSubframeNavigation(String? rawUrl) {
+  if (rawUrl == null || rawUrl.isEmpty) return false;
+
+  final target = Uri.tryParse(rawUrl);
+  if (target == null) return false;
+
+  final scheme = target.scheme.toLowerCase();
+  if (scheme == 'about') {
+    return target.host.isEmpty && target.path.toLowerCase() == 'blank';
+  }
+  return scheme == 'https' &&
+      target.hasAuthority &&
+      target.host.isNotEmpty &&
+      target.userInfo.isEmpty;
+}
+
 QuizPopupRequestKind classifyQuizPopupRequest(
   String? rawUrl,
   Uri? trustedOrigin, {

@@ -334,6 +334,26 @@ def test_quiz_button_mounts_player_and_close_refreshes_from_moodle(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_failed_quiz_open_publishes_recovery_controls(monkeypatch):
+    async def scenario():
+        page, _lease, _players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch
+        )
+        detail_view.update_detail(trusted_quiz())
+        page.update = MagicMock()
+        player_view.open_activity_for_account = MagicMock(return_value=False)
+
+        await detail_view._open_quiz(None)
+
+        player_view.open_activity_for_account.assert_called_once()
+        assert detail_view._open_btn.visible is True
+        assert detail_view._quiz_open_btn.visible is False
+        assert detail_view._quiz_runtime_notice.visible is True
+        page.update.assert_called_once_with()
+
+    asyncio.run(scenario())
+
+
 def test_new_attempt_requires_confirmation_before_entry_post(monkeypatch):
     async def scenario():
         prepared_entries = []
@@ -1076,6 +1096,56 @@ def test_bootstrap_auth_retry_invalidates_old_player_callbacks(monkeypatch):
         assert player_view._ready is True
         assert [entry.results[0].exported_cookies for entry in prepared_entries] == [[], []]
         assert [entry.closed for entry in prepared_entries] == [True, True]
+
+    asyncio.run(scenario())
+
+
+def test_auth_retry_closes_prepared_entry_off_the_ui_loop(monkeypatch):
+    async def scenario():
+        enable_native_runtime(monkeypatch)
+        close_started = threading.Event()
+        release_close = threading.Event()
+        close_thread = []
+
+        class BlockingPreparedEntry:
+            def close(self):
+                close_thread.append(threading.get_ident())
+                close_started.set()
+                release_close.wait(2)
+
+        page = HeadlessPage()
+        player_view = QuizPlayerView(
+            page,
+            player_factory=lambda **_kwargs: ft.Container(expand=True),
+        )
+        player_view.visible = True
+        player_view._activity = trusted_quiz()
+        player_view._lease = Lease()
+        player_view._account_id = "student@example.edu"
+        player_view._prepared_entry = BlockingPreparedEntry()
+        player_view._run_task = MagicMock(return_value=True)
+        ui_thread = threading.get_ident()
+        release_guard = threading.Timer(2, release_close.set)
+        release_guard.start()
+
+        try:
+            retry = asyncio.create_task(player_view._retry_after_auth())
+            assert await asyncio.to_thread(close_started.wait, 1)
+            assert close_thread and close_thread[0] != ui_thread
+
+            # The event loop continues dispatching while prepared-session close
+            # is blocked in its worker thread.
+            await asyncio.sleep(0)
+            assert retry.done() is False
+
+            release_close.set()
+            await retry
+        finally:
+            release_close.set()
+            release_guard.cancel()
+
+        assert player_view._prepared_entry is None
+        player_view._run_task.assert_called_once()
 
     asyncio.run(scenario())
 

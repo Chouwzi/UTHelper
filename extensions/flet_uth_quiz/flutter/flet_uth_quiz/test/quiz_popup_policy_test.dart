@@ -73,4 +73,39 @@ void main() {
       QuizPopupRequestKind.limitReached,
     );
   });
+
+  test('allows HTTPS subframes and blank frames but blocks unsafe schemes', () {
+    for (final value in [
+      'https://courses.ut.edu.vn/pluginfile.php/quiz-image.png',
+      'https://media.example.org/quiz-video.mp4',
+      'about:blank',
+      'about:blank#question-frame',
+    ]) {
+      expect(
+        allowsQuizSubframeNavigation(value),
+        isTrue,
+        reason: value,
+      );
+    }
+
+    for (final value in [
+      null,
+      '',
+      'http://media.example.org/insecure-video.mp4',
+      'javascript:alert(1)',
+      'file:///private/data',
+      'content://provider/item',
+      'data:text/html,example',
+      'blob:https://courses.ut.edu.vn/id',
+      'ftp://example.org/file',
+      'https://student@media.example.org/file',
+      'about:settings',
+    ]) {
+      expect(
+        allowsQuizSubframeNavigation(value),
+        isFalse,
+        reason: '$value',
+      );
+    }
+  });
 }

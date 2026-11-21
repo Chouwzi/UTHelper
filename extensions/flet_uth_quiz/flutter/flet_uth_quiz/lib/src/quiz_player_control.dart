@@ -450,7 +450,13 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     bool popup = false,
   }) {
     if (_disposed) return NavigationActionPolicy.CANCEL;
-    if (!action.isForMainFrame) return NavigationActionPolicy.ALLOW;
+    if (!action.isForMainFrame) {
+      return allowsQuizSubframeNavigation(
+        action.request.url?.toString(),
+      )
+          ? NavigationActionPolicy.ALLOW
+          : NavigationActionPolicy.CANCEL;
+    }
 
     final destination = Uri.tryParse(action.request.url?.toString() ?? '');
     if (popup && destination?.toString() == 'about:blank') {
