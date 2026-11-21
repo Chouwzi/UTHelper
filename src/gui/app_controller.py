@@ -51,7 +51,7 @@ from config import (
     save_settings,
     settings,
 )
-from platform_utils.background_sync import AndroidSecretBackend
+from platform_utils.background_sync import MobileSecretBackend
 from platform_utils.update_packages import (
     DownloadedPackageVerifier,
     detect_runtime_target,
@@ -301,12 +301,12 @@ class AppController:
             self._update_coordinator.start()
 
         if (
-            platform_utils.IS_ANDROID
+            platform_utils.IS_MOBILE
             and self._android_background
             and self._android_background.available
         ):
             self._safe_run_task(
-                self._startup_android_sequence,
+                self._startup_mobile_sequence,
                 has_cached_snapshot,
                 needs_initial_sync,
             )
@@ -623,7 +623,7 @@ class AppController:
         url: str,
         fallback_url: str | None = None,
     ) -> bool:
-        allowed_schemes = {"market", "ms-windows-store", "https"}
+        allowed_schemes = {"market", "ms-windows-store", "itms-apps", "https"}
         if urlsplit(url).scheme.lower() not in allowed_schemes:
             return False
         safe_fallback = (
@@ -1423,7 +1423,8 @@ class AppController:
                 ],
                 spacing=4,
             )
-            padding = ft.Padding.only(left=16, right=8, top=25, bottom=8)
+            # The enclosing SafeArea already accounts for the notch/Dynamic Island.
+            padding = ft.Padding.only(left=16, right=8, top=8, bottom=8)
         else:
             self._sync_status.control.expand = True
             self.status_text.no_wrap = True
@@ -2187,12 +2188,12 @@ class AppController:
             getattr(self, "_cache_requires_server_refresh", False)
         )
 
-    async def _startup_android_sequence(
+    async def _startup_mobile_sequence(
         self,
         has_cached_snapshot: bool = False,
         needs_initial_sync: bool = True,
     ) -> None:
-        """Hydrate AndroidKeyStore secrets, migrate legacy JSON, and start sync."""
+        """Hydrate native mobile secrets, migrate legacy JSON, and start sync."""
         bridge = getattr(self, "_android_background", None)
         if bridge and bridge.available:
             vault_secrets: dict[str, str] = {}
@@ -2211,12 +2212,12 @@ class AppController:
                 except Exception as exc:
                     if attempt == len(retry_delays):
                         logger.warning(
-                            "Failed to read Android secret vault: %s",
+                            "Failed to read native mobile secret vault: %s",
                             type(exc).__name__,
                         )
 
             if vault_read_ok:
-                backend = AndroidSecretBackend(
+                backend = MobileSecretBackend(
                     asyncio.get_running_loop(),
                     bridge,
                     vault_secrets,
@@ -2240,7 +2241,7 @@ class AppController:
                         await asyncio.to_thread(save_settings)
                     else:
                         logger.warning(
-                            "Android secret migration did not confirm; preserving legacy JSON"
+                            "Native mobile secret migration did not confirm; preserving legacy JSON"
                         )
 
             self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
@@ -2257,6 +2258,17 @@ class AppController:
             self._safe_run_task(self._show_login_dialog)
         else:
             self._safe_run_task(self._load_data_async, "startup")
+
+    async def _startup_android_sequence(
+        self,
+        has_cached_snapshot: bool = False,
+        needs_initial_sync: bool = True,
+    ) -> None:
+        """Compatibility wrapper for Android startup tests and integrations."""
+        await self._startup_mobile_sequence(
+            has_cached_snapshot,
+            needs_initial_sync,
+        )
 
     async def _initialize_android_background(self):
         """Attach native worker settings and prefer its cache after app restart."""

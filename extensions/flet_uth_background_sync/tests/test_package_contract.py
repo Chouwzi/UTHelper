@@ -350,3 +350,28 @@ def test_flutter_package_registers_ios_user_notifications_adapter():
     assert 'case "import_activities"' in swift
     assert "seenScheduleKeys" in swift
     assert "s.source_files = 'Classes/**/*.swift'" in podspec
+
+
+def test_ios_podspec_bundles_plugin_privacy_manifest():
+    podspec = (IOS / "flet_uth_background_sync.podspec").read_text(
+        encoding="utf-8"
+    )
+    manifest = IOS / "PrivacyInfo.xcprivacy"
+    assert manifest.is_file()
+    assert "flet_uth_background_sync_privacy" in podspec
+    assert "PrivacyInfo.xcprivacy" in podspec
+
+
+def test_ios_plugin_uses_keychain_for_app_secrets():
+    swift = (IOS / "Classes/UthBackgroundSyncPlugin.swift").read_text(
+        encoding="utf-8"
+    )
+    assert 'case "read_app_secrets"' in swift
+    assert 'case "write_app_secrets"' in swift
+    assert 'case "clear_app_secrets"' in swift
+    assert "SecItemCopyMatching" in swift
+    assert "SecItemUpdate" in swift
+    assert "SecItemAdd" in swift
+    assert "SecItemDelete" in swift
+    assert "kSecAttrAccessibleWhenUnlockedThisDeviceOnly" in swift
+    assert "kSecAttrSynchronizable" not in swift

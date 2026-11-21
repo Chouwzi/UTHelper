@@ -21,7 +21,7 @@ _VALID_UI_PLATFORMS = frozenset({"android", "ios", "desktop"})
 # Runtime capability flags. These must never be changed by the UI override.
 IS_WINDOWS = sys.platform == "win32"
 IS_ANDROID = hasattr(sys, "_ANDROID_") or "android" in sys.platform.lower()
-IS_IOS = hasattr(sys, "_IOS_")
+IS_IOS = hasattr(sys, "_IOS_") or sys.platform.lower() == "ios"
 IS_MOBILE = IS_ANDROID or IS_IOS
 IS_DESKTOP = not IS_MOBILE
 

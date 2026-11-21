@@ -1,5 +1,7 @@
 import CryptoKit
+import Foundation
 import Flutter
+import Security
 import UIKit
 import UserNotifications
 
@@ -10,6 +12,8 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private static let classSchedulePrefix = "uth.class."
     private static let settingsKey = "uth.notification.settings"
     private static let receiptsKey = "uth.notification.receipts"
+    private static let appSecretsService = "com.uthelper.app-secrets"
+    private static let appSecretsAccount = "settings"
 
     private let center = UNUserNotificationCenter.current()
     private let defaults = UserDefaults.standard
@@ -43,6 +47,39 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "set_credentials":
             // iOS schedules from the foreground snapshot and never persists Moodle tokens.
             result(nil)
+
+        case "read_app_secrets":
+            do {
+                result(try readAppSecrets())
+            } catch {
+                result(keychainFlutterError(error, operation: "read"))
+            }
+
+        case "write_app_secrets":
+            let arguments = call.arguments as? [String: Any]
+            let rawSecrets = arguments?["secrets"] as? [String: Any] ?? [:]
+            var secrets: [String: String] = [:]
+            for (rawKey, rawValue) in rawSecrets {
+                let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                let value = String(describing: rawValue)
+                if !key.isEmpty && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    secrets[key] = value
+                }
+            }
+            do {
+                try writeAppSecrets(secrets)
+                result(true)
+            } catch {
+                result(keychainFlutterError(error, operation: "write"))
+            }
+
+        case "clear_app_secrets":
+            do {
+                try clearAppSecrets()
+                result(true)
+            } catch {
+                result(keychainFlutterError(error, operation: "clear"))
+            }
 
         case "import_activities":
             let arguments = call.arguments as? [String: Any]
@@ -554,6 +591,82 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         }
     }
 
+    private func appSecretsQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.appSecretsService,
+            kSecAttrAccount as String: Self.appSecretsAccount,
+        ]
+    }
+
+    private func readAppSecrets() throws -> [String: String] {
+        var query = appSecretsQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return [:] }
+        guard status == errSecSuccess else {
+            throw KeychainVaultError(status: status)
+        }
+        guard let data = item as? Data,
+              let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw KeychainVaultError(status: errSecDecode)
+        }
+        var secrets: [String: String] = [:]
+        for (key, value) in raw {
+            guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let secret = value as? String,
+                  !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            secrets[key] = secret
+        }
+        return secrets
+    }
+
+    private func writeAppSecrets(_ secrets: [String: String]) throws {
+        guard !secrets.isEmpty else {
+            try clearAppSecrets()
+            return
+        }
+        let data = try JSONSerialization.data(withJSONObject: secrets, options: [.sortedKeys])
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
+        let updateStatus = SecItemUpdate(
+            appSecretsQuery() as CFDictionary,
+            attributes as CFDictionary
+        )
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainVaultError(status: updateStatus)
+        }
+        var addQuery = appSecretsQuery()
+        attributes.forEach { addQuery[$0.key] = $0.value }
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw KeychainVaultError(status: addStatus)
+        }
+    }
+
+    private func clearAppSecrets() throws {
+        let status = SecItemDelete(appSecretsQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainVaultError(status: status)
+        }
+    }
+
+    private func keychainFlutterError(_ error: Error, operation: String) -> FlutterError {
+        let status = (error as? KeychainVaultError)?.status ?? errSecInternalError
+        return FlutterError(
+            code: "keychain_\(operation)_failed",
+            message: "iOS Keychain operation failed",
+            details: ["status": status]
+        )
+    }
+
     /// Clears only countdown/deadline notifications, preserving class-schedule
     /// reminders. Used when the deadline switch is turned off and on Moodle
     /// logout, where the Portal schedule must stay armed.
@@ -634,4 +747,8 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private func stringArray(_ value: Any?) -> [String] {
         (value as? [Any] ?? []).compactMap { $0 as? String }
     }
+}
+
+private struct KeychainVaultError: Error {
+    let status: OSStatus
 }

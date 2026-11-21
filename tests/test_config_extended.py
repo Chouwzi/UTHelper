@@ -487,6 +487,65 @@ def test_is_real_android_excludes_ios(monkeypatch):
     assert config._is_real_android() is True
 
 
+def test_ios_ignores_keyring_until_native_keychain_backend_is_registered(
+    monkeypatch,
+):
+    import config
+
+    monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+    monkeypatch.setattr(config.sys, "_IOS_", True, raising=False)
+    monkeypatch.setattr(config.sys, "platform", "ios")
+    monkeypatch.setattr(config, "_HAS_KEYRING", True)
+    config.register_secret_backend(None)
+
+    assert config._is_real_ios() is True
+    assert config._is_real_mobile() is True
+    assert config._has_any_secure_backend() is False
+
+
+def test_ios_queues_legacy_plaintext_secrets_and_never_saves_them_back(
+    monkeypatch, tmp_path
+):
+    import config
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120001",
+                "UTH_PASSWORD": "legacy-ios-password",
+                "THEME": "sakura_pink",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+    monkeypatch.setattr(config.sys, "_IOS_", True, raising=False)
+    monkeypatch.setattr(config.sys, "platform", "ios")
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+    config.pop_pending_plaintext_migration()
+
+    loaded = config.load_settings()
+    assert loaded.UTH_PASSWORD == "legacy-ios-password"
+    assert config.pop_pending_plaintext_migration() == {
+        "password": "legacy-ios-password"
+    }
+    monkeypatch.setattr(config, "settings", loaded)
+    assert config.save_settings() is False
+    stored = json.loads(config_file.read_text(encoding="utf-8"))
+    assert stored["UTH_PASSWORD"] == "legacy-ios-password"
+
+    config.register_secret_backend(_FakeSecretBackend())
+    try:
+        assert config.save_settings() is True
+        scrubbed = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "UTH_PASSWORD" not in scrubbed
+    finally:
+        config.register_secret_backend(None)
+
+
 def test_android_save_settings_fails_closed_without_backend_when_secrets_non_empty(
     monkeypatch, tmp_path
 ):

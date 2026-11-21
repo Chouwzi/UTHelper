@@ -52,6 +52,14 @@ def _is_real_android() -> bool:
         or "android" in sys.platform.lower()
     )
 
+
+def _is_real_ios() -> bool:
+    return bool(getattr(sys, "_IOS_", False)) or sys.platform == "ios"
+
+
+def _is_real_mobile() -> bool:
+    return _is_real_android() or _is_real_ios()
+
 def is_windows():
     return sys.platform == 'win32'
 
@@ -133,7 +141,7 @@ def hydrate_secrets(values: Mapping[str, str]) -> None:
 
 
 def pop_pending_plaintext_migration() -> dict[str, str]:
-    """Return and clear any legacy plaintext JSON secrets captured on Android startup."""
+    """Return and clear legacy JSON secrets queued for native mobile migration."""
     with _settings_save_lock:
         if not _pending_plaintext_migration:
             return {}
@@ -151,7 +159,7 @@ def _read_secret(key: str) -> str:
         except Exception:
             logging.getLogger(__name__).debug("Secret backend read failed", exc_info=True)
             return ""
-    if _HAS_KEYRING:
+    if _HAS_KEYRING and not _is_real_mobile():
         try:
             val = keyring.get_password(KEYRING_SERVICE_NAME, key)
             if val:
@@ -176,7 +184,7 @@ def _write_secret(key: str, value: str) -> bool:
         except Exception as exc:
             _logger.warning("Native secret backend write failed: %s", type(exc).__name__)
             return False
-    if _HAS_KEYRING:
+    if _HAS_KEYRING and not _is_real_mobile():
         try:
             if value:
                 keyring.set_password(KEYRING_SERVICE_NAME, key, value)
@@ -194,7 +202,7 @@ def _write_secret(key: str, value: str) -> bool:
 
 def _has_any_secure_backend() -> bool:
     """Kiểm tra có backend nào an toàn hay không."""
-    return _HAS_KEYRING or (_secret_backend is not None)
+    return _secret_backend is not None or (_HAS_KEYRING and not _is_real_mobile())
 
 
 _settings_save_lock = threading.RLock()
@@ -243,7 +251,7 @@ def _snapshot_secure_secrets() -> dict[str, str] | None:
                 type(exc).__name__,
             )
             return None
-    if not _HAS_KEYRING:
+    if not _HAS_KEYRING or _is_real_mobile():
         return None
     snapshot: dict[str, str] = {}
     try:
@@ -496,7 +504,7 @@ def load_settings() -> Settings:
         for attr, val in json_secrets.items():
             if not getattr(s, attr, ''):
                 setattr(s, attr, val)
-        if _is_real_android():
+        if _is_real_mobile():
             with _settings_save_lock:
                 _pending_plaintext_migration.clear()
                 for attr, val in json_secrets.items():
@@ -505,7 +513,7 @@ def load_settings() -> Settings:
                         _pending_plaintext_migration[key_suffix] = val
 
     # Legacy migration
-    if _HAS_KEYRING and s.UTH_USERNAME and not s.UTH_PASSWORD:
+    if _HAS_KEYRING and not _is_real_mobile() and s.UTH_USERNAME and not s.UTH_PASSWORD:
         try:
             kp = keyring.get_password(KEYRING_SERVICE_NAME, s.UTH_USERNAME)
             if kp:
@@ -526,13 +534,13 @@ def save_settings() -> bool:
         has_secure = _has_any_secure_backend()
         data = settings.model_dump()
         if not has_secure:
-            if _is_real_android():
+            if _is_real_mobile():
                 has_non_empty_secret = any(
                     bool(getattr(settings, attr, "")) for attr in _SECRET_FIELDS
                 )
                 if has_non_empty_secret:
                     _logger.warning(
-                        "Refusing to persist plaintext secrets on Android without a secure backend"
+                        "Refusing to persist plaintext secrets on mobile without a secure backend"
                     )
                     return False
             else:

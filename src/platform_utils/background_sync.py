@@ -208,8 +208,8 @@ class AndroidBackgroundBridge:
         return bool(await clear_fn())
 
 
-class AndroidSecretBackend:
-    """Thread-safe sync-to-async secret store backed by AndroidBackgroundBridge."""
+class MobileSecretBackend:
+    """Thread-safe sync-to-async secret store backed by a native mobile bridge."""
 
     def __init__(
         self,
@@ -267,11 +267,11 @@ class AndroidSecretBackend:
         }
         if self._is_on_loop_thread():
             logger.warning(
-                "Refusing blocking Android secret write on the event loop thread"
+                "Refusing blocking mobile secret write on the event loop thread"
             )
             return False
         if self._loop.is_closed():
-            logger.warning("Android secret write failed: event loop is closed")
+            logger.warning("Mobile secret write failed: event loop is closed")
             return False
         future = asyncio.run_coroutine_threadsafe(
             self._bridge.write_app_secrets(normalized),
@@ -282,7 +282,7 @@ class AndroidSecretBackend:
         except Exception as exc:
             future.cancel()
             logger.warning(
-                "Android secret vault write failed: %s", type(exc).__name__
+                "Mobile secret vault write failed: %s", type(exc).__name__
             )
             return False
         if ok:
@@ -311,3 +311,7 @@ def create_android_background_bridge(page):
 
 # Platform-neutral name for new call sites; keep the old factory for compatibility.
 create_mobile_background_bridge = create_android_background_bridge
+
+# Keep the Android name for existing integrations while both mobile platforms
+# use the same Python-side secure-storage contract.
+AndroidSecretBackend = MobileSecretBackend
