@@ -371,7 +371,7 @@ def test_retryable_failures_are_retained_without_busy_retry(
     tmp_path, monkeypatch, outcome
 ):
     client, _ = _install_fake_client(monkeypatch, [outcome])
-    spool, worker = _worker_with_one_report(tmp_path)
+    spool, worker = _worker_with_one_report(tmp_path, monotonic=lambda: 0.0)
 
     summary = worker.flush_once(CrashConsent.ENABLED, deadline_seconds=0.2)
 

@@ -13,6 +13,7 @@ from diagnostics.logging_setup import (
 from diagnostics.models import AppPhase
 from diagnostics.runtime import create_default_runtime
 from gui.controllers.startup_visibility import is_autostart_launch
+from platform_utils import quiz_client_bootstrap
 from platform_utils.single_instance import bootstrap_windows_instance
 
 # Force stdout/stderr to be unbuffered/line-buffered
@@ -152,7 +153,12 @@ def _show_crash_screen(page, ft, reference: str | None):
 
 
 def _is_web_mode(argv, environ) -> bool:
-    return environ.get("FLET_WEB") == "1" or "--web" in argv
+    forced_web = str(environ.get("FLET_FORCE_WEB_SERVER", "")).casefold()
+    return (
+        environ.get("FLET_WEB") == "1"
+        or "--web" in argv
+        or forced_web in {"1", "true", "yes"}
+    )
 
 
 def _is_source_checkout(module_path: Path) -> bool:
@@ -278,6 +284,39 @@ def main() -> int:
         )
         if result.exit_code is not None:
             return result.exit_code
+
+    if desktop_windows and development and not _TEST_MODE:
+        project_root = Path(__file__).resolve().parents[1]
+        added_quiz_source: Path | None = None
+        try:
+            # Flet's Windows resolver searches ``cwd/build/windows`` for the
+            # custom client. A direct ``python path\to\main.py`` launch may
+            # start outside the checkout; Flet CLI child processes keep their
+            # storage working directory and are already launched from the app
+            # project by the CLI.
+            if os.environ.get("FLET_DISPLAY_URL_PREFIX"):
+                if Path.cwd().resolve() != project_root.resolve():
+                    raise quiz_client_bootstrap.QuizClientBootstrapError(
+                        "flet run was started outside the project root; "
+                        "the custom Windows quiz client is unavailable."
+                    )
+            else:
+                os.chdir(project_root)
+            # Source checkouts are not necessarily installed with ``pip -e``.
+            # Make their Python control available, then ensure Flet's desktop
+            # resolver has a client compiled with the matching Dart extension.
+            added_quiz_source = quiz_client_bootstrap.add_source_quiz_package_to_path(
+                project_root
+            )
+            quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
+            quiz_client_bootstrap.set_source_quiz_client_ready(True)
+        except Exception as exc:
+            quiz_client_bootstrap.set_source_quiz_client_ready(False)
+            quiz_client_bootstrap.remove_source_quiz_package_from_path(
+                added_quiz_source
+            )
+            _boot_log(f"Windows quiz client bootstrap failed: {exc}")
+            logger.error("Windows quiz client bootstrap failed: %s", exc)
 
     runtime = None
     try:

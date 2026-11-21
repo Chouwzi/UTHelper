@@ -56,6 +56,10 @@ def inspect_bundle(
         issues.append("Python runtime DLL is missing")
     if not (root / "flutter_windows.dll").is_file():
         issues.append("Flutter runtime DLL is missing")
+    if not (root / "flutter_inappwebview_windows_plugin.dll").is_file():
+        issues.append("flutter_inappwebview_windows_plugin.dll is missing")
+    if not (root / "WebView2Loader.dll").is_file():
+        issues.append("WebView2Loader.dll is missing")
 
     encodings = root / "Lib" / "encodings"
     if not encodings.is_dir() or not any(encodings.glob("__init__.py*")):
@@ -93,6 +97,13 @@ def inspect_bundle(
                 issues.append(f"packaged {label} module is missing")
         if not any((site_packages / "pywin32_system32").glob("pywintypes3*.dll")):
             issues.append("packaged pywintypes runtime is missing")
+        quiz_pkg = site_packages / "flet_uth_quiz"
+        if (
+            not quiz_pkg.is_dir()
+            or not any(quiz_pkg.glob("__init__.py*"))
+            or not any(quiz_pkg.glob("quiz_player.py*"))
+        ):
+            issues.append("packaged flet_uth_quiz extension is missing")
 
     return tuple(issues)
 

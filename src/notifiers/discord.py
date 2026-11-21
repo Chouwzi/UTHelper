@@ -1,7 +1,8 @@
 import logging
-import httpx
 from datetime import datetime
 from typing import List
+from urllib.parse import urlsplit
+import httpx
 from models import Assignment
 from config import settings
 from core.time_utils import format_remaining_time
@@ -38,7 +39,11 @@ class DiscordNotifier(BaseNotifier):
         tasks = assignments
         if not tasks: return True
 
-        webhook_url = settings.DISCORD_WEBHOOK_URL
+        webhook_url = str(settings.DISCORD_WEBHOOK_URL).strip()
+        parsed_webhook = urlsplit(webhook_url)
+        if parsed_webhook.scheme.lower() != "https" or not parsed_webhook.netloc:
+            logger.error("[Discord] Lỗi cấu hình webhook: URL không hợp lệ")
+            return False
 
         # Count urgencies for smart summary
         critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
@@ -118,6 +123,13 @@ class DiscordNotifier(BaseNotifier):
             r.raise_for_status()
             logger.info(f'[Discord] Đã gửi thông báo cho {len(tasks)} bài tập.')
             return True
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            logger.error("[Discord] Lỗi gửi thông báo: HTTP %s", status_code)
+            return False
+        except httpx.RequestError as e:
+            logger.error("[Discord] Lỗi kết nối: %s", type(e).__name__)
+            return False
         except Exception as e:
-            logger.error(f'[Discord] Lỗi gửi thông báo: {e}')
+            logger.error("[Discord] Lỗi gửi thông báo: %s", type(e).__name__)
             return False

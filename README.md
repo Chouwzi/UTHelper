@@ -40,7 +40,7 @@ UTHelper là dự án độc lập dành cho sinh viên. Dự án không đại 
 Đại học Giao thông vận tải Thành phố Hồ Chí Minh và không thay thế các cổng
 thông tin chính thức của trường.
 
-Phiên bản mã nguồn hiện tại là `2.5.0`. UI, runtime package và số build nền tảng
+Phiên bản mã nguồn hiện tại là `2.5.1`. UI, runtime package và số build nền tảng
 đều được sinh từ version canonical trong `pyproject.toml`; không chỉnh version
 riêng trong từng nền tảng.
 
@@ -111,6 +111,7 @@ Cài project, extension native và công cụ kiểm tra:
 ```powershell
 python -m pip install -e ".[windows]"
 python -m pip install -e extensions\flet_uth_background_sync
+python -m pip install -e extensions\flet_uth_quiz
 python -m pip install pytest pytest-timeout ruff
 ```
 
@@ -126,6 +127,16 @@ python scripts\measure_ui_performance.py
 Các test live dùng tài khoản hoặc course thật bị tắt theo mặc định. Không đưa
 credential, cookie, token, HAR chưa che dữ liệu hoặc payload sinh viên vào
 commit, fixture hay log CI.
+
+Luồng làm quiz trong app dùng custom Flet client trên Windows, Android và iOS.
+Trên Windows, chạy `python src\main.py` để mở app từ source; lần đầu và sau khi
+sửa mã nguồn Flutter hoặc cấu hình extension cục bộ, app tự build client WebView trước khi mở.
+`flet run src\main.py` cũng hỗ trợ hot reload Python qua cùng client. Nếu thiếu
+công cụ build, app vẫn mở nhưng báo trình xem quiz chưa sẵn sàng và giữ nút mở
+bằng trình duyệt để người dùng chọn rõ ràng. Chế độ `--web` vẫn dùng đường mở
+trình duyệt. Xem
+[kiểm chứng quiz](docs/testing/embedded-quiz.md) để phân biệt test nguồn, build
+native và nghiệm thu lưu/nộp bài trên Moodle.
 
 Đọc [CONTRIBUTING.md](CONTRIBUTING.md) trước khi mở pull request. Repository dùng
 Gitflow: tính năng và bugfix đi vào `develop`; release ổn định đi từ `develop`

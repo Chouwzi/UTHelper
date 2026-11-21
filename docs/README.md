@@ -14,7 +14,10 @@ UI và metadata đóng gói được sinh từ nguồn này.
   assignment workflow semantics.
 - [UTH Portal API](api/portal.md) — redacted reverse-engineered Portal contracts.
 - [Windows packaging](guides/windows-packaging.md) — build, verify, sign, and package
-  the Windows release.
+  the Windows LTS MSI/Burn EXE and Microsoft Store MSIX releases.
+- [Store distribution & submission](guides/store-distribution-submission.md) —
+  Google Play (`chplay`), Microsoft Store (`msstore`), GitHub LTS (`apk_lts`,
+  `exe_lts`), WACK validation, and deferred Apple App Store roadmap.
 - [Gitflow policy](guides/gitflow.md) — branch direction, merge contract, and
   GitHub ruleset enforcement.
 - [Theme system](design/theme-system.md) — semantic color contract, dark-theme
@@ -23,6 +26,8 @@ UI và metadata đóng gói được sinh từ nguồn này.
   iOS, or desktop presentation on another runtime.
 - [Notification E2E matrix](testing/notification-e2e-matrix.md) — automated and
   real-device evidence expected per platform.
+- [Embedded quiz](testing/embedded-quiz.md) — native player, session boundaries,
+  build checks and provider acceptance for Courses and THNN.
 - [Package performance](testing/package-performance.md) — measured APK/IPA size,
   packaging tradeoffs and isolated Windows installation benchmarks.
 - [Android device performance](testing/android-device-performance.md) — physical

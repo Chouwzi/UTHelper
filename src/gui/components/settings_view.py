@@ -10,6 +10,8 @@ import flet as ft
 import asyncio
 import logging
 from dataclasses import replace
+from urllib.parse import urlsplit
+from core.distribution import DistributionProfile, resolve_distribution_channel
 from gui.core.theme import (
     C,
     THEME_ORDER,
@@ -41,14 +43,20 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import ClassScheduleLeadHoursError, SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url)
         self._init_controls()
         self._init_layout()
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update):
+    def _get_distribution_profile(self) -> DistributionProfile:
+        profile = getattr(self, "_distribution_profile", None)
+        if profile is not None:
+            return profile
+        return resolve_distribution_channel()
+
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -60,6 +68,14 @@ class SettingsView(ft.Container):
         self._on_test_mail = on_test_mail
         self._on_theme_preview = on_theme_preview
         self._on_check_update = on_check_update
+        self._on_update_action = on_update_action
+        self._on_cancel_update = on_cancel_update
+        self._distribution_profile = (
+            distribution_profile
+            if distribution_profile is not None
+            else resolve_distribution_channel()
+        )
+        self._on_open_store_url = on_open_store_url
         self.visible  = False
         self.expand   = True
         self.bgcolor  = C.BG
@@ -93,8 +109,14 @@ class SettingsView(ft.Container):
             width=8, height=8, border_radius=4,
             bgcolor=C.CRITICAL, visible=False,
         )
+        profile = self._get_distribution_profile()
+        version_label = (
+            f"UTHelper v{APP_VERSION}"
+            if profile.supports_github_self_update
+            else f"UTHelper v{APP_VERSION} · {profile.store_display_name}"
+        )
         self._hub_title = ft.Text("Cài đặt", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER, expand=True)
-        self._hub_version = ft.Text(f"UTHelper v{APP_VERSION}", size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
+        self._hub_version = ft.Text(version_label, size=11, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
         self._title_text = self._hub_title
         self._version_text = self._hub_version
 
@@ -154,6 +176,45 @@ class SettingsView(ft.Container):
         init_account_controls(self)
         init_display_controls(self)
         init_system_controls(self)
+        self._update_status_text = ft.Text(
+            "",
+            size=11,
+            color=C.TEXT_SECONDARY,
+            visible=False,
+        )
+        self._update_progress = ft.ProgressBar(
+            value=0,
+            width=260,
+            height=3,
+            color=C.UPDATE,
+            bgcolor=C.BORDER,
+            visible=False,
+        )
+        self._update_action_btn = ft.Button(
+            "",
+            visible=False,
+            bgcolor=C.SURFACE,
+            color=C.TEXT_PRIMARY,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+            on_click=self._handle_update_action,
+        )
+        self._update_cancel_btn = ft.TextButton(
+            "Hủy tải",
+            visible=False,
+            style=ft.ButtonStyle(color=C.TEXT_SECONDARY),
+            on_click=self._handle_cancel_update,
+        )
+        self._update_action_row = ft.Row(
+            [self._update_action_btn, self._update_cancel_btn],
+            spacing=8,
+            visible=False,
+        )
+        self._update_status_group = ft.Column(
+            [self._update_status_text, self._update_progress, self._update_action_row],
+            spacing=4,
+            tight=True,
+            visible=False,
+        )
         init_privacy_controls(self)
         init_urgency_controls(self)
         init_theme_controls(self)
@@ -264,11 +325,14 @@ class SettingsView(ft.Container):
                 self._debug_mobile_text,
             ])
 
+        if self._get_distribution_profile().supports_github_self_update:
+            _debug_sections.extend([
+                ft.Divider(height=1, color=C.BORDER),
+                _update_section_label,
+                _update_buttons,
+                self._debug_update_text,
+            ])
         _debug_sections.extend([
-            ft.Divider(height=1, color=C.BORDER),
-            _update_section_label,
-            _update_buttons,
-            self._debug_update_text,
             ft.Divider(height=1, color=C.BORDER),
             _action_section_label,
             _action_buttons,
@@ -281,13 +345,24 @@ class SettingsView(ft.Container):
         )
 
     def _init_layout(self):
+        profile = self._get_distribution_profile()
+        system_subtitle = (
+            "Khởi động · Cập nhật"
+            if profile.supports_github_self_update
+            else "Đồng bộ · Cập nhật"
+        )
+        system_desc = (
+            "Khởi động cùng Windows và cập nhật"
+            if profile.supports_github_self_update
+            else "Cấu hình hệ thống và đồng bộ dữ liệu"
+        )
         self._category_defs = [
             ("account", ft.Icons.PERSON_ROUNDED, "Tài khoản", "Đăng nhập UTH", "Thông tin tài khoản và kết nối e-learning"),
             ("display", ft.Icons.VISIBILITY_ROUNDED, "Hiển thị", "Bộ lọc · Cửa sổ", "Tùy chỉnh hiển thị bài tập trên màn hình"),
             ("notification", ft.Icons.NOTIFICATIONS_ROUNDED, "Thông báo", "Nhắc nhở · Kênh gửi", "Cấu hình chế độ, mốc nhắc và kênh gửi"),
             ("urgency", ft.Icons.ACCESS_TIME_ROUNDED, "Cảnh báo", "Mốc thời gian · Mức độ", "Ngưỡng thời gian phân loại khẩn cấp"),
             ("theme", ft.Icons.PALETTE_ROUNDED, "Giao diện", "Chủ đề · Màu sắc", "Giao diện màu sắc và chủ đề ứng dụng"),
-            ("system", ft.Icons.SETTINGS_ROUNDED, "Hệ thống", "Khởi động · Cập nhật", "Khởi động cùng Windows và cập nhật"),
+            ("system", ft.Icons.SETTINGS_ROUNDED, "Hệ thống", system_subtitle, system_desc),
             ("privacy", ft.Icons.SHIELD_ROUNDED, "Riêng tư", "Dữ liệu · Quyền riêng tư", "Chẩn đoán sự cố và chính sách dữ liệu"),
             ("debug", ft.Icons.BUILD_ROUNDED, "Nâng cao", "Hiệu năng · Gỡ lỗi", "Hiệu năng tải và công cụ gỡ lỗi"),
         ]
@@ -484,6 +559,124 @@ class SettingsView(ft.Container):
         self._save_status.value = ""
         self._update_save_button_state()
         self.update()
+
+    def _handle_open_store_url(self, _event=None) -> bool:
+        profile = self._get_distribution_profile()
+        url = profile.store_url
+        if not url:
+            return False
+        fallback = getattr(profile, "store_fallback_url", None)
+        callback = getattr(self, "_on_open_store_url", None)
+        if callable(callback):
+            return bool(callback(url, fallback))
+        return self._launch_external_store_url(url, fallback)
+
+    def _launch_external_store_url(
+        self,
+        url: str,
+        fallback_url: str | None = None,
+    ) -> bool:
+        allowed_schemes = {"market", "ms-windows-store", "https"}
+        if urlsplit(url).scheme.lower() not in allowed_schemes:
+            return False
+        safe_fallback = (
+            fallback_url
+            if fallback_url and urlsplit(fallback_url).scheme.lower() == "https"
+            else None
+        )
+        page = getattr(self, "_page", None)
+        run_task = getattr(page, "run_task", None)
+        if not callable(run_task):
+            return False
+
+        async def _open() -> None:
+            async def _launch_single(target: str) -> None:
+                try:
+                    await ft.UrlLauncher().launch_url(
+                        target,
+                        mode=ft.LaunchMode.EXTERNAL_APPLICATION,
+                    )
+                    return
+                except RuntimeError as exc:
+                    if "must be added to the page first" not in str(exc):
+                        raise
+                    launch_fn = getattr(page, "launch_url", None)
+                    if (
+                        not callable(launch_fn)
+                        or getattr(launch_fn, "__func__", None) is ft.Page.launch_url
+                    ):
+                        raise
+                    await launch_fn(target)
+
+            try:
+                await _launch_single(url)
+            except Exception:
+                if safe_fallback:
+                    try:
+                        await _launch_single(safe_fallback)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "Failed to launch store fallback URL",
+                            exc_info=True,
+                        )
+                else:
+                    logging.getLogger(__name__).warning(
+                        "Failed to launch store URL",
+                        exc_info=True,
+                    )
+
+        run_task(_open)
+        return True
+
+    def _handle_update_action(self, _event=None) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        if self._on_update_action:
+            self._on_update_action()
+
+    def _handle_cancel_update(self, _event=None) -> None:
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        if self._on_cancel_update:
+            self._on_cancel_update()
+
+    def set_update_status(
+        self,
+        message: str,
+        *,
+        progress: float | None = None,
+        show_progress: bool = False,
+        action_label: str | None = None,
+        can_cancel: bool = False,
+        color=None,
+    ) -> None:
+        """Show update progress and actions while the settings page is open."""
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        self._update_status_text.value = message
+        self._update_status_text.visible = bool(message)
+        self._update_status_text.color = color or C.TEXT_SECONDARY
+        self._update_progress.visible = bool(show_progress)
+        self._update_progress.value = (
+            min(1.0, max(0.0, progress)) if progress is not None else None
+        )
+        self._update_action_btn.content = action_label or ""
+        self._update_action_btn.visible = bool(action_label)
+        self._update_cancel_btn.visible = bool(can_cancel)
+        self._update_action_row.visible = bool(action_label or can_cancel)
+        self._update_status_group.visible = bool(
+            message or show_progress or action_label or can_cancel
+        )
+        debug_text = getattr(self, "_debug_update_text", None)
+        if debug_text is not None:
+            debug_text.value = message
+            debug_text.color = color or C.TEXT_SECONDARY
+        try:
+            self.update()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Update status UI refresh skipped", exc_info=True
+            )
 
     def _navigate_to_hub(self):
         self._active_category_id = None
@@ -1164,6 +1357,13 @@ class SettingsView(ft.Container):
             self._hub_title.color = C.TEXT_PRIMARY
         if hasattr(self, '_hub_version'):
             self._hub_version.color = C.TEXT_SECONDARY
+        store_info = getattr(self, "_store_update_info_text", None)
+        if store_info is not None:
+            store_info.color = C.TEXT_PRIMARY
+        store_btn = getattr(self, "_store_link_btn", None)
+        if store_btn is not None:
+            store_btn.bgcolor = C.SURFACE
+            store_btn.color = C.TEXT_PRIMARY
 
     def _update_save_button_state(self):
         """Update save button appearance and disabled state based on dirty state machine."""
@@ -1483,6 +1683,7 @@ class SettingsView(ft.Container):
             f"Flet: {flet_ver}",
             f"Flags: Android={IS_ANDROID}, iOS={IS_IOS}, Mobile={IS_MOBILE}, Windows={IS_WINDOWS}",
             f"UI profile: {UI_PLATFORM} (override={UI_PLATFORM_OVERRIDE or 'none'})",
+            f"Channel: {self._get_distribution_profile().channel.value}",
             f"App: v{APP_VERSION}",
             f"Notifiers: {len(getattr(self._orchestrator, 'notifier', object()).notifiers) if hasattr(self._orchestrator, 'notifier') else '?'} registered",
             f"BG Check: {'ON' if cfg.BACKGROUND_CHECK_ANDROID else 'OFF'} (every {cfg.CHECK_INTERVAL_MINUTES}m)",
@@ -1875,18 +2076,29 @@ class SettingsView(ft.Container):
 
     # Update checker
     def _handle_check_update(self, _event):
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
         if self._on_check_update:
             self._on_check_update()
 
     def _do_force_check_update(self):
         """Force check for app updates."""
+        if not self._get_distribution_profile().supports_github_self_update:
+            return
+        debug_text = getattr(self, "_debug_update_text", None)
+        if debug_text is not None:
+            debug_text.value = "Đang kiểm tra cập nhật..."
+            debug_text.color = C.TEXT_SECONDARY
+            try:
+                debug_text.update()
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "Debug update text refresh skipped", exc_info=True
+                )
         if self._on_check_update:
             self._on_check_update()
             return
         import threading
-        self._debug_update_text.value = "Đang kiểm tra cập nhật..."
-        self._debug_update_text.color = C.TEXT_SECONDARY
-        self._debug_update_text.update()
 
         def _worker():
             try:
@@ -2139,6 +2351,7 @@ class SettingsView(ft.Container):
     def _on_autostart_toggle(self, _event):
         self._sync_autostart_dependency()
         self._autostart_status.value = ""
+        self._autostart_status.visible = False
         if hasattr(self, "_on_form_field_change"):
             self._on_form_field_change()
         try:
@@ -2157,6 +2370,7 @@ class SettingsView(ft.Container):
         self._sync_autostart_dependency()
         self._autostart_status.value = result.message
         self._autostart_status.color = C.SAFE if result.success else C.WARNING
+        self._autostart_status.visible = bool(result.message)
 
     async def _load_autostart_state(
         self, generation: int
@@ -2436,6 +2650,10 @@ class SettingsView(ft.Container):
                 self._sw_start_with_windows.disabled = True
                 self._autostart_status.value = "Đang kiểm tra trạng thái Windows..."
                 self._autostart_status.color = C.TEXT_SECONDARY
+                self._autostart_status.visible = True
+            else:
+                self._autostart_status.value = ""
+                self._autostart_status.visible = False
             self.update()
 
             autostart = await self._load_autostart_state(generation)
@@ -2739,7 +2957,7 @@ class SettingsView(ft.Container):
                     display_result = replace(result, enabled=actual)
                 self._apply_autostart_ui(display_result)
 
-            if not self._persist_snapshot_to_settings(persisted):
+            if not await asyncio.to_thread(self._persist_snapshot_to_settings, persisted):
                 autostart_restored = True
                 if (
                     autostart_may_need_compensation

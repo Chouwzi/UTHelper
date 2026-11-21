@@ -57,6 +57,7 @@ class VerificationResult:
 class LaunchResult:
     acknowledged: bool
     reason: str = ""
+    status: str = ""
 
 
 __all__ = [

@@ -119,3 +119,113 @@ def test_ignore_submitted(manager, mock_config):
 
     filtered = manager._filter_assignments([task_submitted, task_graded])
     assert len(filtered) == 0
+
+
+def test_telegram_notifier_sanitizes_bot_token_from_error_logs(monkeypatch, caplog):
+    import logging
+    import httpx
+    from notifiers import telegram as telegram_module
+    from notifiers.telegram import TelegramNotifier
+
+    secret_token = "987654321:SECRET_TELEGRAM_TOKEN_XYZ"
+    monkeypatch.setattr(telegram_module.settings, "ENABLE_TELEGRAM", True)
+    monkeypatch.setattr(telegram_module.settings, "TELEGRAM_BOT_TOKEN", secret_token)
+    monkeypatch.setattr(telegram_module.settings, "TELEGRAM_CHAT_ID", "112233")
+
+    sample_task = {
+        "title": "Lab 1",
+        "course_name": "CS101",
+        "deadline": datetime.now() + timedelta(hours=4),
+        "urgency": "critical",
+        "type": "assignment",
+    }
+
+    req = httpx.Request("POST", f"https://api.telegram.org/bot{secret_token}/sendMessage")
+    resp = httpx.Response(401, request=req, text="Unauthorized")
+    http_err = httpx.HTTPStatusError("401 Unauthorized for url", request=req, response=resp)
+
+    notifier = TelegramNotifier()
+    with caplog.at_level(logging.ERROR):
+        monkeypatch.setattr(
+            telegram_module.httpx,
+            "post",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(http_err),
+        )
+        assert notifier.notify([sample_task]) is False
+
+        conn_err = httpx.ConnectError(
+            f"connection failed to https://api.telegram.org/bot{secret_token}/sendMessage",
+            request=req,
+        )
+        monkeypatch.setattr(
+            telegram_module.httpx,
+            "post",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(conn_err),
+        )
+        assert notifier.notify([sample_task]) is False
+
+    assert secret_token not in caplog.text
+    assert "HTTP 401" in caplog.text
+    assert "ConnectError" in caplog.text
+
+
+def test_discord_notifier_validates_https_and_sanitizes_webhook_logs(monkeypatch, caplog):
+    import logging
+    import httpx
+    from notifiers import discord as discord_module
+    from notifiers.discord import DiscordNotifier
+
+    secret_webhook = "https://discord.com/api/webhooks/9999/DISCORD_SECRET_TOKEN_XYZ"
+    sample_task = {
+        "title": "Quiz 1",
+        "course_name": "CS102",
+        "deadline": datetime.now() + timedelta(hours=6),
+        "urgency": "warning",
+        "type": "quiz",
+    }
+
+    notifier = DiscordNotifier()
+    monkeypatch.setattr(discord_module.settings, "ENABLE_DISCORD", True)
+
+    post_calls = []
+    monkeypatch.setattr(
+        discord_module.httpx,
+        "post",
+        lambda *args, **kwargs: post_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        discord_module.settings,
+        "DISCORD_WEBHOOK_URL",
+        "http://discord.com/api/webhooks/9999/INSECURE_WEBHOOK",
+    )
+    with caplog.at_level(logging.ERROR):
+        assert notifier.notify([sample_task]) is False
+    assert post_calls == []
+    assert "INSECURE_WEBHOOK" not in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(discord_module.settings, "DISCORD_WEBHOOK_URL", secret_webhook)
+    req = httpx.Request("POST", secret_webhook)
+    resp = httpx.Response(500, request=req, text="Server Error")
+    http_err = httpx.HTTPStatusError("500 error", request=req, response=resp)
+
+    with caplog.at_level(logging.ERROR):
+        monkeypatch.setattr(
+            discord_module.httpx,
+            "post",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(http_err),
+        )
+        assert notifier.notify([sample_task]) is False
+
+        conn_err = httpx.ConnectError(f"failed {secret_webhook}", request=req)
+        monkeypatch.setattr(
+            discord_module.httpx,
+            "post",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(conn_err),
+        )
+        assert notifier.notify([sample_task]) is False
+
+    assert "DISCORD_SECRET_TOKEN_XYZ" not in caplog.text
+    assert secret_webhook not in caplog.text
+    assert "HTTP 500" in caplog.text
+    assert "ConnectError" in caplog.text

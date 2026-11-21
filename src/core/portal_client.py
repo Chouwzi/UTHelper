@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import inspect
 import json
 import threading
 import urllib.error
@@ -16,6 +17,33 @@ from core.today_schedule import (
     parse_portal_day,
     parse_portal_week,
 )
+
+_MAX_PORTAL_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class _SamePortalOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, origin: str) -> None:
+        super().__init__()
+        self.origin = origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        parsed = urllib.parse.urlsplit(redirected.full_url)
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" != self.origin
+        ):
+            raise urllib.error.HTTPError(
+                redirected.full_url,
+                code,
+                "Untrusted Portal redirect",
+                headers,
+                fp,
+            )
+        return redirected
 
 
 class PortalError(RuntimeError):
@@ -48,11 +76,32 @@ class PortalClient:
         base_url: str,
         *,
         timeout: float = 15,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        raw_base = str(base_url or "").strip()
+        parsed = urllib.parse.urlsplit(raw_base)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.netloc
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "PortalClient requires an https:// base_url without userinfo, query, or fragment"
+            )
+        self._origin = f"https://{parsed.netloc.lower()}"
+        self._base_url = raw_base.rstrip("/")
         self._timeout = max(1.0, float(timeout))
-        self._opener = opener
+        if opener is None:
+            default_opener = urllib.request.build_opener(
+                _SamePortalOriginRedirectHandler(self._origin)
+            )
+            self._opener = default_opener.open
+        else:
+            self._opener = opener
         self._token = ""
         # The cached token belongs to exactly one account: after an account
         # switch a stale token must never be replayed for the new username.
@@ -135,9 +184,47 @@ class PortalClient:
         )
         try:
             with self._opener(request, timeout=self._timeout) as response:
-                raw = response.read()
+                geturl = getattr(response, "geturl", None)
+                if callable(geturl):
+                    final_url = str(geturl() or "")
+                    if final_url:
+                        final_parsed = urllib.parse.urlsplit(final_url)
+                        final_origin = (
+                            f"{final_parsed.scheme.lower()}://{final_parsed.netloc.lower()}"
+                        )
+                        if (
+                            final_parsed.username is not None
+                            or final_parsed.password is not None
+                            or final_origin != self._origin
+                        ):
+                            raise PortalProtocolError(
+                                "Portal response redirected outside trusted origin"
+                            )
+                read_fn = response.read
+                try:
+                    sig = inspect.signature(read_fn)
+                    accepts_amt = any(
+                        p.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.VAR_POSITIONAL,
+                        )
+                        for p in sig.parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    accepts_amt = True
+                raw = (
+                    read_fn(_MAX_PORTAL_RESPONSE_BYTES + 1)
+                    if accepts_amt
+                    else read_fn()
+                )
+                if len(raw) > _MAX_PORTAL_RESPONSE_BYTES:
+                    raise PortalProtocolError("Portal response exceeded maximum size")
                 if response.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
+                    if len(raw) > _MAX_PORTAL_RESPONSE_BYTES:
+                        raise PortalProtocolError("Portal response exceeded maximum size")
         except urllib.error.HTTPError as exc:
             raise _PortalHttpError(exc.code) from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
