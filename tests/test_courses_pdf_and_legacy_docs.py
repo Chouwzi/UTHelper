@@ -851,6 +851,45 @@ def test_legacy_ole2_adversarial_ssat_cycles_ssz_dir_cycles_and_bounded_reader(
     assert capsys.readouterr().out == ""
 
 
+def test_legacy_xls_empty_workbook_with_cyclic_book_ssat_and_silent_logfile(
+    monkeypatch, capsys
+):
+    import sys
+    import time
+
+    monkeypatch.setitem(sys.modules, "olefile", None)
+    capsys.readouterr()
+
+    # Empty "Workbook" (tot_size=0, first_SID=-2) + "Book" with 2-node cyclic SSAT (0 -> 1 -> 0)
+    cyc_bypass_xls = bytearray(
+        _build_ministream_ole2_cfb(
+            {
+                "Workbook": b"",
+                "Book": b"\x09\x08\x00\x00" + b"\x00" * 100,
+            }
+        )
+    )
+    ssat_sec = struct.unpack_from("<i", cyc_bypass_xls, 60)[0]
+    struct.pack_into("<II", cyc_bypass_xls, 512 + ssat_sec * 512, 1, 0)
+
+    t0 = time.monotonic()
+    res = convert_document_bytes("empty_wb_cyclic_book.xls", bytes(cyc_bypass_xls), "xlsx")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0
+    assert res.kind == "xlsx"
+    assert "Không thể đọc tệp Excel .xls cũ." in res.markdown_text
+    assert capsys.readouterr().out == ""
+
+    # Valid-header .xls with trailing non-512 bytes passes _precheck_ole2_xls into xlrd.open_workbook
+    # and must not emit CompDoc "WARNING *** file size ..." lines to stdout.
+    trailing_xls = _build_minimal_ole2_cfb({"Workbook": b"\x09\x08\x00\x00" + b"\x00" * 16}) + (
+        b"\x00" * 13
+    )
+    res_trailing = convert_document_bytes("trailing_bytes.xls", trailing_xls, "xlsx")
+    assert res_trailing.kind == "xlsx"
+    assert capsys.readouterr().out == ""
+
+
 def _png_bytes(width: int = 12, height: int = 8) -> bytes:
     from PIL import Image
 

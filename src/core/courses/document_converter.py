@@ -4442,7 +4442,6 @@ def _precheck_ole2_xls(data: bytes) -> None:
                     raise _CompDocError(f"OLE2 stream {qname!r} contains an SSAT cycle at {s}")
                 visited.add(s)
                 s = ole.SSAT[s]
-        break
 
 
 def _convert_legacy_xls(title: str, data: bytes, *, dark_mode: bool) -> ConvertedDocument:
@@ -4456,7 +4455,11 @@ def _convert_legacy_xls(title: str, data: bytes, *, dark_mode: bool) -> Converte
         )
     try:
         _precheck_ole2_xls(data)
-        workbook = _xlrd.open_workbook(file_contents=data, on_demand=True)
+        workbook = _xlrd.open_workbook(
+            file_contents=data,
+            on_demand=True,
+            logfile=io.StringIO(),
+        )
     except Exception as exc:
         err_lower = str(exc).lower()
         if "encrypt" in err_lower or "password" in err_lower:

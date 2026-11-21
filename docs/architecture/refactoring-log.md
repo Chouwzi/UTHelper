@@ -2491,3 +2491,12 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - **Verification**:
   - Added `test_legacy_ole2_adversarial_ssat_cycles_ssz_dir_cycles_and_bounded_reader` and `_CompDoc = None` fallback coverage in `tests/test_courses_pdf_and_legacy_docs.py` (cyclic `SSAT` on `.doc`/`.ppt`/`.xls`, `ssz` 0/1/2, cyclic `left_DID`, 1000-level PPT container, premature `EOCSID`, oversized `tot_size = 0x7FFFFFFF`, negative `tot_size`, out-of-bounds `SSAT`, cyclic `SAT`, storage `etype=1`, zero stdout).
   - Verified post-commit with full `pytest` (`2892 passed, 26 skipped`), `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and isolated Python 3.14 `compileall -b -q` across `[project.dependencies]`.
+
+## M3 Part B Iteration 5: `_precheck_ole2_xls` `"Book"` Bypass & `xlrd` Silent `logfile` Remediation (2026-11-22)
+
+- **Fixes (`src/core/courses/document_converter.py`)**:
+  - Removed the unconditional `break` in `_precheck_ole2_xls()` (`for qname in ("Workbook", "Book"):`) so both `"Workbook"` and `"Book"` entries are validated unconditionally whenever present, preventing an empty `"Workbook"` (`tot_size = 0`, `first_SID = -2`) from bypassing `SSAT`-cycle detection on `"Book"` when `xlrd.book.Book.biff2_8_load` falls through on falsy `b""`.
+  - Passed `logfile=io.StringIO()` to `_xlrd.open_workbook(file_contents=data, on_demand=True, logfile=io.StringIO())` in `_convert_legacy_xls()` so `xlrd` / `CompDoc` diagnostic warnings never leak to `stdout`.
+- **Verification**:
+  - Added `test_legacy_xls_empty_workbook_with_cyclic_book_ssat_and_silent_logfile` in `tests/test_courses_pdf_and_legacy_docs.py` covering empty `"Workbook"` + 2-node cyclic `SSAT` (`0 -> 1 -> 0`) `"Book"` (`< 1.0s`, zero stdout) and trailing non-512-byte `.xls` `xlrd.open_workbook` silence (`capsys.readouterr().out == ""`).
+  - Verified post-commit with `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `tests/test_courses_pdf_and_legacy_docs.py`, full `pytest` (`tests`, `extensions/flet_uth_quiz/tests`, `extensions/flet_uth_background_sync/tests`), `git diff --check`, and clean `git status --short`.
