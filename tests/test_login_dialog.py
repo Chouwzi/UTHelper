@@ -134,3 +134,54 @@ def test_both_login_flows_share_post_login_work_and_only_quiz_reauth_is_cancelab
     assert captured["allow_cancel"] is True
     assert controller._complete_login_success.await_count == 2
     retry.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize(
+    ("old_identity", "player_visible", "expect_clear"),
+    [
+        (("old-user", "old-pass"), False, True),
+        (("old-user", "old-pass"), True, False),
+        (("new-user", "new-pass"), False, False),
+    ],
+)
+def test_login_dialog_account_switch_purges_quiz_sessions_when_player_hidden(
+    monkeypatch, old_identity, player_visible, expect_clear
+):
+    from config import settings
+
+    controller = AppController.__new__(AppController)
+    controller._settings_identity = old_identity
+    controller.orchestrator = SimpleNamespace(
+        moodle_service=SimpleNamespace(clear_all_caches=Mock()),
+        clear_detail_cache=Mock(),
+        _userid_cache=27,
+        is_logged_in=True,
+    )
+    controller._portal_client = SimpleNamespace(clear_token=Mock())
+    coordinator = SimpleNamespace(replace_cache=Mock(), refresh=Mock())
+    controller._today_schedule_coordinator = coordinator
+    controller._today_schedule_state = TodayScheduleViewState(
+        ScheduleLoadStatus.READY
+    )
+    controller._today_schedule_component = SimpleNamespace(set_state=Mock())
+    controller._reconcile_class_schedule_notifications = Mock()
+    clear_persisted_sessions = AsyncMock(return_value=True)
+    controller.quiz_player_view = SimpleNamespace(
+        visible=player_visible,
+        clear_persisted_sessions=clear_persisted_sessions,
+    )
+    scheduled = []
+
+    def safe_run_task(handler, *args, **kwargs):
+        scheduled.append((handler, args, kwargs))
+
+    controller._safe_run_task = safe_run_task
+    controller._load_data_async = AsyncMock()
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "new-user")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "new-pass")
+
+    asyncio.run(AppController._complete_login_success(controller))
+
+    clear_calls = [item for item in scheduled if item[0] is clear_persisted_sessions]
+    assert bool(clear_calls) is expect_clear

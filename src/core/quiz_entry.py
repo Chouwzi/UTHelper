@@ -484,10 +484,18 @@ class QuizPreparedEntry:
             if self.password_required and _wrong_password(page_text):
                 raise QuizEntryError("wrong_password")
             if not _attempt_destination(final_url, self._site):
-                # A same-site page can describe a closed quiz, a rejected
-                # password, or a concurrently changed attempt state. Do not
-                # guess and do not resubmit until a new overview GET reconciles it.
+                # A same-site page can describe SEB enforcement, a closed
+                # quiz, or a concurrently changed attempt state. Do not guess
+                # and do not resubmit until a new overview GET reconciles it.
                 self._uncertain = True
+                if (
+                    "safe exam browser" in page_text.casefold()
+                    or "quizaccess_seb" in html.casefold()
+                ):
+                    raise QuizEntryError("requires_safe_exam_browser")
+                reason = _page_reason(page_text)
+                if reason != "quiz_unavailable":
+                    raise QuizEntryError(reason)
                 raise QuizEntryError("entry_not_opened")
 
             # Moodle has accepted this POST and resolved it to an attempt.

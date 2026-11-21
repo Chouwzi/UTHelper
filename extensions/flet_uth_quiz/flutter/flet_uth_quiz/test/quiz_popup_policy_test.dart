@@ -108,6 +108,8 @@ void main() {
       'https://student@media.example.org/file',
       r'https://media.example.org\file',
       'https://media.example.org/\nfile',
+      'https://courses.ut.edu.vn\u0085evil.com/',
+      'about:blank\n',
       'about:settings',
     ]) {
       expect(

@@ -34,6 +34,21 @@ _GENERATED_DIRECTORIES = frozenset(
         "tests",
     }
 )
+_GENERATED_FILES = frozenset(
+    {
+        ".flutter-plugins",
+        ".flutter-plugins-dependencies",
+        ".packages",
+        "GeneratedPluginRegistrant.h",
+        "GeneratedPluginRegistrant.java",
+        "GeneratedPluginRegistrant.m",
+        "GeneratedPluginRegistrant.swift",
+        "generated_plugin_registrant.cc",
+        "generated_plugin_registrant.cmake",
+        "generated_plugin_registrant.h",
+        "pubspec.lock",
+    }
+)
 _source_quiz_client_ready: bool | None = None
 _added_source_paths: set[str] = set()
 
@@ -109,6 +124,8 @@ def _client_fingerprint(project_root: Path) -> str:
                 continue
             relative_parts = path.relative_to(flutter_root).parts
             if any(part in _GENERATED_DIRECTORIES for part in relative_parts):
+                continue
+            if path.name in _GENERATED_FILES:
                 continue
             inputs.append(path)
     if len(inputs) == 1:

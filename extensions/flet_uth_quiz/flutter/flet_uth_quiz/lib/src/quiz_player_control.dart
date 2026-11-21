@@ -216,7 +216,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
           profileDirectory = Directory(
             path.join(
               profilesRoot.path,
-              '${_sessionKey!.toLowerCase()}-${DateTime.now().microsecondsSinceEpoch}',
+              buildFallbackQuizProfileDirectoryName(_sessionKey!),
             ),
           );
         }

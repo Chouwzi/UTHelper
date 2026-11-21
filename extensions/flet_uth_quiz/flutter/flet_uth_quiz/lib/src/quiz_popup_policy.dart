@@ -10,7 +10,7 @@ enum QuizPopupRequestKind {
 
 const maxQuizPopupCount = 4;
 
-final _controlOrBackslashPattern = RegExp(r'[\\\x00-\x1f\x7f]');
+final _controlOrBackslashPattern = RegExp(r'[\\\x00-\x1f\x7f-\x9f]');
 final _rawAuthorityPattern = RegExp(
   r'^[a-z][a-z0-9+.-]*://([^/?#]+)',
   caseSensitive: false,

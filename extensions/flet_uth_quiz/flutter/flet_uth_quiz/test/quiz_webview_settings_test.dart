@@ -70,7 +70,15 @@ void main() {
       'https://student@media.example.org/file',
       'https:///missing-host',
       r'https://courses.ut.edu.vn\evil',
+      r'https://courses.ut.edu.vn/\evil',
       'https://courses.ut.edu.vn\nhttp://evil',
+      'https://courses.ut.edu.vn/\nhttp://evil.com',
+      'https://courses.ut.edu.vn/\rhttp://evil.com',
+      'https://courses.ut.edu.vn/\x00evil',
+      'https://courses.ut.edu.vn\u0085evil.com/',
+      'about:blank\n',
+      'about:blank#\n',
+      r'about:blank?\evil',
       'about:settings',
     ]) {
       expect(

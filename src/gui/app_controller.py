@@ -420,6 +420,15 @@ class AppController:
                 else None
             )
             self._data_cache = DataCache(namespace=cache_namespace)
+            quiz_player_view = getattr(self, "quiz_player_view", None)
+            clear_quiz_sessions = getattr(
+                quiz_player_view, "clear_persisted_sessions", None
+            )
+            if (
+                callable(clear_quiz_sessions)
+                and not getattr(quiz_player_view, "visible", False)
+            ):
+                self._safe_run_task(clear_quiz_sessions)
 
         schedule_namespace = (
             f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"

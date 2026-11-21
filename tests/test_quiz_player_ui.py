@@ -645,6 +645,43 @@ def test_runtime_quiz_closed_switches_cta_back_to_browser_recovery(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_post_time_safe_exam_browser_switches_cta_back_to_browser_recovery(monkeypatch):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(
+                mode="start",
+                enter_results=[SessionFailure("requires_safe_exam_browser")],
+            ),
+        )
+        _page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        detail_view.update_detail(trusted_quiz())
+        assert detail_view._quiz_open_btn.visible is True
+        assert detail_view._open_btn.visible is False
+
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+        await player_view._confirm_entry_prompt()
+
+        assert prepared_entries[0].enter_calls == [(None, True)]
+        assert prepared_entries[0].closed is True
+        assert players == []
+        assert player_view.visible is False
+        assert detail_view._quiz_runtime_notice.visible is True
+        assert "safe exam browser" in detail_view._quiz_runtime_notice.value.casefold()
+        assert "trình duyệt" in detail_view._quiz_runtime_notice.value.casefold()
+        assert detail_view._quiz_open_btn.visible is False
+        assert detail_view._open_btn.visible is True
+        assert detail_view._header_open_btn.visible is True
+        assert lease.released is True
+
+    asyncio.run(scenario())
+
+
 def test_credentials_change_purges_persisted_quiz_sessions(monkeypatch):
     import gui.app_controller as app_controller_module
     from gui.core.theme import load_theme_from_settings, set_page_theme

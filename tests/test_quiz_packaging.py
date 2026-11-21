@@ -167,6 +167,49 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
     quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
     assert len(calls) == 3
 
+    baseline_fingerprint = quiz_client_bootstrap._client_fingerprint(project_root)
+    assert quiz_client_bootstrap._is_current_custom_client(
+        project_root, baseline_fingerprint
+    )
+
+    quiz_flutter = extension_root / "flutter" / "flet_uth_quiz"
+    generated_files = [
+        quiz_flutter / ".flutter-plugins-dependencies",
+        quiz_flutter / "pubspec.lock",
+        quiz_flutter / ".flutter-plugins",
+        quiz_flutter / ".packages",
+        quiz_flutter / "linux" / "flutter" / "generated_plugin_registrant.cc",
+    ]
+    for generated_file in generated_files:
+        generated_file.parent.mkdir(parents=True, exist_ok=True)
+        generated_file.write_text("generated-v1\n", encoding="utf-8")
+    assert quiz_client_bootstrap._client_fingerprint(project_root) == baseline_fingerprint
+    assert quiz_client_bootstrap._is_current_custom_client(
+        project_root, baseline_fingerprint
+    )
+    quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
+    assert len(calls) == 3
+
+    (quiz_flutter / ".flutter-plugins-dependencies").write_text(
+        '{"date_created":"2099-01-01 00:00:00"}\n', encoding="utf-8"
+    )
+    (quiz_flutter / "pubspec.lock").write_text("# modified lock\n", encoding="utf-8")
+    assert quiz_client_bootstrap._client_fingerprint(project_root) == baseline_fingerprint
+    assert quiz_client_bootstrap._is_current_custom_client(
+        project_root, baseline_fingerprint
+    )
+    quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
+    assert len(calls) == 3
+
+    for generated_file in generated_files:
+        generated_file.unlink()
+    assert quiz_client_bootstrap._client_fingerprint(project_root) == baseline_fingerprint
+    assert quiz_client_bootstrap._is_current_custom_client(
+        project_root, baseline_fingerprint
+    )
+    quiz_client_bootstrap.ensure_windows_quiz_client(project_root)
+    assert len(calls) == 3
+
 
 def test_missing_flet_cli_does_not_mark_quiz_client_available(tmp_path, monkeypatch):
     extension_root = tmp_path / "extensions" / "flet_uth_quiz"

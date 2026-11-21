@@ -9,6 +9,18 @@ const quizProfileDeleteRetryDelays = <Duration>[
   Duration(milliseconds: 500),
 ];
 
+int _profileFallbackCounter = 0;
+
+String buildFallbackQuizProfileDirectoryName(
+  String sessionKey, {
+  int? microsecondsSinceEpoch,
+}) {
+  _profileFallbackCounter += 1;
+  final micros =
+      microsecondsSinceEpoch ?? DateTime.now().microsecondsSinceEpoch;
+  return '${sessionKey.toLowerCase()}-$micros-$_profileFallbackCounter';
+}
+
 String normalizeProfilePath(String rawPath) {
   final normalized = path.normalize(rawPath);
   return Platform.isWindows ? normalized.toLowerCase() : normalized;
@@ -47,10 +59,16 @@ Future<void> sweepQuizProfileDirectories(
 }) async {
   try {
     if (!await root.exists()) return;
-    final normalizedActive = activePaths.map(normalizeProfilePath).toSet();
+    bool isActive(String candidatePath) {
+      final normalizedCandidate = normalizeProfilePath(candidatePath);
+      return activePaths.any(
+        (activePath) => normalizeProfilePath(activePath) == normalizedCandidate,
+      );
+    }
+
     await for (final entity in root.list(followLinks: false)) {
       if (entity is! Directory) continue;
-      if (normalizedActive.contains(normalizeProfilePath(entity.path))) {
+      if (isActive(entity.path)) {
         continue;
       }
       await deleteQuizProfileDirectoryWithRetry(

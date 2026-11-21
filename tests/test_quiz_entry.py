@@ -350,6 +350,48 @@ def test_rejects_non_attempt_redirect_and_clears_result_cookie_copy(monkeypatch)
         _release(prepared, lease)
 
 
+@pytest.mark.parametrize(
+    ("post_html", "expected_reason"),
+    [
+        (
+            "<html><body><p>This quiz requires Safe Exam Browser.</p></body></html>",
+            "requires_safe_exam_browser",
+        ),
+        (
+            '<html><body><div class="quizaccess_seb">Locked</div></body></html>',
+            "requires_safe_exam_browser",
+        ),
+        (
+            "<html><body><p>This quiz is closed.</p></body></html>",
+            "quiz_closed",
+        ),
+        (
+            "<html><body><p>No more attempts are allowed.</p></body></html>",
+            "attempts_exhausted",
+        ),
+    ],
+)
+def test_post_non_attempt_response_surfaces_seb_and_closed_reasons(
+    monkeypatch, post_html, expected_reason
+):
+    prepared, lease, _, calls, _ = _prepared(
+        monkeypatch,
+        _overview("Start attempt"),
+        after_post=lambda _data, _calls, _state: (
+            "https://courses.ut.edu.vn/mod/quiz/view.php?id=52",
+            post_html,
+        ),
+    )
+    try:
+        with pytest.raises(QuizEntryError) as error:
+            prepared.enter(confirmed=True)
+        assert error.value.reason == expected_reason
+        assert prepared._uncertain is True
+        assert len(calls) == 2
+    finally:
+        _release(prepared, lease)
+
+
 def test_concurrent_entry_is_blocked_and_operation_lease_cleans_up(monkeypatch):
     post_started = threading.Event()
     finish_post = threading.Event()

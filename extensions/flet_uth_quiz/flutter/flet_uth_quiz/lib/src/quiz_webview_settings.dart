@@ -6,7 +6,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 /// `NavigationActionPolicy.CANCEL` on subframes unless this Java `Pattern`
 /// matches the target URL.
 const quizSubframeCancelRegex =
-    r'(?is)^(?!(?:https://[^\x00-\x20\x7f/@?#\\]+(?:[/?#].*)?|about:blank(?:[?#].*)?)$).*';
+    r'(?is)^(?!(?:https://[^\x00-\x20\x7f-\x9f/@?#\\]+(?:[/?#][^\x00-\x1f\x7f\\]*)?|about:blank(?:[?#][^\x00-\x1f\x7f\\]*)?)(?![\s\S])).*';
 
 InAppWebViewSettings createQuizWebViewSettings({bool allowPopups = true}) {
   return InAppWebViewSettings(
