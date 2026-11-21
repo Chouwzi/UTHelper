@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from gui.components.courses.embedded_webview_host import WindowsWebView2Dock
 
 
@@ -67,3 +69,26 @@ def test_disposal_during_cookie_refresh_cannot_navigate_after_account_switch(mon
     assert dock._ready is False
     dock._inject_cookies.assert_not_called()
     core.navigate.assert_not_called()
+
+
+@pytest.mark.parametrize("url", ["file:///C:/private.txt", "javascript:alert(1)", "data:text/html,private"])
+def test_page_popup_cannot_navigate_to_a_local_or_executable_scheme(url):
+    dock = WindowsWebView2Dock(page_title="UTHelper")
+    core = Mock()
+    dock._bind_events(core)
+    popup = core.add_new_window_requested.call_args.args[0]
+    event = SimpleNamespace(uri=url, handled=False)
+    popup(core, event)
+    assert event.handled is True
+    core.navigate.assert_not_called()
+
+
+def test_http_popup_stays_in_the_current_app_webview():
+    dock = WindowsWebView2Dock(page_title="UTHelper")
+    core = Mock()
+    dock._bind_events(core)
+    popup = core.add_new_window_requested.call_args.args[0]
+    event = SimpleNamespace(uri="https://courses.ut.edu.vn/mod/page/view.php?id=7", handled=False)
+    popup(core, event)
+    assert event.handled is True
+    core.navigate.assert_called_once_with(event.uri)

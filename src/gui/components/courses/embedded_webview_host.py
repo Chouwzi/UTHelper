@@ -604,7 +604,7 @@ class WindowsWebView2Dock:
                 core.add_web_message_received(_on_web_msg)
 
             def _on_new_window(_sender: Any, args: Any) -> None:
-                uri = str(getattr(args, "uri", "") or "")
+                uri = safe_http_url(str(getattr(args, "uri", "") or ""))
                 try:
                     args.handled = True
                 except Exception:

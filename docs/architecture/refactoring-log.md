@@ -2096,3 +2096,19 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   pytest; runtime platform dependency choices are unchanged. Focused host/session
   regression suite: **27 passed**, Ruff clean; full/CI checks are rerun on the
   follow-up commit.
+
+- Course quiz start now has a dedicated app-entry callback, separate from history/
+  review WebViews, for integration with the native quiz branch. Its primary action
+  is unavailable at a known exhausted limit, while in-progress/overdue attempts,
+  fresh attempts and unlimited quizzes remain available. Module and quiz instance
+  identifiers remain distinct. Native entry remains authoritative when metadata
+  changes. Windows popup navigation also reuses the outer HTTP(S) URL guard.
+  Baseline verification failed eight new cases; the bounded repair passes all
+  thirteen callback/session/popup cases. Native callback wiring is validated in
+  the cross-branch integration checkout.
+
+- Linux CI exposed another fixture race: the assignment scenario expected a
+  background fetch to finish before its initiating callback returned, and its
+  short-lived asyncio loop could cancel the scheduled job. The fake now queues
+  and explicitly drains fetch/retry jobs, preserving the real persistent-loop
+  contract. CI reports the whole suite instead of stopping at its first failure.

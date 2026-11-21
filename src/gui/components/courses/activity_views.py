@@ -916,6 +916,7 @@ class QuizActivityView(_BasePaneActivityView):
         activity_service: CourseActivityService,
         on_close: Callable[[], None],
         on_open_webview: Callable[[str, str], None],
+        on_start_quiz: Optional[Callable[[], None]] = None,
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
@@ -935,6 +936,7 @@ class QuizActivityView(_BasePaneActivityView):
             pane_width=pane_width,
         )
         self._course_id = course_id
+        self._on_start_quiz = on_start_quiz
         self._summary: Optional[QuizActivitySummary] = None
         self._in_review: bool = False
         self._current_review: Optional[
@@ -1710,12 +1712,18 @@ class QuizActivityView(_BasePaneActivityView):
                 )
             )
 
-        if summary.web_url and self._on_open_webview is not None:
+        can_resume = any(attempt.state.lower() in {"inprogress", "in_progress", "overdue"} for attempt in summary.attempts)
+        exhausted = bool(summary.max_attempts > 0 and len(summary.attempts) >= summary.max_attempts and not can_resume)
+        if self._on_start_quiz is not None or (summary.web_url and self._on_open_webview is not None):
             controls.append(
                 ft.FilledButton(
-                    "Làm bài / Xem chi tiết ngay trong app (WebView)",
-                    icon=ft.Icons.PLAY_ARROW_ROUNDED,
-                    on_click=lambda _e: self._on_open_webview(summary.title, summary.web_url),
+                    "Tiếp tục" if can_resume else "Mở bài",
+                    height=44,
+                    disabled=exhausted,
+                    on_click=(None if exhausted else lambda _e: (
+                        self._on_start_quiz() if self._on_start_quiz is not None
+                        else self._on_open_webview(summary.title, summary.web_url)
+                    )),
                 )
             )
 

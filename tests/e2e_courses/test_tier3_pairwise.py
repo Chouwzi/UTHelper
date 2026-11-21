@@ -899,6 +899,9 @@ def test_pair10_pane_assignment_detail_view_mobile_wrap_retry_and_back(
     fake_page.resize(360, 780)
 
     attempts = {"count": 0}
+    # Real Flet owns a persistent event loop. Drain this fake page's queued
+    # jobs explicitly instead of cancelling them when asyncio.run() returns.
+    fake_page.eager_tasks = False
 
     def _flaky_fetcher(payload: dict[str, Any]) -> dict[str, Any]:
         attempts["count"] += 1
@@ -936,6 +939,8 @@ def test_pair10_pane_assignment_detail_view_mobile_wrap_retry_and_back(
     asyncio.run(coord.ensure_loaded_async())
     asyncio.run(coord.courses_view._on_user_select_course_async(course.course_key))
     asyncio.run(coord.courses_view._handle_open_module_async(assign_mod))
+    handler, args, kwargs = fake_page.scheduled_tasks[-1]
+    asyncio.run(handler(*args, **kwargs))
 
     assert coord.courses_view._overlays
     pane_assign = coord.courses_view._overlays[-1]
@@ -949,6 +954,8 @@ def test_pair10_pane_assignment_detail_view_mobile_wrap_retry_and_back(
 
     retry_btn = _find_button_with_text(pane_assign, "Thử lại")
     retry_btn.on_click(None)
+    handler, args, kwargs = fake_page.scheduled_tasks[-1]
+    asyncio.run(handler(*args, **kwargs))
 
     assert attempts["count"] == 2
     assert pane_assign._error_strip.visible is False
