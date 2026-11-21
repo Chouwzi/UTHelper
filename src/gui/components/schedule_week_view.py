@@ -30,31 +30,29 @@ logger = logging.getLogger(__name__)
 FetchWeek = Callable[[date], "dict[date, tuple[ClassSession, ...]]"]
 
 _WEEKDAYS_LONG = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"]
-_CA_LABELS = {0: "Khác", 1: "Ca 1", 2: "Ca 2", 3: "Ca 3", 4: "Ca 4", 5: "Ca 5", 6: "Ca 6"}
-_CA_GROUP = {0: "", 1: "Sáng", 2: "Sáng", 3: "Chiều", 4: "Chiều", 5: "Tối", 6: "Tối"}
-_COL_W = 250          # a full card needs a wide column (grid scrolls sideways)
-_LABEL_W = 52
-_CELL_MIN_H = 56      # empty cell height so every Ca row keeps a visible band
+_NARROW_BREAKPOINT = 920
+_DAY_COLUMN_MIN_W = 112
+_DAY_COLUMN_MAX_W = 225
+_DAY_COLUMN_GAP = 8
+_WEEK_CONTENT_INSET = 28
 _SWIPE_VELOCITY = 250.0
 _TTL_CURRENT = timedelta(minutes=10)   # re-fetch the current week after this
 _TTL_OTHER = timedelta(hours=6)        # ...and the other cached weeks after this
 _PREFETCH_GAP_S = 0.3
 
 
+def _text_action_style(color: str = C.ACCENT) -> ft.ButtonStyle:
+    return ft.ButtonStyle(
+        color=color,
+        bgcolor=ft.Colors.TRANSPARENT,
+        overlay_color=ft.Colors.with_opacity(0.14, color),
+        padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+        shape=ft.RoundedRectangleBorder(radius=4),
+    )
+
+
 def _monday(day: date) -> date:
     return day - timedelta(days=day.weekday())
-
-
-def _ca_of(period: int | None) -> int | None:
-    """Tiết 1-3 -> Ca 1, 4-6 -> Ca 2, ... 16-18 -> Ca 6 (same as the web)."""
-    if period is None or period < 1 or period > 18:
-        return None
-    return (period - 1) // 3 + 1
-
-
-def _ca_for(session: ClassSession) -> int:
-    """Ca the session starts in (0 when the Portal gave no period)."""
-    return _ca_of(session.period_start) or 0
 
 
 class ScheduleWeekView(ft.Container):
@@ -69,6 +67,8 @@ class ScheduleWeekView(ft.Container):
         self._fetch_week = fetch_week
         self._cache = cache
         self._cache_lock = threading.Lock()
+        self._layout_width = self._initial_layout_width()
+        self.on_size_change = self._on_size_change
         self._selected: date = date.today()
         self._weeks: dict[date, dict[date, tuple[ClassSession, ...]]] = {}
         self._live_at: dict[date, datetime] = {}   # weeks fetched live (carry links)
@@ -87,39 +87,51 @@ class ScheduleWeekView(ft.Container):
             ft.Icons.CHEVRON_LEFT_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
+            width=48,
+            height=48,
             tooltip="Tuần trước",
-            on_click=lambda _: self._shift(-7),
+            on_click=lambda _: self._navigate(-1),
         )
         self._next_btn = ft.IconButton(
             ft.Icons.CHEVRON_RIGHT_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
+            width=48,
+            height=48,
             tooltip="Tuần sau",
-            on_click=lambda _: self._shift(7),
+            on_click=lambda _: self._navigate(1),
         )
         self._today_btn = ft.IconButton(
             ft.Icons.TODAY_ROUNDED,
             icon_color=C.ACCENT,
             icon_size=18,
-            tooltip="Tuần này",
+            width=48,
+            height=48,
+            tooltip="Hôm nay",
             on_click=lambda _: self._go(date.today()),
         )
         self._refresh_btn = ft.IconButton(
             ft.Icons.REFRESH_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
             icon_size=18,
-            tooltip="Tải lại tuần này",
+            width=48,
+            height=48,
+            tooltip="Tải lại lịch học",
             on_click=lambda _: self._reload(),
         )
         self._nav_row = ft.Row(
             [
-                ft.Row(
-                    [self._prev_btn, self._week_label, self._next_btn],
-                    spacing=0,
-                ),
-                ft.Row([self._today_btn, self._refresh_btn], spacing=0),
+                self._prev_btn,
+                self._week_label,
+                self._next_btn,
+                self._today_btn,
+                self._refresh_btn,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=0,
+            run_spacing=4,
+            wrap=True,
         )
 
         self._status = ft.Row(spacing=8, visible=False)
@@ -144,7 +156,7 @@ class ScheduleWeekView(ft.Container):
             spacing=0,
             expand=True,
         )
-        # Swipe left/right = next/previous week (one page per week).
+        # Swipe left/right = next/previous day on narrow screens, week on desktop.
         self.content = ft.GestureDetector(
             content=column,
             on_horizontal_drag_end=self._on_swipe,
@@ -157,9 +169,40 @@ class ScheduleWeekView(ft.Container):
         if velocity is None:
             velocity = getattr(getattr(event, "velocity", None), "x", 0.0) or 0.0
         if velocity <= -_SWIPE_VELOCITY:
-            self._shift(7)
+            self._navigate(1)
         elif velocity >= _SWIPE_VELOCITY:
-            self._shift(-7)
+            self._navigate(-1)
+
+    def _initial_layout_width(self) -> float:
+        for source in (
+            getattr(self._page_ref, "width", None),
+            getattr(getattr(self._page_ref, "window", None), "width", None),
+        ):
+            try:
+                width = float(source)
+            except (TypeError, ValueError):
+                continue
+            if width > 0:
+                return width
+        return 1120.0
+
+    def _is_narrow_layout(self) -> bool:
+        return self._layout_width < _NARROW_BREAKPOINT
+
+    def _on_size_change(self, event=None) -> None:
+        try:
+            width = float(getattr(event, "width", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if width <= 0:
+            return
+        previous_width = self._layout_width
+        self._layout_width = width
+        crossed_breakpoint = (
+            previous_width < _NARROW_BREAKPOINT
+        ) != (width < _NARROW_BREAKPOINT)
+        if self.visible and (crossed_breakpoint or abs(width - previous_width) >= 24):
+            self._render()
 
     # ------------------------------------------------------------ public API
     def show(self) -> None:
@@ -203,6 +246,10 @@ class ScheduleWeekView(ft.Container):
     # ------------------------------------------------------------ navigation
     def _shift(self, days: int) -> None:
         self._go(self._selected + timedelta(days=days))
+
+    def _navigate(self, direction: int) -> None:
+        days = 1 if self._is_narrow_layout() else 7
+        self._shift(direction * days)
 
     def _go(self, target: date) -> None:
         self._selected = target
@@ -337,10 +384,25 @@ class ScheduleWeekView(ft.Container):
     def _render(self) -> None:
         monday = _monday(self._selected)
         sunday = monday + timedelta(days=6)
-        self._week_label.value = f"{monday:%d/%m} – {sunday:%d/%m/%Y}"
+        narrow = self._is_narrow_layout()
+        if narrow:
+            self._week_label.value = (
+                f"{_WEEKDAYS_LONG[self._selected.weekday()]}, "
+                f"{self._selected:%d/%m/%Y}"
+            )
+            self._prev_btn.tooltip = "Ngày trước"
+            self._next_btn.tooltip = "Ngày sau"
+        else:
+            self._week_label.value = f"{monday:%d/%m} – {sunday:%d/%m/%Y}"
+            self._prev_btn.tooltip = "Tuần trước"
+            self._next_btn.tooltip = "Tuần sau"
+        self._refresh_btn.tooltip = "Tải lại lịch học"
         self._render_status(monday)
         if monday in self._weeks:
-            self._render_week_body(monday)
+            if narrow:
+                self._render_day_body()
+            else:
+                self._render_week_body(monday)
         else:
             self._body.controls = []
         try:
@@ -369,9 +431,30 @@ class ScheduleWeekView(ft.Container):
         self._status.controls = controls
         self._status.visible = bool(controls)
 
+    def _render_day_body(self) -> None:
+        sessions = self._sessions_on(self._selected)
+        if not sessions:
+            self._body.controls = [
+                ft.Container(
+                    content=ft.Text(
+                        "Không có lịch học ngày này",
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    alignment=ft.Alignment(0, 0),
+                    padding=ft.Padding.symmetric(vertical=28, horizontal=12),
+                )
+            ]
+            return
+        self._body.controls = [
+            self._session_summary_card(session, narrow=True)
+            for session in sessions
+        ]
+
     # ----- session card (full detail)
     @staticmethod
-    def _phase_chip(session: ClassSession, now: datetime) -> ft.Control | None:
+    def _phase_label(session: ClassSession, now: datetime) -> ft.Control | None:
         if session.start_at.date() != now.date() and not session.cancelled:
             return None
         phase = session.phase_at(now)
@@ -381,11 +464,11 @@ class ScheduleWeekView(ft.Container):
             SchedulePhase.FINISHED: ("Đã xong", C.TEXT_SECONDARY),
             SchedulePhase.CANCELLED: ("Tạm ngưng", C.CRITICAL),
         }[phase]
-        return ft.Container(
-            content=ft.Text(label, size=10, color=color, weight=ft.FontWeight.W_600),
-            padding=ft.Padding.symmetric(horizontal=7, vertical=3),
-            border=ft.Border.all(1, color),
-            border_radius=999,
+        return ft.Text(
+            label,
+            size=10,
+            color=color,
+            weight=ft.FontWeight.W_600,
         )
 
     def _meta_row(self, icon, text: str, *, color: str | None = None) -> ft.Row:
@@ -405,24 +488,19 @@ class ScheduleWeekView(ft.Container):
         )
 
     def _link_button(self, label: str, icon, color: str, on_click) -> ft.Control:
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(icon, size=16, color=color),
-                    ft.Text(label, size=12, weight=ft.FontWeight.W_600, color=color),
-                ],
-                spacing=6,
-                tight=True,
-            ),
-            padding=ft.Padding.symmetric(horizontal=2, vertical=3),
+        return ft.TextButton(
+            label,
+            icon=icon,
+            icon_color=color,
+            height=44,
+            tooltip=label,
+            style=_text_action_style(color),
             on_click=on_click,
-            ink=True,
-            border_radius=6,
         )
 
     def _session_card(self, session: ClassSession, now: datetime) -> ft.Control:
         accent = C.CRITICAL if session.cancelled else C.ACCENT
-        chip = self._phase_chip(session, now)
+        phase_label = self._phase_label(session, now)
         tiet = (
             f"Tiết: {session.period_start} - {session.period_end}"
             if session.period_start is not None and session.period_end is not None
@@ -438,7 +516,7 @@ class ScheduleWeekView(ft.Container):
                         color=C.ACCENT,
                         expand=True,
                     ),
-                    *([chip] if chip else []),
+                    *([phase_label] if phase_label else []),
                 ],
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.START,
@@ -517,6 +595,132 @@ class ScheduleWeekView(ft.Container):
             ),
         )
 
+    def _session_summary_card(
+        self, session: ClassSession, *, narrow: bool
+    ) -> ft.Container:
+        time_text = f"{session.start_at:%H:%M} – {session.end_at:%H:%M}"
+        class_text = session.course_code or "Mã lớp chưa cập nhật"
+        room_text = session.room or "Chưa cập nhật phòng"
+        class_label = ft.Text(
+            class_text,
+            size=11,
+            color=C.TEXT_SECONDARY,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            selectable=True,
+        )
+        room_label = ft.Text(
+            room_text,
+            size=12 if narrow else 11,
+            color=C.TEXT_PRIMARY,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        title = ft.Text(
+            session.subject,
+            size=14 if narrow else 12,
+            weight=ft.FontWeight.W_600,
+            color=C.TEXT_PRIMARY,
+            max_lines=3,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            selectable=True,
+        )
+        if narrow:
+            summary = ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Text(
+                            time_text,
+                            size=12,
+                            weight=ft.FontWeight.W_600,
+                            color=C.ACCENT,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        width=82,
+                        alignment=ft.Alignment(0, -1),
+                    ),
+                    ft.Container(width=1, height=70, bgcolor=C.BORDER),
+                    ft.Column(
+                        [title, class_label, room_label],
+                        spacing=3,
+                        expand=True,
+                    ),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            )
+        else:
+            summary_rows: list[ft.Control] = [
+                ft.Text(
+                    time_text,
+                    size=11,
+                    weight=ft.FontWeight.W_600,
+                    color=C.ACCENT,
+                ),
+                title,
+                class_label,
+                room_label,
+            ]
+            if session.cancelled:
+                summary_rows.append(
+                    ft.Text(
+                        "Tạm ngưng",
+                        size=10,
+                        weight=ft.FontWeight.W_600,
+                        color=C.CRITICAL,
+                    )
+                )
+            summary = ft.Column(summary_rows, spacing=4)
+
+        details_button = ft.TextButton(
+            "Chi tiết",
+            height=44,
+            width=88 if narrow else 80,
+            tooltip="Chi tiết buổi học",
+            style=_text_action_style(),
+            on_click=lambda _event, item=session: self._show_session_details(item),
+        )
+        return ft.Container(
+            content=ft.Column([summary, details_button], spacing=4),
+            padding=ft.Padding.all(8 if not narrow else 10),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=8,
+        )
+
+    def _show_session_details(self, session: ClassSession) -> None:
+        width = max(280.0, min(520.0, self._layout_width - 48))
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(
+                "Chi tiết buổi học",
+                size=16,
+                weight=ft.FontWeight.W_600,
+                color=C.TEXT_PRIMARY,
+            ),
+            content=ft.Column(
+                [self._session_card(session, datetime.now())],
+                width=width,
+                height=460,
+                spacing=0,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            actions=[
+                ft.TextButton(
+                    "Đóng",
+                    height=44,
+                    style=_text_action_style(),
+                    on_click=lambda _event: self._page_ref.pop_dialog(),
+                )
+            ],
+            bgcolor=C.SURFACE,
+            shape=ft.RoundedRectangleBorder(radius=14),
+        )
+        try:
+            self._page_ref.show_dialog(dialog)
+        except Exception:
+            logger.debug("Could not show class details", exc_info=True)
+
     def _show_outline(self, session: ClassSession) -> None:
         body = session.outline or "Môn học này chưa có mô tả đề cương."
         dialog = ft.AlertDialog(
@@ -543,7 +747,12 @@ class ScheduleWeekView(ft.Container):
                 spacing=6,
             ),
             actions=[
-                ft.TextButton("Đóng", on_click=lambda _: self._page_ref.pop_dialog())
+                ft.TextButton(
+                    "Đóng",
+                    height=44,
+                    style=_text_action_style(),
+                    on_click=lambda _: self._page_ref.pop_dialog(),
+                )
             ],
             bgcolor=C.SURFACE,
             shape=ft.RoundedRectangleBorder(radius=14),
@@ -554,164 +763,88 @@ class ScheduleWeekView(ft.Container):
             logger.debug("Could not show outline dialog", exc_info=True)
 
 
-    # ----- week grid
+    # ----- desktop week view
     def _render_week_body(self, monday: date) -> None:
         today = date.today()
-        now = datetime.now()
         days = [monday + timedelta(days=i) for i in range(7)]
-        grid: dict[tuple[int, int], list[ClassSession]] = {}
-        for col, day in enumerate(days):
-            for session in self._sessions_on(day):
-                grid.setdefault((_ca_for(session), col), []).append(session)
-        used_ca = sorted({ca for ca, _ in grid}, key=lambda ca: ca or 99)
-        if not used_ca:
+        if not any(self._sessions_on(day) for day in days):
             self._body.controls = [
                 ft.Container(
-                    ft.Text(
+                    content=ft.Text(
                         "Tuần này không có lịch học",
-                        size=12,
+                        size=13,
                         color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
                     ),
-                    alignment=ft.Alignment(0, 0),
+            alignment=ft.Alignment(0, 0),
                     padding=ft.Padding.symmetric(vertical=28),
                 )
             ]
             return
 
-        def col_size(control: ft.Container) -> ft.Container:
-            # Fixed widths: the today highlight below is positioned by x offset.
-            control.width = _COL_W
-            return control
-
-        def head(text: str, *, today_col: bool = False) -> ft.Container:
-            return ft.Container(
-                content=ft.Text(
-                    text,
-                    size=11,
-                    weight=ft.FontWeight.W_700 if today_col else ft.FontWeight.W_600,
-                    color=C.TEXT_PRIMARY,
-                    text_align=ft.TextAlign.CENTER,
+        gaps = _DAY_COLUMN_GAP * (len(days) - 1)
+        available = max(0.0, self._layout_width - _WEEK_CONTENT_INSET - gaps)
+        column_width = min(
+            _DAY_COLUMN_MAX_W,
+            max(_DAY_COLUMN_MIN_W, available / len(days)),
+        )
+        day_columns: list[ft.Control] = []
+        for day in days:
+            is_today = day == today
+            day_header = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            _WEEKDAYS_LONG[day.weekday()],
+                            size=11,
+                            weight=ft.FontWeight.W_600,
+                            color=C.TEXT_PRIMARY,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        ft.Text(
+                            f"{day:%d/%m}",
+                            size=11,
+                            color=C.TEXT_SECONDARY,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                    ],
+                    spacing=2,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                height=40,
+                height=54,
                 alignment=ft.Alignment(0, 0),
                 bgcolor=(
-                    ft.Colors.with_opacity(0.45, C.ACCENT)
-                    if today_col
+                    ft.Colors.with_opacity(0.14, C.ACCENT)
+                    if is_today
                     else C.SURFACE_ELEVATED
                 ),
                 border=ft.Border.all(1, C.BORDER),
             )
-
-        corner = ft.Container(
-            content=ft.Text("Ca", size=11, weight=ft.FontWeight.W_600,
-                            color=C.TEXT_PRIMARY),
-            width=_LABEL_W,
-            height=40,
-            alignment=ft.Alignment(0, 0),
-            bgcolor=C.SURFACE_ELEVATED,
-            border=ft.Border.all(1, C.BORDER),
-        )
-        rows: list[ft.Control] = [
-            ft.Row(
-                [corner]
-                + [
-                    col_size(
-                        head(
-                            f"{_WEEKDAYS_LONG[i]}\n{day:%d/%m}",
-                            today_col=day == today,
-                        )
-                    )
-                    for i, day in enumerate(days)
-                ],
-                spacing=0,
-            )
-        ]
-        for ca in used_ca:
-            label_text = _CA_LABELS[ca] + (f"\n{_CA_GROUP[ca]}" if _CA_GROUP[ca] else "")
-            cells: list[ft.Control] = [
+            sessions = [
+                self._session_summary_card(session, narrow=False)
+                for session in self._sessions_on(day)
+            ]
+            day_columns.append(
                 ft.Container(
-                    content=ft.Text(
-                        label_text,
-                        size=10,
-                        weight=ft.FontWeight.W_600,
-                        color=C.TEXT_PRIMARY,
-                        text_align=ft.TextAlign.CENTER,
+                    content=ft.Column(
+                        [day_header, *sessions],
+                        spacing=6,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                     ),
-                    width=_LABEL_W,
-                    height=_CELL_MIN_H,
-                    alignment=ft.Alignment(0, -1),
-                    padding=ft.Padding.only(top=8),
-                )
-            ]
-            for col, day in enumerate(days):
-                items = grid.get((ca, col), [])
-                cells.append(
-                    col_size(
-                        ft.Container(
-                            content=ft.Column(
-                                [self._session_card(s, now) for s in items],
-                                spacing=6,
-                            ),
-                            # A card sizes the cell; empty cells keep a min band.
-                            height=None if items else _CELL_MIN_H,
-                            padding=4,
-                            bgcolor=None if day == today else C.SURFACE,
-                        )
-                    )
-                )
-            total_w = _LABEL_W + 7 * _COL_W
-            layers: list[ft.Control] = [
-                # Ca label background spans the whole band height.
-                ft.Container(
-                    left=0, width=_LABEL_W, top=0, bottom=0,
-                    bgcolor=C.SURFACE_ELEVATED,
-                )
-            ]
-            today_col = (today - monday).days if monday <= today < monday + timedelta(days=7) else None
-            if today_col is not None:
-                # Full-height aqua strip: it fills the whole band, so the
-                # today column stays one unbroken colour from header to bottom.
-                layers.append(
-                    ft.Container(
-                        left=_LABEL_W + today_col * _COL_W,
-                        width=_COL_W,
-                        top=0,
-                        bottom=0,
-                        bgcolor=ft.Colors.with_opacity(0.18, C.ACCENT),
-                    )
-                )
-            # Band divider, skipping the today column so the strip is not cut.
-            x0 = _LABEL_W + today_col * _COL_W if today_col is not None else total_w
-            x1 = x0 + _COL_W if today_col is not None else total_w
-            for left, width in ((0, x0), (x1, total_w - x1)):
-                if width > 0:
-                    layers.append(
-                        ft.Container(
-                            left=left,
-                            width=width,
-                            height=1,
-                            bottom=0,
-                            bgcolor=C.BORDER,
-                        )
-                    )
-            rows.append(
-                ft.Stack(
-                    [
-                        *layers,
-                        ft.Row(
-                            cells,
-                            spacing=0,
-                            vertical_alignment=ft.CrossAxisAlignment.START,
-                        ),
-                    ],
-                    width=total_w,
+                    width=column_width,
+                    padding=4,
+                    bgcolor=C.SURFACE,
+                    border=ft.Border.all(1, C.BORDER),
+                    border_radius=8,
+                    data={"schedule_day": day.isoformat()},
                 )
             )
-        table = ft.Column(rows, spacing=0)
+
         self._body.controls = [
             ft.Row(
-                [table],
-                scroll=ft.ScrollMode.AUTO,
+                day_columns,
+                spacing=_DAY_COLUMN_GAP,
+                wrap=False,
                 vertical_alignment=ft.CrossAxisAlignment.START,
             )
         ]
