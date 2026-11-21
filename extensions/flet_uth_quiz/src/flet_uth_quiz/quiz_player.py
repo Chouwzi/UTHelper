@@ -1,6 +1,7 @@
 """Python facade for the native Moodle quiz WebView."""
 
 import asyncio
+from dataclasses import dataclass
 import json
 import re
 from typing import Optional
@@ -9,8 +10,11 @@ from urllib.parse import urlsplit
 import flet as ft
 from flet.controls.base_control import control
 from flet.controls.layout_control import LayoutControl
+from flet.controls.services.service import Service
 
 _SESSION_KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_UNSAFE_URL_RE = re.compile(r"[\x00-\x20\x7f\\]")
+_RAW_AUTHORITY_RE = re.compile(r"^[a-z][a-z0-9+.-]*://([^/?#]+)", re.IGNORECASE)
 _COOKIE_FIELDS = frozenset(
     {
         "name",
@@ -51,8 +55,26 @@ class UthQuizPlayer(LayoutControl):
 
     def __post_init__(self, ref: object | None = None) -> None:
         super().__post_init__(ref)
-        parsed = urlsplit(self.url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        if not self.url or _UNSAFE_URL_RE.search(self.url):
+            raise ValueError("url must be an absolute HTTP or HTTPS URL")
+        try:
+            parsed = urlsplit(self.url)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("url must be an absolute HTTP or HTTPS URL") from exc
+        raw_authority_match = _RAW_AUTHORITY_RE.match(self.url)
+        raw_authority = raw_authority_match.group(1) if raw_authority_match else ""
+        allowed_schemes = {"https"} if self.require_session else {"http", "https"}
+        if (
+            parsed.scheme.lower() not in allowed_schemes
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is not None
+            or not raw_authority
+            or "@" in raw_authority
+            or ":" in raw_authority
+        ):
             raise ValueError("url must be an absolute HTTP or HTTPS URL")
         if not _SESSION_KEY_RE.fullmatch(self.session_key):
             raise ValueError("session_key must be a SHA-256 hex digest")
@@ -113,3 +135,15 @@ class UthQuizPlayer(LayoutControl):
             return True
         except Exception:
             raise RuntimeError("session_unavailable") from None
+
+
+@control("UthQuizSessionCleaner")
+@dataclass
+class UthQuizSessionCleaner(Service):
+    """Purges persisted WebView quiz profiles and shared mobile stores."""
+
+    async def clear_sessions(self) -> bool:
+        try:
+            return bool(await self._invoke_method("clear_sessions", timeout=10))
+        except Exception:
+            return False

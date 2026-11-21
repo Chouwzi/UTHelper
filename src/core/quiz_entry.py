@@ -368,10 +368,12 @@ def _wrong_password(text: str) -> bool:
         for phrase in (
             "wrong password",
             "incorrect password",
+            "invalid password",
             "password is incorrect",
             "the password entered was incorrect",
             "sai mật khẩu",
             "mật khẩu không đúng",
+            "mật khẩu không chính xác",
             "mật khẩu không hợp lệ",
             "mật khẩu đã nhập không đúng",
             "mật khẩu đã nhập không chính xác",

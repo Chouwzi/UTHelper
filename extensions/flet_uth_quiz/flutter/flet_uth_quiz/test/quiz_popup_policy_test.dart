@@ -1,4 +1,5 @@
 import 'package:flet_uth_quiz/src/quiz_popup_policy.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -28,7 +29,7 @@ void main() {
     );
   });
 
-  test('reports valid external links and rejects malformed targets', () {
+  test('reports valid external links and rejects malformed or downgraded targets', () {
     expect(
       classifyQuizPopupRequest(
         'https://example.org/help',
@@ -42,6 +43,12 @@ void main() {
       'javascript:alert(1)',
       'https://student@courses.ut.edu.vn/help',
       'https:///missing-host',
+      'https://courses.ut.edu.vn:443/mod/quiz/attempt.php?attempt=42',
+      'https://courses.ut.edu.vn:8443/mod/quiz/attempt.php?attempt=42',
+      'http://courses.ut.edu.vn/mod/quiz/attempt.php?attempt=42',
+      'http://example.org/help',
+      r'https://courses.ut.edu.vn\help',
+      'https://courses.ut.edu.vn/\nhelp',
     ]) {
       expect(
         classifyQuizPopupRequest(
@@ -99,6 +106,8 @@ void main() {
       'blob:https://courses.ut.edu.vn/id',
       'ftp://example.org/file',
       'https://student@media.example.org/file',
+      r'https://media.example.org\file',
+      'https://media.example.org/\nfile',
       'about:settings',
     ]) {
       expect(
@@ -107,5 +116,11 @@ void main() {
         reason: '$value',
       );
     }
+  });
+
+  test('adopts blocked popups on Windows and iOS so main frame never navigates', () {
+    expect(shouldAdoptBlockedPopupToCancel(TargetPlatform.windows), isTrue);
+    expect(shouldAdoptBlockedPopupToCancel(TargetPlatform.iOS), isTrue);
+    expect(shouldAdoptBlockedPopupToCancel(TargetPlatform.android), isFalse);
   });
 }

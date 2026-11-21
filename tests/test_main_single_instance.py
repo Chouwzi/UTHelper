@@ -211,6 +211,71 @@ def test_source_windows_quiz_build_failure_marks_native_quiz_unavailable(
     assert changed_directories == [Path(application.__file__).resolve().parents[1]]
 
 
+def test_source_windows_quiz_failure_rolls_back_added_sys_path(
+    monkeypatch, fake_diagnostic_runtime
+):
+    _install_flet_runner(monkeypatch)
+    result = SimpleNamespace(exit_code=None, broker=None, force_visible=False)
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.delenv("FLET_FORCE_WEB_SERVER", raising=False)
+    monkeypatch.delenv("FLET_DISPLAY_URL_PREFIX", raising=False)
+    monkeypatch.setattr(application, "_TEST_MODE", False)
+    monkeypatch.setattr(application.quiz_client_bootstrap, "_source_quiz_client_ready", None)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda _path: True)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(
+        application, "bootstrap_windows_instance", lambda **_kwargs: result
+    )
+    monkeypatch.setattr(os, "chdir", lambda _path: None)
+
+    project_root = Path(application.__file__).resolve().parents[1]
+    quiz_src = str((project_root / "extensions" / "flet_uth_quiz" / "src").resolve())
+    monkeypatch.setattr(
+        application.sys,
+        "path",
+        [entry for entry in sys.path if entry != quiz_src],
+    )
+    monkeypatch.setattr(
+        application.quiz_client_bootstrap,
+        "_added_source_paths",
+        set(),
+    )
+    monkeypatch.setattr(
+        application.quiz_client_bootstrap,
+        "ensure_windows_quiz_client",
+        lambda _root: (_ for _ in ()).throw(RuntimeError("build failed")),
+    )
+
+    assert application.main() == 0
+    assert application.quiz_client_bootstrap.source_quiz_client_unavailable() is True
+    assert quiz_src not in application.sys.path
+
+
+def test_flet_run_outside_project_root_marks_quiz_client_unavailable(
+    monkeypatch, tmp_path, fake_diagnostic_runtime
+):
+    _install_flet_runner(monkeypatch)
+    result = SimpleNamespace(exit_code=None, broker=None, force_visible=False)
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.delenv("FLET_FORCE_WEB_SERVER", raising=False)
+    monkeypatch.setenv("FLET_DISPLAY_URL_PREFIX", "http://127.0.0.1:8550")
+    monkeypatch.setattr(application, "_TEST_MODE", False)
+    monkeypatch.setattr(application.quiz_client_bootstrap, "_source_quiz_client_ready", None)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda _path: True)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(
+        application, "bootstrap_windows_instance", lambda **_kwargs: result
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert application.main() == 0
+    assert application.quiz_client_bootstrap.source_quiz_client_unavailable() is True
+
+
 @pytest.mark.parametrize("exit_code", [0, 2])
 def test_secondary_instance_exits_without_starting_flet(
     monkeypatch, exit_code, fake_diagnostic_runtime

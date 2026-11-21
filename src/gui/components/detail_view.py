@@ -1380,6 +1380,9 @@ class DetailView(ft.Container):
                 "entry_in_progress": "Bài kiểm tra đang được thực hiện.",
                 "entry_not_opened": "Không thể mở lượt làm bài.",
             }
+            if reason in {"requires_safe_exam_browser", "quiz_closed"}:
+                self._quiz_open_btn.visible = False
+                self._open_btn.visible = self._is_safe_browser_url(self._current_url)
             self._quiz_runtime_notice.value = messages.get(
                 reason,
                 "Không thể mở bài trong ứng dụng. Hãy thử bằng trình duyệt.",

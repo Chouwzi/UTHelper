@@ -3369,6 +3369,12 @@ class AppController:
                 ScheduleLoadStatus.IDLE
             )
             self._today_schedule_component.set_state(self._today_schedule_state)
+            quiz_player_view = getattr(self, "quiz_player_view", None)
+            clear_quiz_sessions = getattr(
+                quiz_player_view, "clear_persisted_sessions", None
+            )
+            if callable(clear_quiz_sessions):
+                self._safe_run_task(clear_quiz_sessions)
             self._safe_run_task(
                 self._reconcile_class_schedule_notifications, (), clear_only=True
             )

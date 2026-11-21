@@ -207,13 +207,50 @@ def test_bootstrap_failure_hides_runtime_details(monkeypatch):
 
 @pytest.mark.parametrize(
     "url",
-    ["", "moodle.example.edu/quiz", "javascript:alert(1)", "file:///tmp/quiz.html"],
+    [
+        "",
+        "moodle.example.edu/quiz",
+        "javascript:alert(1)",
+        "file:///tmp/quiz.html",
+        "https://student@courses.ut.edu.vn/mod/quiz/view.php?id=42",
+        "https://courses.ut.edu.vn:443/mod/quiz/view.php?id=42",
+        "https://courses.ut.edu.vn:8443/mod/quiz/view.php?id=42",
+        r"https://courses.ut.edu.vn\mod/quiz/view.php?id=42",
+        "https://courses.ut.edu.vn/\nmod/quiz/view.php?id=42",
+    ],
 )
 def test_control_rejects_non_http_quiz_urls(url: str):
     from flet_uth_quiz import UthQuizPlayer
 
     with pytest.raises(ValueError, match="absolute HTTP or HTTPS"):
         UthQuizPlayer(url=url, session_key="a1" * 32)
+
+
+def test_control_requires_https_when_require_session_is_enabled():
+    from flet_uth_quiz import UthQuizPlayer
+
+    with pytest.raises(ValueError, match="absolute HTTP or HTTPS"):
+        UthQuizPlayer(
+            url="http://courses.ut.edu.vn/mod/quiz/view.php?id=42",
+            session_key="a1" * 32,
+            require_session=True,
+        )
+
+
+def test_session_cleaner_service_invokes_clear_sessions(monkeypatch):
+    from flet_uth_quiz import UthQuizSessionCleaner
+
+    cleaner = UthQuizSessionCleaner()
+    calls = []
+
+    async def invoke(name, arguments=None, timeout=None):
+        calls.append((name, arguments, timeout))
+        return True
+
+    monkeypatch.setattr(cleaner, "_invoke_method", invoke)
+    assert cleaner._c == "UthQuizSessionCleaner"
+    assert asyncio.run(cleaner.clear_sessions()) is True
+    assert calls == [("clear_sessions", None, 10)]
 
 
 @pytest.mark.parametrize("session_key", ["", "not-a-digest", "a1" * 31, "g1" * 32])

@@ -12,17 +12,41 @@ import 'package:path_provider/path_provider.dart';
 import 'mobile_session_queue.dart';
 import 'quiz_cookie_policy.dart';
 import 'quiz_popup_policy.dart';
+import 'quiz_profile_storage.dart';
 import 'quiz_web_storage.dart';
 import 'quiz_webview_settings.dart';
 
 const _loadTimeout = Duration(seconds: 45);
 const _mobileAcquireTimeout = Duration(seconds: 30);
 const _mobileCleanupTimeout = Duration(seconds: 5);
+const _blockedPopupDisposalTimeout = Duration(seconds: 5);
 const _cookiePayloadTimeout = Duration(seconds: 10);
 const _cookiePayloadLimit = 16 * 1024;
 const _maxSessionCookies = 32;
 final _sessionKeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
-final _mobileSessionQueue = MobileSessionQueue();
+final Set<String> activeQuizWindowsProfilePaths = <String>{};
+
+Uri? parseQuizBaseUri(String? value, {bool requireHttps = false}) {
+  if (value == null ||
+      value.isEmpty ||
+      hasUnsafeUrlCharacters(value) ||
+      value.contains(RegExp(r'\s'))) {
+    return null;
+  }
+  final uri = Uri.tryParse(value);
+  final allowedSchemes = requireHttps ? const {'https'} : const {'http', 'https'};
+  if (uri == null ||
+      !uri.isAbsolute ||
+      !uri.hasAuthority ||
+      !allowedSchemes.contains(uri.scheme.toLowerCase()) ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort ||
+      hasExplicitPortOrUserInfo(value)) {
+    return null;
+  }
+  return uri;
+}
 
 /// Validates a direct Moodle attempt/summary URL against its original site.
 /// The URL is kept on the DataChannel and is never sent in invoke-method args.
@@ -85,6 +109,13 @@ class _PopupWindow {
   final int key;
 }
 
+class _BlockedPopupWindow {
+  const _BlockedPopupWindow({required this.windowId, required this.key});
+
+  final int windowId;
+  final int key;
+}
+
 class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
   InAppWebViewController? _controller;
   WebViewEnvironment? _environment;
@@ -103,7 +134,9 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
   bool _readySent = false;
   int _nextPopupKey = 0;
   final List<_PopupWindow> _popups = [];
+  final List<_BlockedPopupWindow> _blockedPopups = [];
   final Map<int, Timer> _popupLoadTimers = {};
+  final Map<int, Timer> _blockedPopupTimers = {};
   Timer? _loadTimer;
   Future<void>? _initialStorePurge;
   Future<void>? _bootstrapCompletion;
@@ -120,7 +153,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     _initialUrl = widget.control.getString('url');
     _sessionKey = widget.control.getString('session_key');
     _requireSession = widget.control.getBool('require_session', false)!;
-    _trustedOrigin = _parseHttpUri(_initialUrl);
+    _trustedOrigin = parseQuizBaseUri(_initialUrl, requireHttps: _requireSession);
     widget.control.addInvokeMethodListener(_invokeMethod);
     unawaited(_prepare());
   }
@@ -138,23 +171,12 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     });
   }
 
-  Uri? _parseHttpUri(String? value) {
-    if (value == null || value.isEmpty) return null;
-    final uri = Uri.tryParse(value);
-    if (uri == null ||
-        !const {'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
-        uri.host.isEmpty) {
-      return null;
-    }
-    return uri;
-  }
-
   bool _validSessionKey(String? value) =>
       value != null && _sessionKeyPattern.hasMatch(value);
 
   Future<void> _prepare() async {
     if (_trustedOrigin == null) {
-      _emitError('navigation_error');
+      _emitError(_requireSession ? 'session_unavailable' : 'navigation_error');
       return;
     }
     if (_requireSession && _trustedOrigin!.scheme.toLowerCase() != 'https') {
@@ -177,22 +199,38 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
 
         final supportDirectory = await getApplicationSupportDirectory();
         if (_disposed) return;
-        final profileDirectory = Directory(
-          path.join(
-            supportDirectory.path,
-            'uthhelper',
-            'quiz-webview',
-            _sessionKey!.toLowerCase(),
+        final profilesRoot = Directory(
+          path.join(supportDirectory.path, 'uthhelper', 'quiz-webview'),
+        );
+        await profilesRoot.create(recursive: true);
+        if (_disposed) return;
+
+        var profileDirectory = Directory(
+          path.join(profilesRoot.path, _sessionKey!.toLowerCase()),
+        );
+        final deleted = await deleteQuizProfileDirectoryWithRetry(
+          profileDirectory,
+        );
+        if (_disposed) return;
+        if (!deleted) {
+          profileDirectory = Directory(
+            path.join(
+              profilesRoot.path,
+              '${_sessionKey!.toLowerCase()}-${DateTime.now().microsecondsSinceEpoch}',
+            ),
+          );
+        }
+        await profileDirectory.create(recursive: true);
+        activeQuizWindowsProfilePaths.add(
+          normalizeProfilePath(profileDirectory.path),
+        );
+        _profileDirectory = profileDirectory;
+        unawaited(
+          sweepQuizProfileDirectories(
+            profilesRoot,
+            activePaths: activeQuizWindowsProfilePaths,
           ),
         );
-        await profileDirectory.parent.create(recursive: true);
-        if (_disposed) return;
-        if (await profileDirectory.exists()) {
-          await profileDirectory.delete(recursive: true);
-        }
-        if (_disposed) return;
-        await profileDirectory.create(recursive: true);
-        _profileDirectory = profileDirectory;
         if (_disposed) {
           await _deleteProfileDirectory();
           return;
@@ -234,7 +272,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     final timeout = Completer<void>();
     final timer = Timer(_mobileAcquireTimeout, timeout.complete);
     try {
-      final lease = await _mobileSessionQueue.acquire(
+      final lease = await sharedMobileSessionQueue.acquire(
         cancelled: Future.any<void>([_disposeSignal.future, timeout.future]),
       );
       if (_disposed || timeout.isCompleted) {
@@ -428,8 +466,9 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
 
   void _checkSessionExpired(WebUri? value) {
     if (!_sessionBootstrapped || _sessionExpiredSent || value == null) return;
-    final destination = Uri.tryParse(value.toString());
-    if (_sameOrigin(destination) &&
+    final raw = value.toString();
+    final destination = Uri.tryParse(raw);
+    if (_sameOrigin(destination, rawUrl: raw) &&
         (destination!.path == '/login/index.php' ||
             destination.path == '/login/')) {
       _sessionExpiredSent = true;
@@ -437,12 +476,33 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     }
   }
 
-  bool _sameOrigin(Uri? destination) {
+  bool _sameOrigin(Uri? destination, {String? rawUrl}) {
     final trusted = _trustedOrigin;
     if (trusted == null || destination == null) return false;
+    if (!destination.isAbsolute ||
+        !destination.hasAuthority ||
+        destination.host.isEmpty ||
+        destination.userInfo.isNotEmpty ||
+        destination.hasPort) {
+      return false;
+    }
+    if (rawUrl != null &&
+        (hasUnsafeUrlCharacters(rawUrl) || hasExplicitPortOrUserInfo(rawUrl))) {
+      return false;
+    }
     return destination.scheme.toLowerCase() == trusted.scheme.toLowerCase() &&
         destination.host.toLowerCase() == trusted.host.toLowerCase() &&
         destination.port == trusted.port;
+  }
+
+  void _enforceLoadOrigin(InAppWebViewController controller, WebUri? url) {
+    if (_disposed || url == null) return;
+    final raw = url.toString();
+    if (raw.isEmpty || raw.toLowerCase() == 'about:blank') return;
+    final destination = Uri.tryParse(raw);
+    if (!_sameOrigin(destination, rawUrl: raw)) {
+      unawaited(controller.stopLoading().catchError((_) {}));
+    }
   }
 
   NavigationActionPolicy _navigationPolicy(
@@ -458,29 +518,47 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
           : NavigationActionPolicy.CANCEL;
     }
 
-    final destination = Uri.tryParse(action.request.url?.toString() ?? '');
-    if (popup && destination?.toString() == 'about:blank') {
+    final raw = action.request.url?.toString() ?? '';
+    if (popup &&
+        raw.toLowerCase() == 'about:blank' &&
+        !hasUnsafeUrlCharacters(raw)) {
       return NavigationActionPolicy.ALLOW;
     }
-    if (_sameOrigin(destination)) return NavigationActionPolicy.ALLOW;
+    final destination = Uri.tryParse(raw);
+    if (_sameOrigin(destination, rawUrl: raw)) {
+      return NavigationActionPolicy.ALLOW;
+    }
 
     _trigger('external_link', 'external_link');
     return NavigationActionPolicy.CANCEL;
   }
 
   Future<bool> _createWindow(CreateWindowAction action) async {
+    if (_disposed) return false;
     final disposition = classifyQuizPopupRequest(
       action.request.url?.toString(),
       _trustedOrigin,
       activePopupCount: _popups.length,
     );
-    if (_disposed ||
-        disposition == QuizPopupRequestKind.invalid ||
-        disposition == QuizPopupRequestKind.limitReached) {
-      return false;
-    }
     if (disposition == QuizPopupRequestKind.external) {
       _trigger('external_link', 'external_link');
+    }
+    if (disposition == QuizPopupRequestKind.invalid ||
+        disposition == QuizPopupRequestKind.limitReached ||
+        disposition == QuizPopupRequestKind.external) {
+      if (shouldAdoptBlockedPopupToCancel(defaultTargetPlatform)) {
+        final blockedKey = _nextPopupKey++;
+        _blockedPopupTimers[blockedKey] = Timer(
+          _blockedPopupDisposalTimeout,
+          () => _removeBlockedPopup(blockedKey),
+        );
+        setState(() {
+          _blockedPopups.add(
+            _BlockedPopupWindow(windowId: action.windowId, key: blockedKey),
+          );
+        });
+        return true;
+      }
       return false;
     }
 
@@ -490,6 +568,19 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       );
     });
     return true;
+  }
+
+  void _disposeBlockedPopup(int key, InAppWebViewController controller) {
+    unawaited(controller.stopLoading().catchError((_) {}));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _removeBlockedPopup(key);
+    });
+  }
+
+  void _removeBlockedPopup(int key) {
+    _blockedPopupTimers.remove(key)?.cancel();
+    if (_disposed || !mounted) return;
+    setState(() => _blockedPopups.removeWhere((popup) => popup.key == key));
   }
 
   void _closePopup(int key) {
@@ -538,6 +629,29 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     _trigger('close', 'closed');
   }
 
+  Widget _blockedPopupSink(_BlockedPopupWindow blocked) {
+    return Offstage(
+      offstage: true,
+      child: SizedBox(
+        width: 1,
+        height: 1,
+        child: InAppWebView(
+          key: ValueKey('quiz-blocked-popup-${blocked.key}'),
+          windowId: blocked.windowId,
+          webViewEnvironment: _environment,
+          initialSettings: createQuizWebViewSettings(allowPopups: false),
+          onWebViewCreated: (controller) =>
+              _disposeBlockedPopup(blocked.key, controller),
+          onLoadStart: (controller, _url) =>
+              unawaited(controller.stopLoading().catchError((_) {})),
+          shouldOverrideUrlLoading: (_controller, _action) async =>
+              NavigationActionPolicy.CANCEL,
+          onCreateWindow: (_controller, _action) async => false,
+        ),
+      ),
+    );
+  }
+
   Widget _popup(_PopupWindow popup) {
     return Positioned.fill(
       child: InAppWebView(
@@ -546,6 +660,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
         webViewEnvironment: _environment,
         initialSettings: createQuizWebViewSettings(),
         onLoadStart: (controller, url) {
+          _enforceLoadOrigin(controller, url);
           _checkSessionExpired(url);
           _startPopupLoadTimeout(popup.key);
         },
@@ -586,6 +701,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
               initialSettings: createQuizWebViewSettings(),
               onWebViewCreated: _initializeController,
               onLoadStart: (controller, url) {
+                _enforceLoadOrigin(controller, url);
                 _checkSessionExpired(url);
                 _startLoadTimeout();
               },
@@ -602,6 +718,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
               onCloseWindow: (controller) => _rootRequestedClose(),
             ),
           ),
+          for (final blocked in _blockedPopups) _blockedPopupSink(blocked),
           for (final popup in _popups) _popup(popup),
         ],
       ),
@@ -628,6 +745,10 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       timer.cancel();
     }
     _popupLoadTimers.clear();
+    for (final timer in _blockedPopupTimers.values) {
+      timer.cancel();
+    }
+    _blockedPopupTimers.clear();
     final lease = _mobileSessionLease;
     if (lease != null) {
       unawaited(_releaseMobileSession(lease));
@@ -700,12 +821,11 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     final directory = _profileDirectory;
     if (directory == null) return;
     try {
-      if (await directory.exists()) {
-        await directory.delete(recursive: true);
-      }
-    } catch (_) {
-      // The next source session retries clearing the same account-scoped path.
+      await deleteQuizProfileDirectoryWithRetry(directory);
     } finally {
+      activeQuizWindowsProfilePaths.remove(
+        normalizeProfilePath(directory.path),
+      );
       _profileDirectory = null;
     }
   }
@@ -715,7 +835,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       if (!await _waitForSessionWork()) {
         // A late cookie write could follow cleanup, so never hand the shared
         // mobile store to another quiz session in this process.
-        _mobileSessionQueue.disable();
+        sharedMobileSessionQueue.disable();
         unawaited(
           _settleSessionWork().then((_) async {
             try {
@@ -729,7 +849,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       await _purgeSessionStore().timeout(_mobileCleanupTimeout);
     } catch (_) {
       // Cleanup failures are deliberately not surfaced with native details.
-      _mobileSessionQueue.disable();
+      sharedMobileSessionQueue.disable();
     } finally {
       lease.release();
       _mobileSessionLease = null;

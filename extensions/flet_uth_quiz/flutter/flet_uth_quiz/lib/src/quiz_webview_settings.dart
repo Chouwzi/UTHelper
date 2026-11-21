@@ -1,11 +1,21 @@
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
-InAppWebViewSettings createQuizWebViewSettings() {
+/// Cancels any non-HTTPS and non-`about:blank` subframe URL natively on Android.
+///
+/// Android's `InAppWebViewClient.shouldOverrideUrlLoading` ignores Dart's
+/// `NavigationActionPolicy.CANCEL` on subframes unless this Java `Pattern`
+/// matches the target URL.
+const quizSubframeCancelRegex =
+    r'(?is)^(?!(?:https://[^\x00-\x20\x7f/@?#\\]+(?:[/?#].*)?|about:blank(?:[?#].*)?)$).*';
+
+InAppWebViewSettings createQuizWebViewSettings({bool allowPopups = true}) {
   return InAppWebViewSettings(
     javaScriptEnabled: true,
-    javaScriptCanOpenWindowsAutomatically: true,
-    supportMultipleWindows: true,
+    javaScriptCanOpenWindowsAutomatically: allowPopups,
+    supportMultipleWindows: allowPopups,
     useShouldOverrideUrlLoading: true,
+    regexToCancelSubFramesLoading: quizSubframeCancelRegex,
+    isInspectable: false,
     allowContentAccess: false,
     allowFileAccess: false,
     allowFileAccessFromFileURLs: false,

@@ -180,9 +180,11 @@ def test_conflicting_start_and_resume_controls_remain_ambiguous():
     "wrong_text",
     [
         "Sai mật khẩu",
+        "Invalid password",
         "The password entered was incorrect",
         "Mật khẩu đã nhập không đúng",
         "Mật khẩu đã nhập không chính xác",
+        "Mật khẩu không chính xác",
     ],
 )
 def test_password_is_required_and_wrong_password_can_be_retried(

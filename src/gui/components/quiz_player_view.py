@@ -44,6 +44,12 @@ def _default_player_factory():
     return UthQuizPlayer
 
 
+def _default_session_cleaner_factory():
+    from flet_uth_quiz import UthQuizSessionCleaner
+
+    return UthQuizSessionCleaner
+
+
 def _default_target_builder():
     from core.quiz_player import build_quiz_launch_target
 
@@ -120,6 +126,8 @@ class QuizPlayerView(ft.Container):
         self._close_title = "Đóng bài?"
         self._close_action_label = "Đóng bài"
         self._saved_window_state: dict[str, Any] | None = None
+        self._session_cleaner = None
+        self._ensure_session_cleaner()
 
         self._title = ft.Text(
             "",
@@ -1595,3 +1603,38 @@ class QuizPlayerView(ft.Container):
             self._page.update()
         except Exception:
             pass
+
+    def _ensure_session_cleaner(self):
+        if self._session_cleaner is not None or self._player_factory is not None:
+            return self._session_cleaner
+        if not self.native_runtime_supported():
+            return None
+        services = getattr(self._page, "services", None)
+        if not isinstance(services, list):
+            return None
+        try:
+            cleaner_cls = _default_session_cleaner_factory()
+            cleaner = cleaner_cls()
+        except Exception:
+            return None
+        services.append(cleaner)
+        self._session_cleaner = cleaner
+        return cleaner
+
+    async def clear_persisted_sessions(self) -> bool:
+        """Purge stored Windows WebView2 profiles or mobile cookies/storage."""
+        if self.visible or self._player is not None:
+            return False
+        cleaner = self._session_cleaner
+        if cleaner is None:
+            cleaner = self._ensure_session_cleaner()
+            if cleaner is None:
+                return False
+            self._safe_update()
+        clear_method = getattr(cleaner, "clear_sessions", None)
+        if not callable(clear_method):
+            return False
+        try:
+            return bool(await clear_method())
+        except Exception:
+            return False

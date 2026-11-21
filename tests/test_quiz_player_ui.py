@@ -608,8 +608,119 @@ def test_live_safe_exam_browser_requirement_preserves_browser_recovery(monkeypat
         assert detail_view._quiz_runtime_notice.visible is True
         assert "safe exam browser" in detail_view._quiz_runtime_notice.value.casefold()
         assert "trình duyệt" in detail_view._quiz_runtime_notice.value.casefold()
+        assert detail_view._quiz_open_btn.visible is False
+        assert detail_view._open_btn.visible is True
         assert detail_view._header_open_btn.visible is True
         assert lease.released is True
+
+    asyncio.run(scenario())
+
+
+def test_runtime_quiz_closed_switches_cta_back_to_browser_recovery(monkeypatch):
+    async def scenario():
+        prepared_entries = []
+        provider = prepared_entry_provider(
+            prepared_entries,
+            lambda: FakePreparedEntry(mode="unavailable", reason="quiz_closed"),
+        )
+        _page, lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=provider,
+        )
+        detail_view.update_detail(trusted_quiz())
+        assert detail_view._quiz_open_btn.visible is True
+        assert detail_view._open_btn.visible is False
+
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.02)
+
+        assert players == []
+        assert player_view.visible is False
+        assert detail_view._quiz_runtime_notice.visible is True
+        assert "đã đóng" in detail_view._quiz_runtime_notice.value.casefold()
+        assert detail_view._quiz_open_btn.visible is False
+        assert detail_view._open_btn.visible is True
+        assert lease.released is True
+
+    asyncio.run(scenario())
+
+
+def test_credentials_change_purges_persisted_quiz_sessions(monkeypatch):
+    import gui.app_controller as app_controller_module
+    from gui.core.theme import load_theme_from_settings, set_page_theme
+
+    async def scenario():
+        enable_native_runtime(monkeypatch)
+        page = HeadlessPage()
+        page.services = []
+        cleaner_calls = []
+
+        class FakeCleaner:
+            async def clear_sessions(self):
+                cleaner_calls.append("cleared")
+                return True
+
+        fake_cleaner = FakeCleaner()
+        monkeypatch.setattr(
+            "gui.components.quiz_player_view._default_session_cleaner_factory",
+            lambda: (lambda: fake_cleaner),
+        )
+        player_view = QuizPlayerView(page)
+        assert page.services == [fake_cleaner]
+
+        scheduled = []
+        controller = AppController.__new__(AppController)
+        controller.page = page
+        controller.quiz_player_view = player_view
+        controller._settings_identity = ("student-old", "secret-old")
+        controller._notification_milestones_snapshot = tuple(
+            settings.NOTIFY_MILESTONES_MINUTES or []
+        )
+        controller._notification_class_schedule_snapshot = (
+            bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED),
+            tuple(settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS),
+            bool(settings.NOTIFY_DND_ENABLE),
+            int(settings.NOTIFY_DND_START),
+            int(settings.NOTIFY_DND_END),
+        )
+        controller.orchestrator = SimpleNamespace(
+            moodle_service=SimpleNamespace(clear_all_caches=lambda: None),
+            clear_detail_cache=lambda: None,
+            _userid_cache=123,
+            is_logged_in=True,
+        )
+        controller._portal_client = SimpleNamespace(clear_token=lambda: None)
+        controller._today_schedule_coordinator = SimpleNamespace(
+            replace_cache=lambda _cache: None,
+            refresh=AsyncMock(),
+        )
+        controller._today_schedule_component = SimpleNamespace(set_state=lambda _s: None)
+        controller._reconcile_class_schedule_notifications = AsyncMock()
+        controller._rebuild_colors = lambda: None
+        controller._android_background = None
+        controller._safe_run_task = lambda fn, *args, **kwargs: scheduled.append(
+            (fn, args, kwargs)
+        )
+        monkeypatch.setattr(settings, "UTH_USERNAME", "")
+        monkeypatch.setattr(settings, "UTH_PASSWORD", "")
+        monkeypatch.setattr("core.data_cache.DataCache", lambda namespace=None: None)
+        monkeypatch.setattr(
+            app_controller_module, "TodayScheduleCache", lambda namespace=None: None
+        )
+        monkeypatch.setattr(
+            "gui.core.theme.load_theme_from_settings", load_theme_from_settings
+        )
+        monkeypatch.setattr("gui.core.theme.set_page_theme", lambda _p: None)
+        _ = set_page_theme
+
+        controller._on_settings_saved()
+
+        clear_tasks = [
+            item for item in scheduled if item[0] == player_view.clear_persisted_sessions
+        ]
+        assert len(clear_tasks) == 1
+        assert await clear_tasks[0][0]() is True
+        assert cleaner_calls == ["cleared"]
 
     asyncio.run(scenario())
 

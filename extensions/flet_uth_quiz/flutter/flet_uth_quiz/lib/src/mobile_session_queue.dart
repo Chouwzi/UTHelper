@@ -1,5 +1,7 @@
 import 'dart:async';
 
+final sharedMobileSessionQueue = MobileSessionQueue();
+
 /// Serializes mobile WebView sessions because their cookie stores are shared.
 class MobileSessionQueue {
   Future<void> _tail = Future<void>.value();

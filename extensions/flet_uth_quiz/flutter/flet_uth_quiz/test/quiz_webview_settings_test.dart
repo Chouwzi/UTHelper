@@ -3,13 +3,15 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('retains quiz JavaScript and windows with local access disabled', () {
+  test('retains quiz JavaScript and windows with local access and DevTools disabled', () {
     final settings = createQuizWebViewSettings();
 
     expect(settings.javaScriptEnabled, isTrue);
     expect(settings.javaScriptCanOpenWindowsAutomatically, isTrue);
     expect(settings.supportMultipleWindows, isTrue);
     expect(settings.useShouldOverrideUrlLoading, isTrue);
+    expect(settings.regexToCancelSubFramesLoading, quizSubframeCancelRegex);
+    expect(settings.isInspectable, isFalse);
     expect(settings.allowContentAccess, isFalse);
     expect(settings.allowFileAccess, isFalse);
     expect(settings.allowFileAccessFromFileURLs, isFalse);
@@ -21,5 +23,61 @@ void main() {
     );
     expect(settings.incognito, isFalse);
     expect(settings.saveFormData, isFalse);
+  });
+
+  test('can build sink settings with popups disabled', () {
+    final settings = createQuizWebViewSettings(allowPopups: false);
+
+    expect(settings.javaScriptCanOpenWindowsAutomatically, isFalse);
+    expect(settings.supportMultipleWindows, isFalse);
+    expect(settings.isInspectable, isFalse);
+    expect(settings.regexToCancelSubFramesLoading, quizSubframeCancelRegex);
+  });
+
+  test('Android subframe cancellation regex allows HTTPS and about:blank only', () {
+    expect(quizSubframeCancelRegex.startsWith('(?is)'), isTrue);
+    final dartEquivalent = RegExp(
+      quizSubframeCancelRegex.substring('(?is)'.length),
+      caseSensitive: false,
+      dotAll: true,
+    );
+
+    for (final allowed in [
+      'https://courses.ut.edu.vn/pluginfile.php/quiz-image.png',
+      'HTTPS://MEDIA.EXAMPLE.ORG/video.mp4?token=1#t=2',
+      'https://courses.ut.edu.vn',
+      'about:blank',
+      'ABOUT:BLANK#question-frame',
+      'about:blank?x=1',
+    ]) {
+      expect(
+        dartEquivalent.hasMatch(allowed),
+        isFalse,
+        reason: 'expected subframe to be allowed: $allowed',
+      );
+    }
+
+    for (final cancelled in [
+      '',
+      'http://media.example.org/insecure-video.mp4',
+      'javascript:alert(1)',
+      'file:///private/data',
+      'content://provider/item',
+      'intent://scan/#Intent;end',
+      'data:text/html,<script>alert(1)</script>',
+      'blob:https://courses.ut.edu.vn/id',
+      'ftp://example.org/file',
+      'https://student@media.example.org/file',
+      'https:///missing-host',
+      r'https://courses.ut.edu.vn\evil',
+      'https://courses.ut.edu.vn\nhttp://evil',
+      'about:settings',
+    ]) {
+      expect(
+        dartEquivalent.hasMatch(cancelled),
+        isTrue,
+        reason: 'expected subframe to be cancelled: $cancelled',
+      );
+    }
   });
 }
