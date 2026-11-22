@@ -275,7 +275,7 @@ jobs:
 
       - name: 📤 Upload unsigned diagnostic APK (apk_lts)
         if: matrix.channel == 'apk_lts'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: android-unsigned-diagnostic-${{ github.sha }}
           path: UTHelper-${{ github.sha }}-unsigned-diagnostic.apk
@@ -284,7 +284,7 @@ jobs:
 
       - name: 📤 Upload CH Play AAB (${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }})
         if: matrix.channel == 'chplay'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: android-chplay-${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }}-${{ github.sha }}
           path: |
