@@ -229,3 +229,158 @@ def test_academic_radar_and_grade_overview_modals_dismiss_on_escape_via_pop_dial
     assert overlay_list[0].open is True
     overlay_list[0].content.on_key_down(SimpleNamespace(key="Escape"))
     assert overlay_list[0].open is False
+
+
+def test_grade_overview_update_theme_short_circuits_and_defers_updates_in_view_manager():
+    from config import settings
+    from gui.core.theme import apply_theme
+    from gui.view_manager import ViewManager
+
+    original_theme = settings.THEME
+    update_calls = []
+    page_updates = []
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        update=lambda: page_updates.append(True),
+        dialogs=[],
+        overlay=[],
+        show_dialog=lambda _d: None,
+    )
+    try:
+        apply_theme("midnight_blue")
+        view = GradeOverviewView(page=page)
+        sem = _make_sample_semester(75, "HK2 2025-2026")
+        profile = calculate_radar_profile(sem)
+        view.update_academic_data([sem], [profile])
+
+        radar_calls = []
+        list_calls = []
+        orig_radar = view._radar_card.update_theme
+        orig_list = view._grade_list_view.update_theme
+        view._radar_card.update_theme = lambda **kw: (radar_calls.append(kw), orig_radar(**kw))
+        view._grade_list_view.update_theme = lambda **kw: (list_calls.append(kw), orig_list(**kw))
+        view.update = lambda: update_calls.append(True)
+
+        # Unchanged palette: short-circuits completely.
+        view.update_theme()
+        assert radar_calls == []
+        assert list_calls == []
+        assert update_calls == []
+
+        # Changed palette inside ViewManager.show_grades_loading(): 1 page.update(), update=False on children.
+        apply_theme("steel_light")
+        vm = ViewManager(
+            page=page,
+            dashboard=SimpleNamespace(visible=True),
+            detail_view=SimpleNamespace(visible=False),
+            settings_view=SimpleNamespace(visible=False),
+            calendar_view=SimpleNamespace(visible=False),
+            grade_overview_view=view,
+            controller=SimpleNamespace(
+                calendar_btn=SimpleNamespace(icon_color=None),
+                grades_btn=SimpleNamespace(icon_color=None),
+                courses_btn=SimpleNamespace(icon_color=None),
+            ),
+        )
+        vm.show_grades_loading()
+        assert radar_calls == [{"update": False}]
+        assert list_calls == [{"update": False}]
+        assert update_calls == []
+        assert len(page_updates) == 1
+    finally:
+        apply_theme(original_theme)
+
+
+def test_grade_overview_header_prevents_wrapping_and_keeps_touch_targets():
+    page = SimpleNamespace(width=360, height=800, update=lambda: None)
+    view = GradeOverviewView(page=page)
+
+    assert view._title.max_lines == 1
+    assert view._title.no_wrap is True
+    assert view._title.overflow == ft.TextOverflow.ELLIPSIS
+    assert view._header.spacing <= 4
+    assert view._courses_btn.height == 44
+    assert view._courses_btn.style.padding == ft.Padding.symmetric(horizontal=8, vertical=0)
+
+    view.set_width(320)
+    assert view._title.size == 15
+    view.set_width(400)
+    assert view._title.size == 16
+
+
+def test_radar_card_and_chart_fit_360px_mobile_without_clipping():
+    sem1 = _make_sample_semester(75, "Học kỳ hè năm học 2025-2026")
+    sem2 = _make_sample_semester(74, "HK1 2025-2026")
+    p1 = calculate_radar_profile(sem1, previous_semester=sem2)
+    p2 = calculate_radar_profile(sem2)
+
+    card = AcademicRadarCard(
+        profiles=[p1, p2],
+        page=SimpleNamespace(width=360, height=800),
+    )
+
+    assert 220.0 <= card._radar_chart.width <= 294.0
+    assert card._compare_btn.content == "So sánh kỳ trước"
+    header_row = card.content.controls[0]
+    assert isinstance(header_row, ft.Row)
+    assert header_row.wrap is True
+    assert card._sem_dropdown.expand is True
+    assert card._sem_dropdown.expanded_insets == ft.Padding.zero()
+    assert isinstance(card.content.controls[1], ft.Row)
+    assert card.content.controls[1].controls == [card._sem_dropdown]
+
+    for node in card._radar_chart.content.controls[1:]:
+        assert node.left >= 0.0
+        assert node.left + node.width <= card._radar_chart._chart_width
+        assert node.top >= 0.0
+        assert node.top + 50.0 <= card._radar_chart._chart_height
+
+    card.set_viewport_width(390)
+    assert card._radar_chart.width == 322.0
+
+
+def test_planner_and_metric_detail_dialogs_fit_360px_viewport_without_overflow():
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+    metric = profile.metrics["breakthrough"]
+
+    shown_planner = []
+    page_planner = SimpleNamespace(
+        width=360,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown_planner.append,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    gv = GradeOverviewView(page=page_planner)
+    gv.update_academic_data([sem], [profile])
+    gv._open_planner(None)
+
+    planner_dlg = shown_planner[0]
+    assert planner_dlg.inset_padding == ft.Padding.symmetric(horizontal=16, vertical=24)
+    assert planner_dlg.content.content.width <= 296.0
+    assert gv._gpa_target_card.content.controls[0].controls[1].expand is True
+    assert gv._graduation_card.content.controls[0].controls[1].expand is True
+    assert gv._gpa_target_card._target_field.expand is True
+    assert gv._gpa_target_card._target_field.width is None
+    assert gv._graduation_card._target_field.expand is True
+    assert gv._graduation_card._target_field.width is None
+
+    shown_metric = []
+    page_metric = SimpleNamespace(
+        width=360,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown_metric.append,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    MetricDetailSheet.show(page_metric, metric)
+    metric_dlg = shown_metric[0]
+    assert metric_dlg.inset_padding == ft.Padding.symmetric(horizontal=16, vertical=24)
+    assert metric_dlg.content.content.width <= 296.0
+    assert metric_dlg.content.content.padding is None

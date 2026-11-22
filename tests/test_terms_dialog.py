@@ -52,3 +52,18 @@ def test_privacy_settings_default_to_enabled_and_include_terms_entry(monkeypatch
     terms_entry = controls[-1]
     terms_entry.on_click(None)
     page.show_dialog.assert_called_once()
+
+
+def test_privacy_controls_preserve_not_asked_consent_option(monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "CRASH_REPORTING_CONSENT", "not_asked")
+    view = Mock()
+    init_privacy_controls(view)
+
+    assert view._dd_crash_reporting_consent.value == "not_asked"
+    assert [option.key for option in view._dd_crash_reporting_consent.options] == [
+        "not_asked",
+        "enabled",
+        "disabled",
+    ]

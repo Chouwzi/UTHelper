@@ -69,9 +69,16 @@ class GraduationGpaCard(ft.Container):
         title = ft.Row(
             controls=[
                 ft.Icon(ft.Icons.SCHOOL_ROUNDED, size=18, color=C.ACCENT),
-                ft.Text("GPA ra trường kỳ vọng", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+                ft.Text(
+                    "GPA ra trường kỳ vọng",
+                    size=16,
+                    weight=ft.FontWeight.W_700,
+                    color=C.TEXT_PRIMARY,
+                    expand=True,
+                ),
             ],
             spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         p = self._progress
         if p is not None:
@@ -86,9 +93,10 @@ class GraduationGpaCard(ft.Container):
             label="GPA ra trường hệ 4",
             hint_text="0.0 – 4.0",
             keyboard_type=ft.KeyboardType.NUMBER,
-            width=170,
+            expand=True,
             height=48,
             text_size=14,
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
             border_radius=10,
             border_color=C.BORDER,
             focused_border_color=C.ACCENT,
@@ -101,7 +109,7 @@ class GraduationGpaCard(ft.Container):
         )
         self._result_col = ft.Column(controls=self._build_result_controls(), spacing=8)
         self.content = ft.Column(
-            controls=[title, self._note(summary), self._target_field, self._result_col],
+            controls=[title, self._note(summary), ft.Row(controls=[self._target_field]), self._result_col],
             spacing=10,
         )
 

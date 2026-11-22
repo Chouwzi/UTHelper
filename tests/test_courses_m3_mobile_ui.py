@@ -1132,3 +1132,35 @@ def test_flet_mro_and_wrap_invariants_across_mobile_course_panes():
     assert wrap_violations == []
     assert mro_mismatches == []
     assert math.isfinite(state.viewport_height)
+
+    # F6: _refresh_btn has >= 44dp touch constraints; _chips_row wraps in portrait and scrolls in compact height
+    assert lp._refresh_btn.size_constraints.min_width >= 44
+    assert lp._refresh_btn.size_constraints.min_height >= 44
+    assert lp._chips_row.wrap is False
+    assert lp._chips_row.scroll == ft.ScrollMode.AUTO
+
+    portrait_state = CoursesState(
+        courses=[course],
+        layout_mode="mobile",
+        viewport_height=780.0,
+    )
+    lp.render(portrait_state, update=False)
+    assert lp._chips_row.wrap is True
+    assert lp._chips_row.scroll is None
+
+
+def test_app_controller_responsive_layout_prefers_viewport_size_and_updates_grade_view():
+    ctrl = AppController.__new__(AppController)
+    ctrl.page = _fake_page(width=360, height=780)
+    ctrl._nav_shell = AdaptiveNavShell(on_navigate=lambda _k: None)
+
+    viewport_calls = []
+    ctrl.courses_view = SimpleNamespace(
+        set_viewport_size=lambda w, h: viewport_calls.append((w, h))
+    )
+    grade_widths = []
+    ctrl.grade_overview_view = SimpleNamespace(set_width=grade_widths.append)
+
+    ctrl._apply_responsive_layout()
+    assert viewport_calls == [(360.0, 780.0)]
+    assert grade_widths == [360.0]

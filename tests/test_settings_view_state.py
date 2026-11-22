@@ -910,3 +910,19 @@ def test_system_section_keeps_autostart_status_visible_when_disabled(monkeypatch
     )
     assert view._sw_start_minimized_container.visible is True
     assert view._autostart_status.visible is False
+
+
+def test_settings_load_skips_redundant_refresh_when_palette_unchanged():
+    from gui.core.theme import semantic_palette
+
+    async def scenario():
+        view = _make_loading_view(None)
+        view._rendered_palette = semantic_palette()
+        await SettingsView.load_current_settings(view)
+        view._refresh_section_colors.assert_not_called()
+
+        view._rendered_palette = ("stale",)
+        await SettingsView.load_current_settings(view)
+        view._refresh_section_colors.assert_called_once()
+
+    asyncio.run(scenario())

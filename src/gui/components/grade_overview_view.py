@@ -52,6 +52,13 @@ class GradeOverviewView(ft.Container):
         self._semesters: list[SemesterGradeData] = []
         self._profiles: list[RadarProfile] = []
         self._selected_semester_idx = 0
+        self._defer_self_update = False
+        self._viewport_width: float = 0.0
+
+        try:
+            page_w = float(getattr(self._get_page(), "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
 
         # 1. Header (Back button on left, Centered Title in middle, Refresh on right)
         btn_constraints = ft.BoxConstraints(
@@ -68,10 +75,13 @@ class GradeOverviewView(ft.Container):
         )
         self._title = ft.Text(
             "Bảng điểm",
-            size=16,
+            size=15 if 0 < page_w < 360 else 16,
             weight=ft.FontWeight.W_700,
             color=C.TEXT_PRIMARY,
             text_align=ft.TextAlign.CENTER,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            no_wrap=True,
             expand=True,
         )
         self._refresh_btn = ft.IconButton(
@@ -87,7 +97,10 @@ class GradeOverviewView(ft.Container):
             "Môn học",
             height=44,
             on_click=self._handle_open_courses,
-            style=ft.ButtonStyle(color=C.ACCENT),
+            style=ft.ButtonStyle(
+                color=C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+            ),
         )
         self._planner_btn = ft.IconButton(
             icon=ft.Icons.CALCULATE_ROUNDED,
@@ -106,6 +119,7 @@ class GradeOverviewView(ft.Container):
                 ft.Semantics(label="Tính GPA mong muốn", button=True, content=self._planner_btn),
                 ft.Semantics(label="Làm mới bảng điểm từ Portal", button=True, content=self._refresh_btn),
             ],
+            spacing=2,
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -226,6 +240,20 @@ class GradeOverviewView(ft.Container):
         except Exception:
             return None
 
+    def set_width(self, width: float) -> None:
+        """Update layout metrics when the host viewport width changes."""
+        try:
+            numeric = float(width or 0)
+        except (TypeError, ValueError):
+            return
+        if numeric <= 0:
+            return
+        self._viewport_width = numeric
+        target_title_size = 15 if numeric < 360 else 16
+        if self._title.size != target_title_size:
+            self._title.size = target_title_size
+        self._radar_card.set_viewport_width(numeric)
+
     def show_loading(self) -> None:
         """Shows loading state."""
         self._loading_row.visible = True
@@ -236,6 +264,8 @@ class GradeOverviewView(ft.Container):
         self.visible = True
         self.offset = ft.Offset(0, 0)
         self.opacity = 1.0
+        if self._defer_self_update:
+            return
         try:
             self.update()
         except Exception:
@@ -254,6 +284,8 @@ class GradeOverviewView(ft.Container):
                 "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi thử lại."
             )
         self._error_state.visible = True
+        if self._defer_self_update:
+            return
         try:
             self.update()
         except Exception:
@@ -276,6 +308,8 @@ class GradeOverviewView(ft.Container):
             self._empty_state.visible = True
             self._radar_card.visible = False
             self._grade_list_view.visible = False
+            if self._defer_self_update:
+                return
             try:
                 self.update()
             except Exception:
@@ -295,6 +329,8 @@ class GradeOverviewView(ft.Container):
         current_courses = semesters[0].courses if semesters else []
         self._grade_list_view.update_courses(current_courses)
 
+        if self._defer_self_update:
+            return
         try:
             self.update()
         except Exception:
@@ -395,7 +431,8 @@ class GradeOverviewView(ft.Container):
             page_w = float(getattr(page, "width", None) or 0)
         except (TypeError, ValueError):
             page_w = 0.0
-        body_w = max(280.0, min(440.0, page_w - 80)) if page_w else 440.0
+        is_narrow = 0 < page_w < 600
+        body_w = max(240.0, min(440.0, page_w - 64.0)) if page_w else 440.0
 
         used_overlay = False
 
@@ -430,6 +467,10 @@ class GradeOverviewView(ft.Container):
                 ),
             ),
             actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
+            inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
+            title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
+            content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
+            actions_padding=ft.Padding.only(left=16, right=16, top=0, bottom=8),
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )
@@ -504,6 +545,8 @@ class GradeOverviewView(ft.Container):
         """Updates colors dynamically on theme switch."""
         from gui.core.theme import C
         current_palette = semantic_palette()
+        if current_palette == self._rendered_palette:
+            return
         refresh_semantic_control_colors([self], self._rendered_palette, current_palette)
         self._rendered_palette = current_palette
         self.bgcolor = C.BG
@@ -518,15 +561,18 @@ class GradeOverviewView(ft.Container):
         self._error_text.color = C.TEXT_SECONDARY
         self._error_retry_btn.bgcolor = C.ACCENT
         self._error_retry_btn.color = C.ON_ACCENT
-        self._courses_btn.style = ft.ButtonStyle(color=C.ACCENT)
+        self._courses_btn.style = ft.ButtonStyle(
+            color=C.ACCENT,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+        )
         self._planner_btn.icon_color = C.TEXT_SECONDARY
 
-        # These views are cached while detached from the desktop page. Rebuild
-        # them unconditionally so their root surfaces cannot retain the theme
-        # from the previous settings preview when they are shown again.
-        self._radar_card.update_theme()
-        self._grade_list_view.update_theme()
+        # Refresh child subtrees without emitting extra standalone updates.
+        self._radar_card.update_theme(update=False)
+        self._grade_list_view.update_theme(update=False)
 
+        if self._defer_self_update:
+            return
         try:
             self.update()
         except Exception:

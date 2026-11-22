@@ -52,6 +52,7 @@ def build_filter_chip(
         selected_color=active_accent,
         bgcolor=idle_bg,
         border_side=ft.BorderSide(1, active_accent if selected else idle_border),
+        label_padding=ft.Padding.symmetric(horizontal=4, vertical=0),
         on_select=on_select,
     )
 

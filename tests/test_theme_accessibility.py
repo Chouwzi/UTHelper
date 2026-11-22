@@ -96,6 +96,19 @@ def test_set_page_theme_maps_material_semantic_roles():
     assert scheme.error == C.CRITICAL
     assert scheme.on_error == C.ON_CRITICAL
 
+    import flet as ft
+
+    nav_theme = page.theme.navigation_bar_theme
+    assert isinstance(nav_theme, ft.NavigationBarTheme)
+    assert nav_theme.label_behavior == ft.NavigationBarLabelBehavior.ALWAYS_SHOW
+    assert nav_theme.label_padding == ft.Padding.symmetric(horizontal=1, vertical=0)
+    selected_style = nav_theme.label_text_style[ft.ControlState.SELECTED]
+    default_style = nav_theme.label_text_style[ft.ControlState.DEFAULT]
+    assert selected_style.size == 10.5
+    assert selected_style.overflow == ft.TextOverflow.ELLIPSIS
+    assert default_style.size == 10.5
+    assert default_style.overflow == ft.TextOverflow.ELLIPSIS
+
 
 def test_gui_components_do_not_own_literal_palette_colors():
     root = Path(__file__).parents[1]

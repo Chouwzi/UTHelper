@@ -435,6 +435,28 @@ def set_page_theme(page, theme_name: str | None = None) -> None:
             shadow=C.SHADOW,
             scrim=C.SCRIM,
         ),
+        navigation_bar_theme=ft.NavigationBarTheme(
+            bgcolor=C.SURFACE,
+            indicator_color=ft.Colors.with_opacity(0.18, C.ACCENT),
+            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
+            label_padding=ft.Padding.symmetric(horizontal=1, vertical=0),
+            label_text_style={
+                ft.ControlState.SELECTED: ft.TextStyle(
+                    size=10.5,
+                    weight=ft.FontWeight.W_600,
+                    color=C.ACCENT,
+                    letter_spacing=0.0,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.ControlState.DEFAULT: ft.TextStyle(
+                    size=10.5,
+                    weight=ft.FontWeight.W_500,
+                    color=C.TEXT_SECONDARY,
+                    letter_spacing=0.0,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            },
+        ),
     )
     
     if is_light:

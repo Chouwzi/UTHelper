@@ -1569,7 +1569,6 @@ class AppController:
             controls=[self._dashboard_main, self._sidebar],
             spacing=0, expand=True,
             vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
         self.quiz_player_view = QuizPlayerView(
@@ -1699,6 +1698,8 @@ class AppController:
         if hasattr(self.courses_view, "set_on_immersive_changed"):
             self.courses_view.set_on_immersive_changed(self._on_courses_immersive_changed)
 
+        self.dashboard.animate_opacity = None
+        self.dashboard.animate_offset = None
         for _view in (
             self.detail_view,
             self.settings_view,
@@ -1709,13 +1710,15 @@ class AppController:
         ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
-            _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
+            _view.animate_opacity = None
+            _view.animate_offset = None
 
+        switcher_ms = 90 if platform_utils.UI_IS_MOBILE else 120
         self.tab_switcher = ft.AnimatedSwitcher(
             content=self.dashboard,
             transition=ft.AnimatedSwitcherTransition.FADE,
-            duration=160,
-            reverse_duration=160,
+            duration=switcher_ms,
+            reverse_duration=switcher_ms,
             switch_in_curve=ft.AnimationCurve.EASE_OUT,
             switch_out_curve=ft.AnimationCurve.EASE_IN,
             expand=True,
@@ -1845,9 +1848,8 @@ class AppController:
                 expand=True,
             )
         self.page.add(self._app_shell)
-        if not platform_utils.UI_IS_MOBILE:
-            self.page.on_resize = self._on_page_resize
-            self._apply_responsive_layout(force=True)
+        self.page.on_resize = self._on_page_resize
+        self._apply_responsive_layout(force=True)
 
     def _on_courses_immersive_changed(self, immersive: bool) -> None:
         nav_shell = getattr(self, "_nav_shell", None)
@@ -1921,10 +1923,16 @@ class AppController:
         content_width = max(0.0, resolved_width - (RAIL_WIDTH if use_rail else 0.0))
         courses_view = getattr(self, "courses_view", None)
         if courses_view is not None:
-            if hasattr(courses_view, "set_width"):
-                courses_view.set_width(content_width)
-            if hasattr(courses_view, "set_viewport_height"):
-                courses_view.set_viewport_height(resolved_height)
+            if callable(getattr(courses_view, "set_viewport_size", None)):
+                courses_view.set_viewport_size(content_width, resolved_height)
+            else:
+                if hasattr(courses_view, "set_width"):
+                    courses_view.set_width(content_width)
+                if hasattr(courses_view, "set_viewport_height"):
+                    courses_view.set_viewport_height(resolved_height)
+        grade_view = getattr(self, "grade_overview_view", None)
+        if grade_view is not None and callable(getattr(grade_view, "set_width", None)):
+            grade_view.set_width(content_width)
         self._sync_app_webview_bounds(resolved_width, resolved_height)
 
         content_area = getattr(self, "_content_area", None)
@@ -4101,7 +4109,7 @@ class AppController:
         self._diag_screen("home")
         self._sync_rail_active()
 
-    def _rebuild_colors(self):
+    def _rebuild_colors(self, *, sync_nav: bool = True, update_page: bool = True):
         """Repaint ALL existing controls with current C values for live theme switching.
 
         Because controls store hardcoded color strings at init time,
@@ -4109,25 +4117,39 @@ class AppController:
         """
         from gui.core.theme import C as _C
         current_palette = semantic_palette()
-        theme_roots = [self.dashboard]
+        dashboard = getattr(self, "dashboard", None)
+        theme_roots = [dashboard] if dashboard is not None else []
         window_header = getattr(self, "_window_header", None)
         if window_header is not None:
             theme_roots.append(window_header)
-        refresh_semantic_control_colors(
-            theme_roots, self._rendered_palette, current_palette
-        )
+        previous_palette = getattr(self, "_rendered_palette", None)
+        if theme_roots and isinstance(previous_palette, dict):
+            refresh_semantic_control_colors(
+                theme_roots, previous_palette, current_palette
+            )
         self._rendered_palette = current_palette
 
         # Page
-        self.page.bgcolor = _C.BG
+        page = getattr(self, "page", None)
+        if page is not None:
+            page.bgcolor = _C.BG
         if getattr(self, "_sidebar", None) is not None:
             self._sidebar.border = ft.Border.only(left=ft.BorderSide(1, _C.BORDER))
-        self._sync_rail_active()
+        if sync_nav:
+            self._sync_rail_active()
 
-        self._header_container.bgcolor = _C.BG
-        self._app_title.color = _C.TEXT_PRIMARY
-        self._version_text.color = _C.TEXT_SECONDARY
-        self._version_badge.border = ft.Border.all(1, _C.BORDER)
+        header_container = getattr(self, "_header_container", None)
+        if header_container is not None:
+            header_container.bgcolor = _C.BG
+        app_title = getattr(self, "_app_title", None)
+        if app_title is not None:
+            app_title.color = _C.TEXT_PRIMARY
+        version_text = getattr(self, "_version_text", None)
+        if version_text is not None:
+            version_text.color = _C.TEXT_SECONDARY
+        version_badge = getattr(self, "_version_badge", None)
+        if version_badge is not None:
+            version_badge.border = ft.Border.all(1, _C.BORDER)
         dashboard_title = getattr(self, "_dashboard_title", None)
         if dashboard_title is not None:
             dashboard_title.color = _C.TEXT_PRIMARY
@@ -4154,32 +4176,44 @@ class AppController:
             )
 
         # Status text
-        self.status_text.color = _C.TEXT_SECONDARY
+        status_text = getattr(self, "status_text", None)
+        if status_text is not None:
+            status_text.color = _C.TEXT_SECONDARY
 
         # Filter area
-        self._filter_container.bgcolor = _C.BG
-        self.search_field.bgcolor = _C.SURFACE
-        self.search_field.border_color = _C.BORDER
-        self.search_field.focused_border_color = _C.ACCENT
-        self.search_field.color = _C.TEXT_PRIMARY
+        filter_container = getattr(self, "_filter_container", None)
+        if filter_container is not None:
+            filter_container.bgcolor = _C.BG
+        search_field = getattr(self, "search_field", None)
+        if search_field is not None:
+            search_field.bgcolor = _C.SURFACE
+            search_field.border_color = _C.BORDER
+            search_field.focused_border_color = _C.ACCENT
+            search_field.color = _C.TEXT_PRIMARY
 
         # Adaptive filters rebuild from their option models instead of relying
         # on brittle control-tree indexes.
-        self.urgency_filter_menu.refresh_theme(
-            self._urgency_filter_options(
-                {option.key: option.count or 0 for option in self.urgency_filter_menu.options}
+        urgency_filter_menu = getattr(self, "urgency_filter_menu", None)
+        if urgency_filter_menu is not None:
+            urgency_filter_menu.refresh_theme(
+                self._urgency_filter_options(
+                    {option.key: option.count or 0 for option in urgency_filter_menu.options}
+                )
             )
-        )
-        self.type_filter_menu.refresh_theme(
-            self._type_filter_options(
-                {option.key: option.count or 0 for option in self.type_filter_menu.options}
+        type_filter_menu = getattr(self, "type_filter_menu", None)
+        if type_filter_menu is not None:
+            type_filter_menu.refresh_theme(
+                self._type_filter_options(
+                    {option.key: option.count or 0 for option in type_filter_menu.options}
+                )
             )
-        )
-        self.course_filter_menu.refresh_theme(
-            self._course_filter_options(
-                {option.key: option.count or 0 for option in self.course_filter_menu.options}
+        course_filter_menu = getattr(self, "course_filter_menu", None)
+        if course_filter_menu is not None:
+            course_filter_menu.refresh_theme(
+                self._course_filter_options(
+                    {option.key: option.count or 0 for option in course_filter_menu.options}
+                )
             )
-        )
 
         # Empty state
         if hasattr(self, '_empty_icon'):
@@ -4201,16 +4235,25 @@ class AppController:
             self._error_retry_btn.color = _C.ON_ACCENT
 
         # Footer
-        self._footer.bgcolor = _C.SURFACE
-        self._footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
+        footer = getattr(self, "_footer", None)
+        if footer is not None:
+            footer.bgcolor = _C.SURFACE
+            footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
         # Footer counter colors are set dynamically by _refresh_counts,
         # but update the base colors here too
-        self.footer_critical.color = _C.CRITICAL if self.footer_critical.value else _C.BORDER
-        self.footer_warning.color = _C.WARNING if self.footer_warning.value else _C.BORDER
-        self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
-        self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
+        for footer_attr, active_color in (
+            ("footer_critical", _C.CRITICAL),
+            ("footer_warning", _C.WARNING),
+            ("footer_safe", _C.SAFE),
+            ("footer_overdue", _C.CRITICAL),
+        ):
+            footer_label = getattr(self, footer_attr, None)
+            if footer_label is not None:
+                footer_label.color = active_color if footer_label.value else _C.BORDER
 
-        self._content_area.bgcolor = _C.BG
+        content_area = getattr(self, "_content_area", None)
+        if content_area is not None:
+            content_area.bgcolor = _C.BG
 
         # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):
@@ -4252,14 +4295,22 @@ class AppController:
         if nav_shell is not None and hasattr(nav_shell, "refresh_theme"):
             nav_shell.refresh_theme()
 
-        self._sync_status.refresh_theme()
+        sync_status = getattr(self, "_sync_status", None)
+        if sync_status is not None:
+            sync_status.refresh_theme()
 
         # Update banner is a semantic elevated surface, not a fixed brown card.
-        self._update_banner.bgcolor = _C.SURFACE_ELEVATED
-        self._update_banner.border = ft.Border.all(1, _C.UPDATE)
-        self._update_text.color = _C.TEXT_PRIMARY
-        self._update_progress.color = _C.UPDATE
-        self._update_progress.bgcolor = _C.BORDER
+        update_banner = getattr(self, "_update_banner", None)
+        if update_banner is not None:
+            update_banner.bgcolor = _C.SURFACE_ELEVATED
+            update_banner.border = ft.Border.all(1, _C.UPDATE)
+        update_text = getattr(self, "_update_text", None)
+        if update_text is not None:
+            update_text.color = _C.TEXT_PRIMARY
+        update_progress = getattr(self, "_update_progress", None)
+        if update_progress is not None:
+            update_progress.color = _C.UPDATE
+            update_progress.bgcolor = _C.BORDER
         update_btn = getattr(self, "_update_btn", None)
         if update_btn is not None:
             update_btn.style = ft.ButtonStyle(
@@ -4272,7 +4323,9 @@ class AppController:
             )
 
         # Settings view bgcolor
-        self.settings_view.bgcolor = _C.BG
+        settings_view = getattr(self, "settings_view", None)
+        if settings_view is not None:
+            settings_view.bgcolor = _C.BG
 
         # Sub-views theme update propagation
         for view_attr in (
@@ -4298,22 +4351,38 @@ class AppController:
             except Exception as e:
                 logger.error("Failed to update theme for _courses_coordinator: %s", e, exc_info=True)
 
-        self.page.update()
+        if update_page and page is not None:
+            page.update()
 
 
-    def _reconcile_settings_after_exit(self) -> None:
+    def _reconcile_settings_after_exit(
+        self, *, sync_nav: bool = True, update_page: bool = True
+    ) -> None:
         """Restore persisted theme/colors and recalculate urgencies when leaving Settings."""
         settings_view = getattr(self, "settings_view", None)
         cancel_load = getattr(settings_view, "cancel_pending_load", None)
         if callable(cancel_load):
             cancel_load()
-        from gui.core.theme import load_theme_from_settings, set_page_theme
+        from gui.core.theme import C as _C, load_theme_from_settings, set_page_theme
 
         load_theme_from_settings()
         if hasattr(self, "page") and self.page is not None:
             set_page_theme(self.page)
-        if hasattr(self, "_rebuild_colors"):
-            self._rebuild_colors()
+        current_palette = semantic_palette()
+        needs_rebuild = (
+            getattr(self, "_rendered_palette", None) != current_palette
+            or getattr(getattr(self, "page", None), "bgcolor", None) != _C.BG
+        )
+        if needs_rebuild and hasattr(self, "_rebuild_colors"):
+            rebuild = self._rebuild_colors
+            try:
+                params = inspect.signature(rebuild).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "sync_nav" in params and "update_page" in params:
+                rebuild(sync_nav=sync_nav, update_page=update_page)
+            else:
+                rebuild()
 
         from datetime import datetime
 
@@ -4350,7 +4419,15 @@ class AppController:
         if target == "home":
             await self._close_settings()
             return
-        self._reconcile_settings_after_exit()
+        reconcile = self._reconcile_settings_after_exit
+        try:
+            reconcile_params = inspect.signature(reconcile).parameters
+        except (TypeError, ValueError):
+            reconcile_params = {}
+        if "sync_nav" in reconcile_params and "update_page" in reconcile_params:
+            reconcile(sync_nav=False, update_page=False)
+        else:
+            reconcile()
         update_footer = getattr(self, "_update_footer", None)
         if callable(update_footer):
             try:
@@ -4375,7 +4452,15 @@ class AppController:
 
     async def _close_settings(self):
         self._sync_rail_active(force_home=True)
-        self._reconcile_settings_after_exit()
+        reconcile = self._reconcile_settings_after_exit
+        try:
+            reconcile_params = inspect.signature(reconcile).parameters
+        except (TypeError, ValueError):
+            reconcile_params = {}
+        if "sync_nav" in reconcile_params and "update_page" in reconcile_params:
+            reconcile(sync_nav=False, update_page=False)
+        else:
+            reconcile()
 
         # Toggle visibility - no full rebuild needed (fixes white flash)
         await self.view_manager.close_settings()
