@@ -943,123 +943,6 @@ class AppController:
             return list(cards)
         return [self.today_schedule_panel] + list(cards)
 
-    def _build_stat_row(self) -> ft.Container:
-        """Hàng thẻ thống kê (chỉ hiện ở bố cục PC), bấm để lọc theo mức độ."""
-        self._stat_tiles = {}
-        specs = (
-            ("critical", "Khẩn cấp", lambda: C.CRITICAL),
-            ("warning", "Sắp đến hạn", lambda: C.WARNING),
-            ("safe", "An toàn", lambda: C.SAFE),
-            ("overdue", "Quá hạn", lambda: C.CRITICAL),
-        )
-        tiles = []
-        for key, label, color_fn in specs:
-            value = ft.Text("0", size=28, weight=ft.FontWeight.W_700, color=color_fn())
-            caption = ft.Text(label, size=12, color=C.TEXT_SECONDARY)
-            bar = ft.Container(width=4, height=40, bgcolor=color_fn(), border_radius=2)
-            tile = ft.Container(
-                content=ft.Row(
-                    [bar, ft.Column([value, caption], spacing=0, tight=True)],
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                bgcolor=C.SURFACE,
-                border=ft.Border.all(1, C.BORDER),
-                border_radius=14,
-                padding=ft.Padding.symmetric(horizontal=16, vertical=12),
-                expand=True,
-                ink=True,
-                tooltip=f"Lọc: {label}",
-                on_click=lambda _e, k=key: self._safe_run_task(self._set_urgency, k),
-            )
-            self._stat_tiles[key] = (value, bar, color_fn)
-            tiles.append(tile)
-        return ft.Container(
-            content=ft.Row(tiles, spacing=12),
-            padding=ft.Padding(left=16, right=16, top=2, bottom=10),
-            visible=False,
-        )
-
-    def _update_stat_tiles(self, n_critical, n_warning, n_safe, n_overdue) -> None:
-        values = {
-            "critical": n_critical, "warning": n_warning,
-            "safe": n_safe, "overdue": n_overdue,
-        }
-        for key, (text, bar, color_fn) in self._stat_tiles.items():
-            n = values[key]
-            text.value = str(n)
-            text.color = color_fn() if n else C.TEXT_SECONDARY
-            bar.bgcolor = color_fn() if n else C.BORDER
-
-    def _build_rail(self) -> ft.Container:
-        """Thanh điều hướng dọc kiểu ứng dụng desktop (thay các nút trên header)."""
-        self._rail_items = {}
-
-        def item(key, icon, label, handler):
-            ic = ft.Icon(icon, size=24, color=C.TEXT_SECONDARY)
-            tx = ft.Text(label, size=10.5, color=C.TEXT_SECONDARY,
-                         weight=ft.FontWeight.W_600, text_align=ft.TextAlign.CENTER)
-            box = ft.Container(
-                content=ft.Column([ic, tx], spacing=4, tight=True,
-                                  horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                width=68, padding=ft.Padding.symmetric(vertical=10),
-                border_radius=14, ink=True, tooltip=label,
-                on_click=lambda _e: self._safe_run_task(handler),
-            )
-            self._rail_items[key] = (box, ic, tx)
-            return box
-
-        logo = ft.Container(
-            content=ft.Text("U", size=20, weight=ft.FontWeight.W_800, color=C.ON_ACCENT),
-            width=42, height=42, bgcolor=C.ACCENT, border_radius=13,
-            alignment=ft.Alignment(0, 0),
-        )
-        rail = ft.Container(
-            content=ft.Column(
-                controls=[
-                    logo,
-                    ft.Container(height=14),
-                    item("home", ft.Icons.DASHBOARD_ROUNDED, "Tổng quan",
-                         lambda: self._rail_navigate("home")),
-                    item("courses", ft.Icons.MENU_BOOK_ROUNDED, "Môn học",
-                         lambda: self._rail_navigate("courses")),
-                    item("calendar", ft.Icons.CALENDAR_MONTH_ROUNDED, "Lịch",
-                         lambda: self._rail_navigate("calendar")),
-                    item("grades", ft.Icons.INSIGHTS_ROUNDED, "Bảng điểm",
-                         lambda: self._rail_navigate("grades")),
-                    ft.Container(expand=True),
-                    item("refresh", ft.Icons.REFRESH_ROUNDED, "Làm mới",
-                         self._load_data_async),
-                    item("settings", ft.Icons.SETTINGS_ROUNDED, "Cài đặt",
-                         lambda: self._rail_navigate("settings")),
-                ],
-                spacing=6,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            width=_RAIL_WIDTH,
-            padding=ft.Padding.symmetric(vertical=16),
-            bgcolor=C.SURFACE,
-            border=ft.Border.only(right=ft.BorderSide(1, C.BORDER)),
-            visible=False,
-        )
-        self._rail_logo = logo
-        self._wide_header_content = ft.Row(
-            controls=[
-                ft.Column(
-                    controls=[
-                        ft.Text("Tổng quan", size=26, weight=ft.FontWeight.W_800,
-                                color=C.TEXT_PRIMARY),
-                        self._sync_status.control,
-                    ],
-                    spacing=4, tight=True,
-                ),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        self._wide_title = self._wide_header_content.controls[0].controls[0]
-        self._sync_rail_active()
-        return rail
-
     def _current_section(self) -> str:
         if getattr(getattr(self, "settings_view", None), "visible", False):
             return "settings"
@@ -1107,8 +990,16 @@ class AppController:
             return
         if current == "settings":
             if self.settings_view.has_changes():
-                # Hiện hộp thoại "Chưa lưu"; người dùng bấm lại mục sau khi xử lý.
-                await self.settings_view._handle_back(None)
+                self._sync_rail_active()
+                request_close = getattr(self.settings_view, "request_close", None)
+                if callable(request_close):
+                    await request_close(
+                        on_closed=lambda dest=target: self._safe_run_task(
+                            self._leave_settings_and_navigate, dest
+                        )
+                    )
+                else:
+                    await self.settings_view._handle_back(None)
                 return
             await self._close_settings()
         elif current == "calendar":
@@ -1331,19 +1222,46 @@ class AppController:
                 menu.on_desktop_toggle = self._toggle_desktop_filter_menu
                 menu.on_desktop_dismiss = self._dismiss_desktop_filter_menu
 
+        self._search_clear_btn = ft.IconButton(
+            ft.Icons.CLOSE_ROUNDED,
+            icon_size=16,
+            icon_color=C.TEXT_SECONDARY,
+            tooltip="Xóa từ khóa tìm kiếm",
+            padding=0,
+            visible=False,
+            size_constraints=ft.BoxConstraints(
+                min_width=32, max_width=32, min_height=32, max_height=32
+            ),
+            on_click=self._clear_search,
+        )
         self.search_field = ft.TextField(
             hint_text="Tìm hoạt động hoặc môn học",
             hint_style=ft.TextStyle(size=12, color=C.TEXT_SECONDARY),
-            prefix_icon=ft.Icons.SEARCH,
+            prefix_icon=ft.Icons.SEARCH_ROUNDED,
+            suffix=self._search_clear_btn,
             border_radius=10,
             border_color=C.BORDER,
             focused_border_color=C.ACCENT,
             bgcolor=C.SURFACE,
-            text_size=12,
-            height=44,
+            text_size=12.5,
+            height=46 if platform_utils.UI_IS_MOBILE else 40,
             expand=True,
-            content_padding=ft.Padding.only(left=12, right=10, top=10, bottom=10),
+            content_padding=ft.Padding.only(left=12, right=8, top=8, bottom=8),
             on_change=self._on_search,
+        )
+        self._reset_filters_btn = ft.TextButton(
+            "Xóa lọc",
+            icon=ft.Icons.FILTER_ALT_OFF_ROUNDED,
+            visible=False,
+            height=40 if platform_utils.UI_IS_MOBILE else 36,
+            style=ft.ButtonStyle(
+                color=C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._reset_all_filters
+            ),
         )
         self.courses_btn = ft.IconButton(
             ft.Icons.MENU_BOOK_ROUNDED,
@@ -1501,12 +1419,27 @@ class AppController:
         self._empty_icon = ft.Icon(ft.Icons.INBOX_ROUNDED, size=48, color=C.BORDER)
         self._empty_title = ft.Text("Không có hoạt động nào", size=14, color=C.TEXT_SECONDARY, weight=ft.FontWeight.W_500)
         self._empty_subtitle = ft.Text("Thử thay đổi bộ lọc hoặc làm mới dữ liệu", size=12, color=C.BORDER)
+        self._empty_clear_filter_btn = ft.OutlinedButton(
+            "Đặt lại bộ lọc",
+            icon=ft.Icons.RESTART_ALT_ROUNDED,
+            visible=False,
+            style=ft.ButtonStyle(
+                color=C.ACCENT,
+                side=ft.BorderSide(1, C.BORDER),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=lambda _event: self._run_dashboard_header_action(
+                self._reset_all_filters
+            ),
+        )
         self.empty_state  = ft.Container(
             content=ft.Column(controls=[
                 self._empty_icon,
                 ft.Container(height=4),
                 self._empty_title,
                 self._empty_subtitle,
+                ft.Container(height=6),
+                self._empty_clear_filter_btn,
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
             alignment=ft.Alignment(0, 0), expand=True, visible=False,
         )
@@ -1561,14 +1494,13 @@ class AppController:
         self._filter_container = ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Container(content=ft.Row([self.search_field]), padding=ft.Padding.only(left=16, right=16, top=6, bottom=0)),
-                    ft.Container(
-                        content=self._build_dashboard_filter_row(),
-                        padding=ft.Padding.only(left=16, right=12),
-                    ),
-                ], spacing=4,
+                    ft.Row([self.search_field]),
+                    self._build_dashboard_filter_row(),
+                ],
+                spacing=8,
+                tight=True,
             ),
-            padding=ft.Padding.only(left=0, right=0, top=4, bottom=10),
+            padding=ft.Padding.only(left=16, right=16, top=2, bottom=10),
             bgcolor=C.BG,
         )
 
@@ -1579,7 +1511,7 @@ class AppController:
                     self._scroll_to_top_button,
                 ], expand=True),
             ], spacing=8, expand=True),
-            padding=ft.Padding.only(left=4, right=4, bottom=8),
+            padding=ft.Padding.only(left=6, right=6, bottom=10),
             expand=True, clip_behavior=ft.ClipBehavior.NONE,
         )
 
@@ -1589,17 +1521,15 @@ class AppController:
             ], spacing=12, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=C.SURFACE, padding=ft.Padding.symmetric(vertical=10),
             border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
+            visible=False,
         )
 
-        self._stat_row = self._build_stat_row()
         self._dashboard_main = ft.Column(
             controls=[
                 header,
                 self._update_banner,
-                self._stat_row,
                 self._filter_container,
                 self._content_area,
-                self._footer,
             ],
             spacing=0, expand=True,
         )
@@ -1609,7 +1539,7 @@ class AppController:
                 "LỊCH HỌC HÔM NAY", size=11, weight=ft.FontWeight.W_700,
                 color=C.TEXT_SECONDARY,
             ),
-            padding=ft.Padding.only(left=20, right=20, top=4, bottom=2),
+            padding=ft.Padding.only(left=10, right=10, top=4, bottom=2),
         )
         self._sidebar_column = ft.Column(
             controls=[], spacing=8, scroll=ft.ScrollMode.AUTO, expand=True,
@@ -1617,7 +1547,7 @@ class AppController:
         self._sidebar = ft.Container(
             content=self._sidebar_column,
             width=_SIDE_PANE_WIDTH,
-            padding=ft.Padding.only(top=12, bottom=12),
+            padding=ft.Padding(left=6, right=6, top=16, bottom=12),
             bgcolor=C.BG,
             border=ft.Border.only(left=ft.BorderSide(1, C.BORDER)),
             visible=False,
@@ -1877,25 +1807,6 @@ class AppController:
             spacing=0,
             expand=True,
         )
-        self._wide_header_content = ft.Row(
-            controls=[
-                ft.Column(
-                    controls=[
-                        ft.Text(
-                            "Tổng quan",
-                            size=26,
-                            weight=ft.FontWeight.W_800,
-                            color=C.TEXT_PRIMARY,
-                        ),
-                        self._sync_status.control,
-                    ],
-                    spacing=4,
-                    tight=True,
-                ),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        self._wide_title = self._wide_header_content.controls[0].controls[0]
         self._apply_responsive_layout(force=True)
         self._rendered_palette = semantic_palette()
         # Replace the startup splash atomically after the real UI is complete.
@@ -2009,8 +1920,19 @@ class AppController:
 
         list_width = content_width - (_SIDE_PANE_WIDTH if wide else 0)
         gutter = max(0.0, (list_width - _LIST_MAX_WIDTH) / 2)
-        content_area.padding = ft.Padding.only(left=4 + gutter, right=4 + gutter, bottom=8)
-        self._filter_container.padding = ft.Padding.only(left=gutter, right=gutter, top=4, bottom=10)
+        base_pad = 12.0 if platform_utils.UI_IS_MOBILE else 16.0
+        card_container_pad = max(0.0, base_pad - 10.0) + gutter
+        content_area.padding = ft.Padding.only(
+            left=card_container_pad, right=card_container_pad, bottom=10
+        )
+        self._filter_container.padding = ft.Padding.only(
+            left=base_pad + gutter, right=base_pad + gutter, top=2, bottom=10
+        )
+        update_banner = getattr(self, "_update_banner", None)
+        if update_banner is not None:
+            update_banner.margin = ft.Margin(
+                left=base_pad + gutter, right=base_pad + gutter, top=0, bottom=8
+            )
 
         single_gutter = max(0.0, (content_width - _SINGLE_VIEW_MAX_WIDTH) / 2)
         self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
@@ -2034,21 +1956,17 @@ class AppController:
                 host.width = None
                 self.detail_view.border = None
 
-        self._stat_row.padding = ft.Padding(left=16 + gutter, right=16 + gutter, top=2, bottom=10)
-        self._header_container.padding = (
-            ft.Padding(left=16 + gutter, right=16 + gutter, top=18, bottom=10)
-            if wide
-            else self._header_compact_padding
+        header_top = 16 if wide else (14 if platform_utils.UI_IS_MOBILE else 12)
+        self._header_container.padding = ft.Padding(
+            left=base_pad + gutter, right=base_pad + gutter, top=header_top, bottom=8
         )
+        dashboard_title = getattr(self, "_dashboard_title", None)
+        if dashboard_title is not None:
+            dashboard_title.size = 22 if wide else 20
 
-        if mode_changed:
+        if mode_changed or force:
             self._sidebar.visible = wide
-            self._stat_row.visible = wide
-            self._footer.visible = not wide
-            self._header_container.content = (
-                self._wide_header_content if wide else self._header_compact_content
-            )
-            self._sync_status.control.expand = not wide
+            self._footer.visible = False
             if wide:
                 self._sidebar_column.controls = [self._sidebar_title, self.today_schedule_panel]
             else:
@@ -2146,6 +2064,35 @@ class AppController:
                 )
             )
             return
+        settings_view = getattr(self, "settings_view", None)
+        if settings_view is not None and getattr(settings_view, "visible", False):
+            if key == "settings":
+                self._sync_rail_active()
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+                return
+            has_changes_fn = getattr(settings_view, "has_changes", None)
+            has_unsaved = bool(has_changes_fn()) if callable(has_changes_fn) else False
+            if has_unsaved:
+                self._sync_rail_active()
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+                request_close = getattr(settings_view, "request_close", None)
+                if callable(request_close):
+                    await request_close(
+                        on_closed=lambda target=key: self._safe_run_task(
+                            self._leave_settings_and_navigate, target
+                        )
+                    )
+                else:
+                    await settings_view._handle_back(None)
+                return
+            await self._leave_settings_and_navigate(key)
+            return
         if key == "home":
             self.view_manager.show_dashboard()
             self._diag_screen("home")
@@ -2217,53 +2164,73 @@ class AppController:
             label = getattr(btn, "tooltip", None) or fallback_label
             return ft.Semantics(label=label, button=True, content=btn)
 
-        action_buttons = ft.Row(
-            controls=[
-                _wrap_header_btn(self.calendar_btn, "Lịch"),
-                _wrap_header_btn(self.courses_btn, "Môn học"),
-                _wrap_header_btn(self.grades_btn, "Bảng điểm"),
-                _wrap_header_btn(self.refresh_btn, "Làm mới"),
-                _wrap_header_btn(self.settings_btn, "Cài đặt"),
-            ],
-            spacing=0,
-            tight=True,
+        self._sync_status.control.expand = True
+        self.status_text.no_wrap = True
+        self.status_text.overflow = ft.TextOverflow.ELLIPSIS
+
+        self._dashboard_title = ft.Text(
+            "Tổng quan",
+            size=20 if platform_utils.UI_IS_MOBILE else 22,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
-        if platform_utils.UI_IS_MOBILE:
-            self._app_title.max_lines = 1
-            self._app_title.overflow = ft.TextOverflow.ELLIPSIS
-            title_group = ft.Row(
-                controls=[self._app_title, self._version_badge],
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                expand=True,
-            )
-            content = ft.Column(
-                controls=[
-                    ft.Row(
-                        controls=[title_group, action_buttons],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=4,
-                    ),
-                    self._sync_status.control,
-                ],
-                spacing=4,
-            )
-            padding = ft.Padding.only(left=12, right=4, top=20, bottom=8)
-            self._header_compact_content = content
-            self._header_compact_padding = padding
-        else:
-            self._sync_status.control.expand = True
-            self.status_text.no_wrap = True
-            self.status_text.overflow = ft.TextOverflow.ELLIPSIS
-            content = ft.Row(
-                controls=[self._sync_status.control, action_buttons],
-                spacing=4,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-            padding = ft.Padding.only(left=16, right=8, top=4, bottom=8)
-            self._header_compact_content = content
-            self._header_compact_padding = padding
+        action_controls: list[ft.Control] = []
+        reset_btn = getattr(self, "_reset_filters_btn", None)
+        if reset_btn is not None:
+            action_controls.append(reset_btn)
+
+        box_size = 44 if platform_utils.UI_IS_MOBILE else 38
+        self.refresh_btn.size_constraints = ft.BoxConstraints(
+            min_width=box_size,
+            max_width=box_size,
+            min_height=box_size,
+            max_height=box_size,
+        )
+        self._refresh_action_box = ft.Container(
+            content=_wrap_header_btn(self.refresh_btn, "Làm mới"),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+        )
+        action_controls.append(self._refresh_action_box)
+
+        content = ft.Row(
+            controls=[
+                ft.Column(
+                    controls=[
+                        self._dashboard_title,
+                        ft.Row(
+                            controls=[self._sync_status.control],
+                            spacing=6,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ],
+                    spacing=2,
+                    tight=True,
+                    expand=True,
+                ),
+                ft.Row(
+                    controls=action_controls,
+                    spacing=6,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=12,
+        )
+        base_pad = 12 if platform_utils.UI_IS_MOBILE else 16
+        padding = ft.Padding.only(
+            left=base_pad,
+            right=base_pad,
+            top=14 if platform_utils.UI_IS_MOBILE else 12,
+            bottom=8,
+        )
+        self._header_compact_content = content
+        self._header_compact_padding = padding
         return ft.Container(content=content, padding=padding, bgcolor=C.BG)
 
     def _build_dashboard_filter_row(self) -> ft.Row:
@@ -2484,7 +2451,7 @@ class AppController:
             FilterMenuOption(
                 "all", "Tất cả hoạt động", C.TEXT_SECONDARY,
                 count=counts.get("all", 0), icon=ft.Icons.CATEGORY_OUTLINED,
-                trigger_label="Tất cả",
+                trigger_label="Loại bài",
             ),
             FilterMenuOption(
                 "quiz", "Quiz", _TYPE_COLORS["quiz"],
@@ -2579,7 +2546,7 @@ class AppController:
         self.footer_safe.color     = C.SAFE if n_safe else C.BORDER
         self.footer_overdue.value  = f"{n_overdue} quá hạn" if n_overdue else "0 quá hạn"
         self.footer_overdue.color  = C.CRITICAL if n_overdue else C.BORDER
-        self._update_stat_tiles(n_critical, n_warning, n_safe, n_overdue)
+        self._sync_filter_controls_state()
 
         self.urgency_filter_menu.set_options(
             self._urgency_filter_options(counts["urgency"])
@@ -2593,11 +2560,13 @@ class AppController:
         is_empty = len(filtered_items) == 0 and not self._is_loading
         self.empty_state.visible = is_empty
         self.error_state.visible = False
+        has_filter = self._has_active_dashboard_filter()
+        empty_clear_btn = getattr(self, "_empty_clear_filter_btn", None)
+        if empty_clear_btn is not None:
+            empty_clear_btn.visible = bool(is_empty and has_filter)
 
         # P2/P6: Contextual empty state messaging
         if is_empty:
-            has_filter = (self.active_urgency != "all" or self.active_type != "all"
-                          or self.active_course != "all" or self.active_search)
             # Check if all activities are submitted (victory state)
             all_total = counts["urgency"].get("all", 0)
             submitted_statuses = ("submitted", "Đã nộp", "graded", "Đã chấm")
@@ -2770,8 +2739,19 @@ class AppController:
         )
 
         self._clear_skeletons()
-        self.empty_state.visible = len(filtered_items) == 0 and not self._is_loading
+        is_empty = len(filtered_items) == 0 and not self._is_loading
+        self.empty_state.visible = is_empty
         self.error_state.visible = False
+        has_filter = self._has_active_dashboard_filter()
+        self._sync_filter_controls_state()
+        empty_clear_btn = getattr(self, "_empty_clear_filter_btn", None)
+        if empty_clear_btn is not None:
+            empty_clear_btn.visible = bool(is_empty and has_filter)
+        if is_empty and has_filter:
+            self._empty_icon.name = ft.Icons.FILTER_ALT_OFF_ROUNDED
+            self._empty_icon.color = C.BORDER
+            self._empty_title.value = "Không tìm thấy kết quả"
+            self._empty_subtitle.value = "Thử bỏ bớt bộ lọc hoặc đổi từ khóa tìm kiếm"
 
         if not hasattr(self, '_reusable_cards'):
             self._reusable_cards = []
@@ -2836,8 +2816,49 @@ class AppController:
             result.append(d)
         return result
 
+    def _has_active_dashboard_filter(self) -> bool:
+        return bool(
+            getattr(self, "active_urgency", "all") != "all"
+            or getattr(self, "active_type", "all") != "all"
+            or getattr(self, "active_course", "all") != "all"
+            or getattr(self, "active_search", "")
+        )
+
+    def _sync_filter_controls_state(self) -> None:
+        reset_btn = getattr(self, "_reset_filters_btn", None)
+        if reset_btn is not None:
+            reset_btn.visible = self._has_active_dashboard_filter()
+        clear_btn = getattr(self, "_search_clear_btn", None)
+        if clear_btn is not None:
+            clear_btn.visible = bool(getattr(self, "active_search", ""))
+
+    def _clear_search(self, _e=None) -> None:
+        if hasattr(self, "_search_task") and self._search_task:
+            self._search_task.cancel()
+        self.active_search = ""
+        if hasattr(self, "search_field") and self.search_field is not None:
+            self.search_field.value = ""
+        self._sync_filter_controls_state()
+        self._refresh_ui()
+
+    async def _reset_all_filters(self) -> None:
+        if hasattr(self, "_search_task") and self._search_task:
+            self._search_task.cancel()
+        self.active_urgency = "all"
+        self.active_type = "all"
+        self.active_course = "all"
+        self.active_search = ""
+        if hasattr(self, "search_field") and self.search_field is not None:
+            self.search_field.value = ""
+        self.urgency_filter_menu.set_selected("all")
+        self.type_filter_menu.set_selected("all")
+        self.course_filter_menu.set_selected("all")
+        self._sync_filter_controls_state()
+        self._refresh_ui()
+
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
+        self._sync_filter_controls_state()
         # Debounce: 150ms - fast enough to feel instant, prevents excessive renders
         if hasattr(self, '_search_task') and self._search_task:
             self._search_task.cancel()
@@ -3902,6 +3923,30 @@ class AppController:
         self._app_title.color = _C.TEXT_PRIMARY
         self._version_text.color = _C.TEXT_SECONDARY
         self._version_badge.border = ft.Border.all(1, _C.BORDER)
+        dashboard_title = getattr(self, "_dashboard_title", None)
+        if dashboard_title is not None:
+            dashboard_title.color = _C.TEXT_PRIMARY
+        refresh_box = getattr(self, "_refresh_action_box", None)
+        if refresh_box is not None:
+            refresh_box.bgcolor = _C.SURFACE
+            refresh_box.border = ft.Border.all(1, _C.BORDER)
+        reset_filters_btn = getattr(self, "_reset_filters_btn", None)
+        if reset_filters_btn is not None:
+            reset_filters_btn.style = ft.ButtonStyle(
+                color=_C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
+        search_clear_btn = getattr(self, "_search_clear_btn", None)
+        if search_clear_btn is not None:
+            search_clear_btn.icon_color = _C.TEXT_SECONDARY
+        empty_clear_btn = getattr(self, "_empty_clear_filter_btn", None)
+        if empty_clear_btn is not None:
+            empty_clear_btn.style = ft.ButtonStyle(
+                color=_C.ACCENT,
+                side=ft.BorderSide(1, _C.BORDER),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
 
         # Status text
         self.status_text.color = _C.TEXT_SECONDARY
@@ -4045,37 +4090,65 @@ class AppController:
         self.page.update()
 
 
+    def _reconcile_settings_after_exit(self) -> None:
+        """Restore persisted theme/colors and recalculate urgencies when leaving Settings."""
+        settings_view = getattr(self, "settings_view", None)
+        cancel_load = getattr(settings_view, "cancel_pending_load", None)
+        if callable(cancel_load):
+            cancel_load()
+        from gui.core.theme import load_theme_from_settings, set_page_theme
+
+        load_theme_from_settings()
+        if hasattr(self, "page") and self.page is not None:
+            set_page_theme(self.page)
+        if hasattr(self, "_rebuild_colors"):
+            self._rebuild_colors()
+
+        from datetime import datetime
+
+        data_lock = getattr(self, "_data_lock", None)
+        all_data = getattr(self, "all_data", None)
+        if data_lock is not None and all_data is not None:
+            with data_lock:
+                data_copy = list(all_data)
+            for d in data_copy:
+                dt_str = d.get("deadline")
+                if dt_str:
+                    dt = parse_datetime(dt_str)
+                    if dt:
+                        diff_h = (dt - datetime.now()).total_seconds() / 3600
+                        if diff_h < 0:
+                            d["urgency"] = "overdue"
+                        elif diff_h < settings.URGENCY_CRITICAL_HOURS:
+                            d["urgency"] = "critical"
+                        elif diff_h < settings.URGENCY_WARNING_HOURS:
+                            d["urgency"] = "warning"
+                        else:
+                            d["urgency"] = "safe"
+            with data_lock:
+                self.all_data = data_copy
+
+    async def _leave_settings_and_navigate(self, target: str) -> None:
+        """Exit Settings cleanly (after clean check, save, or discard) and open ``target``."""
+        if target == "home":
+            await self._close_settings()
+            return
+        self._reconcile_settings_after_exit()
+        settings_view = getattr(self, "settings_view", None)
+        if settings_view is not None:
+            settings_view.visible = False
+        if hasattr(self, "_update_footer"):
+            self._update_footer()
+        if getattr(self, "_needs_reload", False):
+            self._needs_reload = False
+            self._safe_run_task(self._load_data_async)
+        await self._navigate_destination(target)
+        self._sync_rail_active()
+
     async def _close_settings(self):
         self._sync_rail_active(force_home=True)
-        self.settings_view.cancel_pending_load()
-        from gui.core.theme import load_theme_from_settings, set_page_theme
-        load_theme_from_settings()
-        set_page_theme(self.page)
+        self._reconcile_settings_after_exit()
 
-        # Rebuild all colors from the saved theme
-        self._rebuild_colors()
-
-        # Recalculate urgency dynamically using new settings thresholds
-        from datetime import datetime
-        with self._data_lock:
-            data_copy = list(self.all_data)
-        for d in data_copy:
-            dt_str = d.get("deadline")
-            if dt_str:
-                dt = parse_datetime(dt_str)
-                if dt:
-                    diff_h = (dt - datetime.now()).total_seconds() / 3600
-                    if diff_h < 0:
-                        d["urgency"] = "overdue"
-                    elif diff_h < settings.URGENCY_CRITICAL_HOURS:
-                        d["urgency"] = "critical"
-                    elif diff_h < settings.URGENCY_WARNING_HOURS:
-                        d["urgency"] = "warning"
-                    else:
-                        d["urgency"] = "safe"
-        with self._data_lock:
-            self.all_data = data_copy
-        
         # Toggle visibility - no full rebuild needed (fixes white flash)
         await self.view_manager.close_settings()
         self._diag_screen("home")
@@ -4749,14 +4822,13 @@ class AppController:
 
     def _pulse_cards_once(self, cards_snapshot: list, pulse_high: bool):
         # Tự động tạo bóng đổ nhấp nháy mờ nhẹ (pulse shadow) sử dụng mã màu C.CRITICAL của theme hiện tại
-        crit_hex = C.CRITICAL.lstrip("#")
-        alpha = "45" if pulse_high else "12"
+        alpha = 0.27 if pulse_high else 0.08
         blur = 16 if pulse_high else 6
         spread = 1.2 if pulse_high else 0.2
         shadow = [ft.BoxShadow(
             spread_radius=spread,
             blur_radius=blur,
-            color=f"#{alpha}{crit_hex}",
+            color=ft.Colors.with_opacity(alpha, C.CRITICAL),
             offset=ft.Offset(0, 0)
         )]
         changed = False

@@ -184,3 +184,42 @@ def test_notification_profile_and_theo_sat():
     assert view._current_profile == "exam_week"
     assert view._sw_dnd_enable.value is False
     assert 4320 in view._milestone_chips and view._milestone_chips[4320].selected is True
+
+
+def test_selecting_theme_updates_dirty_dot_save_button_and_color_swatches():
+    from gui.core.theme import THEME_PRESETS, apply_theme
+
+    page = _make_dummy_page()
+    on_close = Mock()
+    view = SettingsView(page=page, orchestrator=None, on_close=on_close)
+    view.update = Mock()
+
+    initial_theme = "midnight_blue"
+    alternate_theme = "nord_frost"
+    try:
+        view._selected_theme = initial_theme
+        view._apply_theme_colors(initial_theme)
+        view._baseline_snapshot = view._capture_form_snapshot()
+        view._update_save_button_state()
+        assert view.has_changes() is False
+        assert view._save_btn.disabled is True
+        assert view._save_text.value == "Đã lưu"
+
+        view._on_theme_select(alternate_theme)
+        assert view.has_changes() is True
+        assert view._unsaved_dot.visible is True
+        assert view._save_btn.disabled is False
+        assert view._save_text.value == "Lưu thay đổi"
+        assert (
+            view._c_tb_critical._swatch_box.bgcolor
+            == THEME_PRESETS[alternate_theme]["critical"]
+        )
+
+        # Selecting back to the baseline theme clears dirty state and relocks Save
+        view._on_theme_select(initial_theme)
+        assert view.has_changes() is False
+        assert view._unsaved_dot.visible is False
+        assert view._save_btn.disabled is True
+        assert view._save_text.value == "Đã lưu"
+    finally:
+        apply_theme(initial_theme)
