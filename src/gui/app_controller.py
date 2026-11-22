@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+from core.class_schedule_notifications import REMINDER_LOOKAHEAD_DAYS
 from core.data_orchestrator import DataOrchestrator
 from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
@@ -2639,26 +2640,39 @@ class AppController:
         else:
             self._safe_run_task(coordinator.ensure_today)
 
-    def _fetch_tomorrow_sessions(self, credentials=None):
-        """Async callable: tomorrow's Portal classes for reminder scheduling.
+    async def _fetch_upcoming_sessions(self, credentials=None):
+        """Async callable: Portal classes inside the reminder look-ahead window.
 
         The reconcile task passes the ``(username, password)`` pair captured
         when it was created, so an in-flight task of the previous account keeps
         fetching with its own credentials instead of reading the global
         settings after a switch.
+
+        Days ``1..REMINDER_LOOKAHEAD_DAYS`` after today are fetched one by one
+        with the shared Portal token (today's sessions already arrive with the
+        dashboard snapshot). The window is all-or-nothing: any failure — a
+        dead network or a rejected session — propagates, because the manager
+        keeps the previously armed alarms on a fetch error instead of
+        replacing them with a partial window (which would cancel the alarms of
+        the days that failed to fetch) and clears them on
+        ``ScheduleAuthenticationError``.
         """
         from datetime import timedelta
 
         if credentials is None:
             credentials = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         username, password = credentials
-        tomorrow = datetime.now().date() + timedelta(days=1)
-        return asyncio.to_thread(
-            self._portal_client.fetch_day,
-            tomorrow,
-            username,
-            password,
-        )
+        today = datetime.now().date()
+        upcoming = []
+        for offset in range(1, REMINDER_LOOKAHEAD_DAYS + 1):
+            day_sessions = await asyncio.to_thread(
+                self._portal_client.fetch_day,
+                today + timedelta(days=offset),
+                username,
+                password,
+            )
+            upcoming.extend(day_sessions)
+        return tuple(upcoming)
 
     async def _reconcile_class_schedule_notifications(
         self, sessions, *, clear_only: bool = False
@@ -2680,7 +2694,7 @@ class AppController:
         await reconcile(
             sessions,
             clear_only=clear_only,
-            fetch_day=self._fetch_tomorrow_sessions,
+            fetch_day=self._fetch_upcoming_sessions,
             identity_getter=lambda: getattr(self, "_settings_identity", None),
             android_bridge=getattr(self, "_android_background", None),
         )

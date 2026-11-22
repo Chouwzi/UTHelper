@@ -323,7 +323,7 @@ def test_auth_required_schedule_state_clears_class_reminders():
 
 
 def test_reconcile_clear_only_never_calls_portal_fetch(monkeypatch):
-    """Logout/account-switch clearing must not fetch tomorrow's timetable."""
+    """Logout/account-switch clearing must not fetch any timetable."""
     from unittest.mock import Mock
 
     from config import settings
@@ -561,6 +561,96 @@ def test_reconcile_auth_failure_clears_the_previously_armed_schedule(monkeypatch
     # The old ``except Exception`` path kept scheduling the cached sessions;
     # the auth branch must flip ``enabled`` off so the payload is empty.
     assert applied == [()]
+
+
+def test_fetch_upcoming_sessions_requests_the_full_two_week_window():
+    """Days +1..+14 after today are fetched with the reconciler's credentials."""
+    controller = AppController.__new__(AppController)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append((target_date, username, password))
+        return (f"session-{target_date.isoformat()}",)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+
+    sessions = asyncio.run(
+        controller._fetch_upcoming_sessions(("student-01", "secret"))
+    )
+
+    today = datetime.now().date()
+    assert [item[0] for item in requested] == [
+        today + timedelta(days=offset) for offset in range(1, 15)
+    ]
+    assert all(item[1:] == ("student-01", "secret") for item in requested)
+    assert len(sessions) == 14
+
+
+def test_fetch_upcoming_sessions_aborts_the_window_when_one_day_fails():
+    """A failed day aborts the run so the armed alarms are left untouched.
+
+    The manager keeps the previously persisted set when the fetch raises
+    (transient outage), so a partial window must never be returned: it would
+    cancel the alarms of the days that failed to fetch.
+    """
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    broken = today + timedelta(days=5)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        if target_date == broken:
+            raise OSError("network down")
+        return (target_date.isoformat(),)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+
+    with pytest.raises(OSError):
+        asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
+
+    # Fail-fast: nothing after the broken day is even requested.
+    assert requested == [today + timedelta(days=offset) for offset in range(1, 6)]
+
+
+def test_fetch_upcoming_sessions_fails_fast_on_a_dead_network():
+    """The first failure aborts the window instead of paying 14 timeouts."""
+    controller = AppController.__new__(AppController)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        raise OSError("network down")
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+
+    with pytest.raises(OSError):
+        asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
+
+    assert len(requested) == 1
+
+
+def test_fetch_upcoming_sessions_propagates_a_rejected_portal_session():
+    """Auth failure aborts the window so the manager clears stale alarms."""
+    from core.today_schedule import ScheduleAuthenticationError
+
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    rejected = today + timedelta(days=3)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        if target_date == rejected:
+            raise ScheduleAuthenticationError("Portal rejected the session")
+        return (target_date.isoformat(),)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+
+    with pytest.raises(ScheduleAuthenticationError):
+        asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
+
+    assert len(requested) == 3
 
 
 @pytest.mark.parametrize("use_android_bridge", [False, True], ids=["windows", "android"])

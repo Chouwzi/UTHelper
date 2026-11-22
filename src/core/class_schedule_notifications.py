@@ -18,6 +18,13 @@ from core.today_schedule import ClassSession
 
 SUPPORTED_LEAD_HOURS = (1, 2, 3)
 
+# The reconciler only arms classes starting within this many days of ``now``
+# (today's sessions already arrive with the dashboard snapshot). The window
+# slides forward on every reconcile, so a student who keeps the app closed for
+# a whole week still receives the reminders that were persisted on the last
+# foreground run instead of losing them after tomorrow.
+REMINDER_LOOKAHEAD_DAYS = 14
+
 _ONLINE_MARKERS = (
     "truc tuyen",
     "zoom",
@@ -184,7 +191,11 @@ def build_class_schedule_reminders(
     dnd_start: int = 22,
     dnd_end: int = 7,
 ) -> tuple[ClassScheduleReminder, ...]:
-    """Create deduplicated reminders at each selected 1/2/3-hour lead time."""
+    """Create deduplicated reminders at each selected 1/2/3-hour lead time.
+
+    Sessions starting more than ``REMINDER_LOOKAHEAD_DAYS`` after ``now`` are
+    skipped: the next reconcile slides the window forward and arms them then.
+    """
     if not enabled:
         return ()
     current = now or datetime.now()
@@ -202,8 +213,11 @@ def build_class_schedule_reminders(
 
     reminders: list[ClassScheduleReminder] = []
     seen: set[str] = set()
+    horizon = current + timedelta(days=REMINDER_LOOKAHEAD_DAYS)
     for session in sessions:
         if session.cancelled or session.start_at <= current:
+            continue
+        if session.start_at > horizon:
             continue
         mode = detect_delivery_mode(session)
         if mode is None:

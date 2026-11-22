@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from core.class_schedule_notifications import (
+    REMINDER_LOOKAHEAD_DAYS,
     build_class_schedule_reminders,
     detect_delivery_mode,
 )
@@ -190,3 +191,34 @@ def test_location_online_word_still_marks_online():
     now = datetime(2026, 11, 16, 8, 0)
     session = _session(now, room="Online", campus="", note="Bài tập elearning")
     assert detect_delivery_mode(session) == "online"
+
+
+def test_look_ahead_window_arms_two_weeks_and_skips_beyond():
+    """Classes within two weeks are armed; later ones wait for the next run."""
+    assert REMINDER_LOOKAHEAD_DAYS == 14  # hai tuần theo yêu cầu
+    now = datetime(2026, 11, 16, 8, 0)
+    inside = _session(
+        now,
+        session_id="session-inside",
+        start_at=now + timedelta(days=13),
+        end_at=now + timedelta(days=13, hours=2),
+    )
+    boundary = _session(
+        now,
+        session_id="session-boundary",
+        start_at=now + timedelta(days=14),
+        end_at=now + timedelta(days=14, hours=2),
+    )
+    outside = _session(
+        now,
+        session_id="session-outside",
+        start_at=now + timedelta(days=14, minutes=1),
+        end_at=now + timedelta(days=14, hours=3),
+    )
+    reminders = build_class_schedule_reminders(
+        [outside, inside, boundary], now=now, enabled=True, lead_hours=(1,)
+    )
+    assert [item.session.session_id for item in reminders] == [
+        "session-inside",
+        "session-boundary",
+    ]
