@@ -2590,6 +2590,15 @@ class SettingsView(ft.Container):
         self._sw_start_minimized.value = snapshot.start_minimized
         self._sw_minimize_to_tray.value = snapshot.minimize_to_tray
         self._sw_auto_update.value = snapshot.auto_update_enabled
+        if snapshot.crash_reporting_consent == "not_asked":
+            dd_options = getattr(self._dd_crash_reporting_consent, "options", None)
+            if isinstance(dd_options, list) and not any(
+                getattr(opt, "key", None) == "not_asked" for opt in dd_options
+            ):
+                dd_options.insert(
+                    0,
+                    ft.dropdown.Option("not_asked", "Chưa chọn (đang tắt)"),
+                )
         self._dd_crash_reporting_consent.value = snapshot.crash_reporting_consent
         self._sw_bg_check.value = snapshot.background_check_android
         self._sw_email.value = snapshot.enable_gmail
@@ -2728,7 +2737,8 @@ class SettingsView(ft.Container):
 
             self._original_theme = snapshot.theme
             self._apply_snapshot_to_controls(snapshot)
-            self._refresh_section_colors()
+            if getattr(self, "_rendered_palette", None) != semantic_palette():
+                self._refresh_section_colors()
 
             self._known_courses = set()
             if hasattr(self, '_orchestrator'):

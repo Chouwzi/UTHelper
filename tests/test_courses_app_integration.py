@@ -293,6 +293,9 @@ def test_adaptive_nav_shell_switches_bar_and_rail_and_handles_theme():
     nav.set_active("courses")
     assert nav.rail.selected_index == 1
     assert nav.bar.selected_index == 1
+    assert nav.bar.height == 64
+    assert nav.bar.label_behavior == ft.NavigationBarLabelBehavior.ALWAYS_SHOW
+    assert nav.bar.label_padding == ft.Padding.symmetric(horizontal=1, vertical=0)
 
     # Unknown key is ignored without resetting selection
     nav.set_active("nonexistent")

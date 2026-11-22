@@ -102,9 +102,12 @@ class AdaptiveNavShell:
         )
         self.bar = ft.NavigationBar(
             selected_index=0,
+            height=64,
             bgcolor=C.SURFACE,
             indicator_color=indicator,
             border=ft.Border.only(top=ft.BorderSide(1, C.BORDER)),
+            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
+            label_padding=ft.Padding.symmetric(horizontal=1, vertical=0),
             destinations=[
                 ft.NavigationBarDestination(
                     icon=spec.icon,
@@ -138,8 +141,10 @@ class AdaptiveNavShell:
         if key not in _KEY_TO_INDEX:
             return
         idx = _KEY_TO_INDEX[key]
-        self.rail.selected_index = idx
-        self.bar.selected_index = idx
+        if self.rail.selected_index != idx:
+            self.rail.selected_index = idx
+        if self.bar.selected_index != idx:
+            self.bar.selected_index = idx
 
     def apply_width(self, width: float) -> bool:
         """Switch between NavigationRail (>= 600px) and NavigationBar (< 600px)."""

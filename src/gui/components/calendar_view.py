@@ -101,6 +101,9 @@ class CalendarView(ft.Container):
             on_open_external=on_open_external,
         )
 
+        self._force_period_rebuild = False
+        self._defer_page_update = False
+
         self._build_ui()
         self._rendered_palette = semantic_palette()
 
@@ -582,6 +585,42 @@ class CalendarView(ft.Container):
             build_period = self._build_week_period_page
 
         old_pages = getattr(self, "_period_pages", [])
+        if (
+            delta is None
+            and not getattr(self, "_force_period_rebuild", False)
+            and len(old_pages) == 3
+            and [page.anchor for page in old_pages] == list(anchors)
+        ):
+            self._period_pages = old_pages
+            pager = getattr(self, "_period_pager", None)
+            if pager is not None:
+                pager.selected_index = 1
+                desired_controls = (
+                    []
+                    if self._native_desktop_period_drag
+                    else [period.control for period in self._period_pages]
+                )
+                if list(getattr(pager, "controls", [])) != desired_controls:
+                    pager.controls = desired_controls
+            if not self._native_desktop_period_drag:
+                self._render_period_pages()
+                return
+            if (
+                self._period_dismissible is not None
+                and list(getattr(self._desktop_period_slot, "controls", []))
+                == [self._period_dismissible]
+                and self._desktop_period_stage is not None
+                and len(getattr(self, "_period_background_pages", [])) == 2
+                and [p.anchor for p in self._period_background_pages]
+                == [anchors[0], anchors[2]]
+            ):
+                height = 316 if self._view_mode == "month" else 88
+                if self._desktop_period_underlay is not None:
+                    self._desktop_period_underlay.height = height
+                self._desktop_period_stage.height = height
+                self._render_period_pages()
+                return
+
         if (
             delta == 1
             and len(old_pages) == 3
@@ -1213,7 +1252,6 @@ class CalendarView(ft.Container):
             border_radius=8,
             alignment=ft.Alignment(0, -0.1),
             on_click=lambda e, c=None: self._on_day_click(e),
-            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
         )
         cell.data = {"day_text": day_num, "dots_row": dots_row, "today_dot": today_dot, "day": 0}
         return cell
@@ -1245,7 +1283,6 @@ class CalendarView(ft.Container):
             border_radius=12,
             alignment=ft.Alignment(0, 0),
             on_click=lambda e, idx=col_index: self._on_week_cell_click(idx),
-            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
         )
         cell.data = {
             "wd_label": wd_label, "day_text": day_num,
@@ -1401,7 +1438,7 @@ class CalendarView(ft.Container):
                 count_text.value = ""
 
         self._update_day_panel()
-        if update_page:
+        if update_page and not getattr(self, "_defer_page_update", False):
             try:
                 self._page_ref.update()
             except Exception:
@@ -1413,7 +1450,11 @@ class CalendarView(ft.Container):
         """Update calendar with new activity data and refresh grid."""
         self._all_data = activities
         self._build_deadline_map()
-        self._reset_period_pager()
+        self._force_period_rebuild = True
+        try:
+            self._reset_period_pager()
+        finally:
+            self._force_period_rebuild = False
         if self._view_mode == "month":
             self._render_month()
         elif self._view_mode == "week":
@@ -1488,122 +1529,123 @@ class CalendarView(ft.Container):
         else:
             self._month_summary.value = "Không có bài tập trong tháng này"
 
-        for r, week in enumerate(month_days):
-            for c, day in enumerate(week):
-                cell = self._day_cells[r][c]
-                day_text: ft.Text = cell.data["day_text"]
-                dots_row: ft.Row = cell.data["dots_row"]
-                cell.data["day"] = day
+        if self._native_desktop_period_drag:
+            for r, week in enumerate(month_days):
+                for c, day in enumerate(week):
+                    cell = self._day_cells[r][c]
+                    day_text: ft.Text = cell.data["day_text"]
+                    dots_row: ft.Row = cell.data["dots_row"]
+                    cell.data["day"] = day
 
-                if day == 0:
-                    day_text.value = ""
-                    dots_row.controls.clear()
-                    cell.data["today_dot"].visible = False
-                    cell.bgcolor = None
-                    cell.border = None
-                    cell.on_click = None
-                    continue
+                    if day == 0:
+                        day_text.value = ""
+                        dots_row.controls.clear()
+                        cell.data["today_dot"].visible = False
+                        cell.bgcolor = None
+                        cell.border = None
+                        cell.on_click = None
+                        continue
 
-                day_text.value = str(day)
-                cell.on_click = lambda e, d=day: self._on_day_click_by_day(d)
+                    day_text.value = str(day)
+                    cell.on_click = lambda e, d=day: self._on_day_click_by_day(d)
 
-                is_today = (day == today.day and self._month == today.month and self._year == today.year)
-                is_selected = (day == self._selected_day)
+                    is_today = (day == today.day and self._month == today.month and self._year == today.year)
+                    is_selected = (day == self._selected_day)
 
-                # Deadline data for this day
-                key = f"{self._year}-{self._month:02d}-{day:02d}"
-                acts = self._deadline_map.get(key, [])
-                has_deadline = len(acts) > 0
+                    # Deadline data for this day
+                    key = f"{self._year}-{self._month:02d}-{day:02d}"
+                    acts = self._deadline_map.get(key, [])
+                    has_deadline = len(acts) > 0
 
-                # CV-07: Determine most urgent urgency for cell hint
-                most_urgent_color = None
-                if has_deadline:
-                    urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
-                    sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
-                    most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
+                    # CV-07: Determine most urgent urgency for cell hint
+                    most_urgent_color = None
+                    if has_deadline:
+                        urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+                        sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
+                        most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
 
-                # Cell styling
-                # Today  = accent dot indicator (always visible, unique landmark)
-                # Selected = white/silver border (navigation state)
-                # Today+Selected = both combined
-                # Has deadline = subtle urgency-tinted bg
+                    # Cell styling
+                    # Today  = accent dot indicator (always visible, unique landmark)
+                    # Selected = white/silver border (navigation state)
+                    # Today+Selected = both combined
+                    # Has deadline = subtle urgency-tinted bg
 
-                today_dot: ft.Container = cell.data["today_dot"]
-                today_dot.visible = is_today  # dot is ONLY for today
-                today_dot.bgcolor = C.ACCENT
+                    today_dot: ft.Container = cell.data["today_dot"]
+                    today_dot.visible = is_today  # dot is ONLY for today
+                    today_dot.bgcolor = C.ACCENT
 
-                if is_selected and is_today:
-                    # Both: accent text + white selection border + today dot
-                    cell.bgcolor = C.SURFACE_HOVER
-                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
-                    day_text.color = C.ACCENT
-                    day_text.weight = ft.FontWeight.W_700
-                elif is_selected:
-                    # Selected only: white/silver border, neutral bg
-                    cell.bgcolor = C.SURFACE_HOVER
-                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
-                    day_text.color = C.TEXT_PRIMARY
-                    day_text.weight = ft.FontWeight.W_600
-                elif is_today:
-                    # Today only: accent text + dot, NO border
-                    cell.bgcolor = None
-                    cell.border = None
-                    day_text.color = C.ACCENT
-                    day_text.weight = ft.FontWeight.W_700
-                elif has_deadline:
-                    # Has deadline: subtle urgency bg
-                    cell.bgcolor = ft.Colors.with_opacity(
-                        0.06, most_urgent_color or C.ACCENT
-                    )
-                    cell.border = ft.Border.all(
-                        0.5,
-                        ft.Colors.with_opacity(
-                            0.19, most_urgent_color or C.BORDER
-                        ),
-                    )
-                    day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
-                    day_text.weight = ft.FontWeight.W_500
-                else:
-                    cell.bgcolor = None
-                    cell.border = None
-                    day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
-                    day_text.weight = ft.FontWeight.W_400
-
-                # CV-03: Larger dots (6px) with smarter display
-                dots_row.controls.clear()
-                if acts:
-                    if len(acts) >= 3:
-                        # Show count badge instead of many dots
-                        dots_row.controls.append(
-                            ft.Container(
-                                content=ft.Text(
-                                    str(len(acts)),
-                                    size=7,
-                                    color=on_color(most_urgent_color or C.ACCENT),
-                                    weight=ft.FontWeight.W_700,
-                                    text_align=ft.TextAlign.CENTER,
-                                ),
-                                width=14, height=14, border_radius=7,
-                                bgcolor=most_urgent_color or C.ACCENT,
-                                alignment=ft.Alignment(0, 0),
-                            )
+                    if is_selected and is_today:
+                        # Both: accent text + white selection border + today dot
+                        cell.bgcolor = C.SURFACE_HOVER
+                        cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                        day_text.color = C.ACCENT
+                        day_text.weight = ft.FontWeight.W_700
+                    elif is_selected:
+                        # Selected only: white/silver border, neutral bg
+                        cell.bgcolor = C.SURFACE_HOVER
+                        cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                        day_text.color = C.TEXT_PRIMARY
+                        day_text.weight = ft.FontWeight.W_600
+                    elif is_today:
+                        # Today only: accent text + dot, NO border
+                        cell.bgcolor = None
+                        cell.border = None
+                        day_text.color = C.ACCENT
+                        day_text.weight = ft.FontWeight.W_700
+                    elif has_deadline:
+                        # Has deadline: subtle urgency bg
+                        cell.bgcolor = ft.Colors.with_opacity(
+                            0.06, most_urgent_color or C.ACCENT
                         )
+                        cell.border = ft.Border.all(
+                            0.5,
+                            ft.Colors.with_opacity(
+                                0.19, most_urgent_color or C.BORDER
+                            ),
+                        )
+                        day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
+                        day_text.weight = ft.FontWeight.W_500
                     else:
-                        urgency_colors = []
-                        seen = set()
-                        for a in acts:
-                            urg = a.get("urgency", "safe")
-                            col = get_urgency_color(urg)
-                            if col not in seen:
-                                seen.add(col)
-                                urgency_colors.append(col)
-                        for color in urgency_colors[:3]:
+                        cell.bgcolor = None
+                        cell.border = None
+                        day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
+                        day_text.weight = ft.FontWeight.W_400
+
+                    # CV-03: Larger dots (6px) with smarter display
+                    dots_row.controls.clear()
+                    if acts:
+                        if len(acts) >= 3:
+                            # Show count badge instead of many dots
                             dots_row.controls.append(
-                                ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+                                ft.Container(
+                                    content=ft.Text(
+                                        str(len(acts)),
+                                        size=7,
+                                        color=on_color(most_urgent_color or C.ACCENT),
+                                        weight=ft.FontWeight.W_700,
+                                        text_align=ft.TextAlign.CENTER,
+                                    ),
+                                    width=14, height=14, border_radius=7,
+                                    bgcolor=most_urgent_color or C.ACCENT,
+                                    alignment=ft.Alignment(0, 0),
+                                )
                             )
+                        else:
+                            urgency_colors = []
+                            seen = set()
+                            for a in acts:
+                                urg = a.get("urgency", "safe")
+                                col = get_urgency_color(urg)
+                                if col not in seen:
+                                    seen.add(col)
+                                    urgency_colors.append(col)
+                            for color in urgency_colors[:3]:
+                                dots_row.controls.append(
+                                    ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+                                )
 
         self._update_day_panel()
-        if update_page:
+        if update_page and not getattr(self, "_defer_page_update", False):
             try:
                 self._page_ref.update()
             except Exception:

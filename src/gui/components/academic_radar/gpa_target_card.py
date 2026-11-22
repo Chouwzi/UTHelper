@@ -60,9 +60,16 @@ class GpaTargetCard(ft.Container):
         title = ft.Row(
             controls=[
                 ft.Icon(ft.Icons.TRACK_CHANGES_ROUNDED, size=18, color=C.ACCENT),
-                ft.Text("GPA mong muốn trong kỳ", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+                ft.Text(
+                    "GPA mong muốn trong kỳ",
+                    size=16,
+                    weight=ft.FontWeight.W_700,
+                    color=C.TEXT_PRIMARY,
+                    expand=True,
+                ),
             ],
             spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         hint = ft.Text(
             "Nhập GPA hệ 4 muốn đạt (VD: 4.0) để xem các môn chưa có điểm cần đạt bao nhiêu.",
@@ -73,9 +80,10 @@ class GpaTargetCard(ft.Container):
             label="GPA hệ 4 mục tiêu",
             hint_text="0.0 – 4.0",
             keyboard_type=ft.KeyboardType.NUMBER,
-            width=170,
+            expand=True,
             height=48,
             text_size=14,
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
             border_radius=10,
             border_color=C.BORDER,
             focused_border_color=C.ACCENT,
@@ -88,7 +96,7 @@ class GpaTargetCard(ft.Container):
         )
         self._result_col = ft.Column(controls=self._build_result_controls(), spacing=8)
         self.content = ft.Column(
-            controls=[title, hint, self._target_field, self._result_col],
+            controls=[title, hint, ft.Row(controls=[self._target_field]), self._result_col],
             spacing=10,
         )
 
@@ -148,6 +156,7 @@ class GpaTargetCard(ft.Container):
                             spacing=2, horizontal_alignment=ft.CrossAxisAlignment.END,
                         ),
                     ],
+                    spacing=8,
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),

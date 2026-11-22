@@ -1569,7 +1569,6 @@ class AppController:
             controls=[self._dashboard_main, self._sidebar],
             spacing=0, expand=True,
             vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_IN_OUT),
         )
 
         self.quiz_player_view = QuizPlayerView(
@@ -1699,6 +1698,8 @@ class AppController:
         if hasattr(self.courses_view, "set_on_immersive_changed"):
             self.courses_view.set_on_immersive_changed(self._on_courses_immersive_changed)
 
+        self.dashboard.animate_opacity = None
+        self.dashboard.animate_offset = None
         for _view in (
             self.detail_view,
             self.settings_view,
@@ -1709,13 +1710,15 @@ class AppController:
         ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
-            _view.animate_opacity = ft.Animation(180, ft.AnimationCurve.EASE_OUT)
+            _view.animate_opacity = None
+            _view.animate_offset = None
 
+        switcher_ms = 90 if platform_utils.UI_IS_MOBILE else 120
         self.tab_switcher = ft.AnimatedSwitcher(
             content=self.dashboard,
             transition=ft.AnimatedSwitcherTransition.FADE,
-            duration=160,
-            reverse_duration=160,
+            duration=switcher_ms,
+            reverse_duration=switcher_ms,
             switch_in_curve=ft.AnimationCurve.EASE_OUT,
             switch_out_curve=ft.AnimationCurve.EASE_IN,
             expand=True,
@@ -1845,9 +1848,8 @@ class AppController:
                 expand=True,
             )
         self.page.add(self._app_shell)
-        if not platform_utils.UI_IS_MOBILE:
-            self.page.on_resize = self._on_page_resize
-            self._apply_responsive_layout(force=True)
+        self.page.on_resize = self._on_page_resize
+        self._apply_responsive_layout(force=True)
 
     def _on_courses_immersive_changed(self, immersive: bool) -> None:
         nav_shell = getattr(self, "_nav_shell", None)
@@ -1921,10 +1923,16 @@ class AppController:
         content_width = max(0.0, resolved_width - (RAIL_WIDTH if use_rail else 0.0))
         courses_view = getattr(self, "courses_view", None)
         if courses_view is not None:
-            if hasattr(courses_view, "set_width"):
-                courses_view.set_width(content_width)
-            if hasattr(courses_view, "set_viewport_height"):
-                courses_view.set_viewport_height(resolved_height)
+            if callable(getattr(courses_view, "set_viewport_size", None)):
+                courses_view.set_viewport_size(content_width, resolved_height)
+            else:
+                if hasattr(courses_view, "set_width"):
+                    courses_view.set_width(content_width)
+                if hasattr(courses_view, "set_viewport_height"):
+                    courses_view.set_viewport_height(resolved_height)
+        grade_view = getattr(self, "grade_overview_view", None)
+        if grade_view is not None and callable(getattr(grade_view, "set_width", None)):
+            grade_view.set_width(content_width)
         self._sync_app_webview_bounds(resolved_width, resolved_height)
 
         content_area = getattr(self, "_content_area", None)
@@ -4101,7 +4109,7 @@ class AppController:
         self._diag_screen("home")
         self._sync_rail_active()
 
-    def _rebuild_colors(self):
+    def _rebuild_colors(self, *, sync_nav: bool = True, update_page: bool = True):
         """Repaint ALL existing controls with current C values for live theme switching.
 
         Because controls store hardcoded color strings at init time,
@@ -4122,7 +4130,8 @@ class AppController:
         self.page.bgcolor = _C.BG
         if getattr(self, "_sidebar", None) is not None:
             self._sidebar.border = ft.Border.only(left=ft.BorderSide(1, _C.BORDER))
-        self._sync_rail_active()
+        if sync_nav:
+            self._sync_rail_active()
 
         self._header_container.bgcolor = _C.BG
         self._app_title.color = _C.TEXT_PRIMARY
@@ -4298,22 +4307,38 @@ class AppController:
             except Exception as e:
                 logger.error("Failed to update theme for _courses_coordinator: %s", e, exc_info=True)
 
-        self.page.update()
+        if update_page:
+            self.page.update()
 
 
-    def _reconcile_settings_after_exit(self) -> None:
+    def _reconcile_settings_after_exit(
+        self, *, sync_nav: bool = True, update_page: bool = True
+    ) -> None:
         """Restore persisted theme/colors and recalculate urgencies when leaving Settings."""
         settings_view = getattr(self, "settings_view", None)
         cancel_load = getattr(settings_view, "cancel_pending_load", None)
         if callable(cancel_load):
             cancel_load()
-        from gui.core.theme import load_theme_from_settings, set_page_theme
+        from gui.core.theme import C as _C, load_theme_from_settings, set_page_theme
 
         load_theme_from_settings()
         if hasattr(self, "page") and self.page is not None:
             set_page_theme(self.page)
-        if hasattr(self, "_rebuild_colors"):
-            self._rebuild_colors()
+        current_palette = semantic_palette()
+        needs_rebuild = (
+            getattr(self, "_rendered_palette", None) != current_palette
+            or getattr(getattr(self, "page", None), "bgcolor", None) != _C.BG
+        )
+        if needs_rebuild and hasattr(self, "_rebuild_colors"):
+            rebuild = self._rebuild_colors
+            try:
+                params = inspect.signature(rebuild).parameters
+            except (TypeError, ValueError):
+                params = {}
+            if "sync_nav" in params and "update_page" in params:
+                rebuild(sync_nav=sync_nav, update_page=update_page)
+            else:
+                rebuild()
 
         from datetime import datetime
 
@@ -4350,7 +4375,15 @@ class AppController:
         if target == "home":
             await self._close_settings()
             return
-        self._reconcile_settings_after_exit()
+        reconcile = self._reconcile_settings_after_exit
+        try:
+            reconcile_params = inspect.signature(reconcile).parameters
+        except (TypeError, ValueError):
+            reconcile_params = {}
+        if "sync_nav" in reconcile_params and "update_page" in reconcile_params:
+            reconcile(sync_nav=False, update_page=False)
+        else:
+            reconcile()
         update_footer = getattr(self, "_update_footer", None)
         if callable(update_footer):
             try:
@@ -4375,7 +4408,15 @@ class AppController:
 
     async def _close_settings(self):
         self._sync_rail_active(force_home=True)
-        self._reconcile_settings_after_exit()
+        reconcile = self._reconcile_settings_after_exit
+        try:
+            reconcile_params = inspect.signature(reconcile).parameters
+        except (TypeError, ValueError):
+            reconcile_params = {}
+        if "sync_nav" in reconcile_params and "update_page" in reconcile_params:
+            reconcile(sync_nav=False, update_page=False)
+        else:
+            reconcile()
 
         # Toggle visibility - no full rebuild needed (fixes white flash)
         await self.view_manager.close_settings()

@@ -199,7 +199,14 @@ class ViewManager:
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
         self._hide_courses_view()
-        self.calendar_view.show(data_snapshot)
+        has_defer = hasattr(self.calendar_view, "_defer_page_update")
+        if has_defer:
+            self.calendar_view._defer_page_update = True
+        try:
+            self.calendar_view.show(data_snapshot)
+        finally:
+            if has_defer:
+                self.calendar_view._defer_page_update = False
         self.calendar_view.visible = True
         if self.tab_switcher is None:
             self._show_only(self.calendar_view)
@@ -273,14 +280,21 @@ class ViewManager:
         self.calendar_view.visible = False
         self.settings_view.visible = False
         self._hide_courses_view()
-        self.grade_overview_view.show_loading()
-        if self.tab_switcher is None:
-            self._show_only(self.grade_overview_view)
-        self._sync_detail_host()
-        # The cached grade view may have been detached while Settings previewed
-        # another theme. Refresh after attaching it so Flet sends the new
-        # surface colors with the next page update.
-        self.grade_overview_view.update_theme()
+        has_defer = hasattr(self.grade_overview_view, "_defer_self_update")
+        if has_defer:
+            self.grade_overview_view._defer_self_update = True
+        try:
+            self.grade_overview_view.show_loading()
+            if self.tab_switcher is None:
+                self._show_only(self.grade_overview_view)
+            self._sync_detail_host()
+            # The cached grade view may have been detached while Settings previewed
+            # another theme. Refresh after attaching it so Flet sends the new
+            # surface colors with the next page update.
+            self.grade_overview_view.update_theme()
+        finally:
+            if has_defer:
+                self.grade_overview_view._defer_self_update = False
         self._sync_nav_buttons("grades")
         self._notify_destination("grades")
         self.page.update()
@@ -395,11 +409,18 @@ class ViewManager:
         await self.close_course_grades()
 
     def show_grades_error(self, message: str = "") -> None:
-        show_err = getattr(self.grade_overview_view, "show_error", None)
-        if callable(show_err):
-            show_err(message)
-        else:
-            self.grade_overview_view.update_academic_data([], [])
+        has_defer = hasattr(self.grade_overview_view, "_defer_self_update")
+        if has_defer:
+            self.grade_overview_view._defer_self_update = True
+        try:
+            show_err = getattr(self.grade_overview_view, "show_error", None)
+            if callable(show_err):
+                show_err(message)
+            else:
+                self.grade_overview_view.update_academic_data([], [])
+        finally:
+            if has_defer:
+                self.grade_overview_view._defer_self_update = False
         self.page.update()
 
     def show_grades_data(self, courses_grades, grade_items):
@@ -409,7 +430,14 @@ class ViewManager:
 
     def show_academic_radar_data(self, semesters, profiles, progress=None):
         """Cập nhật dữ liệu hồ sơ học tập Academic Radar và danh sách học phần."""
-        self.grade_overview_view.update_academic_data(semesters, profiles, progress)
+        has_defer = hasattr(self.grade_overview_view, "_defer_self_update")
+        if has_defer:
+            self.grade_overview_view._defer_self_update = True
+        try:
+            self.grade_overview_view.update_academic_data(semesters, profiles, progress)
+        finally:
+            if has_defer:
+                self.grade_overview_view._defer_self_update = False
         self.page.update()
 
     def show_credit_progress(self, progress):

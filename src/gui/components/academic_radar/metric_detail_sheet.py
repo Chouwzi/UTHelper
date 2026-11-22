@@ -38,6 +38,7 @@ class MetricDetailSheet:
                         status_badge,
                     ],
                     spacing=4,
+                    expand=True,
                 ),
                 ft.Text(
                     score_str,
@@ -46,6 +47,7 @@ class MetricDetailSheet:
                     color=metric.color,
                 ),
             ],
+            spacing=8,
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -84,6 +86,9 @@ class MetricDetailSheet:
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    wrap=True,
+                    spacing=8,
+                    run_spacing=4,
                 ),
             ]
 
@@ -137,6 +142,7 @@ class MetricDetailSheet:
                                     color=val_color,
                                 ),
                             ],
+                            spacing=8,
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
@@ -175,9 +181,13 @@ class MetricDetailSheet:
                         ft.Text(f"● {conf_label}", size=11.5, weight=ft.FontWeight.W_600, color=conf_color),
                     ],
                     spacing=4,
+                    tight=True,
                 ),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            wrap=True,
+            spacing=8,
+            run_spacing=4,
         )
 
         # Expandable formula explanation
@@ -222,7 +232,8 @@ class MetricDetailSheet:
             page_h = float(getattr(page, "height", 0) or 0)
         except (TypeError, ValueError):
             page_h = 0.0
-        dialog_w = max(260.0, min(380.0, page_w - 64.0)) if page_w > 0 else 380.0
+        is_narrow = 0 < page_w < 600
+        dialog_w = max(240.0, min(380.0, page_w - 64.0)) if page_w > 0 else 380.0
         max_h = max(240.0, min(520.0, page_h * 0.65)) if page_h > 0 else None
 
         used_overlay = False
@@ -265,7 +276,6 @@ class MetricDetailSheet:
                     content=content_column,
                     width=dialog_w,
                     height=max_h,
-                    padding=12,
                 ),
             ),
             actions=[
@@ -275,6 +285,10 @@ class MetricDetailSheet:
                     on_click=lambda _: _close_dialog(page, dialog),
                 )
             ],
+            inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
+            title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
+            content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
+            actions_padding=ft.Padding.only(left=16, right=16, top=0, bottom=8),
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )

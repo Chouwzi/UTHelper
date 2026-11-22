@@ -287,3 +287,156 @@ def test_leaving_settings_for_grades_never_violates_animated_switcher_visibility
     assert calendar_view.visible is True
     assert settings_view.visible is False
     assert len(validated_updates) >= 4
+
+
+def test_adaptive_nav_shell_set_active_is_idempotent():
+    from gui.components.courses.adaptive_nav import AdaptiveNavShell
+
+    nav = AdaptiveNavShell(on_navigate=lambda _k: None)
+    nav.set_active("grades")
+    assert nav.rail.selected_index == 3
+    assert nav.bar.selected_index == 3
+
+    class _IndexSpy:
+        def __init__(self, initial: int) -> None:
+            self._selected_index = initial
+            self.writes: list[int] = []
+
+        @property
+        def selected_index(self) -> int:
+            return self._selected_index
+
+        @selected_index.setter
+        def selected_index(self, value: int) -> None:
+            self.writes.append(value)
+            self._selected_index = value
+
+    nav.rail = _IndexSpy(3)
+    nav.bar = _IndexSpy(3)
+    nav.set_active("grades")
+    assert nav.rail.writes == []
+    assert nav.bar.writes == []
+
+
+def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings():
+    import threading
+    import flet as ft
+    from gui.components.courses.adaptive_nav import AdaptiveNavShell
+    from gui.core.theme import C, semantic_palette
+    from gui.view_manager import ViewManager
+
+    dashboard = ft.Container(visible=False)
+    detail_view = ft.Container(visible=False)
+    settings_view = ft.Container(visible=True)
+    settings_view.has_changes = lambda: False
+    settings_view.cancel_pending_load = lambda: None
+    calendar_view = ft.Container(visible=False)
+    calendar_view.show = lambda _d: setattr(calendar_view, "visible", True)
+    calendar_view.hide = lambda: None
+    grade_view = ft.Container(visible=False)
+    grade_view.show_loading = lambda: setattr(grade_view, "visible", True)
+    grade_view.update_theme = lambda: None
+    grade_view.update_academic_data = lambda *_a, **_k: None
+    courses_view = ft.Container(visible=False)
+
+    tab_switcher = ft.AnimatedSwitcher(content=settings_view)
+    empty_detail = ft.Container(visible=True)
+    detail_switcher = ft.AnimatedSwitcher(content=empty_detail)
+
+    flushed_bar_indices: list[int] = []
+    nav_calls: list[str] = []
+
+    nav_shell = AdaptiveNavShell(on_navigate=lambda _k: None)
+    orig_set_active = nav_shell.set_active
+
+    def spy_set_active(key: str) -> None:
+        nav_calls.append(key)
+        orig_set_active(key)
+
+    nav_shell.set_active = spy_set_active
+
+    def record_page_update() -> None:
+        flushed_bar_indices.append(nav_shell.bar.selected_index)
+
+    page = SimpleNamespace(
+        update=record_page_update,
+        overlay=[],
+        theme_mode=None,
+        theme=None,
+        dark_theme=None,
+        bgcolor=C.BG,
+    )
+    controller = AppController.__new__(AppController)
+    controller.page = page
+    controller.dashboard = dashboard
+    controller.detail_view = detail_view
+    controller.settings_view = settings_view
+    controller.calendar_view = calendar_view
+    controller.grade_overview_view = grade_view
+    controller.courses_view = courses_view
+    controller.course_grades_view = None
+    controller.tab_switcher = tab_switcher
+    controller.detail_switcher = detail_switcher
+    controller._detail_host = ft.Container(ignore_interactions=True)
+    controller._nav_shell = nav_shell
+    controller._rail_items = None
+    controller._rendered_palette = semantic_palette()
+    controller._rebuild_colors = AppController._rebuild_colors.__get__(controller, AppController)
+    controller._reconcile_settings_after_exit = AppController._reconcile_settings_after_exit.__get__(
+        controller, AppController
+    )
+    controller._update_footer = lambda *, update_page=True: None
+    controller._needs_reload = False
+    controller._data_lock = threading.Lock()
+    controller.all_data = []
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=lambda **_kw: [],
+        get_radar_profiles=lambda _s: [],
+    )
+    controller.orchestrator = SimpleNamespace(_get_userid=lambda: None)
+    controller._diag_screen = lambda *_a, **_k: None
+    controller._diag_breadcrumb = lambda *_a, **_k: None
+    controller.view_manager = ViewManager(
+        page,
+        dashboard,
+        detail_view,
+        settings_view,
+        calendar_view,
+        grade_view,
+        controller,
+        courses_view=courses_view,
+        tab_switcher=tab_switcher,
+        detail_switcher=detail_switcher,
+        empty_detail=empty_detail,
+        on_destination_change=nav_shell.set_active,
+    )
+
+    for target, expected_idx in (("home", 0), ("courses", 1), ("calendar", 2), ("grades", 3)):
+        nav_calls.clear()
+        flushed_bar_indices.clear()
+        settings_view.visible = True
+        tab_switcher.content = settings_view
+        nav_shell.set_active("settings")
+        nav_calls.clear()
+
+        asyncio.run(controller._navigate_destination(target))
+        assert "settings" not in nav_calls, (target, nav_calls)
+        assert 4 not in flushed_bar_indices, (target, flushed_bar_indices)
+        assert nav_shell.bar.selected_index == expected_idx
+        assert settings_view.visible is False
+
+    # Even when palette rebuild IS needed on exit, sync_nav=False & update_page=False prevent snap-back
+    rebuild_calls = []
+    controller._rendered_palette = ("stale",)
+    controller._rebuild_colors = lambda *, sync_nav=True, update_page=True: rebuild_calls.append(
+        (sync_nav, update_page)
+    )
+    settings_view.visible = True
+    tab_switcher.content = settings_view
+    nav_calls.clear()
+    flushed_bar_indices.clear()
+    asyncio.run(controller._navigate_destination("courses"))
+    assert rebuild_calls == [(False, False)]
+    assert "settings" not in nav_calls
+    assert 4 not in flushed_bar_indices
+    assert nav_shell.bar.selected_index == 1
