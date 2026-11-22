@@ -76,7 +76,7 @@ class GpaTargetResult:
     message: str = ""
 
 
-def _course_point4(c: CourseGradeItem) -> float | None:
+def course_point4(c: CourseGradeItem) -> float | None:
     """Điểm hệ 4 của môn đã có điểm; None nếu chưa có điểm."""
     if c.credit_grade is not None:
         return float(c.credit_grade)
@@ -87,6 +87,9 @@ def _course_point4(c: CourseGradeItem) -> float | None:
     if c.final_grade is not None:
         return score10_to_point4(float(c.final_grade))
     return None
+
+
+_course_point4 = course_point4
 
 
 def _is_gpa_course(c: CourseGradeItem) -> bool:

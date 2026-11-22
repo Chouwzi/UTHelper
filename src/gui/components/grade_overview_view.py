@@ -5,10 +5,13 @@ interactive metric detail modals, and comprehensive course grades.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
+import math
 import os
 import sys
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 # Patch path for direct execution / Flet preview compatibility
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -20,7 +23,10 @@ from core.academic_radar.calculator import calculate_radar_profile
 from core.academic_radar.gpa_planner import CreditProgress
 from core.academic_radar.models import RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
-from gui.components.academic_radar.course_components_dialog import show_course_components_dialog
+from gui.components.academic_radar.course_components_dialog import (
+    MoodleCourseGradesResult,
+    show_course_components_dialog,
+)
 from gui.components.academic_radar.grade_list_view import AcademicGradeListView
 from gui.components.course_grade_table import find_moodle_course
 from gui.components.academic_radar.gpa_target_card import GpaTargetCard
@@ -41,10 +47,18 @@ class GradeOverviewView(ft.Container):
         page: Optional[ft.Page] = None,
         moodle_courses_provider: Optional[Callable[[], list]] = None,
         on_open_courses: Optional[Callable] = None,
+        course_grades_lookup: Optional[
+            Callable[[Any, str], MoodleCourseGradesResult]
+        ] = None,
+        course_grades_async_lookup: Optional[
+            Callable[[Any, str], Awaitable[MoodleCourseGradesResult]]
+        ] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self._moodle_courses_provider = moodle_courses_provider
+        self._course_grades_lookup = course_grades_lookup
+        self._course_grades_async_lookup = course_grades_async_lookup
         self._on_close = on_close
         self._on_refresh = on_refresh
         self._on_open_courses = on_open_courses
@@ -54,6 +68,13 @@ class GradeOverviewView(ft.Container):
         self._selected_semester_idx = 0
         self._defer_self_update = False
         self._viewport_width: float = 0.0
+        self._saved_scroll_offset: float = 0.0
+        self._open_dialog_tokens: dict[int, float] = {}
+        self._next_dialog_token: int = 0
+        self._scroll_restore_token: int = 0
+        self._is_restoring_scroll: bool = False
+        self._active_dialog_token: Optional[int] = None
+        self._active_dialog_closer: Optional[Callable[[], None]] = None
 
         try:
             page_w = float(getattr(self._get_page(), "width", 0) or 0)
@@ -188,6 +209,10 @@ class GradeOverviewView(ft.Container):
             profiles=[],
             on_semester_change=self._on_semester_changed,
             page=self._get_page(),
+            on_before_dialog=self._begin_modal_scroll_guard,
+            on_dialog_dismiss=self._end_modal_scroll_guard,
+            on_dialog_opened=self._set_active_dialog_closer,
+            on_dialog_closing=self._mark_dialog_closing,
             visible=False,
         )
         # Form tính GPA mong muốn mở bằng nút trên header (dialog)
@@ -203,8 +228,12 @@ class GradeOverviewView(ft.Container):
                 self._radar_card,
                 self._grade_list_view,
             ],
+            key="grade_overview_scroll",
             spacing=16,
             scroll=ft.ScrollMode.AUTO,
+            auto_scroll=False,
+            scroll_interval=32,
+            on_scroll=self._on_content_scroll,
             expand=True,
         )
 
@@ -303,6 +332,11 @@ class GradeOverviewView(ft.Container):
         self._semesters = semesters
         self._profiles = profiles
         self._selected_semester_idx = 0
+        self._saved_scroll_offset = 0.0
+        self._open_dialog_tokens.clear()
+        self._is_restoring_scroll = False
+        self._active_dialog_token = None
+        self._active_dialog_closer = None
 
         if not profiles or not semesters:
             self._empty_state.visible = True
@@ -434,10 +468,15 @@ class GradeOverviewView(ft.Container):
         is_narrow = 0 < page_w < 600
         body_w = max(240.0, min(440.0, page_w - 64.0)) if page_w else 440.0
 
+        token = self._begin_modal_scroll_guard()
         used_overlay = False
+        is_real_page = isinstance(page, ft.Page)
 
         def _close(_event=None) -> None:
-            self._close_planner(page, dialog, used_overlay=used_overlay)
+            self._mark_dialog_closing(token)
+            popped = self._close_planner(page, dialog, used_overlay=used_overlay)
+            if not popped or not is_real_page:
+                self._end_modal_scroll_guard(token)
 
         def _on_key_down(event) -> None:
             if getattr(event, "key", "") == "Escape":
@@ -454,7 +493,7 @@ class GradeOverviewView(ft.Container):
                 semantics_label="Tính GPA mong muốn",
             ),
             content=ft.KeyboardListener(
-                autofocus=True,
+                autofocus=False,
                 on_key_down=_on_key_down,
                 content=ft.Container(
                     content=ft.Column(
@@ -467,6 +506,7 @@ class GradeOverviewView(ft.Container):
                 ),
             ),
             actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
+            on_dismiss=lambda _e=None, t=token: self._end_modal_scroll_guard(t),
             inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
             title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
             content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
@@ -475,6 +515,7 @@ class GradeOverviewView(ft.Container):
             shape=ft.RoundedRectangleBorder(radius=16),
         )
         self._planner_dialog = dialog
+        self._set_active_dialog_closer(token, _close)
         try:
             page.show_dialog(dialog)
             logger.info("GPA planner dialog shown")
@@ -487,11 +528,11 @@ class GradeOverviewView(ft.Container):
 
     def _close_planner(
         self, page: ft.Page, dialog: ft.AlertDialog, *, used_overlay: bool = False
-    ) -> None:
+    ) -> bool:
         if not used_overlay:
             try:
                 page.pop_dialog()
-                return
+                return True
             except Exception:
                 pass
         dialog.open = False
@@ -502,25 +543,166 @@ class GradeOverviewView(ft.Container):
                 page.update()
             except Exception:
                 pass
+        return False
+
+    def _on_content_scroll(self, event: Any) -> None:
+        if self._open_dialog_tokens or self._is_restoring_scroll:
+            return
+        raw_pixels = getattr(event, "pixels", None)
+        if raw_pixels is None:
+            return
+        try:
+            pixels = float(raw_pixels)
+            minimum = float(getattr(event, "min_scroll_extent", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(pixels) or not math.isfinite(minimum):
+            return
+        out_of_range = bool(getattr(event, "out_of_range", False))
+        offset = max(0.0, pixels - minimum)
+        if (out_of_range and pixels <= minimum) or offset <= 5.0:
+            offset = 0.0
+        self._saved_scroll_offset = offset
+
+    def _begin_modal_scroll_guard(self) -> int:
+        self._next_dialog_token += 1
+        token = self._next_dialog_token
+        self._open_dialog_tokens[token] = self._saved_scroll_offset
+        return token
+
+    def _set_active_dialog_closer(
+        self, token: int, closer: Optional[Callable[[], None]]
+    ) -> None:
+        self._active_dialog_token = token
+        self._active_dialog_closer = closer
+
+    def _mark_dialog_closing(self, token: Any) -> None:
+        if self._active_dialog_token == token:
+            self._active_dialog_token = None
+            self._active_dialog_closer = None
+
+    def _end_modal_scroll_guard(self, token: Any) -> None:
+        if not isinstance(token, int):
+            return
+        captured_offset = self._open_dialog_tokens.pop(token, None)
+        if captured_offset is None:
+            return
+
+        if self._active_dialog_token == token:
+            self._active_dialog_token = None
+            self._active_dialog_closer = None
+
+        if not self._open_dialog_tokens and captured_offset > 0.0:
+            self._schedule_scroll_restore(captured_offset)
+
+    def _schedule_scroll_restore(self, target_offset: float) -> None:
+        self._scroll_restore_token += 1
+        restore_token = self._scroll_restore_token
+        self._is_restoring_scroll = True
+        self._saved_scroll_offset = target_offset
+
+        async def _restore() -> None:
+            try:
+                await asyncio.sleep(0.03)
+                if restore_token != self._scroll_restore_token:
+                    return
+                scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
+                if callable(scroll_fn):
+                    res = scroll_fn(offset=target_offset, duration=0)
+                    if inspect.isawaitable(res):
+                        await res
+                await asyncio.sleep(0.02)
+            except Exception:
+                logger.debug("GradeOverview scroll restore failed", exc_info=True)
+            finally:
+                if restore_token == self._scroll_restore_token:
+                    self._is_restoring_scroll = False
+
+        page = self._get_page()
+        run_task = getattr(page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(_restore)
+                return
+            except Exception:
+                logger.debug("page.run_task scroll restore failed", exc_info=True)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
+            if callable(scroll_fn) and not inspect.iscoroutinefunction(scroll_fn):
+                try:
+                    res = scroll_fn(offset=target_offset, duration=0)
+                    if inspect.isawaitable(res):
+                        close_fn = getattr(res, "close", None)
+                        if callable(close_fn):
+                            close_fn()
+                except Exception:
+                    pass
+            self._is_restoring_scroll = False
+            return
+        loop.create_task(_restore())
+
+    def handle_back(self) -> bool:
+        """Close an open modal dialog before navigating away from GradeOverviewView."""
+        closer = self._active_dialog_closer
+        if callable(closer):
+            self._active_dialog_token = None
+            self._active_dialog_closer = None
+            closer()
+            return True
+        return False
 
     def _on_course_clicked(self, e: ft.ControlEvent | None, course) -> None:
-        """Bấm vào môn -> popup bảng điểm thành phần (ưu tiên báo cáo điểm Moodle)."""
+        """Bấm vào môn -> popup 2 tab (Portal | Course)."""
         page = self._get_page()
         if page is None and e is not None:
             try:
                 page = e.control.page
             except Exception:
                 page = None
+        sem_name = (
+            self._semesters[self._selected_semester_idx].name
+            if 0 <= self._selected_semester_idx < len(self._semesters)
+            else ""
+        )
         moodle_course = None
-        if self._moodle_courses_provider is not None:
+        moodle_result: Optional[MoodleCourseGradesResult] = None
+        if self._course_grades_lookup is not None:
+            try:
+                moodle_result = self._course_grades_lookup(course, sem_name)
+            except Exception:
+                logger.debug("Course grades lookup failed", exc_info=True)
+        elif self._moodle_courses_provider is not None:
             try:
                 moodle_course = find_moodle_course(course, self._moodle_courses_provider() or [])
             except Exception:
                 logger.debug("Moodle course lookup failed", exc_info=True)
-        show_course_components_dialog(page, course, moodle_course)
+
+        async_loader = (
+            (lambda c, s=sem_name: self._course_grades_async_lookup(c, s))
+            if callable(self._course_grades_async_lookup)
+            else None
+        )
+
+        token = self._begin_modal_scroll_guard()
+        closer = show_course_components_dialog(
+            page,
+            course,
+            moodle_course,
+            moodle_result=moodle_result,
+            async_loader=async_loader,
+            on_dismiss=lambda t=token: self._end_modal_scroll_guard(t),
+            on_closing=lambda t=token: self._mark_dialog_closing(t),
+        )
+        if closer is not None:
+            self._set_active_dialog_closer(token, closer)
+        else:
+            self._open_dialog_tokens.pop(token, None)
 
     def _on_semester_changed(self, index: int) -> None:
         self._selected_semester_idx = index
+        self._saved_scroll_offset = 0.0
         if 0 <= index < len(self._semesters):
             self._grade_list_view.update_courses(self._semesters[index].courses)
 

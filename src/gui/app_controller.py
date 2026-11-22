@@ -75,6 +75,12 @@ from gui.components.detail_view import DetailView
 from gui.components.quiz_player_view import QuizPlayerView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
+from gui.components.academic_radar.course_components_dialog import MoodleCourseGradesResult
+from gui.components.course_grade_table import (
+    find_moodle_course,
+    grade_rows_to_moodle_items,
+    match_portal_course_to_summary,
+)
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
@@ -1173,6 +1179,9 @@ class AppController:
             await self._close_calendar()
             handled = True
         elif self.grade_overview_view.visible:
+            grade_handle_back = getattr(self.grade_overview_view, "handle_back", None)
+            if callable(grade_handle_back) and grade_handle_back():
+                return True
             await self._close_grades()
             handled = True
         self._sync_rail_active()
@@ -1635,6 +1644,8 @@ class AppController:
             page=self.page,
             moodle_courses_provider=self._get_moodle_course_grades,
             on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
+            course_grades_lookup=self._lookup_moodle_course_grades_cached,
+            course_grades_async_lookup=self._fetch_moodle_course_grades_async,
         )
         self.course_grades_view = CoursesView(
             on_close=lambda: self._safe_run_task(self._close_course_grades),
@@ -3090,6 +3101,141 @@ class AppController:
             )
         except Exception:
             return []
+
+    def _lookup_legacy_monitor_grades(self, portal_course) -> MoodleCourseGradesResult:
+        try:
+            moodle_course = find_moodle_course(portal_course, self._get_moodle_course_grades())
+        except Exception:
+            moodle_course = None
+        report = getattr(moodle_course, "report", None)
+        rows = getattr(report, "rows", None) or []
+        if not rows:
+            return MoodleCourseGradesResult()
+        return MoodleCourseGradesResult(
+            grades=grade_rows_to_moodle_items(rows),
+            course_id=getattr(moodle_course, "course_id", None),
+            course_title=str(getattr(moodle_course, "name", "") or ""),
+            source="monitor",
+            needs_async_fetch=False,
+        )
+
+    def _lookup_moodle_course_grades_cached(
+        self, portal_course, semester_name: str = ""
+    ) -> MoodleCourseGradesResult:
+        """Instant cached lookup from CourseCacheStore, falling back to CourseGradeMonitor."""
+        store = getattr(self, "_course_cache_store", None)
+        catalog_service = getattr(self, "_course_catalog_service", None)
+        matched = None
+        catalog_courses: list = []
+        if store is not None:
+            try:
+                catalog = store.load_catalog()
+                catalog_courses = list(getattr(catalog, "courses", None) or [])
+                matched = match_portal_course_to_summary(
+                    portal_course, catalog_courses, semester_name=semester_name
+                )
+                if matched is not None:
+                    detail = store.load_course_detail(matched.source, matched.id)
+                    grades = list(getattr(detail, "grades", None) or [])
+                    if grades:
+                        return MoodleCourseGradesResult(
+                            grades=grades,
+                            course_id=matched.id,
+                            course_title=matched.display_name or matched.fullname,
+                            source=matched.source,
+                            last_synced_at=int(getattr(detail, "last_synced_at", 0) or 0),
+                            needs_async_fetch=False,
+                        )
+                    if catalog_service is not None:
+                        return MoodleCourseGradesResult(
+                            course_id=matched.id,
+                            course_title=matched.display_name or matched.fullname,
+                            source=matched.source,
+                            needs_async_fetch=True,
+                        )
+            except Exception:
+                logger.debug("CourseCacheStore grade lookup failed", exc_info=True)
+
+        legacy_res = self._lookup_legacy_monitor_grades(portal_course)
+        if legacy_res.grades:
+            return legacy_res
+
+        can_fetch = catalog_service is not None and (
+            matched is not None or not catalog_courses
+        )
+        return MoodleCourseGradesResult(
+            course_id=matched.id if matched is not None else None,
+            course_title=(
+                (matched.display_name or matched.fullname) if matched is not None else ""
+            ),
+            source=matched.source if matched is not None else "",
+            needs_async_fetch=bool(can_fetch),
+        )
+
+    async def _fetch_moodle_course_grades_async(
+        self, portal_course, semester_name: str = ""
+    ) -> MoodleCourseGradesResult:
+        """Background on-demand Moodle grade lookup via CourseCatalogService."""
+        def _work() -> MoodleCourseGradesResult:
+            store = getattr(self, "_course_cache_store", None)
+            catalog_service = getattr(self, "_course_catalog_service", None)
+            if store is None or catalog_service is None:
+                return self._lookup_legacy_monitor_grades(portal_course)
+
+            courses: list = []
+            try:
+                courses = list(getattr(store.load_catalog(), "courses", None) or [])
+            except Exception:
+                courses = []
+            if not courses:
+                try:
+                    courses = list(catalog_service.refresh_catalog(include_thnn=True) or [])
+                except Exception:
+                    logger.debug("On-demand catalog refresh failed", exc_info=True)
+                    courses = []
+
+            matched = match_portal_course_to_summary(
+                portal_course, courses, semester_name=semester_name
+            )
+            if matched is None:
+                return self._lookup_legacy_monitor_grades(portal_course)
+
+            try:
+                grades = list(
+                    catalog_service.load_course_grades(matched.source, matched.id, False)
+                    or []
+                )
+            except Exception:
+                logger.debug("On-demand load_course_grades failed", exc_info=True)
+                grades = []
+
+            if grades:
+                last_synced = 0
+                try:
+                    detail = store.load_course_detail(matched.source, matched.id)
+                    last_synced = int(getattr(detail, "last_synced_at", 0) or 0)
+                except Exception:
+                    pass
+                return MoodleCourseGradesResult(
+                    grades=grades,
+                    course_id=matched.id,
+                    course_title=matched.display_name or matched.fullname,
+                    source=matched.source,
+                    last_synced_at=last_synced,
+                    needs_async_fetch=False,
+                )
+
+            legacy_res = self._lookup_legacy_monitor_grades(portal_course)
+            if legacy_res.grades:
+                return legacy_res
+            return MoodleCourseGradesResult(
+                course_id=matched.id,
+                course_title=matched.display_name or matched.fullname,
+                source=matched.source,
+                needs_async_fetch=False,
+            )
+
+        return await asyncio.to_thread(_work)
 
     async def _check_grades_background(self):
         """Chạy cùng chu kỳ cập nhật Tổng quan qua GradeMonitor (WS nhẹ).
