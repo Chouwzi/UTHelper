@@ -215,7 +215,7 @@ jobs:
             --require-office-viewer \
             --output "evidence/UTHelper-$VERSION$APK_SUFFIX.apk.verification.json"
       - name: Attest signed APK
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         timeout-minutes: 5
         with:
           subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}${{ matrix.suffix }}.apk
@@ -284,7 +284,7 @@ jobs:
             --workflow-run-id "$GITHUB_RUN_ID" \
             --require-office-viewer
       - name: Attest unsigned device IPA
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         timeout-minutes: 5
         with:
           subject-path: release/UTHelper-${{ needs['validate-release-source'].outputs.version }}.ipa
@@ -462,7 +462,7 @@ jobs:
             -WorkflowRunId "$env:GITHUB_RUN_ID" `
             -EvidenceDir evidence
       - name: Attest signed Windows installers
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         timeout-minutes: 5
         with:
           subject-path: |
@@ -575,7 +575,7 @@ jobs:
           "${INVENTORY[@]}" --manifest release/release-manifest.json --write-checksums release/SHA256SUMS
           "${INVENTORY[@]}" --manifest release/release-manifest.json --checksums release/SHA256SUMS
       - name: Attest exact public inventory
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         timeout-minutes: 5
         with:
           subject-path: |
