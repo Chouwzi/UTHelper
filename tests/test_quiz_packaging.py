@@ -396,6 +396,7 @@ def test_windows_nuget_provisioning_verifies_sha256_and_repairs_corrupt_cache(
     path_dir.mkdir()
     existing_nuget = path_dir / "nuget.exe"
     existing_nuget.write_bytes(b"MZ-existing")
+    existing_nuget.chmod(0o755)
     env_with_path = {"PATH": str(path_dir)}
     resolved_existing = quiz_client_bootstrap._ensure_windows_nuget_executable(
         tmp_path, env_with_path
