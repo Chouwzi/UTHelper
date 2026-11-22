@@ -2597,3 +2597,17 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
   - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2933 passed, 26 skipped** (0 failed).
   - Live headless Flet Web + Chrome DevTools visual smoke (`steel_light` Desktop `1280x820`, Mobile `390x844`, and open `"Chi tiết buổi học"` modal): verified single-line toolbar alignment, right-corner Refresh icon, solid `C.ACCENT` today highlight, and compact custom session detail modal.
+
+## CI Hardening: Manual `workflow_dispatch` Installable Debug-Test ARM64 APK Option (2026-11-22)
+
+- **Branch & Scope**: `ci/android-manual-test-apk` — `.github/workflows/build-android.yml`, `tests/test_release_hardening.py`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - Extended `workflow_dispatch.inputs` in `.github/workflows/build-android.yml` with `apk_arch` (`arm64-v8a` default / `universal`), `apk_signing` (`debug-test` default / `unsigned-diagnostic`), and `apk_namespace` (`isolated`=`com.uthelper.qa` default / `original`=`com.uthelper.uthelper`), while keeping `sign_upload` intact for CH Play AAB.
+  - Strictly gated `debug-test` installable mode to `CHANNEL == apk_lts` and `GITHUB_EVENT_NAME == workflow_dispatch` (both in shell resolution and upload `if:` conditions), so all `pull_request` and `push` runs remain 100% unchanged (universal `com.uthelper.uthelper`, intentionally signature-invalidated with `UNSIGNED_DIAGNOSTIC_ONLY.txt` and verified non-installable via `apksigner verify`).
+  - In `debug-test` mode, verified exact native ABI contents (`arm64-v8a`-only vs `universal`), verified valid Gradle debug signature via `apksigner verify --verbose --print-certs`, emitted companion `DEBUG_TEST_ONLY.txt` outside the APK, and uploaded `android-debug-test-<arch>-<namespace>-<sha>` without touching any production release signing secrets (`ANDROID_KEYSTORE_*` remains exclusive to `release.yml`).
+  - Added regression test `test_android_manual_dispatch_supports_installable_debug_test_apk_without_weakening_pr_guardrails` in `tests/test_release_hardening.py`.
+- **Verification**:
+  - `python -m pytest tests -q --tb=short`: **2895 passed, 26 skipped** (0 failed).
+  - `ruff check src tests scripts`: **All checks passed!**.
+  - Validated `.github/workflows/build-android.yml` with `yaml.safe_load`, `bash -n`, embedded Python `ast.parse`, live bash/Python matrix simulation across `pull_request`/`push`/`workflow_dispatch`/`chplay` cases, and `scripts/validate_gitflow_pr.py --event-name pull_request --base develop --head ci/android-manual-test-apk` (accepted).
+
