@@ -1092,8 +1092,14 @@ class DataOrchestrator:
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Lấy chi tiết bài tập qua WS API - không cần session, không kick browser."""
         # Xác định cmid và course_id từ activity_data
-        url = activity_data.get("url", "")
+        url = str(activity_data.get("url") or "")
         activity_type = activity_data.get("type", "other")
+        if (
+            activity_data.get("site_identity") == "thnn"
+            or urlsplit(url).netloc.lower().endswith("thnn.ut.edu.vn")
+        ):
+            # Tránh gửi nhầm cmid/course_id của THNN sang Moodle WS của courses.ut.edu.vn.
+            return None
         
         # Extract cmid từ URL: /mod/assign/view.php?id=CMID
         cmid = None

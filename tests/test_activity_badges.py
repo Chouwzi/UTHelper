@@ -149,3 +149,52 @@ def test_completed_activity_card_uses_calm_border_and_hides_redundant_chrome():
     assert active._progress_ctrl.visible is True
     assert active._status_container.visible is False
     assert active._optional_rows.controls[0].content.value == "Chưa nộp"
+
+
+def test_activity_card_hover_and_selected_state_transitions():
+    from types import SimpleNamespace
+
+    card = ActivityCard(
+        {
+            "id": "quiz-hover",
+            "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=101",
+            "type": "quiz",
+            "title": "Quiz hover & selection",
+            "deadline": "2098-12-20 12:00:00",
+            "urgency": "safe",
+            "is_open": True,
+            "submission_status": "not_submitted",
+            "details": {},
+        },
+        on_tap=lambda _data: None,
+    )
+
+    assert card.bgcolor == C.SURFACE
+    assert card._selected_badge.visible is False
+    assert card._urgency_container.visible is True
+
+    # Pointer hover elevates surface and border without marking card as open.
+    card.on_hover(SimpleNamespace(data="true"))
+    assert card.bgcolor == C.SURFACE_HOVER
+    assert card.shadow is not None
+    assert card._selected_badge.visible is False
+
+    # Selecting card (when opened in DetailView) shows "Đang xem" pill and C.ACCENT frame.
+    assert card.set_selected(True) is True
+    assert card.bgcolor == C.SURFACE_HOVER
+    assert card.border.top.color == C.ACCENT
+    assert card._bar_widget.bgcolor == C.ACCENT
+    assert card._selected_badge.visible is True
+    assert card._urgency_container.visible is False
+
+    # Leaving hover while selected preserves the active selection chrome.
+    card.on_hover(SimpleNamespace(data="false"))
+    assert card._selected_badge.visible is True
+    assert card.border.top.color == C.ACCENT
+
+    # Closing DetailView clears selection and restores resting chrome.
+    assert card.set_selected(False) is True
+    assert card.bgcolor == C.SURFACE
+    assert card.border.top.color == C.BORDER
+    assert card._selected_badge.visible is False
+    assert card._urgency_container.visible is True

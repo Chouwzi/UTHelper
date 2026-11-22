@@ -2093,14 +2093,19 @@ class AppController:
                 return
             await self._leave_settings_and_navigate(key)
             return
+        await self._perform_destination_navigation(key)
+
+    async def _perform_destination_navigation(self, key: str) -> None:
         if key == "home":
             self.view_manager.show_dashboard()
-            self._diag_screen("home")
-            self._diag_breadcrumb("navigation", "succeeded", "user", screen="home")
+            if hasattr(self, "_diag_screen"):
+                self._diag_screen("home")
+                self._diag_breadcrumb("navigation", "succeeded", "user", screen="home")
         elif key == "courses":
             self.view_manager.show_courses()
-            self._diag_screen("courses")
-            self._diag_breadcrumb("navigation", "succeeded", "user", screen="courses")
+            if hasattr(self, "_diag_screen"):
+                self._diag_screen("courses")
+                self._diag_breadcrumb("navigation", "succeeded", "user", screen="courses")
             coord = getattr(self, "_courses_coordinator", None)
             if coord is not None:
                 await coord.ensure_loaded_async(
@@ -2496,7 +2501,49 @@ class AppController:
         )
         return options
 
-    def _refresh_ui(self):
+    @staticmethod
+    def _activity_selection_key(data: dict | None) -> tuple | None:
+        if not isinstance(data, dict) or not data:
+            return None
+        url = str(data.get("url") or "").strip()
+        if url:
+            return ("url", url)
+        item_id = data.get("id")
+        if item_id not in (None, ""):
+            return ("id", str(item_id))
+        cmid = data.get("cmid")
+        course_id = data.get("course_id")
+        if cmid not in (None, ""):
+            return ("cmid", str(course_id or ""), str(cmid))
+        title = str(data.get("title") or "").strip()
+        deadline = str(data.get("deadline") or "").strip()
+        if title or deadline:
+            return ("fallback", title, deadline)
+        return None
+
+    def _is_activity_selected(self, data: dict | None) -> bool:
+        active_key = getattr(self, "_selected_activity_key", None)
+        if active_key is None:
+            return False
+        return self._activity_selection_key(data) == active_key
+
+    def _sync_reusable_card_selection(self) -> None:
+        for card in getattr(self, "_reusable_cards", ()) or ():
+            set_selected = getattr(card, "set_selected", None)
+            if callable(set_selected):
+                set_selected(self._is_activity_selected(getattr(card, "data", None)))
+
+    def _set_selected_activity(self, data: dict | None) -> None:
+        self._selected_activity_key = self._activity_selection_key(data)
+        self._sync_reusable_card_selection()
+
+    def _clear_selected_activity(self) -> None:
+        if getattr(self, "_selected_activity_key", None) is None:
+            return
+        self._selected_activity_key = None
+        self._sync_reusable_card_selection()
+
+    def _refresh_ui(self, *, update_page: bool = True):
         # Snapshot all_data under lock for thread safety
         with self._data_lock:
             data_snapshot = list(self.all_data)
@@ -2602,16 +2649,19 @@ class AppController:
         for i, item in enumerate(filtered_items):
             if i < len(current_cards):
                 # Tái sử dụng thẻ
+                current_cards[i].set_selected(self._is_activity_selected(item))
                 current_cards[i].update_data(item, on_tap=self._show_detail)
                 current_cards[i].visible = True
             else:
                 # Tạo thẻ mới
                 new_card = ActivityCard(item, on_tap=self._show_detail, animate=False)
+                new_card.set_selected(self._is_activity_selected(item))
                 new_card.visible = True
                 current_cards.append(new_card)
         
         # Ẩn các thẻ thừa
         for i in range(len(filtered_items), len(current_cards)):
+            current_cards[i].set_selected(False)
             current_cards[i].visible = False
             
         render_cards = current_cards[:len(filtered_items)]
@@ -2622,7 +2672,8 @@ class AppController:
             self.active_cards = render_cards
         
         self.cards_column.controls = render_cards
-        self.page.update()
+        if update_page:
+            self.page.update()
 
     def _fetch_schedule_week(self, week_anchor):
         """Blocking Portal ``lichTuan`` fetch; runs in a worker thread."""
@@ -2719,8 +2770,8 @@ class AppController:
         except Exception:
             logger.debug("Today schedule UI update skipped", exc_info=True)
 
-    def _update_footer(self):
-        self._refresh_ui()
+    def _update_footer(self, *, update_page: bool = True):
+        self._refresh_ui(update_page=update_page)
 
     def _render_cards(self):
         """Full UI refresh - rebuilds filters + cards."""
@@ -2759,14 +2810,17 @@ class AppController:
         current_cards = self._reusable_cards
         for i, item in enumerate(filtered_items):
             if i < len(current_cards):
+                current_cards[i].set_selected(self._is_activity_selected(item))
                 current_cards[i].update_data(item, on_tap=self._show_detail)
                 current_cards[i].visible = True
             else:
                 new_card = ActivityCard(item, on_tap=self._show_detail, animate=False)
+                new_card.set_selected(self._is_activity_selected(item))
                 new_card.visible = True
                 current_cards.append(new_card)
 
         for i in range(len(filtered_items), len(current_cards)):
+            current_cards[i].set_selected(False)
             current_cards[i].visible = False
 
         render_cards = current_cards[:len(filtered_items)]
@@ -4129,20 +4183,37 @@ class AppController:
                 self.all_data = data_copy
 
     async def _leave_settings_and_navigate(self, target: str) -> None:
-        """Exit Settings cleanly (after clean check, save, or discard) and open ``target``."""
+        """Exit Settings cleanly (after clean check, save, or discard) and open ``target``.
+
+        Important Flet invariant: never set ``settings_view.visible = False`` or call
+        ``page.update()`` while ``tab_switcher.content`` still references
+        ``settings_view``, otherwise Flet raises
+        ``ValueError('AnimatedSwitcher.content must be provided and visible')``.
+        """
         if target == "home":
             await self._close_settings()
             return
         self._reconcile_settings_after_exit()
-        settings_view = getattr(self, "settings_view", None)
-        if settings_view is not None:
-            settings_view.visible = False
-        if hasattr(self, "_update_footer"):
-            self._update_footer()
+        update_footer = getattr(self, "_update_footer", None)
+        if callable(update_footer):
+            try:
+                sig = inspect.signature(update_footer)
+                if "update_page" in sig.parameters:
+                    update_footer(update_page=False)
+                else:
+                    update_footer()
+            except (TypeError, ValueError):
+                update_footer()
         if getattr(self, "_needs_reload", False):
             self._needs_reload = False
             self._safe_run_task(self._load_data_async)
-        await self._navigate_destination(target)
+        await self._perform_destination_navigation(target)
+        settings_view = getattr(self, "settings_view", None)
+        tab_switcher = getattr(self, "tab_switcher", None)
+        if settings_view is not None and (
+            tab_switcher is None or tab_switcher.content is not settings_view
+        ):
+            settings_view.visible = False
         self._sync_rail_active()
 
     async def _close_settings(self):
@@ -4790,6 +4861,10 @@ class AppController:
 
         # Ghi nhận nếu màn hình chi tiết được mở từ Lịch để phục vụ quay lại (back-navigation)
         self._detail_from_calendar = self.calendar_view.visible
+        if not self._detail_from_calendar and not getattr(
+            getattr(self, "courses_view", None), "visible", False
+        ):
+            self._set_selected_activity(data)
         self._diag_screen("detail")
         self._diag_breadcrumb("navigation", "succeeded", "user", screen="detail")
         self.view_manager.show_detail_loading(data)
@@ -4797,8 +4872,9 @@ class AppController:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
             if not request_is_current():
                 return
-            if full_data and "details" in full_data:
-                desc_html = full_data["details"].get("description_html", "")
+            details_map = full_data.get("details") if isinstance(full_data, dict) else None
+            if isinstance(details_map, dict):
+                desc_html = details_map.get("description_html", "")
                 if desc_html:
                     from gui.core.utils import pre_cache_description_images
                     cached_html = await asyncio.to_thread(
@@ -4810,7 +4886,7 @@ class AppController:
                     # Cached detail dictionaries are shared with dashboard
                     # hydration. Prepare the view without mutating that cache.
                     full_data = dict(full_data)
-                    full_data["details"] = dict(full_data["details"])
+                    full_data["details"] = dict(details_map)
                     full_data["details"]["description_html"] = cached_html
             if not request_is_current():
                 return
@@ -4833,7 +4909,9 @@ class AppController:
         )]
         changed = False
         for card in cards_snapshot:
-            if getattr(card, "_is_critical_active", False):
+            if getattr(card, "_is_critical_active", False) and not getattr(
+                card, "_selected", False
+            ):
                 card.shadow = shadow
                 changed = True
         if changed:

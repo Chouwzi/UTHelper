@@ -283,3 +283,96 @@ def test_loading_next_quiz_immediately_hides_previous_submission_controls():
     assert shell._open_btn.visible is False
     assert shell._header_open_btn.visible is False
     assert shell._error_banner.visible is False
+
+
+def test_detail_view_update_detail_handles_none_time_limit_and_null_details():
+    import flet as ft
+
+    page = SimpleNamespace(
+        width=900,
+        height=760,
+        overlay=[],
+        update=lambda: None,
+        run_task=lambda *_a, **_k: None,
+    )
+    view = DetailView(page, on_close=lambda: None)
+
+    # Exact payload shape that previously crashed line 1410 with:
+    # TypeError: 'in <string>' requires string as left operand, not NoneType
+    untimed_quiz = {
+        "id": "quiz-ch4",
+        "title": "Bài tập tự học Chương 4 (Phần Dân chủ XHCN - CLO2.1 và CLO2.2)",
+        "course": "[012000510704] - Chủ nghĩa xã hội khoa học - HTHN_LLCT",
+        "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=55123",
+        "type": "quiz",
+        "urgency": "safe",
+        "deadline": "2026-11-27 09:46:00",
+        "submission_status": "submitted",
+        "details": {
+            "attempts_allowed": "Không giới hạn",
+            "time_limit": None,
+            "quiz_info": [
+                "Số lần cho phép: Không giới hạn",
+                "Phương thức tính điểm: Điểm cao nhất",
+            ],
+            "status_data": {"Trạng thái": "Đã hoàn thành"},
+        },
+    }
+    view.update_detail(untimed_quiz)
+    assert view._error_banner.visible is False
+    assert any(
+        isinstance(ctrl, ft.Container) for ctrl in view._content_col.controls
+    )
+
+    # Also handle details=None, string cutoff_date, and None attendance fields cleanly.
+    view.show_loading(
+        {
+            "title": "Null details item",
+            "course": "CS101",
+            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=99",
+            "type": "other",
+            "deadline": "2026-12-01 12:00:00",
+            "cutoff_date": "1796100000",
+            "details": None,
+        }
+    )
+    view.update_detail(
+        {
+            "title": "Attendance with nulls",
+            "course": "CS101",
+            "url": "https://courses.ut.edu.vn/mod/attendance/view.php?id=100",
+            "type": "attendance",
+            "deadline": None,
+            "cutoff_date": "2026-12-02 12:00:00",
+            "details": {
+                "attempts_allowed": None,
+                "time_limit": None,
+                "quiz_info": None,
+                "attendance_records": [
+                    {"Description": None, "Status": None, "Points": None, "Ngày": None}
+                ],
+            },
+        }
+    )
+    assert view._error_banner.visible is False
+
+
+def test_orchestrator_skips_courses_ws_for_thnn_detail_urls():
+    from core.data_orchestrator import DataOrchestrator
+
+    orch = DataOrchestrator.__new__(DataOrchestrator)
+    ws_calls = []
+    orch.moodle_service = SimpleNamespace(
+        get_assign_details_via_ws=lambda **kw: ws_calls.append(kw)
+    )
+
+    res = orch._fetch_detail_via_ws(
+        {
+            "url": "https://thnn.ut.edu.vn/mod/quiz/view.php?id=123",
+            "course_id": 45,
+            "type": "quiz",
+            "site_identity": "thnn",
+        }
+    )
+    assert res is None
+    assert ws_calls == []

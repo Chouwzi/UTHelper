@@ -57,9 +57,12 @@ def test_navigate_destination_prompts_unsaved_settings_before_switching_tabs(
     monkeypatch,
 ):
     import flet as ft
+    from config import settings
     from gui.components.settings_view import SettingsView
     from gui.components.courses.adaptive_nav import AdaptiveNavShell
     from gui.core.theme import apply_theme
+
+    original_theme = settings.THEME
 
     dialogs = []
     scheduled = []
@@ -180,4 +183,107 @@ def test_navigate_destination_prompts_unsaved_settings_before_switching_tabs(
         assert view.visible is False
         controller._show_grades.assert_awaited_once()
     finally:
-        apply_theme("midnight_blue")
+        settings.THEME = original_theme
+        apply_theme(original_theme)
+
+
+def test_leaving_settings_for_grades_never_violates_animated_switcher_visibility():
+    """Regression test for ValueError('AnimatedSwitcher.content must be provided and visible')."""
+    import flet as ft
+    from gui.components.courses.adaptive_nav import AdaptiveNavShell
+    from gui.view_manager import ViewManager
+
+    dashboard = ft.Container(visible=False)
+    detail_view = ft.Container(visible=False)
+    settings_view = ft.Container(visible=True)
+    calendar_view = ft.Container(visible=False)
+    grade_view = ft.Container(visible=False)
+    grade_view.show_loading = lambda: setattr(grade_view, "visible", True)
+    grade_view.update_theme = lambda: None
+    grade_view.update_academic_data = lambda *_a, **_k: None
+    courses_view = ft.Container(visible=False)
+
+    tab_switcher = ft.AnimatedSwitcher(content=settings_view)
+    empty_detail = ft.Container(visible=True)
+    detail_switcher = ft.AnimatedSwitcher(content=empty_detail)
+
+    validated_updates = []
+
+    def strict_page_update():
+        # Run Flet's real AnimatedSwitcher validator on every page.update()!
+        assert tab_switcher.content is not None
+        assert tab_switcher.content.visible is True
+        tab_switcher._before_update_safe()
+        detail_switcher._before_update_safe()
+        validated_updates.append(tab_switcher.content)
+
+    page = SimpleNamespace(update=strict_page_update, overlay=[])
+    controller = AppController.__new__(AppController)
+    controller.page = page
+    controller.dashboard = dashboard
+    controller.detail_view = detail_view
+    controller.settings_view = settings_view
+    controller.calendar_view = calendar_view
+    controller.grade_overview_view = grade_view
+    controller.courses_view = courses_view
+    controller.course_grades_view = None
+    controller.tab_switcher = tab_switcher
+    controller.detail_switcher = detail_switcher
+    controller._detail_host = ft.Container(ignore_interactions=True)
+    controller._nav_shell = AdaptiveNavShell(on_navigate=lambda _k: None)
+    controller._rail_items = None
+    controller._reconcile_settings_after_exit = lambda: None
+    refresh_page_flags = []
+    controller._update_footer = lambda *, update_page=True: (
+        refresh_page_flags.append(update_page)
+        or (strict_page_update() if update_page else None)
+    )
+    controller._needs_reload = False
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=lambda **_kw: [],
+        get_radar_profiles=lambda _s: [],
+    )
+    controller.orchestrator = SimpleNamespace(_get_userid=lambda: None)
+    controller._diag_screen = lambda *_a, **_k: None
+    controller._diag_breadcrumb = lambda *_a, **_k: None
+    controller.view_manager = ViewManager(
+        page,
+        dashboard,
+        detail_view,
+        settings_view,
+        calendar_view,
+        grade_view,
+        controller,
+        courses_view=courses_view,
+        tab_switcher=tab_switcher,
+        detail_switcher=detail_switcher,
+        empty_detail=empty_detail,
+        on_destination_change=controller._nav_shell.set_active,
+    )
+
+    # Navigate Settings -> Grades -> Settings -> Courses -> Settings -> Calendar -> Home
+    asyncio.run(controller._navigate_destination("grades"))
+    assert tab_switcher.content is grade_view
+    assert grade_view.visible is True
+    assert settings_view.visible is False
+    assert refresh_page_flags == [False]
+
+    settings_view.visible = True
+    tab_switcher.content = settings_view
+    asyncio.run(controller._navigate_destination("courses"))
+    assert tab_switcher.content is courses_view
+    assert courses_view.visible is True
+    assert settings_view.visible is False
+
+    settings_view.visible = True
+    tab_switcher.content = settings_view
+    calendar_view.show = lambda _d: None
+    import threading
+
+    controller._data_lock = threading.Lock()
+    controller.all_data = []
+    asyncio.run(controller._navigate_destination("calendar"))
+    assert tab_switcher.content is calendar_view
+    assert calendar_view.visible is True
+    assert settings_view.visible is False
+    assert len(validated_updates) >= 4
