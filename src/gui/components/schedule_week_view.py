@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
@@ -35,6 +36,8 @@ OpenUrlCallback = Callable[[str, str], None]
 OpenExternalCallback = Callable[[str], None]
 
 _WEEKDAYS_LONG = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"]
+_HTTPS_URL_RE = re.compile(r"https://[^\s<>()\"']+")
+_ONLINE_KEYWORDS = ("zoom", "online", "e-learning", "elearning", "trực tuyến", "meet", "teams")
 _NARROW_BREAKPOINT = 920
 _WIDE_SHELL_BREAKPOINT = 980
 _RAIL_WIDTH = 88
@@ -54,8 +57,33 @@ def _text_action_style(color: str = C.ACCENT) -> ft.ButtonStyle:
         bgcolor=ft.Colors.TRANSPARENT,
         overlay_color=ft.Colors.with_opacity(0.14, color),
         padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-        shape=ft.RoundedRectangleBorder(radius=4),
+        shape=ft.RoundedRectangleBorder(radius=6),
     )
+
+
+def _today_pill_style() -> ft.ButtonStyle:
+    return ft.ButtonStyle(
+        color=C.ACCENT,
+        bgcolor=ft.Colors.with_opacity(0.10, C.ACCENT),
+        overlay_color=ft.Colors.with_opacity(0.18, C.ACCENT),
+        padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+        shape=ft.RoundedRectangleBorder(radius=10),
+        side=ft.BorderSide(1, ft.Colors.with_opacity(0.28, C.ACCENT)),
+        text_style=ft.TextStyle(size=12, weight=ft.FontWeight.W_600),
+    )
+
+
+def _extract_inline_https_urls(*texts: str) -> list[str]:
+    found: list[str] = []
+    for raw in texts:
+        if not raw:
+            continue
+        for match in _HTTPS_URL_RE.findall(raw):
+            candidate = match.rstrip(".,;:!?)]}")
+            validated = validate_https_url(candidate)
+            if validated and validated not in found:
+                found.append(validated)
+    return found
 
 
 def _monday(day: date) -> date:
@@ -94,49 +122,106 @@ class ScheduleWeekView(ft.Container):
         self._generation = 0                       # bumped by reset()
 
         self._week_label = ft.Text(
-            "", size=14, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
+            "",
+            size=13,
+            weight=ft.FontWeight.W_600,
+            color=C.TEXT_PRIMARY,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            text_align=ft.TextAlign.CENTER,
         )
-        self._prev_btn = ft.TextButton(
-            "Tuần trước",
-            width=94,
-            height=48,
-            style=_text_action_style(C.TEXT_SECONDARY),
+        nav_btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
+        self._prev_btn = ft.IconButton(
+            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
+            icon_color=C.TEXT_PRIMARY,
+            icon_size=20,
+            tooltip="Tuần trước",
+            padding=0,
+            size_constraints=nav_btn_constraints,
             on_click=lambda _: self._navigate(-1),
         )
-        self._next_btn = ft.TextButton(
-            "Tuần sau",
-            width=86,
-            height=48,
-            style=_text_action_style(C.TEXT_SECONDARY),
+        self._prev_semantics = ft.Semantics(
+            label="Tuần trước",
+            button=True,
+            content=self._prev_btn,
+        )
+        self._next_btn = ft.IconButton(
+            icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            icon_color=C.TEXT_PRIMARY,
+            icon_size=20,
+            tooltip="Tuần sau",
+            padding=0,
+            size_constraints=nav_btn_constraints,
             on_click=lambda _: self._navigate(1),
+        )
+        self._next_semantics = ft.Semantics(
+            label="Tuần sau",
+            button=True,
+            content=self._next_btn,
+        )
+        self._week_label_box = ft.Container(
+            content=self._week_label,
+            padding=ft.Padding.symmetric(horizontal=6),
+            alignment=ft.Alignment(0, 0),
+        )
+        self._stepper_box = ft.Container(
+            content=ft.Row(
+                [
+                    self._prev_semantics,
+                    self._week_label_box,
+                    self._next_semantics,
+                ],
+                spacing=0,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
         )
         self._today_btn = ft.TextButton(
             "Hôm nay",
-            width=82,
-            height=48,
-            style=_text_action_style(C.ACCENT),
+            width=88,
+            height=44,
+            tooltip="Về hôm nay",
+            style=_today_pill_style(),
             on_click=lambda _: self._go(date.today()),
         )
-        self._refresh_btn = ft.TextButton(
-            "Tải lại lịch học",
-            width=126,
-            height=48,
-            style=_text_action_style(C.TEXT_SECONDARY),
+        self._refresh_btn = ft.IconButton(
+            icon=ft.Icons.REFRESH_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=18,
+            tooltip="Tải lại lịch học",
+            padding=0,
+            size_constraints=nav_btn_constraints,
             on_click=lambda _: self._reload(),
+        )
+        self._refresh_semantics = ft.Semantics(
+            label="Tải lại lịch học",
+            button=True,
+            content=self._refresh_btn,
+        )
+        self._refresh_action_box = ft.Container(
+            content=self._refresh_semantics,
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
         )
         self._nav_row = ft.Row(
             [
-                self._prev_btn,
-                self._week_label,
-                self._next_btn,
-                self._today_btn,
-                self._refresh_btn,
+                ft.Row(
+                    [self._stepper_box, self._today_btn],
+                    spacing=8,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                self._refresh_action_box,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=0,
-            run_spacing=4,
-            wrap=True,
+            spacing=8,
         )
 
         self._status = ft.Row(spacing=8, visible=False)
@@ -146,7 +231,7 @@ class ScheduleWeekView(ft.Container):
             [
                 ft.Container(
                     self._nav_row,
-                    padding=ft.Padding.only(left=4, right=4, top=2),
+                    padding=ft.Padding.only(left=14, right=14, top=4, bottom=4),
                 ),
                 ft.Container(
                     self._status,
@@ -258,10 +343,14 @@ class ScheduleWeekView(ft.Container):
     def update_theme(self) -> None:
         self.bgcolor = C.BG
         self._week_label.color = C.TEXT_PRIMARY
-        self._prev_btn.style = _text_action_style(C.TEXT_SECONDARY)
-        self._next_btn.style = _text_action_style(C.TEXT_SECONDARY)
-        self._today_btn.style = _text_action_style(C.ACCENT)
-        self._refresh_btn.style = _text_action_style(C.TEXT_SECONDARY)
+        self._prev_btn.icon_color = C.TEXT_PRIMARY
+        self._next_btn.icon_color = C.TEXT_PRIMARY
+        self._stepper_box.bgcolor = C.SURFACE
+        self._stepper_box.border = ft.Border.all(1, C.BORDER)
+        self._today_btn.style = _today_pill_style()
+        self._refresh_btn.icon_color = C.TEXT_SECONDARY
+        self._refresh_action_box.bgcolor = C.SURFACE
+        self._refresh_action_box.border = ft.Border.all(1, C.BORDER)
         self._render()
 
     # ------------------------------------------------------------ navigation
@@ -435,12 +524,18 @@ class ScheduleWeekView(ft.Container):
                 f"{_WEEKDAYS_LONG[self._selected.weekday()]}, "
                 f"{self._selected:%d/%m/%Y}"
             )
-            self._prev_btn.content = "Ngày trước"
-            self._next_btn.content = "Ngày sau"
+            self._week_label.size = 13
+            self._prev_btn.tooltip = "Ngày trước"
+            self._prev_semantics.label = "Ngày trước"
+            self._next_btn.tooltip = "Ngày sau"
+            self._next_semantics.label = "Ngày sau"
         else:
             self._week_label.value = f"{monday:%d/%m} – {sunday:%d/%m/%Y}"
-            self._prev_btn.content = "Tuần trước"
-            self._next_btn.content = "Tuần sau"
+            self._week_label.size = 14
+            self._prev_btn.tooltip = "Tuần trước"
+            self._prev_semantics.label = "Tuần trước"
+            self._next_btn.tooltip = "Tuần sau"
+            self._next_semantics.label = "Tuần sau"
         self._render_status(monday)
         if monday in self._weeks:
             if narrow:
@@ -501,196 +596,417 @@ class ScheduleWeekView(ft.Container):
             for session in sessions
         ]
 
-    # ----- session card (full detail)
+    # ----- session card & custom detail modal
     @staticmethod
-    def _phase_label(session: ClassSession, now: datetime) -> ft.Control | None:
-        if session.start_at.date() != now.date() and not session.cancelled:
-            return None
+    def _phase_badge(session: ClassSession, now: datetime) -> ft.Container:
         phase = session.phase_at(now)
         label, color = {
-            SchedulePhase.UPCOMING: ("Sắp tới", C.ACCENT),
+            SchedulePhase.UPCOMING: ("Sắp diễn ra", C.ACCENT),
             SchedulePhase.IN_PROGRESS: ("Đang học", C.SAFE),
-            SchedulePhase.FINISHED: ("Đã xong", C.TEXT_SECONDARY),
+            SchedulePhase.FINISHED: ("Đã kết thúc", C.TEXT_SECONDARY),
             SchedulePhase.CANCELLED: ("Tạm ngưng", C.CRITICAL),
         }[phase]
-        return ft.Text(
-            label,
-            size=10,
-            color=color,
-            weight=ft.FontWeight.W_600,
+        return ft.Container(
+            content=ft.Text(
+                label,
+                size=10,
+                color=color,
+                weight=ft.FontWeight.W_600,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.12, color),
+            border_radius=999,
+            padding=ft.Padding.symmetric(horizontal=9, vertical=3),
         )
 
-    def _meta_row(self, icon, text: str, *, color: str | None = None) -> ft.Row:
+    @staticmethod
+    def _detail_field_row(
+        icon,
+        label: str,
+        primary_value: str,
+        *,
+        secondary_value: str = "",
+        icon_color: str | None = None,
+        value_color: str | None = None,
+        extra_control: ft.Control | None = None,
+    ) -> ft.Row:
+        resolved_icon_color = icon_color or C.ACCENT
+        text_items: list[ft.Control] = [
+            ft.Text(
+                label.upper(),
+                size=10,
+                color=C.TEXT_SECONDARY,
+                weight=ft.FontWeight.W_600,
+            ),
+            ft.Text(
+                primary_value,
+                size=13,
+                color=value_color or C.TEXT_PRIMARY,
+                weight=ft.FontWeight.W_500,
+                selectable=True,
+            ),
+        ]
+        if secondary_value:
+            text_items.append(
+                ft.Text(
+                    secondary_value,
+                    size=11,
+                    color=C.TEXT_SECONDARY,
+                    selectable=True,
+                )
+            )
+        if extra_control is not None:
+            text_items.append(extra_control)
         return ft.Row(
             [
-                ft.Icon(icon, size=15, color=C.ACCENT),
-                ft.Text(
-                    text,
-                    size=12,
-                    color=color or C.TEXT_PRIMARY,
+                ft.Container(
+                    content=ft.Icon(icon, size=17, color=resolved_icon_color),
+                    width=34,
+                    height=34,
+                    border_radius=9,
+                    bgcolor=ft.Colors.with_opacity(0.11, resolved_icon_color),
+                    alignment=ft.Alignment(0, 0),
+                ),
+                ft.Column(
+                    text_items,
+                    spacing=2,
+                    tight=True,
                     expand=True,
-                    selectable=True,
                 ),
             ],
-            spacing=7,
+            spacing=11,
             vertical_alignment=ft.CrossAxisAlignment.START,
         )
 
-    def _link_button(self, label: str, icon, color: str, on_click) -> ft.TextButton:
-        return ft.TextButton(
-            label,
-            icon=icon,
-            icon_color=color,
-            height=44,
-            tooltip=label,
-            style=_text_action_style(color),
-            on_click=on_click,
-        )
+    def _safe_pop_dialog(self) -> None:
+        pop_fn = getattr(self._page_ref, "pop_dialog", None)
+        if callable(pop_fn):
+            try:
+                pop_fn()
+            except Exception:
+                logger.debug("Could not pop active schedule dialog", exc_info=True)
 
-    def _link_with_external_button(
+    def _build_action_link_row(
         self,
+        *,
         label: str,
         icon,
-        color: str,
         url: str,
         title: str,
-        *,
+        filled: bool,
         require_uth_lms: bool = False,
+        on_before_open: Callable[[], None] | None = None,
     ) -> ft.Row:
-        primary = self._link_button(
-            label,
-            icon,
-            color,
-            lambda _, u=url, t=title, req=require_uth_lms: self._open_url(
-                u, t, require_uth_lms=req
-            ),
-        )
-        external_btn = ft.Semantics(
-            label=f"Mở {label} bằng trình duyệt ngoài",
-            button=True,
-            content=ft.IconButton(
-                icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                icon_color=color,
-                icon_size=18,
-                tooltip=f"Mở {label} bằng trình duyệt ngoài",
-                padding=0,
-                size_constraints=ft.BoxConstraints(
-                    min_width=44, max_width=44, min_height=44, max_height=44
-                ),
-                on_click=lambda _, u=url, req=require_uth_lms: self._open_external(
-                    u, require_uth_lms=req
-                ),
-            ),
-        )
-        return ft.Row(
-            [primary, external_btn],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=4,
+        def _handle_in_app(_e=None) -> None:
+            if callable(on_before_open):
+                on_before_open()
+            self._open_url(url, title, require_uth_lms=require_uth_lms)
+
+        def _handle_external(_e=None) -> None:
+            self._open_external(url, require_uth_lms=require_uth_lms)
+
+        fg_color = C.ON_ACCENT if filled else C.ACCENT
+        bg_color = C.ACCENT if filled else ft.Colors.with_opacity(0.11, C.ACCENT)
+        border = (
+            None
+            if filled
+            else ft.Border.all(1, ft.Colors.with_opacity(0.28, C.ACCENT))
         )
 
-    def _session_card(self, session: ClassSession, now: datetime) -> ft.Control:
-        accent = C.CRITICAL if session.cancelled else C.ACCENT
-        phase_label = self._phase_label(session, now)
-        tiet = (
-            f"Tiết: {session.period_start} - {session.period_end}"
-            if session.period_start is not None and session.period_end is not None
-            else "Tiết: chưa cập nhật"
-        )
-        rows: list[ft.Control] = [
-            ft.Row(
-                [
-                    ft.Text(
-                        session.subject,
-                        size=14,
-                        weight=ft.FontWeight.W_700,
-                        color=C.ACCENT,
-                        expand=True,
-                    ),
-                    *([phase_label] if phase_label else []),
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.START,
+        primary_btn = ft.Container(
+            content=ft.Semantics(
+                label=label,
+                button=True,
+                content=ft.Row(
+                    [
+                        ft.Icon(icon, size=17, color=fg_color),
+                        ft.Text(
+                            label,
+                            size=13,
+                            weight=ft.FontWeight.W_600,
+                            color=fg_color,
+                        ),
+                    ],
+                    spacing=8,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ),
+            height=44,
+            expand=True,
+            bgcolor=bg_color,
+            border=border,
+            border_radius=10,
+            alignment=ft.Alignment(0, 0),
+            ink=True,
+            tooltip=f"{label} (mở trong ứng dụng)",
+            on_click=_handle_in_app,
+        )
+        external_box = ft.Container(
+            content=ft.Semantics(
+                label=f"Mở {label} bằng trình duyệt ngoài",
+                button=True,
+                content=ft.IconButton(
+                    icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                    icon_color=C.TEXT_SECONDARY,
+                    icon_size=17,
+                    tooltip=f"Mở {label} bằng trình duyệt ngoài",
+                    padding=0,
+                    size_constraints=ft.BoxConstraints(
+                        min_width=44, max_width=44, min_height=44, max_height=44
+                    ),
+                    on_click=_handle_external,
+                ),
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+        )
+        return ft.Row(
+            [primary_btn, external_box],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _session_card(
+        self,
+        session: ClassSession,
+        now: datetime,
+        *,
+        on_before_open_url: Callable[[], None] | None = None,
+        on_open_outline: Callable[[], None] | None = None,
+    ) -> ft.Control:
+        code_chips: list[ft.Control] = []
+        if session.course_code:
+            code_chips.append(
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.BADGE_OUTLINED, size=13, color=C.ACCENT),
+                            ft.Text(
+                                f"Mã lớp: {session.course_code}",
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                                selectable=True,
+                            ),
+                        ],
+                        spacing=5,
+                        tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor=C.SURFACE,
+                    border=ft.Border.all(1, C.BORDER),
+                    border_radius=7,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                )
+            )
+        if session.subject_code:
+            code_chips.append(
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.TAG_ROUNDED, size=13, color=C.TEXT_SECONDARY),
+                            ft.Text(
+                                f"Mã HP: {session.subject_code}",
+                                size=11,
+                                weight=ft.FontWeight.W_500,
+                                color=C.TEXT_SECONDARY,
+                                selectable=True,
+                            ),
+                        ],
+                        spacing=4,
+                        tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor=C.SURFACE,
+                    border=ft.Border.all(1, C.BORDER),
+                    border_radius=7,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                )
+            )
+
+        hero_items: list[ft.Control] = [
             ft.Text(
-                session.course_code or "—",
-                size=13,
+                session.subject,
+                size=16,
                 weight=ft.FontWeight.W_700,
                 color=C.TEXT_PRIMARY,
                 selectable=True,
             ),
-            self._meta_row(ft.Icons.TAG_ROUNDED, f"Mã môn học: {session.subject_code or 'Chưa cập nhật'}"),
-            self._meta_row(ft.Icons.MENU_BOOK_ROUNDED, tiet),
-            self._meta_row(
+        ]
+        if code_chips:
+            hero_items.append(
+                ft.Row(code_chips, spacing=6, run_spacing=6, wrap=True)
+            )
+
+        period_part = (
+            f"  ·  Tiết {session.period_start}–{session.period_end}"
+            if session.period_start is not None and session.period_end is not None
+            else ""
+        )
+        time_primary = f"{session.start_at:%H:%M} – {session.end_at:%H:%M}{period_part}"
+        time_secondary = (
+            f"{_WEEKDAYS_LONG[session.start_at.weekday()]}, "
+            f"{session.start_at:%d/%m/%Y}"
+        )
+
+        room_haystack = f"{session.room} {session.campus}".casefold()
+        is_online_room = any(kw in room_haystack for kw in _ONLINE_KEYWORDS)
+        room_icon = (
+            ft.Icons.VIDEOCAM_OUTLINED
+            if is_online_room
+            else ft.Icons.MEETING_ROOM_OUTLINED
+        )
+        room_primary = session.room or "Chưa cập nhật phòng"
+        room_secondary = f"Cơ sở: {session.campus}" if session.campus else ""
+
+        lecturer_present = bool((session.lecturer or "").strip())
+        lecturer_value = session.lecturer if lecturer_present else "Chưa cập nhật"
+
+        info_rows: list[ft.Control] = [
+            self._detail_field_row(
                 ft.Icons.ACCESS_TIME_ROUNDED,
-                f"Thời gian: {session.start_at:%H:%M} - {session.end_at:%H:%M}",
+                "Thời gian",
+                time_primary,
+                secondary_value=time_secondary,
             ),
-            self._meta_row(
-                ft.Icons.MEETING_ROOM_OUTLINED,
-                f"Phòng: {session.room or 'Chưa cập nhật'}",
+            ft.Divider(height=1, thickness=1, color=C.BORDER),
+            self._detail_field_row(
+                room_icon,
+                "Phòng học & Cơ sở",
+                room_primary,
+                secondary_value=room_secondary,
+            ),
+            ft.Divider(height=1, thickness=1, color=C.BORDER),
+            self._detail_field_row(
+                ft.Icons.PERSON_OUTLINE_ROUNDED,
+                "Giảng viên",
+                lecturer_value,
+                value_color=C.TEXT_PRIMARY if lecturer_present else C.TEXT_SECONDARY,
             ),
         ]
-        if session.campus:
-            rows.append(self._meta_row(ft.Icons.LOCATION_ON_OUTLINED, f"Cơ sở: {session.campus}"))
-        rows.append(
-            self._meta_row(
-                ft.Icons.PERSON_OUTLINE_ROUNDED,
-                f"Giảng viên: {session.lecturer or 'Chưa cập nhật'}",
-            )
-        )
         if session.note:
-            rows.append(
-                self._meta_row(
-                    ft.Icons.INFO_OUTLINE_ROUNDED,
-                    f"Ghi chú: {session.note}",
-                    color=C.CRITICAL,
-                )
+            note_color = C.CRITICAL if session.cancelled else C.WARNING
+            info_rows.extend(
+                [
+                    ft.Divider(height=1, thickness=1, color=C.BORDER),
+                    self._detail_field_row(
+                        ft.Icons.INFO_OUTLINE_ROUNDED,
+                        "Ghi chú",
+                        session.note,
+                        icon_color=note_color,
+                        value_color=C.CRITICAL if session.cancelled else C.TEXT_PRIMARY,
+                    ),
+                ]
             )
-        if session.meeting_url:
-            rows.append(
-                self._link_with_external_button(
-                    "Truy cập Zoom",
-                    ft.Icons.VIDEOCAM_OUTLINED,
-                    C.ACCENT,
-                    session.meeting_url,
-                    f"Zoom · {session.subject}",
-                    require_uth_lms=False,
-                )
-            )
-        if session.has_outline:
-            outline_btn = self._link_button(
-                "Đề cương chi tiết học phần",
-                ft.Icons.AUTO_STORIES_ROUNDED,
-                C.WARNING,
-                None,
-            )
-            outline_btn.on_click = lambda _, item=session, btn=outline_btn: self._show_outline(
-                item, return_focus=btn
-            )
-            rows.append(outline_btn)
-        if session.link:
-            rows.append(
-                self._link_with_external_button(
-                    "LMS",
-                    ft.Icons.SCHOOL_ROUNDED,
-                    C.CRITICAL,
-                    session.link,
-                    f"LMS · {session.subject}",
-                    require_uth_lms=True,
-                )
-            )
-        return ft.Container(
-            content=ft.Column(rows, spacing=6),
-            padding=ft.Padding.all(14),
-            bgcolor=ft.Colors.with_opacity(0.08, accent),
+
+        info_card = ft.Container(
+            content=ft.Column(info_rows, spacing=11, tight=True),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
             border_radius=12,
-            border=ft.Border(
-                left=ft.BorderSide(4, accent),
-                top=ft.BorderSide(1, C.BORDER),
-                right=ft.BorderSide(1, C.BORDER),
-                bottom=ft.BorderSide(1, C.BORDER),
-            ),
+            padding=ft.Padding.all(14),
         )
+
+        actions_col: list[ft.Control] = []
+        if session.has_outline:
+            def _trigger_outline(_e=None) -> None:
+                if callable(on_open_outline):
+                    on_open_outline()
+                else:
+                    self._show_outline(session)
+
+            outline_card = ft.Container(
+                content=ft.Semantics(
+                    label="Đề cương chi tiết học phần",
+                    button=True,
+                    content=ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.AUTO_STORIES_ROUNDED,
+                                size=17,
+                                color=C.ACCENT,
+                            ),
+                            ft.Text(
+                                "Đề cương chi tiết học phần",
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                                expand=True,
+                            ),
+                            ft.Icon(
+                                ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                                size=18,
+                                color=C.TEXT_SECONDARY,
+                            ),
+                        ],
+                        spacing=9,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ),
+                height=44,
+                padding=ft.Padding.symmetric(horizontal=12),
+                bgcolor=C.SURFACE,
+                border=ft.Border.all(1, C.BORDER),
+                border_radius=10,
+                ink=True,
+                on_click=_trigger_outline,
+            )
+            actions_col.append(outline_card)
+
+        known_urls = {
+            u for u in (session.link, session.meeting_url) if u
+        }
+        for inline_url in _extract_inline_https_urls(session.room, session.note):
+            if inline_url in known_urls:
+                continue
+            known_urls.add(inline_url)
+            actions_col.append(
+                self._build_action_link_row(
+                    label="Mở liên kết buổi học",
+                    icon=ft.Icons.LINK_ROUNDED,
+                    url=inline_url,
+                    title=session.subject,
+                    filled=not bool(session.link or session.meeting_url),
+                    require_uth_lms=False,
+                    on_before_open=on_before_open_url,
+                )
+            )
+
+        if session.meeting_url:
+            actions_col.append(
+                self._build_action_link_row(
+                    label="Truy cập Zoom",
+                    icon=ft.Icons.VIDEOCAM_OUTLINED,
+                    url=session.meeting_url,
+                    title=f"Zoom · {session.subject}",
+                    filled=not bool(session.link),
+                    require_uth_lms=False,
+                    on_before_open=on_before_open_url,
+                )
+            )
+
+        if session.link:
+            actions_col.append(
+                self._build_action_link_row(
+                    label="Mở khóa học LMS",
+                    icon=ft.Icons.SCHOOL_ROUNDED,
+                    url=session.link,
+                    title=f"LMS · {session.subject}",
+                    filled=True,
+                    require_uth_lms=True,
+                    on_before_open=on_before_open_url,
+                )
+            )
+
+        sections: list[ft.Control] = [
+            ft.Column(hero_items, spacing=6, tight=True),
+            info_card,
+        ]
+        if actions_col:
+            sections.append(ft.Column(actions_col, spacing=8, tight=True))
+
+        return ft.Column(sections, spacing=12, tight=True)
 
     def _session_summary_card(
         self, session: ClassSession, *, narrow: bool
@@ -790,52 +1106,97 @@ class ScheduleWeekView(ft.Container):
     def _show_session_details(
         self, session: ClassSession, *, return_focus: ft.Control | None = None
     ) -> None:
-        width = max(280.0, min(520.0, self._layout_width - 48))
-        try:
-            page_h = float(getattr(self._page_ref, "height", 0) or 0)
-        except (TypeError, ValueError):
-            page_h = 0.0
-        height = min(460.0, max(240.0, page_h * 0.65)) if page_h > 0 else 460.0
+        width = max(280.0, min(460.0, self._layout_width - 48))
+        now = datetime.now()
+        skip_focus_restore = {"skip": False}
+
+        def _dismiss_for_transition() -> None:
+            skip_focus_restore["skip"] = True
+            self._safe_pop_dialog()
+
+        def _open_outline_from_detail() -> None:
+            _dismiss_for_transition()
+            self._show_outline(
+                session,
+                return_focus=return_focus,
+                on_back=lambda: self._show_session_details(
+                    session, return_focus=return_focus
+                ),
+            )
 
         def _on_key_down(event) -> None:
-            if event.key == "Escape":
-                self._page_ref.pop_dialog()
+            if getattr(event, "key", "") == "Escape":
+                self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if return_focus is not None:
+            if not skip_focus_restore["skip"] and return_focus is not None:
                 await return_focus.focus()
+
+        close_btn = ft.Semantics(
+            label="Đóng",
+            button=True,
+            content=ft.IconButton(
+                icon=ft.Icons.CLOSE_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                icon_size=20,
+                tooltip="Đóng",
+                padding=0,
+                size_constraints=ft.BoxConstraints(
+                    min_width=44, max_width=44, min_height=44, max_height=44
+                ),
+                on_click=lambda _e: self._safe_pop_dialog(),
+            ),
+        )
+        header_row = ft.Row(
+            [
+                ft.Row(
+                    [
+                        ft.Text(
+                            "CHI TIẾT BUỔI HỌC",
+                            size=11,
+                            weight=ft.FontWeight.W_700,
+                            color=C.TEXT_SECONDARY,
+                        ),
+                        self._phase_badge(session, now),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    expand=True,
+                ),
+                close_btn,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        body = self._session_card(
+            session,
+            now,
+            on_before_open_url=_dismiss_for_transition,
+            on_open_outline=_open_outline_from_detail,
+        )
 
         dialog = ft.AlertDialog(
             modal=True,
+            scrollable=True,
             semantics_label="Chi tiết buổi học",
-            title=ft.Text(
-                "Chi tiết buổi học",
-                size=16,
-                weight=ft.FontWeight.W_600,
-                color=C.TEXT_PRIMARY,
-                semantics_label="Chi tiết buổi học",
-            ),
+            content_padding=0,
+            inset_padding=ft.Padding.symmetric(horizontal=16, vertical=24),
             content=ft.KeyboardListener(
-                content=ft.Column(
-                    [self._session_card(session, datetime.now())],
-                    width=width,
-                    height=height,
-                    spacing=0,
-                    scroll=ft.ScrollMode.AUTO,
-                ),
                 autofocus=True,
                 on_key_down=_on_key_down,
+                content=ft.Container(
+                    width=width,
+                    padding=ft.Padding.only(left=16, right=16, top=10, bottom=16),
+                    content=ft.Column(
+                        [header_row, body],
+                        spacing=8,
+                        tight=True,
+                    ),
+                ),
             ),
-            actions=[
-                ft.TextButton(
-                    "Đóng",
-                    height=44,
-                    style=_text_action_style(),
-                    on_click=lambda _event: self._page_ref.pop_dialog(),
-                )
-            ],
-            bgcolor=C.SURFACE,
-            shape=ft.RoundedRectangleBorder(radius=14),
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
             on_dismiss=_restore_focus,
         )
         try:
@@ -844,7 +1205,11 @@ class ScheduleWeekView(ft.Container):
             logger.debug("Could not show class details", exc_info=True)
 
     def _show_outline(
-        self, session: ClassSession, *, return_focus: ft.Control | None = None
+        self,
+        session: ClassSession,
+        *,
+        return_focus: ft.Control | None = None,
+        on_back: Callable[[], None] | None = None,
     ) -> None:
         body = session.outline or "Môn học này chưa có mô tả đề cương."
         width = max(280.0, min(520.0, self._layout_width - 48))
@@ -853,24 +1218,92 @@ class ScheduleWeekView(ft.Container):
         except (TypeError, ValueError):
             page_h = 0.0
         max_h = min(420.0, max(220.0, page_h * 0.55)) if page_h > 0 else 420.0
+        skip_focus_restore = {"skip": False}
 
         def _on_key_down(event) -> None:
             if getattr(event, "key", "") == "Escape":
-                self._page_ref.pop_dialog()
+                self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if return_focus is not None:
+            if not skip_focus_restore["skip"] and return_focus is not None:
                 await return_focus.focus()
+
+        def _handle_back_to_detail(_e=None) -> None:
+            if callable(on_back):
+                skip_focus_restore["skip"] = True
+                self._safe_pop_dialog()
+                on_back()
+
+        def _handle_outline_link(event) -> None:
+            target = str(getattr(event, "data", "") or "").strip()
+            if not target:
+                return
+            validated = validate_https_url(target)
+            if validated is None:
+                return
+            skip_focus_restore["skip"] = True
+            self._safe_pop_dialog()
+            self._open_url(
+                validated,
+                f"Đề cương · {session.subject}",
+                require_uth_lms=False,
+            )
+
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
+        leading_controls: list[ft.Control] = []
+        if callable(on_back):
+            leading_controls.append(
+                ft.Semantics(
+                    label="Quay lại chi tiết buổi học",
+                    button=True,
+                    content=ft.IconButton(
+                        icon=ft.Icons.ARROW_BACK_ROUNDED,
+                        icon_color=C.TEXT_SECONDARY,
+                        icon_size=19,
+                        tooltip="Quay lại",
+                        padding=0,
+                        size_constraints=btn_constraints,
+                        on_click=_handle_back_to_detail,
+                    ),
+                )
+            )
+        leading_controls.append(
+            ft.Text(
+                "Đề cương chi tiết học phần",
+                size=15,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+                expand=True,
+                semantics_label="Đề cương chi tiết học phần",
+            )
+        )
+        leading_controls.append(
+            ft.Semantics(
+                label="Đóng",
+                button=True,
+                content=ft.IconButton(
+                    icon=ft.Icons.CLOSE_ROUNDED,
+                    icon_color=C.TEXT_SECONDARY,
+                    icon_size=20,
+                    tooltip="Đóng",
+                    padding=0,
+                    size_constraints=btn_constraints,
+                    on_click=lambda _e: self._safe_pop_dialog(),
+                ),
+            )
+        )
 
         dialog = ft.AlertDialog(
             modal=True,
             semantics_label="Đề cương chi tiết học phần",
-            title=ft.Text(
-                "Đề cương chi tiết học phần",
-                size=16,
-                weight=ft.FontWeight.W_700,
-                color=C.TEXT_PRIMARY,
-                semantics_label="Đề cương chi tiết học phần",
+            title_padding=ft.Padding.only(left=12 if callable(on_back) else 16, right=8, top=10, bottom=4),
+            content_padding=ft.Padding.only(left=16, right=16, top=4, bottom=16),
+            title=ft.Row(
+                leading_controls,
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             content=ft.KeyboardListener(
                 autofocus=True,
@@ -878,13 +1311,17 @@ class ScheduleWeekView(ft.Container):
                 content=ft.Container(
                     width=width,
                     height=max_h,
+                    padding=ft.Padding.all(14),
+                    bgcolor=C.SURFACE,
+                    border=ft.Border.all(1, C.BORDER),
+                    border_radius=12,
                     content=ft.Column(
                         [
                             ft.Text(
                                 session.subject,
-                                size=13,
-                                weight=ft.FontWeight.W_600,
-                                color=C.ACCENT,
+                                size=14,
+                                weight=ft.FontWeight.W_700,
+                                color=C.TEXT_PRIMARY,
                             ),
                             ft.Text(
                                 f"Mã môn học: {session.subject_code or '—'}  ·  Mã lớp: {session.course_code or '—'}",
@@ -892,7 +1329,12 @@ class ScheduleWeekView(ft.Container):
                                 color=C.TEXT_SECONDARY,
                             ),
                             ft.Divider(height=8, color=C.BORDER),
-                            ft.Text(body, size=12, color=C.TEXT_PRIMARY, selectable=True),
+                            ft.Markdown(
+                                value=body,
+                                selectable=True,
+                                extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                                on_tap_link=_handle_outline_link,
+                            ),
                         ],
                         tight=True,
                         scroll=ft.ScrollMode.AUTO,
@@ -900,23 +1342,14 @@ class ScheduleWeekView(ft.Container):
                     ),
                 ),
             ),
-            actions=[
-                ft.TextButton(
-                    "Đóng",
-                    height=44,
-                    style=_text_action_style(),
-                    on_click=lambda _: self._page_ref.pop_dialog(),
-                )
-            ],
-            bgcolor=C.SURFACE,
-            shape=ft.RoundedRectangleBorder(radius=14),
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
             on_dismiss=_restore_focus,
         )
         try:
             self._page_ref.show_dialog(dialog)
         except Exception:
             logger.debug("Could not show outline dialog", exc_info=True)
-
 
     # ----- desktop week view
     def _render_week_body(self, monday: date) -> None:
@@ -952,14 +1385,23 @@ class ScheduleWeekView(ft.Container):
                         ft.Text(
                             _WEEKDAYS_LONG[day.weekday()],
                             size=11,
-                            weight=ft.FontWeight.W_600,
-                            color=C.TEXT_PRIMARY,
+                            weight=(
+                                ft.FontWeight.W_700
+                                if is_today
+                                else ft.FontWeight.W_600
+                            ),
+                            color=C.ON_ACCENT if is_today else C.TEXT_PRIMARY,
                             text_align=ft.TextAlign.CENTER,
                         ),
                         ft.Text(
                             f"{day:%d/%m}",
                             size=11,
-                            color=C.TEXT_SECONDARY,
+                            weight=(
+                                ft.FontWeight.W_700
+                                if is_today
+                                else ft.FontWeight.W_400
+                            ),
+                            color=C.ON_ACCENT if is_today else C.TEXT_SECONDARY,
                             text_align=ft.TextAlign.CENTER,
                         ),
                     ],
@@ -968,12 +1410,9 @@ class ScheduleWeekView(ft.Container):
                 ),
                 height=54,
                 alignment=ft.Alignment(0, 0),
-                bgcolor=(
-                    ft.Colors.with_opacity(0.14, C.ACCENT)
-                    if is_today
-                    else C.SURFACE_ELEVATED
-                ),
-                border=ft.Border.all(1, C.BORDER),
+                border_radius=6,
+                bgcolor=C.ACCENT if is_today else C.SURFACE_ELEVATED,
+                border=ft.Border.all(1, C.ACCENT if is_today else C.BORDER),
             )
             sessions = [
                 self._session_summary_card(session, narrow=False)
@@ -988,10 +1427,21 @@ class ScheduleWeekView(ft.Container):
                     ),
                     width=column_width,
                     padding=4,
-                    bgcolor=C.SURFACE,
-                    border=ft.Border.all(1, C.BORDER),
+                    bgcolor=(
+                        ft.Colors.with_opacity(0.08, C.ACCENT)
+                        if is_today
+                        else C.SURFACE
+                    ),
+                    border=(
+                        ft.Border.all(1.5, C.ACCENT)
+                        if is_today
+                        else ft.Border.all(1, C.BORDER)
+                    ),
                     border_radius=8,
-                    data={"schedule_day": day.isoformat()},
+                    data={
+                        "schedule_day": day.isoformat(),
+                        "is_today": is_today,
+                    },
                 )
             )
 
