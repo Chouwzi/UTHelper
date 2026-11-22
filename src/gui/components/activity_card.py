@@ -43,6 +43,24 @@ class ActivityCard(ft.Container):
             padding=ft.Padding.symmetric(horizontal=8, vertical=3),
             border_radius=6,
         )
+        self._selected_icon = ft.Icon(
+            ft.Icons.ARROW_FORWARD_IOS_ROUNDED, size=10, color=C.ACCENT
+        )
+        self._selected_text = ft.Text(
+            "Đang xem", size=10, weight=ft.FontWeight.W_700, color=C.ACCENT
+        )
+        self._selected_badge = ft.Container(
+            content=ft.Row(
+                controls=[self._selected_text, self._selected_icon],
+                spacing=3,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+            bgcolor=ft.Colors.with_opacity(0.14, C.ACCENT),
+            border_radius=6,
+            visible=False,
+        )
 
         self._course_text = ft.Text(
             size=11,
@@ -80,7 +98,11 @@ class ActivityCard(ft.Container):
                                 spacing=6,
                                 tight=True,
                             ),
-                            self._urgency_container,
+                            ft.Row(
+                                controls=[self._urgency_container, self._selected_badge],
+                                spacing=6,
+                                tight=True,
+                            ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -123,6 +145,13 @@ class ActivityCard(ft.Container):
         self._animate_reveal = animate
         self.animate = ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT) if animate else None
         self.on_click = lambda _: self.on_tap_cb(self.data)
+        self.on_hover = self._handle_hover
+        self._hovered = False
+        self._selected = False
+        self._is_submitted = False
+        self._base_bar_color = C.BORDER
+        self._base_border_color = C.BORDER
+        self._base_shadow = None
 
         if animate:
             self.opacity = 0
@@ -181,6 +210,7 @@ class ActivityCard(ft.Container):
                 if on_tap:
                     self.on_tap_cb = on_tap
                 self.update_countdown()
+                self._apply_interaction_chrome()
                 return
         self.data = data
         if on_tap:
@@ -201,10 +231,12 @@ class ActivityCard(ft.Container):
         bar_color = cd_color
         submission = get_submission_badge(data)
 
-        _details = data.get("details", {})
-        _full_name = _details.get("course_full_name", "")
-        _ws_course = data.get("course_name", "")
-        course_clean = clean_course_name(_ws_course or _full_name or data.get("course", ""))
+        _details = data.get("details")
+        if not isinstance(_details, dict):
+            _details = {}
+        _full_name = str(_details.get("course_full_name") or "")
+        _ws_course = str(data.get("course_name") or "")
+        course_clean = clean_course_name(_ws_course or _full_name or str(data.get("course") or ""))
 
         _sub_status = normalize_submission_status(
             data.get("submission_status", "unknown")
@@ -301,8 +333,11 @@ class ActivityCard(ft.Container):
         elif (
             not _is_submitted
             and (late_status == "closed" or overdue)
-            and cutoff_ts
-            and cutoff_ts > 0
+            and bool(cutoff_ts)
+            and (
+                (isinstance(cutoff_ts, (int, float)) and cutoff_ts > 0)
+                or (isinstance(cutoff_ts, str) and cutoff_ts.strip() not in ("", "0"))
+            )
         ):
             self._optional_rows.controls.append(
                 ft.Container(
@@ -319,7 +354,7 @@ class ActivityCard(ft.Container):
             )
         self._optional_rows.visible = bool(self._optional_rows.controls)
 
-        self._bar_widget.bgcolor = (
+        self._base_bar_color = (
             ft.Colors.with_opacity(0.4, C.SAFE) if _is_submitted else bar_color
         )
 
@@ -328,8 +363,8 @@ class ActivityCard(ft.Container):
         is_warning_active = (urg_key == "warning") and not overdue and not _is_submitted
 
         if is_critical_active:
-            self.border = ft.Border.all(1, C.CRITICAL)
-            self.shadow = [
+            self._base_border_color = C.CRITICAL
+            self._base_shadow = [
                 ft.BoxShadow(
                     spread_radius=0.8,
                     blur_radius=12,
@@ -340,13 +375,12 @@ class ActivityCard(ft.Container):
             self._is_critical_active = True
             self.animate = ft.Animation(1000, ft.AnimationCurve.EASE_IN_OUT)
         else:
-            border_color = (
+            self._base_border_color = (
                 ft.Colors.with_opacity(0.45, C.WARNING)
                 if is_warning_active
                 else C.BORDER
             )
-            self.border = ft.Border.all(1, border_color)
-            self.shadow = None
+            self._base_shadow = None
             self._is_critical_active = False
             self.animate = (
                 ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT)
@@ -354,7 +388,80 @@ class ActivityCard(ft.Container):
                 else None
             )
 
+        self._apply_interaction_chrome()
         self._initialized = True
+
+    def _apply_interaction_chrome(self) -> None:
+        self._selected_icon.color = C.ACCENT
+        self._selected_text.color = C.ACCENT
+        self._selected_badge.bgcolor = ft.Colors.with_opacity(0.14, C.ACCENT)
+        if self._selected:
+            self.bgcolor = C.SURFACE_HOVER
+            self.border = ft.Border.all(1.5, C.ACCENT)
+            self._bar_widget.width = 4
+            self._bar_widget.bgcolor = C.ACCENT
+            self.shadow = [
+                ft.BoxShadow(
+                    spread_radius=0,
+                    blur_radius=12,
+                    color=ft.Colors.with_opacity(0.16, C.ACCENT),
+                    offset=ft.Offset(0, 2),
+                )
+            ]
+            self._selected_badge.visible = True
+            self._urgency_container.visible = False
+            return
+
+        self._selected_badge.visible = False
+        self._urgency_container.visible = not self._is_submitted
+        if self._hovered:
+            self.bgcolor = C.SURFACE_HOVER
+            hover_border = (
+                C.CRITICAL
+                if self._is_critical_active
+                else ft.Colors.with_opacity(0.5, C.ACCENT)
+            )
+            self.border = ft.Border.all(1, hover_border)
+            self._bar_widget.width = 3.5
+            self._bar_widget.bgcolor = self._base_bar_color
+            hover_shadow_color = C.CRITICAL if self._is_critical_active else C.ACCENT
+            hover_shadow_alpha = 0.20 if self._is_critical_active else 0.08
+            self.shadow = [
+                ft.BoxShadow(
+                    spread_radius=0,
+                    blur_radius=10,
+                    color=ft.Colors.with_opacity(hover_shadow_alpha, hover_shadow_color),
+                    offset=ft.Offset(0, 2),
+                )
+            ]
+            return
+
+        self.bgcolor = C.SURFACE
+        self.border = ft.Border.all(1, self._base_border_color)
+        self._bar_widget.width = 3
+        self._bar_widget.bgcolor = self._base_bar_color
+        self.shadow = self._base_shadow
+
+    def _handle_hover(self, event) -> None:
+        raw = getattr(event, "data", False)
+        hovered = raw is True or str(raw).lower() == "true"
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        self._apply_interaction_chrome()
+        try:
+            if self.page is not None:
+                self.update()
+        except Exception:
+            pass
+
+    def set_selected(self, selected: bool) -> bool:
+        target = bool(selected)
+        if target == self._selected:
+            return False
+        self._selected = target
+        self._apply_interaction_chrome()
+        return True
 
     def update_countdown(self):
         deadline_str = self.data.get("deadline", "")

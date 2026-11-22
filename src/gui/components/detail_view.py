@@ -918,6 +918,38 @@ class DetailView(ft.Container):
         )
 
     # Hàm công khai
+    @staticmethod
+    def _coerce_open_time_str(raw_open_time) -> str:
+        if raw_open_time is None:
+            return ""
+        if hasattr(raw_open_time, "isoformat"):
+            try:
+                return raw_open_time.isoformat(sep=" ")
+            except TypeError:
+                return raw_open_time.isoformat()
+        return str(raw_open_time).strip()
+
+    @staticmethod
+    def _parse_cutoff_datetime(cutoff_raw):
+        if not cutoff_raw:
+            return None
+        from datetime import datetime as _dt
+        from core.time_utils import parse_datetime
+
+        try:
+            if isinstance(cutoff_raw, (int, float)):
+                return _dt.fromtimestamp(cutoff_raw) if cutoff_raw > 0 else None
+            text = str(cutoff_raw).strip()
+            if not text:
+                return None
+            try:
+                numeric = float(text)
+                return _dt.fromtimestamp(numeric) if numeric > 0 else None
+            except ValueError:
+                return parse_datetime(text)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
+
     def show_loading(self, data: dict):
         # Navigation has already changed targets, so invalidate background
         # submission work and hide controls belonging to the previous item.
@@ -947,15 +979,16 @@ class DetailView(ft.Container):
         self._loading_bar.visible = True
 
         badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
-        self._badge_ctrl.content      = ft.Text(badge_text, size=10, color=badge_color,
-                                                 weight=ft.FontWeight.BOLD)
-        self._badge_ctrl.bgcolor      = None
-        self._badge_ctrl.border       = ft.Border.all(1, badge_color)
-        self._badge_ctrl.padding      = ft.Padding.symmetric(horizontal=8, vertical=3)
-        self._badge_ctrl.border_radius = 5
-        self._badge_ctrl.visible      = True
+        self._badge_ctrl.content = ft.Text(
+            badge_text, size=10, color=badge_color, weight=ft.FontWeight.W_600
+        )
+        self._badge_ctrl.bgcolor = ft.Colors.with_opacity(0.11, badge_color)
+        self._badge_ctrl.border = None
+        self._badge_ctrl.padding = ft.Padding.symmetric(horizontal=8, vertical=3)
+        self._badge_ctrl.border_radius = 6
+        self._badge_ctrl.visible = True
 
-        deadline_str = data.get("deadline", "")
+        deadline_str = str(data.get("deadline") or "")
         cd_text, overdue, cd_color, _ = get_card_countdown(data)
         if deadline_str:
             self._countdown_txt.value = cd_text or "Không xác định"
@@ -966,8 +999,10 @@ class DetailView(ft.Container):
             self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
             self._deadline_txt.value = "Không giới hạn"
 
-        details = data.get("details", {})
-        open_time_str = details.get("open_time", "")
+        details = data.get("details")
+        if not isinstance(details, Mapping):
+            details = {}
+        open_time_str = DetailView._coerce_open_time_str(details.get("open_time"))
         if open_time_str:
             self._opentime_txt.value = format_deadline(open_time_str)
             self._opentime_row.visible = True
@@ -975,24 +1010,17 @@ class DetailView(ft.Container):
             self._opentime_row.visible = False
 
         # Cutoff date display
-        cutoff_ts = data.get('cutoff_date', 0)
-        duedate_str = data.get('deadline', '')
-        if cutoff_ts and cutoff_ts > 0:
-            from datetime import datetime as _dt
-            try:
-                cutoff_dt = _dt.fromtimestamp(cutoff_ts)
-                self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
-                # Only show if cutoff differs from deadline
-                deadline_dt = None
-                if duedate_str:
-                    from core.time_utils import parse_datetime
-                    deadline_dt = parse_datetime(duedate_str)
-                if deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60:
-                    self._cutoff_row.visible = True
-                else:
-                    self._cutoff_row.visible = False
-            except (OSError, ValueError):
-                self._cutoff_row.visible = False
+        cutoff_dt = DetailView._parse_cutoff_datetime(data.get("cutoff_date"))
+        if cutoff_dt is not None:
+            self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
+            deadline_dt = None
+            if deadline_str:
+                from core.time_utils import parse_datetime
+
+                deadline_dt = parse_datetime(deadline_str)
+            self._cutoff_row.visible = bool(
+                deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60
+            )
         else:
             self._cutoff_row.visible = False
 
@@ -1038,12 +1066,15 @@ class DetailView(ft.Container):
 
         badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
         self._badge_ctrl.content = ft.Text(
-            badge_text, size=10, color=badge_color, weight=ft.FontWeight.BOLD
+            badge_text, size=10, color=badge_color, weight=ft.FontWeight.W_600
         )
-        self._badge_ctrl.border = ft.Border.all(1, badge_color)
+        self._badge_ctrl.bgcolor = ft.Colors.with_opacity(0.11, badge_color)
+        self._badge_ctrl.border = None
+        self._badge_ctrl.padding = ft.Padding.symmetric(horizontal=8, vertical=3)
+        self._badge_ctrl.border_radius = 6
         self._badge_ctrl.visible = True
 
-        deadline_str = data.get("deadline", "")
+        deadline_str = str(data.get("deadline") or "")
         cd_text, _, cd_color, _ = get_card_countdown(data)
         if deadline_str:
             self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
@@ -1181,7 +1212,7 @@ class DetailView(ft.Container):
                     and self._client_matches_native_submission_site(client, url)
                     and (not client_is_bound or self._has_submission_workflow(client))
                 ):
-                    prefetched = data.get("details", {}).get("raw_submission_status")
+                    prefetched = quiz_details.get("raw_submission_status")
                     load_generation, view_generation = (
                         self._reserve_submission_snapshot_load()
                     )
@@ -1275,9 +1306,11 @@ class DetailView(ft.Container):
             elif player_state == "missing_account":
                 self._quiz_auth_btn.visible = True
 
-        details = data.get("details", {})
+        details = data.get("details")
+        if not isinstance(details, Mapping):
+            details = {}
 
-        open_time_str = details.get("open_time", "")
+        open_time_str = DetailView._coerce_open_time_str(details.get("open_time"))
         if open_time_str:
             self._opentime_txt.value = format_deadline(open_time_str)
         else:
@@ -1285,29 +1318,24 @@ class DetailView(ft.Container):
         self._opentime_row.visible = True
 
         # Cutoff date display in detail panel
-        cutoff_ts = data.get('cutoff_date', 0)
-        deadline_str_raw = data.get('deadline', '')
-        if cutoff_ts and cutoff_ts > 0:
-            from datetime import datetime as _dt
-            try:
-                cutoff_dt = _dt.fromtimestamp(cutoff_ts)
-                self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
-                deadline_dt = None
-                if deadline_str_raw:
-                    from core.time_utils import parse_datetime
-                    deadline_dt = parse_datetime(deadline_str_raw)
-                if deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60:
-                    self._cutoff_row.visible = True
-                else:
-                    self._cutoff_row.visible = False
-            except (OSError, ValueError):
-                self._cutoff_row.visible = False
+        cutoff_dt = DetailView._parse_cutoff_datetime(data.get("cutoff_date"))
+        deadline_str_raw = str(data.get("deadline") or "")
+        if cutoff_dt is not None:
+            self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
+            deadline_dt = None
+            if deadline_str_raw:
+                from core.time_utils import parse_datetime
+
+                deadline_dt = parse_datetime(deadline_str_raw)
+            self._cutoff_row.visible = bool(
+                deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60
+            )
         else:
             self._cutoff_row.visible = False
 
         # Trích xuất thông tin Tên môn học
-        full_name = details.get("course_full_name", "")
-        self._course_text.value = clean_course_name(full_name or data.get("course", ""))
+        full_name = str(details.get("course_full_name") or "")
+        self._course_text.value = clean_course_name(full_name or str(data.get("course") or ""))
 
         # Trạng thái nộp bài
         status_data = details.get("status_data", {})
@@ -1394,8 +1422,8 @@ class DetailView(ft.Container):
 
         # Thông tin Quiz
         quiz_rows = []
-        attempts   = details.get("attempts_allowed")
-        time_limit = details.get("time_limit")
+        attempts = str(details.get("attempts_allowed") or "").strip()
+        time_limit = str(details.get("time_limit") or "").strip()
         if attempts:
             quiz_rows.append(ft.Row(controls=[
                 ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=label_w),
@@ -1406,30 +1434,42 @@ class DetailView(ft.Container):
                 ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=label_w),
                 ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
-        for info in details.get("quiz_info", []):
-            if info and attempts not in info and time_limit not in info:
+        quiz_info_items = details.get("quiz_info") or []
+        if isinstance(quiz_info_items, (list, tuple)):
+            for raw_info in quiz_info_items:
+                info = str(raw_info or "").strip()
+                if not info:
+                    continue
+                if attempts and attempts in info:
+                    continue
+                if time_limit and time_limit in info:
+                    continue
                 quiz_rows.append(ft.Text(info, size=12, color=C.TEXT_SECONDARY))
         if quiz_rows:
             self._content_col.controls.append(self._section("Thông tin Quiz", quiz_rows))
 
         # Thông tin Điểm danh
-        att_records = details.get("attendance_records", [])
+        att_records = details.get("attendance_records") or []
         # Các cột phổ biến, dùng layout đặc biệt
         _ATT_SKIP = {"Description", "Status", "Points", "Ngày", "Ngay", "Date"}
-        if att_records:
+        if isinstance(att_records, (list, tuple)) and att_records:
             att_rows = []
             for rec in att_records:
-                status       = rec.get("Status", "")
+                if not isinstance(rec, Mapping):
+                    continue
+                status = str(rec.get("Status") or "")
                 status_color = (C.SAFE     if any(x in status.lower() for x in ("present", "có mặt"))
                                 else C.CRITICAL if any(x in status.lower() for x in ("absent", "vắng"))
                                 else C.TEXT_SECONDARY)
-                date_raw   = rec.get("Ngày", rec.get("Ngay", rec.get("Date", "")))
+                date_raw = str(
+                    rec.get("Ngày") or rec.get("Ngay") or rec.get("Date") or ""
+                )
                 date_parts = date_raw.split("\n")
 
                 # Các cột phụ khác
                 extra_rows = [
                     ft.Row(controls=[
-                        ft.Text(k, size=11, color=C.TEXT_SECONDARY, width=110),
+                        ft.Text(str(k), size=11, color=C.TEXT_SECONDARY, width=110),
                         ft.Text(str(v), size=11, color=C.TEXT_PRIMARY, expand=True),
                     ], spacing=8)
                     for k, v in rec.items()
@@ -1441,7 +1481,7 @@ class DetailView(ft.Container):
                         content=ft.Column(controls=[
                             ft.Row(controls=[
                                 ft.Column(controls=[
-                                    ft.Text(rec.get("Description", ""), size=12,
+                                    ft.Text(str(rec.get("Description") or ""), size=12,
                                             weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
                                     ft.Text(date_parts[0] if date_parts else "",
                                             size=11, color=C.TEXT_SECONDARY),
@@ -1453,7 +1493,7 @@ class DetailView(ft.Container):
                                 ft.Column(controls=[
                                     ft.Text(status, size=12, color=status_color,
                                             weight=ft.FontWeight.BOLD),
-                                    ft.Text(rec.get("Points", ""), size=11,
+                                    ft.Text(str(rec.get("Points") or ""), size=11,
                                             color=C.TEXT_SECONDARY),
                                 ], spacing=2,
                                    horizontal_alignment=ft.CrossAxisAlignment.END),
@@ -1465,7 +1505,8 @@ class DetailView(ft.Container):
                         border=ft.Border.all(1, C.BORDER),
                     )
                 )
-            self._content_col.controls.append(self._section("Điểm danh", att_rows))
+            if att_rows:
+                self._content_col.controls.append(self._section("Điểm danh", att_rows))
 
         # Mô tả
         desc_html = details.get("description_html", "")
