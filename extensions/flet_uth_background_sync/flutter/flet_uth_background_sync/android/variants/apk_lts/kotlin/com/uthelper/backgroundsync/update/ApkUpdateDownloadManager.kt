@@ -62,8 +62,9 @@ class ApkUpdateDownloadManager(private val context: Context) {
     private val preferences =
         context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val verifiedFiles = ConcurrentHashMap<String, Pair<Long, Long>>()
+    private val lock = Any()
 
-    fun start(identity: UpdateDownloadIdentity): UpdateDownloadResult {
+    fun start(identity: UpdateDownloadIdentity): UpdateDownloadResult = synchronized(lock) {
         identity.validate(context.packageName)
         val manager = downloadManager()
         val destination = destinationFor(identity)
@@ -73,7 +74,7 @@ class ApkUpdateDownloadManager(private val context: Context) {
             writeDownloadId(identity, existingId)
             val current = query(manager, identity, existingId)
             if (current.status in ACTIVE_OR_COMPLETE_STATUSES) {
-                return current
+                return@synchronized current
             }
             manager.remove(existingId)
         }
@@ -92,19 +93,19 @@ class ApkUpdateDownloadManager(private val context: Context) {
         }
         val id = manager.enqueue(request)
         check(writeDownloadId(identity, id)) { "Could not persist Android download identity" }
-        return query(manager, identity, id)
+        return@synchronized query(manager, identity, id)
     }
 
-    fun status(identity: UpdateDownloadIdentity): UpdateDownloadResult {
+    fun status(identity: UpdateDownloadIdentity): UpdateDownloadResult = synchronized(lock) {
         identity.validate(context.packageName)
         val manager = downloadManager()
         val id = readDownloadId(identity) ?: findRequestId(manager, identity)
-            ?: return UpdateDownloadResult("missing", total = identity.expectedSize)
+            ?: return@synchronized UpdateDownloadResult("missing", total = identity.expectedSize)
         writeDownloadId(identity, id)
-        return query(manager, identity, id)
+        return@synchronized query(manager, identity, id)
     }
 
-    fun cancel(identity: UpdateDownloadIdentity) {
+    fun cancel(identity: UpdateDownloadIdentity) = synchronized(lock) {
         identity.validate(context.packageName)
         val manager = downloadManager()
         val id = readDownloadId(identity) ?: findRequestId(manager, identity)
@@ -119,14 +120,23 @@ class ApkUpdateDownloadManager(private val context: Context) {
         identity: UpdateDownloadIdentity,
         id: Long,
     ): UpdateDownloadResult {
-        manager.query(DownloadManager.Query().setFilterById(id)).use { cursor ->
-            if (!cursor.moveToFirst()) {
+        val cursor = manager.query(DownloadManager.Query().setFilterById(id))
+            ?: return UpdateDownloadResult(
+                status = "failed",
+                downloadId = id,
+                total = identity.expectedSize,
+                reason = "download_manager_unavailable",
+            )
+        cursor.use { activeCursor ->
+            if (!activeCursor.moveToFirst()) {
                 preferences.edit().remove(downloadIdPreferenceKey(identity)).commit()
                 verifiedFiles.remove(identity.key)
                 return UpdateDownloadResult("missing", total = identity.expectedSize)
             }
 
-            val requestUrl = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI))
+            val requestUrl = activeCursor.getString(
+                activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI)
+            )
             if (requestUrl != identity.url) {
                 manager.remove(id)
                 preferences.edit().remove(downloadIdPreferenceKey(identity)).commit()
@@ -139,11 +149,13 @@ class ApkUpdateDownloadManager(private val context: Context) {
                 )
             }
 
-            val downloaded = cursor.getLong(
-                cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+            val downloaded = activeCursor.getLong(
+                activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
             ).coerceAtLeast(0L)
             val total = identity.expectedSize
-            return when (cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))) {
+            return when (
+                activeCursor.getInt(activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            ) {
                 DownloadManager.STATUS_PENDING ->
                     UpdateDownloadResult("pending", id, downloaded, total)
                 DownloadManager.STATUS_RUNNING ->
@@ -162,7 +174,9 @@ class ApkUpdateDownloadManager(private val context: Context) {
                     downloaded = downloaded,
                     total = total,
                     reason = failureReason(
-                        cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                        activeCursor.getInt(
+                            activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)
+                        )
                     ),
                 )
                 else -> UpdateDownloadResult(
@@ -244,21 +258,38 @@ class ApkUpdateDownloadManager(private val context: Context) {
         identity: UpdateDownloadIdentity,
     ): Long? {
         val expectedDestination = destinationFor(identity)
-        manager.query(DownloadManager.Query()).use { cursor ->
-            val idColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID)
-            val localUriColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI)
-            val uriColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI)
-            while (cursor.moveToNext()) {
-                val localUri = cursor.getString(localUriColumn)
+        val cursor = manager.query(DownloadManager.Query()) ?: return null
+        var bestId: Long? = null
+        var bestRank = Int.MAX_VALUE
+        cursor.use { activeCursor ->
+            val idColumn = activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID)
+            val localUriColumn = activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI)
+            val uriColumn = activeCursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI)
+            val statusColumn = activeCursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            while (activeCursor.moveToNext()) {
+                val localUri = activeCursor.getString(localUriColumn)
                 if (
-                    cursor.getString(uriColumn) == identity.url &&
+                    activeCursor.getString(uriColumn) == identity.url &&
                     isExpectedDestination(localUri, expectedDestination)
                 ) {
-                    return cursor.getLong(idColumn)
+                    val status = if (statusColumn >= 0) activeCursor.getInt(statusColumn) else -1
+                    val rank = when (status) {
+                        DownloadManager.STATUS_RUNNING -> 0
+                        DownloadManager.STATUS_PENDING -> 1
+                        DownloadManager.STATUS_PAUSED -> 2
+                        DownloadManager.STATUS_SUCCESSFUL -> 3
+                        DownloadManager.STATUS_FAILED -> 5
+                        else -> 4
+                    }
+                    val rowId = activeCursor.getLong(idColumn)
+                    if (rank < bestRank) {
+                        bestRank = rank
+                        bestId = rowId
+                    }
                 }
             }
         }
-        return null
+        return bestId
     }
 
     private fun isExpectedDestination(localUri: String?, expectedDestination: File): Boolean {

@@ -126,7 +126,9 @@ jobs:
           java-version: '17'
       - name: Install Android build dependencies
         timeout-minutes: 10
-        run: pip install -e ".[android-build]"
+        run: |
+          pip install -e ".[android-build]"
+          pip install "flet[cli]==0.86.5"
       - name: Build and natively verify signed APK
         timeout-minutes: 45
         shell: bash
@@ -168,6 +170,7 @@ jobs:
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
+          python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel apk_lts --target-sdk 36
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose
@@ -250,7 +253,9 @@ jobs:
           cache: pip
       - name: Install iOS build dependencies
         timeout-minutes: 10
-        run: pip install -e .
+        run: |
+          pip install -e .
+          pip install "flet[cli]==0.86.5"
       - name: Build and natively verify unsigned device IPA
         timeout-minutes: 55
         shell: bash
@@ -276,7 +281,8 @@ jobs:
             --build-number "$BUILD_NUMBER" \
             --bundle-id com.uthelper.UTHelper \
             --commit-sha "$GITHUB_SHA" \
-            --workflow-run-id "$GITHUB_RUN_ID"
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --require-office-viewer
       - name: Attest unsigned device IPA
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
         timeout-minutes: 5

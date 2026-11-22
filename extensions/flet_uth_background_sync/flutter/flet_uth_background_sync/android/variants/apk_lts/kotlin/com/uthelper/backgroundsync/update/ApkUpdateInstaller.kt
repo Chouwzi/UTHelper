@@ -1,5 +1,6 @@
 package com.uthelper.backgroundsync.update
 
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
@@ -7,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.core.content.pm.PackageInfoCompat
@@ -198,6 +200,7 @@ private fun verifyExistingPackage(
 
 class ApkUpdateInstaller(private val context: Context) {
     private val currentCancellation = AtomicReference<AtomicBoolean?>(null)
+    internal var onBeforeCancelCheckForTest: ((String) -> Unit)? = null
 
     fun cancel() {
         currentCancellation.get()?.set(true)
@@ -213,6 +216,8 @@ class ApkUpdateInstaller(private val context: Context) {
     ): InstallUpdateResult {
         var stage = "release_metadata_validation"
         var keepCachedApk = false
+        var hadExistingCache = false
+        var verifiedCacheReady = false
         var apk: File? = null
         var partial: File? = null
         val cancelled = AtomicBoolean(false)
@@ -241,9 +246,13 @@ class ApkUpdateInstaller(private val context: Context) {
             val stagedPartial = File(directory, "update-$releaseKey.apk.part")
             apk = stagedApk
             partial = stagedPartial
+            hadExistingCache = stagedApk.isFile
+            cleanupStaleUpdateFiles(directory, stagedApk, stagedPartial, localPath)
+            onBeforeCancelCheckForTest?.invoke(stage)
             checkNotCancelled(cancelled)
 
             stage = "downloaded_package_verification"
+            onBeforeCancelCheckForTest?.invoke(stage)
             val prepared = prepareVerifiedUpdatePackage(
                 localPath = localPath,
                 cachedApk = stagedApk,
@@ -254,10 +263,12 @@ class ApkUpdateInstaller(private val context: Context) {
             )
             val verified = prepared.verification
             if (!prepared.reusedCache) {
+                onBeforeCancelCheckForTest?.invoke("post_stage_rename")
                 checkNotCancelled(cancelled)
                 stagedApk.delete()
                 check(stagedPartial.renameTo(stagedApk)) { "Cannot finalize verified APK" }
             }
+            verifiedCacheReady = true
 
             stage = "archive_metadata_validation"
             val archive = readArchiveMetadata(stagedApk)
@@ -269,6 +280,7 @@ class ApkUpdateInstaller(private val context: Context) {
                 expectedCertificateSha256,
                 installed,
             )
+            onBeforeCancelCheckForTest?.invoke(stage)
             checkNotCancelled(cancelled)
             keepCachedApk = true
             val packageBytes = verified.bytes
@@ -344,6 +356,9 @@ class ApkUpdateInstaller(private val context: Context) {
                 sha256 = packageSha256,
             )
         } catch (exception: CancellationException) {
+            if (apk?.isFile == true && (hadExistingCache || verifiedCacheReady)) {
+                keepCachedApk = true
+            }
             return InstallUpdateResult(
                 status = "cancelled",
                 stage = stage,
@@ -462,9 +477,90 @@ class ApkUpdateInstaller(private val context: Context) {
         }.toSet()
     }
 
+    private fun cleanupStaleUpdateFiles(
+        cacheDir: File,
+        currentApk: File,
+        currentPartial: File,
+        localPath: String,
+    ) {
+        val cachedEntries = cacheDir.listFiles()?.take(MAX_CLEANUP_ENTRIES) ?: emptyList()
+        for (entry in cachedEntries) {
+            if (
+                entry.isFile &&
+                entry.name.startsWith("update-") &&
+                (entry.name.endsWith(".apk") || entry.name.endsWith(".apk.part")) &&
+                entry.name != currentApk.name &&
+                entry.name != currentPartial.name
+            ) {
+                entry.delete()
+            }
+        }
+
+        val downloadsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
+        if (!downloadsDir.isDirectory) return
+        val protectedPaths = HashSet<File>()
+        if (localPath.isNotBlank()) {
+            try {
+                protectedPaths.add(File(localPath).canonicalFile)
+            } catch (_: Exception) {
+                // Ignore unresolvable source path during best-effort cleanup.
+            }
+        }
+        try {
+            val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+                ?: return
+            val cursor = manager.query(DownloadManager.Query()) ?: return
+            cursor.use { activeCursor ->
+                val uriCol = activeCursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                val statusCol = activeCursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                while (activeCursor.moveToNext()) {
+                    val status = if (statusCol >= 0) activeCursor.getInt(statusCol) else -1
+                    if (
+                        status == DownloadManager.STATUS_PENDING ||
+                        status == DownloadManager.STATUS_RUNNING ||
+                        status == DownloadManager.STATUS_PAUSED ||
+                        status == DownloadManager.STATUS_SUCCESSFUL
+                    ) {
+                        val localUri = if (uriCol >= 0) activeCursor.getString(uriCol) else null
+                        if (!localUri.isNullOrBlank()) {
+                            val uri = Uri.parse(localUri)
+                            val path = uri.path
+                            if (uri.scheme == "file" && !path.isNullOrBlank()) {
+                                protectedPaths.add(File(path).canonicalFile)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // If DownloadManager query fails or is unavailable, skip external download cleanup
+            // so active downloads are never deleted blindly.
+            return
+        }
+
+        val downloadEntries = downloadsDir.listFiles()?.take(MAX_CLEANUP_ENTRIES) ?: emptyList()
+        for (entry in downloadEntries) {
+            if (
+                entry.isFile &&
+                entry.name.startsWith("update-") &&
+                entry.name.endsWith(".apk")
+            ) {
+                val canonical = try {
+                    entry.canonicalFile
+                } catch (_: Exception) {
+                    continue
+                }
+                if (canonical !in protectedPaths) {
+                    entry.delete()
+                }
+            }
+        }
+    }
+
 }
 
 private const val LOCAL_COPY_TIMEOUT_MILLIS = 180_000L
+private const val MAX_CLEANUP_ENTRIES = 100
 
 private fun checkNotCancelled(cancelled: AtomicBoolean) {
     if (cancelled.get()) {
