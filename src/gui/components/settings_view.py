@@ -771,6 +771,7 @@ class SettingsView(ft.Container):
             if hasattr(self, "_on_form_field_change"):
                 self._on_form_field_change()
         tb.on_change = _on_change
+        tb._swatch_box = box
         label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
         self._themed_texts.append(label_txt)
         return tb, ft.Row([label_txt, box_click, tb], spacing=10, tight=True)
@@ -1093,9 +1094,14 @@ class SettingsView(ft.Container):
             # after every external theme callback so no broader repaint can tint
             # the swatches with the active application palette.
             self._rebuild_theme_cards()
-            # Show unsaved indicator
+            # Sync dirty indicator and unlock/lock Save button based on baseline diff
+            changed = self.has_changes()
             if hasattr(self, '_unsaved_dot'):
-                self._unsaved_dot.visible = True
+                self._unsaved_dot.visible = changed
+            if hasattr(self, "_update_save_button_state") and callable(
+                getattr(self, "_update_save_button_state")
+            ):
+                self._update_save_button_state()
             # Force full page repaint
             self._page.update()
             log.info("[THEME] page.update() completed successfully")
@@ -1408,6 +1414,23 @@ class SettingsView(ft.Container):
         except Exception:
             pass
 
+    def _sync_color_swatch_boxes(self) -> None:
+        """Keep color preview squares aligned with programmatic TextField updates."""
+        for attr in (
+            "_c_tb_critical",
+            "_c_tb_warning",
+            "_c_tb_safe",
+            "_c_tb_quiz",
+            "_c_tb_ass",
+            "_c_tb_att",
+            "_c_tb_open",
+            "_c_tb_other",
+        ):
+            tb = getattr(self, attr, None)
+            box = getattr(tb, "_swatch_box", None) if tb is not None else None
+            if box is not None:
+                box.bgcolor = tb.value
+
     def _apply_theme_colors(self, theme_key: str):
         """Fill color text fields from preset values."""
         preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["midnight_blue"])
@@ -1419,6 +1442,7 @@ class SettingsView(ft.Container):
         self._c_tb_att.value = preset["attendance"]
         self._c_tb_open.value = preset["open"]
         self._c_tb_other.value = preset["other"]
+        SettingsView._sync_color_swatch_boxes(self)
 
     def _rebuild_theme_cards(self):
         """Restore preset previews and update selection state in place."""
@@ -1547,7 +1571,13 @@ class SettingsView(ft.Container):
         self._dnd_end_field.value = "7"
         self._update_profile_summary()
         self._update_dnd_summary()
-        
+        if hasattr(self, "_unsaved_dot"):
+            self._unsaved_dot.visible = self.has_changes()
+        if hasattr(self, "_update_save_button_state") and callable(
+            getattr(self, "_update_save_button_state")
+        ):
+            self._update_save_button_state()
+
         self.update()
 
     async def _handle_test_login(self, e):
@@ -2550,6 +2580,7 @@ class SettingsView(ft.Container):
         self._c_tb_att.value = snapshot.color_attendance
         self._c_tb_open.value = snapshot.color_open
         self._c_tb_other.value = snapshot.color_other
+        SettingsView._sync_color_swatch_boxes(self)
         self._username_field.value = snapshot.uth_username
         self._password_field.value = snapshot.uth_password
         self._sw_always_on_top.value = snapshot.always_on_top
@@ -2765,7 +2796,7 @@ class SettingsView(ft.Container):
             # values in diagnostics; Back must still offer the safe discard path.
             return True
 
-    def _discard_and_close(self) -> None:
+    def _discard_and_close(self, on_closed=None) -> None:
         """Restore the complete persisted baseline before closing Settings."""
         if self._baseline_snapshot is not None:
             baseline = self._baseline_snapshot
@@ -2781,16 +2812,26 @@ class SettingsView(ft.Container):
                 self._unsaved_dot.visible = False
             if hasattr(self, "_save_status"):
                 self._save_status.value = ""
+            if hasattr(self, "_update_save_button_state") and callable(
+                getattr(self, "_update_save_button_state")
+            ):
+                self._update_save_button_state()
             self.update()
-        self._on_close_cb()
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
+        close_cb()
 
-    async def _handle_back(self, e):
+    async def request_close(self, on_closed=None) -> None:
+        """Guard leaving Settings (Back button or tab switch) when unsaved edits exist."""
+        await SettingsView._handle_back(self, None, on_closed=on_closed)
+
+    async def _handle_back(self, e, on_closed=None):
         import logging
         _log = logging.getLogger("settings.dialog")
         _log.debug("Settings Back requested; has_changes=%s", self.has_changes())
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
         if self._loading and not self.has_changes():
             self.cancel_pending_load()
-            self._on_close_cb()
+            close_cb()
             return
         if self.has_changes():
             def close_dlg(e):
@@ -2801,12 +2842,23 @@ class SettingsView(ft.Container):
             def discard_and_close(e):
                 _log.debug("Settings changes discarded")
                 self._page.pop_dialog()
-                self._discard_and_close()
+                if on_closed is None:
+                    self._discard_and_close()
+                else:
+                    SettingsView._discard_and_close(self, on_closed=on_closed)
 
             def save_and_close(e):
                 _log.debug("Settings save requested from Back dialog")
                 self._page.pop_dialog()
-                self._page.run_task(self._save_and_close_if_valid, e)
+                if on_closed is None:
+                    self._page.run_task(self._save_and_close_if_valid, e)
+                else:
+                    self._page.run_task(
+                        SettingsView._save_and_close_if_valid,
+                        self,
+                        e,
+                        on_closed,
+                    )
 
             confirm_dlg = ft.AlertDialog(
                 title=ft.Row(controls=[
@@ -2830,13 +2882,14 @@ class SettingsView(ft.Container):
             self._page.show_dialog(confirm_dlg)
             _log.debug("Settings discard dialog opened")
         else:
-            self._on_close_cb()
+            close_cb()
 
-    async def _save_and_close_if_valid(self, e) -> bool:
+    async def _save_and_close_if_valid(self, e, on_closed=None) -> bool:
         """Close Settings only after validation and persistence succeed."""
         if not await self._save(e):
             return False
-        self._on_close_cb()
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
+        close_cb()
         return True
 
     async def _save(self, e) -> bool:

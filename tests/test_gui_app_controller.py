@@ -51,7 +51,7 @@ def test_dashboard_filter_models_share_counts_and_short_trigger_labels():
 
     assert urgency[0].trigger_label == "Mức độ"
     assert urgency[1].count == 1
-    assert activity_type[0].trigger_label == "Tất cả"
+    assert activity_type[0].trigger_label == "Loại bài"
     assert activity_type[1].count == 4
     assert courses[0].trigger_label == "Môn học"
     assert [option.key for option in courses] == ["all", "Course A", "Course B"]

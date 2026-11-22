@@ -102,3 +102,50 @@ def test_activity_card_rerenders_when_only_status_details_are_enriched():
     )
 
     assert card._optional_rows.controls[0].content.value == "Chưa nộp"
+
+
+def test_completed_activity_card_uses_calm_border_and_hides_redundant_chrome():
+    completed = ActivityCard(
+        {
+            "id": "quiz-done",
+            "type": "quiz",
+            "title": "Quiz đã hoàn thành",
+            "deadline": "2098-12-20 12:00:00",
+            "urgency": "safe",
+            "is_open": True,
+            "submission_status": "submitted",
+            "details": {},
+        },
+        on_tap=lambda _data: None,
+    )
+    active = ActivityCard(
+        {
+            "id": "assign-todo",
+            "type": "assignment",
+            "title": "Bài tập chưa nộp",
+            "deadline": "2098-12-20 12:00:00",
+            "urgency": "safe",
+            "is_open": True,
+            "submission_status": "not_submitted",
+            "details": {},
+        },
+        on_tap=lambda _data: None,
+    )
+
+    # Completed items use calm neutral card border instead of shouting C.SAFE,
+    # hide redundant urgency/progress chrome, and use soft tinted pills.
+    assert completed.border.top.color == C.BORDER
+    assert completed._urgency_container.visible is False
+    assert completed._progress_ctrl.visible is False
+    assert completed._status_container.visible is False
+    assert completed._type_container.border is None
+    assert completed._optional_rows.controls[0].border is None
+    assert completed._optional_rows.controls[0].content.value == "Đã làm"
+
+    # Active unsubmitted items keep urgency pill and progress indicator visible,
+    # while hiding redundant "ĐANG MỞ" duplicate status pill.
+    assert active.border.top.color == C.BORDER
+    assert active._urgency_container.visible is True
+    assert active._progress_ctrl.visible is True
+    assert active._status_container.visible is False
+    assert active._optional_rows.controls[0].content.value == "Chưa nộp"
