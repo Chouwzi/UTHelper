@@ -110,6 +110,12 @@ class ViewManager:
                 dismiss()
             except Exception:
                 pass
+        close_wv = getattr(self.controller, "_close_app_webview", None)
+        if callable(close_wv):
+            try:
+                close_wv(update_page=False)
+            except Exception:
+                pass
 
     def _show_only(self, *views):
         """Keep only active views mounted in Flutter's control tree."""

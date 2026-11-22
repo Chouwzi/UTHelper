@@ -281,47 +281,73 @@ def test_summary_detail_action_preserves_full_session_content():
 
     dialog = view._page_ref.show_dialog.call_args.args[0]
     assert dialog.semantics_label == "Chi tiết buổi học"
+    assert dialog.scrollable is True
+    assert dialog.title is None
+    assert not dialog.actions
     assert isinstance(dialog.content, ft.KeyboardListener)
     dialog.content.on_key_down(SimpleNamespace(key="Enter"))
     view._page_ref.pop_dialog.assert_not_called()
     dialog.content.on_key_down(SimpleNamespace(key="Escape"))
     view._page_ref.pop_dialog.assert_called_once()
     details = _text_values(dialog)
-    action_labels = [
-        item.content
-        for item in _walk(dialog)
-        if isinstance(item, ft.TextButton) and isinstance(item.content, str)
-    ]
-    assert "Giảng viên: Nguyễn Văn An" in details
+    assert "CHI TIẾT BUỔI HỌC" in details
+    assert "GIẢNG VIÊN" in details
+    assert "Nguyễn Văn An" in details
     assert "Cơ sở: Cơ sở 1" in details
-    assert "Truy cập Zoom" in action_labels
-    assert "Đề cương chi tiết học phần" in action_labels
+    assert "Mã lớp: ECE-ENGR-302-2026" in details
+    assert "Mã HP: CS-301" in details
+    assert "Truy cập Zoom" in details
+    assert "Đề cương chi tiết học phần" in details
 
-    action_controls = [
-        item for item in _walk(dialog) if isinstance(item, ft.TextButton)
+    semantic_buttons = [
+        item
+        for item in _walk(dialog)
+        if isinstance(item, ft.Semantics) and getattr(item, "button", False)
     ]
-    assert all(item.height >= 44 for item in action_controls)
+    assert semantic_buttons
+    for sem in semantic_buttons:
+        assert sem.content is not None
+        assert getattr(sem.content, "visible", True) is True
 
 
 def test_narrow_navigation_controls_keep_accessible_names_and_touch_targets():
     view = _view(390)
 
-    for button, label in (
-        (view._prev_btn, "Ngày trước"),
-        (view._next_btn, "Ngày sau"),
-        (view._today_btn, "Hôm nay"),
-        (view._refresh_btn, "Tải lại lịch học"),
-    ):
-        assert button.content == label
-        assert button.width >= 44
-        assert button.height >= 44
+    assert view._prev_btn.icon == ft.Icons.CHEVRON_LEFT_ROUNDED
+    assert view._prev_btn.tooltip == "Ngày trước"
+    assert view._prev_semantics.label == "Ngày trước"
+    assert view._prev_btn.size_constraints.min_width >= 44
+    assert view._prev_btn.size_constraints.min_height >= 44
+
+    assert view._next_btn.icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
+    assert view._next_btn.tooltip == "Ngày sau"
+    assert view._next_semantics.label == "Ngày sau"
+    assert view._next_btn.size_constraints.min_width >= 44
+    assert view._next_btn.size_constraints.min_height >= 44
+
+    assert view._today_btn.content == "Hôm nay"
+    assert view._today_btn.width >= 44
+    assert view._today_btn.height >= 44
+
+    assert view._refresh_btn.icon == ft.Icons.REFRESH_ROUNDED
+    assert view._refresh_btn.tooltip == "Tải lại lịch học"
+    assert view._refresh_semantics.label == "Tải lại lịch học"
+    assert view._refresh_btn.size_constraints.min_width >= 44
+    assert view._refresh_btn.size_constraints.min_height >= 44
+    assert view._nav_row.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    assert view._nav_row.wrap is not True
+    assert view._nav_row.controls[-1] is view._refresh_action_box
 
 
 def test_week_navigation_still_moves_a_full_week_on_desktop():
     view = _view(1120)
 
-    assert view._prev_btn.content == "Tuần trước"
-    assert view._next_btn.content == "Tuần sau"
+    assert view._prev_btn.icon == ft.Icons.CHEVRON_LEFT_ROUNDED
+    assert view._prev_btn.tooltip == "Tuần trước"
+    assert view._prev_semantics.label == "Tuần trước"
+    assert view._next_btn.icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
+    assert view._next_btn.tooltip == "Tuần sau"
+    assert view._next_semantics.label == "Tuần sau"
 
     view._next_btn.on_click(None)
 
@@ -395,10 +421,11 @@ def test_schedule_theme_update_rebuilds_nav_button_styles():
     try:
         apply_theme("steel_light")
         view.update_theme()
-        expected_secondary = C.TEXT_SECONDARY
-        assert view._prev_btn.style.color == expected_secondary
-        assert view._next_btn.style.color == expected_secondary
-        assert view._refresh_btn.style.color == expected_secondary
+        assert view._prev_btn.icon_color == C.TEXT_PRIMARY
+        assert view._next_btn.icon_color == C.TEXT_PRIMARY
+        assert view._refresh_btn.icon_color == C.TEXT_SECONDARY
+        assert view._refresh_action_box.bgcolor == C.SURFACE
+        assert view._stepper_box.bgcolor == C.SURFACE
         assert view._today_btn.style.color == C.ACCENT
     finally:
         apply_theme("midnight_blue")
@@ -590,3 +617,214 @@ def test_schedule_on_size_change_rerenders_on_small_shrink_in_wide_mode():
     ]
     used_width = sum(float(item.width or 0) for item in day_columns) + 6 * 8 + 28
     assert used_width <= 1108
+
+
+def test_today_column_uses_bold_solid_accent_header_and_tinted_frame(monkeypatch):
+    fake_today = date(2026, 11, 22)  # Chủ nhật
+
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return fake_today
+
+    monkeypatch.setattr("gui.components.schedule_week_view.date", _FixedDate)
+    view = _view(1120, selected=fake_today)
+    day_columns = [
+        item
+        for item in _walk(view._body)
+        if isinstance(item, ft.Container)
+        and isinstance(item.data, dict)
+        and item.data.get("schedule_day")
+    ]
+    assert len(day_columns) == 7
+
+    today_cols = [c for c in day_columns if c.data.get("is_today")]
+    other_cols = [c for c in day_columns if not c.data.get("is_today")]
+    assert len(today_cols) == 1
+    assert len(other_cols) == 6
+
+    sunday_col = today_cols[0]
+    assert sunday_col.data["schedule_day"] == "2026-11-22"
+    sunday_header = sunday_col.content.controls[0]
+    assert sunday_header.bgcolor == C.ACCENT
+    header_texts = [t for t in _walk(sunday_header) if isinstance(t, ft.Text)]
+    assert [t.value for t in header_texts] == ["Chủ nhật", "22/11"]
+    assert all(t.color == C.ON_ACCENT for t in header_texts)
+    assert all(t.weight == ft.FontWeight.W_700 for t in header_texts)
+
+    monday_col = other_cols[0]
+    monday_header = monday_col.content.controls[0]
+    assert monday_header.bgcolor == C.SURFACE_ELEVATED
+    assert monday_col.bgcolor == C.SURFACE
+
+
+def test_session_detail_popup_clicks_dismiss_dialog_and_open_in_app_webview(monkeypatch):
+    in_app_calls: list[tuple[str, str]] = []
+    external_calls: list[str] = []
+    dialogs: list[ft.AlertDialog] = []
+    pops: list[bool] = []
+    monkeypatch.setattr(
+        "gui.components.schedule_week_view.ft.UrlLauncher.launch_url",
+        lambda self, url: (_ for _ in ()).throw(AssertionError(f"Unexpected external launch: {url}")),
+        raising=False,
+    )
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        window=SimpleNamespace(width=1120),
+        dialogs=dialogs,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: pops.append(True),
+        update=lambda: None,
+        run_task=lambda *_a, **_k: None,
+    )
+    view = ScheduleWeekView(
+        page=page,
+        fetch_week=lambda _d: {},
+        on_open_url=lambda url, title: in_app_calls.append((url, title)),
+        on_open_external=lambda url: external_calls.append(url),
+    )
+    session = ClassSession(
+        session_id="sess-lms-1",
+        subject="Quản trị doanh nghiệp CNTT",
+        course_code="012012113707",
+        start_at=datetime(2026, 11, 21, 20, 10),
+        end_at=datetime(2026, 11, 21, 22, 40),
+        room="E-Learning",
+        campus="Online",
+        period_start=16,
+        period_end=18,
+        cancelled=False,
+        note="Tài liệu bổ sung: https://docs.example.com/guide",
+        link="https://courses.ut.edu.vn/course/view.php?id=121137",
+        meeting_url="https://us02web.zoom.us/j/96538251192",
+        subject_code="121137",
+        lecturer="",
+        has_outline=True,
+        outline="Xem thêm [Đề cương PDF](https://portal.ut.edu.vn/syllabus/121137.pdf)",
+    )
+
+    view._show_session_details(session)
+    assert len(dialogs) == 1
+    detail_dialog = dialogs[-1]
+
+    # Click primary LMS CTA -> pops detail modal and opens in-app WebView (NOT external)
+    lms_btn = next(
+        c
+        for c in _walk(detail_dialog)
+        if isinstance(c, ft.Container)
+        and callable(getattr(c, "on_click", None))
+        and "Mở khóa học LMS" in _text_values(c)
+    )
+    lms_btn.on_click(None)
+    assert len(pops) == 1
+    assert in_app_calls == [
+        ("https://courses.ut.edu.vn/course/view.php?id=121137", "LMS · Quản trị doanh nghiệp CNTT")
+    ]
+    assert external_calls == []
+
+    # Click Outline card -> pops detail modal, opens Outline modal; Back returns to detail; link opens in-app WebView
+    outline_btn = next(
+        c
+        for c in _walk(detail_dialog)
+        if isinstance(c, ft.Container)
+        and callable(getattr(c, "on_click", None))
+        and "Đề cương chi tiết học phần" in _text_values(c)
+    )
+    outline_btn.on_click(None)
+    assert len(pops) == 2
+    assert len(dialogs) == 2
+    outline_dialog = dialogs[-1]
+    md = next(c for c in _walk(outline_dialog) if isinstance(c, ft.Markdown))
+    md.on_tap_link(SimpleNamespace(data="https://portal.ut.edu.vn/syllabus/121137.pdf"))
+    assert len(pops) == 3
+    assert in_app_calls[-1] == (
+        "https://portal.ut.edu.vn/syllabus/121137.pdf",
+        "Đề cương · Quản trị doanh nghiệp CNTT",
+    )
+    assert external_calls == []
+
+
+def test_app_controller_open_url_in_app_mounts_embedded_webview_pane_and_handles_back(monkeypatch):
+    from gui.app_controller import AppController
+
+    mounted_panes = []
+
+    class _FakeWebViewPane(ft.Container):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.kwargs = kwargs
+            self.bounds = None
+            self.disposed = False
+            self.back_steps = 1
+            mounted_panes.append(self)
+
+        def sync_bounds(self, left, top, width, height, *, nav_bottom_inset=0.0):
+            self.bounds = (left, top, width, height, nav_bottom_inset)
+
+        def handle_back(self) -> bool:
+            if self.back_steps > 0:
+                self.back_steps -= 1
+                return True
+            return False
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    monkeypatch.setattr(
+        "gui.components.courses.embedded_webview_host._is_windows_webview2_platform",
+        lambda _page: True,
+    )
+    monkeypatch.setattr(
+        "gui.components.courses.embedded_webview_host._webview2_runtime_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "gui.components.courses.webview_pane.CoursesWebViewPane",
+        _FakeWebViewPane,
+    )
+
+    popped = []
+    updated = []
+    courses_client = object()
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(
+        width=1280,
+        height=820,
+        web=False,
+        platform=ft.PagePlatform.WINDOWS,
+        pop_dialog=lambda: popped.append(True),
+        update=lambda: updated.append(True),
+    )
+    controller._nav_shell = SimpleNamespace(rail_visible=True)
+    controller._app_webview_host = ft.Container(visible=False)
+    controller._app_webview_pane = None
+    controller.quiz_player_view = SimpleNamespace(handle_back=lambda: False, visible=False)
+    controller._courses_coordinator = SimpleNamespace(
+        preview_server="preview_srv",
+        _client_for=lambda src: courses_client if src == "courses" else None,
+    )
+
+    controller._open_url_in_app(
+        "https://courses.ut.edu.vn/course/view.php?id=121137",
+        "LMS · Quản trị doanh nghiệp CNTT",
+    )
+
+    assert popped == [True]
+    assert controller._app_webview_host.visible is True
+    assert len(mounted_panes) == 1
+    pane = mounted_panes[0]
+    assert pane.kwargs["url"] == "https://courses.ut.edu.vn/course/view.php?id=121137"
+    assert pane.kwargs["source"] == "courses"
+    assert pane.kwargs["session_client"] is courses_client
+    assert pane.bounds is not None
+
+    # First Back steps inside WebView history; second Back closes & disposes the overlay
+    assert asyncio.run(controller._navigate_back()) is True
+    assert controller._app_webview_host.visible is True
+    assert pane.disposed is False
+
+    assert asyncio.run(controller._navigate_back()) is True
+    assert controller._app_webview_host.visible is False
+    assert controller._app_webview_pane is None
+    assert pane.disposed is True

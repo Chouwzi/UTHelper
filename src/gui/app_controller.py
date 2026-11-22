@@ -80,7 +80,11 @@ from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
 from gui.components.desktop_window_header import build_desktop_window_header
-from gui.components.courses.adaptive_nav import AdaptiveNavShell, RAIL_WIDTH
+from gui.components.courses.adaptive_nav import (
+    AdaptiveNavShell,
+    RAIL_BREAKPOINT,
+    RAIL_WIDTH,
+)
 from gui.components.adaptive_filter_menu import (
     AdaptiveFilterMenu,
     FilterMenuOption,
@@ -478,6 +482,7 @@ class AppController:
                 and not getattr(quiz_player_view, "visible", False)
             ):
                 self._safe_run_task(clear_quiz_sessions)
+            self._close_app_webview(update_page=False)
             courses_coord = getattr(self, "_courses_coordinator", None)
             reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
             if callable(reset_courses):
@@ -1128,6 +1133,13 @@ class AppController:
         quiz_player_view = getattr(self, "quiz_player_view", None)
         if quiz_player_view is not None and quiz_player_view.handle_back():
             return True
+        app_wv_host = getattr(self, "_app_webview_host", None)
+        app_wv_pane = getattr(self, "_app_webview_pane", None)
+        if app_wv_host is not None and getattr(app_wv_host, "visible", False):
+            if app_wv_pane is not None and app_wv_pane.handle_back():
+                return True
+            self._close_app_webview()
+            return True
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
             return True
@@ -1566,6 +1578,16 @@ class AppController:
             account_id_provider=lambda: settings.UTH_USERNAME,
             on_auth_required=self._show_quiz_auth_dialog,
         )
+        self._app_webview_pane = None
+        self._app_webview_host = ft.Container(
+            expand=True,
+            visible=False,
+            bgcolor=C.BG,
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
+        )
         self.detail_view   = DetailView(
             self.page,
             on_close=lambda: self._safe_run_task(self._close_detail),
@@ -1772,6 +1794,8 @@ class AppController:
                 self._desktop_filter_popup_host,
             ]
             main_stack_controls.extend(overlays)
+        overlays.append(self._app_webview_host)
+        main_stack_controls.append(self._app_webview_host)
         overlays.append(self.quiz_player_view)
         main_stack_controls.append(self.quiz_player_view)
         main_stack = ft.Stack(
@@ -1901,6 +1925,7 @@ class AppController:
                 courses_view.set_width(content_width)
             if hasattr(courses_view, "set_viewport_height"):
                 courses_view.set_viewport_height(resolved_height)
+        self._sync_app_webview_bounds(resolved_width, resolved_height)
 
         content_area = getattr(self, "_content_area", None)
         if content_area is None or not hasattr(self, "_wide_layout"):
@@ -2064,6 +2089,7 @@ class AppController:
                 )
             )
             return
+        self._close_app_webview(update_page=False)
         settings_view = getattr(self, "settings_view", None)
         if settings_view is not None and getattr(settings_view, "visible", False):
             if key == "settings":
@@ -2133,14 +2159,139 @@ class AppController:
             version_control=self._version_badge,
         )
 
+    def _compute_app_webview_bounds(
+        self,
+        width: float | None = None,
+        height: float | None = None,
+    ) -> tuple[float, float, float, float, float]:
+        raw_page_w = self._current_page_width(width)
+        page_h = self._current_page_height(height)
+        is_web = bool(getattr(self.page, "web", False))
+        nav_shell = getattr(self, "_nav_shell", None)
+        has_rail = (
+            bool(getattr(nav_shell, "rail_visible", False))
+            if nav_shell is not None
+            else raw_page_w >= float(RAIL_BREAKPOINT)
+        )
+        rail_w = float(RAIL_WIDTH + 1) if has_rail else 0.0
+        left = rail_w
+        top = 0.0 if (is_web or platform_utils.UI_IS_MOBILE) else 36.0
+        bottom_inset = 0.0 if has_rail else 80.0
+        pane_w = max(240.0, raw_page_w - rail_w)
+        pane_h = max(200.0, page_h - top - bottom_inset)
+        return (left, top, pane_w, pane_h, bottom_inset)
+
+    def _sync_app_webview_bounds(
+        self,
+        width: float | None = None,
+        height: float | None = None,
+    ) -> None:
+        pane = getattr(self, "_app_webview_pane", None)
+        host = getattr(self, "_app_webview_host", None)
+        if pane is None or host is None or not getattr(host, "visible", False):
+            return
+        sync_fn = getattr(pane, "sync_bounds", None)
+        if callable(sync_fn):
+            left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds(
+                width, height
+            )
+            sync_fn(left, top, pane_w, pane_h, nav_bottom_inset=bottom_inset)
+
+    def _close_app_webview(self, *, update_page: bool = True) -> bool:
+        host = getattr(self, "_app_webview_host", None)
+        pane = getattr(self, "_app_webview_pane", None)
+        was_visible = bool(host is not None and getattr(host, "visible", False))
+        self._app_webview_pane = None
+        if host is not None:
+            host.visible = False
+            host.content = None
+        if pane is not None:
+            try:
+                pane.dispose()
+            except Exception:
+                logger.debug("App WebView dispose skipped", exc_info=True)
+        if (was_visible or pane is not None) and update_page:
+            try:
+                self.page.update()
+            except Exception:
+                pass
+        return was_visible or pane is not None
+
     def _open_url_in_app(self, url: str, title: str = "") -> None:
-        from core.url_validation import validate_https_url
+        from core.moodle_sites import moodle_site_from_url
+        from core.url_validation import validate_public_https_url
+        from gui.components.courses.embedded_webview_host import (
+            _is_flet_webview_platform,
+            _is_windows_webview2_platform,
+            _webview2_runtime_available,
+        )
+        from gui.components.courses.webview_pane import CoursesWebViewPane
         from gui.components.in_app_webview import InAppWebViewDialog
 
-        validated = validate_https_url(url)
+        validated = validate_public_https_url(url, resolve_dns=False)
         if validated is None:
             logger.warning("Blocked invalid or non-HTTPS URL")
             return
+
+        host = getattr(self, "_app_webview_host", None)
+        supports_embedded = host is not None and (
+            _is_flet_webview_platform(self.page)
+            or (
+                _is_windows_webview2_platform(self.page)
+                and _webview2_runtime_available()
+            )
+        )
+        if supports_embedded:
+            self._close_app_webview(update_page=False)
+            pop_dialog = getattr(self.page, "pop_dialog", None)
+            if callable(pop_dialog):
+                try:
+                    pop_dialog()
+                except Exception:
+                    pass
+
+            moodle_site = moodle_site_from_url(validated)
+            moodle_site_id = moodle_site.identity if moodle_site is not None else None
+            source = "thnn" if moodle_site_id == "thnn" else "courses"
+            preview_server = None
+            session_client = None
+            if moodle_site_id in {"courses", "thnn"}:
+                coord = getattr(self, "_courses_coordinator", None)
+                if coord is not None:
+                    preview_server = getattr(coord, "preview_server", None)
+                    client_for = getattr(coord, "_client_for", None)
+                    if callable(client_for):
+                        session_client = client_for(source)
+                if session_client is None and moodle_site_id == "courses":
+                    session_client = getattr(
+                        getattr(self, "orchestrator", None), "client", None
+                    )
+
+            left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds()
+            pane = CoursesWebViewPane(
+                page=self.page,
+                source=source,
+                title=(title or "").strip() or "Trình duyệt trong ứng dụng",
+                url=validated,
+                preview_server=preview_server,
+                session_client=session_client,
+                on_back=self._close_app_webview,
+                on_open_external=self._open_url_external,
+                show_expand_toggle=False,
+                pane_width=pane_w,
+            )
+            self._app_webview_pane = pane
+            host.content = pane
+            host.visible = True
+            pane.sync_bounds(
+                left, top, pane_w, pane_h, nav_bottom_inset=bottom_inset
+            )
+            try:
+                self.page.update()
+            except Exception:
+                logger.debug("App WebView page update skipped", exc_info=True)
+            return
+
         InAppWebViewDialog(
             self.page,
             url=validated,
@@ -4074,6 +4225,12 @@ class AppController:
         component = getattr(self, "_today_schedule_component", None)
         if component is not None:
             component.refresh_theme()
+        app_wv_host = getattr(self, "_app_webview_host", None)
+        if app_wv_host is not None:
+            app_wv_host.bgcolor = _C.BG
+        app_wv_pane = getattr(self, "_app_webview_pane", None)
+        if app_wv_pane is not None:
+            app_wv_pane.update_theme()
 
         # Icon buttons
         buttons_to_update = [
@@ -4714,6 +4871,7 @@ class AppController:
             )
             if callable(clear_quiz_sessions):
                 self._safe_run_task(clear_quiz_sessions)
+            self._close_app_webview(update_page=False)
             courses_coord = getattr(self, "_courses_coordinator", None)
             reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
             if callable(reset_courses):
@@ -5033,6 +5191,7 @@ class AppController:
         update_coordinator = getattr(self, "_update_coordinator", None)
         if update_coordinator is not None:
             update_coordinator.shutdown(timeout_seconds=1.0)
+        self._close_app_webview(update_page=False)
         courses_coord = getattr(self, "_courses_coordinator", None)
         if courses_coord is not None:
             try:
