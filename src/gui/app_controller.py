@@ -4117,26 +4117,39 @@ class AppController:
         """
         from gui.core.theme import C as _C
         current_palette = semantic_palette()
-        theme_roots = [self.dashboard]
+        dashboard = getattr(self, "dashboard", None)
+        theme_roots = [dashboard] if dashboard is not None else []
         window_header = getattr(self, "_window_header", None)
         if window_header is not None:
             theme_roots.append(window_header)
-        refresh_semantic_control_colors(
-            theme_roots, self._rendered_palette, current_palette
-        )
+        previous_palette = getattr(self, "_rendered_palette", None)
+        if theme_roots and isinstance(previous_palette, dict):
+            refresh_semantic_control_colors(
+                theme_roots, previous_palette, current_palette
+            )
         self._rendered_palette = current_palette
 
         # Page
-        self.page.bgcolor = _C.BG
+        page = getattr(self, "page", None)
+        if page is not None:
+            page.bgcolor = _C.BG
         if getattr(self, "_sidebar", None) is not None:
             self._sidebar.border = ft.Border.only(left=ft.BorderSide(1, _C.BORDER))
         if sync_nav:
             self._sync_rail_active()
 
-        self._header_container.bgcolor = _C.BG
-        self._app_title.color = _C.TEXT_PRIMARY
-        self._version_text.color = _C.TEXT_SECONDARY
-        self._version_badge.border = ft.Border.all(1, _C.BORDER)
+        header_container = getattr(self, "_header_container", None)
+        if header_container is not None:
+            header_container.bgcolor = _C.BG
+        app_title = getattr(self, "_app_title", None)
+        if app_title is not None:
+            app_title.color = _C.TEXT_PRIMARY
+        version_text = getattr(self, "_version_text", None)
+        if version_text is not None:
+            version_text.color = _C.TEXT_SECONDARY
+        version_badge = getattr(self, "_version_badge", None)
+        if version_badge is not None:
+            version_badge.border = ft.Border.all(1, _C.BORDER)
         dashboard_title = getattr(self, "_dashboard_title", None)
         if dashboard_title is not None:
             dashboard_title.color = _C.TEXT_PRIMARY
@@ -4163,32 +4176,44 @@ class AppController:
             )
 
         # Status text
-        self.status_text.color = _C.TEXT_SECONDARY
+        status_text = getattr(self, "status_text", None)
+        if status_text is not None:
+            status_text.color = _C.TEXT_SECONDARY
 
         # Filter area
-        self._filter_container.bgcolor = _C.BG
-        self.search_field.bgcolor = _C.SURFACE
-        self.search_field.border_color = _C.BORDER
-        self.search_field.focused_border_color = _C.ACCENT
-        self.search_field.color = _C.TEXT_PRIMARY
+        filter_container = getattr(self, "_filter_container", None)
+        if filter_container is not None:
+            filter_container.bgcolor = _C.BG
+        search_field = getattr(self, "search_field", None)
+        if search_field is not None:
+            search_field.bgcolor = _C.SURFACE
+            search_field.border_color = _C.BORDER
+            search_field.focused_border_color = _C.ACCENT
+            search_field.color = _C.TEXT_PRIMARY
 
         # Adaptive filters rebuild from their option models instead of relying
         # on brittle control-tree indexes.
-        self.urgency_filter_menu.refresh_theme(
-            self._urgency_filter_options(
-                {option.key: option.count or 0 for option in self.urgency_filter_menu.options}
+        urgency_filter_menu = getattr(self, "urgency_filter_menu", None)
+        if urgency_filter_menu is not None:
+            urgency_filter_menu.refresh_theme(
+                self._urgency_filter_options(
+                    {option.key: option.count or 0 for option in urgency_filter_menu.options}
+                )
             )
-        )
-        self.type_filter_menu.refresh_theme(
-            self._type_filter_options(
-                {option.key: option.count or 0 for option in self.type_filter_menu.options}
+        type_filter_menu = getattr(self, "type_filter_menu", None)
+        if type_filter_menu is not None:
+            type_filter_menu.refresh_theme(
+                self._type_filter_options(
+                    {option.key: option.count or 0 for option in type_filter_menu.options}
+                )
             )
-        )
-        self.course_filter_menu.refresh_theme(
-            self._course_filter_options(
-                {option.key: option.count or 0 for option in self.course_filter_menu.options}
+        course_filter_menu = getattr(self, "course_filter_menu", None)
+        if course_filter_menu is not None:
+            course_filter_menu.refresh_theme(
+                self._course_filter_options(
+                    {option.key: option.count or 0 for option in course_filter_menu.options}
+                )
             )
-        )
 
         # Empty state
         if hasattr(self, '_empty_icon'):
@@ -4210,16 +4235,25 @@ class AppController:
             self._error_retry_btn.color = _C.ON_ACCENT
 
         # Footer
-        self._footer.bgcolor = _C.SURFACE
-        self._footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
+        footer = getattr(self, "_footer", None)
+        if footer is not None:
+            footer.bgcolor = _C.SURFACE
+            footer.border = ft.Border.only(top=ft.BorderSide(1, _C.BORDER))
         # Footer counter colors are set dynamically by _refresh_counts,
         # but update the base colors here too
-        self.footer_critical.color = _C.CRITICAL if self.footer_critical.value else _C.BORDER
-        self.footer_warning.color = _C.WARNING if self.footer_warning.value else _C.BORDER
-        self.footer_safe.color = _C.SAFE if self.footer_safe.value else _C.BORDER
-        self.footer_overdue.color = _C.CRITICAL if self.footer_overdue.value else _C.BORDER
+        for footer_attr, active_color in (
+            ("footer_critical", _C.CRITICAL),
+            ("footer_warning", _C.WARNING),
+            ("footer_safe", _C.SAFE),
+            ("footer_overdue", _C.CRITICAL),
+        ):
+            footer_label = getattr(self, footer_attr, None)
+            if footer_label is not None:
+                footer_label.color = active_color if footer_label.value else _C.BORDER
 
-        self._content_area.bgcolor = _C.BG
+        content_area = getattr(self, "_content_area", None)
+        if content_area is not None:
+            content_area.bgcolor = _C.BG
 
         # Cards  Re-color all existing recycled cards
         if hasattr(self, '_reusable_cards'):
@@ -4261,14 +4295,22 @@ class AppController:
         if nav_shell is not None and hasattr(nav_shell, "refresh_theme"):
             nav_shell.refresh_theme()
 
-        self._sync_status.refresh_theme()
+        sync_status = getattr(self, "_sync_status", None)
+        if sync_status is not None:
+            sync_status.refresh_theme()
 
         # Update banner is a semantic elevated surface, not a fixed brown card.
-        self._update_banner.bgcolor = _C.SURFACE_ELEVATED
-        self._update_banner.border = ft.Border.all(1, _C.UPDATE)
-        self._update_text.color = _C.TEXT_PRIMARY
-        self._update_progress.color = _C.UPDATE
-        self._update_progress.bgcolor = _C.BORDER
+        update_banner = getattr(self, "_update_banner", None)
+        if update_banner is not None:
+            update_banner.bgcolor = _C.SURFACE_ELEVATED
+            update_banner.border = ft.Border.all(1, _C.UPDATE)
+        update_text = getattr(self, "_update_text", None)
+        if update_text is not None:
+            update_text.color = _C.TEXT_PRIMARY
+        update_progress = getattr(self, "_update_progress", None)
+        if update_progress is not None:
+            update_progress.color = _C.UPDATE
+            update_progress.bgcolor = _C.BORDER
         update_btn = getattr(self, "_update_btn", None)
         if update_btn is not None:
             update_btn.style = ft.ButtonStyle(
@@ -4281,7 +4323,9 @@ class AppController:
             )
 
         # Settings view bgcolor
-        self.settings_view.bgcolor = _C.BG
+        settings_view = getattr(self, "settings_view", None)
+        if settings_view is not None:
+            settings_view.bgcolor = _C.BG
 
         # Sub-views theme update propagation
         for view_attr in (
@@ -4307,8 +4351,8 @@ class AppController:
             except Exception as e:
                 logger.error("Failed to update theme for _courses_coordinator: %s", e, exc_info=True)
 
-        if update_page:
-            self.page.update()
+        if update_page and page is not None:
+            page.update()
 
 
     def _reconcile_settings_after_exit(

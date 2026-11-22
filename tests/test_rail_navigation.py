@@ -60,7 +60,7 @@ def test_navigate_destination_prompts_unsaved_settings_before_switching_tabs(
     from config import settings
     from gui.components.settings_view import SettingsView
     from gui.components.courses.adaptive_nav import AdaptiveNavShell
-    from gui.core.theme import apply_theme
+    from gui.core.theme import apply_theme, load_theme_from_settings
 
     original_theme = settings.THEME
 
@@ -184,7 +184,7 @@ def test_navigate_destination_prompts_unsaved_settings_before_switching_tabs(
         controller._show_grades.assert_awaited_once()
     finally:
         settings.THEME = original_theme
-        apply_theme(original_theme)
+        load_theme_from_settings()
 
 
 def test_leaving_settings_for_grades_never_violates_animated_switcher_visibility():
@@ -318,12 +318,19 @@ def test_adaptive_nav_shell_set_active_is_idempotent():
     assert nav.bar.writes == []
 
 
-def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings():
+def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings(
+    monkeypatch,
+):
     import threading
     import flet as ft
     from gui.components.courses.adaptive_nav import AdaptiveNavShell
-    from gui.core.theme import C, semantic_palette
+    from gui.core.theme import C, load_theme_from_settings, semantic_palette
     from gui.view_manager import ViewManager
+
+    # Isolate theme state so prior tests' apply_theme() calls do not leave C
+    # out of sync with load_theme_from_settings() on clean CI runners.
+    load_theme_from_settings()
+    monkeypatch.setattr("gui.core.theme.load_theme_from_settings", load_theme_from_settings)
 
     dashboard = ft.Container(visible=False)
     detail_view = ft.Container(visible=False)
@@ -381,7 +388,14 @@ def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings()
     controller._nav_shell = nav_shell
     controller._rail_items = None
     controller._rendered_palette = semantic_palette()
-    controller._rebuild_colors = AppController._rebuild_colors.__get__(controller, AppController)
+    real_rebuild = AppController._rebuild_colors.__get__(controller, AppController)
+    clean_rebuild_calls: list[tuple[bool, bool]] = []
+
+    def tracked_real_rebuild(*, sync_nav: bool = True, update_page: bool = True) -> None:
+        clean_rebuild_calls.append((sync_nav, update_page))
+        real_rebuild(sync_nav=sync_nav, update_page=update_page)
+
+    controller._rebuild_colors = tracked_real_rebuild
     controller._reconcile_settings_after_exit = AppController._reconcile_settings_after_exit.__get__(
         controller, AppController
     )
@@ -420,6 +434,7 @@ def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings()
         nav_calls.clear()
 
         asyncio.run(controller._navigate_destination(target))
+        assert clean_rebuild_calls == [], (target, clean_rebuild_calls)
         assert "settings" not in nav_calls, (target, nav_calls)
         assert 4 not in flushed_bar_indices, (target, flushed_bar_indices)
         assert nav_shell.bar.selected_index == expected_idx
@@ -440,3 +455,19 @@ def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings()
     assert "settings" not in nav_calls
     assert 4 not in flushed_bar_indices
     assert nav_shell.bar.selected_index == 1
+
+    # Also verify real AppController._rebuild_colors executes cleanly under forced rebuild without snap-back
+    controller._rendered_palette = ("stale",)
+    controller._rebuild_colors = tracked_real_rebuild
+    settings_view.visible = True
+    tab_switcher.content = settings_view
+    nav_calls.clear()
+    flushed_bar_indices.clear()
+    clean_rebuild_calls.clear()
+    asyncio.run(controller._navigate_destination("grades"))
+    assert clean_rebuild_calls == [(False, False)]
+    assert controller._rendered_palette == semantic_palette()
+    assert "settings" not in nav_calls
+    assert 4 not in flushed_bar_indices
+    assert nav_shell.bar.selected_index == 3
+    assert settings_view.visible is False
