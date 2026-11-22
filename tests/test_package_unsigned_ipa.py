@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import stat
 import struct
 import zipfile
 
@@ -11,8 +12,10 @@ import pytest
 
 from scripts.package_unsigned_ipa import (
     IpaError,
+    _REQUIRED_OFFICE_VIEWER_ASSETS,
     inspect_device_app,
     inspect_ipa,
+    verify_ios_app_office_viewer_assets,
     write_verification_evidence,
 )
 
@@ -236,3 +239,64 @@ def test_evidence_declares_unsigned_resign_required_without_identity(tmp_path):
         "sha256",
         "version",
     ]
+
+
+def test_inspector_require_office_viewer_accepts_nested_app_zip_and_rejects_missing(tmp_path):
+    app = _make_app(tmp_path / "source")
+    with pytest.raises(IpaError, match="office_viewer"):
+        inspect_device_app(
+            app,
+            version=VERSION,
+            build_number=BUILD,
+            bundle_id=BUNDLE_ID,
+            require_office_viewer=True,
+        )
+
+    app_zip = app / "Frameworks" / "App.framework" / "flutter_assets" / "app" / "app.zip"
+    app_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(app_zip, "w") as nested:
+        for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
+            nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+
+    assert verify_ios_app_office_viewer_assets(app, require=True) is True
+    ipa = tmp_path / "UTHelper.ipa"
+    _write_ipa(ipa, app)
+    metadata = inspect_ipa(
+        ipa,
+        version=VERSION,
+        build_number=BUILD,
+        bundle_id=BUNDLE_ID,
+        require_office_viewer=True,
+    )
+    assert metadata.bundle_id == BUNDLE_ID
+
+    with zipfile.ZipFile(app_zip, "w") as nested:
+        for asset in _REQUIRED_OFFICE_VIEWER_ASSETS[:-1]:
+            nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+    with pytest.raises(IpaError, match="missing office_viewer asset"):
+        verify_ios_app_office_viewer_assets(app, require=True)
+
+
+def test_inspector_rejects_symlink_in_nested_app_zip(tmp_path):
+    app = _make_app(tmp_path / "source")
+    app_zip = app / "Frameworks" / "App.framework" / "flutter_assets" / "app" / "app.zip"
+    app_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(app_zip, "w") as nested:
+        for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
+            if asset == "docx_host.html":
+                symlink = zipfile.ZipInfo(f"assets/office_viewer/{asset}")
+                symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+                nested.writestr(symlink, b"../../etc/passwd")
+            else:
+                nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+
+    with pytest.raises(IpaError, match="symlink"):
+        verify_ios_app_office_viewer_assets(app, require=True)
+    with pytest.raises(IpaError, match="symlink"):
+        inspect_device_app(
+            app,
+            version=VERSION,
+            build_number=BUILD,
+            bundle_id=BUNDLE_ID,
+            require_office_viewer=True,
+        )

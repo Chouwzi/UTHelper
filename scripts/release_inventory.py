@@ -79,6 +79,7 @@ _EXPECTED = {
                 "apk_signature",
                 "native_abis",
                 "notification_receivers",
+                "office_viewer_assets",
                 "package_id",
                 "sha256",
                 "version_code",

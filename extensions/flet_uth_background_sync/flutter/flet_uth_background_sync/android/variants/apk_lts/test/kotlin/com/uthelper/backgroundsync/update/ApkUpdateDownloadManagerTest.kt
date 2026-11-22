@@ -129,6 +129,65 @@ class ApkUpdateDownloadManagerTest {
         assertTrue(result.isFailure)
     }
 
+    @Test
+    fun findRequestIdPrefersRunningRequestOverEarlierFailedRequest() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val identity = identity(context)
+        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val shadowManager = Shadows.shadowOf(manager)
+
+        val failedRequest = DownloadManager.Request(Uri.parse(url)).apply {
+            setDestinationInExternalFilesDir(
+                context,
+                android.os.Environment.DIRECTORY_DOWNLOADS,
+                "update-${identity.key}.apk",
+            )
+        }
+        val failedId = manager.enqueue(failedRequest)
+        Shadows.shadowOf(failedRequest).setStatus(DownloadManager.STATUS_FAILED)
+
+        val runningRequest = DownloadManager.Request(Uri.parse(url)).apply {
+            setDestinationInExternalFilesDir(
+                context,
+                android.os.Environment.DIRECTORY_DOWNLOADS,
+                "update-${identity.key}.apk",
+            )
+        }
+        val runningId = manager.enqueue(runningRequest)
+        Shadows.shadowOf(runningRequest).setStatus(DownloadManager.STATUS_RUNNING)
+
+        context.getSharedPreferences("uth_update_downloads", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .commit()
+
+        val result = ApkUpdateDownloadManager(context).status(identity)
+        assertEquals("running", result.status)
+        assertEquals(runningId, result.downloadId)
+        assertTrue(runningId != failedId)
+        assertEquals(2, shadowManager.requestCount)
+    }
+
+    @Test
+    @Config(shadows = [NullCursorShadowDownloadManager::class])
+    fun nullCursorFromSystemDownloadManagerDoesNotThrowNpe() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val identity = identity(context)
+        val downloader = ApkUpdateDownloadManager(context)
+
+        val started = downloader.start(identity)
+        assertEquals("failed", started.status)
+        assertEquals("download_manager_unavailable", started.reason)
+
+        context.getSharedPreferences("uth_update_downloads", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .commit()
+
+        val missing = downloader.status(identity)
+        assertEquals("missing", missing.status)
+    }
+
     private fun identity(context: Context) = UpdateDownloadIdentity(
         url = url,
         sha256 = packageSha256,
@@ -151,4 +210,13 @@ class PendingShadowDownloadManager : org.robolectric.shadows.ShadowDownloadManag
         super.enqueue(request).also {
             Shadows.shadowOf(request).setStatus(DownloadManager.STATUS_PENDING)
         }
+}
+
+@Implements(DownloadManager::class)
+class NullCursorShadowDownloadManager : org.robolectric.shadows.ShadowDownloadManager() {
+    @Implementation
+    override fun enqueue(request: DownloadManager.Request): Long = 42L
+
+    @Implementation
+    override fun query(query: DownloadManager.Query): android.database.Cursor? = null
 }

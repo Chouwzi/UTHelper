@@ -19,7 +19,7 @@ from platform_utils import detect_platform
 from notifiers.manager import NotificationManager
 import threading
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 from core.class_schedule_notifications import REMINDER_LOOKAHEAD_DAYS
@@ -294,6 +294,9 @@ class AppController:
         self._init_window()
         self._distribution_profile = resolve_distribution_channel()
         self._update_candidate = None
+        self._update_ready = False
+        self._update_open_release_page = False
+        self._update_manual_download = False
         self._manual_update_check_requested = False
         self._update_coordinator = self._create_update_coordinator()
         self._init_ui()
@@ -675,6 +678,33 @@ class AppController:
         )
 
     def _open_external_update_url(self, url: str) -> bool:
+        if (
+            not isinstance(url, str)
+            or "\\" in url
+            or any(ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F for ch in url)
+        ):
+            return False
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError:
+            return False
+        decoded_path = unquote(parsed.path)
+        if (
+            parsed.scheme.lower() != "https"
+            or (parsed.hostname or "").lower() != "github.com"
+            or port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or "\\" in decoded_path
+            or not parsed.path.startswith("/Chouwzi/UTHelper/releases/")
+            or not decoded_path.startswith("/Chouwzi/UTHelper/releases/")
+            or ".." in decoded_path.replace("\\", "/").split("/")
+        ):
+            return False
+
         async def _open():
             await self.page.launch_url(url)
 
@@ -4176,6 +4206,7 @@ class AppController:
         if event.candidate is not None:
             if event.candidate != self._update_candidate:
                 self._update_ready = False
+                self._update_manual_download = False
             self._update_candidate = event.candidate
         self._safe_run_task(self._apply_update_event, event)
 
@@ -4186,7 +4217,9 @@ class AppController:
         if candidate is not None:
             if getattr(self, "_update_open_release_page", False):
                 self._open_external_update_url(candidate.manifest.release_notes_url)
-            elif getattr(self, "_update_ready", False):
+            elif getattr(self, "_update_ready", False) or getattr(
+                self, "_update_manual_download", False
+            ):
                 self._show_update_confirmation()
             else:
                 coordinator = getattr(self, "_update_coordinator", None)
@@ -4221,6 +4254,7 @@ class AppController:
                 check_button.content = "Đang kiểm tra..."
         elif event.kind is UpdateEventKind.UP_TO_DATE:
             self._update_ready = False
+            self._update_manual_download = False
             self._update_candidate = None
             self._update_banner.visible = False
             self._diag_breadcrumb("update_check", "succeeded", "github")
@@ -4249,7 +4283,10 @@ class AppController:
             self._update_btn.icon = None
             self._update_progress.visible = False
             self._update_banner.visible = True
-            if getattr(self, "_update_ready", False):
+            if getattr(self, "_update_manual_download", False):
+                self._update_text.value = "Có bản cập nhật"
+                self._update_btn.content = "Mở trang tải"
+            elif getattr(self, "_update_ready", False):
                 self._update_text.value = "Đã tải xong bản cập nhật"
                 self._update_btn.content = "Cài đặt"
         elif event.kind in {UpdateEventKind.DOWNLOADING, UpdateEventKind.DOWNLOAD_PROGRESS}:
@@ -4261,19 +4298,27 @@ class AppController:
                 )
             self._update_btn.disabled = True
             self._update_ready = False
+            self._update_manual_download = False
             self._update_btn.content = "Đang tải"
             self._update_banner.visible = True
             self._update_progress.visible = True
             self._update_progress.value = event.progress or 0.0
-        elif event.kind in {
-            UpdateEventKind.READY_TO_INSTALL,
-            UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
-        }:
+        elif event.kind is UpdateEventKind.READY_TO_INSTALL:
             self._diag_breadcrumb("update_download", "succeeded", "github")
             self._update_btn.disabled = False
             self._update_ready = True
-            self._update_btn.content = "Cài đặt" if event.kind is UpdateEventKind.READY_TO_INSTALL else "Mở trang tải"
-            self._update_text.value = "Đã tải xong bản cập nhật" if event.kind is UpdateEventKind.READY_TO_INSTALL else "Có bản cập nhật"
+            self._update_manual_download = False
+            self._update_btn.content = "Cài đặt"
+            self._update_text.value = "Đã tải xong bản cập nhật"
+            self._update_progress.visible = False
+            self._update_banner.visible = True
+        elif event.kind is UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED:
+            self._diag_breadcrumb("update_download", "succeeded", "github")
+            self._update_btn.disabled = False
+            self._update_ready = False
+            self._update_manual_download = True
+            self._update_btn.content = "Mở trang tải"
+            self._update_text.value = "Có bản cập nhật"
             self._update_progress.visible = False
             self._update_banner.visible = True
         elif event.kind is UpdateEventKind.VERIFYING:
@@ -4289,6 +4334,7 @@ class AppController:
             self._update_btn.disabled = True
         elif event.kind is UpdateEventKind.INSTALL_PERMISSION_REQUIRED:
             self._update_ready = True
+            self._update_manual_download = False
             self._update_banner.visible = True
             self._update_text.value = "Cho phép cài ứng dụng, rồi quay lại và nhấn Cài đặt."
             self._update_btn.content = "Cài đặt"
@@ -4296,11 +4342,7 @@ class AppController:
             self._update_progress.visible = False
         elif event.kind is UpdateEventKind.INSTALL_FAILED:
             self._diag_breadcrumb("update_install", "failed", "os")
-            self._update_ready = event.message not in {
-                "source_unavailable",
-                "Windows installer is unavailable",
-                "installer_unavailable",
-            }
+            self._update_manual_download = False
             self._update_banner.visible = True
             self._update_text.value = _update_install_error_message(event.message)
             self._update_btn.content = "Thử lại"
@@ -4314,6 +4356,16 @@ class AppController:
                 "installer is unavailable on this platform",
                 "platform_unavailable",
             }
+            self._update_ready = (
+                not self._update_open_release_page
+                and event.message not in {
+                    "source_unavailable",
+                    "Windows installer is unavailable",
+                    "installer_unavailable",
+                    "sha256_mismatch",
+                    "size_mismatch",
+                }
+            )
             if self._update_open_release_page:
                 self._update_btn.content = "Bản phát hành"
             self._update_btn.disabled = False
@@ -4335,6 +4387,7 @@ class AppController:
                     )
             else:
                 self._update_ready = False
+                self._update_manual_download = False
                 self._diag_breadcrumb("update_download", "failed", "github")
                 should_notify = self._update_banner.visible
                 self._manual_update_check_requested = False
@@ -4365,6 +4418,7 @@ class AppController:
                     )
         elif event.kind is UpdateEventKind.CANCELLED:
             self._update_ready = False
+            self._update_manual_download = False
             self._update_text.value = "Đã hủy tải bản cập nhật"
             self._diag_breadcrumb("update_download", "cancelled", "user")
             self._update_btn.disabled = False
