@@ -2570,3 +2570,14 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
   - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2929 passed, 26 skipped** (0 failed).
   - Live Flet Web + Playwright verification (`1280x820` `steel_light`): verified untimed quiz detail rendering without error banner, `"Đang xem ›"` selected card & hover state in split-view, and clean `Settings -> Bảng điểm` transition.
+
+## Post-M4 Bugfix: `DetailView` Header `Semantics.content` Red Flash on Card Open (2026-11-22)
+
+- **Fix `Semantics.content must be provided and visible` Flash (`src/gui/components/detail_view.py`, `tests/test_app_controller_detail_navigation.py`)**:
+  - Diagnosed from user screenshot on card open: `DetailView._init_layout()` previously wrapped `self._header_open_btn` inside an anonymous `ft.Semantics(label="Mở bằng trình duyệt ngoài", button=True, content=self._header_open_btn)` whose `visible` remained `True`, while `DetailView.show_loading()` set `self._header_open_btn.visible = False` during the ~0.2–0.4s `fetch_full_details` round-trip (and `update_detail()` kept `self._header_open_btn.visible = False` when `browser_available` was `False` or `_embedded_in_pane` was `True`). On the Flutter client (`flet 0.86.5`), `SemanticsControl` checks `content != null && content.isVisible` and rendered the red `ErrorControl("Semantics.content must be provided and visible")` chip in the top-right header.
+  - Stored `self._header_open_semantics` with initial `visible=False` matching `self._header_open_btn.visible = False`, and added `DetailView._set_header_open_visible(target_view, visible)` so showing enables `btn.visible = True` before `semantics.visible = True` and hiding disables `semantics.visible = False` and `btn.visible = False` across `show_loading()` and `update_detail()`.
+  - Audited all `ft.Semantics(...)` and `visible_control()` wrappers across `src/gui/` and confirmed no other control toggles inner `.content.visible = False` while leaving an outer `ft.Semantics` visible.
+  - Added `test_detail_view_never_leaves_visible_semantics_with_hidden_content` in `tests/test_app_controller_detail_navigation.py` walking the entire `DetailView` control tree across `init`, `show_loading`, `update_detail` (valid & empty URLs), and `embedded_in_pane=True`.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2930 passed, 26 skipped** (0 failed).

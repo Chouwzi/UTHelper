@@ -376,3 +376,94 @@ def test_orchestrator_skips_courses_ws_for_thnn_detail_urls():
     )
     assert res is None
     assert ws_calls == []
+
+
+def test_detail_view_never_leaves_visible_semantics_with_hidden_content():
+    import flet as ft
+
+    def _walk_controls(root):
+        seen = set()
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node is None or id(node) in seen:
+                continue
+            seen.add(id(node))
+            yield node
+            content = getattr(node, "content", None)
+            if isinstance(content, ft.BaseControl):
+                stack.append(content)
+            controls = getattr(node, "controls", None)
+            if isinstance(controls, (list, tuple)):
+                for child in controls:
+                    if isinstance(child, ft.BaseControl):
+                        stack.append(child)
+
+    def _assert_semantics_invariant(root_control, context_label: str) -> None:
+        for ctrl in _walk_controls(root_control):
+            if isinstance(ctrl, ft.Semantics) and getattr(ctrl, "visible", True):
+                inner = getattr(ctrl, "content", None)
+                assert inner is not None, f"{context_label}: visible Semantics missing content"
+                assert getattr(inner, "visible", True) is True, (
+                    f"{context_label}: Semantics.content must be provided and visible "
+                    f"(label={getattr(ctrl, 'label', None)!r})"
+                )
+
+    page = SimpleNamespace(
+        width=900,
+        height=760,
+        overlay=[],
+        update=lambda: None,
+        run_task=lambda *_a, **_k: None,
+    )
+    view = DetailView(page, on_close=lambda: None)
+
+    # 1) Initial construction (before any item is opened)
+    assert view._header_open_semantics.visible is False
+    assert view._header_open_btn.visible is False
+    _assert_semantics_invariant(view, "init")
+
+    # 2) Opening a card enters show_loading() first (~0.2-0.4s before fetch_full_details completes)
+    loading_item = {
+        "id": "assign-1",
+        "title": "Nộp dự án hoàn chỉnh tới hạn",
+        "course": "[012012213905] - Đồ án thực tế công nghệ phần mềm - CNS_CS1",
+        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=42",
+        "type": "assignment",
+        "urgency": "safe",
+        "deadline": "2026-12-03 09:07:00",
+        "details": {},
+    }
+    view.show_loading(loading_item)
+    assert view._header_open_semantics.visible is False
+    assert view._header_open_btn.visible is False
+    _assert_semantics_invariant(view, "show_loading")
+
+    # 3) update_detail() with safe external URL enables both button and semantics wrapper
+    view.update_detail(loading_item)
+    assert view._header_open_semantics.visible is True
+    assert view._header_open_btn.visible is True
+    _assert_semantics_invariant(view, "update_detail(valid_url)")
+
+    # 4) Switching to another card hides semantics wrapper again during show_loading()
+    view.show_loading(loading_item)
+    assert view._header_open_semantics.visible is False
+    assert view._header_open_btn.visible is False
+    _assert_semantics_invariant(view, "second show_loading")
+
+    # 5) update_detail() with empty/unsafe URL keeps both hidden without red flash
+    no_url_item = dict(loading_item, url="")
+    view.update_detail(no_url_item)
+    assert view._header_open_semantics.visible is False
+    assert view._header_open_btn.visible is False
+    _assert_semantics_invariant(view, "update_detail(empty_url)")
+
+    # 6) Embedded-in-pane mode keeps header open semantics hidden even with valid URL
+    embedded_view = DetailView(page, on_close=lambda: None, embedded_in_pane=True)
+    _assert_semantics_invariant(embedded_view, "embedded init")
+    embedded_view.show_loading(loading_item)
+    _assert_semantics_invariant(embedded_view, "embedded show_loading")
+    embedded_view.update_detail(loading_item)
+    assert embedded_view._header_open_semantics.visible is False
+    assert embedded_view._header_open_btn.visible is False
+    _assert_semantics_invariant(embedded_view, "embedded update_detail")
