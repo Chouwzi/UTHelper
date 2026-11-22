@@ -883,3 +883,54 @@ def test_windows_flet_builds_append_msvc_coroutine_deprecation_guard():
     windows_release_script = _read("scripts/build_windows_release.ps1")
     assert cl_flag in windows_release_script
     assert safe_append_marker in windows_release_script
+
+
+def test_android_manual_dispatch_supports_installable_debug_test_apk_without_weakening_pr_guardrails():
+    workflow = _read(".github/workflows/build-android.yml")
+
+    # Manual dispatch inputs for lightweight installable QA test APKs.
+    for marker in (
+        "apk_arch:",
+        "apk_signing:",
+        "apk_namespace:",
+        "default: arm64-v8a",
+        "default: debug-test",
+        "default: isolated",
+        "--arch arm64-v8a",
+        '--bundle-id "$APK_PACKAGE_ID"',
+        'APK_PACKAGE_ID="com.uthelper.qa"',
+        '"$APKSIGNER" verify --verbose --print-certs "$TEST_APK"',
+        "DEBUG_TEST_ONLY.txt",
+        "android-debug-test-",
+    ):
+        assert marker in workflow
+
+    # Installable debug-test mode is strictly gated to manual workflow_dispatch runs on apk_lts.
+    assert (
+        'if [ "$CHANNEL" = "apk_lts" ] && [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ]; then'
+        in workflow
+    )
+    assert (
+        'if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] && [ "${APK_INSTALLABLE_TEST:-false}" = "true" ]; then'
+        in workflow
+    )
+    assert (
+        "if: matrix.channel == 'apk_lts' && (github.event_name != 'workflow_dispatch' || env.APK_INSTALLABLE_TEST != 'true')"
+        in workflow
+    )
+    assert (
+        "if: matrix.channel == 'apk_lts' && github.event_name == 'workflow_dispatch' && env.APK_INSTALLABLE_TEST == 'true'"
+        in workflow
+    )
+
+    # Production Android release signing secrets remain strictly isolated to release.yml.
+    for forbidden in (
+        "ANDROID_KEYSTORE_BASE64",
+        "ANDROID_KEYSTORE_PASSWORD",
+        "ANDROID_KEY_PASSWORD",
+        "ANDROID_KEY_ALIAS",
+        "ANDROID_SIGNING_CERT_SHA256",
+        "environment: release",
+    ):
+        assert forbidden not in workflow
+
