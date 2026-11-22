@@ -44,6 +44,9 @@ class CourseGradeItem:
     )
     components: tuple[ComponentScore, ...] = ()
     subject_code: str = ""
+    class_code: str = ""
+    pass_status: bool | None = None
+    extra_portal_fields: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

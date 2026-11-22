@@ -8,6 +8,8 @@ from typing import Optional
 import flet as ft
 
 from core.course_grade_scraper import GradeRow
+from core.courses.models import CourseGradeItem as CoreMoodleGradeItem, CourseSummary
+from core.courses.shortname_parser import parse_portal_semester_label
 from gui.core.theme import C
 
 _TOTAL_ROWS = {"course total", "tổng khóa học", "tổng điểm khóa học"}
@@ -112,6 +114,129 @@ def find_moodle_course(item, moodle_courses):
         if best is None and name and len(name) >= 6 and (name in cname or cname in name):
             best = c
     return best
+
+
+def match_portal_course_to_summary(
+    portal_course,
+    catalog_courses: list[CourseSummary],
+    *,
+    semester_name: str = "",
+) -> Optional[CourseSummary]:
+    """Match a Portal CourseGradeItem against cached CourseSummary entries."""
+    if portal_course is None or not catalog_courses:
+        return None
+
+    portal_codes = [
+        raw.strip()
+        for raw in (
+            getattr(portal_course, "class_code", ""),
+            getattr(portal_course, "course_code", ""),
+            getattr(portal_course, "subject_code", ""),
+        )
+        if str(raw or "").strip()
+    ]
+    # Deduplicate while preserving order
+    seen_codes: set[str] = set()
+    unique_codes: list[str] = []
+    for code in portal_codes:
+        key = code.casefold()
+        if key not in seen_codes:
+            seen_codes.add(key)
+            unique_codes.append(code)
+
+    portal_name_norm = _norm(getattr(portal_course, "course_name", ""))
+    target_sem = ""
+    if semester_name:
+        target_sem, _ = parse_portal_semester_label(semester_name)
+
+    best_score: Optional[tuple[int, int, int, int]] = None
+    best_summary: Optional[CourseSummary] = None
+
+    for summary in catalog_courses:
+        s_code = str(getattr(summary, "course_code", "") or "").strip()
+        s_short = str(getattr(summary, "shortname", "") or "").strip()
+        s_full = str(getattr(summary, "fullname", "") or "").strip()
+        s_disp = str(getattr(summary, "display_name", "") or "").strip()
+        s_haystack = f"{s_short} {s_full}"
+
+        tier = 0
+        for p_code in unique_codes:
+            if len(p_code) >= 6:
+                if s_code and s_code.casefold() == p_code.casefold():
+                    tier = max(tier, 4)
+                    break
+                if (
+                    p_code.casefold() in s_haystack.casefold()
+                    or (s_code and s_code.casefold().startswith(p_code.casefold()))
+                    or (len(s_code) >= 6 and p_code.casefold().startswith(s_code.casefold()))
+                ):
+                    tier = max(tier, 3)
+            elif len(p_code) >= 3:
+                if re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(p_code)}(?![A-Za-z0-9])",
+                    s_haystack,
+                    re.IGNORECASE,
+                ):
+                    tier = max(tier, 2)
+
+        if tier < 2 and portal_name_norm:
+            s_disp_norm = _norm(s_disp)
+            s_full_norm = _norm(s_full)
+            if portal_name_norm == s_disp_norm or portal_name_norm == s_full_norm:
+                tier = max(tier, 2)
+            elif len(portal_name_norm) >= 6 and (
+                (s_disp_norm and (portal_name_norm in s_disp_norm or s_disp_norm in portal_name_norm))
+                or (s_full_norm and (portal_name_norm in s_full_norm or s_full_norm in portal_name_norm))
+            ):
+                tier = max(tier, 1)
+
+        if tier == 0:
+            continue
+
+        s_sem = str(getattr(summary, "semester_label", "") or "").strip()
+        if target_sem:
+            if s_sem == target_sem:
+                sem_rank = 1
+            elif not s_sem or s_sem in {"Khác", "THNN"}:
+                sem_rank = 0
+            else:
+                sem_rank = -1
+        else:
+            sem_rank = 0
+
+        source_rank = 1 if getattr(summary, "source", "") == "courses" else 0
+        synced_at = int(getattr(summary, "last_synced_at", 0) or 0)
+        score = (tier, sem_rank, source_rank, synced_at)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_summary = summary
+
+    return best_summary
+
+
+def grade_rows_to_moodle_items(rows) -> list[CoreMoodleGradeItem]:
+    """Convert legacy CourseGradeReport GradeRow entries to Core CourseGradeItem objects."""
+    items: list[CoreMoodleGradeItem] = []
+    for idx, row in enumerate(rows or [], start=1):
+        name = str(getattr(row, "name", "") or "").strip()
+        if not name:
+            continue
+        item_module = (
+            "course"
+            if is_total_row(row)
+            else ("attendance" if getattr(row, "is_attendance", False) else "")
+        )
+        raw_grade = str(getattr(row, "grade", "") or "").strip()
+        items.append(
+            CoreMoodleGradeItem(
+                id=idx,
+                item_name=name,
+                item_module=item_module,
+                grade_formatted=raw_grade or "-",
+                percentage=str(getattr(row, "percentage", "") or "").strip(),
+            )
+        )
+    return items
 
 
 def portal_rows(item) -> list[GradeRow]:

@@ -1,15 +1,27 @@
 from __future__ import annotations
 
+import logging
+from typing import Any, Callable, Optional
+
 import flet as ft
 from core.academic_radar.models import RadarMetric
 from gui.core.theme import C
+
+logger = logging.getLogger(__name__)
 
 
 class MetricDetailSheet:
     """Displays comprehensive breakdown, contributors, and formula explanation for a single metric."""
 
     @staticmethod
-    def show(page: ft.Page, metric: RadarMetric, is_mobile: bool = False) -> None:
+    def show(
+        page: ft.Page,
+        metric: RadarMetric,
+        is_mobile: bool = False,
+        *,
+        on_dismiss: Optional[Callable[[], Any]] = None,
+        on_closing: Optional[Callable[[], Any]] = None,
+    ) -> Optional[Callable[[], None]]:
         # Status capsule
         status_badge = ft.Container(
             content=ft.Text(
@@ -237,11 +249,26 @@ class MetricDetailSheet:
         max_h = max(240.0, min(520.0, page_h * 0.65)) if page_h > 0 else None
 
         used_overlay = False
+        is_real_page = isinstance(page, ft.Page)
+
+        def _notify_dismiss(_event=None) -> None:
+            if callable(on_dismiss):
+                try:
+                    on_dismiss()
+                except Exception:
+                    logger.debug("MetricDetailSheet on_dismiss failed", exc_info=True)
 
         def _close_dialog(p: ft.Page, d: ft.AlertDialog):
+            if callable(on_closing):
+                try:
+                    on_closing()
+                except Exception:
+                    logger.debug("MetricDetailSheet on_closing failed", exc_info=True)
             if not used_overlay:
                 try:
                     p.pop_dialog()
+                    if not is_real_page:
+                        _notify_dismiss()
                     return
                 except Exception:
                     pass
@@ -253,6 +280,7 @@ class MetricDetailSheet:
                     p.update()
                 except Exception:
                     pass
+            _notify_dismiss()
 
         def _on_key_down(event) -> None:
             if getattr(event, "key", "") == "Escape":
@@ -270,7 +298,7 @@ class MetricDetailSheet:
                 semantics_label=metric.label,
             ),
             content=ft.KeyboardListener(
-                autofocus=True,
+                autofocus=False,
                 on_key_down=_on_key_down,
                 content=ft.Container(
                     content=content_column,
@@ -285,6 +313,7 @@ class MetricDetailSheet:
                     on_click=lambda _: _close_dialog(page, dialog),
                 )
             ],
+            on_dismiss=_notify_dismiss,
             inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
             title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
             content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
@@ -305,3 +334,5 @@ class MetricDetailSheet:
                     page.update()
                 except Exception:
                     pass
+
+        return lambda: _close_dialog(page, dialog)

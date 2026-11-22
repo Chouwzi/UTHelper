@@ -384,3 +384,594 @@ def test_planner_and_metric_detail_dialogs_fit_360px_viewport_without_overflow()
     assert metric_dlg.inset_padding == ft.Padding.symmetric(horizontal=16, vertical=24)
     assert metric_dlg.content.content.width <= 296.0
     assert metric_dlg.content.content.padding is None
+
+
+def _collect_texts(root) -> list[str]:
+    texts: list[str] = []
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        if cur is None:
+            continue
+        if isinstance(cur, ft.Text) and cur.value is not None:
+            texts.append(str(cur.value))
+        for attr in ("content", "title", "subtitle"):
+            child = getattr(cur, attr, None)
+            if child is not None and not isinstance(child, str):
+                stack.append(child)
+        for seq_attr in ("controls", "actions"):
+            seq = getattr(cur, seq_attr, None)
+            if isinstance(seq, (list, tuple)):
+                stack.extend(seq)
+    return texts
+
+
+def _walk_controls(root):
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        if cur is None or isinstance(cur, str):
+            continue
+        yield cur
+        for attr in ("content", "title", "subtitle"):
+            child = getattr(cur, attr, None)
+            if child is not None and not isinstance(child, str):
+                stack.append(child)
+        for seq_attr in ("controls", "actions"):
+            seq = getattr(cur, seq_attr, None)
+            if isinstance(seq, (list, tuple)):
+                stack.extend(seq)
+
+
+def test_course_components_dialog_two_tabs_portal_and_course_parity():
+    import dataclasses
+    from core.academic_radar.models import ComponentScore, CourseEligibility
+    from core.courses.models import CourseGradeItem as CoreMoodleGradeItem
+    from gui.components.academic_radar.course_components_dialog import (
+        MoodleCourseGradesResult,
+        show_course_components_dialog,
+    )
+
+    course = CourseGradeItem(
+        course_id="501",
+        course_code="012000101",
+        course_name="Lập trình Python",
+        credits=3,
+        process_grade=8.5,
+        exam_grade=9.0,
+        final_grade=8.8,
+        credit_grade=4.0,
+        letter_grade="A",
+        is_passed=True,
+        eligibility=CourseEligibility(status="academic", reason="Tính GPA chính khóa"),
+        components=(ComponentScore("Chuyên cần", 9.5, 20.0),),
+        subject_code="0120001",
+        class_code="012000101",
+        pass_status=True,
+        extra_portal_fields={"diemThiLan1": 9.0, "hinhThucThi": "Vấn đáp"},
+    )
+    moodle_res = MoodleCourseGradesResult(
+        grades=[
+            CoreMoodleGradeItem(
+                id=1,
+                item_name="Quiz 1 (20%)",
+                item_module="quiz",
+                grade_formatted="8.5",
+                range_formatted="0–10",
+                percentage="85 %",
+                feedback_html="<p>Làm tốt</p>",
+            ),
+            CoreMoodleGradeItem(
+                id=2,
+                item_name="Course total",
+                item_module="course",
+                grade_formatted="4.0",
+                range_formatted="0–10",
+                percentage="40 %",
+                weight="100 %",
+            ),
+            CoreMoodleGradeItem(
+                id=3,
+                item_name="Bài tự luyện thêm",
+                item_module="assign",
+                grade_formatted="-",
+            ),
+        ],
+        course_id=42,
+        course_title="Lập trình Python [HK1]",
+        source="courses",
+        last_synced_at=1_770_000_000,
+    )
+
+    shown = []
+    page = SimpleNamespace(
+        width=360,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown.append,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    show_course_components_dialog(page, course, moodle_result=moodle_res)
+    dlg = shown[0]
+
+    assert dlg.inset_padding == ft.Padding.symmetric(horizontal=16, vertical=24)
+    assert isinstance(dlg.content, ft.KeyboardListener)
+    assert dlg.content.autofocus is False
+    dialog_container = dlg.content.content
+    assert dialog_container.width <= 296.0
+
+    main_col = dialog_container.content
+    tab_track = main_col.controls[0]
+    body_host = main_col.controls[1]
+    tab_pills = tab_track.content.controls
+    assert len(tab_pills) == 2
+
+    # Tab 0 = Portal: shows component + omitted Portal metadata, never repeats outer QT/Thi/TK rows
+    portal_texts = _collect_texts(body_host)
+    assert "Chuyên cần" in portal_texts
+    assert "4.00" in portal_texts
+    assert "0120001" in portal_texts
+    assert "012000101" in portal_texts
+    assert "Điểm thi lần 1" in portal_texts
+    assert "Vấn đáp" in portal_texts
+    assert "Điểm quá trình" not in portal_texts
+    assert "Tổng khóa học" not in portal_texts
+
+    # Switch to Tab 1 = Course
+    tab_pills[1].on_click(None)
+    course_texts = _collect_texts(body_host)
+    assert "ĐIỂM ĐÃ CẬP NHẬT" in course_texts
+    assert "Quiz 1 (20%)" in course_texts
+    assert "Tổng kết" in course_texts
+    assert "Trọng số 20%" in course_texts
+    assert "Làm tốt" in course_texts
+    assert "Chưa có điểm / Bài tự luyện" in course_texts
+    assert "Nguồn: Moodle (Môn học)" in course_texts
+
+    # Verify Flet invariants: no expand=True inside Row(wrap=True) & ExpansionTile uses OutlinedBorder
+    for ctrl in _walk_controls(dlg):
+        if isinstance(ctrl, ft.Row) and bool(getattr(ctrl, "wrap", False)):
+            for ch in ctrl.controls:
+                assert not getattr(ch, "expand", None)
+        if isinstance(ctrl, ft.ExpansionTile):
+            assert isinstance(ctrl.shape, ft.OutlinedBorder)
+            assert isinstance(ctrl.collapsed_shape, ft.OutlinedBorder)
+        if isinstance(ctrl, ft.Container) and ctrl.margin is not None:
+            assert isinstance(ctrl.margin, ft.Margin)
+        for f in dataclasses.fields(ctrl):
+            if f.name in {"padding", "inset_padding", "title_padding", "content_padding", "actions_padding"}:
+                val = getattr(ctrl, f.name, None)
+                if val is not None:
+                    assert isinstance(val, ft.Padding)
+
+
+def test_course_components_dialog_course_tab_resolves_async_loader():
+    import asyncio
+    from core.courses.models import CourseGradeItem as CoreMoodleGradeItem
+    from gui.components.academic_radar.course_components_dialog import (
+        MoodleCourseGradesResult,
+        show_course_components_dialog,
+    )
+
+    course = CourseGradeItem("1", "CS1", "Algorithms", 3, 8.0, 8.5, 8.3)
+    initial = MoodleCourseGradesResult(needs_async_fetch=True)
+
+    async def _loader(_course):
+        return MoodleCourseGradesResult(
+            grades=[
+                CoreMoodleGradeItem(
+                    id=10,
+                    item_name="Midterm",
+                    item_module="quiz",
+                    grade_formatted="8.5",
+                )
+            ],
+            course_id=77,
+            course_title="Algorithms",
+            source="courses",
+        )
+
+    async def scenario():
+        shown = []
+        scheduled = []
+        page = SimpleNamespace(
+            width=1000,
+            height=800,
+            dialogs=[],
+            overlay=[],
+            show_dialog=shown.append,
+            pop_dialog=lambda: None,
+            update=lambda: None,
+            run_task=lambda fn: scheduled.append(asyncio.create_task(fn())),
+        )
+        show_course_components_dialog(
+            page,
+            course,
+            moodle_result=initial,
+            async_loader=_loader,
+        )
+        dlg = shown[0]
+        main_col = dlg.content.content.content
+        tab_pills = main_col.controls[0].content.controls
+        body_host = main_col.controls[1]
+
+        tab_pills[1].on_click(None)
+        assert "Đang tải bảng điểm Moodle..." in _collect_texts(body_host)
+
+        await asyncio.gather(*scheduled)
+        texts_after = _collect_texts(body_host)
+        assert "Midterm" in texts_after
+        assert "8.5" in texts_after
+
+    asyncio.run(scenario())
+
+
+def test_all_academic_radar_dialogs_keep_keyboard_listener_with_autofocus_false():
+    from core.academic_radar.overall import OverallGpa
+    from gui.components.academic_radar.course_components_dialog import (
+        show_course_components_dialog,
+    )
+    from gui.components.academic_radar.expected_grade_dialog import ExpectedGradeDialog
+    from gui.components.academic_radar.gpa_detail_sheet import GpaDetailSheet
+
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+    metric = profile.metrics["breakthrough"]
+    overall = OverallGpa(gpa_10=8.5, gpa_4=3.5, total_credits=18, semester_count=1, course_count=6)
+
+    def _page():
+        shown = []
+        return (
+            SimpleNamespace(
+                width=400,
+                height=800,
+                dialogs=[],
+                overlay=[],
+                show_dialog=shown.append,
+                pop_dialog=lambda: None,
+                update=lambda: None,
+            ),
+            shown,
+        )
+
+    p1, s1 = _page()
+    MetricDetailSheet.show(p1, metric)
+    assert isinstance(s1[0].content, ft.KeyboardListener)
+    assert s1[0].content.autofocus is False
+
+    p2, s2 = _page()
+    GpaDetailSheet.show(p2, profile)
+    assert isinstance(s2[0].content, ft.KeyboardListener)
+    assert s2[0].content.autofocus is False
+
+    p3, s3 = _page()
+    ExpectedGradeDialog.show(p3, overall)
+    assert isinstance(s3[0].content, ft.KeyboardListener)
+    assert s3[0].content.autofocus is False
+
+    p4, s4 = _page()
+    show_course_components_dialog(p4, sem.courses[0])
+    assert isinstance(s4[0].content, ft.KeyboardListener)
+    assert s4[0].content.autofocus is False
+
+    p5, s5 = _page()
+    gv = GradeOverviewView(page=p5)
+    gv.update_academic_data([sem], [profile])
+    gv._open_planner(None)
+    assert isinstance(s5[0].content, ft.KeyboardListener)
+    assert s5[0].content.autofocus is False
+
+    p6, s6 = _page()
+    card = AcademicRadarCard(profiles=[profile], page=p6)
+    card._show_radar_info(None)
+    assert isinstance(s6[0].content, ft.KeyboardListener)
+    assert s6[0].content.autofocus is False
+
+
+def test_grade_overview_preserves_and_restores_scroll_offset_across_modal_dismissals():
+    import asyncio
+    import warnings
+
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+
+    # 1. Synchronous test: verifies key, auto_scroll=False, synthetic 0.0 guard, and zero unawaited coro warnings
+    shown_sync = []
+    scroll_calls_sync = []
+    page_sync = SimpleNamespace(
+        width=400,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown_sync.append,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    gv_sync = GradeOverviewView(page=page_sync)
+    gv_sync.update_academic_data([sem], [profile])
+    assert gv_sync._scrollable_content.key == "grade_overview_scroll"
+    assert gv_sync._scrollable_content.auto_scroll is False
+    assert callable(gv_sync._scrollable_content.on_scroll)
+
+    gv_sync._scrollable_content.scroll_to = lambda **kw: scroll_calls_sync.append(kw)
+    gv_sync._on_content_scroll(SimpleNamespace(pixels=640.0, min_scroll_extent=0.0, out_of_range=False))
+    assert gv_sync._saved_scroll_offset == 640.0
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        gv_sync._on_course_clicked(None, sem.courses[0])
+        assert len(gv_sync._open_dialog_tokens) == 1
+        # Synthetic focus-jump scroll event while modal is open must NOT clobber saved offset
+        gv_sync._on_content_scroll(SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False))
+        assert gv_sync._saved_scroll_offset == 640.0
+        # Close via button
+        shown_sync[-1].actions[0].on_click(None)
+        assert gv_sync._open_dialog_tokens == {}
+        assert scroll_calls_sync == [{"offset": 640.0, "duration": 0}]
+        assert gv_sync._saved_scroll_offset == 640.0
+        assert not [w for w in caught if "was never awaited" in str(w.message)]
+
+    # 2. Async test across all 4 dialog triggers (course, planner, metric sheet, radar info) & handle_back()
+    async def scenario():
+        shown = []
+        scroll_calls = []
+
+        async def _fake_scroll_to(**kw):
+            scroll_calls.append(kw)
+
+        page = SimpleNamespace(
+            width=400,
+            height=800,
+            dialogs=[],
+            overlay=[],
+            show_dialog=shown.append,
+            pop_dialog=lambda: None,
+            update=lambda: None,
+        )
+        gv = GradeOverviewView(page=page)
+        gv.update_academic_data([sem], [profile])
+        gv._scrollable_content.scroll_to = _fake_scroll_to
+        gv._on_content_scroll(SimpleNamespace(pixels=520.0, min_scroll_extent=0.0, out_of_range=False))
+
+        # a) Course dialog dismissed via handle_back()
+        gv._on_course_clicked(None, sem.courses[0])
+        gv._on_content_scroll(SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False))
+        assert gv.handle_back() is True
+        assert gv.handle_back() is False
+        await asyncio.sleep(0.08)
+        assert scroll_calls[-1] == {"offset": 520.0, "duration": 0}
+
+        # b) Planner dialog dismissed via Escape
+        gv._open_planner(None)
+        gv._on_content_scroll(SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False))
+        shown[-1].content.on_key_down(SimpleNamespace(key="Escape"))
+        await asyncio.sleep(0.08)
+        assert scroll_calls[-1] == {"offset": 520.0, "duration": 0}
+
+        # c) MetricDetailSheet dismissed via on_dismiss
+        gv._radar_card._on_metric_click(profile.metrics["breakthrough"])
+        gv._on_content_scroll(SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False))
+        shown[-1].on_dismiss(None)
+        await asyncio.sleep(0.08)
+        assert scroll_calls[-1] == {"offset": 520.0, "duration": 0}
+
+        # d) Radar info dialog dismissed via close button
+        gv._radar_card._show_radar_info(None)
+        gv._on_content_scroll(SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False))
+        shown[-1].actions[0].on_click(None)
+        await asyncio.sleep(0.08)
+        assert scroll_calls[-1] == {"offset": 520.0, "duration": 0}
+        assert gv._saved_scroll_offset == 520.0
+
+    asyncio.run(scenario())
+
+
+def test_course_components_dialog_kv_rows_bound_long_values_and_pass_status_none():
+    from core.academic_radar.models import CourseEligibility
+    from gui.components.academic_radar.course_components_dialog import (
+        build_portal_tab_body,
+        show_course_components_dialog,
+    )
+    from gui.components.academic_radar.expected_grade_dialog import ExpectedGradeDialog
+    from gui.components.academic_radar.gpa_detail_sheet import GpaDetailSheet
+    from core.academic_radar.overall import OverallGpa
+
+    long_reason = "Học phần điều kiện theo quy chế UTH (GDTC/GDQP/Anh văn tổng quát)"
+    failing_unflagged = CourseGradeItem(
+        course_id="99",
+        course_code="012000101",
+        course_name="Giải tích 1",
+        credits=3,
+        final_grade=3.0,
+        credit_grade=None,
+        letter_grade="",
+        is_passed=True,
+        eligibility=CourseEligibility(status="conditional", reason=long_reason),
+        pass_status=None,
+        extra_portal_fields={"ghiChu": "X" * 200},
+    )
+
+    shown = []
+    page = SimpleNamespace(
+        width=360,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown.append,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    show_course_components_dialog(page, failing_unflagged)
+    dlg = shown[0]
+    body_host = dlg.content.content.content.controls[1]
+
+    # Failing final_grade with pass_status=None must render "Chưa đạt", not "Đạt"
+    portal_texts = _collect_texts(body_host)
+    assert "Chưa đạt" in portal_texts
+    assert "Đạt" not in portal_texts
+
+    # Both label and value inside _build_kv_row must have bounded flex constraints on 360px
+    kv_rows = [
+        ctrl
+        for ctrl in _walk_controls(body_host)
+        if isinstance(ctrl, ft.Row)
+        and len(ctrl.controls) == 2
+        and all(isinstance(ch, ft.Text) for ch in ctrl.controls)
+    ]
+    assert kv_rows
+    for row in kv_rows:
+        lbl, val = row.controls
+        assert lbl.expand == 2
+        assert lbl.max_lines == 2
+        assert lbl.overflow == ft.TextOverflow.ELLIPSIS
+        assert val.expand == 3
+        assert val.max_lines == 3
+        assert val.overflow == ft.TextOverflow.ELLIPSIS
+
+    # Ungraded course with pass_status=None shows "Chưa có kết quả"
+    ungraded = CourseGradeItem(
+        course_id="100",
+        course_code="012000102",
+        course_name="Giải tích 2",
+        credits=3,
+        final_grade=None,
+        pass_status=None,
+    )
+    ungraded_texts = _collect_texts(build_portal_tab_body(ungraded, is_mobile=True))
+    assert "Chưa có kết quả" in ungraded_texts
+
+    # Legacy GpaDetailSheet & ExpectedGradeDialog include mobile inset/content padding on 360px
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+    overall = OverallGpa(gpa_10=8.5, gpa_4=3.5, total_credits=18, semester_count=1, course_count=6)
+    shown_legacy = []
+    legacy_page = SimpleNamespace(
+        width=360,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown_legacy.append,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    GpaDetailSheet.show(legacy_page, profile)
+    ExpectedGradeDialog.show(legacy_page, overall)
+    for leg_dlg in shown_legacy:
+        assert leg_dlg.inset_padding == ft.Padding.symmetric(horizontal=16, vertical=24)
+        assert leg_dlg.content_padding == ft.Padding.only(left=16, right=16, top=12, bottom=8)
+
+
+def test_grade_overview_modal_scroll_guard_races_and_pop_dialog_fallback():
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+
+    class _FakeSession:
+        def __init__(self):
+            self.index = {}
+
+        def update_control(self, *a, **kw):
+            pass
+
+        def register_control(self, *a, **kw):
+            pass
+
+        def patch_control(self, *a, **kw):
+            pass
+
+    class _RealPageDouble(ft.Page):
+        run_task = None  # type: ignore[assignment]
+
+        def __init__(self, *, raise_on_pop: bool = False):
+            super().__init__(sess=_FakeSession())
+            self.width = 400
+            self.height = 800
+            self.shown = []
+            self.pop_calls = 0
+            self.raise_on_pop = raise_on_pop
+
+        def show_dialog(self, dialog):
+            self.shown.append(dialog)
+
+        def pop_dialog(self):
+            self.pop_calls += 1
+            if self.raise_on_pop:
+                raise RuntimeError("pop_dialog failed")
+
+        def update(self, *controls):
+            pass
+
+    # 1. Late on_dismiss after overlay close must NOT yank scroll back to stale 640.0
+    real_page1 = _RealPageDouble()
+    scroll_calls1 = []
+    gv1 = GradeOverviewView(page=real_page1)
+    gv1.update_academic_data([sem], [profile])
+    gv1._scrollable_content.scroll_to = lambda **kw: scroll_calls1.append(kw)
+    gv1._on_content_scroll(SimpleNamespace(pixels=640.0, min_scroll_extent=0.0, out_of_range=False))
+    tok1 = gv1._begin_modal_scroll_guard()
+    gv1._end_modal_scroll_guard(tok1)
+    assert len(scroll_calls1) == 1
+    gv1._on_content_scroll(SimpleNamespace(pixels=1200.0, min_scroll_extent=0.0, out_of_range=False))
+    assert gv1._saved_scroll_offset == 1200.0
+    # Second (late) _end_modal_scroll_guard(tok1) must be a strict no-op
+    gv1._end_modal_scroll_guard(tok1)
+    assert len(scroll_calls1) == 1
+    assert gv1._saved_scroll_offset == 1200.0
+
+    # 2. Rapid close-then-reopen before async on_dismiss & handle_back() after close button
+    real_page2 = _RealPageDouble()
+    scroll_calls2 = []
+    gv2 = GradeOverviewView(page=real_page2)
+    gv2.update_academic_data([sem], [profile])
+    gv2._scrollable_content.scroll_to = lambda **kw: scroll_calls2.append(kw)
+    gv2._on_content_scroll(SimpleNamespace(pixels=640.0, min_scroll_extent=0.0, out_of_range=False))
+
+    gv2._on_course_clicked(None, sem.courses[0])
+    dlg1 = real_page2.shown[-1]
+    # Close Dialog 1 via "Đóng" button (async on_dismiss not yet delivered)
+    dlg1.actions[0].on_click(None)
+    assert real_page2.pop_calls == 1
+    # Immediate handle_back() must NOT call pop_dialog() a second time
+    assert gv2.handle_back() is False
+    assert real_page2.pop_calls == 1
+
+    # Open Dialog 2 before Dialog 1's on_dismiss arrives
+    gv2._open_planner(None)
+    dlg2 = real_page2.shown[-1]
+    assert len(gv2._open_dialog_tokens) == 2
+
+    # Dialog 1's delayed on_dismiss arrives while Dialog 2 is still open -> no scroll_to yet
+    dlg1.on_dismiss(None)
+    assert len(gv2._open_dialog_tokens) == 1
+    assert scroll_calls2 == []
+
+    # Dialog 2 closes via handle_back(), then on_dismiss arrives -> restores scroll once
+    assert gv2.handle_back() is True
+    assert gv2.handle_back() is False
+    assert real_page2.pop_calls == 2
+    dlg2.on_dismiss(None)
+    assert gv2._open_dialog_tokens == {}
+    assert scroll_calls2 == [{"offset": 640.0, "duration": 0}]
+
+    # 3. pop_dialog() raising on real ft.Page must still clear _open_dialog_tokens for all modals
+    real_page3 = _RealPageDouble(raise_on_pop=True)
+    gv3 = GradeOverviewView(page=real_page3)
+    gv3.update_academic_data([sem], [profile])
+    gv3._scrollable_content.scroll_to = lambda **kw: None
+    gv3._on_content_scroll(SimpleNamespace(pixels=500.0, min_scroll_extent=0.0, out_of_range=False))
+
+    gv3._on_course_clicked(None, sem.courses[0])
+    assert len(gv3._open_dialog_tokens) == 1
+    real_page3.shown[-1].actions[0].on_click(None)
+    assert gv3._open_dialog_tokens == {}
+
+    gv3._open_planner(None)
+    assert len(gv3._open_dialog_tokens) == 1
+    real_page3.shown[-1].actions[0].on_click(None)
+    assert gv3._open_dialog_tokens == {}
+
+    gv3._radar_card._show_radar_info(None)
+    assert len(gv3._open_dialog_tokens) == 1
+    real_page3.shown[-1].actions[0].on_click(None)
+    assert gv3._open_dialog_tokens == {}

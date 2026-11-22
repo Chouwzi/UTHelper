@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+import logging
+from typing import Any, Callable, Optional
 import flet as ft
 
 from core.academic_radar.models import RadarMetric, RadarProfile
 from gui.components.academic_radar.metric_detail_sheet import MetricDetailSheet
 from gui.components.academic_radar.radar_chart import AcademicRadarChart
 from gui.core.theme import C
+
+logger = logging.getLogger(__name__)
 
 
 class AcademicRadarCard(ft.Container):
@@ -18,6 +21,10 @@ class AcademicRadarCard(ft.Container):
         selected_index: int = 0,
         on_semester_change: Optional[Callable[[int], None]] = None,
         page: Optional[ft.Page] = None,
+        on_before_dialog: Optional[Callable[[], Any]] = None,
+        on_dialog_dismiss: Optional[Callable[[Any], None]] = None,
+        on_dialog_opened: Optional[Callable[[Any, Callable[[], None]], None]] = None,
+        on_dialog_closing: Optional[Callable[[Any], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -25,6 +32,10 @@ class AcademicRadarCard(ft.Container):
         self.selected_index = selected_index
         self.on_semester_change = on_semester_change
         self._page_ref = page
+        self._on_before_dialog = on_before_dialog
+        self._on_dialog_dismiss = on_dialog_dismiss
+        self._on_dialog_opened = on_dialog_opened
+        self._on_dialog_closing = on_dialog_closing
         self._is_comparing = False
         self._viewport_width: float = 0.0
         self._chart_width_used: float = 0.0
@@ -124,7 +135,23 @@ class AcademicRadarCard(ft.Container):
     def _on_metric_click(self, metric: RadarMetric) -> None:
         p = self._get_page()
         if p is not None:
-            MetricDetailSheet.show(p, metric)
+            token = self._on_before_dialog() if callable(self._on_before_dialog) else None
+            closer = MetricDetailSheet.show(
+                p,
+                metric,
+                on_dismiss=(
+                    (lambda t=token: self._on_dialog_dismiss(t))
+                    if callable(self._on_dialog_dismiss)
+                    else None
+                ),
+                on_closing=(
+                    (lambda t=token: self._on_dialog_closing(t))
+                    if callable(self._on_dialog_closing)
+                    else None
+                ),
+            )
+            if closer is not None and callable(self._on_dialog_opened):
+                self._on_dialog_opened(token, closer)
 
     def _show_radar_info(self, _event=None) -> None:
         page = self._get_page()
@@ -144,12 +171,28 @@ class AcademicRadarCard(ft.Container):
             ("Về Đích", "Tỷ lệ hoàn thành và qua môn trong kỳ."),
             ("Trụ Vững", "Điểm của các môn nặng tín chỉ nhất."),
         ]
+        token = self._on_before_dialog() if callable(self._on_before_dialog) else None
         used_overlay = False
+        is_real_page = isinstance(page, ft.Page)
+
+        def _notify_dismiss(_event=None) -> None:
+            if callable(self._on_dialog_dismiss):
+                try:
+                    self._on_dialog_dismiss(token)
+                except Exception:
+                    logger.debug("Radar info on_dialog_dismiss failed", exc_info=True)
 
         def _close_dialog(p: ft.Page, d: ft.AlertDialog) -> None:
+            if callable(self._on_dialog_closing):
+                try:
+                    self._on_dialog_closing(token)
+                except Exception:
+                    logger.debug("Radar info on_dialog_closing failed", exc_info=True)
             if not used_overlay:
                 try:
                     p.pop_dialog()
+                    if not is_real_page:
+                        _notify_dismiss()
                     return
                 except Exception:
                     pass
@@ -161,6 +204,7 @@ class AcademicRadarCard(ft.Container):
                     p.update()
                 except Exception:
                     pass
+            _notify_dismiss()
 
         def _on_key_down(event) -> None:
             if getattr(event, "key", "") == "Escape":
@@ -177,7 +221,7 @@ class AcademicRadarCard(ft.Container):
                 semantics_label="6 chỉ số Radar học tập",
             ),
             content=ft.KeyboardListener(
-                autofocus=True,
+                autofocus=False,
                 on_key_down=_on_key_down,
                 content=ft.Container(
                     width=dialog_w,
@@ -203,6 +247,7 @@ class AcademicRadarCard(ft.Container):
                     on_click=lambda _: _close_dialog(page, dialog),
                 )
             ],
+            on_dismiss=_notify_dismiss,
             inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
             title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
             content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
@@ -222,6 +267,8 @@ class AcademicRadarCard(ft.Container):
                     page.update()
                 except Exception:
                     pass
+        if callable(self._on_dialog_opened):
+            self._on_dialog_opened(token, lambda: _close_dialog(page, dialog))
 
     def _build_ui(self) -> None:
         # Data-driven rebuilds can happen after a theme preview while this view

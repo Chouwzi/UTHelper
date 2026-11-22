@@ -2122,3 +2122,233 @@ def test_app_controller_retry_after_sha256_mismatch_redownloads_with_real_coordi
         assert controller._update_ready is True
     finally:
         assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_lookup_moodle_course_grades_cached_and_async_with_semester_disambiguation(tmp_path):
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.courses.cache_store import CourseCacheStore
+    from core.courses.models import (
+        CourseGradeItem as CoreMoodleGradeItem,
+        CourseSummary,
+    )
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="test|user")
+    old_course = CourseSummary(
+        id=101,
+        source="courses",
+        fullname="[HKI_2024-2025] Lập trình Python (012000101)",
+        shortname="HKI_2024-2025_012000101",
+        display_name="Lập trình Python",
+        course_code="012000101",
+        semester_label="HKI 2024-2025",
+        last_synced_at=100,
+    )
+    cur_course = CourseSummary(
+        id=202,
+        source="courses",
+        fullname="[HKI_2025-2026] Lập trình Python (012000101)",
+        shortname="HKI_2025-2026_012000101",
+        display_name="Lập trình Python",
+        course_code="012000101",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    uncached_course = CourseSummary(
+        id=303,
+        source="courses",
+        fullname="[HKI_2025-2026] Mạng máy tính (012000201)",
+        shortname="HKI_2025-2026_012000201",
+        display_name="Mạng máy tính",
+        course_code="012000201",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    store.save_catalog([old_course, cur_course, uncached_course], synced_at=200)
+    store.save_course_detail(
+        "courses",
+        101,
+        sections=[],
+        grades=[CoreMoodleGradeItem(id=1, item_name="Old Grade", grade_formatted="5.0")],
+        synced_at=100,
+    )
+    store.save_course_detail(
+        "courses",
+        202,
+        sections=[],
+        grades=[CoreMoodleGradeItem(id=2, item_name="New Grade", grade_formatted="9.5")],
+        synced_at=200,
+    )
+
+    loaded_calls = []
+
+    class _FakeCatalogService:
+        def refresh_catalog(self, include_thnn=False):
+            return [old_course, cur_course, uncached_course]
+
+        def load_course_grades(self, source, course_id, force=False):
+            loaded_calls.append((source, course_id, force))
+            grades = [CoreMoodleGradeItem(id=3, item_name="Lab 1", grade_formatted="8.0")]
+            store.save_course_detail(source, course_id, sections=[], grades=grades, synced_at=300)
+            return grades
+
+    controller = AppController.__new__(AppController)
+    controller._course_cache_store = store
+    controller._course_catalog_service = _FakeCatalogService()
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: []),
+    )
+
+    portal_python = RadarCourseGradeItem(
+        course_id="1",
+        course_code="012000101",
+        course_name="Lập trình Python",
+        credits=3,
+        subject_code="0120001",
+        class_code="012000101",
+    )
+    res_cached = controller._lookup_moodle_course_grades_cached(
+        portal_python, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res_cached.course_id == 202
+    assert res_cached.source == "courses"
+    assert res_cached.needs_async_fetch is False
+    assert [g.item_name for g in res_cached.grades] == ["New Grade"]
+
+    # Matched summary with empty detail.grades triggers async fetch
+    portal_net = RadarCourseGradeItem(
+        course_id="2",
+        course_code="012000201",
+        course_name="Mạng máy tính",
+        credits=3,
+        subject_code="0120002",
+        class_code="012000201",
+    )
+    res_pending = controller._lookup_moodle_course_grades_cached(
+        portal_net, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res_pending.course_id == 303
+    assert res_pending.grades == []
+    assert res_pending.needs_async_fetch is True
+
+    res_async = asyncio.run(
+        controller._fetch_moodle_course_grades_async(
+            portal_net, "Học kỳ 1 năm học 2025-2026"
+        )
+    )
+    assert loaded_calls == [("courses", 303, False)]
+    assert res_async.needs_async_fetch is False
+    assert [g.item_name for g in res_async.grades] == ["Lab 1"]
+
+
+def test_navigate_back_closes_grade_overview_dialog_before_closing_grades():
+    async def scenario():
+        from unittest.mock import AsyncMock, Mock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(visible=False, _handle_back=AsyncMock())
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.course_grades_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(
+            visible=True,
+            handle_back=Mock(return_value=True),
+        )
+        controller._close_grades = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
+
+        assert await controller._navigate_back() is True
+        controller.grade_overview_view.handle_back.assert_called_once_with()
+        controller._close_grades.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_lookup_moodle_course_grades_cached_does_not_shadow_matched_course_with_legacy_monitor(
+    tmp_path,
+):
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.course_grade_scraper import CourseGradeReport, GradeRow
+    from core.course_grades_service import CourseWithGrades
+    from core.courses.cache_store import CourseCacheStore
+    from core.courses.models import CourseSummary
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="test|shadow")
+    matched_summary = CourseSummary(
+        id=501,
+        source="courses",
+        fullname="[HKI_2025-2026] Cơ sở dữ liệu (012005501)",
+        shortname="HKI_2025-2026_012005501",
+        display_name="Cơ sở dữ liệu",
+        course_code="012005501",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    store.save_catalog([matched_summary], synced_at=200)
+
+    stale_monitor_course = CourseWithGrades(
+        course_id=99,
+        name="Cơ sở dữ liệu",
+        shortname="HKI_2023-2024_OLD",
+        report=CourseGradeReport(
+            course_id=99,
+            rows=[GradeRow(name="Old Exam", grade="5.0", percentage="50 %")],
+        ),
+    )
+
+    controller = AppController.__new__(AppController)
+    controller._course_cache_store = store
+    controller._course_catalog_service = SimpleNamespace()
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[stale_monitor_course],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: [stale_monitor_course]),
+    )
+
+    portal_db = RadarCourseGradeItem(
+        course_id="501",
+        course_code="012005501",
+        course_name="Cơ sở dữ liệu",
+        credits=3,
+        subject_code="0120055",
+        class_code="012005501",
+    )
+    res = controller._lookup_moodle_course_grades_cached(
+        portal_db, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res.course_id == 501
+    assert res.source == "courses"
+    assert res.grades == []
+    assert res.needs_async_fetch is True
+
+
+def test_match_portal_course_to_summary_rejects_short_summary_course_code_prefix():
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.courses.models import CourseSummary
+    from gui.components.course_grade_table import match_portal_course_to_summary
+
+    portal_course = RadarCourseGradeItem(
+        course_id="12",
+        course_code="012000901",
+        course_name="Lập trình C",
+        credits=3,
+        subject_code="0120009",
+        class_code="012000901",
+    )
+    short_code_summary = CourseSummary(
+        id=10,
+        source="courses",
+        fullname="[HKI_2025-2026] Nhập môn AI (01)",
+        shortname="HKI_2025-2026_01",
+        display_name="Nhập môn AI",
+        course_code="01",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    assert (
+        match_portal_course_to_summary(
+            portal_course,
+            [short_code_summary],
+            semester_name="Học kỳ 1 năm học 2025-2026",
+        )
+        is None
+    )
