@@ -66,10 +66,13 @@ packages = true
 app = true
 
 [tool.flet.flutter.pubspec.dependency_overrides]
-# Flet 0.86.5's template pins 1.0.0; jni_flutter >=1.1.0 (published
-# 2026-11-18) requires jni ^1.2.0 for JReference.nonNullPointer.
+# Flet 0.86.5's template pins jni 1.0.0; jni_flutter >=1.1.0 requires jni ^1.2.0
+# for JReference.nonNullPointer. jni 1.2.0 was retracted on 2026-11-19 because
+# Jni.findClass stopped stripping L...; descriptors, crashing older bindings
+# like path_provider_android 2.3.1 (ClassNotFoundException: "Landroid/content/Context;").
+# jni 1.2.1 retains nonNullPointer and restores descriptor stripping.
 # https://github.com/flet-dev/flet/issues/6919
-jni = "1.2.0"
+jni = "1.2.1"
 
 # ── Windows-specific configuration ──
 [tool.flet.windows]
