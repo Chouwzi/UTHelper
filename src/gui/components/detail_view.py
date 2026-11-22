@@ -846,15 +846,18 @@ class DetailView(ft.Container):
         )
         self._details_divider = ft.Divider(height=16, color=C.BORDER)
 
+        self._header_open_semantics = ft.Semantics(
+            label="Mở bằng trình duyệt ngoài",
+            button=True,
+            content=self._header_open_btn,
+            visible=False,
+        )
+        self._header_open_btn.visible = False
         self._top_bar_container = ft.Container(
             content=ft.Row(
                 controls=[
                     back_btn,
-                    ft.Semantics(
-                        label="Mở bằng trình duyệt ngoài",
-                        button=True,
-                        content=self._header_open_btn,
-                    ),
+                    self._header_open_semantics,
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             ),
@@ -950,6 +953,22 @@ class DetailView(ft.Container):
         except (OSError, OverflowError, TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _set_header_open_visible(target_view, visible: bool) -> None:
+        show = bool(visible)
+        semantics = getattr(target_view, "_header_open_semantics", None)
+        btn = getattr(target_view, "_header_open_btn", None)
+        if show:
+            if btn is not None:
+                btn.visible = True
+            if semantics is not None:
+                semantics.visible = True
+        else:
+            if semantics is not None:
+                semantics.visible = False
+            if btn is not None:
+                btn.visible = False
+
     def show_loading(self, data: dict):
         # Navigation has already changed targets, so invalidate background
         # submission work and hide controls belonging to the previous item.
@@ -958,7 +977,7 @@ class DetailView(ft.Container):
         self._submission_area.visible = False
         self._submitted_area.visible = False
         self._open_btn.visible = False
-        self._header_open_btn.visible = False
+        DetailView._set_header_open_visible(self, False)
         quiz_open_btn = getattr(self, "_quiz_open_btn", None)
         if quiz_open_btn is not None:
             quiz_open_btn.visible = False
@@ -1054,7 +1073,9 @@ class DetailView(ft.Container):
         self._current_data         = data
         browser_available = self._is_safe_browser_url(self._current_url)
         self._open_btn.visible = browser_available
-        self._header_open_btn.visible = browser_available and not self._embedded_in_pane
+        DetailView._set_header_open_visible(
+            self, browser_available and not self._embedded_in_pane
+        )
         self._quiz_open_btn.visible = False
         self._quiz_open_btn.disabled = False
         self._quiz_open_btn.bgcolor = C.ACCENT
