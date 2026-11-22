@@ -2611,3 +2611,18 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts`: **All checks passed!**.
   - Validated `.github/workflows/build-android.yml` with `yaml.safe_load`, `bash -n`, embedded Python `ast.parse`, live bash/Python matrix simulation across `pull_request`/`push`/`workflow_dispatch`/`chplay` cases, and `scripts/validate_gitflow_pr.py --event-name pull_request --base develop --head ci/android-manual-test-apk` (accepted).
 
+## Android Startup Crash Fix: Bump Retracted `jni 1.2.0` Override to `jni 1.2.1` (2026-11-22)
+
+- **Branch & Scope**: `fix/android-jni-1.2.1` — `pyproject.toml`, `tests/test_release_hardening.py`, `docs/architecture/refactoring-log.md`.
+- **Root Cause**:
+  - Live device crash on Android launch: `java.lang.ClassNotFoundException: Didn't find class "Landroid/content/Context;"`.
+  - Confirmed via run `45028377141` (`! jni 1.2.0 (overridden) (retracted, 1.2.1 available)`) and pub.dev tarball diff (`jni 1.2.0 -> 1.2.1`): `jni 1.2.0` (published 2026-11-18, retracted 2026-11-19) introduced `JType.className` and removed `L...;` descriptor stripping in `Jni.findClass()`. Older generated bindings such as `path_provider_android 2.3.1` (`lib/src/path_provider.g.dart:L7279`, `signature => r'Landroid/content/Context;'` without `className`) fell back to passing `"Landroid/content/Context;"` directly to `ClassLoader.loadClass`.
+  - `jni 1.2.1` keeps `JReference.nonNullPointer` (required by `jni_flutter 1.1.0`) while restoring `L...;` descriptor stripping in `Jni.findClass()`.
+- **Changes**:
+  - Updated `[tool.flet.flutter.pubspec.dependency_overrides]` in `pyproject.toml` from `jni = "1.2.0"` to `jni = "1.2.1"`.
+  - Added regression test `test_pyproject_pins_fixed_non_retracted_jni_override` in `tests/test_release_hardening.py`.
+- **Verification**:
+  - `pytest tests/test_release_hardening.py tests/test_chplay_packaging.py tests/test_repository_governance.py tests/test_release_metadata.py extensions/flet_uth_background_sync/tests extensions/flet_uth_quiz/tests -q --tb=short`: **168 passed** (0 failed).
+  - `ruff check src tests scripts`: **All checks passed!**.
+
+

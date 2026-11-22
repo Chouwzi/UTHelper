@@ -934,3 +934,11 @@ def test_android_manual_dispatch_supports_installable_debug_test_apk_without_wea
     ):
         assert forbidden not in workflow
 
+
+def test_pyproject_pins_fixed_non_retracted_jni_override():
+    config = tomllib.loads(_read("pyproject.toml"))
+    overrides = config["tool"]["flet"]["flutter"]["pubspec"]["dependency_overrides"]
+
+    assert overrides["jni"] != "1.2.0"
+    assert overrides["jni"] == "1.2.1"
+
