@@ -17,6 +17,7 @@ class ViewManager:
         controller,
         courses_view=None,
         course_grades_view=None,
+        profile_view=None,
         view_host=None,
         overlays=None,
         tab_switcher=None,
@@ -32,6 +33,7 @@ class ViewManager:
         self.grade_overview_view = grade_overview_view
         self.courses_view = courses_view
         self.course_grades_view = course_grades_view
+        self.profile_view = profile_view
         self.controller = controller
         self.view_host = view_host
         self.overlays = tuple(overlays or ())
@@ -86,6 +88,11 @@ class ViewManager:
             self.courses_view.visible = False
         if self.course_grades_view is not None:
             self.course_grades_view.visible = False
+
+    def _hide_profile_view(self) -> None:
+        """Ẩn màn Hồ sơ khi chuyển sang view khác (profile_view có thể thiếu ở test)."""
+        if self.profile_view is not None:
+            self.profile_view.visible = False
 
     def _clear_selected_card(self) -> None:
         clear_fn = getattr(self.controller, "_clear_selected_activity", None)
@@ -145,6 +152,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_profile_view()
         self._hide_courses_view()
         self._clear_detail_layer()
         if self.tab_switcher is None:
@@ -174,6 +182,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_profile_view()
         if self.course_grades_view is not None:
             self.course_grades_view.visible = False
         on_shown = getattr(self.courses_view, "on_tab_shown", None)
@@ -198,6 +207,7 @@ class ViewManager:
         self.dashboard.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_profile_view()
         self._hide_courses_view()
         has_defer = hasattr(self.calendar_view, "_defer_page_update")
         if has_defer:
@@ -253,6 +263,7 @@ class ViewManager:
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_profile_view()
         self._hide_courses_view()
         if self.tab_switcher is None:
             self._show_only(self.settings_view)
@@ -279,6 +290,7 @@ class ViewManager:
         self.dashboard.visible = False
         self.calendar_view.visible = False
         self.settings_view.visible = False
+        self._hide_profile_view()
         self._hide_courses_view()
         has_defer = hasattr(self.grade_overview_view, "_defer_self_update")
         if has_defer:
@@ -320,6 +332,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_profile_view()
         if self.courses_view is not None and self.courses_view is not target:
             on_hidden = getattr(self.courses_view, "on_tab_hidden", None)
             if callable(on_hidden):
@@ -462,6 +475,94 @@ class ViewManager:
             self.page.update()
             await asyncio.sleep(0.18)
             self.grade_overview_view.visible = False
+            self._show_only(self.dashboard)
+        self._sync_detail_host()
+        self._sync_nav_buttons("home")
+        self._notify_destination("home")
+        self.page.update()
+
+    # ------------------------------------------------------------------
+    # Hồ sơ & Học phí (Profile & Tuition)
+    # ------------------------------------------------------------------
+    def show_profile_loading(self):
+        """Hiển thị màn Hồ sơ & Học phí (loading nếu chưa có dữ liệu nào)."""
+        self._dismiss_menu_if_open()
+        self.cancel_pending_settings_navigation()
+        self._clear_detail_layer()
+        if self.profile_view is None:
+            self.page.update()
+            return
+        self.profile_view.visible = True
+        self.profile_view.opacity = 1.0
+        self.profile_view.offset = ft.Offset(0, 0)
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.profile_view
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.settings_view.visible = False
+        self.grade_overview_view.visible = False
+        self._hide_courses_view()
+        has_defer = hasattr(self.profile_view, "_defer_self_update")
+        if has_defer:
+            self.profile_view._defer_self_update = True
+        try:
+            self.profile_view.show_loading()
+            if self.tab_switcher is None:
+                self._show_only(self.profile_view)
+            self._sync_detail_host()
+            if hasattr(self.profile_view, "update_theme"):
+                self.profile_view.update_theme()
+        finally:
+            if has_defer:
+                self.profile_view._defer_self_update = False
+        self._sync_nav_buttons("profile")
+        self._notify_destination("profile")
+        self.page.update()
+
+    def show_profile_data(self, snapshot, *, from_cache: bool = False) -> None:
+        """Đẩy snapshot hồ sơ/học phí vào màn hình (bản lưu hoặc mới từ Portal)."""
+        if self.profile_view is None:
+            return
+        update = getattr(self.profile_view, "update_snapshot", None)
+        if callable(update):
+            update(snapshot, from_cache=from_cache)
+        self.page.update()
+
+    def show_profile_error(self, message: str = "") -> None:
+        """Trạng thái lỗi — chỉ dùng khi không có cả dữ liệu đã lưu."""
+        if self.profile_view is None:
+            return
+        show_err = getattr(self.profile_view, "show_error", None)
+        if callable(show_err):
+            show_err(message)
+        self.page.update()
+
+    def show_profile_stale_notice(self, message: str) -> None:
+        """Banner 'đang xem dữ liệu đã lưu' khi không làm mới được từ Portal."""
+        if self.profile_view is None:
+            return
+        set_notice = getattr(self.profile_view, "set_stale_notice", None)
+        if callable(set_notice):
+            set_notice(message)
+            self.page.update()
+
+    async def close_profile(self):
+        """Đóng màn Hồ sơ & Học phí và quay lại Dashboard."""
+        self._hide_courses_view()
+        if self.tab_switcher is not None:
+            self.dashboard.visible = True
+            self.dashboard.opacity = 1.0
+            self.tab_switcher.content = self.dashboard
+            self._hide_profile_view()
+        else:
+            self.dashboard.opacity = 1.0
+            self.dashboard.visible = True
+            if self.profile_view is not None:
+                self._show_only(self.dashboard, self.profile_view)
+                self.profile_view.opacity = 0.0
+                self.page.update()
+                await asyncio.sleep(0.18)
+                self.profile_view.visible = False
             self._show_only(self.dashboard)
         self._sync_detail_host()
         self._sync_nav_buttons("home")

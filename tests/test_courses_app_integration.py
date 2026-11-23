@@ -261,12 +261,13 @@ def test_adaptive_nav_shell_switches_bar_and_rail_and_handles_theme():
     seen: list[str] = []
     nav = AdaptiveNavShell(on_navigate=seen.append)
 
-    assert len(NAV_DESTINATIONS) == 5
+    assert len(NAV_DESTINATIONS) == 6
     assert [d.key for d in NAV_DESTINATIONS] == [
         "home",
         "courses",
         "calendar",
         "grades",
+        "profile",
         "settings",
     ]
     assert RAIL_BREAKPOINT == 600

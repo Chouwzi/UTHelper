@@ -35,6 +35,7 @@ from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
 from core.portal_client import PortalClient
+from core.student_profile import StudentProfileCache, StudentProfileService
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
@@ -82,6 +83,7 @@ from gui.components.course_grade_table import (
     match_portal_course_to_summary,
 )
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.components.profile_view import ProfileView
 from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
@@ -963,6 +965,8 @@ class AppController:
             getattr(self, "course_grades_view", None), "visible", False
         ):
             return "grades"
+        if getattr(getattr(self, "profile_view", None), "visible", False):
+            return "profile"
         if getattr(getattr(self, "courses_view", None), "visible", False):
             return "courses"
         return "home"
@@ -1017,12 +1021,16 @@ class AppController:
             await self._close_calendar()
         elif current == "grades":
             await self._close_grades()
+        elif current == "profile":
+            await self._close_profile()
         elif current == "courses":
             await self._close_courses()
         if target == "calendar":
             await self._show_calendar()
         elif target == "grades":
             await self._show_grades()
+        elif target == "profile":
+            await self._show_profile()
         elif target == "courses":
             await self._show_courses()
         elif target == "settings":
@@ -1183,6 +1191,9 @@ class AppController:
             if callable(grade_handle_back) and grade_handle_back():
                 return True
             await self._close_grades()
+            handled = True
+        elif getattr(self, "profile_view", None) is not None and self.profile_view.visible:
+            await self._close_profile()
             handled = True
         self._sync_rail_active()
         return handled
@@ -1651,6 +1662,11 @@ class AppController:
             on_close=lambda: self._safe_run_task(self._close_course_grades),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_course_grades(force_refresh=True)),
         )
+        self.profile_view = ProfileView(
+            on_close=lambda: self._safe_run_task(self._close_profile),
+            on_refresh=lambda: self._safe_run_task(self._show_profile),
+            page=self.page,
+        )
 
         courses_namespace = (
             f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
@@ -1718,6 +1734,7 @@ class AppController:
             self.grade_overview_view,
             self.courses_view,
             self.course_grades_view,
+            self.profile_view,
         ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
@@ -1827,6 +1844,7 @@ class AppController:
             self,
             courses_view=self.courses_view,
             course_grades_view=self.course_grades_view,
+            profile_view=self.profile_view,
             view_host=main_stack,
             overlays=overlays,
             tab_switcher=self.tab_switcher,
@@ -1982,6 +2000,7 @@ class AppController:
         self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
         for view in (
             getattr(self, "grade_overview_view", None),
+            getattr(self, "profile_view", None),
             getattr(self, "calendar_view", None),
             courses_view,
             getattr(self, "course_grades_view", None),
@@ -2162,6 +2181,8 @@ class AppController:
             await self._show_calendar()
         elif key == "grades":
             await self._show_grades()
+        elif key == "profile":
+            await self._show_profile()
         elif key == "settings":
             await self._show_settings()
 
@@ -4255,6 +4276,66 @@ class AppController:
         self._diag_screen("home")
         self._sync_rail_active()
 
+    def _get_profile_service(self) -> StudentProfileService:
+        """Service hồ sơ/học phí theo tài khoản Portal hiện tại (tạo lazily)."""
+        # Chỉ dùng tài khoản Portal (UTH); Settings không có MOODLE_USERNAME.
+        username = settings.UTH_USERNAME or ""
+        service = getattr(self, "_profile_service", None)
+        if service is None or getattr(self, "_profile_service_account", None) != username:
+            service = StudentProfileService(
+                self._portal_client,
+                StudentProfileCache(namespace=username or "anon"),
+            )
+            self._profile_service = service
+            self._profile_service_account = username
+        return service
+
+    async def _show_profile(self):
+        """Mở màn Hồ sơ & Học phí: hiện bản lưu trước, làm mới nền từ Portal.
+
+        Cache-first để màn hình xuất hiện ngay cả khi offline; sau đó gọi Portal
+        (chạy nền, không chặn UI) và chỉ rơi về banner dữ liệu đã lưu khi lỗi.
+        """
+        self._diag_screen("profile")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="profile")
+        self.view_manager.show_profile_loading()
+        self._sync_rail_active()
+
+        service = self._get_profile_service()
+        username = settings.UTH_USERNAME or ""
+        password = settings.UTH_PASSWORD or ""
+        cached = await asyncio.to_thread(service.load_cached)
+        if cached is not None:
+            self.view_manager.show_profile_data(cached, from_cache=True)
+        try:
+            result = await asyncio.to_thread(
+                service.load, username, password, force_refresh=True
+            )
+        except Exception as exc:
+            logger.error("Student profile load failed: %s", exc)
+            if cached is None:
+                self.view_manager.show_profile_error(
+                    "Không tải được hồ sơ từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
+                )
+            else:
+                self.view_manager.show_profile_stale_notice(
+                    "Không thể làm mới · đang hiển thị dữ liệu đã lưu."
+                )
+            return
+        if not getattr(self.profile_view, "visible", False):
+            return  # Người dùng đã chuyển màn trước khi tải xong.
+        self.view_manager.show_profile_data(result.snapshot, from_cache=result.from_cache)
+        if result.from_cache:
+            self.view_manager.show_profile_stale_notice(
+                "Không thể làm mới · đang hiển thị dữ liệu đã lưu."
+            )
+
+    async def _close_profile(self):
+        """Đóng màn Hồ sơ & Học phí và quay về Dashboard."""
+        await self.view_manager.close_profile()
+        self._diag_screen("home")
+        self._sync_rail_active()
+
     def _rebuild_colors(self, *, sync_nav: bool = True, update_page: bool = True):
         """Repaint ALL existing controls with current C values for live theme switching.
 
@@ -4478,6 +4559,7 @@ class AppController:
             "calendar_view",
             "detail_view",
             "grade_overview_view",
+            "profile_view",
             "courses_view",
             "course_grades_view",
             "quiz_player_view",

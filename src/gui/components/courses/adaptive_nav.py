@@ -51,6 +51,12 @@ NAV_DESTINATIONS: tuple[NavDestinationSpec, ...] = (
         ft.Icons.INSIGHTS_ROUNDED,
     ),
     NavDestinationSpec(
+        "profile",
+        "Hồ sơ",
+        ft.Icons.BADGE_OUTLINED,
+        ft.Icons.BADGE_ROUNDED,
+    ),
+    NavDestinationSpec(
         "settings",
         "Cài đặt",
         ft.Icons.SETTINGS_OUTLINED,
