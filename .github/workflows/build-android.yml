@@ -91,6 +91,20 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # Robolectric's unit tests download a ~100 MB android-all jar from
+      # Maven Central; without a warm cache the shared runner IP can get
+      # HTTP 429 (rate limited) and the whole build fails.
+      - name: 💾 Cache Gradle and Robolectric artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.m2/repository
+          key: android-gradle-${{ runner.os }}-${{ hashFiles('extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/**') }}
+          restore-keys: |
+            android-gradle-${{ runner.os }}-
+
       - name: 📦 Install project and Flet CLI
         run: |
           pip install -e ".[android-build]"
@@ -229,9 +243,21 @@ jobs:
           UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
-          ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
-            testDebugUnitTest -Pandroid.useAndroidX=true -PuthDistributionChannel=apk_lts \
-            -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
+          # Robolectric fetches its android-all jar from Maven Central, which
+          # occasionally answers 429 on shared runners: retry before failing.
+          for attempt in 1 2 3; do
+            if ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
+              testDebugUnitTest -Pandroid.useAndroidX=true -PuthDistributionChannel=apk_lts \
+              -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Gradle testDebugUnitTest failed 3 times (apk_lts)"
+              exit 1
+            fi
+            echo "::warning::Gradle test attempt $attempt failed (apk_lts), retrying in 30s"
+            sleep 30
+          done
 
       - name: Test and compile CH Play stripped native plugin
         if: matrix.channel == 'chplay'
@@ -242,9 +268,20 @@ jobs:
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
           PLUGIN_DIR="../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
-          ./gradlew -p "$PLUGIN_DIR" \
-            testDebugUnitTest bundleReleaseAar -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
-            -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
+          # Same Maven Central 429 protection as the apk_lts test step.
+          for attempt in 1 2 3; do
+            if ./gradlew -p "$PLUGIN_DIR" \
+              testDebugUnitTest bundleReleaseAar -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
+              -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Gradle testDebugUnitTest failed 3 times (chplay)"
+              exit 1
+            fi
+            echo "::warning::Gradle test attempt $attempt failed (chplay), retrying in 30s"
+            sleep 30
+          done
           python - "$PLUGIN_DIR" <<'PY'
           import io
           from pathlib import Path
