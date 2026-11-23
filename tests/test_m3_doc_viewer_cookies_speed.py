@@ -307,6 +307,7 @@ def test_f14_windows_office_bridge_does_not_abort_when_open_and_supports_libreof
 
     # LibreOffice fallback path on win32 when MS Office COM is absent
     monkeypatch.setattr(windows_office_bridge.sys, "platform", "win32")
+    monkeypatch.setattr(windows_office_bridge.shutil, "which", lambda _name: None)
     monkeypatch.setattr(windows_office_bridge, "_find_soffice_executable", lambda: r"C:\LO\soffice.exe")
     fake_winreg = SimpleNamespace(
         HKEY_CLASSES_ROOT=1,
