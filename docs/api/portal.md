@@ -361,15 +361,92 @@ exposes the shorter `/lichhoc/tuan` route.
 
 ## 💰 5. Học phí (Tuition)
 
+> **Nguồn schema**: đọc từ bundle frontend của Portal
+> (`/assets/index-*.js` + chunk `TuitionTable-*.js`, verified 2026-11-23) —
+> đúng tên trường mà trang `/tuition` của Portal tự render.
+> UTHelper dùng các endpoint này cho màn **Hồ sơ & Học phí**
+> (`src/gui/components/profile_view.py` + `src/core/student_profile.py`).
+
 ### `GET /api/v1/hocphi?idDot={idDot}`
 
-**Description:** Chi tiết học phí theo học kỳ
+**Description:** Chi tiết học phí theo học kỳ (mỗi dòng = một lớp học phần)
 
-**Params:** `idDot` — ID học kỳ (lấy từ `hoctap/hocky`)
+**Params:** `idDot` — ID học kỳ (lấy từ `hoctap/hocky`); **`idDot=0` = tất cả các kỳ**
+(UTHelper chỉ fetch 1 lần với `idDot=0` rồi lọc client-side bằng pill học kỳ).
+
+**Response `body` (mảng dict) — các trường quan sát được:**
+
+| Field | Ý nghĩa | Ghi chú |
+|-------|---------|---------|
+| `tenDot` | Tên học kỳ của dòng | VD `Học kỳ 1 năm học 2025-2026` |
+| `maLopHocPhan` | Mã lớp học phần | |
+| `noiDung` | Tên môn học | |
+| `soTinChi` | Số tín chỉ | |
+| `mucPhiBanDau` | Học phí gốc | |
+| `mucNop` | Mức phải nộp | |
+| `trangThaiDangKy` | Trạng thái đăng ký | |
+| `ngayNop` | Ngày nộp | chuỗi rỗng nếu chưa nộp |
+| `soTienNop` | Đã nộp | |
+| `khauTru` | Khấu trừ | có thể `null` |
+| `truNo` | Trừ nợ | |
+| `congNo` | Còn nợ | `> 0` ⇒ trạng thái **Còn nợ** |
+| `daDongHocPhi` | Cờ đã đóng | `true/false` — tiền luôn được ưu tiên hơn cờ |
+
+**Trạng thái hiển thị (UTHelper):** `congNo > 0` → *Còn nợ*; ngược lại
+`daDongHocPhi` hoặc `soTienNop > 0` → *Đã đóng*; nếu không → *Chưa đóng*.
+
+**Response mẫu (redacted):**
+```json
+{
+  "success": true,
+  "status": 200,
+  "body": [
+    {
+      "tenDot": "Học kỳ 1 năm học 2025-2026",
+      "maLopHocPhan": "0120005105",
+      "noiDung": "Triết học Mác - Lênin",
+      "soTinChi": 3,
+      "mucPhiBanDau": 4500000,
+      "mucNop": 4500000,
+      "trangThaiDangKy": "Đã đăng ký",
+      "ngayNop": "12/09/2025",
+      "soTienNop": 4500000,
+      "khauTru": null,
+      "truNo": 0,
+      "congNo": 0,
+      "daDongHocPhi": true
+    }
+  ],
+  "token": null
+}
+```
 
 ### `GET /api/v1/hocphi/khoanthukhac`
 
 **Description:** Các khoản thu khác ngoài học phí (bảo hiểm, ký túc xá, ...)
+
+**Response `body` (mảng dict):**
+
+| Field | Ý nghĩa |
+|-------|---------|
+| `namHoc` | Năm học |
+| `maKhoanThuKhac` | Mã khoản thu |
+| `tenKhoanThuKhac` | Tên khoản thu |
+| `mucNop` | Mức nộp |
+| `isBatBuoc` | Bắt buộc hay không |
+| `ngayThu` | Ngày thu (có thể rỗng) |
+| `soTienNop` | Đã nộp |
+| `congNo` | Còn nợ |
+
+### Ghi chú triển khai (UTHelper)
+
+- Cả hai endpoint trả `body: null` khi chưa có dữ liệu → coi là danh sách rỗng.
+- Màn Hồ sơ & Học phí fetch tuần tự qua `_authorized_get`
+  (`getSummaryProfile` → `getCredit` → `hocky` → `hocphi?idDot=0` → `khoanthukhac`)
+  dùng chung token cache + retry 401 một lần như `fetch_day`.
+- Snapshot được cache theo tài khoản
+  (`StudentProfileCache`, `student_profile_*.json`) để xem offline:
+  load bản lưu trước → refresh nền → lỗi thì giữ cache + banner dữ liệu đã lưu.
 
 ---
 
@@ -615,4 +692,4 @@ Access-Control-Expose-Headers: Content-Disposition, Link
 
 > **Tổng cộng: 30+ API endpoints** đã được phát hiện và document.
 > **Discovery method**: Chrome DevTools MCP — live network traffic analysis
-> **Last updated**: 2026-06-22
+> **Last updated**: 2026-11-23
