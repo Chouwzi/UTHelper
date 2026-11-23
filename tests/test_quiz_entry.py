@@ -448,4 +448,144 @@ def test_concurrent_entry_is_blocked_and_operation_lease_cleans_up(monkeypatch):
         finish_post.set()
         worker.join(timeout=2)
         prepared.close()
+
+
+def test_prepare_quiz_entry_reuses_cloned_session_and_preserves_shared_client(monkeypatch):
+    from config import settings
+    from core.client import MoodleClient
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-42")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "private-example-password")
+
+    existing = MoodleClient("https://courses.ut.edu.vn")
+    existing._cookie_jar.set_cookie(_session_cookie("courses.ut.edu.vn"))
+    existing._session_owner = "student-42"
+    existing._sesskey = "shared-sesskey"
+    existing._session_generation = 4
+
+    target = build_quiz_launch_target(
+        "https://courses.ut.edu.vn/mod/quiz/view.php?id=52", "student-42"
+    )
+    lease = acquire_quiz_session_lease(target.session_key)
+    seen_urls = []
+
+    def fake_open_html(self, path, *, data=None):
+        seen_urls.append((self is existing, path, data))
+        assert self is not existing
+        return target.url, _overview("Continue attempt")
+
+    monkeypatch.setattr(MoodleClient, "_open_html", fake_open_html)
+    monkeypatch.setattr(
+        quiz_entry,
+        "_authenticated_quiz_client",
+        lambda *_args, **_kwargs: pytest.fail("Should not re-login when reused session is valid"),
+    )
+
+    prepared = prepare_quiz_entry(target, lease, existing_client=existing)
+    try:
+        assert prepared.mode == "resume"
+        assert seen_urls == [(False, target.url, None)]
+    finally:
+        prepared.close()
+        lease.release()
+
+    # Shared app client cookies & sesskey remain untouched after quiz close.
+    assert existing._sesskey == "shared-sesskey"
+    assert len(list(existing._cookie_jar)) == 1
+    assert existing._session_owner == "student-42"
+
+
+def test_prepare_quiz_entry_falls_back_to_cold_login_when_reused_cookies_expire(monkeypatch):
+    from config import settings
+    from core.client import MoodleClient
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-42")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "private-example-password")
+
+    existing = MoodleClient("https://courses.ut.edu.vn")
+    stale_cookie = _session_cookie("courses.ut.edu.vn")
+    stale_cookie.value = "stale-cookie"
+    existing._cookie_jar.set_cookie(stale_cookie)
+    existing._session_owner = "student-42"
+    existing._sesskey = ""
+    existing._session_generation = 1
+
+    target = build_quiz_launch_target(
+        "https://courses.ut.edu.vn/mod/quiz/view.php?id=52", "student-42"
+    )
+    lease = acquire_quiz_session_lease(target.session_key)
+    site = moodle_site_from_origin("https://courses.ut.edu.vn")
+    assert site is not None
+
+    fresh_client = MoodleClient(site.origin)
+    fresh_cookie = _session_cookie("courses.ut.edu.vn")
+    fresh_cookie.value = "fresh-cookie"
+    fresh_client._cookie_jar.set_cookie(fresh_cookie)
+    fresh_client._session_owner = "student-42"
+    fresh_op_lease = acquire_quiz_session_lease(target.session_key)
+    auth_calls = []
+
+    def fake_open_html(self, path, *, data=None):
+        if self is fresh_client:
+            return target.url, _overview("Start attempt")
+        return f"{site.origin}/login/index.php", "<form>login</form>"
+
+    monkeypatch.setattr(MoodleClient, "_open_html", fake_open_html)
+
+    def fake_auth(_target, _lease, *, require_sesskey=True):
+        auth_calls.append(require_sesskey)
+        return fresh_client, site, fresh_op_lease
+
+    monkeypatch.setattr(quiz_entry, "_authenticated_quiz_client", fake_auth)
+
+    prepared = prepare_quiz_entry(target, lease, existing_client=existing)
+    try:
+        assert prepared.mode == "start"
+        assert auth_calls == [False]
+        assert existing._sesskey == "private-form-sesskey"
+        assert [c.value for c in existing._cookie_jar] == ["fresh-cookie"]
+    finally:
+        prepared.close()
+        lease.release()
+
+
+def test_prepare_quiz_entry_rejects_cross_account_or_cross_site_reuse(monkeypatch):
+    from config import settings
+    from core.client import MoodleClient
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-42")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "private-example-password")
+
+    wrong_owner = MoodleClient("https://courses.ut.edu.vn")
+    wrong_owner._cookie_jar.set_cookie(_session_cookie("courses.ut.edu.vn"))
+    wrong_owner._session_owner = "other-student"
+
+    wrong_site = MoodleClient("https://thnn.ut.edu.vn")
+    wrong_site._cookie_jar.set_cookie(_session_cookie("thnn.ut.edu.vn"))
+    wrong_site._session_owner = "student-42"
+
+    target = build_quiz_launch_target(
+        "https://courses.ut.edu.vn/mod/quiz/view.php?id=52", "student-42"
+    )
+    site = moodle_site_from_origin("https://courses.ut.edu.vn")
+    assert site is not None
+
+    for candidate in (wrong_owner, wrong_site):
+        lease = acquire_quiz_session_lease(target.session_key)
+        op_lease = acquire_quiz_session_lease(target.session_key)
+        fresh = MoodleClient(site.origin)
+        fresh._cookie_jar.set_cookie(_session_cookie("courses.ut.edu.vn"))
+        fresh._open_html = lambda _url, *, data=None: (target.url, _overview("Continue attempt"))
+        auth_called = []
+        monkeypatch.setattr(
+            quiz_entry,
+            "_authenticated_quiz_client",
+            lambda _t, _l, **_kw: (auth_called.append(True) or (fresh, site, op_lease)),
+        )
+        prepared = prepare_quiz_entry(target, lease, existing_client=candidate)
+        try:
+            assert auth_called == [True]
+        finally:
+            prepared.close()
+            lease.release()
         lease.release()

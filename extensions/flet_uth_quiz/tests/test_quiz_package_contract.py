@@ -253,6 +253,25 @@ def test_session_cleaner_service_invokes_clear_sessions(monkeypatch):
     assert calls == [("clear_sessions", None, 10)]
 
 
+def test_session_cleaner_service_prewarm_validates_key_and_invokes(monkeypatch):
+    from flet_uth_quiz import UthQuizSessionCleaner
+
+    cleaner = UthQuizSessionCleaner()
+    calls = []
+
+    async def invoke(name, arguments=None, timeout=None):
+        calls.append((name, arguments, timeout))
+        return True
+
+    monkeypatch.setattr(cleaner, "_invoke_method", invoke)
+    assert asyncio.run(cleaner.prewarm("bad-key")) is False
+    assert calls == []
+
+    valid_key = "b2" * 32
+    assert asyncio.run(cleaner.prewarm(valid_key)) is True
+    assert calls == [("prewarm", {"session_key": valid_key}, 10)]
+
+
 @pytest.mark.parametrize("session_key", ["", "not-a-digest", "a1" * 31, "g1" * 32])
 def test_control_requires_hashed_site_account_identity(session_key: str):
     from flet_uth_quiz import UthQuizPlayer

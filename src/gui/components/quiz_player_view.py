@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -81,6 +82,7 @@ class QuizPlayerView(ft.Container):
         lease_provider: Callable | None = None,
         entry_provider: Callable | None = None,
         account_id_provider: Callable | None = None,
+        client_provider: Callable[[str], Any] | None = None,
         on_auth_required: Callable | None = None,
         on_entry_unavailable: Callable | None = None,
         ready_timeout_seconds: float = _READY_TIMEOUT_SECONDS,
@@ -92,6 +94,7 @@ class QuizPlayerView(ft.Container):
         self._lease_provider = lease_provider
         self._entry_provider = entry_provider
         self._account_id_provider = account_id_provider
+        self._client_provider = client_provider
         self._on_auth_required = on_auth_required
         self._on_entry_unavailable = on_entry_unavailable
         self._ready_timeout_seconds = max(0.1, float(ready_timeout_seconds))
@@ -125,7 +128,6 @@ class QuizPlayerView(ft.Container):
         self._after_close: Callable | None = None
         self._close_title = "Đóng bài?"
         self._close_action_label = "Đóng bài"
-        self._saved_window_state: dict[str, Any] | None = None
         self._session_cleaner = None
         self._ensure_session_cleaner()
 
@@ -412,12 +414,28 @@ class QuizPlayerView(ft.Container):
             return False
 
         self._safe_update()
+        if self._session_cleaner is not None and callable(
+            getattr(self._session_cleaner, "prewarm", None)
+        ):
+            self._run_task(self._prewarm_session, target.session_key)
         if not self._run_task(
             self._prepare_entry_and_prompt, generation, factory
         ):
             self._show_mount_error("player_unavailable")
             return False
         return True
+
+    async def _prewarm_session(self, session_key: str) -> None:
+        cleaner = self._session_cleaner
+        if cleaner is None:
+            return
+        prewarm_fn = getattr(cleaner, "prewarm", None)
+        if not callable(prewarm_fn):
+            return
+        try:
+            await prewarm_fn(session_key)
+        except Exception:
+            pass
 
     def open_activity_for_account(
         self,
@@ -475,9 +493,29 @@ class QuizPlayerView(ft.Container):
 
         try:
             provider = self._entry_provider or _default_entry_provider()
-            prepare_task = asyncio.create_task(
-                asyncio.to_thread(provider, self._target, lease)
-            )
+            existing_client = None
+            if callable(self._client_provider) and self._target is not None:
+                try:
+                    existing_client = self._client_provider(
+                        getattr(self._target, "site_identity", "")
+                    )
+                except Exception:
+                    existing_client = None
+            if existing_client is not None and self._provider_accepts_existing_client(
+                provider
+            ):
+                prepare_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        provider,
+                        self._target,
+                        lease,
+                        existing_client=existing_client,
+                    )
+                )
+            else:
+                prepare_task = asyncio.create_task(
+                    asyncio.to_thread(provider, self._target, lease)
+                )
             self._entry_prepare_task = prepare_task
             done, _ = await asyncio.wait(
                 {prepare_task},
@@ -553,6 +591,18 @@ class QuizPlayerView(ft.Container):
             task = locals().get("prepare_task")
             if task is not None and task.done() and self._entry_prepare_task is task:
                 self._entry_prepare_task = None
+
+    @staticmethod
+    def _provider_accepts_existing_client(provider: Callable) -> bool:
+        try:
+            params = inspect.signature(provider).parameters
+        except (TypeError, ValueError):
+            return False
+        if "existing_client" in params:
+            return True
+        return any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        )
 
     @classmethod
     def _close_late_prepared_entry(cls, future):
@@ -828,6 +878,8 @@ class QuizPlayerView(ft.Container):
                 getattr(result, "secure_window", False)
                 or getattr(prepared, "secure_window", False)
             )
+            if secure_window:
+                logger.debug("Opening securewindow quiz in normal app window")
             source_cookies = None
             try:
                 source_cookies = result.to_native_cookies()
@@ -853,8 +905,6 @@ class QuizPlayerView(ft.Container):
             self._launch_url = launch_url
             self._bootstrap_started = False
             self._close_entry_prompt()
-            if secure_window:
-                self._enter_desktop_fullscreen()
             self._player = factory(
                 # The direct attempt URL travels only through the native
                 # player's private session DataChannel in bootstrap_session.
@@ -1011,7 +1061,6 @@ class QuizPlayerView(ft.Container):
             self._release_lease()
         self._status_panel.visible = False
         self._error_actions.visible = False
-        self._restore_desktop_window()
         self._safe_update()
         if callable(callback):
             await self._call_maybe_async(callback, activity)
@@ -1055,7 +1104,6 @@ class QuizPlayerView(ft.Container):
         self._status_panel.visible = False
         self._error_actions.visible = False
         self._clear_pending_cookies()
-        self._restore_desktop_window()
         self._safe_update()
         if prepared is not None:
             await asyncio.to_thread(self._close_prepared_entry, prepared)
@@ -1187,7 +1235,6 @@ class QuizPlayerView(ft.Container):
         self._ready = False
         self._clear_pending_cookies()
         self._release_lease()
-        self._restore_desktop_window()
         if player is not None:
             self._generation += 1
         self._safe_update()
@@ -1467,7 +1514,6 @@ class QuizPlayerView(ft.Container):
             if prepared is not None:
                 await asyncio.to_thread(self._close_prepared_entry, prepared)
             self._release_lease()
-        self._restore_desktop_window()
         self._safe_update()
 
         try:
@@ -1485,59 +1531,6 @@ class QuizPlayerView(ft.Container):
                 lease.release()
             except Exception as exc:
                 logger.warning("Quiz session lease release failed (%s)", type(exc).__name__)
-
-    def _enter_desktop_fullscreen(self):
-        if (
-            not self.native_runtime_supported()
-            or not platform_utils.IS_WINDOWS
-            or self._saved_window_state is not None
-        ):
-            return
-        window = getattr(self._page, "window", None)
-        if window is None:
-            return
-        fields = (
-            "full_screen",
-            "width",
-            "height",
-            "min_width",
-            "max_width",
-            "min_height",
-            "max_height",
-            "resizable",
-            "maximizable",
-        )
-        self._saved_window_state = {
-            field: getattr(window, field, None) for field in fields
-        }
-        try:
-            window.full_screen = True
-            self._page.update()
-        except Exception:
-            self._saved_window_state = None
-
-    def _restore_desktop_window(self):
-        state = self._saved_window_state
-        self._saved_window_state = None
-        window = getattr(self._page, "window", None)
-        if state is None or window is None:
-            return
-        try:
-            window.full_screen = bool(state.get("full_screen", False))
-            for field in (
-                "width",
-                "height",
-                "min_width",
-                "max_width",
-                "min_height",
-                "max_height",
-                "resizable",
-                "maximizable",
-            ):
-                setattr(window, field, state.get(field))
-            self._page.update()
-        except Exception:
-            logger.debug("Could not restore window size after quiz close", exc_info=True)
 
     def update_theme(self):
         """Refresh this detached or mounted quiz surface from semantic colors."""

@@ -995,7 +995,7 @@ def test_normal_quiz_exit_waits_for_confirmation_without_fullscreen(monkeypatch)
     asyncio.run(scenario())
 
 
-def test_securewindow_attempt_enters_fullscreen_and_restores_previous_window(
+def test_securewindow_attempt_stays_windowed_without_fullscreen(
     monkeypatch,
 ):
     async def scenario():
@@ -1024,13 +1024,16 @@ def test_securewindow_attempt_enters_fullscreen_and_restores_previous_window(
         await asyncio.sleep(0.02)
 
         assert prepared_entries[0].enter_calls == [(None, False)]
-        assert page.window.full_screen is True
+        assert page.window.full_screen is False
+        assert page.window.width == 420
+        assert page.window.height == 720
+        assert page.window.resizable is False
         assert player_view._player is not None
 
         player_view.request_close()
         player_view._cancel_close()
         assert player_view._player is not None
-        assert page.window.full_screen is True
+        assert page.window.full_screen is False
 
         player_view.request_close()
         await player_view._confirm_close()
@@ -1484,5 +1487,49 @@ def test_prebootstrap_account_change_releases_old_lease_and_rebuilds_target(
         ]
         assert len(players) == 1
         assert players[0].callbacks["url"] == new_target.url
+
+    asyncio.run(scenario())
+
+
+def test_open_activity_prewarms_session_cleaner_and_forwards_client_provider(monkeypatch):
+    async def scenario():
+        prewarm_keys = []
+        seen_existing_clients = []
+        fake_courses_client = SimpleNamespace(tag="courses")
+        fake_thnn_client = SimpleNamespace(tag="thnn")
+
+        controller = AppController.__new__(AppController)
+        controller.orchestrator = SimpleNamespace(
+            client=fake_courses_client,
+            thnn_client=fake_thnn_client,
+        )
+        assert controller._quiz_client_for_site("courses") is fake_courses_client
+        assert controller._quiz_client_for_site("thnn") is fake_thnn_client
+
+        class FakeCleaner:
+            async def prewarm(self, session_key):
+                prewarm_keys.append(session_key)
+                return True
+
+        def entry_provider(target, lease, *, existing_client=None):
+            seen_existing_clients.append((target.site_identity, existing_client))
+            return FakePreparedEntry()
+
+        page, _lease, players, _entries, player_view, detail_view = make_quiz_ui(
+            monkeypatch,
+            entry_provider=entry_provider,
+            ready=True,
+        )
+        player_view._client_provider = controller._quiz_client_for_site
+        player_view._session_cleaner = FakeCleaner()
+
+        detail_view.update_detail(trusted_quiz())
+        await detail_view._open_quiz(None)
+        await asyncio.sleep(0.03)
+
+        target = player_view._target
+        assert prewarm_keys == [target.session_key]
+        assert seen_existing_clients == [("courses", fake_courses_client)]
+        assert len(players) == 1
 
     asyncio.run(scenario())

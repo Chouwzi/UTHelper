@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 import threading
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from core.quiz_web_session import (
     _authenticated_quiz_client,
     _export_moodle_session_cookies,
     _site_for_target,
+    clone_authenticated_quiz_client,
+    warm_existing_client_from_quiz_login,
 )
 
 
@@ -553,25 +556,87 @@ class _OverviewParserText(HTMLParser):
             self.text.append(data)
 
 
+def _authenticate_quiz_client_for_entry(
+    target: QuizLaunchTarget,
+    lease: QuizSessionLease,
+):
+    try:
+        params = inspect.signature(_authenticated_quiz_client).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "require_sesskey" in params:
+        return _authenticated_quiz_client(target, lease, require_sesskey=False)
+    return _authenticated_quiz_client(target, lease)
+
+
 def prepare_quiz_entry(
     target: QuizLaunchTarget,
     lease: QuizSessionLease,
+    existing_client: Any = None,
 ) -> QuizPreparedEntry:
     """Authenticate and inspect a quiz overview without starting an attempt."""
     try:
         site = _site_for_target(target)
-        client, site, operation_lease = _authenticated_quiz_client(target, lease)
     except QuizWebSessionError as error:
         raise QuizEntryError(error.reason) from None
 
-    try:
-        try:
-            final_url, html = client._open_html(target.url)
-        except Exception:
-            raise QuizEntryError("overview_unavailable") from None
-        if not _overview_destination(final_url, site):
-            raise QuizEntryError("session_expired")
+    client = None
+    operation_lease = None
+    final_url = ""
+    html = ""
+    reused_initial_gen = (
+        int(getattr(existing_client, "_session_generation", 0))
+        if existing_client is not None
+        else None
+    )
+    used_cold_login = False
+    reused_was_stale = False
 
+    if existing_client is not None:
+        try:
+            cloned = clone_authenticated_quiz_client(target, lease, existing_client)
+        except QuizWebSessionError as error:
+            raise QuizEntryError(error.reason) from None
+        if cloned is not None:
+            reused_client, site, reused_lease, _ = cloned
+            try:
+                candidate_url, candidate_html = reused_client._open_html(target.url)
+                if _overview_destination(candidate_url, site):
+                    _export_moodle_session_cookies(reused_client, site, target)
+                    client = reused_client
+                    operation_lease = reused_lease
+                    final_url = candidate_url
+                    html = candidate_html
+                else:
+                    reused_was_stale = True
+                    reused_client._cookie_jar.clear()
+                    reused_lease.release()
+            except Exception:
+                reused_was_stale = True
+                reused_client._cookie_jar.clear()
+                reused_lease.release()
+
+    if client is None:
+        used_cold_login = True
+        try:
+            client, site, operation_lease = _authenticate_quiz_client_for_entry(
+                target, lease
+            )
+        except QuizWebSessionError as error:
+            raise QuizEntryError(error.reason) from None
+        try:
+            try:
+                final_url, html = client._open_html(target.url)
+            except Exception:
+                raise QuizEntryError("overview_unavailable") from None
+            if not _overview_destination(final_url, site):
+                raise QuizEntryError("session_expired")
+        except Exception:
+            client._cookie_jar.clear()
+            operation_lease.release()
+            raise
+
+    try:
         mode, secure_window, reason, form, password_required = _inspect_page(
             html, target, site
         )
@@ -585,6 +650,18 @@ def prepare_quiz_entry(
             _export_moodle_session_cookies(client, site, target)
         except QuizWebSessionError as error:
             raise QuizEntryError(error.reason) from None
+
+        if used_cold_login and existing_client is not None:
+            warm_existing_client_from_quiz_login(
+                existing_client,
+                client,
+                site,
+                str(getattr(client, "_session_owner", "") or ""),
+                html,
+                initial_gen=reused_initial_gen,
+                fallback_sesskey=str((form_fields or {}).get("sesskey") or ""),
+                replace_stale=reused_was_stale,
+            )
 
         return QuizPreparedEntry(
             target=target,
