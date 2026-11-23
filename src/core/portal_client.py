@@ -376,6 +376,109 @@ class PortalClient:
         except ValueError as exc:
             raise PortalProtocolError("Portal week contract was invalid") from exc
 
+    def _authorized_get(
+        self,
+        path: str,
+        username: str,
+        password: str,
+        *,
+        query: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """GET ``path`` with the cached Bearer token and one 401 re-login retry.
+
+        Shared by the read-only profile/tuition endpoints so every call keeps
+        the same token-owner and generation rules as ``fetch_day``.
+        """
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
+        try:
+            payload = self._request_json("GET", path, token=token, query=query)
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password, generation)
+            payload = self._request_json("GET", path, token=token, query=query)
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._store_token(refreshed_token, username, generation)
+        return payload
+
+    @staticmethod
+    def _list_body(payload: dict[str, Any], path: str) -> tuple[dict[str, Any], ...]:
+        """Normalize a list envelope into dicts; ``null`` means an empty list."""
+        body = payload.get("body")
+        if body is None:
+            return ()
+        if not isinstance(body, list):
+            raise PortalProtocolError(f"Portal {path} contract was invalid")
+        return tuple(item for item in body if isinstance(item, dict))
+
+    def fetch_summary_profile(
+        self, username: str, password: str
+    ) -> dict[str, Any]:
+        """Fetch the compact student identity shown on the Portal dashboard.
+
+        Returns the raw ``body`` of ``user/getSummaryProfile`` (hoDem/ten,
+        maSinhVien, khoa, nganh, ...) so callers can tolerate optional
+        fields the Portal does not always populate.
+        """
+        payload = self._authorized_get(
+            "user/getSummaryProfile", username, password
+        )
+        body = payload.get("body")
+        if not isinstance(body, dict):
+            raise PortalProtocolError("Portal summary profile contract was invalid")
+        return body
+
+    def fetch_credit(self, username: str, password: str) -> str:
+        """Fetch the UTH account balance as Portal renders it (``0.00Đ (UTH)``)."""
+        payload = self._authorized_get("user/getCredit", username, password)
+        body = payload.get("body")
+        if body is None:
+            return ""
+        if not isinstance(body, str):
+            raise PortalProtocolError("Portal credit contract was invalid")
+        return body.strip()
+
+    def fetch_semesters(
+        self, username: str, password: str
+    ) -> tuple[dict[str, Any], ...]:
+        """Fetch semester references (``{"id", "tenDot"}``) in Portal order."""
+        return self._list_body(
+            self._authorized_get("hoctap/hocky", username, password),
+            "hocky",
+        )
+
+    def fetch_tuition(
+        self, id_dot: int | str, username: str, password: str
+    ) -> tuple[dict[str, Any], ...]:
+        """Fetch per-course tuition rows for ``id_dot`` (``0`` = every semester).
+
+        The field names mirror the Portal's own ``/tuition`` table
+        (tenDot, maLopHocPhan, noiDung, soTinChi, mucPhiBanDau, mucNop,
+        ngayNop, soTienNop, khauTru, truNo, congNo, daDongHocPhi).
+        """
+        return self._list_body(
+            self._authorized_get(
+                "hocphi",
+                username,
+                password,
+                query={"idDot": str(id_dot)},
+            ),
+            "hocphi",
+        )
+
+    def fetch_tuition_other(
+        self, username: str, password: str
+    ) -> tuple[dict[str, Any], ...]:
+        """Fetch non-tuition collections (bảo hiểm, ký túc xá, ...)."""
+        return self._list_body(
+            self._authorized_get("hocphi/khoanthukhac", username, password),
+            "hocphi/khoanthukhac",
+        )
+
     def fetch_credit_progress(
         self, username: str, password: str
     ) -> dict[str, Any] | None:

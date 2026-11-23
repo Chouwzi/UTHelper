@@ -563,3 +563,154 @@ def test_decompress_gzip_bounded_rejects_truncated_and_trailing_garbage_streams(
     )
     with pytest.raises(PortalProtocolError, match="not valid gzip"):
         client.fetch_day(date(2026, 8, 11), "student", "secret")
+
+
+def test_portal_client_fetches_summary_profile_and_credit_with_shared_login():
+    """One login serves the profile + balance calls; bodies normalize to types."""
+    requests = []
+
+    def opener(request, timeout):
+        del timeout
+        requests.append(request.full_url)
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        if request.full_url.endswith("/user/getSummaryProfile"):
+            return _Response(
+                {
+                    "success": True,
+                    "body": {
+                        "maSinhVien": "SV001",
+                        "hoDem": "Nguyễn Văn",
+                        "ten": "A",
+                        "nganh": "Công nghệ thông tin",
+                        "khoa": "Ban CNTT",
+                    },
+                }
+            )
+        if request.full_url.endswith("/user/getCredit"):
+            return _Response({"success": True, "body": "125000.00Đ (UTH)"})
+        raise AssertionError(f"unexpected request {request.full_url}")
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+
+    profile = client.fetch_summary_profile("student", "secret")
+    credit = client.fetch_credit("student", "secret")
+
+    assert profile["maSinhVien"] == "SV001"
+    assert profile["hoDem"] == "Nguyễn Văn"
+    assert credit == "125000.00Đ (UTH)"
+    # Exactly one login: the cached token served the second call.
+    assert sum(url.endswith("/user/login") for url in requests) == 1
+
+
+def test_portal_client_tuition_endpoints_send_id_dot_and_normalize_lists():
+    requests = []
+
+    def opener(request, timeout):
+        del timeout
+        requests.append(request.full_url)
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        if "/hocphi?idDot=76" in request.full_url:
+            return _Response(
+                {
+                    "success": True,
+                    "body": [
+                        {
+                            "tenDot": "Học kỳ 1 năm học 2025-2026",
+                            "maLopHocPhan": "0120005105",
+                            "noiDung": "Triết học Mác - Lênin",
+                            "soTinChi": 3,
+                            "mucPhiBanDau": 4500000,
+                            "mucNop": 4500000,
+                            "congNo": 0,
+                            "daDongHocPhi": True,
+                        },
+                        "not-a-dict",
+                    ],
+                }
+            )
+        if request.full_url.endswith("/hocphi/khoanthukhac"):
+            return _Response(
+                {
+                    "success": True,
+                    "body": [
+                        {
+                            "namHoc": "2025-2026",
+                            "tenKhoanThuKhac": "Bảo hiểm y tế",
+                            "mucNop": 450000,
+                            "congNo": 0,
+                        }
+                    ],
+                }
+            )
+        raise AssertionError(f"unexpected request {request.full_url}")
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+
+    rows = client.fetch_tuition(76, "student", "secret")
+    others = client.fetch_tuition_other("student", "secret")
+
+    assert len(rows) == 1  # non-dict entries are dropped
+    assert rows[0]["daDongHocPhi"] is True
+    assert len(others) == 1
+    assert others[0]["tenKhoanThuKhac"] == "Bảo hiểm y tế"
+    assert any(url.endswith("/hocphi?idDot=76") for url in requests)
+
+
+def test_portal_client_tuition_rejects_non_list_body():
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": {"oops": True}})
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+
+    import pytest
+
+    from core.portal_client import PortalProtocolError
+
+    with pytest.raises(PortalProtocolError, match="hocphi"):
+        client.fetch_tuition(0, "student", "secret")
+
+
+def test_portal_client_semester_list_tolerates_null_body():
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": None})
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+
+    assert client.fetch_semesters("student", "secret") == ()
+
+
+def test_portal_client_summary_profile_reauthenticates_after_401():
+    login_count = 0
+
+    def opener(request, timeout):
+        del timeout
+        nonlocal login_count
+        if request.full_url.endswith("/user/login"):
+            login_count += 1
+            return _Response({"success": True, "token": f"token-{login_count}"})
+        if login_count == 1:
+            raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+        return _Response({"success": True, "body": {"maSinhVien": "SV001"}})
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+
+    assert client.fetch_summary_profile("student", "secret")["maSinhVien"] == "SV001"
+    assert login_count == 2
