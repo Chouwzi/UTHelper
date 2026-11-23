@@ -18,6 +18,7 @@ on:
       - 'src/core/distribution.py'
       - 'src/platform_utils/background_sync.py'
       - 'src/assets/office_viewer/**'
+      - 'src/assets/pdf_viewer/**'
   workflow_dispatch:
     inputs:
       apk_arch:

@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const output = path.resolve(root, '../../src/assets/office_viewer');
+const pdfOutput = path.resolve(root, '../../src/assets/pdf_viewer');
 await mkdir(path.join(output, 'licenses'), { recursive: true });
+await mkdir(path.join(pdfOutput, 'licenses'), { recursive: true });
 const bundled = await build({
   stdin: { contents: "export {loadPresentation,getSlides,getSlideNotes} from '@office-kit/pptx'; export {renderSlideToSvg} from '@office-kit/pptx-preview';", resolveDir: root },
   bundle: true, minify: true, platform: 'browser', format: 'iife',
@@ -28,4 +30,18 @@ for (const name of ['docx-preview.min.js', 'jszip.min.js', 'pptx_engine.js']) {
 await writeFile(path.join(output, 'manifest.json'), JSON.stringify({
   packages: { 'docx-preview': '0.4.1', jszip: '3.10.2', '@office-kit/pptx': '0.28.0', '@office-kit/pptx-preview': '0.21.0' },
   hashes, inputs: Object.keys(bundled.metafile.inputs).filter(name => name.includes('node_modules')).map(name => name.replaceAll('\\', '/').split('node_modules/').pop()),
+}, null, 2) + '\n');
+
+for (const [source, target] of [
+  ['pdfjs-dist/legacy/build/pdf.min.mjs', 'pdf.min.mjs'],
+  ['pdfjs-dist/legacy/build/pdf.worker.min.mjs', 'pdf.worker.min.mjs'],
+  ['pdfjs-dist/LICENSE', 'licenses/pdfjs-dist.txt'],
+]) await copyFile(path.join(root, 'node_modules', source), path.join(pdfOutput, target));
+const pdfHashes = {};
+for (const name of ['pdf.min.mjs', 'pdf.worker.min.mjs']) {
+  pdfHashes[name] = createHash('sha256').update(await readFile(path.join(pdfOutput, name))).digest('hex');
+}
+await writeFile(path.join(pdfOutput, 'manifest.json'), JSON.stringify({
+  packages: { 'pdfjs-dist': '4.10.38' },
+  hashes: pdfHashes,
 }, null, 2) + '\n');

@@ -135,6 +135,7 @@ class CoursesWebViewPane(ft.Container):
         on_toggle_expand: Optional[Callable[[], None]] = None,
         embedded_webview_factory: Optional[Callable[[str], Optional[ft.Control]]] = None,
         pane_width: Optional[float] = None,
+        account_namespace: Optional[str] = None,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
         self._page = page
@@ -149,6 +150,7 @@ class CoursesWebViewPane(ft.Container):
         self._show_expand_toggle = bool(show_expand_toggle)
         self._on_toggle_expand = on_toggle_expand
         self._embedded_factory = embedded_webview_factory
+        self._account_namespace = account_namespace
 
         if pane_width is not None:
             resolved_width = float(pane_width)
@@ -382,6 +384,7 @@ class CoursesWebViewPane(ft.Container):
             load_url,
             page=self._page,
             bgcolor=C.BG,
+            account_namespace=self._account_namespace,
             cookie_provider=cookie_provider,
             on_title_changed=self._on_native_title,
             on_url_changed=self._on_native_url_or_bridge,

@@ -42,19 +42,57 @@ def test_successful_cookie_refresh_preserves_in_app_navigation(monkeypatch):
     core.navigate.assert_called_once_with(dock._url)
 
 
-def test_each_pane_uses_a_separate_private_browser_profile():
-    profiles = []
+def test_same_account_reuses_persistent_profile_and_distinct_accounts_isolate(tmp_path, monkeypatch):
+    from gui.components.courses.embedded_webview_host import (
+        _sweep_stale_profiles,
+        clear_persisted_webview2_profiles,
+        webview2_account_profile_name,
+    )
+
+    ns_a = "https://courses.ut.edu.vn|student_a"
+    ns_b = "https://courses.ut.edu.vn|student_b"
+    profiles_a = []
     for _ in range(2):
         environment = Mock()
-        options = SimpleNamespace(profile_name="", is_in_private_mode_enabled=False)
+        options = SimpleNamespace(profile_name="", is_in_private_mode_enabled=True)
         environment.create_core_webview2_controller_options.return_value = options
-        dock = WindowsWebView2Dock(page_title="UTHelper")
+        dock = WindowsWebView2Dock(page_title="UTHelper", account_namespace=ns_a)
         window_ref = object()
         dock._create_private_controller(environment, window_ref)
         environment.create_core_webview2_controller_async.assert_called_once_with(window_ref, options)
-        assert options.is_in_private_mode_enabled is True
-        profiles.append(options.profile_name)
-    assert profiles[0] and profiles[1] and profiles[0] != profiles[1]
+        assert options.is_in_private_mode_enabled is False
+        assert options.profile_name.startswith("acct_")
+        profiles_a.append(options.profile_name)
+    assert profiles_a[0] == profiles_a[1] == webview2_account_profile_name(ns_a)
+
+    profile_b = webview2_account_profile_name(ns_b)
+    assert profile_b != profiles_a[0]
+
+    # _cleanup_native retains acct_* across closes; _sweep_stale_profiles cleans only legacy uth*
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    profile_root = tmp_path / "UTHelper" / "webview2_profile"
+    acct_dir = profile_root / "EBWebView" / profiles_a[0]
+    other_acct_dir = profile_root / "EBWebView" / profile_b
+    legacy_dir = profile_root / "EBWebView" / "uthlegacy1234"
+    acct_dir.mkdir(parents=True)
+    other_acct_dir.mkdir(parents=True)
+    legacy_dir.mkdir(parents=True)
+
+    dock_a = WindowsWebView2Dock(page_title="UTHelper", account_namespace=ns_a)
+    dock_a._cleanup_native()
+    assert acct_dir.is_dir()
+
+    _sweep_stale_profiles(profile_root, active_profile=profiles_a[0])
+    assert acct_dir.is_dir()
+    assert other_acct_dir.is_dir()
+    assert not legacy_dir.exists()
+
+    clear_persisted_webview2_profiles(keep_profile_name=profile_b, profile_root=profile_root)
+    assert not acct_dir.exists()
+    assert other_acct_dir.is_dir()
+
+    clear_persisted_webview2_profiles(profile_root=profile_root)
+    assert not other_acct_dir.exists()
 
 
 def test_disposal_during_cookie_refresh_cannot_navigate_after_account_switch(monkeypatch):

@@ -549,6 +549,9 @@ def test_scenario3_nested_zip_archive_pdf_outlines_bottomsheet_and_back(
         on_open_assignment_fallback=lambda _m: None,
         on_launch_url=lambda u: fake_page.launch_url(u),
     )
+    # Force native Flet PDF outline BottomSheet path even on runtimes without pypdfium2
+    # (e.g., Linux CI) where DocumentReaderView otherwise routes to pdf.js WebView.
+    monkeypatch.setattr(coord, "build_webview_host", lambda *_a, **_kw: None)
     courses_view = coord.courses_view
     courses_view.set_viewport_size(360, 780)
     asyncio.run(coord.ensure_loaded_async())
