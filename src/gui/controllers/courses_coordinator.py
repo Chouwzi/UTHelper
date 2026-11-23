@@ -29,6 +29,12 @@ from core.courses.models import (
     RecentMaterialEntry,
 )
 from core.courses.pdf_renderer import PdfDocumentSession
+from core.courses.office_viewer_service import (
+    OfficeViewerDescriptor,
+    prepare_office_viewer,
+    prepare_office_viewer_from_file,
+    prepare_pdf_viewer,
+)
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.windows_office_bridge import render_office_pdf
 from gui.components.courses._shared import (
@@ -54,6 +60,7 @@ from gui.components.courses.document_reader_view import DocumentReaderView
 from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     build_embedded_webview_host,
+    is_embedded_webview_supported,
 )
 from gui.components.courses.webview_pane import CoursesWebViewPane
 from gui.components.detail_view import DetailView
@@ -171,9 +178,11 @@ class CoursesCoordinator:
         submission_workflow_factory: Optional[Callable[..., Any]] = None,
         all_assignments_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_start_quiz: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
+        account_namespace: Optional[str] = None,
     ) -> None:
         self._page = page
         self._on_start_quiz = on_start_quiz
+        self._account_namespace = account_namespace
         self.catalog_service = catalog_service
         self.preview_cache = preview_cache
         self.archive_service = archive_service
@@ -270,7 +279,10 @@ class CoursesCoordinator:
         self._attachment_load_seq += 1
         self._initial_loaded = False
         if namespace:
-            cache_store = getattr(self.catalog_service, "_cache_store", None)
+            self._account_namespace = namespace
+            cache_store = getattr(self.catalog_service, "_cache", None) or getattr(
+                self.catalog_service, "_cache_store", None
+            )
             set_ns = getattr(cache_store, "set_namespace", None)
             if callable(set_ns):
                 set_ns(namespace)
@@ -395,6 +407,7 @@ class CoursesCoordinator:
             html=html,
             page=self._page,
             bgcolor=C.BG,
+            account_namespace=self._account_namespace,
             on_ready=on_ready,
             on_error=on_error,
             on_message=on_message,
@@ -434,6 +447,7 @@ class CoursesCoordinator:
             on_open_external=self._launch_url_safe,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             pane_width=initial_pane_w,
+            account_namespace=self._account_namespace,
         )
         self.courses_view.push_overlay(pane, tag=tag or f"webview:{abs(hash(safe_url))}")
 
@@ -574,7 +588,7 @@ class CoursesCoordinator:
     async def _prefetch_course_attachments_async(
         self, course: CourseSummary, sections: list[CourseSection]
     ) -> None:
-        """Politely prefetch up to 2 small uncached previewable documents in idle background."""
+        """Concurrently prefetch up to 4 uncached previewable documents (<= 5 MiB) in background."""
         if course.source != "courses":
             return
         fetch_cache_fn = getattr(self.catalog_service, "fetch_or_cache_preview_file", None)
@@ -588,7 +602,7 @@ class CoursesCoordinator:
                         continue
                     if (
                         att.preview_kind in {"pdf", "docx", "pptx", "xlsx", "csv", "text"}
-                        and 0 < int(att.file_size or 0) <= 1_572_864
+                        and 0 < int(att.file_size or 0) <= 5 * 1024 * 1024
                         and att.file_url
                     ):
                         prio = 0 if mod.is_new else 1
@@ -596,9 +610,9 @@ class CoursesCoordinator:
         if not candidates:
             return
         candidates.sort(key=lambda item: (item[0], item[1].file_size))
-        prefetched = 0
+        to_fetch: list[CourseAttachment] = []
         for _, att in candidates:
-            if prefetched >= 2:
+            if len(to_fetch) >= 4:
                 break
             if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
                 return
@@ -611,26 +625,42 @@ class CoursesCoordinator:
                 )
                 if existing is not None:
                     continue
-                await asyncio.sleep(0.15)
-                if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
-                    return
-                await asyncio.to_thread(
-                    fetch_cache_fn,
-                    "courses",
-                    att.file_url,
-                    att.time_modified,
-                    att.file_name,
-                )
-                prefetched += 1
+                to_fetch.append(att)
             except Exception:
                 logger.debug("Idle attachment prefetch skipped for %s", att.file_name)
 
-    async def _fetch_attachment_bytes_async(
+        if not to_fetch:
+            return
+        await asyncio.sleep(0.05)
+        if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
+            return
+
+        is_mobile = bool(platform_utils.IS_ANDROID or platform_utils.IS_IOS)
+        sem = asyncio.Semaphore(2 if is_mobile else 3)
+
+        async def _prefetch_one(att: CourseAttachment) -> None:
+            async with sem:
+                if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
+                    return
+                try:
+                    await asyncio.to_thread(
+                        fetch_cache_fn,
+                        "courses",
+                        att.file_url,
+                        att.time_modified,
+                        att.file_name,
+                    )
+                except Exception:
+                    logger.debug("Idle attachment prefetch skipped for %s", att.file_name)
+
+        await asyncio.gather(*(_prefetch_one(att) for att in to_fetch), return_exceptions=True)
+
+    async def _fetch_attachment_payload_async(
         self,
         source: str,
         att: CourseAttachment,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> bytes:
+    ) -> tuple[bytes, Optional[Path]]:
         try:
             cached_path = await asyncio.to_thread(
                 self.preview_cache.get_cached_path,
@@ -645,7 +675,7 @@ class CoursesCoordinator:
                         progress_callback(len(data_cached), len(data_cached))
                     except Exception:
                         pass
-                return data_cached
+                return data_cached, cached_path
         except OSError as exc:
             logger.debug("Preview cache read failed for %s: %s", att.file_name, exc)
 
@@ -665,8 +695,9 @@ class CoursesCoordinator:
             )
 
         raw = await asyncio.to_thread(_invoke_fetch)
+        saved_path: Optional[Path] = None
         try:
-            await asyncio.to_thread(
+            saved_path = await asyncio.to_thread(
                 self.preview_cache.put_bytes,
                 att.file_url,
                 att.time_modified,
@@ -677,6 +708,17 @@ class CoursesCoordinator:
             logger.warning(
                 "Failed to persist preview cache for %s: %s", att.file_name, exc
             )
+        return raw, saved_path
+
+    async def _fetch_attachment_bytes_async(
+        self,
+        source: str,
+        att: CourseAttachment,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bytes:
+        raw, _ = await self._fetch_attachment_payload_async(
+            source, att, progress_callback=progress_callback
+        )
         return raw
 
     def open_attachment_bytes_in_overlay(
@@ -689,6 +731,8 @@ class CoursesCoordinator:
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
         rendered_pdf_bytes: Optional[bytes] = None,
+        preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None,
+        cached_file_path: Optional[Path] = None,
     ) -> None:
         """Record recent access and open ArchiveExplorerView or DocumentReaderView overlay."""
         try:
@@ -737,6 +781,8 @@ class CoursesCoordinator:
             preconverted=preconverted,
             preopened_pdf=preopened_pdf,
             rendered_pdf_bytes=rendered_pdf_bytes,
+            preprepared_office_viewer=preprepared_office_viewer,
+            cached_file_path=cached_file_path,
         )
 
     def _open_entry_reader(
@@ -748,6 +794,8 @@ class CoursesCoordinator:
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
         rendered_pdf_bytes: Optional[bytes] = None,
+        preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None,
+        cached_file_path: Optional[Path] = None,
     ) -> None:
         if kind == "archive":
             nested = ArchiveExplorerView(
@@ -768,6 +816,11 @@ class CoursesCoordinator:
                 initial_pane_w = float(bounds_fn()[2])
             except Exception:
                 initial_pane_w = 700.0
+        plat_val = getattr(self._page, "platform", None)
+        is_windows_native_pdf = (
+            (plat_val == ft.PagePlatform.WINDOWS or str(plat_val or "").lower() == "windows")
+            and not bool(getattr(self._page, "web", False))
+        )
         reader = DocumentReaderView(
             file_name=name,
             data=data,
@@ -785,8 +838,10 @@ class CoursesCoordinator:
             preopened_pdf=preopened_pdf,
             rendered_pdf_bytes=rendered_pdf_bytes,
             pane_width=initial_pane_w,
-            pdf_in_webview=isinstance(self._page, ft.Page) and self._page.platform == ft.PagePlatform.WINDOWS and not self._page.web,
+            pdf_in_webview=is_windows_native_pdf,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            preprepared_office_viewer=preprepared_office_viewer,
+            cached_file_path=cached_file_path,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")
 
@@ -846,7 +901,7 @@ class CoursesCoordinator:
                         subtitle=f"Đã nhận {done_txt}{speed_txt}",
                     )
 
-            raw = await self._fetch_attachment_bytes_async(
+            raw, cached_file_path = await self._fetch_attachment_payload_async(
                 course.source, att, progress_callback=_on_dl_progress
             )
             if req_seq != self._attachment_load_seq or loading_overlay._disposed:
@@ -859,15 +914,78 @@ class CoursesCoordinator:
 
             preconverted: Optional[ConvertedDocument] = None
             rendered_pdf_bytes: Optional[bytes] = None
+            preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None
+            plat_val = getattr(self._page, "platform", None)
+            is_windows_desktop = (
+                (plat_val == ft.PagePlatform.WINDOWS or str(plat_val or "").lower() == "windows")
+                and not bool(getattr(self._page, "web", False))
+            )
+            webview_supported = is_embedded_webview_supported(self._page)
             if not (att.is_archive or att.preview_kind == "archive"):
-                if att.preview_kind in {"docx", "pptx"} and isinstance(self._page, ft.Page) and self._page.platform == ft.PagePlatform.WINDOWS and not self._page.web:
-                    rendered_pdf_bytes = await asyncio.to_thread(render_office_pdf, raw, att.file_name)
-                if rendered_pdf_bytes is not None:
-                    preopened_pdf = await asyncio.to_thread(
-                        PdfDocumentSession, rendered_pdf_bytes,
-                        cache_dir=getattr(self.preview_cache, "cache_dir", None),
-                    )
-                elif att.preview_kind in {"docx", "xlsx", "csv", "pptx", "text"}:
+                if att.preview_kind in {"docx", "pptx"}:
+                    if is_windows_desktop:
+                        get_cached_pdf = getattr(
+                            self.preview_cache, "get_cached_converted_pdf", None
+                        )
+                        put_cached_pdf = getattr(
+                            self.preview_cache, "put_converted_pdf", None
+                        )
+                        if callable(get_cached_pdf):
+                            rendered_pdf_bytes = await asyncio.to_thread(
+                                get_cached_pdf, raw, att.file_name
+                            )
+                        if rendered_pdf_bytes is None:
+                            rendered_pdf_bytes = await asyncio.to_thread(
+                                render_office_pdf, raw, att.file_name
+                            )
+                            if rendered_pdf_bytes is not None and callable(put_cached_pdf):
+                                await asyncio.to_thread(
+                                    put_cached_pdf, raw, att.file_name, rendered_pdf_bytes
+                                )
+                    if rendered_pdf_bytes is not None:
+                        if not is_windows_desktop:
+                            preopened_pdf = await asyncio.to_thread(
+                                PdfDocumentSession,
+                                rendered_pdf_bytes,
+                                cache_dir=getattr(self.preview_cache, "cache_dir", None),
+                            )
+                    else:
+                        is_ooxml_office = att.file_name.lower().endswith(
+                            (".docx", ".pptx")
+                        )
+                        if is_ooxml_office and webview_supported:
+                            def _prepare_office() -> Optional[OfficeViewerDescriptor]:
+                                if (
+                                    cached_file_path is not None
+                                    and cached_file_path.is_file()
+                                ):
+                                    desc = prepare_office_viewer_from_file(
+                                        cached_file_path,
+                                        att.file_name,
+                                        self.preview_server,
+                                        theme="light",
+                                    )
+                                    if desc is not None:
+                                        return desc
+                                return prepare_office_viewer(
+                                    raw,
+                                    att.file_name,
+                                    self.preview_server,
+                                    theme="light",
+                                )
+
+                            preprepared_office_viewer = await asyncio.to_thread(
+                                _prepare_office
+                            )
+                        if preprepared_office_viewer is None:
+                            preconverted = await asyncio.to_thread(
+                                convert_document_bytes,
+                                att.file_name,
+                                raw,
+                                att.preview_kind,
+                                dark_mode=False,
+                            )
+                elif att.preview_kind in {"xlsx", "csv", "text"}:
                     preconverted = await asyncio.to_thread(
                         convert_document_bytes,
                         att.file_name,
@@ -876,12 +994,21 @@ class CoursesCoordinator:
                         dark_mode=False,
                     )
                 elif att.preview_kind == "pdf":
-                    pdf_in_webview = (
-                        isinstance(self._page, ft.Page)
-                        and self._page.platform == ft.PagePlatform.WINDOWS
-                        and not self._page.web
+                    is_mobile = bool(
+                        platform_utils.IS_ANDROID
+                        or platform_utils.IS_IOS
+                        or plat_val in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
+                        or str(plat_val or "").lower() in ("android", "ios")
                     )
-                    if not pdf_in_webview:
+                    if is_mobile and webview_supported:
+                        preprepared_office_viewer = await asyncio.to_thread(
+                            prepare_pdf_viewer,
+                            raw,
+                            self.preview_server,
+                            theme="light",
+                            file_path=cached_file_path,
+                        )
+                    elif not is_windows_desktop:
                         pdf_dir = getattr(self.preview_cache, "cache_dir", None)
 
                         def _warm_pdf() -> PdfDocumentSession:
@@ -905,6 +1032,8 @@ class CoursesCoordinator:
                 preconverted=preconverted,
                 preopened_pdf=preopened_pdf,
                 rendered_pdf_bytes=rendered_pdf_bytes,
+                preprepared_office_viewer=preprepared_office_viewer,
+                cached_file_path=cached_file_path,
             )
             preopened_pdf = None
         except Exception as exc:

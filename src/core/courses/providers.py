@@ -533,6 +533,33 @@ class CoursesWsProvider:
                 pass
         return self._client.download_file(safe_url)
 
+    def download_file_to_path(
+        self,
+        url: str,
+        dest_stream: Any,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        if self._client is None:
+            return False
+        safe_url = _safe_http_url(url)
+        if not safe_url or not _same_origin(safe_url, self._origin):
+            return False
+        stream_fn = getattr(self._client, "download_file_to_path", None)
+        if callable(stream_fn):
+            try:
+                return bool(
+                    stream_fn(
+                        safe_url, dest_stream, progress_callback=progress_callback
+                    )
+                )
+            except TypeError:
+                return bool(stream_fn(safe_url, dest_stream))
+        raw = self.download_file(safe_url, progress_callback=progress_callback)
+        if not raw:
+            return False
+        dest_stream.write(raw)
+        return True
+
     def fetch_user_groups(self, course_id: int) -> list[dict[str, Any]]:
         getter = getattr(self._service, "get_course_user_groups", None)
         if not callable(getter):
@@ -861,3 +888,31 @@ class ThnnCourseProvider:
             except TypeError:
                 pass
         return self._client.download_session_file(safe_url)
+
+    def download_file_to_path(
+        self,
+        url: str,
+        dest_stream: Any,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        if self._client is None:
+            return False
+        safe_url = _safe_http_url(url)
+        base = self._base_url()
+        if not safe_url or not _same_origin(safe_url, base):
+            return False
+        stream_fn = getattr(self._client, "download_session_file_to_path", None)
+        if callable(stream_fn):
+            try:
+                return bool(
+                    stream_fn(
+                        safe_url, dest_stream, progress_callback=progress_callback
+                    )
+                )
+            except TypeError:
+                return bool(stream_fn(safe_url, dest_stream))
+        raw = self.download_file(safe_url, progress_callback=progress_callback)
+        if not raw:
+            return False
+        dest_stream.write(raw)
+        return True

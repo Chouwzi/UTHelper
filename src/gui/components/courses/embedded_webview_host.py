@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import ctypes
 from ctypes import wintypes
+import hashlib
 import inspect
+import json
 import logging
 import os
 from pathlib import Path
 import queue
-import secrets
 import shutil
 import sys
 import threading
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -64,8 +66,68 @@ def _validate_webview_url(
     return safe_http_url(cleaned, allow_loopback=False)
 
 
+def webview2_profile_root() -> Path:
+    """Return the root folder storing WebView2 user data profiles on Windows."""
+    local_app = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(local_app) / "UTHelper" / "webview2_profile"
+
+
+def webview2_account_profile_name(account_namespace: Optional[str] = None) -> str:
+    """Return a deterministic persistent WebView2 profile name for an account namespace."""
+    ns = str(account_namespace or "").strip()
+    if not ns:
+        try:
+            from config import settings
+
+            base = str(getattr(settings, "MOODLE_BASE_URL", "") or "").strip()
+            user = str(getattr(settings, "UTH_USERNAME", "") or "").strip() or "anon"
+            ns = f"{base}|{user}"
+        except Exception:
+            ns = "default|anon"
+    digest = hashlib.sha256(
+        f"uth-webview2-profile-v1\0{ns}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"acct_{digest}"
+
+
+def clear_persisted_webview2_profiles(
+    *,
+    keep_profile_name: Optional[str] = None,
+    profile_root: Optional[Path] = None,
+) -> None:
+    """Delete persisted ``acct_*`` and legacy ``uth*`` WebView2 profiles on logout/account switch."""
+    root = Path(profile_root) if profile_root is not None else webview2_profile_root()
+    retry_delays = (0.08, 0.2, 0.4)
+    for base in (root, root / "EBWebView"):
+        if not base.is_dir():
+            continue
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if not (name.startswith("acct_") or name.startswith("uth")):
+                continue
+            if keep_profile_name and name == keep_profile_name:
+                continue
+            for attempt in range(len(retry_delays) + 1):
+                try:
+                    shutil.rmtree(entry, ignore_errors=False)
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    if attempt < len(retry_delays):
+                        time.sleep(retry_delays[attempt])
+                    else:
+                        shutil.rmtree(entry, ignore_errors=True)
+
+
 def _sweep_stale_profiles(profile_root: Path, *, active_profile: str) -> None:
-    """Best-effort cleanup of stale ``uth*`` per-pane WebView2 profile directories."""
+    """Best-effort cleanup of legacy ephemeral ``uth*`` WebView2 profile directories."""
     for base in (profile_root, profile_root / "EBWebView"):
         if not base.is_dir():
             continue
@@ -138,6 +200,13 @@ def _webview2_runtime_available() -> bool:
         return False
 
 
+def is_embedded_webview_supported(page: Optional[ft.Page]) -> bool:
+    """Return True when the current runtime can host an inline WebView."""
+    return _is_flet_webview_platform(page) or (
+        _is_windows_webview2_platform(page) and _webview2_runtime_available()
+    )
+
+
 class WindowsWebView2Dock:
     """Owned borderless WebView2 host window synced over Pane 3 on Windows Desktop."""
 
@@ -150,6 +219,7 @@ class WindowsWebView2Dock:
         page_title: str,
         url: str = "",
         initial_html: Optional[str] = None,
+        account_namespace: Optional[str] = None,
         cookies: Optional[list[dict[str, Any]]] = None,
         cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_title_changed: Optional[Callable[[str], None]] = None,
@@ -163,7 +233,8 @@ class WindowsWebView2Dock:
         on_history_changed: Optional[Callable[[bool, bool], None]] = None,
     ) -> None:
         self._page_title = page_title or "UTHelper"
-        self._profile_name = f"uth{secrets.token_hex(12)}"
+        self._account_namespace = account_namespace
+        self._profile_name = webview2_account_profile_name(account_namespace)
         self._url = url
         self._html: Optional[str] = initial_html
         self._cookies = list(cookies or ())
@@ -182,6 +253,8 @@ class WindowsWebView2Dock:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._ready = False
+        self._paint_ready = False
+        self._paint_deadline: float = 0.0
         self._failed = False
         self._visible = True
         self._can_go_back = False
@@ -217,7 +290,8 @@ class WindowsWebView2Dock:
         if not self._url:
             return False
         try:
-            return urlsplit(self._url).path.startswith("/viewer/")
+            path = urlsplit(self._url).path
+            return path.startswith("/viewer/") or path.startswith("/pdf-viewer/")
         except ValueError:
             return False
 
@@ -227,8 +301,8 @@ class WindowsWebView2Dock:
         try:
             parts = urlsplit(self._url)
             segs = [s for s in parts.path.split("/") if s]
-            if len(segs) >= 2 and segs[0] == "viewer":
-                return f"{parts.scheme.lower()}://{parts.netloc.lower()}/viewer/{segs[1]}/"
+            if len(segs) >= 2 and segs[0] in ("viewer", "pdf-viewer"):
+                return f"{parts.scheme.lower()}://{parts.netloc.lower()}/{segs[0]}/{segs[1]}/"
         except ValueError:
             pass
         return ""
@@ -270,11 +344,15 @@ class WindowsWebView2Dock:
             return
         self._html = None
         self._url = safe_url
+        self._paint_ready = False
+        self._paint_deadline = 0.0
         self._enqueue("navigate", safe_url)
 
     def load_html(self, html: str) -> None:
         self._html = html
         self._url = ""
+        self._paint_ready = False
+        self._paint_deadline = 0.0
         self._enqueue("load_html", html)
 
     async def eval_js_async(self, script: str) -> None:
@@ -295,6 +373,8 @@ class WindowsWebView2Dock:
         self._enqueue("go_forward", None)
 
     def reload(self) -> None:
+        self._paint_ready = False
+        self._paint_deadline = 0.0
         self._enqueue("reload", None)
 
     def can_go_back(self) -> bool:
@@ -476,6 +556,17 @@ class WindowsWebView2Dock:
         return matched[0][1] if len(matched) == 1 else 0
 
     def _run_sta_thread(self) -> None:
+        if sys.platform == "win32":
+            try:
+                user32 = ctypes.windll.user32
+                set_dpi = getattr(user32, "SetThreadDpiAwarenessContext", None)
+                if set_dpi is not None:
+                    set_dpi.argtypes = [ctypes.c_void_p]
+                    set_dpi.restype = ctypes.c_void_p
+                    if not set_dpi(ctypes.c_void_p(-4)):
+                        set_dpi(ctypes.c_void_p(-3))
+            except Exception:
+                pass
         try:
             ctypes.oledll.ole32.CoInitializeEx(None, 2)
         except Exception:
@@ -557,8 +648,7 @@ class WindowsWebView2Dock:
         self._hwnd = hwnd
         self._apply_window_bounds()
 
-        local_app = os.environ.get("LOCALAPPDATA") or str(Path.home())
-        profile_root = Path(local_app) / "UTHelper" / "webview2_profile"
+        profile_root = webview2_profile_root()
         profile_root.mkdir(parents=True, exist_ok=True)
         _sweep_stale_profiles(profile_root, active_profile=self._profile_name)
         user_data_dir = str(profile_root)
@@ -587,11 +677,15 @@ class WindowsWebView2Dock:
         except Exception as exc:
             self._fail(str(exc))
 
-    def _create_private_controller(self, environment: Any, window_ref: Any) -> Any:
+    def _create_controller(self, environment: Any, window_ref: Any) -> Any:
         options = environment.create_core_webview2_controller_options()
         options.profile_name = self._profile_name
-        options.is_in_private_mode_enabled = True
+        options.is_in_private_mode_enabled = False
         return environment.create_core_webview2_controller_async(window_ref, options)
+
+    def _create_private_controller(self, environment: Any, window_ref: Any) -> Any:
+        """Compatibility alias returning the persistent per-account controller."""
+        return self._create_controller(environment, window_ref)
 
     def _handle_ctrl_done(self, op: Any) -> None:
         if self._stop_event.is_set() or not self._hwnd:
@@ -641,14 +735,11 @@ class WindowsWebView2Dock:
                 self._core = None
                 return
             self._ready = True
+            self._paint_ready = False
+            self._paint_deadline = 0.0
             self._bind_events(core)
             self._apply_window_bounds()
             ctrl.is_visible = self._visible
-            if self._visible:
-                import win32con
-                import win32gui
-
-                win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNOACTIVATE)
             if self._html is not None:
                 core.navigate_to_string(self._html)
             elif self._url:
@@ -695,6 +786,18 @@ class WindowsWebView2Dock:
             except Exception:
                 pass
 
+    def _mark_paint_ready(self) -> None:
+        if self._paint_ready:
+            return
+        self._paint_ready = True
+        self._paint_deadline = 0.0
+        try:
+            self._apply_window_bounds()
+        except Exception:
+            pass
+        if self._on_loading_changed is not None:
+            self._on_loading_changed(False)
+
     def _bind_events(self, core: Any) -> None:
         try:
             core.add_document_title_changed(
@@ -716,19 +819,32 @@ class WindowsWebView2Dock:
                     except Exception:
                         pass
                     return
+                self._paint_ready = False
+                self._paint_deadline = 0.0
                 if self._on_loading_changed:
                     self._on_loading_changed(True)
 
             core.add_navigation_starting(_on_nav_starting)
 
             def _on_nav_completed(_sender: Any, args: Any) -> None:
-                if self._on_loading_changed:
-                    self._on_loading_changed(False)
                 self._update_history_state(core)
                 if getattr(args, "is_success", True):
+                    if self._is_viewer_locked():
+                        self._paint_deadline = time.monotonic() + 12.0
+                    else:
+                        self._paint_deadline = time.monotonic() + 0.25
+                        try:
+                            core.execute_script_async(
+                                "requestAnimationFrame(() => requestAnimationFrame(() => "
+                                "window.chrome && window.chrome.webview && "
+                                "window.chrome.webview.postMessage('__UTH_VIEWER_PAINTED__')))"
+                            )
+                        except Exception:
+                            self._mark_paint_ready()
                     if self._on_ready is not None:
                         self._on_ready()
                 else:
+                    self._mark_paint_ready()
                     if self._on_error is not None:
                         self._on_error(
                             f"Navigation failed: {getattr(args, 'web_error_status', '')}"
@@ -742,8 +858,6 @@ class WindowsWebView2Dock:
             if hasattr(core, "add_web_message_received"):
 
                 def _on_web_msg(_sender: Any, args: Any) -> None:
-                    if self._on_message is None:
-                        return
                     msg: Optional[str] = None
                     try:
                         msg = args.try_get_web_message_as_string()
@@ -753,8 +867,35 @@ class WindowsWebView2Dock:
                         raw_json = getattr(args, "web_message_as_json", None)
                         if raw_json is not None:
                             msg = str(raw_json)
-                    if msg is not None:
-                        self._on_message(str(msg))
+                    if msg is None:
+                        return
+                    text = str(msg)
+                    if text in ("__UTH_VIEWER_READY__", "__UTH_VIEWER_PAINTED__"):
+                        self._mark_paint_ready()
+                        return
+                    if text.startswith("__UTH_VIEWER_ERROR__:"):
+                        self._mark_paint_ready()
+                        if self._on_error is not None:
+                            self._on_error(
+                                text[len("__UTH_VIEWER_ERROR__:") :] or "Viewer failed"
+                            )
+                        return
+                    forwarded = (
+                        text[len(_UTH_MSG_PREFIX) :]
+                        if text.startswith(_UTH_MSG_PREFIX)
+                        else text
+                    )
+                    try:
+                        parsed = json.loads(forwarded)
+                        if isinstance(parsed, dict) and parsed.get("type") in (
+                            "ready",
+                            "error",
+                        ):
+                            self._mark_paint_ready()
+                    except Exception:
+                        pass
+                    if self._on_message is not None:
+                        self._on_message(forwarded)
 
                 core.add_web_message_received(_on_web_msg)
 
@@ -785,6 +926,7 @@ class WindowsWebView2Dock:
 
         parent = self._parent_hwnd
         if parent and win32gui.IsWindow(parent):
+            user32 = ctypes.windll.user32
             if (
                 win32gui.IsIconic(parent)
                 or not win32gui.IsWindowVisible(parent)
@@ -795,10 +937,21 @@ class WindowsWebView2Dock:
                     self._controller.is_visible = False
                 return
             try:
-                dpi = float(ctypes.windll.user32.GetDpiForWindow(parent))
+                dpi = float(user32.GetDpiForWindow(parent))
             except Exception:
                 dpi = 96.0
-            scale = max(1.0, dpi / 96.0)
+            awareness = 2
+            try:
+                get_ctx = getattr(user32, "GetThreadDpiAwarenessContext", None)
+                get_aw = getattr(user32, "GetAwarenessFromDpiAwarenessContext", None)
+                if get_ctx is not None and get_aw is not None:
+                    get_ctx.restype = ctypes.c_void_p
+                    get_aw.argtypes = [ctypes.c_void_p]
+                    get_aw.restype = ctypes.c_int
+                    awareness = int(get_aw(get_ctx()))
+            except Exception:
+                awareness = 2
+            scale = 1.0 if awareness == 0 else max(1.0, dpi / 96.0)
             origin_x, origin_y = win32gui.ClientToScreen(parent, (0, 0))
             crect = win32gui.GetClientRect(parent)
             max_w = max(160, crect[2] - crect[0])
@@ -809,26 +962,67 @@ class WindowsWebView2Dock:
             w_px = max(160, max_w - left_px)
             h_px = max(160, max_h - top_px - bot_px)
             fg_hwnd = 0
+            fg_root_owner = 0
             try:
-                fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+                fg_hwnd = int(user32.GetForegroundWindow() or 0)
+                if fg_hwnd:
+                    get_anc = getattr(user32, "GetAncestor", None)
+                    if get_anc is not None:
+                        get_anc.argtypes = [wintypes.HWND, wintypes.UINT]
+                        get_anc.restype = wintypes.HWND
+                        fg_root_owner = int(get_anc(fg_hwnd, 3) or 0)  # GA_ROOTOWNER
             except Exception:
                 fg_hwnd = 0
-            app_is_fg = fg_hwnd in (int(parent), int(self._hwnd))
-            keep_z = preserve_zorder or not app_is_fg
-            flags = win32con.SWP_NOACTIVATE | (
-                win32con.SWP_NOZORDER if keep_z else 0
+                fg_root_owner = 0
+            app_is_fg = fg_hwnd in (int(parent), int(self._hwnd)) or fg_root_owner in (
+                int(parent),
+                int(self._hwnd),
             )
+            parent_topmost = False
+            self_topmost = False
+            prev_above = 0
+            try:
+                parent_topmost = bool(
+                    int(user32.GetWindowLongW(int(parent), -20)) & win32con.WS_EX_TOPMOST
+                )
+                self_topmost = bool(
+                    int(user32.GetWindowLongW(int(self._hwnd), -20)) & win32con.WS_EX_TOPMOST
+                )
+                prev_above = int(win32gui.GetWindow(int(parent), win32con.GW_HWNDPREV) or 0)
+            except Exception:
+                pass
+            if self_topmost != parent_topmost:
+                insert_after = (
+                    win32con.HWND_TOPMOST if parent_topmost else win32con.HWND_NOTOPMOST
+                )
+                z_flag = 0
+            elif app_is_fg and not preserve_zorder:
+                insert_after = win32con.HWND_TOP
+                z_flag = 0
+            elif prev_above != int(self._hwnd):
+                insert_after = (
+                    prev_above
+                    if prev_above
+                    else (win32con.HWND_TOPMOST if parent_topmost else win32con.HWND_TOP)
+                )
+                z_flag = 0
+            else:
+                insert_after = 0
+                z_flag = win32con.SWP_NOZORDER
+            flags = win32con.SWP_NOACTIVATE | z_flag
             win32gui.SetWindowPos(
                 self._hwnd,
-                0 if keep_z else win32con.HWND_TOP,
+                insert_after,
                 origin_x + left_px,
                 origin_y + top_px,
                 w_px,
                 h_px,
                 flags,
             )
-            if self._visible:
+            if self._visible and self._paint_ready:
                 win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNOACTIVATE)
+            else:
+                win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
             if self._controller is not None:
                 self._controller.bounds = Rect(0.0, 0.0, float(w_px), float(h_px))
                 self._controller.is_visible = self._visible
@@ -849,19 +1043,39 @@ class WindowsWebView2Dock:
         import win32gui
 
         msg = wintypes.MSG()
-        last_parent_state: tuple[int, int, int, int, bool] = (0, 0, 0, 0, False)
+        last_parent_state: tuple[int, int, int, int, bool, bool, bool, bool] = (
+            0, 0, 0, 0, False, True, False, True,
+        )
         while not self._stop_event.is_set():
             self._drain_commands()
+            if (
+                not self._paint_ready
+                and self._paint_deadline > 0.0
+                and time.monotonic() >= self._paint_deadline
+            ):
+                self._mark_paint_ready()
             if self._parent_hwnd and win32gui.IsWindow(self._parent_hwnd):
                 try:
                     cur_rect = win32gui.GetWindowRect(self._parent_hwnd)
                     is_min = bool(win32gui.IsIconic(self._parent_hwnd))
+                    is_vis = bool(win32gui.IsWindowVisible(self._parent_hwnd))
+                    parent_topmost = bool(
+                        int(ctypes.windll.user32.GetWindowLongW(int(self._parent_hwnd), -20))
+                        & win32con.WS_EX_TOPMOST
+                    )
+                    z_aligned = (
+                        int(win32gui.GetWindow(int(self._parent_hwnd), win32con.GW_HWNDPREV) or 0)
+                        == int(self._hwnd)
+                    )
                     cur_state = (
                         cur_rect[0],
                         cur_rect[1],
                         cur_rect[2],
                         cur_rect[3],
                         is_min,
+                        is_vis,
+                        parent_topmost,
+                        z_aligned,
                     )
                     if cur_state != last_parent_state:
                         last_parent_state = cur_state
@@ -930,11 +1144,8 @@ class WindowsWebView2Dock:
             elif action == "visible":
                 if self._controller is not None:
                     self._controller.is_visible = bool(payload)
-                if self._hwnd:
-                    win32gui.ShowWindow(
-                        self._hwnd,
-                        win32con.SW_SHOWNOACTIVATE if payload else win32con.SW_HIDE,
-                    )
+                if self._hwnd and not payload:
+                    win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
                 self._apply_window_bounds()
             elif action == "bounds":
                 self._apply_window_bounds()
@@ -959,14 +1170,6 @@ class WindowsWebView2Dock:
             except Exception:
                 pass
             self._hwnd = 0
-        try:
-            local_app = os.environ.get("LOCALAPPDATA") or str(Path.home())
-            profile_root = Path(local_app) / "UTHelper" / "webview2_profile"
-            for candidate in (profile_root / self._profile_name, profile_root / "EBWebView" / self._profile_name):
-                if candidate.is_dir():
-                    shutil.rmtree(candidate, ignore_errors=True)
-        except Exception:
-            pass
 
 
 class _FletWebViewSlot(ft.Container):
@@ -1215,8 +1418,19 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         if not loading and self._dock is not None:
+            if not getattr(self._dock, "_paint_ready", True):
+                return
+            if self._loading_ring is not None:
+                self._loading_ring.visible = False
+            if self._loading_text is not None:
+                self._loading_text.visible = False
             self._slot.content = ft.Container(expand=True, bgcolor=C.BG)
             safe_control_update(self._slot)
+        elif loading and self._dock is not None:
+            if self._loading_ring is not None:
+                self._loading_ring.visible = True
+            if self._loading_text is not None:
+                self._loading_text.visible = True
         if self._on_loading_changed is not None:
             self._on_loading_changed(loading)
 
@@ -1423,6 +1637,7 @@ def build_embedded_webview_host(
     html: Optional[str] = None,
     page: Optional[ft.Page] = None,
     bgcolor: Optional[str] = None,
+    account_namespace: Optional[str] = None,
     cookies: Optional[list[dict[str, Any]]] = None,
     cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
     on_ready: Optional[Callable[[], None]] = None,
@@ -1498,6 +1713,7 @@ def build_embedded_webview_host(
             page_title=str(getattr(page, "title", "") or "UTHelper"),
             url=safe_url,
             initial_html=html,
+            account_namespace=account_namespace,
             cookies=cookies,
             cookie_provider=cookie_provider,
             on_title_changed=on_title_changed,

@@ -101,6 +101,180 @@ def _is_same_moodle_origin_url(url: str, origin: str) -> bool:
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" == origin.rstrip("/").lower()
 
 
+def _stream_bounded_response(
+    response,
+    write_fn: Callable[[bytes], Any],
+    *,
+    max_bytes: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> bool:
+    """Stream HTTP response bytes in 64 KB chunks with size bound, gzip support, and progress callback."""
+    info = response.info() if hasattr(response, "info") else None
+    total_len = 0
+    raw_cl_str = ""
+    if info is not None:
+        try:
+            raw_cl = info.get("Content-Length") if hasattr(info, "get") else None
+            raw_cl_str = str(raw_cl).strip() if raw_cl is not None else ""
+            total_len = max(0, int(raw_cl)) if raw_cl else 0
+        except (TypeError, ValueError):
+            total_len = 0
+
+    encoding = (
+        str(info.get("Content-Encoding") or "").lower()
+        if info and hasattr(info, "get")
+        else ""
+    )
+    is_gzip = encoding == "gzip"
+
+    # Stream in 64 KB chunks on real HTTPResponse / BufferedIOBase; read once on non-advancing test fakes.
+    is_real_stream = isinstance(response, (http.client.HTTPResponse, io.IOBase)) or hasattr(
+        getattr(response, "fp", None), "read"
+    )
+    if is_real_stream:
+        chunk_size = 65536
+        last_emit = 0.0
+        raw_read = 0
+        out_total = 0
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS) if is_gzip else None
+        while True:
+            to_read = (
+                min(chunk_size, (max_bytes + 1) - raw_read)
+                if max_bytes is not None
+                else chunk_size
+            )
+            if to_read <= 0:
+                extra = response.read(1)
+                if extra:
+                    logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+                    return False
+                break
+            chunk = response.read(to_read)
+            if not chunk:
+                break
+            raw_read += len(chunk)
+            if max_bytes is not None and raw_read > max_bytes:
+                logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+                return False
+            if decompressor is not None:
+                try:
+                    if max_bytes is not None:
+                        allowed = max(0, max_bytes - out_total)
+                        piece = decompressor.decompress(chunk, allowed + 1)
+                        if len(piece) > allowed or decompressor.unconsumed_tail:
+                            logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
+                            return False
+                    else:
+                        piece = decompressor.decompress(chunk)
+                except zlib.error:
+                    logger.warning("Corrupt gzip download stream")
+                    return False
+            else:
+                piece = chunk
+                if max_bytes is not None and out_total + len(piece) > max_bytes:
+                    logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+                    return False
+            if piece:
+                write_fn(piece)
+                out_total += len(piece)
+            if callable(progress_callback):
+                now_m = time.monotonic()
+                if (now_m - last_emit) >= 0.065:
+                    last_emit = now_m
+                    try:
+                        progress_callback(raw_read, total_len)
+                    except Exception:
+                        pass
+        if total_len > 0 and raw_read < total_len:
+            logger.warning(
+                "Download truncated before Content-Length (%d < %d)",
+                raw_read,
+                total_len,
+            )
+            return False
+        if decompressor is not None:
+            try:
+                if max_bytes is not None:
+                    allowed = max(0, max_bytes - out_total)
+                    tail = decompressor.flush(allowed + 1)
+                    if len(tail) > allowed:
+                        logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
+                        return False
+                else:
+                    tail = decompressor.flush()
+            except zlib.error:
+                logger.warning("Corrupt gzip download trailer")
+                return False
+            if not decompressor.eof and not (raw_read == 0 and raw_cl_str == "0"):
+                logger.warning("Gzip download truncated before EOF")
+                return False
+            if tail:
+                write_fn(tail)
+                out_total += len(tail)
+        if callable(progress_callback):
+            try:
+                progress_callback(raw_read, total_len or raw_read)
+            except Exception:
+                pass
+        return True
+
+    body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
+    if max_bytes is not None and len(body) > max_bytes:
+        logger.warning("Download exceeded max_bytes (%d)", max_bytes)
+        return False
+    if total_len > 0 and len(body) < total_len:
+        logger.warning(
+            "Download truncated before Content-Length (%d < %d)",
+            len(body),
+            total_len,
+        )
+        return False
+    if callable(progress_callback):
+        try:
+            progress_callback(len(body), total_len or len(body))
+        except Exception:
+            pass
+
+    if is_gzip:
+        if not body and raw_cl_str == "0":
+            return True
+        if max_bytes is None:
+            if not body:
+                logger.warning("Gzip download truncated before EOF")
+                return False
+            try:
+                write_fn(gzip.decompress(body))
+            except (EOFError, zlib.error):
+                logger.warning("Truncated or corrupt gzip download")
+                return False
+            return True
+        try:
+            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            decompressed = decompressor.decompress(body, max_bytes + 1)
+            if len(decompressed) > max_bytes or decompressor.unconsumed_tail:
+                logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
+                return False
+            tail = decompressor.flush()
+        except zlib.error:
+            logger.warning("Corrupt gzip download")
+            return False
+        if not decompressor.eof:
+            logger.warning("Gzip download truncated before EOF")
+            return False
+        if len(decompressed) + len(tail) > max_bytes:
+            logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
+            return False
+        if decompressed:
+            write_fn(decompressed)
+        if tail:
+            write_fn(tail)
+        return True
+
+    if body:
+        write_fn(body)
+    return True
+
+
 def _read_bounded_response_bytes(
     response,
     *,
@@ -108,81 +282,14 @@ def _read_bounded_response_bytes(
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Optional[bytes]:
     """Read HTTP response bytes in 64 KB chunks with size bound, gzip support, and progress callback."""
-    info = response.info() if hasattr(response, "info") else None
-    total_len = 0
-    if info is not None:
-        try:
-            raw_cl = info.get("Content-Length") if hasattr(info, "get") else None
-            total_len = max(0, int(raw_cl)) if raw_cl else 0
-        except (TypeError, ValueError):
-            total_len = 0
-
-    # Stream in 64 KB chunks on real HTTPResponse / BufferedIOBase; read once on non-advancing test fakes.
-    is_real_stream = isinstance(response, (http.client.HTTPResponse, io.IOBase)) or hasattr(
-        getattr(response, "fp", None), "read"
+    buf = bytearray()
+    ok = _stream_bounded_response(
+        response,
+        buf.extend,
+        max_bytes=max_bytes,
+        progress_callback=progress_callback,
     )
-    if is_real_stream:
-        buf = bytearray()
-        chunk_size = 65536
-        last_emit = 0.0
-        while True:
-            to_read = (
-                min(chunk_size, (max_bytes + 1) - len(buf))
-                if max_bytes is not None
-                else chunk_size
-            )
-            if to_read <= 0:
-                extra = response.read(1)
-                if extra:
-                    buf.extend(extra)
-                break
-            chunk = response.read(to_read)
-            if not chunk:
-                break
-            buf.extend(chunk)
-            if max_bytes is not None and len(buf) > max_bytes:
-                logger.warning("Download exceeded max_bytes (%d)", max_bytes)
-                return None
-            if callable(progress_callback):
-                now_m = time.monotonic()
-                if (now_m - last_emit) >= 0.065:
-                    last_emit = now_m
-                    try:
-                        progress_callback(len(buf), total_len)
-                    except Exception:
-                        pass
-        body = bytes(buf)
-        if callable(progress_callback):
-            try:
-                progress_callback(len(body), total_len or len(body))
-            except Exception:
-                pass
-    else:
-        body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
-        if max_bytes is not None and len(body) > max_bytes:
-            logger.warning("Download exceeded max_bytes (%d)", max_bytes)
-            return None
-        if callable(progress_callback):
-            try:
-                progress_callback(len(body), total_len or len(body))
-            except Exception:
-                pass
-
-    encoding = str(info.get("Content-Encoding") or "").lower() if info and hasattr(info, "get") else ""
-    if encoding == "gzip":
-        if max_bytes is None:
-            return gzip.decompress(body)
-        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        decompressed = decompressor.decompress(body, max_bytes + 1)
-        if len(decompressed) > max_bytes or decompressor.unconsumed_tail:
-            logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
-            return None
-        tail = decompressor.flush()
-        if len(decompressed) + len(tail) > max_bytes:
-            logger.warning("Gzip download exceeded max_bytes (%d)", max_bytes)
-            return None
-        return decompressed + tail
-    return body
+    return bytes(buf) if ok else None
 
 
 @dataclass(frozen=True)
@@ -270,6 +377,7 @@ class MoodleClient:
         self._cookie_jar = CookieJar()
         self._sesskey = ""
         self._session_owner = ""
+        self._session_generation: int = 0
         self._html_opener = None
         self._session_lock = threading.RLock()
         self.last_grade_report_error = ""
@@ -280,6 +388,7 @@ class MoodleClient:
             self._cookie_jar.clear()
             self._sesskey = ""
             self._session_owner = ""
+            self._session_generation += 1
 
     def _reset_session_if_account_changed(self, username: str | None = None) -> None:
         """Drop stale HTML session cookies/sesskey when the active account changes."""
@@ -291,6 +400,7 @@ class MoodleClient:
                 self._cookie_jar.clear()
                 self._sesskey = ""
                 self._session_owner = ""
+                self._session_generation += 1
 
     @property
     def moodle_site_origin(self) -> str:
@@ -628,6 +738,7 @@ class MoodleClient:
             self._cookie_jar.clear()
             self._sesskey = ""
             self._session_owner = ""
+            self._session_generation += 1
 
             _, login_page = self._open_html("/login/index.php")
             parsed_login = _MoodleHtmlFormParser()
@@ -661,6 +772,7 @@ class MoodleClient:
             if match:
                 self._sesskey = match.group(1)
                 self._session_owner = str(username)
+                self._session_generation += 1
                 return True
             
             # Fallback 1: tìm biến sesskey=...
@@ -668,6 +780,7 @@ class MoodleClient:
             if match2:
                 self._sesskey = match2.group(1)
                 self._session_owner = str(username)
+                self._session_generation += 1
                 return True
 
             logger.error("Không trích xuất được sesskey sau khi login.")
@@ -1226,22 +1339,22 @@ class MoodleClient:
         record = self.upload_draft_file_record(filename, file_bytes, itemid, "/")
         return record.itemid if record else None
 
-    def download_file(
+    def _download_ws_stream(
         self,
         url: str,
+        write_fn: Callable[[bytes], Any],
         *,
         max_bytes: int = 100 * 1024 * 1024,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> Optional[bytes]:
-        """Tải file từ Moodle server bằng WS token trên đúng origin tin cậy."""
+    ) -> bool:
         origin = self.moodle_site_origin
         if not _is_same_moodle_origin_url(url, origin):
             logger.warning("Blocked off-origin or unsafe WS download URL")
-            return None
+            return False
 
         token = self._get_ws_token()
         if not token:
-            return None
+            return False
 
         parts = urllib.parse.urlsplit(url.strip())
         token_param = f"token={urllib.parse.quote(token, safe='')}"
@@ -1256,18 +1369,18 @@ class MoodleClient:
             headers={"User-Agent": _DEFAULT_UA, "Accept-Encoding": "gzip"},
         )
         try:
-            self._throttle()
             with opener.open(request, timeout=60) as response:
                 final_url = response.geturl()
                 if not _is_same_moodle_origin_url(final_url, origin):
                     logger.warning("Download response changed origin")
-                    return None
+                    return False
                 status = getattr(response, "status", 200)
                 if status != 200:
                     logger.error("Download failed (HTTP %d): %s", status, url)
-                    return None
-                return _read_bounded_response_bytes(
+                    return False
+                return _stream_bounded_response(
                     response,
+                    write_fn,
                     max_bytes=max_bytes,
                     progress_callback=progress_callback,
                 )
@@ -1278,7 +1391,124 @@ class MoodleClient:
                 e.close()
         except Exception as e:
             logger.error("Download error: %s", e)
-        return None
+        return False
+
+    def download_file_to_path(
+        self,
+        url: str,
+        dest_stream: Any,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        """Stream a Moodle WS-authenticated file directly into ``dest_stream``."""
+        return self._download_ws_stream(
+            url,
+            dest_stream.write,
+            max_bytes=max_bytes,
+            progress_callback=progress_callback,
+        )
+
+    def download_file(
+        self,
+        url: str,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Optional[bytes]:
+        """Tải file từ Moodle server bằng WS token trên đúng origin tin cậy."""
+        buf = bytearray()
+        ok = self._download_ws_stream(
+            url,
+            buf.extend,
+            max_bytes=max_bytes,
+            progress_callback=progress_callback,
+        )
+        return bytes(buf) if ok else None
+
+    def _download_session_stream(
+        self,
+        url: str,
+        write_fn: Callable[[bytes], Any],
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        origin = self.moodle_site_origin
+        if not _is_same_moodle_origin_url(url, origin):
+            logger.warning("Blocked off-origin or unsafe session download URL")
+            return False
+
+        target_url = url.strip()
+        try:
+            with self._session_lock:
+                self._reset_session_if_account_changed()
+                if not self._sesskey and not self.login_session():
+                    return False
+                opener = self._ensure_html_opener()
+                gen = int(getattr(self, "_session_generation", 0))
+
+            for attempt in range(2):
+                request = urllib.request.Request(
+                    target_url,
+                    headers={"User-Agent": _DEFAULT_UA, "Accept-Encoding": "gzip"},
+                )
+                with opener.open(request, timeout=60) as response:
+                    final_url = response.geturl()
+                    if not _is_same_moodle_origin_url(final_url, origin):
+                        logger.warning("Session download response changed origin")
+                        return False
+                    if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                        if attempt == 0:
+                            with self._session_lock:
+                                if int(getattr(self, "_session_generation", 0)) != gen:
+                                    return False
+                                if not self.login_session(force=True):
+                                    return False
+                                opener = self._ensure_html_opener()
+                                gen = int(getattr(self, "_session_generation", 0))
+                            continue
+                        return False
+                    status = getattr(response, "status", 200)
+                    if status != 200:
+                        logger.error("Session download failed (HTTP %d): %s", status, url)
+                        return False
+                    ok = _stream_bounded_response(
+                        response,
+                        write_fn,
+                        max_bytes=max_bytes,
+                        progress_callback=progress_callback,
+                    )
+                    if not ok:
+                        return False
+                    with self._session_lock:
+                        if int(getattr(self, "_session_generation", 0)) != gen:
+                            return False
+                    return True
+        except urllib.error.HTTPError as e:
+            try:
+                logger.error("Session download failed (HTTP %d): %s", e.code, url)
+            finally:
+                e.close()
+        except Exception as e:
+            logger.error("Session download error: %s", e)
+        return False
+
+    def download_session_file_to_path(
+        self,
+        url: str,
+        dest_stream: Any,
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        """Stream a cookie-session-authenticated file directly into ``dest_stream``."""
+        return self._download_session_stream(
+            url,
+            dest_stream.write,
+            max_bytes=max_bytes,
+            progress_callback=progress_callback,
+        )
 
     def download_session_file(
         self,
@@ -1288,51 +1518,14 @@ class MoodleClient:
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Optional[bytes]:
         """Download a same-origin Moodle file authenticated by cookie session."""
-        origin = self.moodle_site_origin
-        if not _is_same_moodle_origin_url(url, origin):
-            logger.warning("Blocked off-origin or unsafe session download URL")
-            return None
-
-        target_url = url.strip()
-        try:
-            with self._session_lock:
-                self._reset_session_if_account_changed()
-                if not self._sesskey and not self.login_session():
-                    return None
-
-                for attempt in range(2):
-                    opener = self._ensure_html_opener()
-                    request = urllib.request.Request(
-                        target_url,
-                        headers={"User-Agent": _DEFAULT_UA, "Accept-Encoding": "gzip"},
-                    )
-                    self._throttle()
-                    with opener.open(request, timeout=60) as response:
-                        final_url = response.geturl()
-                        if not _is_same_moodle_origin_url(final_url, origin):
-                            logger.warning("Session download response changed origin")
-                            return None
-                        if urllib.parse.urlsplit(final_url).path == "/login/index.php":
-                            if attempt == 0 and self.login_session(force=True):
-                                continue
-                            return None
-                        status = getattr(response, "status", 200)
-                        if status != 200:
-                            logger.error("Session download failed (HTTP %d): %s", status, url)
-                            return None
-                        return _read_bounded_response_bytes(
-                            response,
-                            max_bytes=max_bytes,
-                            progress_callback=progress_callback,
-                        )
-        except urllib.error.HTTPError as e:
-            try:
-                logger.error("Session download failed (HTTP %d): %s", e.code, url)
-            finally:
-                e.close()
-        except Exception as e:
-            logger.error("Session download error: %s", e)
-        return None
+        buf = bytearray()
+        ok = self._download_session_stream(
+            url,
+            buf.extend,
+            max_bytes=max_bytes,
+            progress_callback=progress_callback,
+        )
+        return bytes(buf) if ok else None
 
     def remove_assignment_submission(
         self,

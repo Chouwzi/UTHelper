@@ -75,9 +75,17 @@ _REQUIRED_OFFICE_VIEWER_ASSETS = (
     "jszip.min.js",
     "pptx_host.html",
     "pptx_host.js",
+    "pptx_worker.js",
     "pptx_engine.js",
     "viewer.css",
     "viewer_common.js",
+)
+_REQUIRED_PDF_VIEWER_ASSETS = (
+    "pdf_host.html",
+    "pdf_host.js",
+    "pdf_viewer.css",
+    "pdf.min.mjs",
+    "pdf.worker.min.mjs",
 )
 
 
@@ -544,6 +552,20 @@ def _verify_office_viewer_assets_in_app_zip(
                     if nested.getinfo(matched).file_size <= 0:
                         raise AndroidVerificationError(
                             f"Nested app.zip ({nested_name}) has empty office_viewer asset: {asset_name}"
+                        )
+                for asset_name in _REQUIRED_PDF_VIEWER_ASSETS:
+                    candidates = (
+                        f"assets/pdf_viewer/{asset_name}",
+                        f"app/assets/pdf_viewer/{asset_name}",
+                    )
+                    matched = next((c for c in candidates if c in names), None)
+                    if matched is None:
+                        raise AndroidVerificationError(
+                            f"Nested app.zip ({nested_name}) is missing pdf_viewer asset: {asset_name}"
+                        )
+                    if nested.getinfo(matched).file_size <= 0:
+                        raise AndroidVerificationError(
+                            f"Nested app.zip ({nested_name}) has empty pdf_viewer asset: {asset_name}"
                         )
                 verified_any = True
         except zipfile.BadZipFile as exc:
