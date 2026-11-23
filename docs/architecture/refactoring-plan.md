@@ -3,6 +3,8 @@
 Trạng thái: baseline và kế hoạch kiến trúc lịch sử từ đợt audit 2026-07-01.
 Quyết định kiến trúc có hiệu lực lâu dài được lưu trong `docs/adr/`.
 
+> **Cập nhật sau Milestone 4 (2026-11-23 — F20)**: Lộ trình tiến hóa kiến trúc dài hạn sang `uthelper-core` (Rust) + `Tauri v2` (PC) + `Kotlin/Jetpack Compose` & `Swift/SwiftUI` (UniFFI) được chuẩn hóa tại [ADR 0006](../adr/0006-rust-core-tauri-native-migration.md) và [`docs/architecture/rust-migration-roadmap.md`](rust-migration-roadmap.md). Các khoản nợ ranh giới Python còn lại trong các Phase 2/4/5/6 bên dưới (`models.py -> config`, 4 demo import `gui.components -> app_controller`, 13 `core -> config`, 4 `core -> platform_utils`, `SettingsView`, `DataOrchestrator`) được gom trực tiếp vào **Phase 0** của lộ trình mới mà không làm thay đổi nội dung audit lịch sử dưới đây.
+
 Ngày audit: 2026-07-01
 Phạm vi: `src/`, `tests/`, `.github/workflows/ci.yml`, `.agents/AGENTS.md`, `docs/architecture/refactoring-log.md`
 Mục tiêu: đánh giá theo Clean Code, SOLID/OOP, Clean Architecture, C4/ADR và đề xuất kế hoạch refactor có thể thực thi từng bước.

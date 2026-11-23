@@ -65,12 +65,34 @@ class _MoodleHtmlFormParser(HTMLParser):
             self._current = None
 
 
+_OPEN_SESSION_REDIRECT_STATE = threading.local()
+
+
+def _headers_have_set_cookie(headers: Any) -> bool:
+    if headers is None:
+        return False
+    if hasattr(headers, "get_all"):
+        values = headers.get_all("Set-Cookie")
+        if values:
+            return True
+    if hasattr(headers, "items"):
+        for key, val in headers.items():
+            if str(key).lower() == "set-cookie" and val:
+                return True
+    elif hasattr(headers, "get"):
+        if headers.get("Set-Cookie") or headers.get("set-cookie"):
+            return True
+    return False
+
+
 class _SameMoodleOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
     def __init__(self, origin: str):
         super().__init__()
         self.origin = origin
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _headers_have_set_cookie(headers):
+            _OPEN_SESSION_REDIRECT_STATE.has_set_cookie = True
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is None:
             return None
@@ -292,6 +314,49 @@ def _read_bounded_response_bytes(
     return bytes(buf) if ok else None
 
 
+def _read_raw_with_optional_gzip(response, max_bytes: int) -> bytes:
+    """Read raw response bytes up to ``max_bytes``, transparently gunzipping if gzip-encoded."""
+    info = response.info() if hasattr(response, "info") else getattr(response, "headers", None)
+    encoding = (
+        str(info.get("Content-Encoding") or "").strip().lower()
+        if info is not None and hasattr(info, "get")
+        else ""
+    )
+    if encoding != "gzip":
+        raw = response.read(max_bytes + 1)
+        return raw[:max_bytes] if len(raw) > max_bytes else raw
+
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = bytearray()
+    compressed_limit = max(max_bytes * 2 + 65536, 128 * 1024)
+    compressed_read = 0
+    chunk_size = 65536
+    while len(out) < max_bytes and compressed_read < compressed_limit:
+        chunk = response.read(min(chunk_size, compressed_limit - compressed_read))
+        if not chunk:
+            break
+        compressed_read += len(chunk)
+        remaining = max_bytes - len(out)
+        try:
+            piece = decompressor.decompress(chunk, remaining)
+        except zlib.error:
+            if not out:
+                return chunk[:max_bytes]
+            break
+        if piece:
+            out.extend(piece)
+        if decompressor.unconsumed_tail and len(out) >= max_bytes:
+            break
+    if len(out) < max_bytes:
+        try:
+            tail = decompressor.flush(max_bytes - len(out))
+            if tail:
+                out.extend(tail)
+        except zlib.error:
+            pass
+    return bytes(out[:max_bytes])
+
+
 @dataclass(frozen=True)
 class DraftFileRecord:
     """The exact identity Moodle assigned to an uploaded draft file."""
@@ -380,7 +445,22 @@ class MoodleClient:
         self._session_generation: int = 0
         self._html_opener = None
         self._session_lock = threading.RLock()
+        self._open_session_meta_local = threading.local()
         self.last_grade_report_error = ""
+
+    def _get_open_session_meta_local(self) -> threading.local:
+        meta = getattr(self, "_open_session_meta_local", None)
+        if meta is None:
+            meta = threading.local()
+            self._open_session_meta_local = meta
+        return meta
+
+    def pop_last_open_session_has_set_cookie(self) -> bool:
+        """Return and clear whether the current thread's last ``open_session_raw`` saw ``Set-Cookie``."""
+        meta = self._get_open_session_meta_local()
+        value = bool(getattr(meta, "has_set_cookie", False))
+        meta.has_set_cookie = False
+        return value
 
     def clear_session(self) -> None:
         """Clear the HTML session cookies, sesskey, and owning username."""
@@ -585,67 +665,113 @@ class MoodleClient:
         """Fetch raw response bytes for same-origin Moodle resources with auto-login recovery."""
         path = self._resolve_same_origin_path(url)
         origin = self.moodle_site_origin
+        req_method = (method or "GET").upper()
+        target_url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+        headers: dict[str, str] = {
+            "User-Agent": _DEFAULT_UA,
+            "Accept": accept,
+            "Accept-Encoding": "gzip",
+        }
+        if body is not None and content_type:
+            headers["Content-Type"] = content_type
+
         with self._session_lock:
             self._reset_session_if_account_changed()
             if not self._sesskey and not path.startswith("/login/index.php"):
                 self.login_session()
-
-            req_method = (method or "GET").upper()
             opener = self._ensure_html_opener()
-            target_url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
-            headers: dict[str, str] = {"User-Agent": _DEFAULT_UA, "Accept": accept}
-            if body is not None and content_type:
-                headers["Content-Type"] = content_type
+            gen = int(getattr(self, "_session_generation", 0))
+            owner = str(getattr(self, "_session_owner", "") or "")
 
-            for attempt in range(2):
-                request = urllib.request.Request(
-                    target_url,
-                    data=body if req_method == "POST" else None,
-                    method=req_method,
-                    headers=headers,
-                )
+        meta = self._get_open_session_meta_local()
+        meta.has_set_cookie = False
+
+        for attempt in range(2):
+            request = urllib.request.Request(
+                target_url,
+                data=body if req_method == "POST" else None,
+                method=req_method,
+                headers=headers,
+            )
+            _OPEN_SESSION_REDIRECT_STATE.has_set_cookie = False
+            attempt_has_set_cookie = False
+            try:
+                with opener.open(request, timeout=timeout) as response:
+                    status = int(getattr(response, "status", 200) or 200)
+                    final_url = response.geturl()
+                    resp_headers = getattr(response, "headers", None)
+                    if resp_headers is None and hasattr(response, "info"):
+                        resp_headers = response.info()
+                    attempt_has_set_cookie = bool(
+                        getattr(_OPEN_SESSION_REDIRECT_STATE, "has_set_cookie", False)
+                        or _headers_have_set_cookie(resp_headers)
+                    )
+                    resp_ct = str(
+                        response.headers.get("Content-Type", "application/octet-stream")
+                    )
+                    raw = _read_raw_with_optional_gzip(response, max_bytes)
+            except urllib.error.HTTPError as exc:
                 try:
-                    with opener.open(request, timeout=timeout) as response:
-                        status = int(getattr(response, "status", 200) or 200)
-                        final_url = response.geturl()
-                        resp_ct = str(
-                            response.headers.get("Content-Type", "application/octet-stream")
-                        )
-                        raw = response.read(max_bytes + 1)
-                except urllib.error.HTTPError as exc:
-                    try:
-                        reason_text = f"{getattr(exc, 'msg', '')} {getattr(exc, 'reason', '')}"
-                        redirect_target = str(
-                            getattr(exc, "filename", "") or getattr(exc, "url", "") or ""
-                        )
-                        if "Untrusted Moodle redirect" in reason_text and redirect_target:
-                            return 302, redirect_target, "text/plain", b""
-                        err_ct = str(
-                            exc.headers.get("Content-Type", "text/html; charset=utf-8")
-                            if exc.headers
-                            else "text/html; charset=utf-8"
-                        )
-                        err_body = exc.read(min(max_bytes, 512 * 1024))
-                        return int(exc.code), str(exc.geturl() or target_url), err_ct, err_body
-                    finally:
-                        exc.close()
+                    attempt_has_set_cookie = bool(
+                        getattr(_OPEN_SESSION_REDIRECT_STATE, "has_set_cookie", False)
+                        or _headers_have_set_cookie(getattr(exc, "headers", None))
+                    )
+                    meta.has_set_cookie = attempt_has_set_cookie
+                    reason_text = f"{getattr(exc, 'msg', '')} {getattr(exc, 'reason', '')}"
+                    redirect_target = str(
+                        getattr(exc, "filename", "") or getattr(exc, "url", "") or ""
+                    )
+                    if "Untrusted Moodle redirect" in reason_text and redirect_target:
+                        return 302, redirect_target, "text/plain", b""
+                    err_ct = str(
+                        exc.headers.get("Content-Type", "text/html; charset=utf-8")
+                        if exc.headers
+                        else "text/html; charset=utf-8"
+                    )
+                    err_body = _read_raw_with_optional_gzip(
+                        exc, min(max_bytes, 512 * 1024)
+                    )
+                    return int(exc.code), str(exc.geturl() or target_url), err_ct, err_body
+                finally:
+                    exc.close()
+            finally:
+                _OPEN_SESSION_REDIRECT_STATE.has_set_cookie = False
 
-                parsed = urllib.parse.urlsplit(final_url)
-                final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-                if final_origin != origin:
-                    raise ValueError("Moodle response changed origin")
-                if (
-                    parsed.path == "/login/index.php"
-                    and not path.startswith("/login/index.php")
-                    and attempt == 0
-                    and self.login_session(force=True)
+            parsed = urllib.parse.urlsplit(final_url)
+            final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            if final_origin != origin:
+                raise ValueError("Moodle response changed origin")
+            if parsed.path == "/login/index.php" and not path.startswith("/login/index.php"):
+                if attempt == 0:
+                    with self._session_lock:
+                        current_gen = int(getattr(self, "_session_generation", 0))
+                        current_owner = str(getattr(self, "_session_owner", "") or "")
+                        if current_gen != gen:
+                            if not self._sesskey or (owner and current_owner != owner):
+                                raise RuntimeError("Moodle session expired")
+                            gen = current_gen
+                            owner = current_owner
+                            opener = self._ensure_html_opener()
+                            continue
+                        if not self.login_session(force=True):
+                            raise RuntimeError("Moodle session expired")
+                        gen = int(getattr(self, "_session_generation", 0))
+                        owner = str(getattr(self, "_session_owner", "") or "")
+                        opener = self._ensure_html_opener()
+                        continue
+                raise RuntimeError("Moodle session expired")
+
+            with self._session_lock:
+                current_gen = int(getattr(self, "_session_generation", 0))
+                current_owner = str(getattr(self, "_session_owner", "") or "")
+                if current_gen != gen and (
+                    not self._sesskey or (owner and current_owner != owner)
                 ):
-                    continue
-                if len(raw) > max_bytes:
-                    raw = raw[:max_bytes]
-                return status, final_url, resp_ct, raw
+                    raise RuntimeError("Moodle session expired")
+            meta.has_set_cookie = attempt_has_set_cookie
+            return status, final_url, resp_ct, raw
 
-            raise RuntimeError("Moodle session expired")
+        raise RuntimeError("Moodle session expired")
 
     def open_session_url(self, url: str) -> tuple[str, str, bool]:
         """Open a same-origin Moodle web page using cookie session, recovering once on expiry."""
@@ -694,6 +820,28 @@ class MoodleClient:
                 return final_url, html_text, False
             raise RuntimeError("Moodle session expired")
 
+    @staticmethod
+    def _extract_sesskey_from_html(html: str) -> str:
+        """Extract Moodle ``sesskey`` from page HTML without extra network requests."""
+        if not isinstance(html, str) or not html:
+            return ""
+        import re
+
+        match = re.search(r'"sesskey":"([a-zA-Z0-9]+)"', html)
+        if match:
+            return match.group(1)
+        match2 = re.search(r"sesskey=([a-zA-Z0-9]+)", html)
+        if match2:
+            return match2.group(1)
+        return ""
+
+    def _has_moodle_session_cookie(self) -> bool:
+        return any(
+            getattr(cookie, "name", "").casefold() == "moodlesession"
+            and bool(getattr(cookie, "value", ""))
+            for cookie in self._cookie_jar
+        )
+
     def login_session(
         self,
         username: str = None,
@@ -701,6 +849,7 @@ class MoodleClient:
         force: bool = False,
         *,
         quiz_lease: QuizSessionLease | None = None,
+        require_sesskey: bool = True,
     ) -> bool:
         """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey."""
         if not username:
@@ -708,96 +857,99 @@ class MoodleClient:
         if not password:
             password = settings.UTH_PASSWORD
 
-        self._reset_session_if_account_changed(username)
+        with self._session_lock:
+            self._reset_session_if_account_changed(username)
 
-        if not force and self._sesskey and quiz_lease is None:
-            return True
+            if not force and self._sesskey and quiz_lease is None:
+                return True
 
-        if not self.moodle_site_origin or not username or not password:
-            self._last_login_error = "invalid_credentials"
-            return False
-
-        try:
-            session_key = quiz_session_key(self._moodle_site, username)
-        except ValueError:
-            self._last_login_error = "invalid_credentials"
-            return False
-        if quiz_lease is not None and (
-            quiz_lease.session_key != session_key or not quiz_lease.is_active
-        ):
-            self._last_login_error = "quiz_session_lease_invalid"
-            return False
-
-        if not _begin_quiz_session_login(session_key, lease=quiz_lease):
-            # Leave the existing cookie jar and sesskey intact while a quiz
-            # player holds this account/site session.
-            self._last_login_error = "quiz_session_active"
-            return False
-
-        try:
-            self._cookie_jar.clear()
-            self._sesskey = ""
-            self._session_owner = ""
-            self._session_generation += 1
-
-            _, login_page = self._open_html("/login/index.php")
-            parsed_login = _MoodleHtmlFormParser()
-            parsed_login.feed(login_page)
-            login_token = parsed_login.inputs.get("logintoken", "")
-            if not login_token:
-                logger.error("Không tìm thấy logintoken trên trang đăng nhập.")
-                self._last_login_error = "server_error"
-                return False
-
-            final_url, _ = self._open_html(
-                "/login/index.php",
-                data={
-                    "anchor": "",
-                    "logintoken": login_token,
-                    "username": username,
-                    "password": password,
-                },
-            )
-            if urllib.parse.urlsplit(final_url).path == "/login/index.php":
-                logger.warning("Đăng nhập session thất bại (sai tài khoản hoặc lỗi Moodle).")
+            if not self.moodle_site_origin or not username or not password:
                 self._last_login_error = "invalid_credentials"
                 return False
 
-            # Lấy trang Dashboard để trích xuất sesskey
-            _, dashboard_page = self._open_html("/my/")
-            
-            # sesskey thường nằm trong thẻ JS: "sesskey":"123xyz"
-            import re
-            match = re.search(r'"sesskey":"([a-zA-Z0-9]+)"', dashboard_page)
-            if match:
-                self._sesskey = match.group(1)
-                self._session_owner = str(username)
-                self._session_generation += 1
-                return True
-            
-            # Fallback 1: tìm biến sesskey=...
-            match2 = re.search(r'sesskey=([a-zA-Z0-9]+)', dashboard_page)
-            if match2:
-                self._sesskey = match2.group(1)
-                self._session_owner = str(username)
-                self._session_generation += 1
-                return True
+            try:
+                session_key = quiz_session_key(self._moodle_site, username)
+            except ValueError:
+                self._last_login_error = "invalid_credentials"
+                return False
+            if quiz_lease is not None and (
+                quiz_lease.session_key != session_key or not quiz_lease.is_active
+            ):
+                self._last_login_error = "quiz_session_lease_invalid"
+                return False
 
-            logger.error("Không trích xuất được sesskey sau khi login.")
-            self._last_login_error = "server_error"
-            return False
+            if not _begin_quiz_session_login(session_key, lease=quiz_lease):
+                # Leave the existing cookie jar and sesskey intact while a quiz
+                # player holds this account/site session.
+                self._last_login_error = "quiz_session_active"
+                return False
 
-        except Exception as e:
-            if quiz_lease is not None:
-                logger.warning(
-                    "Quiz HTML session login failed (%s)", type(e).__name__
+            try:
+                self._cookie_jar.clear()
+                self._sesskey = ""
+                self._session_owner = ""
+                self._session_generation += 1
+
+                _, login_page = self._open_html("/login/index.php")
+                parsed_login = _MoodleHtmlFormParser()
+                parsed_login.feed(login_page)
+                login_token = parsed_login.inputs.get("logintoken", "")
+                if not login_token:
+                    logger.error("Không tìm thấy logintoken trên trang đăng nhập.")
+                    self._last_login_error = "server_error"
+                    return False
+
+                final_url, post_html = self._open_html(
+                    "/login/index.php",
+                    data={
+                        "anchor": "",
+                        "logintoken": login_token,
+                        "username": username,
+                        "password": password,
+                    },
                 )
-            else:
-                logger.error(f"Lỗi login_session: {e}")
-            self._last_login_error = "network_error"
-            return False
-        finally:
-            _end_quiz_session_login(session_key)
+                if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                    logger.warning("Đăng nhập session thất bại (sai tài khoản hoặc lỗi Moodle).")
+                    self._last_login_error = "invalid_credentials"
+                    return False
+
+                sesskey = self._extract_sesskey_from_html(post_html)
+                if not sesskey and require_sesskey:
+                    # Lấy trang Dashboard để trích xuất sesskey khi POST redirect chưa có sẵn
+                    _, dashboard_page = self._open_html("/my/")
+                    sesskey = self._extract_sesskey_from_html(dashboard_page)
+
+                if sesskey:
+                    self._sesskey = sesskey
+                    self._session_owner = str(username)
+                    self._session_generation += 1
+                    return True
+
+                if not require_sesskey and self._has_moodle_session_cookie():
+                    self._sesskey = ""
+                    self._session_owner = str(username)
+                    self._session_generation += 1
+                    return True
+
+                if not require_sesskey:
+                    self._last_login_error = "session_cookie_missing"
+                    return False
+
+                logger.error("Không trích xuất được sesskey sau khi login.")
+                self._last_login_error = "server_error"
+                return False
+
+            except Exception as e:
+                if quiz_lease is not None:
+                    logger.warning(
+                        "Quiz HTML session login failed (%s)", type(e).__name__
+                    )
+                else:
+                    logger.error(f"Lỗi login_session: {e}")
+                self._last_login_error = "network_error"
+                return False
+            finally:
+                _end_quiz_session_login(session_key)
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle AJAX service. Trả về None nếu lỗi hoặc HTTP fail."""

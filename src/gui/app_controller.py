@@ -1612,6 +1612,7 @@ class AppController:
             self.page,
             on_closed=self._on_quiz_player_closed,
             account_id_provider=lambda: settings.UTH_USERNAME,
+            client_provider=self._quiz_client_for_site,
             on_auth_required=self._show_quiz_auth_dialog,
         )
         self._app_webview_pane = None
@@ -3931,6 +3932,14 @@ class AppController:
             if cmid and mod_cmid and int(cmid) != int(mod_cmid):
                 return None
         return top
+
+    def _quiz_client_for_site(self, site_identity: str):
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return None
+        if str(site_identity or "").strip().casefold() == "thnn":
+            return getattr(orchestrator, "thnn_client", None)
+        return getattr(orchestrator, "client", None)
 
     def _sync_quiz_immersive(self, active: bool) -> None:
         nav_shell = getattr(self, "_nav_shell", None)

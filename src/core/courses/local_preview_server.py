@@ -109,7 +109,76 @@ class _PreviewEntry:
 
 
 _MAX_SESSION_POST_BYTES = 4 * 1024 * 1024
+_MAX_SESSION_ASSET_CACHE_ITEMS = 64
+_MAX_SESSION_ASSET_CACHE_BYTES = 16 * 1024 * 1024
+_MAX_SINGLE_SESSION_ASSET_BYTES = 2 * 1024 * 1024
+_SESSION_STATIC_EXTENSIONS = frozenset(
+    {
+        ".css",
+        ".js",
+        ".mjs",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".ico",
+        ".svg",
+    }
+)
+_SESSION_STATIC_PREFIXES = (
+    "/theme/image.php",
+    "/theme/styles.php",
+    "/theme/styles_debug.php",
+    "/theme/font.php",
+    "/theme/yui_combo.php",
+    "/lib/javascript.php",
+    "/lib/requirejs.php",
+)
+_SESSION_DYNAMIC_BLOCKLIST = (
+    "pluginfile.php",
+    "forcedownload=1",
+    "/login/",
+    "/lib/ajax/",
+    "/webservice/",
+    "/mod/quiz/",
+    "/mod/assign/",
+    "/grade/",
+)
 _SESSION_PATH_RE = re.compile(r"^/session/([^/]+)/([^/]+)/(.*)$")
+
+
+def _is_cacheable_session_static_path(
+    remote_path: str,
+    query: str,
+    method: str,
+) -> bool:
+    if method.upper() != "GET":
+        return False
+    normalized_path = "/" + remote_path.lstrip("/").lower()
+    full_target = f"{normalized_path}?{query.lower()}" if query else normalized_path
+    if any(blocked in full_target for blocked in _SESSION_DYNAMIC_BLOCKLIST):
+        return False
+    if any(normalized_path.startswith(prefix) for prefix in _SESSION_STATIC_PREFIXES):
+        return True
+    _, ext = os.path.splitext(normalized_path)
+    return ext in _SESSION_STATIC_EXTENSIONS
+
+
+def _is_cacheable_session_static_asset(
+    remote_path: str,
+    query: str,
+    media_type: str,
+    method: str,
+) -> bool:
+    if media_type in ("text/html", "application/xhtml+xml", "application/json", ""):
+        return False
+    return _is_cacheable_session_static_path(remote_path, query, method)
 _ATTR_URL_RE = re.compile(
     r"""(?i)\b(href|src|action|data-url)\s*=\s*(["'])([^"']+)\2"""
 )
@@ -341,14 +410,16 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
                 self._send_empty_status(HTTPStatus.BAD_REQUEST, close_connection=True)
                 return
 
-        status_code, resp_ct, resp_body, redirect_url = self.server.owner._proxy_session_request(
-            token=token,
-            source=source,
-            remote_path=remote_path,
-            query=parsed.query,
-            method=method,
-            body=req_body,
-            content_type=req_ct,
+        status_code, resp_ct, resp_body, redirect_url, allow_http_cache = (
+            self.server.owner._proxy_session_request(
+                token=token,
+                source=source,
+                remote_path=remote_path,
+                query=parsed.query,
+                method=method,
+                body=req_body,
+                content_type=req_ct,
+            )
         )
         if redirect_url:
             try:
@@ -370,10 +441,21 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
         try:
             final_ct = resp_ct or "application/octet-stream"
             mime = final_ct.split(";", 1)[0].strip().lower()
+            cache_control = (
+                "private, max-age=300"
+                if (
+                    allow_http_cache
+                    and status_code == HTTPStatus.OK
+                    and _is_cacheable_session_static_asset(
+                        remote_path, parsed.query, mime, method
+                    )
+                )
+                else "no-store, private"
+            )
             self.send_response(status_code)
             self.send_header("Content-Type", final_ct)
             self.send_header("Content-Length", str(len(resp_body)))
-            self.send_header("Cache-Control", "no-store, private")
+            self.send_header("Cache-Control", cache_control)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
@@ -612,6 +694,8 @@ class LocalPreviewServer:
         self._bridge_token: str = secrets.token_urlsafe(24)
         self._viewer_token: str = secrets.token_urlsafe(24)
         self._session_providers: dict[str, Any] = {}
+        self._session_asset_cache: OrderedDict[tuple[str, int, str], tuple[str, bytes]] = OrderedDict()
+        self._session_asset_cache_bytes: int = 0
         self._viewer_asset_cache: OrderedDict[tuple[str, str], tuple[int, int, str, bytes, str]] = OrderedDict()
         self._viewer_asset_cache_bytes: int = 0
 
@@ -732,6 +816,12 @@ class LocalPreviewServer:
                 self._session_providers.pop(source, None)
             else:
                 self._session_providers[source] = client
+            for key in [k for k in self._session_asset_cache if k[0] == source]:
+                removed = self._session_asset_cache.pop(key, None)
+                if removed is not None:
+                    self._session_asset_cache_bytes = max(
+                        0, self._session_asset_cache_bytes - len(removed[1])
+                    )
 
     def build_session_bridge_url(self, source: str, target_url: str) -> Optional[str]:
         """Return a loopback reverse-proxy URL for a same-origin Moodle web page."""
@@ -778,7 +868,7 @@ class LocalPreviewServer:
         method: str,
         body: Optional[bytes],
         content_type: str,
-    ) -> tuple[int, str, bytes, str]:
+    ) -> tuple[int, str, bytes, str, bool]:
         with self._lock:
             expected_token = self._bridge_token
             client = self._session_providers.get(source)
@@ -787,18 +877,28 @@ class LocalPreviewServer:
         if not secrets.compare_digest(
             token.encode("utf-8"), expected_token.encode("utf-8")
         ):
-            return HTTPStatus.FORBIDDEN, "text/plain", b"", ""
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
         if source not in ("courses", "thnn") or client is None:
-            return HTTPStatus.NOT_FOUND, "text/plain", b"", ""
+            return HTTPStatus.NOT_FOUND, "text/plain", b"", "", False
 
         origin = str(getattr(client, "moodle_site_origin", "") or "").rstrip("/")
         if not origin:
-            return HTTPStatus.SERVICE_UNAVAILABLE, "text/plain", b"", ""
+            return HTTPStatus.SERVICE_UNAVAILABLE, "text/plain", b"", "", False
 
         rel_target = "/" + remote_path.lstrip("/")
         if query:
             rel_target = f"{rel_target}?{query}"
         remote_url = urljoin(f"{origin}/", rel_target.lstrip("/"))
+
+        session_gen = int(getattr(client, "_session_generation", 0) or 0)
+        cacheable_path = _is_cacheable_session_static_path(remote_path, query, method)
+        cache_key = (source, session_gen, rel_target)
+        if cacheable_path:
+            with self._lock:
+                cached_asset = self._session_asset_cache.get(cache_key)
+                if cached_asset is not None:
+                    self._session_asset_cache.move_to_end(cache_key)
+                    return HTTPStatus.OK, cached_asset[0], cached_asset[1], "", True
 
         try:
             status_code, final_url, resp_ct, raw_bytes = client.open_session_raw(
@@ -807,17 +907,23 @@ class LocalPreviewServer:
                 body=body,
                 content_type=content_type,
             )
+            pop_set_cookie = getattr(
+                client, "pop_last_open_session_has_set_cookie", None
+            )
+            has_set_cookie = (
+                bool(pop_set_cookie()) if callable(pop_set_cookie) else False
+            )
         except ValueError:
-            return HTTPStatus.FORBIDDEN, "text/plain", b"", ""
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
         except Exception:
-            return HTTPStatus.BAD_GATEWAY, "text/plain", b"", ""
+            return HTTPStatus.BAD_GATEWAY, "text/plain", b"", "", False
 
         if 300 <= status_code < 400 and final_url:
             if _is_same_moodle_origin_url(final_url, origin):
                 proxied = self.build_session_bridge_url(source, final_url)
                 if proxied:
-                    return HTTPStatus.FOUND, "text/plain", b"", proxied
-            return HTTPStatus.FORBIDDEN, "text/plain", b"", ""
+                    return HTTPStatus.FOUND, "text/plain", b"", proxied, False
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
 
         media_type = (resp_ct or "").split(";", 1)[0].strip().lower()
         if media_type in ("text/html", "application/xhtml+xml"):
@@ -830,9 +936,42 @@ class LocalPreviewServer:
                 port=port,
                 bridge_prefix=bridge_prefix,
             )
-            return status_code, resp_ct or "text/html; charset=utf-8", rewritten.encode("utf-8"), ""
+            return status_code, resp_ct or "text/html; charset=utf-8", rewritten.encode("utf-8"), "", False
 
-        return status_code, resp_ct or "application/octet-stream", raw_bytes, ""
+        final_ct = resp_ct or "application/octet-stream"
+        post_gen = int(getattr(client, "_session_generation", 0) or 0)
+        allow_http_cache = (
+            cacheable_path
+            and method.upper() == "GET"
+            and status_code == HTTPStatus.OK
+            and not has_set_cookie
+            and _is_cacheable_session_static_asset(remote_path, query, media_type, method)
+        )
+        if (
+            allow_http_cache
+            and post_gen == session_gen
+            and len(raw_bytes) <= _MAX_SINGLE_SESSION_ASSET_BYTES
+        ):
+            with self._lock:
+                if self._session_providers.get(source) is client:
+                    old = self._session_asset_cache.pop(cache_key, None)
+                    if old is not None:
+                        self._session_asset_cache_bytes = max(
+                            0, self._session_asset_cache_bytes - len(old[1])
+                        )
+                    while self._session_asset_cache and (
+                        len(self._session_asset_cache) >= _MAX_SESSION_ASSET_CACHE_ITEMS
+                        or self._session_asset_cache_bytes + len(raw_bytes)
+                        > _MAX_SESSION_ASSET_CACHE_BYTES
+                    ):
+                        _, evicted = self._session_asset_cache.popitem(last=False)
+                        self._session_asset_cache_bytes = max(
+                            0, self._session_asset_cache_bytes - len(evicted[1])
+                        )
+                    self._session_asset_cache[cache_key] = (final_ct, raw_bytes)
+                    self._session_asset_cache_bytes += len(raw_bytes)
+
+        return status_code, final_ct, raw_bytes, "", allow_http_cache
 
     @property
     def port(self) -> int:
@@ -1089,6 +1228,8 @@ class LocalPreviewServer:
             self._session_port = 0
             self._items.clear()
             self._total_bytes = 0
+            self._session_asset_cache.clear()
+            self._session_asset_cache_bytes = 0
             self._viewer_asset_cache.clear()
             self._viewer_asset_cache_bytes = 0
 

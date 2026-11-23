@@ -359,3 +359,55 @@ def test_temporary_lease_protects_login_export_after_ui_lease_releases(monkeypat
     assert len(calls) == 3
     assert _begin_quiz_session_login(target.session_key) is True
     _end_quiz_session_login(target.session_key)
+
+
+def test_login_session_skips_get_my_when_post_redirect_contains_sesskey(monkeypatch):
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-42")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "private-example-password")
+    calls = []
+
+    def fake_open_html(self, path, *, data=None):
+        calls.append(path)
+        if path == "/login/index.php" and data is None:
+            return (
+                f"{self.moodle_site_origin}/login/index.php",
+                '<form><input name="logintoken" value="one-time-token"></form>',
+            )
+        if path == "/login/index.php" and data is not None:
+            self._cookie_jar.set_cookie(
+                _cookie("MoodleSession", "cookie-123", "courses.ut.edu.vn")
+            )
+            return f"{self.moodle_site_origin}/my/", '<script>M.cfg={"sesskey":"fastSess99"};</script>'
+        raise AssertionError(f"Unexpected extra GET {path}")
+
+    monkeypatch.setattr(MoodleClient, "_open_html", fake_open_html)
+    client = MoodleClient("https://courses.ut.edu.vn")
+    assert client.login_session() is True
+    assert client._sesskey == "fastSess99"
+    assert calls == ["/login/index.php", "/login/index.php"]
+
+
+def test_login_session_require_sesskey_false_accepts_cookie_only_redirect(monkeypatch):
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-42")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "private-example-password")
+    calls = []
+
+    def fake_open_html(self, path, *, data=None):
+        calls.append(path)
+        if path == "/login/index.php" and data is None:
+            return (
+                f"{self.moodle_site_origin}/login/index.php",
+                '<form><input name="logintoken" value="one-time-token"></form>',
+            )
+        if path == "/login/index.php" and data is not None:
+            self._cookie_jar.set_cookie(
+                _cookie("MoodleSession", "cookie-abc", "courses.ut.edu.vn")
+            )
+            return f"{self.moodle_site_origin}/my/", ""
+        raise AssertionError(f"Unexpected extra GET {path}")
+
+    monkeypatch.setattr(MoodleClient, "_open_html", fake_open_html)
+    client = MoodleClient("https://courses.ut.edu.vn")
+    assert client.login_session(require_sesskey=False) is True
+    assert client._session_owner == "student-42"
+    assert calls == ["/login/index.php", "/login/index.php"]
