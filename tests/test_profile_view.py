@@ -20,15 +20,14 @@ from core.student_profile import (
 )
 from gui.app_controller import AppController
 from gui.components.profile_view import (
-    ALL_SEMESTERS_KEY,
     TAB_OTHER,
     TAB_TUITION,
     ProfileView,
-    format_credit,
     format_vnd,
     initials_of,
     short_semester,
 )
+from gui.core.theme import C
 from gui.view_manager import ViewManager
 
 SEMESTER_1 = "Học kỳ 1 năm học 2025-2026"
@@ -112,10 +111,6 @@ def test_format_helpers_render_vietnamese_money_and_names():
     assert format_vnd(0) == "0 ₫"
     assert format_vnd("not-a-number") == "0 ₫"
 
-    assert format_credit("125000.00Đ (UTH)") == "125.000 ₫"
-    assert format_credit("") == ""
-    assert format_credit("bizarre text") == "bizarre text"
-
     assert short_semester("Học kỳ 1 năm học 2025-2026") == "HK1 2025-2026"
     assert initials_of("Nguyễn Văn An") == "NA"
     assert initials_of("", fallback="SV001") == "SV"
@@ -162,8 +157,7 @@ def test_profile_view_renders_identity_money_and_status():
     assert view._data_host.visible is True
     assert view._name_text.value == "Nguyễn Văn A"
     assert "SV001" in view._sid_text.value
-    assert "125.000 ₫" in view._credit_text.value
-    # Kỳ 2 còn nợ 3.000.000 -> banner tổng thể là "Còn nợ".
+    # Kỳ 2 (mới nhất, mặc định) còn nợ 3.000.000 -> banner là "Còn nợ".
     assert "Còn nợ" in view._status_text.value
     # Bản mạng -> ghi rõ nguồn "Portal".
     assert "Portal" in view._updated_text.value
@@ -225,17 +219,58 @@ def test_profile_view_semester_pill_filters_tuition_rows():
     view = _make_view()
     view.update_snapshot(_make_snapshot())
 
-    # "Tất cả": 2 dòng học phí + 1 dòng tổng.
-    assert len(view._table.rows) == 3
-    assert view._selected_semester == ALL_SEMESTERS_KEY
+    # Mặc định là kỳ mới nhất (HK2 theo dropdown Portal): 1 dòng + dòng tổng.
+    assert view._selected_semester == SEMESTER_2
+    assert len(view._table.rows) == 2
 
     view.select_semester(SEMESTER_1)
     # Chỉ còn 1 dòng của HK1 + dòng tổng.
     assert len(view._table.rows) == 2
     assert view._selected_semester == SEMESTER_1
 
-    view.select_semester(ALL_SEMESTERS_KEY)
-    assert len(view._table.rows) == 3
+    view.select_semester(SEMESTER_2)
+    assert len(view._table.rows) == 2
+    # Bấm lại đúng kỳ đang chọn -> không render lại (không nháy).
+    view.select_semester(SEMESTER_2)
+    assert view._selected_semester == SEMESTER_2
+
+
+def test_profile_view_defaults_to_newest_semester_and_resets_when_it_disappears():
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+
+    # Không còn pill "Tất cả": mặc định chọn kỳ mới nhất, bảng chỉ có kỳ đó.
+    assert view._selected_semester == SEMESTER_2
+    header_labels = [col.label.value for col in view._table.columns]
+    assert "Học kỳ" not in header_labels
+
+    view.select_semester(SEMESTER_1)
+
+    # Snapshot mới không còn kỳ đang chọn -> tự quay về kỳ mới nhất còn lại.
+    newer = _make_snapshot()
+    newer = ProfileSnapshot(
+        profile=newer.profile,
+        credit=newer.credit,
+        semesters=parse_semesters([{"id": 76, "tenDot": SEMESTER_2}]),
+        tuition_rows=tuple(
+            row for row in newer.tuition_rows if row.semester == SEMESTER_2
+        ),
+        other_fees=newer.other_fees,
+        account=newer.account,
+    )
+    view.update_snapshot(newer)
+    assert view._selected_semester == SEMESTER_2
+    assert len(view._table.rows) == 2
+
+
+def test_profile_view_keeps_selected_semester_across_refresh():
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+    view.select_semester(SEMESTER_1)
+
+    # Làm mới Portal với cùng dữ liệu -> giữ nguyên kỳ người dùng đang xem.
+    view.update_snapshot(_make_snapshot())
+    assert view._selected_semester == SEMESTER_1
 
 
 def test_profile_view_tab_switches_between_fee_tables():
@@ -262,14 +297,18 @@ def test_profile_view_semester_pills_cover_every_semester_with_status_tooltip():
     view = _make_view()
     view.update_snapshot(_make_snapshot())
 
-    # 1 pill "Tất cả" + 2 pill học kỳ, đúng thứ tự dropdown Portal (HK2 trước).
+    # Chỉ pill học kỳ (không còn "Tất cả"), đúng thứ tự dropdown Portal (HK2 trước).
     pills = view._pills_row.controls
-    assert len(pills) == 3
-    assert pills[0].tooltip == "Tất cả học kỳ"
-    assert "HK2" in pills[1].content.value
-    assert "Còn nợ" in pills[1].tooltip
-    assert "HK1" in pills[2].content.value
-    assert "Đã đóng" in pills[2].tooltip
+    assert len(pills) == 2
+    labels = [pill.content.value for pill in pills]
+    assert all("Tất cả" not in label for label in labels)
+    assert "HK2" in labels[0]
+    assert "Còn nợ" in pills[0].tooltip
+    assert "HK1" in labels[1]
+    assert "Đã đóng" in pills[1].tooltip
+    # Kỳ mới nhất (còn nợ) đang được chọn -> pill đầu tiên tô đặc màu trạng thái.
+    assert pills[0].bgcolor == C.CRITICAL
+    assert pills[1].bgcolor != C.CRITICAL
 
 
 def test_profile_view_theme_refresh_does_not_crash():

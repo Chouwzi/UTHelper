@@ -3,10 +3,11 @@
 Layout (single screen, minimal taps — no drill-down):
 
 1. Header: back / title / manual refresh.
-2. Student card: avatar, họ tên, MSSV, khoa/ngành/lớp + số dư UTH.
+2. Student card: avatar, họ tên, MSSV, khoa/ngành/lớp.
 3. Money summary: tổng mức nộp · đã đóng · còn nợ + one status pill.
 4. Semester pills: each pill *is* the per-semester paid/debt status and
-   filters the table on a single tap ("Tất cả" restores everything).
+   filters the table on a single tap; the newest semester is selected by
+   default (there is no "Tất cả" pill).
 5. Tabs: Học phí (per subject) / Khoản thu khác.
 6. Horizontally scrollable table with a totals row.
 
@@ -38,7 +39,6 @@ from gui.core.theme import C
 
 logger = logging.getLogger(__name__)
 
-ALL_SEMESTERS_KEY = "__all__"
 TAB_TUITION = "tuition"
 TAB_OTHER = "other"
 
@@ -56,22 +56,6 @@ def format_vnd(amount: int) -> str:
     except (TypeError, ValueError):
         value = 0
     return f"{value:,}".replace(",", ".") + " ₫"
-
-
-def format_credit(raw: str) -> str:
-    """Normalize Portal balance text (``125000.00Đ (UTH)`` → ``125.000 ₫``)."""
-    text = (raw or "").strip()
-    if not text:
-        return ""
-    match = re.match(r"^(-?[\d.,]+)", text)
-    if match is None:
-        return text
-    candidate = match.group(1).replace(",", "")
-    try:
-        amount = int(round(float(candidate)))
-    except ValueError:
-        return text
-    return format_vnd(amount)
 
 
 def short_semester(name: str) -> str:
@@ -112,7 +96,8 @@ class ProfileView(ft.Container):
 
         self._snapshot: ProfileSnapshot | None = None
         self._from_cache = False
-        self._selected_semester = ALL_SEMESTERS_KEY
+        # Newest semester once a snapshot arrives; ``""`` when there are none.
+        self._selected_semester: str = ""
         self._active_tab = TAB_TUITION
 
         # ---- Header -------------------------------------------------------
@@ -238,8 +223,6 @@ class ProfileView(ft.Container):
         self._avatar_text: ft.Text | None = None
         self._name_text: ft.Text | None = None
         self._sid_text: ft.Text | None = None
-        self._credit_pill: ft.Container | None = None
-        self._credit_text: ft.Text | None = None
         self._info_column: ft.Column | None = None
         self._stat_total: ft.Text | None = None
         self._stat_paid: ft.Text | None = None
@@ -329,7 +312,7 @@ class ProfileView(ft.Container):
 
     # Interaction -------------------------------------------------------
     def select_semester(self, key: str) -> None:
-        """Filter rows to one semester (or ``ALL_SEMESTERS_KEY``)."""
+        """Filter rows to one semester (a pill tap re-renders the tables)."""
         if key == self._selected_semester:
             return
         self._selected_semester = key
@@ -361,22 +344,37 @@ class ProfileView(ft.Container):
         if self._snapshot is None:
             return ()
         if self._active_tab == TAB_OTHER:
-            fees = self._snapshot.other_fees
-            if self._selected_semester != ALL_SEMESTERS_KEY:
-                # Other fees are not bound to a semester: keep them visible.
-                return fees
-            return fees
-        rows = self._snapshot.tuition_rows
-        if self._selected_semester == ALL_SEMESTERS_KEY:
-            return rows
+            # Other fees are not bound to a semester: keep them all visible.
+            return self._snapshot.other_fees
         return tuple(
-            row for row in rows if row.semester == self._selected_semester
+            row
+            for row in self._snapshot.tuition_rows
+            if row.semester == self._selected_semester
         )
+
+    @staticmethod
+    def _ordered_semester_names(snapshot: ProfileSnapshot) -> list[str]:
+        """Semesters holding tuition rows, newest first (Portal dropdown order)."""
+        seen: list[str] = []
+        for row in snapshot.tuition_rows:
+            if row.semester and row.semester not in seen:
+                seen.append(row.semester)
+        known = [ref.name for ref in snapshot.semesters]
+        return [name for name in known if name in seen] + [
+            name for name in seen if name not in known
+        ]
+
+    def _ensure_selected_semester(self, snapshot: ProfileSnapshot) -> None:
+        """Default to the newest semester whenever the selection is invalid."""
+        ordered = self._ordered_semester_names(snapshot)
+        if self._selected_semester not in ordered:
+            self._selected_semester = ordered[0] if ordered else ""
 
     def _render_data(self) -> None:
         snapshot = self._snapshot
         if snapshot is None:
             return
+        self._ensure_selected_semester(snapshot)
         controls: list[ft.Control] = [
             self._build_student_card(snapshot),
             self._build_summary(),
@@ -426,19 +424,6 @@ class ProfileView(ft.Container):
             f"MSSV: {profile.student_id or '—'}",
             size=12.5,
             color=C.TEXT_SECONDARY,
-        )
-        self._credit_text = ft.Text(
-            f"Số dư UTH: {format_credit(snapshot.credit) or '—'}",
-            size=13,
-            weight=ft.FontWeight.W_700,
-            color=C.SAFE,
-        )
-        self._credit_pill = ft.Container(
-            content=self._credit_text,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            border_radius=10,
-            border=ft.Border.all(1, C.SAFE),
-            bgcolor=ft.Colors.with_opacity(0.10, C.SAFE),
         )
 
         info_rows = [
@@ -494,7 +479,6 @@ class ProfileView(ft.Container):
                                 tight=True,
                                 expand=True,
                             ),
-                            self._credit_pill,
                         ],
                         spacing=14,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -611,21 +595,13 @@ class ProfileView(ft.Container):
     def _build_pills(self, snapshot: ProfileSnapshot) -> ft.Container:
         """One pill per semester — the pill itself shows that semester's status."""
         rows = snapshot.tuition_rows
-        seen: list[str] = []
-        for row in rows:
-            if row.semester and row.semester not in seen:
-                seen.append(row.semester)
-        known = [ref.name for ref in snapshot.semesters]
-        ordered = [name for name in known if name in seen] + [
-            name for name in seen if name not in known
-        ]
+        ordered = self._ordered_semester_names(snapshot)
 
         pills: list[ft.Control] = [
-            self._semester_pill(ALL_SEMESTERS_KEY, "Tất cả", None, rows)
+            self._semester_pill(name, short_semester(name), name,
+                                tuple(r for r in rows if r.semester == name))
+            for name in ordered
         ]
-        for name in ordered:
-            semester_rows = tuple(r for r in rows if r.semester == name)
-            pills.append(self._semester_pill(name, short_semester(name), name, semester_rows))
 
         self._pills_row = ft.Row(
             controls=pills, spacing=8, tight=True, scroll=ft.ScrollMode.AUTO
@@ -641,19 +617,16 @@ class ProfileView(ft.Container):
         )
 
     def _semester_pill(
-        self, key: str, label: str, semester_name: Optional[str], rows: tuple
+        self, key: str, label: str, semester_name: str, rows: tuple
     ) -> ft.Container:
         active = self._selected_semester == key
-        if key == ALL_SEMESTERS_KEY:
-            status_color = C.ACCENT
+        totals = summarize_tuition(rows)
+        if totals.debt > 0:
+            status_color = C.CRITICAL
+        elif rows and totals.unpaid_rows == 0:
+            status_color = C.SAFE
         else:
-            totals = summarize_tuition(rows)
-            if totals.debt > 0:
-                status_color = C.CRITICAL
-            elif rows and totals.unpaid_rows == 0:
-                status_color = C.SAFE
-            else:
-                status_color = C.TEXT_SECONDARY
+            status_color = C.TEXT_SECONDARY
         text_color = C.ON_ACCENT if active else C.TEXT_PRIMARY
         return ft.Container(
             content=ft.Text(
@@ -667,11 +640,7 @@ class ProfileView(ft.Container):
             border=ft.Border.all(1, status_color),
             bgcolor=status_color if active else ft.Colors.with_opacity(0.10, status_color),
             ink=True,
-            tooltip=(
-                "Tất cả học kỳ"
-                if semester_name is None
-                else f"{semester_name} · {_pills_status_label(rows)}"
-            ),
+            tooltip=f"{semester_name} · {_pills_status_label(rows)}",
             on_click=lambda _e, pill_key=key: self.select_semester(pill_key),
         )
 
@@ -769,12 +738,8 @@ class ProfileView(ft.Container):
 
     def _build_tuition_table(self) -> ft.DataTable:
         rows: list[TuitionRow] = list(self._filtered_rows())
-        show_semester = self._selected_semester == ALL_SEMESTERS_KEY
 
-        headers = ["#", "Mã LHP", "Môn học"]
-        if show_semester:
-            headers.append("Học kỳ")
-        headers += ["TC", "Học phí", "Đã nộp", "Còn nợ", "Trạng thái"]
+        headers = ["#", "Mã LHP", "Môn học", "TC", "Học phí", "Đã nộp", "Còn nợ", "Trạng thái"]
 
         data_rows: list[ft.DataRow] = []
         for index, row in enumerate(rows, start=1):
@@ -782,10 +747,6 @@ class ProfileView(ft.Container):
                 self._text_cell(str(index), color=C.TEXT_SECONDARY),
                 self._text_cell(row.course_code or "—"),
                 self._text_cell(row.subject or "—"),
-            ]
-            if show_semester:
-                cells.append(self._text_cell(short_semester(row.semester)))
-            cells += [
                 self._text_cell(str(row.credits)),
                 self._text_cell(format_vnd(row.tuition)),
                 self._text_cell(format_vnd(row.paid_amount), color=C.SAFE),
@@ -825,8 +786,6 @@ class ProfileView(ft.Container):
                 ft.DataCell(ft.Text("", size=12)),
                 ft.DataCell(ft.Text("", size=12)),
             ]
-            if show_semester:
-                total_cells.append(ft.DataCell(ft.Text("", size=12)))
             total_cells += [
                 ft.DataCell(
                     ft.Text(
