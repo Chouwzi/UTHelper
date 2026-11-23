@@ -449,8 +449,13 @@ class AppController:
             except Exception:
                 logger.debug("Portal week token clear failed after login", exc_info=True)
 
+        old_username = str(self._settings_identity[0] or "").strip() if getattr(self, "_settings_identity", None) else ""
         new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         identity_changed = new_identity != self._settings_identity
+        new_username = str(settings.UTH_USERNAME or "").strip()
+        account_switched_or_logged_out = (
+            old_username.casefold() != new_username.casefold()
+        ) or not new_username
         # Identity must flip before any account-bound background work is queued.
         self._settings_identity = new_identity
 
@@ -481,6 +486,15 @@ class AppController:
                 else None
             )
             self._data_cache = DataCache(namespace=cache_namespace)
+            courses_ns = (
+                f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+            )
+            # Close active WebViews BEFORE purging profiles/cookies so msedgewebview2.exe locks release.
+            self._close_app_webview(update_page=False)
+            courses_coord = getattr(self, "_courses_coordinator", None)
+            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
+            if callable(reset_courses):
+                reset_courses(courses_ns)
             quiz_player_view = getattr(self, "quiz_player_view", None)
             clear_quiz_sessions = getattr(
                 quiz_player_view, "clear_persisted_sessions", None
@@ -490,14 +504,17 @@ class AppController:
                 and not getattr(quiz_player_view, "visible", False)
             ):
                 self._safe_run_task(clear_quiz_sessions)
-            self._close_app_webview(update_page=False)
-            courses_coord = getattr(self, "_courses_coordinator", None)
-            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
-            if callable(reset_courses):
-                courses_ns = (
-                    f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+            if account_switched_or_logged_out and sys.platform == "win32":
+                from gui.components.courses.embedded_webview_host import (
+                    webview2_account_profile_name,
                 )
-                reset_courses(courses_ns)
+
+                keep_profile = (
+                    webview2_account_profile_name(courses_ns)
+                    if new_username
+                    else None
+                )
+                self._schedule_webview2_profile_purge(keep_profile)
 
         schedule_namespace = (
             f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
@@ -1719,7 +1736,25 @@ class AppController:
             submission_workflow_factory=self._submission_workflow_factory,
             all_assignments_provider=self._snapshot_all_data,
             on_start_quiz=self._start_course_quiz,
+            account_namespace=courses_namespace,
         )
+        if sys.platform == "win32" and not bool(getattr(self.page, "web", False)):
+            from gui.components.courses.embedded_webview_host import (
+                clear_persisted_webview2_profiles,
+                webview2_account_profile_name,
+            )
+
+            keep_startup_profile = (
+                webview2_account_profile_name(courses_namespace)
+                if str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+                else None
+            )
+            threading.Thread(
+                target=clear_persisted_webview2_profiles,
+                kwargs={"keep_profile_name": keep_startup_profile},
+                name="WebView2ProfileSweep",
+                daemon=True,
+            ).start()
         self.courses_view = self._courses_coordinator.courses_view
         self.courses_view.visible = False
         if hasattr(self.courses_view, "set_on_immersive_changed"):
@@ -2237,6 +2272,20 @@ class AppController:
             )
             sync_fn(left, top, pane_w, pane_h, nav_bottom_inset=bottom_inset)
 
+    def _schedule_webview2_profile_purge(
+        self, keep_profile_name: str | None = None
+    ) -> None:
+        from gui.components.courses.embedded_webview_host import (
+            clear_persisted_webview2_profiles,
+        )
+
+        threading.Thread(
+            target=clear_persisted_webview2_profiles,
+            kwargs={"keep_profile_name": keep_profile_name},
+            name="WebView2ProfilePurge",
+            daemon=True,
+        ).start()
+
     def _close_app_webview(self, *, update_page: bool = True) -> bool:
         host = getattr(self, "_app_webview_host", None)
         pane = getattr(self, "_app_webview_pane", None)
@@ -2308,6 +2357,9 @@ class AppController:
                     )
 
             left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds()
+            account_ns = (
+                f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+            )
             pane = CoursesWebViewPane(
                 page=self.page,
                 source=source,
@@ -2319,6 +2371,7 @@ class AppController:
                 on_open_external=self._open_url_external,
                 show_expand_toggle=False,
                 pane_width=pane_w,
+                account_namespace=account_ns,
             )
             self._app_webview_pane = pane
             host.content = pane
@@ -5104,8 +5157,13 @@ class AppController:
     def _on_settings_saved(self):
         from gui.core.theme import load_theme_from_settings, set_page_theme
 
+        old_username = str(self._settings_identity[0] or "").strip() if getattr(self, "_settings_identity", None) else ""
         new_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         credentials_changed = new_identity != self._settings_identity
+        new_username = str(settings.UTH_USERNAME or "").strip()
+        account_switched_or_logged_out = (
+            old_username.casefold() != new_username.casefold()
+        ) or not new_username
         new_milestones = tuple(settings.NOTIFY_MILESTONES_MINUTES or [])
         milestones_changed = new_milestones != self._notification_milestones_snapshot
         self._notification_milestones_snapshot = new_milestones
@@ -5178,20 +5236,31 @@ class AppController:
                 ScheduleLoadStatus.IDLE
             )
             self._today_schedule_component.set_state(self._today_schedule_state)
+            courses_ns = (
+                f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+            )
+            self._close_app_webview(update_page=False)
+            courses_coord = getattr(self, "_courses_coordinator", None)
+            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
+            if callable(reset_courses):
+                reset_courses(courses_ns)
             quiz_player_view = getattr(self, "quiz_player_view", None)
             clear_quiz_sessions = getattr(
                 quiz_player_view, "clear_persisted_sessions", None
             )
             if callable(clear_quiz_sessions):
                 self._safe_run_task(clear_quiz_sessions)
-            self._close_app_webview(update_page=False)
-            courses_coord = getattr(self, "_courses_coordinator", None)
-            reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
-            if callable(reset_courses):
-                courses_ns = (
-                    f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
+            if account_switched_or_logged_out and sys.platform == "win32":
+                from gui.components.courses.embedded_webview_host import (
+                    webview2_account_profile_name,
                 )
-                reset_courses(courses_ns)
+
+                keep_profile = (
+                    webview2_account_profile_name(courses_ns)
+                    if new_username
+                    else None
+                )
+                self._schedule_webview2_profile_purge(keep_profile)
             self._safe_run_task(
                 self._reconcile_class_schedule_notifications, (), clear_only=True
             )

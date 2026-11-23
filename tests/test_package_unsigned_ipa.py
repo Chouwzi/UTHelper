@@ -13,6 +13,7 @@ import pytest
 from scripts.package_unsigned_ipa import (
     IpaError,
     _REQUIRED_OFFICE_VIEWER_ASSETS,
+    _REQUIRED_PDF_VIEWER_ASSETS,
     inspect_device_app,
     inspect_ipa,
     verify_ios_app_office_viewer_assets,
@@ -257,6 +258,8 @@ def test_inspector_require_office_viewer_accepts_nested_app_zip_and_rejects_miss
     with zipfile.ZipFile(app_zip, "w") as nested:
         for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
             nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in _REQUIRED_PDF_VIEWER_ASSETS:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
 
     assert verify_ios_app_office_viewer_assets(app, require=True) is True
     ipa = tmp_path / "UTHelper.ipa"
@@ -273,7 +276,17 @@ def test_inspector_require_office_viewer_accepts_nested_app_zip_and_rejects_miss
     with zipfile.ZipFile(app_zip, "w") as nested:
         for asset in _REQUIRED_OFFICE_VIEWER_ASSETS[:-1]:
             nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in _REQUIRED_PDF_VIEWER_ASSETS:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
     with pytest.raises(IpaError, match="missing office_viewer asset"):
+        verify_ios_app_office_viewer_assets(app, require=True)
+
+    with zipfile.ZipFile(app_zip, "w") as nested:
+        for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
+            nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in _REQUIRED_PDF_VIEWER_ASSETS[:-1]:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
+    with pytest.raises(IpaError, match="missing pdf_viewer asset"):
         verify_ios_app_office_viewer_assets(app, require=True)
 
 

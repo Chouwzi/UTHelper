@@ -23,9 +23,17 @@ _REQUIRED_OFFICE_VIEWER_ASSETS = (
     "jszip.min.js",
     "pptx_host.html",
     "pptx_host.js",
+    "pptx_worker.js",
     "pptx_engine.js",
     "viewer.css",
     "viewer_common.js",
+)
+_REQUIRED_PDF_VIEWER_ASSETS = (
+    "pdf_host.html",
+    "pdf_host.js",
+    "pdf_viewer.css",
+    "pdf.min.mjs",
+    "pdf.worker.min.mjs",
 )
 
 
@@ -91,6 +99,11 @@ def inspect_bundle(
         asset_path = office_viewer_dir / asset_name
         if not asset_path.is_file() or asset_path.stat().st_size <= 0:
             issues.append(f"packaged office_viewer asset is missing: {asset_name}")
+    pdf_viewer_dir = app_dir / "assets" / "pdf_viewer"
+    for asset_name in _REQUIRED_PDF_VIEWER_ASSETS:
+        asset_path = pdf_viewer_dir / asset_name
+        if not asset_path.is_file() or asset_path.stat().st_size <= 0:
+            issues.append(f"packaged pdf_viewer asset is missing: {asset_name}")
 
     site_packages = root / "site-packages"
     if not site_packages.is_dir():

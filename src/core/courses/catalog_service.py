@@ -969,9 +969,15 @@ class CourseCatalogService:
         return raw
 
     def fetch_or_cache_preview_file(
-        self, source: CourseSource, file_url: str, time_modified: int, file_name: str
+        self,
+        source: CourseSource,
+        file_url: str,
+        time_modified: int,
+        file_name: str,
+        *,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Optional[Path]:
-        """Return a cached preview file path or download and persist it on miss."""
+        """Return a cached preview file path or stream/persist it on miss."""
         valid_source = _validate_source(source)
         safe_url = _safe_http_url(file_url)
         if not safe_url or not isinstance(file_name, str) or not file_name.strip():
@@ -982,8 +988,49 @@ class CourseCatalogService:
         if cached_path is not None:
             return cached_path
 
+        provider = self._provider_for(valid_source)
+        stream_fn = (
+            getattr(provider, "download_file_to_path", None)
+            if provider is not None
+            else None
+        )
+        if callable(stream_fn):
+            def _stream_into_cache() -> Optional[Path]:
+                def _write(handle: Any) -> bool:
+                    if progress_callback is not None:
+                        try:
+                            return bool(
+                                stream_fn(
+                                    safe_url,
+                                    handle,
+                                    progress_callback=progress_callback,
+                                )
+                            )
+                        except TypeError:
+                            pass
+                    return bool(stream_fn(safe_url, handle))
+
+                return self._preview_cache.stage_and_commit(
+                    safe_url, time_modified, file_name, _write
+                )
+
+            try:
+                return self._call_provider(
+                    valid_source, _stream_into_cache, context="download_file"
+                )
+            except (CourseProviderError, OSError) as exc:
+                logger.warning(
+                    "Failed to stream preview file %r for %s: %s",
+                    file_name,
+                    valid_source,
+                    _format_error(exc),
+                )
+                return None
+
         try:
-            raw = self._download_bytes(valid_source, safe_url)
+            raw = self._download_bytes(
+                valid_source, safe_url, progress_callback=progress_callback
+            )
         except CourseProviderError:
             return None
         if not raw:

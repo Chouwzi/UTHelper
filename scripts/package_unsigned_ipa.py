@@ -33,9 +33,17 @@ _REQUIRED_OFFICE_VIEWER_ASSETS = (
     "jszip.min.js",
     "pptx_host.html",
     "pptx_host.js",
+    "pptx_worker.js",
     "pptx_engine.js",
     "viewer.css",
     "viewer_common.js",
+)
+_REQUIRED_PDF_VIEWER_ASSETS = (
+    "pdf_host.html",
+    "pdf_host.js",
+    "pdf_viewer.css",
+    "pdf.min.mjs",
+    "pdf.worker.min.mjs",
 )
 
 
@@ -168,6 +176,27 @@ def verify_ios_app_office_viewer_assets(
                                 raise IpaError(
                                     f"Nested app.zip ({app_zip.name}) has empty office_viewer asset: {asset_name}"
                                 )
+                    for asset_name in _REQUIRED_PDF_VIEWER_ASSETS:
+                        candidates = (
+                            f"assets/pdf_viewer/{asset_name}",
+                            f"app/assets/pdf_viewer/{asset_name}",
+                        )
+                        matched_infos = []
+                        for candidate in candidates:
+                            matched_infos.extend(by_name.get(candidate, ()))
+                        if not matched_infos:
+                            raise IpaError(
+                                f"Nested app.zip ({app_zip.name}) is missing pdf_viewer asset: {asset_name}"
+                            )
+                        for info in matched_infos:
+                            if info.is_dir():
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) contains unsafe pdf_viewer asset: {asset_name}"
+                                )
+                            if info.file_size <= 0:
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) has empty pdf_viewer asset: {asset_name}"
+                                )
             except (OSError, zipfile.BadZipFile) as exc:
                 raise IpaError("iOS nested app.zip is invalid") from exc
         return True
@@ -177,16 +206,33 @@ def verify_ios_app_office_viewer_assets(
         for item in bundle.rglob("office_viewer")
         if not item.is_symlink() and item.is_dir()
     )
-    for viewer_dir in viewer_dirs:
-        if all(
+    pdf_viewer_dirs = sorted(
+        item
+        for item in bundle.rglob("pdf_viewer")
+        if not item.is_symlink() and item.is_dir()
+    )
+    has_office = any(
+        all(
             not (viewer_dir / asset_name).is_symlink()
             and (viewer_dir / asset_name).is_file()
             and (viewer_dir / asset_name).stat().st_size > 0
             for asset_name in _REQUIRED_OFFICE_VIEWER_ASSETS
-        ):
-            return True
+        )
+        for viewer_dir in viewer_dirs
+    )
+    has_pdf = any(
+        all(
+            not (pdf_dir / asset_name).is_symlink()
+            and (pdf_dir / asset_name).is_file()
+            and (pdf_dir / asset_name).stat().st_size > 0
+            for asset_name in _REQUIRED_PDF_VIEWER_ASSETS
+        )
+        for pdf_dir in pdf_viewer_dirs
+    )
+    if has_office and has_pdf:
+        return True
 
-    raise IpaError("iOS app bundle is missing required office_viewer assets")
+    raise IpaError("iOS app bundle is missing required office_viewer/pdf_viewer assets")
 
 
 def inspect_device_app(

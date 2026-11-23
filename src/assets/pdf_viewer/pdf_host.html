@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes">
+  <title>Trình đọc PDF</title>
+  <link rel="stylesheet" href="pdf_viewer.css">
+</head>
+<body>
+  <header class="chrome">
+    <nav class="toolbar" aria-label="Điều khiển PDF">
+      <button id="outline-btn" type="button" title="Mục lục" aria-label="Mục lục" aria-expanded="false" hidden>☰</button>
+      <button id="prev-btn" type="button" title="Trang trước" aria-label="Trang trước" disabled>‹</button>
+      <div class="page-jump">
+        <input id="page-input" type="text" inputmode="numeric" aria-label="Số trang" value="1">
+        <span id="page-total">/ 0</span>
+      </div>
+      <button id="next-btn" type="button" title="Trang sau" aria-label="Trang sau" disabled>›</button>
+      <span class="spacer" aria-hidden="true"></span>
+      <button id="zoom-out-btn" type="button" title="Thu nhỏ" aria-label="Thu nhỏ">−</button>
+      <button id="zoom-reset-btn" type="button" title="Khớp chiều rộng" aria-label="Đặt lại thu phóng">100%</button>
+      <button id="zoom-in-btn" type="button" title="Phóng to" aria-label="Phóng to">+</button>
+      <button id="search-toggle-btn" type="button" title="Tìm trong PDF" aria-label="Tìm trong PDF" aria-expanded="false">⌕</button>
+    </nav>
+    <div id="search-bar" class="search-bar" hidden>
+      <input id="search-input" type="search" placeholder="Tìm trong PDF..." aria-label="Từ khóa tìm kiếm">
+      <span id="search-count" aria-live="polite">0/0</span>
+      <button id="search-prev-btn" type="button" title="Kết quả trước" aria-label="Kết quả trước" disabled>▲</button>
+      <button id="search-next-btn" type="button" title="Kết quả sau" aria-label="Kết quả sau" disabled>▼</button>
+      <button id="search-close-btn" type="button" title="Đóng tìm kiếm" aria-label="Đóng tìm kiếm">✕</button>
+    </div>
+  </header>
+  <aside id="outline-drawer" class="outline-drawer" aria-label="Mục lục PDF" hidden></aside>
+  <p id="status" role="status">Đang tải PDF…</p>
+  <main id="pages" aria-label="Nội dung PDF"></main>
+  <script type="module" src="pdf_host.js"></script>
+</body>
+</html>

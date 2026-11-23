@@ -53,11 +53,22 @@ def _write_valid_bundle(root: Path) -> None:
         "jszip.min.js",
         "pptx_host.html",
         "pptx_host.js",
+        "pptx_worker.js",
         "pptx_engine.js",
         "viewer.css",
         "viewer_common.js",
     ):
         (office_dir / asset_name).write_bytes(b"asset")
+    pdf_dir = root / "app" / "assets" / "pdf_viewer"
+    pdf_dir.mkdir(parents=True)
+    for asset_name in (
+        "pdf_host.html",
+        "pdf_host.js",
+        "pdf_viewer.css",
+        "pdf.min.mjs",
+        "pdf.worker.min.mjs",
+    ):
+        (pdf_dir / asset_name).write_bytes(b"asset")
 
 
 def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
@@ -96,7 +107,10 @@ def test_valid_compiled_flet_bundle_has_no_issues(tmp_path):
         ("site-packages/flet_uth_quiz/__init__.pyc", "flet_uth_quiz"),
         ("site-packages/flet_uth_quiz/quiz_player.pyc", "flet_uth_quiz"),
         ("app/assets/office_viewer/docx_host.html", "office_viewer"),
+        ("app/assets/office_viewer/pptx_worker.js", "office_viewer"),
         ("app/assets/office_viewer/pptx_engine.js", "office_viewer"),
+        ("app/assets/pdf_viewer/pdf_host.html", "pdf_viewer"),
+        ("app/assets/pdf_viewer/pdf.min.mjs", "pdf_viewer"),
     ],
 )
 def test_missing_runtime_artifact_fails_closed(tmp_path, relative_path, message):

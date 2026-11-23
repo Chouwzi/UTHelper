@@ -9,8 +9,9 @@ import posixpath
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, BinaryIO, Callable, Optional
 
 from core.safe_file_io import get_memory_lock
 
@@ -124,6 +125,75 @@ class PreviewFileCache:
                 raise
             self.evict_if_needed(keep=path)
             return path
+
+    def stage_and_commit(
+        self,
+        key_url: str,
+        time_modified: int,
+        file_name: str,
+        writer_fn: Callable[[BinaryIO], bool],
+    ) -> Optional[Path]:
+        """Stream bytes via ``writer_fn`` outside the cache lock, then commit atomically."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        path = self._entry_path(key_url, time_modified, file_name)
+        tmp = (
+            self.cache_dir
+            / f"{_STAGING_PREFIX}{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
+        )
+        committed = False
+        try:
+            with open(tmp, "wb") as handle:
+                ok = bool(writer_fn(handle))
+                if ok:
+                    handle.flush()
+            if not ok:
+                return None
+            with self._lock:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                os.replace(tmp, path)
+                committed = True
+                self.evict_if_needed(keep=path)
+            return path
+        finally:
+            if not committed:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def converted_pdf_cache_key(
+        self, data: bytes, file_name: str
+    ) -> tuple[str, int, str]:
+        """Deterministic SHA-256 cache key for an Office-to-PDF conversion artifact."""
+        ext = Path(file_name or "").suffix.lower()
+        stem = Path(file_name or "document").stem or "document"
+        digest = hashlib.sha256(data).hexdigest()
+        return (f"office-pdf:v1:{ext}:{digest}", 0, f"{stem}.pdf")
+
+    def get_cached_converted_pdf(
+        self, data: bytes, file_name: str
+    ) -> Optional[bytes]:
+        """Return cached PDF bytes for an Office document if present and valid."""
+        if not data:
+            return None
+        key_url, mtime, pdf_name = self.converted_pdf_cache_key(data, file_name)
+        cached = self.get_cached_path(key_url, mtime, pdf_name)
+        if cached is None:
+            return None
+        try:
+            raw = cached.read_bytes()
+        except OSError:
+            return None
+        return raw if raw.startswith(b"%PDF-") else None
+
+    def put_converted_pdf(
+        self, data: bytes, file_name: str, pdf_bytes: bytes
+    ) -> Optional[Path]:
+        """Persist converted Office PDF bytes keyed by source SHA-256."""
+        if not data or not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
+            return None
+        key_url, mtime, pdf_name = self.converted_pdf_cache_key(data, file_name)
+        return self.put_bytes(key_url, mtime, pdf_name, pdf_bytes)
 
     def evict_if_needed(self, keep: Optional[Path] = None) -> None:
         """Remove expired files, stale temp files, and oldest entries above max_bytes."""

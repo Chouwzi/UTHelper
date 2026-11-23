@@ -45,6 +45,7 @@ on:
       - 'src/core/distribution.py'
       - 'src/assets/icon.png'
       - 'src/assets/office_viewer/**'
+      - 'src/assets/pdf_viewer/**'
 
 concurrency:
   group: build-msstore-${{ github.ref }}

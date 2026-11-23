@@ -289,7 +289,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     if (_disposed) return;
     _controller = controller;
     try {
-      final purge = _purgeSessionStore();
+      final purge = _purgeQuizOriginStore();
       _initialStorePurge = purge;
       await purge.timeout(_mobileCleanupTimeout);
       if (_disposed) return;
@@ -334,14 +334,20 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     return CookieManager.instance();
   }
 
-  Future<void> _purgeSessionStore() async {
-    await _cookieManager().deleteAllCookies();
-    if (!kIsWeb && defaultTargetPlatform != TargetPlatform.windows) {
-      await purgeQuizWebStorage(
+  Future<void> _purgeQuizOriginStore() async {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      await _cookieManager().deleteAllCookies();
+      return;
+    }
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      await purgeQuizOriginCookies(_cookieManager(), _trustedOrigin);
+      await purgeQuizOriginWebStorage(
         defaultTargetPlatform,
         WebStorageManager.instance(),
+        _trustedOrigin,
       );
-      await InAppWebViewController.clearAllCache();
     }
   }
 
@@ -839,14 +845,14 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
         unawaited(
           _settleSessionWork().then((_) async {
             try {
-              await _purgeSessionStore().timeout(_mobileCleanupTimeout);
+              await _purgeQuizOriginStore().timeout(_mobileCleanupTimeout);
             } catch (_) {
               // The queue stays disabled if the final purge also fails.
             }
           }),
         );
       }
-      await _purgeSessionStore().timeout(_mobileCleanupTimeout);
+      await _purgeQuizOriginStore().timeout(_mobileCleanupTimeout);
     } catch (_) {
       // Cleanup failures are deliberately not surfaced with native details.
       sharedMobileSessionQueue.disable();
