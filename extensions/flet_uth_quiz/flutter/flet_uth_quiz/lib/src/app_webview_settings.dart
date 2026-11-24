@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show TargetPlatform;
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import 'quiz_popup_policy.dart' show hasUnsafeUrlCharacters;
@@ -138,6 +139,7 @@ InAppWebViewSettings createAppWebViewSettings({
     supportMultipleWindows: !viewerLocked,
     javaScriptCanOpenWindowsAutomatically: !viewerLocked,
     useShouldOverrideUrlLoading: true,
+    useOnDownloadStart: !viewerLocked,
     regexToCancelSubFramesLoading: viewerLocked
         ? buildLockedViewerSubframeCancelRegex(viewerPrefix)
         : appBrowserSubframeCancelRegex,
@@ -732,8 +734,18 @@ bool shouldForwardAppConsoleMessage(
       msg.length <= appWebViewMaxConsoleMsgLength;
 }
 
+/// Returns true on platforms where `onCreateWindow` child `windowId` must be
+/// attached to an offstage `InAppWebView` sink (Android needs `WebViewTransport`
+/// to receive JS `window.open(url)` targets and release `resultMsg`; iOS and
+/// Windows otherwise fall back to navigating the main frame to blocked URLs).
+bool shouldAdoptAppPopupWindowSink(TargetPlatform platform) =>
+    platform == TargetPlatform.android ||
+    platform == TargetPlatform.iOS ||
+    platform == TargetPlatform.windows;
+
 /// Returns true when cookies installed after an initial timeout navigation should
-/// trigger a single reload of [_initialUrl].
+/// trigger a single reload of [_initialUrl], skipping reload if the WebView has
+/// already redirected to a different host (e.g. SharePoint / Microsoft SSO).
 bool shouldReloadAfterLateCookies({
   required int appliedCount,
   required bool initialNavDispatched,
@@ -741,13 +753,28 @@ bool shouldReloadAfterLateCookies({
   required bool disposed,
   required bool hasController,
   required String initialUrl,
+  String currentLoadedUrl = '',
 }) {
-  return appliedCount > 0 &&
-      initialNavDispatched &&
-      !alreadyReloaded &&
-      !disposed &&
-      hasController &&
-      initialUrl.isNotEmpty;
+  if (appliedCount <= 0 ||
+      !initialNavDispatched ||
+      alreadyReloaded ||
+      disposed ||
+      !hasController ||
+      initialUrl.isEmpty) {
+    return false;
+  }
+  final trimmedCurrent = currentLoadedUrl.trim();
+  if (trimmedCurrent.isNotEmpty) {
+    final initUri = Uri.tryParse(initialUrl.trim());
+    final curUri = Uri.tryParse(trimmedCurrent);
+    if (initUri == null ||
+        curUri == null ||
+        initUri.host.isEmpty ||
+        curUri.host.toLowerCase() != initUri.host.toLowerCase()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /// Evicts oldest popup sinks so adding a new entry never exceeds [maxCount].

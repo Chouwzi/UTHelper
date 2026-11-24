@@ -132,7 +132,9 @@ class CoursesTabView(ft.Container):
             on_toggle_expand=self.toggle_pane3_expanded,
         )
 
-        self._workspace_stack = ft.Stack(expand=True, controls=[self._detail_pane])
+        self._workspace_stack = ft.Stack(
+            expand=True, fit=ft.StackFit.EXPAND, controls=[self._detail_pane]
+        )
         self._list_pane_host = ft.Container(
             content=self._list_pane,
             width=320,
@@ -181,7 +183,9 @@ class CoursesTabView(ft.Container):
             content=self._workspace_host,
         )
         self._root_stack = ft.Stack(
-            expand=True, controls=[self._main_host, self._workspace_layer]
+            expand=True,
+            fit=ft.StackFit.EXPAND,
+            controls=[self._main_host, self._workspace_layer],
         )
 
         self.bgcolor = C.BG
@@ -1469,7 +1473,8 @@ class CoursesTabView(ft.Container):
     def update_theme(self) -> None:
         """Apply updated global palette tokens across panes and open overlays once."""
         current = semantic_palette()
-        self.bgcolor = C.BG
+        if self.bgcolor != C.BG:
+            self.bgcolor = C.BG
         self._workspace_host.bgcolor = C.BG
         self._narrow_workspace_host.bgcolor = C.BG
         self._split_divider.color = C.BORDER

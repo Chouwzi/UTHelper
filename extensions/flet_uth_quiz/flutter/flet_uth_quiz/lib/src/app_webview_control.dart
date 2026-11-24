@@ -11,9 +11,10 @@ import 'mobile_session_queue.dart';
 
 const _cookiePayloadLimit = 32 * 1024;
 const _maxInjectedCookies = 64;
-const appWebViewCookieWaitTimeout = Duration(seconds: 10);
+const appWebViewCookieWaitTimeout = Duration(seconds: 4);
 const _cookieQueueTimeout = Duration(seconds: 5);
 const _popupSinkLifetime = Duration(seconds: 4);
+const _popupSinkResolveTimeout = Duration(milliseconds: 800);
 
 /// Serializes host-only cookie installation through [MobileSessionQueue] so
 /// writes never interleave with logout cleanup or quiz origin purges, and pins
@@ -83,10 +84,15 @@ Future<int> installAppWebViewCookies({
 }
 
 class _PopupSinkEntry {
-  const _PopupSinkEntry({required this.windowId, required this.key});
+  const _PopupSinkEntry({
+    required this.windowId,
+    required this.key,
+    required this.allowInPlaceRedirect,
+  });
 
   final int windowId;
   final int key;
+  final bool allowInPlaceRedirect;
 }
 
 class UthAppWebViewControl extends StatefulWidget {
@@ -126,6 +132,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   int _nextPopupSinkKey = 0;
   final List<_PopupSinkEntry> _popupSinks = [];
   final Map<int, Timer> _popupSinkTimers = {};
+  final Set<int> _consumedPopupSinkKeys = <int>{};
 
   void _readControlProperties() {
     _initialUrl = widget.control.getString('url', '') ?? '';
@@ -353,6 +360,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         disposed: _disposed,
         hasController: _controller != null,
         initialUrl: _initialUrl,
+        currentLoadedUrl: _currentLoadedUrl,
       )) {
         _lateCookieReloaded = true;
         unawaited(_navigateInternal(_controller!, _initialUrl));
@@ -567,18 +575,14 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       allowedLoopbackPorts: _allowedLoopbackPorts,
     );
     if (target != null) {
-      unawaited(
-        controller
-            .loadUrl(urlRequest: URLRequest(url: WebUri(target)))
-            .catchError((_) {}),
-      );
+      unawaited(_navigateInternal(controller, target));
     }
-    // On iOS/Windows returning false from onCreateWindow would otherwise navigate
-    // the main frame to even blocked URLs; sink the child windowId cleanly.
-    if (!kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.iOS ||
-            defaultTargetPlatform == TargetPlatform.windows)) {
+    // On Android, JS `window.open(url, '_blank')` arrives with `request.url == null`
+    // and holds a pending `WebViewTransport` (`resultMsg`) until a child WebView
+    // attaches; on iOS/Windows returning false navigates the main frame to blocked URLs.
+    if (!kIsWeb && shouldAdoptAppPopupWindowSink(defaultTargetPlatform)) {
       final sinkKey = _nextPopupSinkKey++;
+      final allowDeferredRedirect = target == null && !_viewerLocked;
       _popupSinkTimers[sinkKey] = Timer(
         _popupSinkLifetime,
         () => _removePopupSink(sinkKey),
@@ -587,10 +591,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         trimPopupSinksToCap(
           _popupSinks,
           maxCount: maxAppPopupSinks,
-          onEvict: (oldest) => _popupSinkTimers.remove(oldest.key)?.cancel(),
+          onEvict: (oldest) {
+            _popupSinkTimers.remove(oldest.key)?.cancel();
+            _consumedPopupSinkKeys.remove(oldest.key);
+          },
         );
         _popupSinks.add(
-          _PopupSinkEntry(windowId: action.windowId, key: sinkKey),
+          _PopupSinkEntry(
+            windowId: action.windowId,
+            key: sinkKey,
+            allowInPlaceRedirect: allowDeferredRedirect,
+          ),
         );
       });
       return true;
@@ -600,8 +611,29 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
 
   void _removePopupSink(int key) {
     _popupSinkTimers.remove(key)?.cancel();
+    _consumedPopupSinkKeys.remove(key);
     if (_disposed || !mounted) return;
     setState(() => _popupSinks.removeWhere((item) => item.key == key));
+  }
+
+  void _handlePopupSinkTarget(_PopupSinkEntry sink, String? rawUrl) {
+    if (_disposed ||
+        !sink.allowInPlaceRedirect ||
+        _consumedPopupSinkKeys.contains(sink.key)) {
+      return;
+    }
+    final deferredTarget = resolveCreateWindowInPlaceTarget(
+      rawUrl,
+      viewerLocked: _viewerLocked,
+      allowedLoopbackPorts: _allowedLoopbackPorts,
+    );
+    if (deferredTarget != null && _controller != null) {
+      _consumedPopupSinkKeys.add(sink.key);
+      unawaited(_navigateInternal(_controller!, deferredTarget));
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _removePopupSink(sink.key);
+    });
   }
 
   Widget _buildPopupSink(_PopupSinkEntry sink) {
@@ -618,15 +650,29 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             javaScriptEnabled: false,
           ),
           onWebViewCreated: (ctrl) {
-            unawaited(ctrl.stopLoading().catchError((_) {}));
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _removePopupSink(sink.key);
-            });
+            if (!sink.allowInPlaceRedirect) {
+              unawaited(ctrl.stopLoading().catchError((_) {}));
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _removePopupSink(sink.key);
+              });
+            } else {
+              _popupSinkTimers[sink.key]?.cancel();
+              _popupSinkTimers[sink.key] = Timer(
+                _popupSinkResolveTimeout,
+                () => _removePopupSink(sink.key),
+              );
+            }
           },
-          onLoadStart: (ctrl, _u) =>
-              unawaited(ctrl.stopLoading().catchError((_) {})),
-          shouldOverrideUrlLoading: (_c, _a) async =>
-              NavigationActionPolicy.CANCEL,
+          onLoadStart: (ctrl, url) {
+            _handlePopupSinkTarget(sink, url?.toString());
+            unawaited(ctrl.stopLoading().catchError((_) {}));
+          },
+          shouldOverrideUrlLoading: (_c, action) async {
+            if (action.isForMainFrame) {
+              _handlePopupSinkTarget(sink, action.request.url?.toString());
+            }
+            return NavigationActionPolicy.CANCEL;
+          },
           onCreateWindow: (_c, _a) async => false,
         ),
       ),
@@ -709,6 +755,20 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                   viewerPrefix: _viewerPrefix,
                   allowedLoopbackPorts: _allowedLoopbackPorts,
                 );
+                if (decision.kind == AppNavigationKind.redirectInPlace &&
+                    decision.targetUrl != null) {
+                  unawaited(controller.stopLoading().catchError((_) {}));
+                  _currentLoadedUrl = decision.targetUrl!;
+                  unawaited(
+                    controller
+                        .loadUrl(
+                          urlRequest:
+                              URLRequest(url: WebUri(decision.targetUrl!)),
+                        )
+                        .catchError((_) {}),
+                  );
+                  return;
+                }
                 if (decision.kind != AppNavigationKind.allow) {
                   unawaited(controller.stopLoading().catchError((_) {}));
                   return;

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
@@ -520,4 +520,220 @@ def test_pane_loading_overlay_marshals_off_thread_set_progress_onto_page_loop():
         stop.set()
         t.join(timeout=2.0)
         loop.close()
+
+
+def test_remount_after_page_started_redirect_syncs_url_skips_abort_wait_and_dedups_cookie_sync(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tab-switch remounts must sync redirect URLs on page_started, skip 3s abort wait when cookies are not needed, and deduplicate concurrent cookie bootstrap."""
+    import time
+
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    provider_calls = 0
+
+    def _slow_provider():
+        nonlocal provider_calls
+        provider_calls += 1
+        time.sleep(0.05)
+        return [{"name": "MoodleSession", "value": "tok1", "domain": "courses.ut.edu.vn"}]
+
+    pane = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="SharePoint Redirect",
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=99",
+        session_client=SimpleNamespace(get_session_cookies=lambda **_kw: _slow_provider()),
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    try:
+        assert pane._host is not None
+        host = pane._host
+        slot = host.control()
+        wv = slot.content
+        bootstrap_calls: list[tuple[int, str]] = []
+
+        async def _fake_bootstrap(cookies, *, target_url=None):
+            bootstrap_calls.append((len(cookies), str(target_url or "")))
+            wv._initial_bootstrap_done = True
+            if wv._cookie_channel_id is not None:
+                wv._consumed_channel_ids.add(wv._cookie_channel_id)
+            return True
+
+        abort_calls = 0
+
+        async def _fake_abort():
+            nonlocal abort_calls
+            abort_calls += 1
+            return True
+
+        monkeypatch.setattr(wv, "bootstrap_cookies", _fake_bootstrap)
+        monkeypatch.setattr(wv, "abort_cookie_bootstrap", _fake_abort)
+        monkeypatch.setattr(
+            wv, "get_data_channel", lambda cid: SimpleNamespace(id=cid, send=lambda _b: None)
+        )
+
+        # Simulate initial mount + remount where did_mount and data_channel_open race while _slow_provider runs
+        wv._initial_bootstrap_done = True
+        wv.will_unmount()
+
+        async def _run_concurrent_remount() -> None:
+            scheduled: list[Any] = []
+            monkeypatch.setattr(page, "run_task", lambda fn, *a, **k: scheduled.append(asyncio.create_task(fn(*a, **k))))
+            slot.did_mount()
+            await asyncio.sleep(0.01)
+            # While _slow_provider is still in flight on thread pool, Dart fires data_channel_open!
+            wv.on_data_channel_open(
+                SimpleNamespace(channel_name="app_webview_cookies", channel_id=22)
+            )
+            if scheduled:
+                await asyncio.gather(*scheduled)
+
+        asyncio.run(_run_concurrent_remount())
+        assert provider_calls == 1
+        assert len(bootstrap_calls) == 1
+
+        # Mid-redirect: page_started fires for SharePoint BEFORE onUpdateVisitedHistory (url_change)
+        sp_url = "https://uteduvn-my.sharepoint.com/:x:/g/personal/u/doc?e=rs8b4a"
+        wv.on_page_started(SimpleNamespace(data=sp_url))
+        assert host._url == sp_url
+        assert wv.url == sp_url
+        assert wv.require_initial_cookies is False
+
+        # Remounting now that require_initial_cookies is False must NOT schedule abort_cookie_bootstrap
+        scheduled_after_redirect: list[Any] = []
+        monkeypatch.setattr(page, "run_task", lambda fn, *a, **k: scheduled_after_redirect.append(fn))
+        slot.did_mount()
+        assert scheduled_after_redirect == []
+        assert abort_calls == 0
+    finally:
+        pane.dispose()
+
+
+def test_document_reader_dark_mode_syncs_viewer_url_and_preserves_html_webview_on_theme_refresh():
+    """Toggling dark mode on PDF/DOCX WebView must sync theme= in wv.url, and update_theme must preserve .html WebViews."""
+    from core.courses.office_viewer_service import prepare_pdf_viewer
+
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    server = LocalPreviewServer()
+    try:
+        pdf_bytes = build_pdf_bytes(["Trang 1"])
+        pdf_desc = prepare_pdf_viewer(pdf_bytes, server, theme="light")
+        assert pdf_desc is not None
+
+        reader = DocumentReaderView(
+            file_name="Lecture.pdf",
+            data=pdf_bytes,
+            kind="pdf",
+            preview_server=server,
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+            webview_builder=lambda url, **kw: build_embedded_webview_host(url, page=page, **kw),
+            preprepared_office_viewer=pdf_desc,
+        )
+        try:
+            assert reader._embedded_host is not None
+            wv = reader._embedded_host.control().content
+            assert "theme=light" in wv.url
+            reader._toggle_reader_mode()
+            assert reader._dark_reader is True
+            assert "theme=dark" in wv.url
+            assert "theme=dark" in (reader._active_webview_url or "")
+            reader._toggle_reader_mode()
+            assert reader._dark_reader is False
+            assert "theme=light" in wv.url
+        finally:
+            reader.dispose()
+
+        html_bytes = b"<!doctype html><html><body><h1>Slide HTML</h1></body></html>"
+        html_reader = DocumentReaderView(
+            file_name="summary.html",
+            data=html_bytes,
+            kind="text",
+            preview_server=server,
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+            webview_builder=lambda url, **kw: build_embedded_webview_host(url, page=page, **kw),
+        )
+        try:
+            first_host = html_reader._embedded_host
+            assert first_host is not None
+            html_reader.update_theme()
+            assert html_reader._embedded_host is first_host
+        finally:
+            html_reader.dispose()
+    finally:
+        server.stop()
+
+
+def test_in_app_webview_dialog_uses_stack_progress_and_uth_app_webview_on_live_mobile(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """InAppWebViewDialog must use UthAppWebView on live Android pages and keep fallback WebView index stable when status_bar toggles."""
+    from flet_uth_quiz import UthAppWebView
+    from gui.components import in_app_webview as webview_module
+    from gui.components.in_app_webview import InAppWebViewDialog
+
+    live_page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    dialogs: list[Any] = []
+    monkeypatch.setattr(live_page, "show_dialog", dialogs.append, raising=False)
+
+    dlg = InAppWebViewDialog(
+        live_page,
+        url="https://uteduvn-my.sharepoint.com/:x:/g/personal/doc",
+        title="SharePoint",
+    )
+    assert dlg.show() is True
+    assert len(dialogs) == 1
+
+    def _walk_controls(ctrl):
+        if ctrl is None:
+            return
+        yield ctrl
+        c = getattr(ctrl, "content", None)
+        if c is not None:
+            yield from _walk_controls(c)
+        for ch in getattr(ctrl, "controls", None) or ():
+            yield from _walk_controls(ch)
+
+    assert any(isinstance(n, UthAppWebView) for n in _walk_controls(dialogs[0]))
+
+    # Fallback flet_webview path (non-ft.Page dummy) must keep _webview index path stable across started/ended!
+    captured: list[dict[str, Any]] = []
+
+    class _FakeWebView(ft.Container):
+        def __init__(self, url, **kwargs):
+            captured.append(kwargs)
+            super().__init__(expand=True)
+
+    monkeypatch.setattr(
+        webview_module, "flet_webview", SimpleNamespace(WebView=_FakeWebView)
+    )
+    dummy_page = SimpleNamespace(
+        platform=ft.PagePlatform.ANDROID,
+        web=False,
+        width=400,
+        height=800,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: None,
+        run_task=lambda *_a, **_k: None,
+        update=lambda: None,
+    )
+    dialogs.clear()
+    dlg_fb = InAppWebViewDialog(
+        dummy_page,  # type: ignore[arg-type]
+        url="https://portal.ut.edu.vn/schedule",
+        title="Schedule",
+    )
+    assert dlg_fb.show() is True
+    wv_node = dlg_fb._webview
+    baseline = _visible_index_path(dialogs[0].content, wv_node)
+    assert baseline is not None
+    captured[0]["on_page_started"](SimpleNamespace(data="https://portal.ut.edu.vn/schedule"))
+    assert _visible_index_path(dialogs[0].content, wv_node) == baseline
+    captured[0]["on_page_ended"](SimpleNamespace(data="https://portal.ut.edu.vn/schedule"))
+    assert _visible_index_path(dialogs[0].content, wv_node) == baseline
+
 

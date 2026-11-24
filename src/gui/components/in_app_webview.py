@@ -143,6 +143,7 @@ class InAppWebViewDialog:
         self._on_open_external = on_open_external
         self._dialog: Optional[ft.AlertDialog] = None
         self._webview = None
+        self._embedded_host = None
         self._closed = False
 
     def show(self) -> bool:
@@ -259,8 +260,81 @@ class InAppWebViewDialog:
         )
 
         body_host = ft.Container(expand=True, bgcolor=C.BG, border_radius=10)
-        if supports_native_webview(self._page):
-            status_bar = ft.ProgressBar(value=0, height=2, color=C.ACCENT, bgcolor=C.BORDER)
+        from gui.components.courses.embedded_webview_host import (
+            _is_inappwebview_mobile_platform,
+            build_embedded_webview_host,
+        )
+
+        embedded_host = (
+            build_embedded_webview_host(
+                self._url,
+                page=self._page,
+                bgcolor=C.BG,
+                on_title_changed=lambda title: (
+                    setattr(title_label, "value", title),
+                    self._safe_update(title_label),
+                )
+                if title
+                else None,
+                on_url_changed=lambda nav_url: (
+                    setattr(
+                        subtitle_label,
+                        "value",
+                        urllib.parse.urlsplit(nav_url).hostname or host,
+                    ),
+                    self._safe_update(subtitle_label),
+                )
+                if validate_https_url(nav_url)
+                else None,
+                on_external_url=lambda ext: self._on_open_external(ext)
+                if callable(self._on_open_external)
+                else None,
+            )
+            if _is_inappwebview_mobile_platform(self._page)
+            else None
+        )
+        if embedded_host is not None:
+            self._embedded_host = embedded_host
+            slot_ctrl = embedded_host.control()
+            self._webview = getattr(slot_ctrl, "content", slot_ctrl)
+            status_bar = ft.ProgressBar(
+                value=None, bar_height=2, color=C.ACCENT, bgcolor=C.BORDER, visible=True
+            )
+            status_host = ft.Container(
+                left=0,
+                top=0,
+                right=0,
+                height=2,
+                opacity=1.0,
+                ignore_interactions=True,
+                content=status_bar,
+            )
+
+            def _on_inapp_loading(loading: bool) -> None:
+                is_loading = bool(loading)
+                status_bar.visible = is_loading
+                status_host.opacity = 1.0 if is_loading else 0.0
+                self._safe_update(status_host)
+
+            embedded_host._on_loading_changed = _on_inapp_loading
+            body_host.content = ft.Stack(
+                expand=True,
+                fit=ft.StackFit.EXPAND,
+                controls=[slot_ctrl, status_host],
+            )
+        elif supports_native_webview(self._page):
+            status_bar = ft.ProgressBar(
+                value=0, bar_height=2, color=C.ACCENT, bgcolor=C.BORDER, visible=True
+            )
+            status_host = ft.Container(
+                left=0,
+                top=0,
+                right=0,
+                height=2,
+                opacity=1.0,
+                ignore_interactions=True,
+                content=status_bar,
+            )
 
             def _extract_nav_url(e) -> str:
                 raw = getattr(e, "data", None)
@@ -284,7 +358,8 @@ class InAppWebViewDialog:
                     return
                 status_bar.value = None
                 status_bar.visible = True
-                self._safe_update(status_bar)
+                status_host.opacity = 1.0
+                self._safe_update(status_host)
 
             def _on_url_change(e):
                 nav_url = _extract_nav_url(e)
@@ -297,13 +372,14 @@ class InAppWebViewDialog:
 
             def _on_ended(e):
                 status_bar.visible = False
+                status_host.opacity = 0.0
                 nav_url = _extract_nav_url(e)
                 if nav_url and not _is_safe_native_url(nav_url):
                     self.close()
                     return
                 if validate_https_url(nav_url):
                     subtitle_label.value = urllib.parse.urlsplit(nav_url).hostname or host
-                self._safe_update(status_bar)
+                self._safe_update(status_host)
                 self._safe_update(subtitle_label)
 
             self._webview = flet_webview.WebView(
@@ -320,10 +396,10 @@ class InAppWebViewDialog:
                 expand=True,
                 bgcolor=C.BG,
                 border_radius=10,
-                content=ft.Column(
-                    controls=[status_bar, self._webview],
-                    spacing=0,
+                content=ft.Stack(
                     expand=True,
+                    fit=ft.StackFit.EXPAND,
+                    controls=[self._webview, status_host],
                 ),
             )
         else:
@@ -410,6 +486,12 @@ class InAppWebViewDialog:
 
     def close(self) -> None:
         self._closed = True
+        if self._embedded_host is not None:
+            try:
+                self._embedded_host.dispose()
+            except Exception:
+                pass
+            self._embedded_host = None
         try:
             self._page.pop_dialog()
         except Exception:
@@ -496,13 +578,22 @@ class InAppWebViewDialog:
             logger.debug("Could not schedule external browser launch", exc_info=True)
 
     async def _go_back(self, _event=None) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.go_back()
+            return
         if self._webview is not None and await self._webview.can_go_back():
             await self._webview.go_back()
 
     async def _go_forward(self, _event=None) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.go_forward()
+            return
         if self._webview is not None and await self._webview.can_go_forward():
             await self._webview.go_forward()
 
     async def _reload(self, _event=None) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.reload()
+            return
         if self._webview is not None:
             await self._webview.reload()

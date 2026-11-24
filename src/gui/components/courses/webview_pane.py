@@ -297,6 +297,7 @@ class CoursesWebViewPane(ft.Container):
         self._body_host = ft.Container(expand=True, bgcolor=C.BG)
         self._body_stack = ft.Stack(
             expand=True,
+            fit=ft.StackFit.EXPAND,
             controls=[
                 self._body_host,
                 self._nav_progress_host,
@@ -305,6 +306,7 @@ class CoursesWebViewPane(ft.Container):
         self.content = ft.Column(
             expand=True,
             spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[
                 self._header_container,
                 self._body_stack,

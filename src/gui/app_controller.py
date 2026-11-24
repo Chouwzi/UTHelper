@@ -2407,14 +2407,15 @@ class AppController:
 
         single_gutter = max(0.0, (content_width - _SINGLE_VIEW_MAX_WIDTH) / 2)
         self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
+        zero_margin = ft.Margin(left=0, right=0, top=0, bottom=0)
         for view in (
             getattr(self, "grade_overview_view", None),
             getattr(self, "calendar_view", None),
             courses_view,
             getattr(self, "course_grades_view", None),
         ):
-            if view is not None:
-                view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
+            if view is not None and getattr(view, "margin", None) != zero_margin:
+                view.margin = zero_margin
 
         host = getattr(self, "_detail_host", None)
         if host is not None:

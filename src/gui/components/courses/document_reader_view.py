@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 from pathlib import Path
 import re
 import threading
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import flet as ft
 
@@ -50,6 +52,22 @@ _MAX_NATIVE_TABLE_COLS = 40
 _WHITESPACE_RE = re.compile(r"\s+")
 _MONO_FONT = "Consolas, 'Courier New', monospace"
 _SERIF_FONT = "Georgia, 'Times New Roman', Cambria, serif"
+
+
+def _with_viewer_theme_param(url: str, mode: str) -> str:
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        query_items = [
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "theme"
+        ]
+        query_items.append(("theme", "dark" if mode == "dark" else "light"))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query_items), parts.fragment)
+        )
+    except Exception:
+        return url
 
 
 def _split_markdown_by_outline(
@@ -557,10 +575,26 @@ class DocumentReaderView(ft.Container):
         self._dark_reader = not self._dark_reader
         self._sync_night_button()
         if self._office_webview is not None:
+            mode = "dark" if self._dark_reader else "light"
+            if self._office_viewer is not None:
+                updated_viewer_url = _with_viewer_theme_param(
+                    self._office_viewer.viewer_url, mode
+                )
+                self._office_viewer = replace(
+                    self._office_viewer, viewer_url=updated_viewer_url
+                )
+                self._active_webview_url = updated_viewer_url
+                if self._embedded_host is not None:
+                    self._embedded_host._url = updated_viewer_url
+                    wv_ctrl = getattr(self._embedded_host, "_wv", None)
+                    if wv_ctrl is not None and hasattr(wv_ctrl, "url"):
+                        try:
+                            wv_ctrl.url = updated_viewer_url
+                        except Exception:
+                            pass
             evaluator = getattr(self._embedded_host or self._office_webview, "eval_js", None)
             if callable(evaluator):
                 async def _set_office_theme() -> None:
-                    mode = "dark" if self._dark_reader else "light"
                     result = evaluator(f"window.setTheme && window.setTheme('{mode}');")
                     if inspect.isawaitable(result):
                         await result
@@ -3361,7 +3395,7 @@ class DocumentReaderView(ft.Container):
         ) or (
             self._active_webview_url is not None
             and self._preview_server.has_active_url(self._active_webview_url)
-            and (self._kind == "pdf" or self._dark_reader)
+            and (self._kind in {"pdf", "text"} or self._dark_reader)
         )
         if not preserve_webview:
             self._set_body_content(self._build_body())

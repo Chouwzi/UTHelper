@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -42,6 +43,7 @@ void main() {
     expect(browser.useHybridComposition, isTrue);
     expect(browser.hardwareAcceleration, isTrue);
     expect(browser.useShouldOverrideUrlLoading, isTrue);
+    expect(browser.useOnDownloadStart, isTrue);
     expect(browser.allowFileAccess, isFalse);
     expect(browser.allowContentAccess, isFalse);
     expect(browser.allowFileAccessFromFileURLs, isFalse);
@@ -59,6 +61,7 @@ void main() {
     expect(viewer.thirdPartyCookiesEnabled, isFalse);
     expect(viewer.supportMultipleWindows, isFalse);
     expect(viewer.javaScriptCanOpenWindowsAutomatically, isFalse);
+    expect(viewer.useOnDownloadStart, isFalse);
     expect(viewer.cacheEnabled, isFalse);
     expect(viewer.cacheMode, CacheMode.LOAD_NO_CACHE);
     expect(viewer.regexToCancelSubFramesLoading, isNotNull);
@@ -583,8 +586,8 @@ void main() {
     expect(installed, isEmpty);
   });
 
-  test('appWebViewCookieWaitTimeout is 10s and late-cookie reload fires once after initial nav (WV-06)', () {
-    expect(appWebViewCookieWaitTimeout, const Duration(seconds: 10));
+  test('appWebViewCookieWaitTimeout is bounded to 4s and late-cookie reload skips cross-host redirects (WV-06)', () {
+    expect(appWebViewCookieWaitTimeout, const Duration(seconds: 4));
     expect(
       shouldReloadAfterLateCookies(
         appliedCount: 1,
@@ -593,8 +596,22 @@ void main() {
         disposed: false,
         hasController: true,
         initialUrl: 'https://courses.ut.edu.vn/course/view.php?id=9',
+        currentLoadedUrl: 'https://courses.ut.edu.vn/login/index.php',
       ),
       isTrue,
+    );
+    // Must NOT yank user back to Moodle if 302 redirect already landed on SharePoint/Microsoft SSO!
+    expect(
+      shouldReloadAfterLateCookies(
+        appliedCount: 1,
+        initialNavDispatched: true,
+        alreadyReloaded: false,
+        disposed: false,
+        hasController: true,
+        initialUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+        currentLoadedUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isFalse,
     );
     expect(
       shouldReloadAfterLateCookies(
@@ -874,5 +891,12 @@ void main() {
       ),
       isFalse,
     );
+  });
+
+  test('shouldAdoptAppPopupWindowSink adopts Android, iOS, and Windows popup windowIds so JS window.open resolves cleanly', () {
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.android), isTrue);
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.iOS), isTrue);
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.windows), isTrue);
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.linux), isFalse);
   });
 }
