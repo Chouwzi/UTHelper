@@ -410,3 +410,75 @@ def test_parse_portal_day_treats_string_false_as_active_and_string_true_as_cance
 
     assert sessions[0].cancelled is False
     assert sessions[1].cancelled is True
+
+
+def test_today_schedule_close_from_background_thread_wakes_run_loop(tmp_path):
+    import threading
+
+    now = datetime(2026, 8, 11, 8, 0)
+    cache = TodayScheduleCache(cache_dir=tmp_path, namespace="portal|student")
+    cache.save(
+        TodayScheduleSnapshot(
+            schedule_date=now.date(),
+            sessions=(_session(),),
+            fetched_at=now,
+        )
+    )
+    coordinator = TodayScheduleCoordinator(
+        fetch_day=lambda *_: (_session(),),
+        cache=cache,
+        credentials_provider=lambda: ("student", "secret"),
+        state_sink=lambda _state: None,
+        now_provider=lambda: now,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(coordinator.run())
+        await asyncio.sleep(0.05)
+
+        def bg_close():
+            time_module.sleep(0.03)
+            coordinator.close()
+
+        t = threading.Thread(target=bg_close, daemon=True)
+        t.start()
+        await asyncio.wait_for(task, timeout=1.0)
+        t.join(timeout=1.0)
+
+    asyncio.run(scenario())
+
+
+def test_today_schedule_offloads_cache_io_off_event_loop(tmp_path):
+    import threading
+
+    now = datetime(2026, 8, 11, 8, 0)
+    real_cache = TodayScheduleCache(cache_dir=tmp_path, namespace="portal|student")
+    io_threads: list[tuple[str, int]] = []
+
+    class TrackingCache:
+        def load_for(self, target_date):
+            io_threads.append(("load", threading.get_ident()))
+            return real_cache.load_for(target_date)
+
+        def save(self, snapshot):
+            io_threads.append(("save", threading.get_ident()))
+            return real_cache.save(snapshot)
+
+    coordinator = TodayScheduleCoordinator(
+        fetch_day=lambda *_: (_session(),),
+        cache=TrackingCache(),  # type: ignore[arg-type]
+        credentials_provider=lambda: ("student", "secret"),
+        state_sink=lambda _state: None,
+        now_provider=lambda: now,
+    )
+
+    async def scenario():
+        loop_tid = threading.get_ident()
+        await coordinator.ensure_today()
+        return loop_tid
+
+    loop_tid = asyncio.run(scenario())
+    assert ("load", loop_tid) not in io_threads
+    assert ("save", loop_tid) not in io_threads
+    assert any(op == "load" for op, _ in io_threads)
+    assert any(op == "save" for op, _ in io_threads)
