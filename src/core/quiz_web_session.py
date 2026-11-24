@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from http.cookiejar import Cookie
@@ -311,6 +312,7 @@ def warm_existing_client_from_quiz_login(
             existing_jar.set_cookie(copy.deepcopy(cookie))
         existing_client._sesskey = sesskey
         existing_client._session_owner = account_id.strip()
+        existing_client._session_authenticated_at = time.monotonic()
         existing_client._session_generation = (
             int(getattr(existing_client, "_session_generation", 0)) + 1
         )
