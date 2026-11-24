@@ -45,7 +45,76 @@ _MAX_JSON_BYTES = 1024 * 1024
 _APPROVED_GITHUB_HOSTS = frozenset(
     {"github.com", "objects.githubusercontent.com"}
 )
+_APPROVED_GITHUB_REDIRECT_HOSTS = frozenset(
+    {
+        "api.github.com",
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "raw.githubusercontent.com",
+        "codeload.github.com",
+    }
+)
 _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
+_DEFAULT_URLOPEN = urllib.request.urlopen
+
+
+def _is_approved_github_url(url: str) -> bool:
+    """Allow only HTTPS GitHub/GitHubusercontent URLs on default port without userinfo."""
+    if not isinstance(url, str):
+        return False
+    raw = url.strip()
+    if not raw or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    if port not in (None, 443):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return host in _APPROVED_GITHUB_REDIRECT_HOSTS or (
+        host.endswith(".githubusercontent.com")
+        and not host.startswith(".")
+        and ".." not in host
+    )
+
+
+class _ApprovedGitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject HTTP downgrades and off-GitHub redirects during update discovery/download."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        if not _is_approved_github_url(redirected.full_url):
+            raise urllib.error.URLError("Blocked untrusted update redirect target")
+        return redirected
+
+
+def _open_github_url(request: urllib.request.Request, *, timeout: float):
+    """Open an update request with strict GitHub HTTPS redirect pinning."""
+    if urllib.request.urlopen is not _DEFAULT_URLOPEN:
+        return urllib.request.urlopen(request, timeout=timeout)
+    opener = urllib.request.build_opener(_ApprovedGitHubRedirectHandler())
+    response = opener.open(request, timeout=timeout)
+    geturl = getattr(response, "geturl", None)
+    final_url = str(geturl() or "") if callable(geturl) else ""
+    if (
+        final_url
+        and final_url != request.full_url
+        and not _is_approved_github_url(final_url)
+    ):
+        response.close()
+        raise urllib.error.URLError("Blocked untrusted update final URL")
+    return response
 
 
 class UpdateError(RuntimeError):
@@ -157,7 +226,7 @@ def _request_json(url: str, timeout: int = _SOCKET_TIMEOUT_SECONDS) -> dict:
             "User-Agent": _UA,
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _open_github_url(request, timeout=timeout) as response:
         payload = response.read(_MAX_JSON_BYTES + 1)
     if len(payload) > _MAX_JSON_BYTES:
         raise ValueError("update response exceeds size limit")
@@ -297,7 +366,7 @@ class GitHubReleaseClient:
                 "User-Agent": _UA,
             },
         )
-        with urllib.request.urlopen(
+        with _open_github_url(
             request,
             timeout=self.socket_timeout_seconds,
         ) as response:
@@ -634,7 +703,7 @@ class VerifiedDownloader:
             float(_SOCKET_TIMEOUT_SECONDS),
             self._remaining_seconds(deadline),
         )
-        with urllib.request.urlopen(
+        with _open_github_url(
             request,
             timeout=request_timeout,
         ) as response:

@@ -18,6 +18,7 @@ import com.uthelper.backgroundsync.notification.NotificationReconciler
 import com.uthelper.backgroundsync.security.AppSecretVault
 import com.uthelper.backgroundsync.security.CredentialVault
 import com.uthelper.backgroundsync.worker.BackgroundSyncScheduler
+import com.uthelper.backgroundsync.worker.MoodleSyncWorker
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -26,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
@@ -134,36 +136,38 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 ClassScheduleAlarmScheduler(context).reconcile(sessions, enabled)
             }
             "import_activities" -> execute(result) {
-                val database = UthDatabase.get(context)
-                val dao = database.dao()
-                val previous = dao.activities().associateBy { it.activityKey }
-                val generation = System.currentTimeMillis()
-                val imported = ForegroundActivityImporter().parse(
-                    call.argument<List<*>>("activities") ?: emptyList<Any>(),
-                    generation,
-                    previous,
-                )
-                val authoritative = call.argument<Boolean>("authoritative") ?: true
-                database.withTransaction {
-                    if (authoritative) {
-                        dao.replaceAuthoritativeSnapshot(imported, generation)
-                    } else if (imported.isNotEmpty()) {
-                        dao.upsertActivities(imported)
+                MoodleSyncWorker.syncMutex.withLock {
+                    val database = UthDatabase.get(context)
+                    val dao = database.dao()
+                    val previous = dao.activities().associateBy { it.activityKey }
+                    val generation = System.currentTimeMillis()
+                    val imported = ForegroundActivityImporter().parse(
+                        call.argument<List<*>>("activities") ?: emptyList<Any>(),
+                        generation,
+                        previous,
+                    )
+                    val authoritative = call.argument<Boolean>("authoritative") ?: true
+                    database.withTransaction {
+                        if (authoritative) {
+                            dao.replaceAuthoritativeSnapshot(imported, generation)
+                        } else if (imported.isNotEmpty()) {
+                            dao.upsertActivities(imported)
+                        }
+                        dao.setState(SyncStateEntity("last_foreground_import_at", (generation / 1000).toString()))
+                        dao.setState(SyncStateEntity("activity_count", imported.size.toString()))
                     }
-                    dao.setState(SyncStateEntity("last_foreground_import_at", (generation / 1000).toString()))
-                    dao.setState(SyncStateEntity("activity_count", imported.size.toString()))
+                    val reconciled = NotificationReconciler(context).reconcile(
+                        previous = previous,
+                        allowImmediate = true,
+                    )
+                    mapOf(
+                        "imported" to imported.size,
+                        "authoritative" to authoritative,
+                        "scheduled" to reconciled.scheduled,
+                        "cancelled" to reconciled.cancelled,
+                        "delivered" to reconciled.delivered,
+                    )
                 }
-                val reconciled = NotificationReconciler(context).reconcile(
-                    previous = previous,
-                    allowImmediate = true,
-                )
-                mapOf(
-                    "imported" to imported.size,
-                    "authoritative" to authoritative,
-                    "scheduled" to reconciled.scheduled,
-                    "cancelled" to reconciled.cancelled,
-                    "delivered" to reconciled.delivered,
-                )
             }
             "get_diagnostics" -> execute(result) {
                 val dao = UthDatabase.get(context).dao()
@@ -198,22 +202,24 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
             "logout" -> execute(result) {
-                BackgroundSyncScheduler(context).cancelAll()
-                // Portal class-schedule alarms are deliberately NOT cancelled
-                // here: AndroidBackgroundBridge.configure() calls logout()
-                // whenever the Moodle token is missing, which would wipe a
-                // freshly armed class schedule. Class reminders are cleared
-                // only through "schedule_class_sessions" with enabled=false.
-                val database = UthDatabase.get(context)
-                database.dao().reminders().forEach(AlarmScheduler(context)::cancel)
-                database.withTransaction {
-                    database.dao().clearReminders()
-                    database.dao().clearActivities()
-                    database.dao().clearState()
+                MoodleSyncWorker.syncMutex.withLock {
+                    BackgroundSyncScheduler(context).cancelAll()
+                    // Portal class-schedule alarms are deliberately NOT cancelled
+                    // here: AndroidBackgroundBridge.configure() calls logout()
+                    // whenever the Moodle token is missing, which would wipe a
+                    // freshly armed class schedule. Class reminders are cleared
+                    // only through "schedule_class_sessions" with enabled=false.
+                    val database = UthDatabase.get(context)
+                    database.dao().reminders().forEach(AlarmScheduler(context)::cancel)
+                    database.withTransaction {
+                        database.dao().clearReminders()
+                        database.dao().clearActivities()
+                        database.dao().clearState()
+                    }
+                    CredentialVault(context).clear()
+                    SettingsStore(context).clear()
+                    null
                 }
-                CredentialVault(context).clear()
-                SettingsStore(context).clear()
-                null
             }
             else -> {
                 if (!updateBridge.handleMethodCall(call, result, ::execute)) {

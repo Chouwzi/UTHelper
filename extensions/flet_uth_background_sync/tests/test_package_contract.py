@@ -350,3 +350,62 @@ def test_flutter_package_registers_ios_user_notifications_adapter():
     assert 'case "import_activities"' in swift
     assert "seenScheduleKeys" in swift
     assert "s.source_files = 'Classes/**/*.swift'" in podspec
+
+
+def test_ios_plugin_implements_keychain_app_secret_vault():
+    swift = (IOS / "Classes/UthBackgroundSyncPlugin.swift").read_text(
+        encoding="utf-8"
+    )
+    assert "import Security" in swift
+    for method in ('case "read_app_secrets":', 'case "write_app_secrets":', 'case "clear_app_secrets":'):
+        assert method in swift
+    assert "kSecClassGenericPassword" in swift
+    assert "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly" in swift
+    assert "SecItemCopyMatching" in swift
+    assert "SecItemUpdate" in swift
+    assert "SecItemAdd" in swift
+    assert "SecItemDelete" in swift
+    assert "errSecItemNotFound" in swift
+    assert "FlutterError(" in swift
+
+
+def test_android_vault_uses_process_wide_locks_unique_temp_files_and_io_error_safety():
+    vault = next(ANDROID.rglob("CredentialVault.kt")).read_text(encoding="utf-8")
+    assert "@Synchronized" not in vault
+    assert vault.count("private val VAULT_LOCK = Any()") == 2
+    assert "synchronized(VAULT_LOCK)" in vault
+    assert "UUID.randomUUID()" in vault
+    assert "stream.fd.sync()" in vault
+    assert "catch (ioError: IOException)" in vault
+    assert "throw ioError" in vault
+    assert "catch (_: GeneralSecurityException)" in vault
+
+
+def test_android_receivers_alarms_and_worker_handle_security_exceptions_and_logout_races():
+    deadline_rx = next(ANDROID.rglob("DeadlineAlarmReceiver.kt")).read_text(encoding="utf-8")
+    reschedule_rx = next(ANDROID.rglob("RescheduleReceiver.kt")).read_text(encoding="utf-8")
+    class_rx = next(ANDROID.rglob("ClassScheduleAlarmReceiver.kt")).read_text(encoding="utf-8")
+    alarm_sched = next(ANDROID.rglob("AlarmScheduler.kt")).read_text(encoding="utf-8")
+    class_sched = next(ANDROID.rglob("ClassScheduleAlarmScheduler.kt")).read_text(encoding="utf-8")
+    worker = next(ANDROID.rglob("MoodleSyncWorker.kt")).read_text(encoding="utf-8")
+    plugin = next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(encoding="utf-8")
+
+    for rx in (deadline_rx, reschedule_rx, class_rx):
+        assert "goAsync()" in rx
+        assert "CoroutineExceptionHandler" in rx
+        assert "Dispatchers.IO" in rx
+        assert "pending.finish()" in rx
+        assert "catch (" in rx
+
+    for sched in (alarm_sched, class_sched):
+        assert "catch (_: SecurityException)" in sched
+        assert "setAndAllowWhileIdle" in sched
+
+    assert "internal val syncMutex = Mutex()" in worker
+    assert "activeCredential != credential" in worker
+    assert "catch (cancelled: CancellationException)" in worker
+    assert "MoodleSyncWorker.syncMutex.withLock" in plugin
+    logout_block = plugin.split('"logout" ->', 1)[1].split("else ->", 1)[0]
+    import_block = plugin.split('"import_activities" ->', 1)[1].split('"get_diagnostics" ->', 1)[0]
+    assert "MoodleSyncWorker.syncMutex.withLock" in logout_block
+    assert "MoodleSyncWorker.syncMutex.withLock" in import_block

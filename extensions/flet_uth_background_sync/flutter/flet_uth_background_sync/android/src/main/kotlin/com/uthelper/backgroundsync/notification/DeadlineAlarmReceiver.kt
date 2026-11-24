@@ -3,9 +3,11 @@ package com.uthelper.backgroundsync.notification
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import com.uthelper.backgroundsync.data.DeliveredMilestoneEntity
 import com.uthelper.backgroundsync.data.SettingsStore
 import com.uthelper.backgroundsync.data.UthDatabase
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,7 +17,10 @@ class DeadlineAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != AlarmScheduler.ACTION_DEADLINE) return
         val pending = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            Log.e(TAG, "Unhandled deadline alarm failure: ${throwable.javaClass.simpleName}")
+        }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler).launch {
             try {
                 val dao = UthDatabase.get(context).dao()
                 val activityKey = intent.getStringExtra(AlarmScheduler.EXTRA_ACTIVITY_KEY).orEmpty()
@@ -50,9 +55,15 @@ class DeadlineAlarmReceiver : BroadcastReceiver() {
                     )
                 }
                 dao.deleteReminder(reminderId)
+            } catch (throwable: Throwable) {
+                Log.w(TAG, "Deadline alarm processing failed: ${throwable.javaClass.simpleName}")
             } finally {
                 pending.finish()
             }
         }
+    }
+
+    private companion object {
+        const val TAG = "DeadlineAlarmReceiver"
     }
 }
