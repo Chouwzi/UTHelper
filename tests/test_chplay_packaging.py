@@ -41,7 +41,7 @@ PLUGIN = (
 )
 VERSION = "2.5.1"
 BUILD_NUMBER = 2_005_001
-PACKAGE_ID = "com.uthelper.uthelper"
+PACKAGE_ID = "io.github.chouwzi.uthelper"
 FINGERPRINT = "AB" * 32
 COMMIT_SHA = "1" * 40
 
@@ -212,6 +212,9 @@ def test_pyproject_is_https_only_backup_disabled_and_play_targeted():
     gradle_props = android["gradle_properties"]
 
     assert any(dep.startswith("httpx>=") for dep in dependencies)
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert android["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
     assert android["target_sdk_version"] >= 35
     assert application["usesCleartextTraffic"] == "false"
     assert application["allowBackup"] == "false"
@@ -435,7 +438,7 @@ def test_verifier_accepts_compliant_chplay_aab(tmp_path):
         _manifest(application_attrs='android:allowBackup="false" android:extractNativeLibs="true"'),
         _manifest(
             extra_application='<provider android:name=".update.UthUpdateFileProvider" '
-            'android:authorities="com.uthelper.uthelper.uthupdates" />'
+            'android:authorities="io.github.chouwzi.uthelper.uthupdates" />'
         ),
         _manifest(
             extra_application='<service android:name="com.dexterous.flutterlocalnotifications.ForegroundService" '

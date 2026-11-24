@@ -128,7 +128,7 @@ def _build_staged_msix_dir(
             "schema_version": 1,
             "channel": channel,
             "store_product_id": store_product_id,
-            "android_package_id": "com.uthelper.uthelper",
+            "android_package_id": "io.github.chouwzi.uthelper",
         }
         (app_assets_dir / "distribution-channel.json").write_text(
             json.dumps(payload, indent=2) + "\n",
@@ -331,7 +331,7 @@ def test_package_and_verify_msix_store_end_to_end_without_repo_mutation(tmp_path
                 "schema_version": 1,
                 "channel": "msstore",
                 "store_product_id": "9NBLGGH4NNS1",
-                "android_package_id": "com.uthelper.uthelper",
+                "android_package_id": "io.github.chouwzi.uthelper",
             }
 
         verify_proc = _run_ps_script(

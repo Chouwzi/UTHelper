@@ -43,7 +43,7 @@ PYTHON_EXE: str = sys.executable
 
 DEFAULT_GITHUB_OWNER = "Chouwzi"
 DEFAULT_GITHUB_REPO = "UTHelper"
-DEFAULT_ANDROID_PACKAGE_ID = "com.uthelper.uthelper"
+DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"
 DEFAULT_TRUSTED_SIGNER_SHA256 = (
     "7E3547EE6A31325A47BE22049E238BA83CA1D90AFB8A30D053060D02678A0B3C"
 )
@@ -2000,7 +2000,7 @@ def make_synthetic_lts_release_dir(
         (
             ipa_name,
             "ios",
-            "com.uthelper.UTHelper",
+            "io.github.chouwzi.uthelper",
             "arm64",
             "ipa",
             "sideload",

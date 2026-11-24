@@ -154,7 +154,7 @@ def _make_fake_android_sdk(sdk_root: Path) -> Path:
             "            raise SystemExit(2)\n"
             "    root = ET.fromstring(xml_text)\n"
             "    if sub == 'application-id':\n"
-            "        print(root.attrib.get('package', 'com.uthelper.uthelper'))\n"
+            "        print(root.attrib.get('package', 'io.github.chouwzi.uthelper'))\n"
             "    elif sub == 'version-name':\n"
             "        print('2.5.1')\n"
             "    elif sub == 'version-code':\n"
@@ -470,8 +470,8 @@ def test_t3_p03_channel_x_ui_mobile_x_settings_and_terms(
             None,
             "market",
             [
-                "market://details?id=com.uthelper.uthelper",
-                "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+                "market://details?id=io.github.chouwzi.uthelper",
+                "https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
             ],
         ),
         (

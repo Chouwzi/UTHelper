@@ -25,7 +25,7 @@ from core.update_models import (
 )
 
 
-PACKAGE_ID = "com.uthelper.uthelper"
+PACKAGE_ID = "io.github.chouwzi.uthelper"
 logger = logging.getLogger(__name__)
 
 try:

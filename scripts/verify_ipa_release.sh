@@ -19,7 +19,7 @@ EVIDENCE_JSON=$9
 [[ -f "$IPA" && "$(basename "$IPA")" == "UTHelper-$VERSION.ipa" ]]
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]
-[[ "$BUNDLE_ID" == "com.uthelper.UTHelper" ]]
+[[ "$BUNDLE_ID" == "io.github.chouwzi.uthelper" ]]
 [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
 [[ "$EXPECTED_CERTIFICATE" =~ ^[A-F0-9]{64}$ ]]
 [[ "$COMMIT_SHA" =~ ^[A-Fa-f0-9]{40}$ ]]

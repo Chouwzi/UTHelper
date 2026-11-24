@@ -46,7 +46,7 @@ from tests.e2e_store_distribution.harness import (
 
 _CLEAN_CHPLAY_MANIFEST_XML = """<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.uthelper.uthelper"
+    package="io.github.chouwzi.uthelper"
     android:versionCode="2005001"
     android:versionName="2.5.1">
   <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35" />
@@ -504,7 +504,7 @@ def test_t2_f01_empty_file_and_non_object_json_fall_back(
 def test_t2_f01_missing_or_invalid_android_package_id_defaults_to_canonical(
     isolated_runtime_env: dict[str, Path],
 ) -> None:
-    """F1: Missing/blank/invalid ``android_package_id`` defaults to ``com.uthelper.uthelper``."""
+    """F1: Missing/blank/invalid ``android_package_id`` defaults to ``io.github.chouwzi.uthelper``."""
     dist_mod = load_module("core.distribution")
     cfg = isolated_runtime_env["assets"] / "distribution-channel.json"
 
@@ -827,7 +827,7 @@ def test_t2_f03_open_store_url_rejects_disallowed_schemes(fake_page) -> None:
     for bad_url in (
         "javascript:alert(1)",
         "file:///C:/Windows/System32/calc.exe",
-        "http://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+        "http://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
     ):
         assert controller._open_store_url(bad_url) is False
     assert fake_page.launched_urls == []
@@ -1276,7 +1276,7 @@ def test_t2_f06_null_update_candidate_in_release_version_provider_never_raises_a
                     url="https://github.com/Chouwzi/UTHelper/releases/download/v2.6.0/UTHelper-2.6.0.apk",
                     sha256="a" * 64,
                     size=128,
-                    signer_identity="com.uthelper.uthelper",
+                    signer_identity="io.github.chouwzi.uthelper",
                     certificate_fingerprint="b" * 64,
                     install_strategy={"kind": "android_package_installer"},
                 )
@@ -1887,7 +1887,7 @@ def test_t2_f09_chplay_verifier_rejects_uth_update_file_provider(tmp_path: Path)
     """F9: ``chplay`` verifier rejects ``UthUpdateFileProvider`` declaration in manifest."""
     bad_manifest = _CLEAN_CHPLAY_MANIFEST_XML.replace(
         "<receiver ",
-        '<provider android:name=".update.UthUpdateFileProvider" android:authorities="com.uthelper.uthelper.uthupdates" />\n    <receiver ',
+        '<provider android:name=".update.UthUpdateFileProvider" android:authorities="io.github.chouwzi.uthelper.uthupdates" />\n    <receiver ',
         1,
     )
     sdk_dir = _make_android_sdk_shim(tmp_path / "sdk", manifest_xml=bad_manifest)

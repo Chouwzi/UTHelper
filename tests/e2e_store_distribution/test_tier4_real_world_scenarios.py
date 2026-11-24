@@ -124,7 +124,7 @@ def _make_fake_android_sdk(sdk_root: Path) -> Path:
             "            raise SystemExit(2)\n"
             "    root = ET.fromstring(xml_text)\n"
             "    if sub == 'application-id':\n"
-            "        print(root.attrib.get('package', 'com.uthelper.uthelper'))\n"
+            "        print(root.attrib.get('package', 'io.github.chouwzi.uthelper'))\n"
             "    elif sub == 'version-name':\n"
             "        print('2.5.1')\n"
             "    elif sub == 'version-code':\n"

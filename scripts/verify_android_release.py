@@ -890,7 +890,7 @@ def verify_android_release(
         raise AndroidVerificationError("Android release version metadata is invalid") from exc
     if build_number != canonical_build_number:
         raise AndroidVerificationError("Android build number is not canonical for version")
-    if package_id != "com.uthelper.uthelper":
+    if package_id != "io.github.chouwzi.uthelper":
         raise AndroidVerificationError("Android package ID is not canonical")
     if not _COMMIT.fullmatch(commit_sha) or not workflow_run_id.strip():
         raise AndroidVerificationError("Android provenance metadata is invalid")
