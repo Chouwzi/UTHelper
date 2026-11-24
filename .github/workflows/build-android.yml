@@ -226,10 +226,26 @@ jobs:
         run: |
           # Test the source library independently: configuring the full app here
           # would require Flet's transient serious_python packaging environment.
+          set -euo pipefail
           UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
-          ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
+          run_gradle_with_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if ./gradlew "$@" \
+                -Dorg.gradle.internal.http.retry.max.attempts=5 \
+                -Dorg.gradle.internal.http.retry.initial.backoff=2000; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "Gradle invocation failed on attempt $attempt; retrying in $((attempt * 10))s..." >&2
+                sleep "$((attempt * 10))"
+              fi
+            done
+            return 1
+          }
+          run_gradle_with_retry -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
             testDebugUnitTest -Pandroid.useAndroidX=true -PuthDistributionChannel=apk_lts \
             -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
 
@@ -238,11 +254,27 @@ jobs:
         timeout-minutes: 15
         working-directory: build/flutter/android
         run: |
+          set -euo pipefail
           UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
           PLUGIN_DIR="../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
-          ./gradlew -p "$PLUGIN_DIR" \
+          run_gradle_with_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if ./gradlew "$@" \
+                -Dorg.gradle.internal.http.retry.max.attempts=5 \
+                -Dorg.gradle.internal.http.retry.initial.backoff=2000; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "Gradle invocation failed on attempt $attempt; retrying in $((attempt * 10))s..." >&2
+                sleep "$((attempt * 10))"
+              fi
+            done
+            return 1
+          }
+          run_gradle_with_retry -p "$PLUGIN_DIR" \
             testDebugUnitTest bundleReleaseAar -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
             -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
           python - "$PLUGIN_DIR" <<'PY'

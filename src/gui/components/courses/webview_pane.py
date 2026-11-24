@@ -25,6 +25,7 @@ from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     WindowsWebView2Dock,
     _is_flet_webview_platform,
+    _is_inappwebview_mobile_platform,
     _safe_control_page,
     _webview2_runtime_available,
     build_embedded_webview_host,
@@ -347,7 +348,9 @@ class CoursesWebViewPane(ft.Container):
         return self._url
 
     def _mount_engine(self) -> None:
-        use_bridge = _is_flet_webview_platform(self._page)
+        use_bridge = _is_flet_webview_platform(
+            self._page
+        ) and not _is_inappwebview_mobile_platform(self._page)
         load_url = self._build_bridge_or_target_url() if use_bridge else self._url
 
         if self._embedded_factory is not None:

@@ -244,7 +244,17 @@ class DocumentReaderView(ft.Container):
         self._schedule_alternate_theme_prewarm(force=True)
 
     def _set_body_content(self, ctrl: ft.Control) -> None:
+        if (
+            self._active_webview_url
+            and getattr(self._embedded_host, "backend", None)
+            in {"inappwebview", "flet_webview"}
+        ):
+            self._body_switcher.content = ft.Container()
+            self._body_host.content = ctrl
+            return
         self._body_switcher.content = ctrl
+        if self._body_host.content is not self._body_switcher:
+            self._body_host.content = self._body_switcher
 
     def _schedule_alternate_theme_prewarm(self, *, force: bool = False) -> None:
         """Warm the opposite dark/light conversion in a background thread so toggling is 0ms."""
@@ -362,7 +372,10 @@ class DocumentReaderView(ft.Container):
         self._cancel_viewer_watchdog()
         if self._disposed or self._viewer_ready_received:
             return
-        if "pptx_host.html" not in url and "pdf_host.html" not in url:
+        if not any(
+            host in url
+            for host in ("docx_host.html", "pptx_host.html", "pdf_host.html")
+        ):
             return
         if not (hasattr(result, "control") or hasattr(result, "eval_js")):
             return
