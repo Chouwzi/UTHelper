@@ -148,6 +148,8 @@ class ProfileSnapshot:
         default_factory=lambda: datetime.now(timezone.utc)
     )
     account: str = ""
+    # Portal avatar as a ``data:image/...;base64,...`` URI ("" when absent).
+    avatar: str = ""
 
 
 @dataclass(frozen=True)
@@ -363,6 +365,7 @@ class StudentProfileCache:
                 ),
                 fetched_at=datetime.fromisoformat(str(payload["fetched_at"])),
                 account=_text(payload.get("account")),
+                avatar=_text(payload.get("avatar")),
             )
         except (KeyError, TypeError, ValueError):
             logger.warning("Student profile cache is invalid")
@@ -375,6 +378,7 @@ class StudentProfileCache:
             "account": snapshot.account,
             "fetched_at": snapshot.fetched_at.isoformat(),
             "credit": snapshot.credit,
+            "avatar": snapshot.avatar,
             "profile": vars(snapshot.profile).copy(),
             "semesters": [
                 {"id": ref.id, "tenDot": ref.name} for ref in snapshot.semesters
@@ -452,6 +456,15 @@ class StudentProfileService:
                 )
                 return ProfileLoadResult(cached, from_cache=True)
             raise
+        # The avatar is optional: a broken image endpoint must not sink the
+        # whole refresh, so fall back to the cached photo (or none) instead.
+        avatar = ""
+        try:
+            avatar = self._portal_client.fetch_profile_image(username, password)
+        except Exception as exc:
+            logger.warning("Student profile avatar refresh failed: %s", exc)
+            if cached is not None:
+                avatar = cached.avatar
         snapshot = ProfileSnapshot(
             profile=profile,
             credit=credit,
@@ -460,6 +473,7 @@ class StudentProfileService:
             other_fees=other_fees,
             fetched_at=datetime.now(timezone.utc),
             account=username,
+            avatar=avatar,
         )
         self._cache.save(snapshot)
         return ProfileLoadResult(snapshot, from_cache=False)

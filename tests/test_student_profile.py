@@ -190,6 +190,7 @@ def test_cache_roundtrip_preserves_snapshot(tmp_path):
         other_fees=parse_other_fee_rows([]),
         fetched_at=datetime(2026, 11, 23, 8, 0, tzinfo=timezone.utc),
         account="SV001",
+        avatar="data:image/png;base64,QUJD",
     )
 
     assert cache.save(snapshot) is True
@@ -198,6 +199,7 @@ def test_cache_roundtrip_preserves_snapshot(tmp_path):
     assert loaded is not None
     assert loaded.account == "SV001"
     assert loaded.credit == "125000.00Đ (UTH)"
+    assert loaded.avatar == "data:image/png;base64,QUJD"
     assert loaded.profile.full_name == "Nguyễn Văn A"
     assert len(loaded.tuition_rows) == 2
     assert loaded.tuition_rows[1].status == "debt"
@@ -229,6 +231,7 @@ class _FakePortalClient:
 
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
+        self.fail_image = False
         self.calls: list[str] = []
 
     def _maybe_fail(self, name: str) -> None:
@@ -256,6 +259,12 @@ class _FakePortalClient:
         self._maybe_fail("other")
         return []
 
+    def fetch_profile_image(self, username, password):
+        if self.fail_image:
+            raise OSError("image endpoint down")
+        self.calls.append("image")
+        return "data:image/png;base64,QUJD"
+
 
 def test_service_first_load_fetches_saves_and_flags_network_data(tmp_path):
     client = _FakePortalClient()
@@ -268,6 +277,7 @@ def test_service_first_load_fetches_saves_and_flags_network_data(tmp_path):
     assert result.from_cache is False
     assert result.snapshot.profile.student_id == "SV001"
     assert len(result.snapshot.tuition_rows) == 2
+    assert result.snapshot.avatar == "data:image/png;base64,QUJD"
     # idDot=0 → all semesters in one request, filtered locally later.
     assert client.calls == [
         "profile",
@@ -275,9 +285,29 @@ def test_service_first_load_fetches_saves_and_flags_network_data(tmp_path):
         "semesters",
         "tuition:0",
         "other",
+        "image",
     ]
     # Persisted for the offline path.
     assert service.load_cached() is not None
+    assert service.load_cached().avatar == "data:image/png;base64,QUJD"
+
+
+def test_service_keeps_cached_avatar_when_image_endpoint_fails(tmp_path):
+    """A broken image endpoint must not sink the refresh or drop the photo."""
+    warm = StudentProfileService(
+        _FakePortalClient(), StudentProfileCache(cache_dir=tmp_path, namespace="sv001")
+    )
+    warm.load("sv001", "secret", force_refresh=True)
+
+    flaky = _FakePortalClient()
+    flaky.fail_image = True
+    refreshed = StudentProfileService(
+        flaky, StudentProfileCache(cache_dir=tmp_path, namespace="sv001")
+    )
+    result = refreshed.load("sv001", "secret", force_refresh=True)
+
+    assert result.from_cache is False
+    assert result.snapshot.avatar == "data:image/png;base64,QUJD"
 
 
 def test_service_serves_cache_without_network_when_not_forced(tmp_path):
