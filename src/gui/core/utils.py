@@ -707,3 +707,26 @@ def html_to_markdown(html_content: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     
     return text.strip()
+
+
+DEMO_LMS_WEBVIEW_GUARD_MESSAGE: str = (
+    "Phiên xem thử (Demo) sử dụng dữ liệu mẫu ngoại tuyến. "
+    "Đăng nhập bằng tài khoản sinh viên UTH để mở cổng LMS trực tuyến."
+)
+
+
+def is_uth_lms_url(url: object) -> bool:
+    """Return True when ``url`` targets a live UTH Moodle/Portal host (``*.ut.edu.vn``)."""
+    if not isinstance(url, str) or not url.strip():
+        return False
+    from core.url_validation import is_trusted_uth_lms_url
+
+    candidate = url.strip()
+    if is_trusted_uth_lms_url(candidate):
+        return True
+    try:
+        host = (_urlparse.urlsplit(candidate).hostname or "").rstrip(".").casefold()
+    except ValueError:
+        return False
+    return host == "ut.edu.vn" or host.endswith(".ut.edu.vn")
+

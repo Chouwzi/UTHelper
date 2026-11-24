@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-20
+- Updated: 2026-11-24
 - Extends: [ADR 0003: Platform release update channel](0003-signed-release-update-channel.md)
 
 ## Context
@@ -42,11 +43,13 @@ packages:
 
 ## Decision
 
-1. **Explicit Distribution Channel Model (`src/core/distribution.py`)**:
+1. **Explicit Distribution Channel Model (`src/core/distribution.py`) & Unified Mobile Package Identity (`io.github.chouwzi.uthelper`)**:
+   - Standardize `[tool.flet] org = "io.github.chouwzi"` and mobile `applicationId` / `CFBundleIdentifier` on **`io.github.chouwzi.uthelper`** across Android (`chplay` `.aab`, `apk_lts` `.apk`) and iOS (`ipa`), matching the verified open-source publisher namespace (`github.com/Chouwzi/UTHelper` / `chouwzi.github.io`) without colliding with UTH's official app (`vn.edu.ut.app`) or unowned `.com` domains. Windows MSI `UpgradeCode` GUIDs, `single_instance.py` local mutex naming (`com.uthelper.UTHelper`), Partner Center `MSSTORE_IDENTITY_NAME`, isolated QA/benchmark IDs (`com.uthelper.qa`, `com.uthelper.benchmark`), and internal Kotlin plugin namespaces (`com.uthelper.backgroundsync`, `com.uthelper.quiz`) remain unchanged.
    - Introduce a pure, testable 5-channel `DistributionChannel` boundary:
      - `chplay`: Google Play Store Android `.aab` (`supports_github_self_update = False`,
-       deep link `market://details?id=com.uthelper.uthelper` with HTTPS fallback).
-     - `apk_lts`: GitHub Releases Android `.apk` LTS (`supports_github_self_update = True`).
+       deep link `market://details?id=io.github.chouwzi.uthelper` with HTTPS fallback).
+     - `apk_lts`: GitHub Releases Android `.apk` LTS (`supports_github_self_update = True`,
+       canonical `applicationId = io.github.chouwzi.uthelper`).
      - `msstore`: Microsoft Store Windows `.msix` (`supports_github_self_update = False`,
        deep link `ms-windows-store://pdp/?ProductId=<StoreProductId>` with web fallback when
        configured).
@@ -96,8 +99,11 @@ packages:
 6. **Apple App Store Deferral**:
    - Apple App Store distribution is deferred until after Google Play launch and adoption, at
      which point the team may consider transparent community support/crowdfunding to fund an
-     Apple Developer Program membership. Unsigned iOS `.ipa` sideload builds remain part of
+     Apple Developer Program membership. Unsigned iOS `.ipa` sideload builds (`CFBundleIdentifier = io.github.chouwzi.uthelper`) remain part of
      the 7-asset GitHub LTS release.
+7. **Service-Boundary Reviewer Demo Sandbox (`src/core/demo_sandbox.py`)**:
+   - To satisfy Google Play Console **App access** review and automated Pre-launch / Robo testing without exposing real student PII or mutating university servers, a pure-Python sandbox intercepts `MoodleClient`, `PortalClient`, and `SubmissionWorkflow` when signed in with the canonical reviewer account (`uthelper_demo`, verified via constant-time PBKDF2-HMAC-SHA256 without storing plaintext credentials in `src/`).
+   - All 5 production tabs (`Tổng quan`, `Môn học`, `Lịch`, `Bảng điểm`, `Cài đặt`) execute 100% real orchestrator/UI rendering paths over `today`-relative fixtures and in-memory PDF/Markdown/ZIP attachments, while outbound `*.ut.edu.vn` requests, native `WorkManager` polling, write mutations, and live UTH LMS WebView/Quiz launches are blocked with explicit Vietnamese user notices.
 
 ## Consequences
 
@@ -113,6 +119,10 @@ packages:
     keystore) and Windows installation models (MSIX container vs machine-scoped Program Files
     MSI). Users migrating between GitHub LTS and a Store release must reinstall rather than
     in-place upgrading across tracks.
+  - Existing `apk_lts` users on legacy `v2.2.8`–`v2.5.0` builds (which used the pre-unification
+    application ID) perform a one-time install of the `io.github.chouwzi.uthelper` APK from
+    GitHub Releases and uninstall the older app; all subsequent `apk_lts` releases upgrade in
+    place under `io.github.chouwzi.uthelper`.
   - Maintainers must supply Partner Center identity values (`MSSTORE_IDENTITY_NAME`,
     `MSSTORE_PUBLISHER`, `MSSTORE_PRODUCT_ID`) and Play Console upload credentials via
     environment variables/workflow inputs rather than committing secrets to the repository.

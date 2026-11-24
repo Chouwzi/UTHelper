@@ -14,7 +14,9 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 import platform_utils
+from config import settings
 from core.courses.activity_service import CourseActivityService
+from core.demo_sandbox import is_demo_account
 from core.courses.archive_service import ArchiveService
 from core.courses.catalog_service import CourseCatalogService
 from core.courses.document_converter import ConvertedDocument, convert_document_bytes
@@ -65,6 +67,7 @@ from gui.components.courses.embedded_webview_host import (
 from gui.components.courses.webview_pane import CoursesWebViewPane
 from gui.components.detail_view import DetailView
 from gui.core.theme import C
+from gui.core.utils import DEMO_LMS_WEBVIEW_GUARD_MESSAGE, is_uth_lms_url
 from gui.view_models.courses_state import format_file_size, safe_http_url
 
 logger = logging.getLogger(__name__)
@@ -248,8 +251,12 @@ class CoursesCoordinator:
 
     def _launch_url_safe(self, url: str) -> None:
         safe_url = safe_http_url(url)
-        if safe_url:
-            self._dispatch_cb(self._on_launch_url, safe_url)
+        if not safe_url:
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe_url):
+            self._show_snack(DEMO_LMS_WEBVIEW_GUARD_MESSAGE)
+            return
+        self._dispatch_cb(self._on_launch_url, safe_url)
 
     async def ensure_loaded_async(self, *, background_sync_hours: int = 6) -> None:
         """Load cached courses on first visit; reset flag on failure for retry."""
@@ -428,6 +435,9 @@ class CoursesCoordinator:
         """Open any safe HTTP(S) URL inside authenticated Pane-3 CoursesWebViewPane."""
         safe_url = safe_http_url(url)
         if not safe_url:
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe_url):
+            self._show_snack(DEMO_LMS_WEBVIEW_GUARD_MESSAGE)
             return
         initial_pane_w: Optional[float] = None
         bounds_fn = getattr(self.courses_view, "_compute_pane3_bounds", None)

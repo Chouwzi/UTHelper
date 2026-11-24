@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 
 
 from core.data_orchestrator import DataOrchestrator
+from core.demo_sandbox import is_demo_account
 from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
 from core.courses.cache_store import CourseCacheStore
@@ -69,6 +70,7 @@ from platform_utils.update_packages import (
 )
 
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
+from gui.core.utils import DEMO_LMS_WEBVIEW_GUARD_MESSAGE, is_uth_lms_url
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
@@ -823,6 +825,8 @@ class AppController:
 
     def _native_background_credentials(self) -> tuple[str, str]:
         """Return only a token proven to belong to the active Moodle client."""
+        if is_demo_account(settings.UTH_USERNAME):
+            return "", ""
         configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
         client_site = moodle_site_from_origin(
             getattr(getattr(self.orchestrator, "client", None), "moodle_site_origin", None)
@@ -2065,9 +2069,19 @@ class AppController:
         except Exception:
             logger.debug("Responsive layout update skipped", exc_info=True)
 
+    def _show_demo_lms_guard_snackbar(self) -> None:
+        self._show_snackbar(
+            DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+            ft.Icons.INFO_OUTLINE_ROUNDED,
+            C.WARNING,
+        )
+
     def _launch_safe_url(self, url: str) -> None:
         safe = safe_http_url(url)
         if not safe:
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe):
+            self._show_demo_lms_guard_snackbar()
             return
 
         async def _open() -> None:
@@ -2301,6 +2315,9 @@ class AppController:
         if validated is None:
             logger.warning("Blocked invalid or non-HTTPS URL")
             return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(validated):
+            self._show_demo_lms_guard_snackbar()
+            return
 
         host = getattr(self, "_app_webview_host", None)
         supports_embedded = host is not None and (
@@ -2378,6 +2395,9 @@ class AppController:
         validated = validate_https_url(url)
         if validated is None:
             logger.warning("Blocked invalid or non-HTTPS external URL")
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(validated):
+            self._show_demo_lms_guard_snackbar()
             return
 
         async def _launch() -> None:
@@ -3405,9 +3425,17 @@ class AppController:
             False,
         )
 
+    def _has_detail_prefetch_credentials(self) -> bool:
+        if settings.MOODLE_WS_TOKEN:
+            return True
+        if not is_demo_account(settings.UTH_USERNAME):
+            return False
+        client = getattr(getattr(self, "orchestrator", None), "client", None)
+        return bool(getattr(client, "has_site_credentials", False))
+
     def _schedule_card_detail_warmup(self) -> bool:
         """Schedule one ordered card-cache pass without affecting sync UI."""
-        if not settings.MOODLE_WS_TOKEN:
+        if not self._has_detail_prefetch_credentials():
             return False
         with self._data_lock:
             activities = list(self.all_data)
@@ -3427,7 +3455,7 @@ class AppController:
 
     def _schedule_cached_detail_hydration(self, has_cached_snapshot: bool) -> bool:
         """Hydrate incomplete cached cards immediately without blocking startup."""
-        if not has_cached_snapshot or not settings.MOODLE_WS_TOKEN:
+        if not has_cached_snapshot or not self._has_detail_prefetch_credentials():
             return False
         with self._data_lock:
             cached_items = list(self.all_data)
@@ -3975,6 +4003,9 @@ class AppController:
         return activity
 
     def _start_course_quiz(self, course: CourseSummary, mod: CourseModuleItem) -> None:
+        if is_demo_account(settings.UTH_USERNAME):
+            self._show_demo_lms_guard_snackbar()
+            return
         player_view = getattr(self, "quiz_player_view", None)
         activity = self._build_course_quiz_activity(course, mod)
         url = str(activity.get("url") or "")
@@ -4687,7 +4718,7 @@ class AppController:
         sb = ft.SnackBar(
             content=ft.Row([
                 ft.Icon(icon, color=color, size=16),
-                ft.Text(msg, size=13, color=C.TEXT_PRIMARY),
+                ft.Text(msg, size=13, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8),
             bgcolor=C.SURFACE,
             duration=2500,

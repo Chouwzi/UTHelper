@@ -11,6 +11,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from urllib.parse import urlsplit
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
 from gui.core.theme import (
     C,
@@ -27,7 +28,11 @@ import platform_utils as _pu  # live runtime capability and UI-profile detection
 from gui.components.color_picker import open_color_picker
 
 # Import settings section helpers
-from gui.components.settings.account_section import init_account_controls, build_account_section
+from gui.components.settings.account_section import (
+    build_account_section,
+    init_account_controls,
+    refresh_demo_account_banner,
+)
 from gui.components.settings.display_section import init_display_controls, build_display_section
 from gui.components.settings.system_section import init_system_controls, build_system_section
 from gui.components.settings.privacy_section import init_privacy_controls, build_privacy_section
@@ -1255,6 +1260,7 @@ class SettingsView(ft.Container):
         if hasattr(self, '_test_loading_bar'):
             self._test_loading_bar.color = C.ACCENT
             self._test_loading_bar.bgcolor = C.SURFACE
+        refresh_demo_account_banner(self)
 
         # Reset button
         if hasattr(self, 'btn_reset'):
@@ -1581,8 +1587,13 @@ class SettingsView(ft.Container):
         self.update()
 
     async def _handle_test_login(self, e):
-        user = self._username_field.value.strip()
-        pwd = self._password_field.value.strip()
+        raw_user = self._username_field.value or ""
+        user = (
+            normalize_demo_username(raw_user)
+            if is_demo_account(raw_user)
+            else raw_user.strip()
+        )
+        pwd = (self._password_field.value or "").strip()
         if not user or not pwd:
             self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
@@ -1607,6 +1618,8 @@ class SettingsView(ft.Container):
         try:
             success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
             if success:
+                self._username_field.value = user
+                refresh_demo_account_banner(self, user)
                 self._test_login_status.value = "Đã kết nối với hệ thống UTH"
                 self._test_login_status.color = C.SAFE
                 if hasattr(self, "_test_login_status_icon"):
@@ -2516,6 +2529,12 @@ class SettingsView(ft.Container):
 
     def _capture_form_snapshot(self) -> SettingsFormSnapshot:
         """Map controls to the canonical form model in exactly one place."""
+        raw_username = self._username_field.value
+        normalized_username = (
+            normalize_demo_username(raw_username)
+            if is_demo_account(raw_username)
+            else raw_username
+        )
         return SettingsFormSnapshot.from_form_values(
             {
                 "theme": self._selected_theme,
@@ -2527,7 +2546,7 @@ class SettingsView(ft.Container):
                 "color_attendance": self._c_tb_att.value,
                 "color_open": self._c_tb_open.value,
                 "color_other": self._c_tb_other.value,
-                "uth_username": self._username_field.value,
+                "uth_username": normalized_username,
                 "uth_password": self._password_field.value,
                 "always_on_top": self._sw_always_on_top.value,
                 "include_submitted": self._sw_submitted.value,
@@ -2583,6 +2602,7 @@ class SettingsView(ft.Container):
         SettingsView._sync_color_swatch_boxes(self)
         self._username_field.value = snapshot.uth_username
         self._password_field.value = snapshot.uth_password
+        refresh_demo_account_banner(self, snapshot.uth_username)
         self._sw_always_on_top.value = snapshot.always_on_top
         self._sw_submitted.value = snapshot.include_submitted
         self._sw_graded.value = snapshot.include_graded

@@ -16,12 +16,16 @@ import inspect
 import logging
 from collections import Counter
 import platform_utils
+from config import settings
+from core.demo_sandbox import is_demo_account
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from gui.core.utils import (
+    DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
     clean_course_name,
     format_deadline,
     get_card_countdown,
     get_urgency_badge,
+    is_uth_lms_url,
 )
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
 from gui.components.detail.submission_presenter import (
@@ -1549,6 +1553,42 @@ class DetailView(ft.Container):
 
         # Chỉ thay đổi giao diện, không tự gọi update
 
+    def _show_demo_lms_guard_snackbar(self) -> None:
+        sb = ft.SnackBar(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=C.WARNING, size=16),
+                    ft.Text(
+                        DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+                        size=13,
+                        color=C.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+            ),
+            bgcolor=C.SURFACE,
+            duration=3000,
+        )
+        overlay = getattr(self._page, "overlay", None)
+        if overlay is not None:
+            overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
+            overlay.append(sb)
+            sb.open = True
+            update_fn = getattr(self._page, "update", None)
+            if callable(update_fn):
+                try:
+                    update_fn()
+                except Exception:
+                    pass
+            return
+        show_dlg = getattr(self._page, "show_dialog", None)
+        if callable(show_dlg):
+            try:
+                show_dlg(sb)
+            except (AttributeError, TypeError):
+                pass
+
     def _open_url_in_app(self, url: str, title: str = "") -> None:
         validated = validate_https_url(url)
         if validated is None:
@@ -1582,6 +1622,11 @@ class DetailView(ft.Container):
                 if callable(run_task):
                     run_task(lambda: res)
             return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
+            return
         InAppWebViewDialog(
             self._page,
             url=validated,
@@ -1595,6 +1640,11 @@ class DetailView(ft.Container):
             return
         if callable(self._on_open_external):
             self._on_open_external(validated)
+            return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
             return
 
         async def _launch() -> None:
@@ -1640,6 +1690,11 @@ class DetailView(ft.Container):
         if callable(self._on_open_external):
             self._on_open_external(validated)
             return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
+            return
         await ft.UrlLauncher().launch_url(validated)
 
     async def _open_browser(self, e):
@@ -1657,6 +1712,9 @@ class DetailView(ft.Container):
                 account_id = self._get_quiz_account_id() or ""
             except Exception:
                 logger.debug("Quiz account identity is unavailable", exc_info=True)
+        if is_demo_account(account_id or getattr(settings, "UTH_USERNAME", "")):
+            self._show_demo_lms_guard_snackbar()
+            return
         open_for_account = getattr(
             self._quiz_player_view, "open_activity_for_account", None
         )
