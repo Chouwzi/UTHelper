@@ -111,12 +111,26 @@ def test_global_webview_occlusion_hides_and_restores_visible_dock():
 
 
 def test_apply_window_bounds_respects_explicit_width_height_and_bottom_inset(monkeypatch):
+    import gui.components.courses.embedded_webview_host as host_mod
     from gui.components.courses.embedded_webview_host import clear_global_webview_occlusion
 
     clear_global_webview_occlusion()
     pos_calls: list[tuple[int, int, int, int]] = []
     show_calls: list[int] = []
 
+    monkeypatch.setattr(host_mod.sys, "platform", "win32")
+    monkeypatch.setattr(
+        host_mod.ctypes,
+        "windll",
+        SimpleNamespace(
+            user32=SimpleNamespace(
+                GetDpiForWindow=lambda _h: 96,
+                GetForegroundWindow=lambda: 0,
+                GetWindowLongW=lambda _h, _idx: 0,
+            )
+        ),
+        raising=False,
+    )
     monkeypatch.setitem(
         sys.modules,
         "win32con",

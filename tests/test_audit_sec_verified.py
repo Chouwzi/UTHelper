@@ -744,16 +744,17 @@ def test_sec07_mobile_soft_file_lock_recovers_stale_lock_under_pid_reuse(
 ) -> None:
     import socket
     import time
-    from filelock import SoftFileLock, Timeout
+    from filelock import Timeout
     from core.safe_file_io import SafeFileIO
 
     monkeypatch.setattr(sys, "_ANDROID_", True, raising=False)
-    # Simulate POSIX EPERM from Android PID reuse where filelock treats the stale PID as alive.
-    monkeypatch.setattr(SoftFileLock, "_is_process_alive", staticmethod(lambda _pid: True))
 
     target = tmp_path / "mobile_settings.json"
     lock_file = target.with_suffix(".lock")
-    posix_lock_payload = f"99999\n{socket.gethostname()}\n"
+    # Use the live current PID without a creation-time line (2-line POSIX format)
+    # so every filelock >=3.25 implementation treats the holder PID as alive
+    # (simulating Android POSIX EPERM under PID reuse without coupling to private internals).
+    posix_lock_payload = f"{os.getpid()}\n{socket.gethostname()}\n"
 
     # 1. Stale SoftFileLock (>60s old) with reused PID -> write_json_atomic MUST recover.
     lock_file.write_text(posix_lock_payload, encoding="utf-8")
