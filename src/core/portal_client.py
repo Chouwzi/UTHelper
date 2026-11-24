@@ -170,6 +170,16 @@ class _PortalHttpError(PortalError):
         self.status = status
 
 
+def _require_credentials(username: Any, password: Any) -> None:
+    if (
+        not isinstance(username, str)
+        or not username.strip()
+        or not isinstance(password, str)
+        or not password
+    ):
+        raise PortalAuthenticationError("Portal credentials are unavailable")
+
+
 class PortalClient:
     """Small stateless HTTP adapter for Portal authentication and daily classes.
 
@@ -358,27 +368,28 @@ class PortalClient:
             raise PortalProtocolError("Portal response envelope was not an object")
         return payload
 
-    def _login(
+    def _login_with_role(
         self, username: str, password: str, generation: int | None = None
-    ) -> str:
-        if (
-            not isinstance(username, str)
-            or not username.strip()
-            or not isinstance(password, str)
-            or not password
-        ):
-            raise PortalAuthenticationError("Portal credentials are unavailable")
+    ) -> tuple[str, str]:
+        _require_credentials(username, password)
         payload = self._request_json(
             "POST",
             "user/login",
             body={"username": username, "password": password},
         )
-        token = payload.get("token") if payload.get("success") else ""
-        if not isinstance(token, str) or not token:
+        raw_token = payload.get("token") if payload.get("success") else ""
+        token = raw_token.strip() if isinstance(raw_token, str) else ""
+        if not token:
             self._discard_token(generation)
             raise PortalAuthenticationError("Portal login was rejected")
         role = _extract_token_role(token, payload.get("body"))
         self._store_token(token, username, generation, role=role)
+        return token, role
+
+    def _login(
+        self, username: str, password: str, generation: int | None = None
+    ) -> str:
+        token, _ = self._login_with_role(username, password, generation)
         return token
 
     def ensure_web_session(
@@ -389,13 +400,7 @@ class PortalClient:
         Reuses the cached token for ``username`` unless ``force=True`` or the
         JWT ``exp`` claim is expired (or within the default skew window).
         """
-        if (
-            not isinstance(username, str)
-            or not username.strip()
-            or not isinstance(password, str)
-            or not password
-        ):
-            raise PortalAuthenticationError("Portal credentials are unavailable")
+        _require_credentials(username, password)
         with self._token_lock:
             generation = self._token_generation
             if not force and self._token and self._token_owner == username:
@@ -406,18 +411,7 @@ class PortalClient:
                 cached_role = ""
         if cached_token and not _is_jwt_expired(cached_token):
             return cached_token, cached_role or _extract_token_role(cached_token)
-        token = self._login(username, password, generation)
-        with self._token_lock:
-            role = (
-                self._token_role
-                if self._token == token
-                and self._token_owner == username
-                and self._token_role
-                else ""
-            )
-        if not role:
-            role = _extract_token_role(token)
-        return token, role
+        return self._login_with_role(username, password, generation)
 
     def fetch_day(
         self, target_date: date, username: str, password: str

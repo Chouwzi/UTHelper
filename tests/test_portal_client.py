@@ -634,11 +634,30 @@ def test_ensure_web_session_rejects_missing_credentials():
         ("   ", "pass123"),
         ("2251120001", ""),
         ("", ""),
+        (None, "pass123"),
+        ("2251120001", None),
+        (None, None),
     ):
         with pytest.raises(PortalAuthenticationError):
             client.ensure_web_session(username, password)
 
     assert calls == 0
+
+
+def test_ensure_web_session_rejects_whitespace_only_token():
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response(
+            {"success": True, "body": "sv", "token": "   "}
+        ),
+    )
+    client._store_token("old-tok", "student", client._current_generation(), role="gv")
+
+    with pytest.raises(PortalAuthenticationError):
+        client.ensure_web_session("student", "pass123", force=True)
+
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
 
 
 def test_decode_jwt_payload_handles_valid_and_malformed_tokens():
@@ -826,12 +845,19 @@ def test_ensure_web_session_forces_relogin_for_different_username_and_isolates_r
 
 def test_ensure_web_session_and_store_token_respect_stale_generation():
     now = int(time.time())
-    late_jwt = _build_fake_jwt(exp=now + 86400, role="gv")
+    # Deliberately give JWT data.role="sv" while login body reports authoritative "gv"
+    late_jwt = _build_fake_jwt(exp=now + 86400, role="sv")
+    responses = iter(
+        [
+            {"success": True, "body": "gv", "token": late_jwt},
+            {"success": True, "body": "gv", "token": "late-opaque-tok"},
+        ]
+    )
 
     def opener(request, timeout):
         del request, timeout
         client.clear_token()
-        return _Response({"success": True, "body": "gv", "token": late_jwt})
+        return _Response(next(responses))
 
     client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
 
@@ -842,8 +868,43 @@ def test_ensure_web_session_and_store_token_respect_stale_generation():
     assert client._cached_token("student") == ""
     assert client._token_role == ""
 
-    # Mid-flight clear_token() during ensure_web_session returns session without caching it
+    # Mid-flight clear_token() during ensure_web_session preserves authoritative body role
+    # even when JWT data.role differs ("sv") and cache write is skipped
     tok, role = client.ensure_web_session("student", "pass123")
     assert (tok, role) == (late_jwt, "gv")
     assert client._cached_token("student") == ""
     assert client._token_role == ""
+
+    # Same guarantee for an opaque token with no JWT claims at all
+    tok_opaque, role_opaque = client.ensure_web_session("student", "pass123")
+    assert (tok_opaque, role_opaque) == ("late-opaque-tok", "gv")
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+
+def test_ensure_web_session_preserves_body_role_under_concurrent_store_token():
+    now = int(time.time())
+    jwt_u1 = _build_fake_jwt(exp=now + 86400, role="sv")
+    jwt_u2 = _build_fake_jwt(exp=now + 86400, role="sv")
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response(
+            {"success": True, "body": "gv", "token": jwt_u1}
+        ),
+    )
+
+    original_store = client._store_token
+
+    def racing_store_token(token, username, generation=None, *, role=""):
+        original_store(token, username, generation, role=role)
+        # Simulate another thread completing login for a different account right after store
+        if username == "student1":
+            original_store(jwt_u2, "student2", role="sv")
+
+    client._store_token = racing_store_token  # type: ignore[method-assign]
+
+    tok, role = client.ensure_web_session("student1", "pass1")
+    assert (tok, role) == (jwt_u1, "gv")
+    assert client._cached_token("student2") == jwt_u2
+    assert client._token_role == "sv"
