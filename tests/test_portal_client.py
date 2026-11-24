@@ -605,6 +605,52 @@ def test_portal_client_fetches_summary_profile_and_credit_with_shared_login():
     assert sum(url.endswith("/user/login") for url in requests) == 1
 
 
+def test_portal_client_fetch_profile_image_normalizes_avatar_sources():
+    """``user/image`` may return a data URI or bare base64; empty means no avatar."""
+    requests = []
+
+    def opener(request, timeout):
+        del timeout
+        requests.append(request.full_url)
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        if request.full_url.endswith("/user/image"):
+            return _Response({"success": True, "body": "data:image/png;base64,QUJD"})
+        raise AssertionError(f"unexpected request {request.full_url}")
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+    assert client.fetch_profile_image("student", "secret") == "data:image/png;base64,QUJD"
+    # Second call reuses the cached token: exactly one login overall.
+    assert sum(url.endswith("/user/login") for url in requests) == 1
+
+    # Bare base64 gets wrapped; a null body means "no avatar".
+    def bare_opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": "QUJD"})
+
+    bare = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=bare_opener
+    )
+    assert bare.fetch_profile_image("student", "secret") == (
+        "data:image/png;base64,QUJD"
+    )
+
+    def empty_opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": None})
+
+    empty = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=empty_opener
+    )
+    assert empty.fetch_profile_image("student", "secret") == ""
+
+
 def test_portal_client_tuition_endpoints_send_id_dot_and_normalize_lists():
     requests = []
 

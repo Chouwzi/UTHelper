@@ -442,6 +442,27 @@ class PortalClient:
             raise PortalProtocolError("Portal credit contract was invalid")
         return body.strip()
 
+    def fetch_profile_image(self, username: str, password: str) -> str:
+        """Fetch the student's Portal avatar as an image source string.
+
+        The Portal answers ``user/image`` with a ``data:image/...;base64,...``
+        URI (or occasionally a bare base64 string); both are normalized here
+        so callers can hand the result straight to ``ft.Image(src=...)``.
+        An empty body means "no avatar" and returns ``""`` instead of raising.
+        """
+        payload = self._authorized_get("user/image", username, password)
+        body = payload.get("body")
+        if body is None:
+            return ""
+        if not isinstance(body, str):
+            raise PortalProtocolError("Portal image contract was invalid")
+        text = body.strip()
+        if not text:
+            return ""
+        if text.startswith(("data:image/", "http://", "https://")):
+            return text
+        return f"data:image/png;base64,{text}"
+
     def fetch_semesters(
         self, username: str, password: str
     ) -> tuple[dict[str, Any], ...]:
