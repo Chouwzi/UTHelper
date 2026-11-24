@@ -56,6 +56,7 @@ def test_source_checkout_imports_quiz_control_without_editable_install():
         capture_output=True,
         text=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -149,6 +150,7 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
         env=calls[0]["env"],
         capture_output=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert unicode_probe.returncode == 0, unicode_probe.stderr
     assert unicode_probe.stdout.decode("utf-8").strip() == "✅"

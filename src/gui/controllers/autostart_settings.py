@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from core.autostart import is_startup_approved_disabled_by_user
 from platform_utils.autostart import (
+    APP_NAME,
+    AUTOSTART_RUNNER_NAME,
     AutostartServiceProtocol,
     AutostartState,
     AutostartStatus,
@@ -75,14 +79,46 @@ class AutostartSettingsCoordinator:
         return _to_ui_state(status, requested=enabled)
 
 
+def _is_packaged_windows_run_key_service(service: AutostartServiceProtocol) -> bool:
+    if getattr(service, "backend", None) != "run_key":
+        return False
+    command = str(getattr(service, "command", "")).strip().casefold()
+    if not command or "--autostart" in command:
+        return False
+    return AUTOSTART_RUNNER_NAME.casefold() in command
+
+
 async def apply_initial_autostart_default(
     service: AutostartServiceProtocol,
     settings_value,
     persist,
+    *,
+    startup_approved_disabled_probe: Callable[[str], bool] = (
+        is_startup_approved_disabled_by_user
+    ),
 ) -> AutostartUiState | None:
-    """Apply the Windows default once without overriding an existing choice."""
+    """Apply the Windows default once without overriding an existing choice.
+
+    On unpackaged Windows builds where ``AUTOSTART_DEFAULT_APPLIED`` and
+    ``START_WITH_WINDOWS`` are both ``True``, also self-heal a missing or legacy
+    ``--autostart`` ``HKCU\\...\\Run\\UTHelper`` entry (for example after an
+    older MSI ``MajorUpgrade`` deleted ``Run\\UTHelper``), unless the user
+    explicitly disabled startup in Windows Startup Apps / Task Manager
+    (``StartupApproved\\Run``).
+    """
     if getattr(settings_value, "AUTOSTART_DEFAULT_APPLIED", False):
-        return None
+        if not getattr(settings_value, "START_WITH_WINDOWS", False):
+            return None
+        if not _is_packaged_windows_run_key_service(service):
+            return None
+        app_name = str(getattr(service, "app_name", APP_NAME) or APP_NAME)
+        if startup_approved_disabled_probe(app_name):
+            return None
+        current = await service.get_status()
+        if current.state is not AutostartState.DISABLED:
+            return None
+        repaired = await service.set_enabled(True)
+        return _to_ui_state(repaired, requested=True)
 
     result = _to_ui_state(await service.set_enabled(True), requested=True)
     if not result.confirmed:

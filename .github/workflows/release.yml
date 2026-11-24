@@ -38,7 +38,7 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e . -e extensions/flet_uth_quiz "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
+        run: pip install -e . -e extensions/flet_uth_quiz -e extensions/flet_uth_background_sync "flet-webview==0.86.5" "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
         run: python -m pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short
@@ -198,6 +198,7 @@ jobs:
           grep -q "ActionBroadcastReceiver" final-android-manifest.xml
           grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
           grep -q "RescheduleReceiver" final-android-manifest.xml
+          grep -q "ClassScheduleAlarmReceiver" final-android-manifest.xml
 
           mkdir -p release evidence
           FINAL_APK="release/UTHelper-$VERSION$APK_SUFFIX.apk"
@@ -213,6 +214,7 @@ jobs:
             --workflow-run-id "$GITHUB_RUN_ID" \
             --architecture "$ARCHITECTURE" \
             --require-office-viewer \
+            --require-quiz-webview \
             --output "evidence/UTHelper-$VERSION$APK_SUFFIX.apk.verification.json"
       - name: Attest signed APK
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
@@ -387,7 +389,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
           python scripts/prepare_windows_bundle.py build/windows
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
-          python scripts/verify_windows_bundle.py build/windows --expected-version "$env:VERSION"
+          python scripts/verify_windows_bundle.py build/windows --expected-version "$env:VERSION" --strict-site-packages
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
           powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test_windows_bundle_e2e.ps1 -BundleDir build/windows -ObservationSeconds 8
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle E2E failed" }

@@ -198,6 +198,96 @@ def _write_exclusive_utf8(path: Path, content: str) -> None:
         raise OSError("Target file became a symlink or reparse point")
 
 
+def _seal_handoff_readonly_dacl(handoff_dir: Path, files: tuple[Path, ...]) -> None:
+    """Strip write/create/GENERIC_ALL rights from user_sid after writing handoff files."""
+    for target in (*files, handoff_dir):
+        if _is_reparse_or_symlink(target):
+            raise OSError("Refusing symlink or reparse point while sealing handoff DACL")
+    if os.name == "nt":
+        import ntsecuritycon
+        import win32api
+        import win32con
+        import win32security
+
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+        )
+        try:
+            user_sid = win32security.GetTokenInformation(
+                token, win32security.TokenUser
+            )[0]
+        finally:
+            win32api.CloseHandle(token)
+
+        admins_sid = win32security.CreateWellKnownSid(
+            win32security.WinBuiltinAdministratorsSid, None
+        )
+        system_sid = win32security.CreateWellKnownSid(
+            win32security.WinLocalSystemSid, None
+        )
+        inherit_flags = (
+            win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE
+        )
+        # Allow Medium-IL user_sid read/execute + cleanup unlink only; forbid
+        # GENERIC_ALL, FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_ADD_FILE, and
+        # FILE_ADD_SUBDIRECTORY so scripts/config cannot be modified or recreated.
+        user_readonly_mask = (
+            ntsecuritycon.FILE_GENERIC_READ
+            | ntsecuritycon.FILE_GENERIC_EXECUTE
+            | ntsecuritycon.DELETE
+            | ntsecuritycon.FILE_DELETE_CHILD
+        )
+        sealed_dacl = win32security.ACL()
+        seen_sids: set[str] = set()
+        for sid, mask in (
+            (admins_sid, win32con.GENERIC_ALL),
+            (system_sid, win32con.GENERIC_ALL),
+            (user_sid, user_readonly_mask),
+        ):
+            sid_str = win32security.ConvertSidToStringSid(sid)
+            if sid_str in seen_sids:
+                continue
+            seen_sids.add(sid_str)
+            sealed_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                inherit_flags,
+                mask,
+                sid,
+            )
+        security_info = (
+            win32security.DACL_SECURITY_INFORMATION
+            | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+        )
+        for target in (*files, handoff_dir):
+            win32security.SetNamedSecurityInfo(
+                str(target),
+                win32security.SE_FILE_OBJECT,
+                security_info,
+                None,
+                None,
+                sealed_dacl,
+                None,
+            )
+    else:
+        for file_path in files:
+            os.chmod(file_path, 0o400)
+        os.chmod(handoff_dir, 0o500)
+
+
+def _unseal_and_remove_handoff_dir(handoff_dir: Path) -> None:
+    if os.name != "nt":
+        try:
+            os.chmod(handoff_dir, 0o700)
+            for child in handoff_dir.iterdir():
+                try:
+                    os.chmod(child, 0o600)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    shutil.rmtree(handoff_dir, ignore_errors=True)
+
+
 class VerificationCancelled(RuntimeError):
     """Raised when an active Windows package verification probe is cancelled."""
 
@@ -205,6 +295,10 @@ class VerificationCancelled(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class TransientVerificationResult(VerificationResult):
     retryable: bool = True
+
+    @property
+    def is_transient(self) -> bool:
+        return self.retryable
 
 _SIGNATURE_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
@@ -357,6 +451,7 @@ def _powershell_json(
         completed = subprocess.run(
             argv,
             env=child_environment,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=bounded_timeout,
@@ -368,6 +463,7 @@ def _powershell_json(
         proc = subprocess.Popen(
             argv,
             env=child_environment,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -610,12 +706,25 @@ class WindowsPackageVerifier:
             if package.package_type == "exe" and not magic.startswith(b"MZ"):
                 return VerificationResult(False, "Burn executable header mismatch")
 
-            signature = _call_probe(
-                self.signature_probe,
-                candidate_path,
-                self.timeout_seconds,
-                self._cancel,
-            )
+            try:
+                signature = _call_probe(
+                    self.signature_probe,
+                    candidate_path,
+                    self.timeout_seconds,
+                    self._cancel,
+                )
+            except (
+                VerificationCancelled,
+                subprocess.TimeoutExpired,
+                subprocess.SubprocessError,
+            ):
+                raise
+            except OSError:
+                return TransientVerificationResult(
+                    False,
+                    "Windows package verification failed",
+                    retryable=True,
+                )
             fingerprint = normalize_fingerprint(signature.fingerprint)
             self_signed_pinned = (
                 candidate.manifest.schema_version == 3
@@ -641,12 +750,25 @@ class WindowsPackageVerifier:
                 )
 
             if package.package_type == "msi":
-                details = _call_probe(
-                    self.msi_probe,
-                    candidate_path,
-                    self.timeout_seconds,
-                    self._cancel,
-                )
+                try:
+                    details = _call_probe(
+                        self.msi_probe,
+                        candidate_path,
+                        self.timeout_seconds,
+                        self._cancel,
+                    )
+                except (
+                    VerificationCancelled,
+                    subprocess.TimeoutExpired,
+                    subprocess.SubprocessError,
+                ):
+                    raise
+                except OSError:
+                    return TransientVerificationResult(
+                        False,
+                        "Windows package verification failed",
+                        retryable=True,
+                    )
                 if (
                     details.product_name != "UTHelper"
                     or details.product_version != candidate.manifest.release_version
@@ -655,12 +777,25 @@ class WindowsPackageVerifier:
                 ):
                     return VerificationResult(False, "MSI identity mismatch")
             else:
-                details = _call_probe(
-                    self.executable_probe,
-                    candidate_path,
-                    self.timeout_seconds,
-                    self._cancel,
-                )
+                try:
+                    details = _call_probe(
+                        self.executable_probe,
+                        candidate_path,
+                        self.timeout_seconds,
+                        self._cancel,
+                    )
+                except (
+                    VerificationCancelled,
+                    subprocess.TimeoutExpired,
+                    subprocess.SubprocessError,
+                ):
+                    raise
+                except OSError:
+                    return TransientVerificationResult(
+                        False,
+                        "Windows package verification failed",
+                        retryable=True,
+                    )
                 if (
                     details.product_name != "UTHelper"
                     or details.product_version != candidate.manifest.release_version
@@ -691,12 +826,31 @@ class WindowsPackageVerifier:
 
 _INSTALL_HELPER_SCRIPT = r"""
 param(
-  [Parameter(Mandatory=$true)][string]$ConfigPath
+  [Parameter(Mandatory=$true)][string]$ConfigPath,
+  [string]$ExpectedSha256 = '',
+  [string]$ExpectedKind = '',
+  [string]$ExpectedConfigSha256 = ''
 )
 $ErrorActionPreference = 'Stop'
+if ($ExpectedConfigSha256) {
+  $cfgHash = (Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($cfgHash -ne $ExpectedConfigSha256.ToLowerInvariant()) {
+    throw 'Handoff config SHA-256 verification failed'
+  }
+}
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $exitCode = 1
+$stageDir = $null
 try {
+  $pinnedSha256 = ([string]$config.expected_sha256).ToLowerInvariant()
+  if ($ExpectedSha256 -and ($pinnedSha256 -ne $ExpectedSha256.ToLowerInvariant())) {
+    throw 'Installer SHA-256 command-line pin mismatch'
+  }
+  $installerKind = [string]$config.kind
+  if ($ExpectedKind -and ($installerKind -ne $ExpectedKind)) {
+    throw 'Installer kind command-line pin mismatch'
+  }
+
   $parentPid = [int]$config.parent_pid
   $waitSeconds = [double]$config.wait_timeout_seconds
   if ($waitSeconds -le 0) { $waitSeconds = 30 }
@@ -708,17 +862,82 @@ try {
   Start-Sleep -Milliseconds 300
 
   $packagePath = [string]$config.package_path
-  $actualHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actualHash -ne ([string]$config.expected_sha256).ToLowerInvariant()) {
-    throw 'Installer SHA-256 verification failed'
+  $programDataBase = [Environment]::GetFolderPath('CommonApplicationData')
+  if (-not $programDataBase) { $programDataBase = $env:ProgramData }
+  if (-not $programDataBase) { throw 'ProgramData directory unavailable' }
+  $uthelperProgramData = Join-Path $programDataBase 'UTHelper'
+  $stageParent = Join-Path $uthelperProgramData 'update_stage'
+  foreach ($candidateDir in @($uthelperProgramData, $stageParent)) {
+    if (Test-Path -LiteralPath $candidateDir) {
+      $item = Get-Item -LiteralPath $candidateDir -Force
+      if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw 'Refusing reparse point in ProgramData update_stage'
+      }
+    }
+  }
+  $adminAcl = New-Object System.Security.AccessControl.DirectorySecurity
+  $adminAcl.SetAccessRuleProtection($true, $false)
+  $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  $prop = [System.Security.AccessControl.PropagationFlags]::None
+  foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+    $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,
+      $inherit,
+      $prop,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $adminAcl.AddAccessRule($rule)
+  }
+  if (-not (Test-Path -LiteralPath $uthelperProgramData)) {
+    [void][System.IO.Directory]::CreateDirectory($uthelperProgramData)
+  }
+  if (-not (Test-Path -LiteralPath $stageParent)) {
+    [void][System.IO.Directory]::CreateDirectory($stageParent, $adminAcl)
+  } else {
+    Set-Acl -LiteralPath $stageParent -AclObject $adminAcl
+  }
+  $stageDir = Join-Path $stageParent ('stage-' + [guid]::NewGuid().ToString('N'))
+  [void][System.IO.Directory]::CreateDirectory($stageDir, $adminAcl)
+  $stageItem = Get-Item -LiteralPath $stageDir -Force
+  if ($stageItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point in stage directory'
+  }
+
+  $fileName = [System.IO.Path]::GetFileName($packagePath)
+  if (-not $fileName) { throw 'Invalid installer filename' }
+  $stagedPackage = Join-Path $stageDir $fileName
+  Copy-Item -LiteralPath $packagePath -Destination $stagedPackage -Force
+
+  $lockStream = [System.IO.File]::Open(
+    $stagedPackage,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+  )
+  try {
+    $sha256Alg = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hashBytes = $sha256Alg.ComputeHash($lockStream)
+    } finally {
+      $sha256Alg.Dispose()
+    }
+    $streamHash = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    $actualHash = (Get-FileHash -LiteralPath $stagedPackage -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (($streamHash -ne $pinnedSha256) -or ($actualHash -ne $pinnedSha256)) {
+      throw 'Installer SHA-256 verification failed'
+    }
+  } finally {
+    $lockStream.Dispose()
   }
 
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  if ([string]$config.kind -eq 'launch_msi') {
+  if ($installerKind -eq 'launch_msi') {
     $psi.FileName = (Join-Path $env:SystemRoot 'System32\msiexec.exe')
-    $psi.Arguments = '/i "' + $packagePath + '" /passive /norestart'
-  } elseif ([string]$config.kind -eq 'launch_bootstrapper') {
-    $psi.FileName = $packagePath
+    $psi.Arguments = '/i "' + $stagedPackage + '" /passive /norestart'
+  } elseif ($installerKind -eq 'launch_bootstrapper') {
+    $psi.FileName = $stagedPackage
     $psi.Arguments = '/passive /norestart'
   } else {
     throw 'Unsupported installer kind'
@@ -730,6 +949,9 @@ try {
 } catch {
   if ($exitCode -eq 0) { $exitCode = 1 }
 } finally {
+  if ($stageDir -and (Test-Path -LiteralPath $stageDir)) {
+    Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
   $statusPath = [string]$config.status_path
   if ($statusPath) {
     $statusTmp = $statusPath + '.tmp'
@@ -1115,12 +1337,18 @@ class WindowsPackageLauncher:
                 str(fallback_relaunch) if fallback_relaunch is not None else ""
             ),
         }
+        config_json = json.dumps(config_data)
+        config_sha256 = hashlib.sha256(config_json.encode("utf-8")).hexdigest().lower()
         try:
-            _write_exclusive_utf8(config_path, json.dumps(config_data))
+            _write_exclusive_utf8(config_path, config_json)
             _write_exclusive_utf8(install_ps1, _INSTALL_HELPER_SCRIPT)
             _write_exclusive_utf8(relaunch_ps1, _RELAUNCH_HELPER_SCRIPT)
+            _seal_handoff_readonly_dacl(
+                handoff_dir,
+                (config_path, install_ps1, relaunch_ps1),
+            )
         except OSError:
-            shutil.rmtree(handoff_dir, ignore_errors=True)
+            _unseal_and_remove_handoff_dir(handoff_dir)
             return LaunchResult(
                 False,
                 "installer launch failed",
@@ -1162,6 +1390,12 @@ class WindowsPackageLauncher:
             str(install_ps1),
             "-ConfigPath",
             str(config_path),
+            "-ExpectedSha256",
+            package.sha256.lower(),
+            "-ExpectedKind",
+            kind,
+            "-ExpectedConfigSha256",
+            config_sha256,
         ]
         if _is_user_admin():
             try:
@@ -1176,7 +1410,7 @@ class WindowsPackageLauncher:
                     stderr=subprocess.DEVNULL,
                 )
             except OSError:
-                shutil.rmtree(handoff_dir, ignore_errors=True)
+                _unseal_and_remove_handoff_dir(handoff_dir)
                 return LaunchResult(
                     False,
                     "installer launch failed",
@@ -1189,14 +1423,14 @@ class WindowsPackageLauncher:
                 safe_cwd,
             )
             if err == _ERROR_CANCELLED:
-                shutil.rmtree(handoff_dir, ignore_errors=True)
+                _unseal_and_remove_handoff_dir(handoff_dir)
                 return LaunchResult(
                     False,
                     "installer cancelled by user",
                     status="uac_cancelled",
                 )
             if err != 0:
-                shutil.rmtree(handoff_dir, ignore_errors=True)
+                _unseal_and_remove_handoff_dir(handoff_dir)
                 return LaunchResult(
                     False,
                     "installer launch failed",
