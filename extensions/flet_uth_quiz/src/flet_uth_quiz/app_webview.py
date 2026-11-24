@@ -1,7 +1,5 @@
 """Python facade for general-purpose mobile InAppWebView (Courses, SharePoint, SSO, PDF/Office)."""
 
-from __future__ import annotations
-
 import asyncio
 from dataclasses import field
 import json

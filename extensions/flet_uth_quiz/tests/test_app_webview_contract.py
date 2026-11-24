@@ -25,6 +25,7 @@ def test_app_webview_exported_and_registered_without_altering_quiz_player_privac
     assert "evaluateJavascript" not in quiz_widget
     assert "onConsoleMessage" not in quiz_widget
     assert "openDataChannel()" in app_widget
+    assert "if (!_requireInitialCookies || _cookieChannel != null) return;" in app_widget
     assert "app_webview_cookies" in app_widget
     assert "onConsoleMessage" in app_widget
 
@@ -102,3 +103,76 @@ def test_app_webview_accepts_https_and_loopback_and_bootstraps_cookies_via_data_
     assert asyncio.run(viewer_wv.go_back()) is True
     assert asyncio.run(viewer_wv.go_forward()) is True
     assert asyncio.run(viewer_wv.reload()) is True
+
+
+def test_app_webview_flet_session_event_dispatch_resolves_all_event_types(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from unittest.mock import AsyncMock
+
+    from flet.controls.control_event import Event, get_event_field_type
+    from flet_uth_quiz import UthAppWebView
+
+    received: dict[str, list[Event]] = {}
+
+    def _record(name: str):
+        return lambda event: received.setdefault(name, []).append(event)
+
+    wv = UthAppWebView(
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=42",
+        require_initial_cookies=True,
+        on_page_started=_record("page_started"),
+        on_page_ended=_record("page_ended"),
+        on_url_change=_record("url_change"),
+        on_title_change=_record("title_change"),
+        on_history_change=_record("history_change"),
+        on_web_error=_record("web_error"),
+        on_console_message=_record("console_message"),
+        on_external_url=_record("external_url"),
+    )
+
+    event_fields = (
+        "on_data_channel_open",
+        "on_page_started",
+        "on_page_ended",
+        "on_url_change",
+        "on_title_change",
+        "on_history_change",
+        "on_web_error",
+        "on_console_message",
+        "on_external_url",
+    )
+    for field_name in event_fields:
+        event_cls = get_event_field_type(wv, field_name)
+        assert event_cls is not None, field_name
+
+    fake_channel = SimpleNamespace(send=lambda _b: None)
+    monkeypatch.setattr(
+        wv, "get_data_channel", lambda cid: fake_channel if cid == 11 else None
+    )
+    fake_page = SimpleNamespace(
+        session=SimpleNamespace(after_event=AsyncMock(), index={wv._i: wv})
+    )
+    monkeypatch.setattr(UthAppWebView, "page", property(lambda _s: fake_page))
+
+    asyncio.run(
+        wv._trigger_event(
+            "data_channel_open",
+            {"channel_name": "app_webview_cookies", "channel_id": 11},
+        )
+    )
+    asyncio.run(wv._trigger_event("console_message", '__UTH_MSG__:{"type":"ready"}'))
+    asyncio.run(wv._trigger_event("page_started", "https://courses.ut.edu.vn/"))
+
+    assert wv._cookie_channel_id == 11
+    assert wv._cookie_channel is fake_channel
+    assert wv._cookie_channel_ready.is_set()
+    assert len(received["console_message"]) == 1
+    assert isinstance(received["console_message"][0], Event)
+    assert received["console_message"][0].control is wv
+    assert received["console_message"][0].data == '__UTH_MSG__:{"type":"ready"}'
+    assert len(received["page_started"]) == 1
+    assert isinstance(received["page_started"][0], Event)
+    assert received["page_started"][0].control is wv
+    assert received["page_started"][0].data == "https://courses.ut.edu.vn/"
+

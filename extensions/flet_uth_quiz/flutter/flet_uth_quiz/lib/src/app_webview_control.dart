@@ -95,7 +95,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_cookieChannel != null) return;
+    if (!_requireInitialCookies || _cookieChannel != null) return;
     final channel = FletBackend.of(context).openDataChannel();
     _cookieChannel = channel;
     _cookieSubscription = channel.messages.listen(_onCookiePayload);
