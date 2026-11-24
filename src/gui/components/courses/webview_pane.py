@@ -576,7 +576,7 @@ class CoursesWebViewPane(ft.Container):
                         self._show_html_fallback_or_card()
                         safe_control_update(self)
                     return
-            logger.debug("EmbeddedWebViewHost error: %s", reason)
+            logger.warning("EmbeddedWebViewHost error: %s", reason)
 
         self._marshal_ui(_apply)
 

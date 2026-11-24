@@ -137,38 +137,48 @@ class CoursesTabView(ft.Container):
         )
         self._list_pane_host = ft.Container(
             content=self._list_pane,
+            expand=True,
             width=320,
             opacity=1.0,
+            ignore_interactions=False,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             animate=ft.Animation(220, ft.AnimationCurve.EASE_OUT_CUBIC),
             animate_opacity=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
         )
+        self._narrow_list_host = self._list_pane_host
         self._split_divider = ft.VerticalDivider(
             width=1, thickness=1, color=C.BORDER, visible=True
         )
+        self._divider_layer = ft.Container(
+            left=320.0,
+            top=0.0,
+            bottom=0.0,
+            width=1.0,
+            ignore_interactions=True,
+            content=self._split_divider,
+        )
         self._pane3_host = ft.Container(expand=True)
-        self._wide_row = ft.Row(
-            expand=True,
-            spacing=0,
-            controls=[self._list_pane_host, self._split_divider, self._pane3_host],
-        )
-
-        self._tablet_content = ft.Container(expand=True, width=820.0)
-        self._tablet_wrapper = ft.Container(
-            expand=True, alignment=ft.Alignment.TOP_CENTER, content=self._tablet_content
-        )
-        self._narrow_list_host = ft.Container(expand=True)
         self._narrow_workspace_host = ft.Container(
             expand=True, bgcolor=C.BG, visible=False
         )
         self._narrow_stack = ft.Stack(
             expand=True,
-            controls=[self._narrow_list_host, self._narrow_workspace_host],
+            fit=ft.StackFit.EXPAND,
+            controls=[self._list_pane_host, self._narrow_workspace_host],
         )
-        self._main_host = ft.Container(expand=True)
-        # Keep _workspace_stack permanently mounted at a constant depth inside
-        # _root_stack so rotating a tablet (wide <-> tablet_portrait) or entering
-        # Samsung Pop-up View (<600dp mobile) never unmounts active PlatformViews.
+        self._tablet_content = ft.Container(
+            expand=True, width=320, content=self._narrow_stack
+        )
+        self._tablet_wrapper = ft.Container(
+            expand=True,
+            alignment=ft.Alignment.TOP_LEFT,
+            content=self._tablet_content,
+        )
+        self._main_host = ft.Container(expand=True, content=self._tablet_wrapper)
+        # Keep both _list_pane and _workspace_stack permanently mounted at a
+        # constant parent path inside _root_stack so rotating a tablet
+        # (wide <-> tablet_portrait) or resizing Samsung Pop-up View (<600dp)
+        # never unmounts PlatformViews or triggers Flet ObjectPatch RangeErrors.
         self._workspace_host = ft.Container(
             expand=True, bgcolor=C.BG, content=self._workspace_stack
         )
@@ -185,7 +195,7 @@ class CoursesTabView(ft.Container):
         self._root_stack = ft.Stack(
             expand=True,
             fit=ft.StackFit.EXPAND,
-            controls=[self._main_host, self._workspace_layer],
+            controls=[self._main_host, self._workspace_layer, self._divider_layer],
         )
 
         self.bgcolor = C.BG
@@ -262,41 +272,41 @@ class CoursesTabView(ft.Container):
         self._workspace_host.bgcolor = C.BG
         if self._layout_mode == "wide":
             expanded = bool(self._state.pane3_expanded)
-            self._tablet_content.content = None
-            self._narrow_list_host.content = None
-            self._narrow_workspace_host.visible = False
-            self._list_pane_host.content = self._list_pane
+            self._tablet_wrapper.alignment = ft.Alignment.TOP_LEFT
+            self._tablet_content.width = 0 if expanded else 320
             self._list_pane_host.width = 0 if expanded else 320
             self._list_pane_host.opacity = 0.0 if expanded else 1.0
+            self._list_pane_host.ignore_interactions = expanded
+            self._narrow_workspace_host.visible = False
             self._split_divider.color = C.BORDER
             self._split_divider.visible = not expanded
-            self._main_host.content = self._wide_row
+            self._divider_layer.visible = not expanded
             self._workspace_layer.left = 0.0 if expanded else 321.0
             self._workspace_layer.right = 0.0
             self._workspace_layer.opacity = 1.0
             self._workspace_layer.ignore_interactions = False
             return
 
-        self._list_pane_host.content = None
         show_workspace = bool(self._overlays) or (
             self._state.in_detail_mobile and self._state.selected_course() is not None
         )
-        self._narrow_list_host.content = self._list_pane
-        self._narrow_list_host.opacity = 0.0 if show_workspace else 1.0
-        self._narrow_list_host.ignore_interactions = show_workspace
+        self._list_pane_host.width = None
+        self._list_pane_host.opacity = 0.0 if show_workspace else 1.0
+        self._list_pane_host.ignore_interactions = show_workspace
         self._narrow_workspace_host.bgcolor = C.BG
         self._narrow_workspace_host.visible = show_workspace
+        self._split_divider.visible = False
+        self._divider_layer.visible = False
         if self._layout_mode == "tablet_portrait":
             tablet_w = min(820.0, max(320.0, self._current_width))
             side_pad = max(0.0, (self._current_width - tablet_w) / 2.0)
-            self._tablet_content.content = self._narrow_stack
+            self._tablet_wrapper.alignment = ft.Alignment.TOP_CENTER
             self._tablet_content.width = tablet_w
-            self._main_host.content = self._tablet_wrapper
             self._workspace_layer.left = side_pad
             self._workspace_layer.right = side_pad
         else:
-            self._tablet_content.content = None
-            self._main_host.content = self._narrow_stack
+            self._tablet_wrapper.alignment = ft.Alignment.TOP_LEFT
+            self._tablet_content.width = None
             self._workspace_layer.left = 0.0
             self._workspace_layer.right = 0.0
         self._workspace_layer.opacity = 1.0 if show_workspace else 0.0

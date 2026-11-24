@@ -899,4 +899,88 @@ void main() {
     expect(shouldAdoptAppPopupWindowSink(TargetPlatform.windows), isTrue);
     expect(shouldAdoptAppPopupWindowSink(TargetPlatform.linux), isFalse);
   });
+
+  test('shouldUseCleanAndroidMainFrameLoad strips stale redirect headers on Android GET HTTPS navigations to prevent ERR_HTTP2_PROTOCOL_ERROR', () {
+    // Android main-frame GET HTTPS in browser mode must reload cleanly without
+    // forwarding InAppWebViewClientCompat's stale cross-origin request headers.
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://www.office.com/login',
+        method: 'GET',
+      ),
+      isTrue,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+        method: null,
+      ),
+      isTrue,
+    );
+    // POST, subframes, locked viewers, non-HTTPS (about:/blob:), and non-Android
+    // platforms must NOT intercept via clean loadUrl.
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://uteduvn-my.sharepoint.com/_forms/default.aspx',
+        method: 'POST',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: false,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://ffc-excel.officeapps.live.com/wv/wordviewerframe.aspx',
+        method: 'GET',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: true,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'http://127.0.0.1:43125/viewer/Token/pdf_host.html',
+        method: 'GET',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'about:blank',
+        method: 'GET',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.iOS,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://www.office.com/login',
+        method: 'GET',
+      ),
+      isFalse,
+    );
+  });
 }

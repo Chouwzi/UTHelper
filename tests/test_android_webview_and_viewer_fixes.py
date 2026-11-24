@@ -737,3 +737,201 @@ def test_in_app_webview_dialog_uses_stack_progress_and_uth_app_webview_on_live_m
     assert _visible_index_path(dialogs[0].content, wv_node) == baseline
 
 
+def test_courses_tab_view_roundtrip_mobile_tablet_wide_emits_valid_flet_patches() -> None:
+    """Round-tripping wide -> mobile (<600dp Pop-up View) -> tablet_portrait -> wide
+    must never emit out-of-bounds Flet list patches (Control.applyPatch RangeError)
+    and must restore _workspace_layer.left == 321.0."""
+    import msgpack
+    from flet.messaging.connection import Connection
+    from flet.messaging.protocol import (
+        ClientAction,
+        configure_encode_object_for_msgpack,
+        decode_ext_from_msgpack,
+    )
+    from flet.messaging.session import Session, _context_page
+    from flet.pubsub.pubsub_hub import PubSubHub
+
+    from core.courses.models import (
+        CourseModuleItem,
+        CourseSection,
+        CourseSummary,
+        RecentMaterialEntry,
+    )
+    from gui.components.courses.courses_tab_view import CoursesTabView
+
+    enc = configure_encode_object_for_msgpack(ft.BaseControl)
+
+    def _roundtrip(obj: Any) -> Any:
+        return msgpack.unpackb(
+            msgpack.packb(obj, default=enc),
+            ext_hook=decode_ext_from_msgpack,
+            strict_map_key=False,
+        )
+
+    class _DartPatchMirror:
+        def __init__(self, root_map: Any) -> None:
+            self.controls: dict[int, dict[str, Any]] = {}
+            self._index_tree(_roundtrip(root_map))
+
+        def _index_tree(self, val: Any) -> Any:
+            if isinstance(val, dict) and "_i" in val and "_c" in val:
+                self.controls[val["_i"]] = val
+                for k, v in list(val.items()):
+                    val[k] = self._index_tree(v)
+                return val
+            if isinstance(val, list):
+                return [self._index_tree(x) for x in val]
+            if isinstance(val, dict):
+                return {k: self._index_tree(v) for k, v in val.items()}
+            return val
+
+        def apply_patch(self, ctrl_id: int, raw_patch: Any) -> None:
+            patch = _roundtrip(raw_patch)
+            target_ctrl = self.controls[ctrl_id]
+            path_index: dict[int, list[Any]] = {}
+
+            def _build_paths(node: list[Any], path: list[Any]) -> None:
+                path_index[node[0]] = path
+                if len(node) > 1 and isinstance(node[1], dict):
+                    for k, v in node[1].items():
+                        _build_paths(v, [*path, k])
+
+            _build_paths(patch[0], [])
+
+            def _get_target(idx: int) -> tuple[Any, dict[str, Any]]:
+                obj: Any = target_ctrl
+                ctrl = target_ctrl
+                for p in path_index[idx]:
+                    obj = obj[p]
+                    if isinstance(obj, dict) and "_i" in obj and "_c" in obj:
+                        ctrl = obj
+                return obj, ctrl
+
+            for op in patch[1:]:
+                op_type = op[0]
+                if op_type == 3:
+                    f_obj, _ = _get_target(op[1])
+                    t_obj, _ = _get_target(op[3])
+                    if isinstance(f_obj, list) and isinstance(t_obj, list):
+                        t_obj.insert(op[4], f_obj.pop(op[2]))
+                    elif isinstance(f_obj, dict) and isinstance(t_obj, dict):
+                        t_obj[op[4]] = f_obj.pop(op[2])
+                    continue
+                obj, _ = _get_target(op[1])
+                if op_type == 0:
+                    key, val = op[2], self._index_tree(op[3])
+                    if isinstance(obj, list) and (key < 0 or key >= len(obj)):
+                        raise IndexError(
+                            f"Control.applyPatch RangeError: list len={len(obj)}, replace key={key}"
+                        )
+                    obj[key] = val
+                elif op_type == 1:
+                    idx, val = op[2], self._index_tree(op[3])
+                    if isinstance(obj, list):
+                        obj.insert(idx, val)
+                    else:
+                        obj[idx] = val
+                elif op_type == 2:
+                    idx = op[2]
+                    if isinstance(obj, list):
+                        if idx < 0 or idx >= len(obj):
+                            raise IndexError(
+                                f"Control.applyPatch RangeError: list len={len(obj)}, remove idx={idx}"
+                            )
+                        obj.pop(idx)
+                    else:
+                        obj.pop(idx, None)
+
+    class _FakeConn(Connection):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pubsubhub = PubSubHub()
+            self.messages: list[Any] = []
+
+        def send_message(self, message: Any) -> None:
+            self.messages.append(message)
+
+    conn = _FakeConn()
+    sess = Session(conn)
+    sess.attach_connection(conn)
+    token = _context_page.set(sess.page)
+    try:
+        page = sess.page
+        page.platform = ft.PagePlatform.ANDROID
+        sess.apply_page_patch({"width": 1400, "height": 876})
+
+        view = CoursesTabView(page=page)
+        view.set_viewport_size(1312, 876)
+        page.controls.append(view)
+        mirror = _DartPatchMirror(sess.get_page_patch())
+        conn.messages.clear()
+
+        course = CourseSummary(
+            id=9901,
+            source="courses",
+            fullname="AI",
+            shortname="AI",
+            display_name="AI",
+            is_current_term=True,
+        )
+        section = CourseSection(
+            id=1,
+            course_id=9901,
+            source="courses",
+            section_num=0,
+            name="S1",
+            modules=(
+                CourseModuleItem(
+                    cmid=101,
+                    instance_id=101,
+                    modname="url",
+                    name="M1",
+                    section_id=1,
+                    url="https://uteduvn-my.sharepoint.com/:x:/g/personal/doc",
+                    open_strategy="external_url",
+                ),
+            ),
+        )
+        view._state.courses = [course]
+        view._state.selected_course_key = course.course_key
+        view._state.in_detail_mobile = True
+        view._state.sections = [section]
+        view._state.recent_items = [
+            RecentMaterialEntry(
+                course_key=course.course_key,
+                course_name="AI",
+                cmid=101,
+                title="M1",
+                attachment_url="https://uteduvn-my.sharepoint.com/:x:/g/personal/doc",
+                file_name="doc.xlsx",
+                opened_at=1,
+            )
+        ]
+        view._render()
+        view.push_overlay(ft.Container(expand=True), tag="wv")
+        page.update()
+        for msg in conn.messages:
+            if msg.action == ClientAction.PATCH_CONTROL:
+                mirror.apply_patch(msg.body.id, msg.body.patch)
+        conn.messages.clear()
+
+        for pw, cw, ph, expected_left in (
+            (550, 550, 420, 0.0),
+            (800, 712, 420, 0.0),
+            (1400, 1312, 876, 321.0),
+            (420, 420, 800, 0.0),
+            (1400, 1312, 876, 321.0),
+        ):
+            sess.apply_page_patch({"width": pw, "height": ph})
+            view.set_viewport_size(cw, ph)
+            page.update()
+            for msg in conn.messages:
+                if msg.action == ClientAction.PATCH_CONTROL:
+                    mirror.apply_patch(msg.body.id, msg.body.patch)
+            conn.messages.clear()
+            assert mirror.controls[view._workspace_layer._i].get("left") == expected_left
+    finally:
+        _context_page.reset(token)
+
+
+

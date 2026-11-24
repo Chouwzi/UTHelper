@@ -703,8 +703,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             onWebViewCreated: _onWebViewCreated,
             shouldOverrideUrlLoading: (controller, action) async {
               if (_disposed) return NavigationActionPolicy.CANCEL;
+              final actionUrl = action.request.url?.toString();
               final decision = decideAppWebViewNavigation(
-                action.request.url?.toString(),
+                actionUrl,
                 isForMainFrame: action.isForMainFrame,
                 viewerLocked: _viewerLocked,
                 viewerPrefix: _viewerPrefix,
@@ -712,11 +713,30 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               );
               if (decision.kind == AppNavigationKind.redirectInPlace &&
                   decision.targetUrl != null) {
+                _currentLoadedUrl = decision.targetUrl!;
                 unawaited(
                   controller
                       .loadUrl(
                         urlRequest: URLRequest(url: WebUri(decision.targetUrl!)),
                       )
+                      .catchError((_) {}),
+                );
+                return NavigationActionPolicy.CANCEL;
+              }
+              if (!kIsWeb &&
+                  shouldUseCleanAndroidMainFrameLoad(
+                    platform: defaultTargetPlatform,
+                    viewerLocked: _viewerLocked,
+                    isForMainFrame: action.isForMainFrame,
+                    decisionKind: decision.kind,
+                    rawUrl: actionUrl,
+                    method: action.request.method,
+                  )) {
+                final cleanUrl = actionUrl!.trim();
+                _currentLoadedUrl = cleanUrl;
+                unawaited(
+                  controller
+                      .loadUrl(urlRequest: URLRequest(url: WebUri(cleanUrl)))
                       .catchError((_) {}),
                 );
                 return NavigationActionPolicy.CANCEL;

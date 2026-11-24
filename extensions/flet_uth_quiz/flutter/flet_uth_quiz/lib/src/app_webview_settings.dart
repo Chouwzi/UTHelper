@@ -788,3 +788,35 @@ void trimPopupSinksToCap<T>(
     onEvict(oldest);
   }
 }
+
+/// Returns true when Android `shouldOverrideUrlLoading` should issue a fresh
+/// headerless `controller.loadUrl(...)` and return `CANCEL` instead of `ALLOW`.
+///
+/// On Android, `InAppWebViewClientCompat.allowShouldOverrideUrlLoading` calls
+/// `webView.loadUrl(url, request.getRequestHeaders())`, forwarding the previous
+/// origin's HTTP/2 request headers (`Sec-Fetch-*`, `Origin`, etc.) as custom
+/// extra headers across redirects (`login.microsoftonline.com` -> `office.com`,
+/// `sharepoint.com` -> `officeapps.live.com`), causing strict HTTP/2 edges to
+/// abort the stream with `net::ERR_HTTP2_PROTOCOL_ERROR`.
+bool shouldUseCleanAndroidMainFrameLoad({
+  required TargetPlatform platform,
+  required bool viewerLocked,
+  required bool isForMainFrame,
+  required AppNavigationKind decisionKind,
+  required String? rawUrl,
+  required String? method,
+}) {
+  if (platform != TargetPlatform.android ||
+      viewerLocked ||
+      !isForMainFrame ||
+      decisionKind != AppNavigationKind.allow ||
+      rawUrl == null) {
+    return false;
+  }
+  final normalizedMethod = (method ?? 'GET').trim().toUpperCase();
+  if (normalizedMethod.isNotEmpty && normalizedMethod != 'GET') {
+    return false;
+  }
+  final trimmedUrl = rawUrl.trim();
+  return trimmedUrl.toLowerCase().startsWith('https://');
+}
