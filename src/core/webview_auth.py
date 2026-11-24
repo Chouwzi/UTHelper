@@ -59,12 +59,12 @@ class WebViewAuthBootstrap:
 def _parse_uth_url(
     url: object,
 ) -> tuple[Optional[_AuthSite], Optional[urllib.parse.SplitResult]]:
-    """Return ``(site, split_result)`` only for HTTPS UTH URLs on the default port."""
+    """Return ``(site, split_result)`` only for HTTPS UTH URLs with no explicit port."""
     validated = validate_https_url(url)
     if validated is None:
         return None, None
     parsed = urllib.parse.urlsplit(validated)
-    if parsed.port not in (None, 443):
+    if parsed.port is not None:
         return None, None
     host = (parsed.hostname or "").casefold()
     site = _HOST_TO_SITE.get(host)
@@ -74,7 +74,7 @@ def _parse_uth_url(
 
 
 def _canonicalize_uth_url(site: _AuthSite, parsed: urllib.parse.SplitResult) -> str:
-    """Canonicalize scheme, host (including ``elearning`` -> ``courses``), and default port."""
+    """Canonicalize scheme and host (including ``elearning`` -> ``courses``)."""
     return urllib.parse.urlunsplit(
         (
             "https",
@@ -587,7 +587,7 @@ class UthWebViewAuthService:
             primary_cookies = self._invoke_cookies(
                 client,
                 ensure_login=True,
-                verify_live=True,
+                verify_live=False,
                 force_relogin=True,
                 default_domain=_CANONICAL_HOST_FOR_SITE[site],
             )

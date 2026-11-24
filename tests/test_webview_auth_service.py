@@ -112,18 +112,21 @@ def _moodle_cookie(
 
 def test_classify_and_login_url_host_scheme_and_port_discipline():
     assert classify_uth_webview_url("https://courses.ut.edu.vn/my/") == "courses"
-    assert classify_uth_webview_url("https://courses.ut.edu.vn:443/my/") == "courses"
     assert classify_uth_webview_url("https://elearning.ut.edu.vn/course/view.php?id=1") == "courses"
-    assert classify_uth_webview_url("https://ELEARNING.UT.EDU.VN:443/login/index.php") == "courses"
+    assert classify_uth_webview_url("https://ELEARNING.UT.EDU.VN/login/index.php") == "courses"
     assert classify_uth_webview_url("https://thnn.ut.edu.vn/my/") == "thnn"
     assert classify_uth_webview_url("https://portal.ut.edu.vn/dashboard") == "portal"
-    assert classify_uth_webview_url("https://portal.ut.edu.vn:443/") == "portal"
 
-    # Non-HTTPS, custom ports, lookalikes, credentials, loopback -> external
+    # Non-HTTPS, any explicit port (including :443 and :8443), lookalikes, credentials, loopback -> external
     for external_url in (
         "http://courses.ut.edu.vn/login/index.php",
         "http://thnn.ut.edu.vn/login/index.php",
         "http://portal.ut.edu.vn/",
+        "https://courses.ut.edu.vn:443/my/",
+        "https://courses.ut.edu.vn:443/login/index.php",
+        "https://ELEARNING.UT.EDU.VN:443/login/index.php",
+        "https://thnn.ut.edu.vn:443/login/",
+        "https://portal.ut.edu.vn:443/",
         "https://courses.ut.edu.vn:8443/login/index.php",
         "https://elearning.ut.edu.vn:8443/course/view.php?id=1",
         "https://thnn.ut.edu.vn:8443/login/",
@@ -167,12 +170,9 @@ def test_normalize_unwraps_same_origin_wantsurl_and_canonicalizes_elearning_alia
         normalize_uth_webview_target_url(alias_url)
         == "https://courses.ut.edu.vn/course/view.php?id=121#section-2"
     )
-    assert (
-        normalize_uth_webview_target_url(
-            "https://elearning.ut.edu.vn:443/course/view.php?id=121"
-        )
-        == "https://courses.ut.edu.vn/course/view.php?id=121"
-    )
+    explicit_443_alias = "https://elearning.ut.edu.vn:443/course/view.php?id=121"
+    assert classify_uth_webview_url(explicit_443_alias) == "external"
+    assert normalize_uth_webview_target_url(explicit_443_alias) == explicit_443_alias
 
     # Expired Portal SSO link -> unwrap same-site wantsurl
     sso_link = (
@@ -201,6 +201,7 @@ def test_normalize_unwraps_same_origin_wantsurl_and_canonicalizes_elearning_alia
         "https%3A%2F%2Fportal.ut.edu.vn%2Fdashboard",
         "https%3A%2F%2Fcourses.ut.edu.vn%2Flogin%2Findex.php",
         "https%3A%2F%2Felearning.ut.edu.vn%2Flogin%2F",
+        "https%3A%2F%2Fcourses.ut.edu.vn%3A443%2Fcourse%2Fview.php%3Fid%3D1",
         "https%3A%2F%2Fcourses.ut.edu.vn%3A8443%2Fcourse%2Fview.php%3Fid%3D1",
         "http%3A%2F%2Fcourses.ut.edu.vn%2Fcourse%2Fview.php%3Fid%3D1",
         "javascript%3Aalert(1)",
@@ -443,7 +444,7 @@ def test_recover_from_login_redirect_cross_site_thnn_and_anti_loop_budget():
     assert first.site == "thnn"
     assert first.target_url == "https://thnn.ut.edu.vn/course/view.php?id=55"
     assert thnn_client.calls == [
-        {"ensure_login": True, "verify_live": True, "force_relogin": True}
+        {"ensure_login": True, "verify_live": False, "force_relogin": True}
     ]
     assert courses_client.calls == [
         {"ensure_login": False, "verify_live": False, "force_relogin": False}
