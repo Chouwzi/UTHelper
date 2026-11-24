@@ -483,3 +483,311 @@ def test_settings_test_login_and_save_normalize_demo_username_and_refresh_banner
     assert settings.UTH_USERNAME == DEMO_USERNAME
     assert view._username_field.value == DEMO_USERNAME
     assert view._demo_account_banner.visible is True
+
+
+def test_settings_test_login_persists_updates_baseline_and_fires_on_saved(
+    monkeypatch,
+):
+    import gui.components.settings_view as settings_view_module
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", DEMO_USERNAME)
+    monkeypatch.setattr(settings, "UTH_PASSWORD", _reviewer_password())
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "")
+    save_calls: list[tuple[str, str]] = []
+    on_saved_calls: list[tuple[str, str]] = []
+
+    def fake_save_settings() -> bool:
+        save_calls.append((settings.UTH_USERNAME, settings.UTH_PASSWORD))
+        return True
+
+    monkeypatch.setattr(settings_view_module, "save_settings", fake_save_settings)
+
+    def fake_login(username: str, password: str, force: bool = False) -> bool:
+        if username == "2251120777" and password == "real-student-pw":
+            settings.MOODLE_WS_TOKEN = "real-ws-token"
+            return True
+        if username == DEMO_USERNAME and password == _reviewer_password():
+            return True
+        return False
+
+    page = _make_dummy_page()
+    orchestrator = SimpleNamespace(
+        client=SimpleNamespace(login=fake_login),
+        is_logged_in=False,
+        get_cached_details_snapshot=lambda: {},
+    )
+
+    def fake_on_saved() -> None:
+        on_saved_calls.append((settings.UTH_USERNAME, settings.UTH_PASSWORD))
+        # Simulate AppController._on_settings_saved flipping is_logged_in=False on cred change
+        orchestrator.is_logged_in = False
+
+    view = SettingsView(
+        page=page,
+        orchestrator=orchestrator,
+        on_close=Mock(),
+        on_saved=fake_on_saved,
+        autostart_coordinator=None,
+    )
+    view.update = Mock()
+    view._baseline_snapshot = view._capture_form_snapshot()
+    assert view._demo_account_banner.visible is True
+
+    # Switch from Demo -> real MSSV via Account screen's sole "Đăng nhập" button.
+    view._username_field.value = "  2251120777  "
+    view._password_field.value = "real-student-pw"
+    asyncio.run(view._handle_test_login(None))
+
+    assert settings.UTH_USERNAME == "2251120777"
+    assert settings.UTH_PASSWORD == "real-student-pw"
+    assert settings.MOODLE_WS_TOKEN == "real-ws-token"
+    assert save_calls == [("2251120777", "real-student-pw")]
+    assert on_saved_calls == [("2251120777", "real-student-pw")]
+    assert orchestrator.is_logged_in is True
+    assert view.has_changes() is False
+    assert view._unsaved_dot.visible is False
+    assert view._demo_account_banner.visible is False
+
+    # Switch back from real MSSV -> Demo via "Đăng nhập" button.
+    view._username_field.value = "  UTHelper_Demo  "
+    view._password_field.value = _reviewer_password()
+    asyncio.run(view._handle_test_login(None))
+
+    assert settings.UTH_USERNAME == DEMO_USERNAME
+    assert settings.MOODLE_WS_TOKEN == ""
+    assert save_calls[-1] == (DEMO_USERNAME, _reviewer_password())
+    assert on_saved_calls[-1] == (DEMO_USERNAME, _reviewer_password())
+    assert orchestrator.is_logged_in is True
+    assert view.has_changes() is False
+    assert view._unsaved_dot.visible is False
+    assert view._demo_account_banner.visible is True
+
+
+def test_settings_debug_ping_and_moodle_connection_make_zero_network_calls_in_demo_mode(
+    monkeypatch,
+):
+    import time
+    import urllib.request
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", DEMO_USERNAME)
+    urlopen_calls: list[object] = []
+
+    def fail_urlopen(*args, **kwargs):
+        urlopen_calls.append((args, kwargs))
+        raise AssertionError("urlopen must not be called in Demo Mode")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    login_mock = Mock(return_value=True)
+    orchestrator = SimpleNamespace(
+        client=SimpleNamespace(login=login_mock),
+        get_cached_details_snapshot=lambda: {},
+    )
+    view = SettingsView(
+        page=_make_dummy_page(),
+        orchestrator=orchestrator,
+        on_close=Mock(),
+        autostart_coordinator=None,
+    )
+    view.update = Mock()
+    view._debug_info_text.update = Mock()
+
+    view._do_test_latency()
+    time.sleep(0.05)
+    assert urlopen_calls == []
+    assert "Demo" in view._debug_info_text.value
+
+    view._debug_info_text.value = ""
+    view._do_test_moodle_connection()
+    time.sleep(0.05)
+    assert login_mock.call_count == 0
+    assert urlopen_calls == []
+    assert "Demo" in view._debug_info_text.value
+
+
+def test_android_background_sync_disables_worker_logs_out_and_skips_room_import_in_demo_mode(
+    monkeypatch,
+):
+    from core.sync_coordinator import FetchOutcome
+    from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
+    from platform_utils.background_sync import AndroidBackgroundBridge
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", DEMO_USERNAME)
+    monkeypatch.setattr(settings, "UTH_PASSWORD", _reviewer_password())
+    monkeypatch.setattr(settings, "BACKGROUND_CHECK_ANDROID", True)
+    monkeypatch.setattr(settings, "CHECK_INTERVAL_MINUTES", 60)
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+
+    # 1. AndroidBackgroundBridge forces enabled=False, logs out, and skips Room DB in Demo Mode.
+    payload = AndroidBackgroundBridge.settings_payload()
+    assert payload["enabled"] is False
+
+    service_calls: list[tuple[str, object]] = []
+
+    class FakeNativeService:
+        async def set_credentials(self, origin: str, token: str):
+            service_calls.append(("set_credentials", (origin, token)))
+
+        async def logout(self):
+            service_calls.append(("logout", None))
+
+        async def configure(self, cfg: dict):
+            service_calls.append(("configure", dict(cfg)))
+            return {"enabled": cfg["enabled"]}
+
+        async def import_activities(self, activities, authoritative):
+            service_calls.append(("import_activities", (activities, authoritative)))
+            return {"imported": len(activities), "scheduled": 1, "cancelled": 0}
+
+        async def get_cached_activities(self):
+            service_calls.append(("get_cached_activities", None))
+            return [{"title": "Stale Real Activity", "url": "https://courses.ut.edu.vn/1"}]
+
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = FakeNativeService()
+
+    asyncio.run(bridge.configure("tok", token_origin="https://courses.ut.edu.vn"))
+    assert ("set_credentials", ("https://courses.ut.edu.vn", "tok")) not in service_calls
+    assert ("logout", None) in service_calls
+    configure_payloads = [v for k, v in service_calls if k == "configure"]
+    assert len(configure_payloads) == 1
+    assert configure_payloads[0]["enabled"] is False
+
+    service_calls.clear()
+    assert asyncio.run(bridge.import_activities([{"title": "Demo"}])) == {
+        "imported": 0,
+        "scheduled": 0,
+        "cancelled": 0,
+    }
+    assert asyncio.run(bridge.cached_activities()) == []
+    assert service_calls == []
+
+    # 2. AppController hooks (`_initialize_android_background`, `_perform_data_sync`,
+    #    `_on_activity_status_changed`, `_complete_login_success`, `_reconcile_class_schedule_notifications`)
+    mock_bridge = SimpleNamespace(
+        available=True,
+        logout=AsyncMock(),
+        configure=AsyncMock(return_value={"enabled": False}),
+        cached_activities=AsyncMock(return_value=[{"title": "Leak"}]),
+        import_activities=AsyncMock(return_value={"scheduled": 2}),
+        diagnostics=AsyncMock(return_value={"enabled": False}),
+    )
+    controller = AppController.__new__(AppController)
+    controller._android_background = mock_bridge
+    controller._data_lock = threading.Lock()
+    controller.all_data = []
+    controller.orchestrator = SimpleNamespace(
+        client=SimpleNamespace(
+            moodle_site_origin="https://courses.ut.edu.vn",
+            has_site_credentials=True,
+            clear_session=Mock(),
+        ),
+        thnn_client=SimpleNamespace(clear_session=Mock()),
+        moodle_service=SimpleNamespace(clear_all_caches=Mock()),
+        clear_detail_cache=Mock(),
+        invalidate_detail_cache=Mock(),
+        get_cached_details_snapshot=lambda: {},
+        fetch_activity_outcome_async=AsyncMock(
+            return_value=FetchOutcome.complete(
+                [
+                    {
+                        "title": "Bài tập mẫu Demo",
+                        "course": "Môn mẫu",
+                        "type": "assignment",
+                        "urgency": "critical",
+                        "deadline": "2026-11-25 23:59:00",
+                        "submission_status": "not_submitted",
+                        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=101",
+                    }
+                ]
+            )
+        ),
+        android_background_diagnostics={},
+    )
+
+    asyncio.run(controller._initialize_android_background())
+    mock_bridge.logout.assert_awaited_once()
+    mock_bridge.configure.assert_awaited_once_with("", token_origin="")
+    mock_bridge.cached_activities.assert_not_awaited()
+    assert controller.all_data == []
+
+    # `_perform_data_sync` skips `import_activities` and `notifier.dispatch` in Demo Mode.
+    mock_bridge.logout.reset_mock()
+    mock_bridge.configure.reset_mock()
+    controller._is_loading = False
+    controller._skeleton_visible = True
+    controller._prefetch_cancel_event = threading.Event()
+    controller._pending_updates = {}
+    controller.refresh_btn = SimpleNamespace(disabled=False)
+    controller.empty_state = SimpleNamespace(visible=False)
+    controller.error_state = SimpleNamespace(visible=False)
+    controller.page = SimpleNamespace(update=Mock())
+    controller._diag_breadcrumb = Mock()
+    controller._set_sync_status = Mock()
+    controller._update_footer = Mock()
+    controller._safe_run_task = Mock(return_value=object())
+    controller._data_cache = SimpleNamespace(
+        load=lambda: ([], None),
+        save_server_snapshot=lambda _items: True,
+        load_snapshot=lambda: SimpleNamespace(last_successful_sync_at="2026-11-24T12:00:00"),
+        save_local_activities=Mock(),
+    )
+    notifier_mock = SimpleNamespace(
+        dispatch=AsyncMock(),
+        dispatch_with_native_local=AsyncMock(),
+        reconcile_schedules=AsyncMock(),
+        reconcile_class_schedule_notifications=AsyncMock(),
+    )
+    controller.notifier = notifier_mock
+
+    asyncio.run(controller._perform_data_sync("startup"))
+    mock_bridge.logout.assert_awaited_once()
+    mock_bridge.configure.assert_awaited_once_with("", token_origin="")
+    mock_bridge.import_activities.assert_not_awaited()
+    notifier_mock.dispatch.assert_not_awaited()
+    notifier_mock.dispatch_with_native_local.assert_not_awaited()
+    notifier_mock.reconcile_schedules.assert_awaited_once_with([])
+
+    # `_on_activity_status_changed` skips `mobile_bridge.import_activities` in Demo Mode.
+    controller._safe_run_task.reset_mock()
+    controller._on_activity_status_changed(
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=101",
+        "submitted",
+    )
+    import_tasks = [
+        call.args[0]
+        for call in controller._safe_run_task.call_args_list
+        if call.args and call.args[0] == mock_bridge.import_activities
+    ]
+    assert import_tasks == []
+
+    # `_reconcile_class_schedule_notifications` forces `clear_only=True` and empty sessions in Demo Mode.
+    controller._fetch_tomorrow_sessions = Mock()
+    asyncio.run(
+        controller._reconcile_class_schedule_notifications(
+            ["demo-session-1"], clear_only=False
+        )
+    )
+    notifier_mock.reconcile_class_schedule_notifications.assert_awaited_once()
+    rec_args, rec_kwargs = (
+        notifier_mock.reconcile_class_schedule_notifications.await_args
+    )
+    assert rec_args == ((),)
+    assert rec_kwargs["clear_only"] is True
+
+    # `_complete_login_success` on account switch into Demo logs out native bridge before reload.
+    mock_bridge.logout.reset_mock()
+    mock_bridge.configure.reset_mock()
+    controller._settings_identity = ("2251120001", "old-pass")
+    controller._portal_client = SimpleNamespace(clear_token=Mock())
+    controller._today_schedule_coordinator = SimpleNamespace(
+        replace_cache=Mock(), refresh=Mock()
+    )
+    controller._today_schedule_state = TodayScheduleViewState(ScheduleLoadStatus.READY)
+    controller._today_schedule_component = SimpleNamespace(set_state=Mock())
+    controller._close_app_webview = Mock()
+    controller._load_data_async = AsyncMock()
+    asyncio.run(controller._complete_login_success())
+    mock_bridge.logout.assert_awaited_once()
+    mock_bridge.configure.assert_awaited_once_with("", token_origin="")
+

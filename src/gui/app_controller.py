@@ -515,6 +515,14 @@ class AppController:
                     else None
                 )
                 self._schedule_webview2_profile_purge(keep_profile)
+            mobile_bridge = getattr(self, "_android_background", None)
+            if mobile_bridge is not None and mobile_bridge.available:
+                try:
+                    await mobile_bridge.logout()
+                    if is_demo_account(settings.UTH_USERNAME):
+                        await mobile_bridge.configure("", token_origin="")
+                except Exception:
+                    logger.debug("Android background logout after login skipped", exc_info=True)
 
         schedule_namespace = (
             f"{settings.PORTAL_API_BASE}|{settings.UTH_USERNAME}"
@@ -2971,9 +2979,13 @@ class AppController:
         )
         if not callable(reconcile):
             return
+        effective_clear_only = bool(
+            clear_only or is_demo_account(settings.UTH_USERNAME)
+        )
+        effective_sessions = () if effective_clear_only else sessions
         await reconcile(
-            sessions,
-            clear_only=clear_only,
+            effective_sessions,
+            clear_only=effective_clear_only,
             fetch_day=self._fetch_tomorrow_sessions,
             identity_getter=lambda: getattr(self, "_settings_identity", None),
             android_bridge=getattr(self, "_android_background", None),
@@ -3606,6 +3618,10 @@ class AppController:
         if not bridge or not bridge.available:
             return
         try:
+            if is_demo_account(settings.UTH_USERNAME):
+                await bridge.logout()
+                await bridge.configure("", token_origin="")
+                return True
             token, token_origin = self._native_background_credentials()
             await bridge.configure(token, token_origin=token_origin)
             native_data = await bridge.cached_activities()
@@ -3803,17 +3819,24 @@ class AppController:
                 )
             # Commit state is user-visible before optional native/notification work.
             self.page.update()
+            demo_mode = is_demo_account(settings.UTH_USERNAME)
             native_schedule_result = None
             if self._android_background and self._android_background.available:
                 try:
-                    token, token_origin = self._native_background_credentials()
-                    await self._android_background.configure(
-                        token, token_origin=token_origin
-                    )
-                    native_schedule_result = await self._android_background.import_activities(
-                        data_copy,
-                        authoritative=True,
-                    )
+                    if demo_mode:
+                        await self._android_background.logout()
+                        await self._android_background.configure(
+                            "", token_origin=""
+                        )
+                    else:
+                        token, token_origin = self._native_background_credentials()
+                        await self._android_background.configure(
+                            token, token_origin=token_origin
+                        )
+                        native_schedule_result = await self._android_background.import_activities(
+                            data_copy,
+                            authoritative=True,
+                        )
                     self.orchestrator.android_background_diagnostics = (
                         await self._android_background.diagnostics()
                     )
@@ -3821,40 +3844,46 @@ class AppController:
                     logger.warning("Android native snapshot import failed: %s", exc)
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
-                try:
-                    with self._data_lock:
-                        dispatch_copy = list(self.all_data)
-                    if native_schedule_result is None:
-                        dispatch_result = await self.notifier.dispatch(dispatch_copy)
-                        schedule_result = await self.notifier.reconcile_schedules(
-                            dispatch_copy
-                        )
-                    else:
-                        from core.notification_types import ScheduleResult
+                if demo_mode:
+                    try:
+                        await self.notifier.reconcile_schedules([])
+                    except Exception as e:
+                        logger.debug("Demo schedule clear skipped: %s", e)
+                else:
+                    try:
+                        with self._data_lock:
+                            dispatch_copy = list(self.all_data)
+                        if native_schedule_result is None:
+                            dispatch_result = await self.notifier.dispatch(dispatch_copy)
+                            schedule_result = await self.notifier.reconcile_schedules(
+                                dispatch_copy
+                            )
+                        else:
+                            from core.notification_types import ScheduleResult
 
-                        dispatch_result = await self.notifier.dispatch_with_native_local(
-                            dispatch_copy,
-                            native_schedule_result,
+                            dispatch_result = await self.notifier.dispatch_with_native_local(
+                                dispatch_copy,
+                                native_schedule_result,
+                            )
+                            schedule_result = ScheduleResult(
+                                desired=int(native_schedule_result.get("scheduled", 0) or 0),
+                                scheduled=int(native_schedule_result.get("scheduled", 0) or 0),
+                                cancelled=int(native_schedule_result.get("cancelled", 0) or 0),
+                            )
+                        logger.info(
+                            "[Notifications] delivered=%d filtered=%d scheduled=%d "
+                            "cancelled=%d failed=%d",
+                            dispatch_result.delivered,
+                            dispatch_result.filtered,
+                            schedule_result.scheduled,
+                            schedule_result.cancelled,
+                            schedule_result.failed,
                         )
-                        schedule_result = ScheduleResult(
-                            desired=int(native_schedule_result.get("scheduled", 0) or 0),
-                            scheduled=int(native_schedule_result.get("scheduled", 0) or 0),
-                            cancelled=int(native_schedule_result.get("cancelled", 0) or 0),
-                        )
-                    logger.info(
-                        "[Notifications] delivered=%d filtered=%d scheduled=%d "
-                        "cancelled=%d failed=%d",
-                        dispatch_result.delivered,
-                        dispatch_result.filtered,
-                        schedule_result.scheduled,
-                        schedule_result.cancelled,
-                        schedule_result.failed,
-                    )
-                except Exception as e:
-                    logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
+                    except Exception as e:
+                        logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
-                # PERF-OPT: Grade check moved to background task to not block main data display
-                self._safe_run_task(self._check_grades_background)
+                    # PERF-OPT: Grade check moved to background task to not block main data display
+                    self._safe_run_task(self._check_grades_background)
 
             self._prefetch_cancel_event.clear()
             with self._data_lock:
@@ -5243,7 +5272,12 @@ class AppController:
             if credentials_changed:
                 # Prevent the previous account token/Room snapshot from being
                 # used while the new credentials have not logged in yet.
-                self._safe_run_task(self._android_background.logout)
+                async def _reset_android_on_credentials_change():
+                    await self._android_background.logout()
+                    if is_demo_account(settings.UTH_USERNAME):
+                        await self._android_background.configure("", token_origin="")
+
+                self._safe_run_task(_reset_android_on_credentials_change)
             else:
                 async def _apply_android_settings():
                     token, token_origin = self._native_background_credentials()
@@ -5251,14 +5285,20 @@ class AppController:
                         token, token_origin=token_origin
                     )
                     needs_exact_alarm = (
-                        milestones_changed
-                        and any(
-                            int(value) <= 60
-                            for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
+                        not is_demo_account(settings.UTH_USERNAME)
+                        and (
+                            (
+                                milestones_changed
+                                and any(
+                                    int(value) <= 60
+                                    for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
+                                )
+                            )
+                            or (
+                                class_schedule_settings_changed
+                                and bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED)
+                            )
                         )
-                    ) or (
-                        class_schedule_settings_changed
-                        and bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED)
                     )
                     if needs_exact_alarm:
                         diagnostics = await self._android_background.diagnostics()
@@ -5334,17 +5374,18 @@ class AppController:
 
             # A successful/manual submission must cancel every remaining local
             # deadline reminder immediately instead of waiting for the next sync.
-            mobile_bridge = getattr(self, "_android_background", None)
-            if mobile_bridge is not None and mobile_bridge.available:
-                self._safe_run_task(
-                    mobile_bridge.import_activities,
-                    data_copy,
-                    authoritative=True,
-                )
-            elif getattr(self, "notifier", None) is not None:
-                self._safe_run_task(
-                    self.notifier.reconcile_schedules, data_copy
-                )
+            if not is_demo_account(settings.UTH_USERNAME):
+                mobile_bridge = getattr(self, "_android_background", None)
+                if mobile_bridge is not None and mobile_bridge.available:
+                    self._safe_run_task(
+                        mobile_bridge.import_activities,
+                        data_copy,
+                        authoritative=True,
+                    )
+                elif getattr(self, "notifier", None) is not None:
+                    self._safe_run_task(
+                        self.notifier.reconcile_schedules, data_copy
+                    )
 
     def _show_detail(self, data: dict):
         self._dismiss_desktop_filter_menu()

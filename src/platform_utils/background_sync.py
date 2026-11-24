@@ -31,10 +31,16 @@ class AndroidBackgroundBridge:
     @staticmethod
     def settings_payload() -> dict[str, Any]:
         from config import get_sync_interval_minutes, settings
+        from core.demo_sandbox import is_demo_account
 
         interval_minutes = get_sync_interval_minutes()
+        demo_active = is_demo_account(getattr(settings, "UTH_USERNAME", ""))
         return {
-            "enabled": bool(settings.BACKGROUND_CHECK_ANDROID and interval_minutes > 0),
+            "enabled": bool(
+                not demo_active
+                and settings.BACKGROUND_CHECK_ANDROID
+                and interval_minutes > 0
+            ),
             "interval_minutes": interval_minutes,
             "fetch_months": int(settings.FETCH_MONTHS),
             "notify_types": list(settings.NOTIFY_TYPES or []),
@@ -55,11 +61,17 @@ class AndroidBackgroundBridge:
         if not self.service:
             return {}
         from config import settings
+        from core.demo_sandbox import is_demo_account
         from core.moodle_sites import moodle_site_from_origin
 
         configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
         issuing_site = moodle_site_from_origin(token_origin)
-        if token and configured_site is not None and issuing_site == configured_site:
+        if (
+            not is_demo_account(getattr(settings, "UTH_USERNAME", ""))
+            and token
+            and configured_site is not None
+            and issuing_site == configured_site
+        ):
             await self.service.set_credentials(configured_site.origin, token)
         else:
             await self.service.logout()
@@ -70,6 +82,11 @@ class AndroidBackgroundBridge:
     ) -> dict[str, Any]:
         if not self.service:
             return {}
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return {"imported": 0, "scheduled": 0, "cancelled": 0}
         return await self.service.import_activities(activities, authoritative)
 
     async def schedule_class_sessions(
@@ -82,6 +99,11 @@ class AndroidBackgroundBridge:
 
     async def cached_activities(self) -> list[dict[str, Any]]:
         if not self.service:
+            return []
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
             return []
         values = await self.service.get_cached_activities() or []
         normalized = []

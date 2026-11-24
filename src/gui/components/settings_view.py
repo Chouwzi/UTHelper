@@ -8,6 +8,7 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import inspect
 import logging
 from dataclasses import replace
 from urllib.parse import urlsplit
@@ -1619,7 +1620,34 @@ class SettingsView(ft.Container):
             success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
             if success:
                 self._username_field.value = user
+                self._password_field.value = pwd
+                settings.UTH_USERNAME = user
+                settings.UTH_PASSWORD = pwd
+                if is_demo_account(user):
+                    settings.MOODLE_WS_TOKEN = ""
+                    settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                if self._orchestrator is not None:
+                    self._orchestrator.is_logged_in = True
+                await asyncio.to_thread(save_settings)
+                if self._baseline_snapshot is not None:
+                    self._baseline_snapshot = replace(
+                        self._baseline_snapshot,
+                        uth_username=user,
+                        uth_password=pwd,
+                    )
                 refresh_demo_account_banner(self, user)
+                if hasattr(self, "_unsaved_dot"):
+                    self._unsaved_dot.visible = self.has_changes()
+                if hasattr(self, "_update_save_button_state") and callable(
+                    getattr(self, "_update_save_button_state")
+                ):
+                    self._update_save_button_state()
+                if self._on_saved:
+                    cb_res = self._on_saved()
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
+                    if self._orchestrator is not None:
+                        self._orchestrator.is_logged_in = True
                 self._test_login_status.value = "Đã kết nối với hệ thống UTH"
                 self._test_login_status.color = C.SAFE
                 if hasattr(self, "_test_login_status_icon"):
@@ -1754,18 +1782,35 @@ class SettingsView(ft.Container):
 
     def _do_test_moodle_connection(self):
         """Quick Moodle API connectivity test."""
+        if is_demo_account(settings.UTH_USERNAME):
+            self._debug_info_text.value = (
+                "Phiên xem thử (Demo) đang hoạt động ngoại tuyến (Sandbox) · "
+                "Không gửi yêu cầu mạng tới máy chủ Moodle."
+            )
+            self._debug_info_text.color = C.SAFE
+            self._safe_update(self._debug_info_text)
+            return
         import threading
         self._debug_info_text.value = "Đang kiểm tra kết nối Moodle..."
         self._debug_info_text.color = C.TEXT_SECONDARY
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
         def _worker():
             try:
                 ok = self._orchestrator.client.login(force=True)
                 if ok:
-                    token = self._orchestrator.client.token or "?"
+                    token = (
+                        getattr(self._orchestrator.client, "token", None)
+                        or settings.MOODLE_WS_TOKEN
+                        or "?"
+                    )
                     masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
-                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {self._orchestrator.client.user_id}"
+                    uid = (
+                        getattr(self._orchestrator.client, "user_id", None)
+                        or getattr(self._orchestrator, "_userid_cache", None)
+                        or "?"
+                    )
+                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {uid}"
                     color = C.SAFE
                 else:
                     result = "Đăng nhập Moodle thất bại!"
@@ -1776,11 +1821,7 @@ class SettingsView(ft.Container):
 
             self._debug_info_text.value = result
             self._debug_info_text.color = color
-            try:
-                self._debug_info_text.update()
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            self._safe_update(self._debug_info_text)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2232,10 +2273,18 @@ class SettingsView(ft.Container):
     # Network latency test
     def _do_test_latency(self):
         """Ping Moodle server and measure response time."""
+        if is_demo_account(settings.UTH_USERNAME):
+            self._debug_info_text.value = (
+                "Phiên xem thử (Demo) sử dụng dữ liệu mẫu ngoại tuyến · "
+                "Bỏ qua ping máy chủ Moodle."
+            )
+            self._debug_info_text.color = C.SAFE
+            self._safe_update(self._debug_info_text)
+            return
         import threading
         self._debug_info_text.value = "Đang ping Moodle..."
         self._debug_info_text.color = C.TEXT_SECONDARY
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
         def _ping():
             import time, urllib.request
