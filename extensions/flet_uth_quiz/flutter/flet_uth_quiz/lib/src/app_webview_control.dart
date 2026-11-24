@@ -99,9 +99,10 @@ class UthAppWebViewControl extends StatefulWidget {
 }
 
 class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
-  final GlobalKey _webViewKey = GlobalKey();
+  GlobalKey _webViewKey = GlobalKey();
   InAppWebViewController? _controller;
   String _initialUrl = '';
+  String _currentLoadedUrl = '';
   String? _initialHtml;
   String? _initialBaseUrl;
   bool _viewerLocked = false;
@@ -120,15 +121,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   StreamSubscription<Uint8List>? _cookieSubscription;
   Uint8List? _pendingCookiePayload;
   Completer<Uint8List>? _cookiePayloadWaiter;
-  final Completer<void> _cookieBootstrapDone = Completer<void>();
+  Completer<void> _cookieBootstrapDone = Completer<void>();
 
   int _nextPopupSinkKey = 0;
   final List<_PopupSinkEntry> _popupSinks = [];
   final Map<int, Timer> _popupSinkTimers = {};
 
-  @override
-  void initState() {
-    super.initState();
+  void _readControlProperties() {
     _initialUrl = widget.control.getString('url', '') ?? '';
     _initialHtml = widget.control.getString('html');
     _initialBaseUrl = widget.control.getString('base_url');
@@ -156,17 +155,12 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     }
     _allowedLoopbackPorts = ports;
     _viewerPrefix = extractViewerLockPrefix(_initialUrl);
-    if (_viewerPrefix != null) {
+    if (_viewerPrefix != null || _initialHtml != null) {
       _viewerLocked = true;
     }
-
-    widget.control.addInvokeMethodListener(_invokeMethod);
-    unawaited(_prepare());
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
+  void _openCookieChannelIfNeeded() {
     if (_viewerLocked || !_requireInitialCookies || _cookieChannel != null) return;
     final channel = FletBackend.of(context).openDataChannel();
     _cookieChannel = channel;
@@ -175,6 +169,94 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       'channel_name': 'app_webview_cookies',
       'channel_id': channel.id,
     });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _readControlProperties();
+    widget.control.addInvokeMethodListener(_invokeMethod);
+    unawaited(_prepare());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _openCookieChannelIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(covariant UthAppWebViewControl oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_disposed) return;
+    if (oldWidget.control.id != widget.control.id) {
+      oldWidget.control.removeInvokeMethodListener(_invokeMethod);
+      widget.control.addInvokeMethodListener(_invokeMethod);
+      _cookieSubscription?.cancel();
+      _cookieSubscription = null;
+      _cookieChannel?.close();
+      _cookieChannel = null;
+      _pendingCookiePayload?.fillRange(0, _pendingCookiePayload!.length, 0);
+      _pendingCookiePayload = null;
+      final waiter = _cookiePayloadWaiter;
+      if (waiter != null && !waiter.isCompleted) {
+        waiter.completeError(StateError('replaced'));
+      }
+      if (!_cookieBootstrapDone.isCompleted) {
+        _cookieBootstrapDone.complete();
+      }
+      _cookieBootstrapDone = Completer<void>();
+      _controller = null;
+      _currentLoadedUrl = '';
+      _cookieBootstrapStarted = false;
+      _initialNavDispatched = false;
+      _lateCookieReloaded = false;
+      _webViewKey = GlobalKey();
+      _readControlProperties();
+      _openCookieChannelIfNeeded();
+      return;
+    }
+
+    _requireInitialCookies =
+        widget.control.getBool('require_initial_cookies', false) ?? false;
+    final nextHtml = widget.control.getString('html');
+    final nextBaseUrl = widget.control.getString('base_url');
+    if (nextHtml != null && nextHtml != _initialHtml) {
+      _initialHtml = nextHtml;
+      _initialBaseUrl = nextBaseUrl;
+      final ctrl = _controller;
+      if (ctrl != null) {
+        unawaited(_loadHtmlInternal(ctrl, nextHtml, baseUrl: nextBaseUrl));
+      }
+      return;
+    }
+
+    final nextUrl = widget.control.getString('url', '') ?? '';
+    if (shouldNavigateOnWidgetUrlSync(
+      nextUrl: nextUrl,
+      previousInitialUrl: _initialUrl,
+      currentLoadedUrl: _currentLoadedUrl,
+    )) {
+      _initialUrl = nextUrl;
+      final nextPrefix = extractViewerLockPrefix(nextUrl);
+      if (nextPrefix != null) {
+        _viewerPrefix = nextPrefix;
+        _viewerLocked = true;
+      }
+      final uri = Uri.tryParse(nextUrl);
+      if (uri != null &&
+          uri.scheme.toLowerCase() == 'http' &&
+          (uri.host == '127.0.0.1' || uri.host.toLowerCase() == 'localhost') &&
+          uri.hasPort) {
+        _allowedLoopbackPorts = {..._allowedLoopbackPorts, uri.port};
+      }
+      final ctrl = _controller;
+      if (ctrl != null) {
+        unawaited(_navigateInternal(ctrl, nextUrl));
+      }
+    } else if (nextUrl.isNotEmpty) {
+      _initialUrl = nextUrl;
+    }
   }
 
   Future<void> _prepare() async {
@@ -320,6 +402,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       AppNavigationKind.cancel => null,
     };
     if (resolved == null || resolved.isEmpty) return false;
+    _currentLoadedUrl = resolved;
     try {
       await controller.loadUrl(urlRequest: URLRequest(url: WebUri(resolved)));
       return true;
@@ -337,12 +420,14 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     if (baseUrl != null && baseUrl.trim().isNotEmpty) {
       safeBase = WebUri(baseUrl.trim());
     }
+    final effectiveBase = safeBase ?? WebUri('about:blank');
     try {
       await controller.loadData(
         data: html,
         mimeType: 'text/html',
         encoding: 'utf-8',
-        baseUrl: safeBase,
+        baseUrl: effectiveBase,
+        historyUrl: effectiveBase,
       );
       return true;
     } catch (_) {
@@ -595,10 +680,28 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                   : NavigationActionPolicy.CANCEL;
             },
             onCreateWindow: _handleCreateWindow,
+            onDownloadStartRequest: (_controller, downloadStartRequest) {
+              if (_disposed) return;
+              final extUrl = resolveDownloadExternalUrl(
+                downloadStartRequest.url.toString(),
+                viewerLocked: _viewerLocked,
+              );
+              if (extUrl != null) {
+                widget.control.triggerEvent('external_url', extUrl);
+              }
+            },
             onLoadStart: (controller, url) {
               if (_disposed) return;
               final urlStr = url?.toString() ?? '';
-              if (urlStr.isNotEmpty && urlStr.toLowerCase() != 'about:blank') {
+              final urlLower = urlStr.toLowerCase();
+              final isTransientAbout = urlLower == 'about:blank' ||
+                  urlLower.startsWith('about:blank?') ||
+                  urlLower.startsWith('about:blank#') ||
+                  (!_viewerLocked &&
+                      (urlLower == 'about:srcdoc' ||
+                          urlLower.startsWith('about:srcdoc?') ||
+                          urlLower.startsWith('about:srcdoc#')));
+              if (urlStr.isNotEmpty && !isTransientAbout) {
                 final decision = decideAppWebViewNavigation(
                   urlStr,
                   isForMainFrame: true,
@@ -609,6 +712,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                 if (decision.kind != AppNavigationKind.allow) {
                   unawaited(controller.stopLoading().catchError((_) {}));
                   return;
+                }
+                if (!urlLower.startsWith('blob:')) {
+                  _currentLoadedUrl = urlStr;
                 }
               }
               widget.control.triggerEvent('page_started', urlStr);
@@ -630,6 +736,11 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               if (_disposed) return;
               final urlStr = url?.toString() ?? '';
               if (urlStr.isNotEmpty) {
+                final urlLower = urlStr.toLowerCase();
+                if (!urlLower.startsWith('about:') &&
+                    !urlLower.startsWith('blob:')) {
+                  _currentLoadedUrl = urlStr;
+                }
                 widget.control.triggerEvent('url_change', urlStr);
               }
               unawaited(_emitHistoryState(controller));

@@ -6,7 +6,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flet_uth_quiz/src/app_webview_control.dart';
 import 'package:flet_uth_quiz/src/app_webview_settings.dart';
 import 'package:flet_uth_quiz/src/mobile_session_queue.dart';
-import 'package:flet_uth_quiz/src/quiz_webview_settings.dart';
 
 void main() {
   test('normalizeEmbeddedUserAgent strips Android wv markers while preserving Chrome and iOS Safari UAs', () {
@@ -49,7 +48,7 @@ void main() {
     expect(browser.allowUniversalAccessFromFileURLs, isFalse);
     expect(browser.isInspectable, isFalse);
     expect(browser.mixedContentMode, MixedContentMode.MIXED_CONTENT_NEVER_ALLOW);
-    expect(browser.regexToCancelSubFramesLoading, quizSubframeCancelRegex);
+    expect(browser.regexToCancelSubFramesLoading, appBrowserSubframeCancelRegex);
     expect(browser.userAgent, 'Mozilla/5.0 Chrome/131.0 Mobile Safari/537.36');
 
     final viewer = createAppWebViewSettings(
@@ -658,6 +657,222 @@ void main() {
         description: 'net::ERR_NAME_NOT_RESOLVED',
       ),
       isTrue,
+    );
+  });
+
+  test('decideAppWebViewNavigation preserves case-sensitive token_urlsafe viewer prefixes while lowercasing scheme and host', () {
+    const mixedTokenUrl =
+        'http://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn-OpQrStUvWxYz0123/pdf_host.html?src=%2F1a25f20417cab3d2%3Ftoken%3DxYz_987';
+    final mixedPrefix = extractViewerLockPrefix(mixedTokenUrl);
+    expect(
+      mixedPrefix,
+      'http://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn-OpQrStUvWxYz0123/',
+    );
+    expect(
+      decideAppWebViewNavigation(
+        mixedTokenUrl,
+        isForMainFrame: true,
+        viewerLocked: true,
+        viewerPrefix: mixedPrefix,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+    expect(
+      decideAppWebViewNavigation(
+        'HTTP://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn-OpQrStUvWxYz0123/pdf.worker.min.mjs',
+        isForMainFrame: false,
+        viewerLocked: true,
+        viewerPrefix: mixedPrefix,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+
+    const docxUrl =
+        'http://LOCALHOST:51234/viewer/ZxYwVuTsRqPoNmLkJiHgFeDcBa987654/docx_host.html?src=%2Fdeadbeefcafebabe%3Ftoken%3DT0k';
+    final docxPrefix = extractViewerLockPrefix(docxUrl);
+    expect(
+      docxPrefix,
+      'http://localhost:51234/viewer/ZxYwVuTsRqPoNmLkJiHgFeDcBa987654/',
+    );
+    expect(
+      decideAppWebViewNavigation(
+        docxUrl,
+        isForMainFrame: true,
+        viewerLocked: true,
+        viewerPrefix: docxPrefix,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+
+    // Wrong-case token must still be rejected
+    expect(
+      decideAppWebViewNavigation(
+        'http://127.0.0.1:51234/pdf-viewer/abcdefgh_ijklmn-opqrstuvwxyz0123/pdf_host.html',
+        isForMainFrame: true,
+        viewerLocked: true,
+        viewerPrefix: mixedPrefix,
+      ).kind,
+      AppNavigationKind.cancel,
+    );
+  });
+
+  test('appBrowserSubframeCancelRegex allows SharePoint/Office Online about:srcdoc and blob:https subframes while cancelling unsafe schemes', () {
+    expect(appBrowserSubframeCancelRegex.startsWith('(?is)'), isTrue);
+    final regex = RegExp(
+      appBrowserSubframeCancelRegex.substring('(?is)'.length),
+      caseSensitive: false,
+      dotAll: true,
+    );
+
+    for (final allowed in [
+      'https://excel.officeapps.live.com/x/_layouts/xlviewerinternal.aspx?ui=vi-VN',
+      'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+      'about:blank',
+      'about:blank#wac',
+      'about:srcdoc',
+      'about:srcdoc#frame1',
+      'blob:https://excel.officeapps.live.com/550e8400-e29b-41d4-a716-446655440000',
+      'blob:https://docs.google.com/12345678-90ab-cdef',
+    ]) {
+      expect(regex.hasMatch(allowed), isFalse, reason: allowed);
+    }
+
+    for (final cancelled in [
+      'javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'file:///etc/hosts',
+      'intent://uteduvn-my.sharepoint.com/#Intent;scheme=https;end',
+      'http://evil.example/frame',
+      'http://127.0.0.1:51234/pdf-viewer/tok/pdf_host.html',
+      'blob:http://127.0.0.1:51234/550e8400-e29b',
+      'blob:http://evil.example/550e8400-e29b',
+      'https://user:pass@courses.ut.edu.vn/',
+      'https://127.0.0.1/admin',
+      'https://localhost:8443/',
+      'https://10.0.0.1/internal',
+      'https://192.168.1.1/',
+      'https://169.254.169.254/latest',
+      'https://[::1]/',
+      'blob:https://127.0.0.1/uuid',
+      'blob:https://localhost/uuid',
+    ]) {
+      expect(regex.hasMatch(cancelled), isTrue, reason: cancelled);
+    }
+
+    expect(
+      decideAppWebViewNavigation(
+        'about:srcdoc',
+        isForMainFrame: false,
+        viewerLocked: false,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+    expect(
+      resolveCreateWindowInPlaceTarget('about:srcdoc', viewerLocked: false),
+      isNull,
+    );
+  });
+
+  test('resolveAndroidIntentFallbackUrl synthesizes HTTPS URL when scheme=https and S.browser_fallback_url is absent', () {
+    const driveIntent =
+        'intent://docs.google.com/spreadsheets/d/1AbC_dEf/edit?usp=sharing#Intent;'
+        'scheme=https;package=com.google.android.apps.docs.editors.sheets;end';
+    expect(
+      resolveAndroidIntentFallbackUrl(driveIntent),
+      'https://docs.google.com/spreadsheets/d/1AbC_dEf/edit?usp=sharing',
+    );
+
+    const sharePointHttpsIntent =
+        'intent://uteduvn-my.sharepoint.com/:x:/g/personal/user_ut_edu_vn/Doc1?e=rs8b4a#Intent;'
+        'package=com.microsoft.office.excel;scheme=HTTPS;end';
+    expect(
+      resolveAndroidIntentFallbackUrl(sharePointHttpsIntent),
+      'https://uteduvn-my.sharepoint.com/:x:/g/personal/user_ut_edu_vn/Doc1?e=rs8b4a',
+    );
+
+    // Custom non-https scheme without S.browser_fallback_url must return null
+    const customSchemeOnly =
+        'intent://uteduvn-my.sharepoint.com/doc#Intent;scheme=ms-excel;package=com.microsoft.office.excel;end';
+    expect(resolveAndroidIntentFallbackUrl(customSchemeOnly), isNull);
+
+    // Explicit unsafe S.browser_fallback_url must NOT fall back to scheme=https
+    const explicitUnsafeFallback =
+        'intent://docs.google.com/doc#Intent;scheme=https;S.browser_fallback_url=javascript%3Aalert(1);end';
+    expect(resolveAndroidIntentFallbackUrl(explicitUnsafeFallback), isNull);
+
+    // SSRF / userinfo targets in scheme=https intent must be rejected
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        'intent://127.0.0.1/admin#Intent;scheme=https;end',
+      ),
+      isNull,
+    );
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        'intent://user:pass@docs.google.com/doc#Intent;scheme=https;end',
+      ),
+      isNull,
+    );
+  });
+
+  test('resolveDownloadExternalUrl allows only public HTTPS downloads in browser mode', () {
+    expect(
+      resolveDownloadExternalUrl(
+        'https://uteduvn-my.sharepoint.com/:x:/g/personal/u/file.xlsx?download=1',
+        viewerLocked: false,
+      ),
+      'https://uteduvn-my.sharepoint.com/:x:/g/personal/u/file.xlsx?download=1',
+    );
+    expect(
+      resolveDownloadExternalUrl(
+        'https://uteduvn-my.sharepoint.com/:x:/g/personal/u/file.xlsx?download=1',
+        viewerLocked: true,
+      ),
+      isNull,
+    );
+    for (final blocked in [
+      null,
+      '',
+      'blob:https://excel.officeapps.live.com/uuid',
+      'data:application/pdf;base64,JVBERi0=',
+      'http://127.0.0.1:51234/1a25f20417cab3d2?token=abc',
+      'https://127.0.0.1/file.pdf',
+      'https://192.168.1.1/file.pdf',
+    ]) {
+      expect(
+        resolveDownloadExternalUrl(blocked, viewerLocked: false),
+        isNull,
+        reason: '$blocked',
+      );
+    }
+  });
+
+  test('shouldNavigateOnWidgetUrlSync avoids echo reloads while navigating on genuine URL changes', () {
+    // Echo of URL already loaded in WebView must NOT trigger reload
+    expect(
+      shouldNavigateOnWidgetUrlSync(
+        nextUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+        previousInitialUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+        currentLoadedUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isFalse,
+    );
+    // Genuine new URL must navigate
+    expect(
+      shouldNavigateOnWidgetUrlSync(
+        nextUrl: 'https://docs.google.com/document/d/2',
+        previousInitialUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+        currentLoadedUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isTrue,
+    );
+    expect(
+      shouldNavigateOnWidgetUrlSync(
+        nextUrl: '',
+        previousInitialUrl: 'https://courses.ut.edu.vn/',
+        currentLoadedUrl: 'https://courses.ut.edu.vn/',
+      ),
+      isFalse,
     );
   });
 }

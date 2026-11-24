@@ -144,7 +144,7 @@ class CoursesTabView(ft.Container):
         self._split_divider = ft.VerticalDivider(
             width=1, thickness=1, color=C.BORDER, visible=True
         )
-        self._pane3_host = ft.Container(expand=True, content=self._workspace_stack)
+        self._pane3_host = ft.Container(expand=True)
         self._wide_row = ft.Row(
             expand=True,
             spacing=0,
@@ -164,7 +164,25 @@ class CoursesTabView(ft.Container):
             controls=[self._narrow_list_host, self._narrow_workspace_host],
         )
         self._main_host = ft.Container(expand=True)
-        self._root_stack = ft.Stack(expand=True, controls=[self._main_host])
+        # Keep _workspace_stack permanently mounted at a constant depth inside
+        # _root_stack so rotating a tablet (wide <-> tablet_portrait) or entering
+        # Samsung Pop-up View (<600dp mobile) never unmounts active PlatformViews.
+        self._workspace_host = ft.Container(
+            expand=True, bgcolor=C.BG, content=self._workspace_stack
+        )
+        self._workspace_layer = ft.Container(
+            left=321.0,
+            top=0.0,
+            right=0.0,
+            bottom=0.0,
+            opacity=1.0,
+            ignore_interactions=False,
+            animate_position=ft.Animation(220, ft.AnimationCurve.EASE_OUT_CUBIC),
+            content=self._workspace_host,
+        )
+        self._root_stack = ft.Stack(
+            expand=True, controls=[self._main_host, self._workspace_layer]
+        )
 
         self.bgcolor = C.BG
         self.content = self._root_stack
@@ -237,39 +255,48 @@ class CoursesTabView(ft.Container):
         return " | ".join(p for p in (courses_err, thnn_err) if p)
 
     def _rebuild_layout(self) -> None:
+        self._workspace_host.bgcolor = C.BG
         if self._layout_mode == "wide":
             expanded = bool(self._state.pane3_expanded)
             self._tablet_content.content = None
             self._narrow_list_host.content = None
-            self._narrow_workspace_host.content = None
             self._narrow_workspace_host.visible = False
             self._list_pane_host.content = self._list_pane
-            self._pane3_host.content = self._workspace_stack
             self._list_pane_host.width = 0 if expanded else 320
             self._list_pane_host.opacity = 0.0 if expanded else 1.0
             self._split_divider.color = C.BORDER
             self._split_divider.visible = not expanded
             self._main_host.content = self._wide_row
+            self._workspace_layer.left = 0.0 if expanded else 321.0
+            self._workspace_layer.right = 0.0
+            self._workspace_layer.opacity = 1.0
+            self._workspace_layer.ignore_interactions = False
             return
 
         self._list_pane_host.content = None
-        self._pane3_host.content = None
         show_workspace = bool(self._overlays) or (
             self._state.in_detail_mobile and self._state.selected_course() is not None
         )
         self._narrow_list_host.content = self._list_pane
         self._narrow_list_host.opacity = 0.0 if show_workspace else 1.0
         self._narrow_list_host.ignore_interactions = show_workspace
-        self._narrow_workspace_host.content = self._workspace_stack
         self._narrow_workspace_host.bgcolor = C.BG
         self._narrow_workspace_host.visible = show_workspace
         if self._layout_mode == "tablet_portrait":
+            tablet_w = min(820.0, max(320.0, self._current_width))
+            side_pad = max(0.0, (self._current_width - tablet_w) / 2.0)
             self._tablet_content.content = self._narrow_stack
-            self._tablet_content.width = min(820.0, max(320.0, self._current_width))
+            self._tablet_content.width = tablet_w
             self._main_host.content = self._tablet_wrapper
+            self._workspace_layer.left = side_pad
+            self._workspace_layer.right = side_pad
         else:
             self._tablet_content.content = None
             self._main_host.content = self._narrow_stack
+            self._workspace_layer.left = 0.0
+            self._workspace_layer.right = 0.0
+        self._workspace_layer.opacity = 1.0 if show_workspace else 0.0
+        self._workspace_layer.ignore_interactions = not show_workspace
 
     def set_on_immersive_changed(
         self, callback: Optional[Callable[[bool], None]]
@@ -1317,6 +1344,7 @@ class CoursesTabView(ft.Container):
                         preset="activity",
                         on_back=self.pop_overlay,
                         on_toggle_expand=self.toggle_pane3_expanded,
+                        page=self._get_page(),
                     )
                     self.push_overlay(loading_overlay, tag=f"module:resolve:{req_seq}")
                     resolved = await asyncio.to_thread(
@@ -1383,6 +1411,7 @@ class CoursesTabView(ft.Container):
                     preset="archive" if mod.modname == "folder" else "document",
                     on_back=self.pop_overlay,
                     on_toggle_expand=self.toggle_pane3_expanded,
+                    page=self._get_page(),
                 )
                 self.push_overlay(loading_overlay, tag=f"module:resolve:{req_seq}")
                 resolved_atts = await asyncio.to_thread(
@@ -1441,6 +1470,7 @@ class CoursesTabView(ft.Container):
         """Apply updated global palette tokens across panes and open overlays once."""
         current = semantic_palette()
         self.bgcolor = C.BG
+        self._workspace_host.bgcolor = C.BG
         self._narrow_workspace_host.bgcolor = C.BG
         self._split_divider.color = C.BORDER
         self._list_pane.update_theme(update=False, rerender=False)

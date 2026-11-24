@@ -285,14 +285,29 @@ class CoursesWebViewPane(ft.Container):
             bgcolor=C.BORDER,
             visible=True,
         )
+        self._nav_progress_host = ft.Container(
+            left=0,
+            top=0,
+            right=0,
+            height=2,
+            opacity=1.0,
+            ignore_interactions=True,
+            content=self._nav_progress,
+        )
         self._body_host = ft.Container(expand=True, bgcolor=C.BG)
+        self._body_stack = ft.Stack(
+            expand=True,
+            controls=[
+                self._body_host,
+                self._nav_progress_host,
+            ],
+        )
         self.content = ft.Column(
             expand=True,
             spacing=0,
             controls=[
                 self._header_container,
-                self._nav_progress,
-                self._body_host,
+                self._body_stack,
                 self._mobile_nav_bar,
             ],
         )
@@ -369,11 +384,13 @@ class CoursesWebViewPane(ft.Container):
                     self._host = custom
                     self._dock = custom.dock
                     self._nav_progress.visible = False
+                    self._nav_progress_host.opacity = 0.0
                     self._body_host.content = ft.Container(
                         expand=True, content=custom.control()
                     )
                     return
                 self._nav_progress.visible = False
+                self._nav_progress_host.opacity = 0.0
                 self._body_host.content = ft.Container(expand=True, content=custom)
                 return
 
@@ -420,6 +437,7 @@ class CoursesWebViewPane(ft.Container):
                 self._show_html_fallback_or_card()
                 return
             self._nav_progress.visible = True
+            self._nav_progress_host.opacity = 1.0
             self._body_host.content = host.control()
             return
 
@@ -438,13 +456,14 @@ class CoursesWebViewPane(ft.Container):
     def _set_nav_loading(self, loading: bool) -> None:
         if self._disposed:
             return
-        self._nav_progress.visible = bool(loading)
-        safe_control_update(self._nav_progress)
+        is_loading = bool(loading)
+        self._nav_progress.visible = is_loading
+        self._nav_progress_host.opacity = 1.0 if is_loading else 0.0
+        safe_control_update(self._nav_progress_host)
 
     def _on_host_loading_changed(self, loading: bool) -> None:
         def _apply() -> None:
-            self._nav_progress.visible = bool(loading)
-            safe_control_update(self._nav_progress)
+            self._set_nav_loading(loading)
 
         self._marshal_ui(_apply)
 
@@ -661,8 +680,7 @@ class CoursesWebViewPane(ft.Container):
         def _apply_fallback() -> None:
             if self._disposed:
                 return
-            self._nav_progress.visible = False
-            safe_control_update(self._nav_progress)
+            self._set_nav_loading(False)
 
             if error_text or not markdown_text:
                 card_controls: list[ft.Control] = [

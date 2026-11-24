@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
@@ -316,3 +317,207 @@ def test_mobile_inappwebview_locks_register_html_16hex_and_inline_html_previews(
         host_inline.dispose()
     finally:
         server.stop()
+
+
+def _visible_children(ctrl: ft.Control) -> list[ft.Control]:
+    raw = getattr(ctrl, "controls", None)
+    if isinstance(raw, list):
+        return [c for c in raw if getattr(c, "visible", True) is not False]
+    content = getattr(ctrl, "content", None)
+    if content is not None and getattr(content, "visible", True) is not False:
+        return [content]
+    return []
+
+
+def _visible_index_path(root: ft.Control, target: ft.Control) -> Optional[tuple[int, ...]]:
+    if root is target:
+        return ()
+    for idx, child in enumerate(_visible_children(root)):
+        sub = _visible_index_path(child, target)
+        if sub is not None:
+            return (idx, *sub)
+    return None
+
+
+def test_courses_webview_pane_loading_and_compact_toggles_keep_body_host_index_stable():
+    """Toggling _nav_progress or _mobile_nav_bar must NEVER shift _body_host's visible child index."""
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    pane = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="SharePoint",
+        url="https://uteduvn-my.sharepoint.com/:x:/g/personal/doc",
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+        pane_width=820.0,
+    )
+    try:
+        baseline_path = _visible_index_path(pane, pane._body_host)
+        assert baseline_path is not None
+
+        pane._set_nav_loading(False)
+        assert _visible_index_path(pane, pane._body_host) == baseline_path
+
+        pane._set_nav_loading(True)
+        assert _visible_index_path(pane, pane._body_host) == baseline_path
+
+        pane._on_host_loading_changed(False)
+        assert _visible_index_path(pane, pane._body_host) == baseline_path
+
+        # Crossing 600dp (Samsung Pop-up View <-> Tablet landscape) keeps _body_host path identical
+        pane.sync_bounds(0, 36, 420.0, 620.0)
+        assert pane._mobile_nav_bar.visible is True
+        assert _visible_index_path(pane, pane._body_host) == baseline_path
+
+        pane.sync_bounds(89, 36, 1200.0, 800.0)
+        assert pane._mobile_nav_bar.visible is False
+        assert _visible_index_path(pane, pane._body_host) == baseline_path
+    finally:
+        pane.dispose()
+
+
+def test_adaptive_nav_rail_slot_and_courses_tab_view_preserve_webview_across_rotations_and_popup_view():
+    """Crossing 600dp/900dp breakpoints must never shift main_stack or reparent _workspace_stack."""
+    from gui.components.courses.adaptive_nav import AdaptiveNavShell
+    from gui.components.courses.courses_tab_view import CoursesTabView
+
+    nav = AdaptiveNavShell(on_navigate=lambda _k: None)
+    main_stack = ft.Stack(expand=True)
+    body_row = ft.Row(controls=[nav.rail_slot, main_stack], expand=True)
+
+    nav.apply_width(1400)
+    assert nav.rail_host.visible is True
+    assert nav.rail_slot.visible is True
+    assert _visible_index_path(body_row, main_stack) == (1,)
+
+    # Pop-up View (< 600dp): rail_host hides, but rail_slot stays visible at width 0 so main_stack stays at (1,)
+    nav.apply_width(420)
+    assert nav.rail_host.visible is False
+    assert nav.rail_slot.visible is True
+    assert nav.rail_slot.width == 0
+    assert _visible_index_path(body_row, main_stack) == (1,)
+
+    # CoursesTabView keeps _workspace_stack at the exact same ancestor path across wide, tablet_portrait, and mobile
+    tab = CoursesTabView(page=None, catalog_service=None)
+    overlay = ft.Container(expand=True)
+    tab.push_overlay(overlay, tag="reader:test.pdf")
+
+    tab.set_width(1311)  # wide
+    wide_path = _visible_index_path(tab, tab._workspace_stack)
+    assert wide_path is not None
+
+    tab.set_width(787)  # tablet_portrait (Galaxy Tab S10+ portrait)
+    assert tab._layout_mode == "tablet_portrait"
+    assert _visible_index_path(tab, tab._workspace_stack) == wide_path
+
+    tab.set_width(420)  # mobile / Samsung Pop-up View
+    assert tab._layout_mode == "mobile"
+    assert _visible_index_path(tab, tab._workspace_stack) == wide_path
+
+    tab.set_width(1311)  # back to wide + expand toggle
+    tab.set_pane3_expanded(True)
+    assert _visible_index_path(tab, tab._workspace_stack) == wide_path
+
+
+def test_inappwebview_suspend_preserves_visibility_syncs_redirect_url_and_allows_about_srcdoc():
+    """inappwebview suspend() must NOT set slot.visible=False, and redirect URLs sync cleanly."""
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    pane = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="SharePoint Excel",
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=99",
+        session_client=SimpleNamespace(
+            get_session_cookies=lambda **_kw: [
+                {"name": "MoodleSession", "value": "tok", "domain": "courses.ut.edu.vn"}
+            ]
+        ),
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    try:
+        assert pane._host is not None
+        assert pane._host.backend == "inappwebview"
+        slot = pane._host.control()
+        wv = slot.content
+        assert wv.require_initial_cookies is True
+
+        # Suspend must NOT unmount PlatformView via slot.visible = False
+        pane.suspend()
+        assert slot.visible is True
+        assert slot.ignore_interactions is True
+        pane.resume()
+        assert slot.visible is True
+        assert slot.ignore_interactions is False
+
+        # SharePoint / Office Online about:srcdoc event must not destroy pane
+        wv.on_page_started(SimpleNamespace(data="about:srcdoc"))
+        wv.on_url_change(SimpleNamespace(data="about:srcdoc#wac"))
+        assert pane._host is not None
+        assert pane._url == "https://courses.ut.edu.vn/mod/url/view.php?id=99"
+
+        # Redirect to SharePoint updates wv.url and clears require_initial_cookies for future remounts
+        sp_url = "https://uteduvn-my.sharepoint.com/:x:/g/personal/u/doc?e=rs8b4a"
+        wv.on_url_change(SimpleNamespace(data=sp_url))
+        assert pane._url == sp_url
+        assert wv.url == sp_url
+        assert wv.require_initial_cookies is False
+    finally:
+        pane.dispose()
+
+
+def test_pane_loading_overlay_marshals_off_thread_set_progress_onto_page_loop():
+    """Worker-thread set_progress must marshal control mutations onto page.loop to prevent applyPatch RangeError."""
+    import threading
+    from gui.components.courses._shared import PaneLoadingOverlay
+
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+    gate = threading.Event()
+    stop = threading.Event()
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        ready.set()
+        loop.run_until_complete(_wait_stop())
+
+    async def _wait_stop() -> None:
+        while not stop.is_set():
+            await asyncio.sleep(0.005)
+
+    t = threading.Thread(target=_run_loop, daemon=True)
+    t.start()
+    ready.wait(timeout=2.0)
+    try:
+        blocked_in_gate = threading.Event()
+
+        def _hold_loop() -> None:
+            blocked_in_gate.set()
+            gate.wait(timeout=2.0)
+
+        # Hold the event loop momentarily so off-thread mutation would be caught immediately
+        loop.call_soon_threadsafe(_hold_loop)
+        assert blocked_in_gate.wait(timeout=2.0)
+        fake_page = SimpleNamespace(loop=loop, update=lambda: None)
+        overlay = PaneLoadingOverlay(
+            title="Chuong_3_1.pdf",
+            on_back=lambda: None,
+            page=fake_page,
+        )
+        overlay.update = lambda: None  # type: ignore[method-assign]
+
+        # Call set_progress from THIS thread (off `loop`): must NOT mutate until `loop` runs
+        overlay.set_progress(0.65, message="Đang tải 65%...", subtitle="650 KB / 1 MB")
+        assert overlay._progress_bar.value is None
+        gate.set()
+        fut = asyncio.run_coroutine_threadsafe(asyncio.sleep(0.02), loop)
+        fut.result(timeout=2.0)
+        assert overlay._progress_bar.value == pytest.approx(0.65)
+        assert overlay._status_label.value == "Đang tải 65%..."
+        assert overlay._subtitle_text.value == "650 KB / 1 MB"
+    finally:
+        gate.set()
+        stop.set()
+        t.join(timeout=2.0)
+        loop.close()
+

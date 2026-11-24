@@ -2262,7 +2262,7 @@ class AppController:
             on_destination_change=self._nav_shell.set_active,
         )
         body_with_rail = ft.Row(
-            controls=[self._nav_shell.rail_host, main_stack],
+            controls=[self._nav_shell.rail_slot, main_stack],
             spacing=0,
             expand=True,
             vertical_alignment=ft.CrossAxisAlignment.STRETCH,

@@ -577,11 +577,12 @@ class DocumentReaderView(ft.Container):
                 return
         target_mode = bool(self._dark_reader)
         # Offload uncached non-PDF conversion when mounted on a live page so UI never stutters
+        live_page = self._get_page()
         if (
             self._kind != "pdf"
             and self._rendered_pdf_bytes is None
             and target_mode not in self._converted_cache
-            and self._get_page() is not None
+            and live_page is not None
         ):
             safe_control_update(self._night_btn)
 
@@ -603,7 +604,7 @@ class DocumentReaderView(ft.Container):
                         self._set_body_content(self._build_body())
                         safe_control_update(self)
 
-                marshal_to_ui(self, _apply_converted)
+                marshal_to_ui(self, _apply_converted, page=live_page)
 
             threading.Thread(target=_convert_async, name="DocThemeToggle", daemon=True).start()
             return
@@ -2888,6 +2889,7 @@ class DocumentReaderView(ft.Container):
             page_cards.append(slot)
 
         if session.can_render_images:
+            hydrate_page = self._get_page()
             all_batch_indices = [
                 self._pdf_page_index,
                 *[i for i in range(batch_start, batch_end) if i != self._pdf_page_index],
@@ -2912,7 +2914,7 @@ class DocumentReaderView(ft.Container):
                             s.content = c
                             safe_control_update(s)
 
-                        marshal_to_ui(slot, _mount_slot)
+                        marshal_to_ui(slot, _mount_slot, page=hydrate_page)
                 # Pre-warm opposite dark/light mode in RAM so clicking Dark/Light is 0ms
                 alt_dark = not cur_dark
                 for p_idx in all_batch_indices:

@@ -5,8 +5,9 @@ from dataclasses import field
 import ipaddress
 import json
 import re
+import secrets
 import socket
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 import flet as ft
@@ -179,6 +180,8 @@ class UthAppWebView(LayoutControl):
 
     def __post_init__(self, ref: object | None = None) -> None:
         super().__post_init__(ref)
+        if self.key is None:
+            self.key = f"uth-app-wv-{secrets.token_hex(8)}"
         if self.url:
             self.url = _validate_app_webview_url(self.url)
         if self.base_url:
@@ -186,7 +189,17 @@ class UthAppWebView(LayoutControl):
         self._cookie_channel: ft.DataChannel | None = None
         self._cookie_channel_id: int | None = None
         self._cookie_channel_ready = asyncio.Event()
+        self._consumed_channel_ids: set[int] = set()
+        self._bootstrap_in_flight = False
+        self._initial_bootstrap_done = False
+        self._on_rebootstrap_requested: Optional[Callable[[], None]] = None
         self.on_data_channel_open = self._handle_data_channel_open
+
+    def will_unmount(self) -> None:
+        super().will_unmount()
+        self._cookie_channel = None
+        self._cookie_channel_id = None
+        self._cookie_channel_ready.clear()
 
     def _handle_data_channel_open(self, event: ft.DataChannelOpenEvent) -> None:
         if getattr(event, "channel_name", None) != "app_webview_cookies":
@@ -194,6 +207,37 @@ class UthAppWebView(LayoutControl):
         self._cookie_channel_id = event.channel_id
         self._cookie_channel = self.get_data_channel(event.channel_id)
         self._cookie_channel_ready.set()
+        if (
+            self._initial_bootstrap_done
+            and not self._bootstrap_in_flight
+            and event.channel_id not in self._consumed_channel_ids
+            and callable(self._on_rebootstrap_requested)
+        ):
+            self._on_rebootstrap_requested()
+
+    async def abort_cookie_bootstrap(self) -> bool:
+        """Release Dart's initial cookie wait immediately when cookies are no longer needed."""
+        self._bootstrap_in_flight = True
+        channel_id: int | None = None
+        try:
+            await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=3.0)
+            channel_id = self._cookie_channel_id
+            if channel_id is None:
+                return False
+            return bool(
+                await self._invoke_method(
+                    "bootstrap_cookies",
+                    {"channel_id": channel_id, "abort": True},
+                    timeout=5,
+                )
+            )
+        except Exception:
+            return False
+        finally:
+            self._bootstrap_in_flight = False
+            self._initial_bootstrap_done = True
+            if channel_id is not None:
+                self._consumed_channel_ids.add(channel_id)
 
     async def bootstrap_cookies(
         self,
@@ -202,47 +246,49 @@ class UthAppWebView(LayoutControl):
         target_url: Optional[str] = None,
     ) -> bool:
         """Send cookies privately over DataChannel before initial URL load."""
-        resolved_target = _validate_app_webview_url(target_url or self.url)
-        safe_cookies: list[dict[str, Any]] = []
-        for item in (cookies or ())[:_MAX_COOKIES]:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or "")
-            value = item.get("value")
-            if not name or value is None:
-                continue
-            safe_cookies.append(
-                {
-                    "name": name,
-                    "value": str(value),
-                    "domain": str(item.get("domain") or ""),
-                    "path": str(item.get("path") or "/"),
-                    "secure": bool(item.get("secure", True)),
-                    "httpOnly": bool(
-                        item.get("httpOnly", item.get("http_only", False))
-                    ),
-                    "expires": item.get("expires"),
-                }
-            )
-        payload = json.dumps(
-            {"target_url": resolved_target, "cookies": safe_cookies},
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-        if len(payload) > _COOKIE_PAYLOAD_LIMIT:
-            try:
-                await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=2.0)
-                channel_id = self._cookie_channel_id
-                if channel_id is not None:
-                    await self._invoke_method(
-                        "bootstrap_cookies",
-                        {"channel_id": channel_id, "abort": True},
-                        timeout=5,
-                    )
-            except Exception:
-                pass
-            return False
+        self._bootstrap_in_flight = True
+        channel_id: int | None = None
         try:
+            resolved_target = _validate_app_webview_url(target_url or self.url)
+            safe_cookies: list[dict[str, Any]] = []
+            for item in (cookies or ())[:_MAX_COOKIES]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "")
+                value = item.get("value")
+                if not name or value is None:
+                    continue
+                safe_cookies.append(
+                    {
+                        "name": name,
+                        "value": str(value),
+                        "domain": str(item.get("domain") or ""),
+                        "path": str(item.get("path") or "/"),
+                        "secure": bool(item.get("secure", True)),
+                        "httpOnly": bool(
+                            item.get("httpOnly", item.get("http_only", False))
+                        ),
+                        "expires": item.get("expires"),
+                    }
+                )
+            payload = json.dumps(
+                {"target_url": resolved_target, "cookies": safe_cookies},
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+            if len(payload) > _COOKIE_PAYLOAD_LIMIT:
+                try:
+                    await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=2.0)
+                    channel_id = self._cookie_channel_id
+                    if channel_id is not None:
+                        await self._invoke_method(
+                            "bootstrap_cookies",
+                            {"channel_id": channel_id, "abort": True},
+                            timeout=5,
+                        )
+                except Exception:
+                    pass
+                return False
             await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=5.0)
             channel = self._cookie_channel
             channel_id = self._cookie_channel_id
@@ -257,6 +303,11 @@ class UthAppWebView(LayoutControl):
             return bool(res)
         except Exception:
             return False
+        finally:
+            self._bootstrap_in_flight = False
+            self._initial_bootstrap_done = True
+            if channel_id is not None:
+                self._consumed_channel_ids.add(channel_id)
 
     async def load_request(self, url: str) -> bool:
         safe_url = _validate_app_webview_url(url)

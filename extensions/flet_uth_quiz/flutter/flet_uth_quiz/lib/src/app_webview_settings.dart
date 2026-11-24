@@ -1,11 +1,24 @@
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import 'quiz_popup_policy.dart' show hasUnsafeUrlCharacters;
-import 'quiz_webview_settings.dart' show quizSubframeCancelRegex;
 
 const appWebViewMsgPrefix = '__UTH_MSG__:';
 const appWebViewMaxConsoleMsgLength = 4096;
 const maxAppPopupSinks = 4;
+
+const _safePublicHttpsAuthorityPattern =
+    r'(?!localhost(?:[:/?#]|(?![\s\S]))|[^\x00-\x20\x7f-\x9f/@?#\\]*\.local(?:host)?(?:[:/?#]|(?![\s\S]))|127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2[0-9]|3[01])\.|0\.|\[::1?\])[^\x00-\x20\x7f-\x9f/@?#\\]+';
+
+/// Cancels unsafe subframe URLs natively on Android while allowing SharePoint,
+/// Office Online, and Google Docs `https://`, `blob:https://`, `about:blank`,
+/// and `about:srcdoc` subframes.
+const appBrowserSubframeCancelRegex =
+    r'(?is)^(?!(?:'
+    r'(?:blob:)?https://' +
+    _safePublicHttpsAuthorityPattern +
+    r'(?:[/?#][^\x00-\x1f\x7f\\]*)?'
+    r'|about:(?:blank|srcdoc)(?:[?#][^\x00-\x1f\x7f\\]*)?'
+    r')(?![\s\S])).*';
 
 final _cookieNamePattern = RegExp(r"^[!#\$%&'*+.^_`|~0-9A-Za-z-]+$");
 final _rawAuthorityPattern = RegExp(
@@ -127,7 +140,7 @@ InAppWebViewSettings createAppWebViewSettings({
     useShouldOverrideUrlLoading: true,
     regexToCancelSubFramesLoading: viewerLocked
         ? buildLockedViewerSubframeCancelRegex(viewerPrefix)
-        : quizSubframeCancelRegex,
+        : appBrowserSubframeCancelRegex,
     useHybridComposition: true,
     hardwareAcceleration: true,
     cacheEnabled: !viewerLocked,
@@ -384,8 +397,9 @@ bool _isValidHttpsBrowserUrl(String rawUrl) {
 }
 
 /// Extracts `S.browser_fallback_url` from Android `intent://...#Intent;...;end`
-/// redirects emitted by SharePoint, OneDrive, Google Drive, or Zalo, returning
-/// it only when it is a safe `https://` URL.
+/// redirects emitted by SharePoint, OneDrive, Google Drive, or Zalo, or
+/// synthesizes `https://<host><path>` when `scheme=https` is declared and no
+/// explicit `S.browser_fallback_url` parameter is present.
 String? resolveAndroidIntentFallbackUrl(String? rawUrl) {
   if (rawUrl == null) return null;
   final trimmed = rawUrl.trim();
@@ -397,6 +411,7 @@ String? resolveAndroidIntentFallbackUrl(String? rawUrl) {
   final markerIndex = trimmed.toLowerCase().indexOf('#intent;');
   if (markerIndex < 0) return null;
   final tail = trimmed.substring(markerIndex + '#Intent;'.length);
+  String? declaredScheme;
   for (final rawPart in tail.split(';')) {
     if (rawPart.startsWith('S.browser_fallback_url=')) {
       final encoded = rawPart.substring('S.browser_fallback_url='.length);
@@ -411,8 +426,34 @@ String? resolveAndroidIntentFallbackUrl(String? rawUrl) {
       }
       return null;
     }
+    if (rawPart.toLowerCase().startsWith('scheme=')) {
+      declaredScheme = rawPart.substring('scheme='.length).trim().toLowerCase();
+    }
+  }
+  if (declaredScheme == 'https') {
+    final hostAndPath = trimmed.substring('intent://'.length, markerIndex);
+    if (hostAndPath.isEmpty) return null;
+    final candidate = 'https://$hostAndPath';
+    if (_isValidHttpsBrowserUrl(candidate)) {
+      return candidate;
+    }
   }
   return null;
+}
+
+bool _isSafeAboutDocumentUrl(String lowered, {required bool viewerLocked}) {
+  if (lowered == 'about:blank' ||
+      lowered.startsWith('about:blank?') ||
+      lowered.startsWith('about:blank#')) {
+    return true;
+  }
+  if (!viewerLocked &&
+      (lowered == 'about:srcdoc' ||
+          lowered.startsWith('about:srcdoc?') ||
+          lowered.startsWith('about:srcdoc#'))) {
+    return true;
+  }
+  return false;
 }
 
 AppNavigationDecision decideAppWebViewNavigation(
@@ -431,7 +472,7 @@ AppNavigationDecision decideAppWebViewNavigation(
   }
 
   final lowered = trimmed.toLowerCase();
-  if (lowered == 'about:blank') {
+  if (_isSafeAboutDocumentUrl(lowered, viewerLocked: viewerLocked)) {
     return const AppNavigationDecision.allow();
   }
 
@@ -481,12 +522,21 @@ AppNavigationDecision decideAppWebViewNavigation(
         uri.path.split('/').contains('..')) {
       return const AppNavigationDecision.cancel();
     }
+    final prefixTrimmed = viewerPrefix.trim();
+    final prefixUri = Uri.tryParse(prefixTrimmed);
+    if (prefixUri == null ||
+        !prefixUri.isAbsolute ||
+        !prefixUri.hasAuthority ||
+        !prefixUri.hasPort) {
+      return const AppNavigationDecision.cancel();
+    }
     final normalized =
         '${uri.scheme.toLowerCase()}://${uri.host.toLowerCase()}:${uri.port}${uri.path}';
-    final prefixLower = viewerPrefix.toLowerCase();
-    final matched = prefixLower.endsWith('/')
-        ? normalized.startsWith(prefixLower)
-        : normalized == prefixLower;
+    final normalizedPrefix =
+        '${prefixUri.scheme.toLowerCase()}://${prefixUri.host.toLowerCase()}:${prefixUri.port}${prefixUri.path}';
+    final matched = normalizedPrefix.endsWith('/')
+        ? normalized.startsWith(normalizedPrefix)
+        : normalized == normalizedPrefix;
     return matched
         ? const AppNavigationDecision.allow()
         : const AppNavigationDecision.cancel();
@@ -637,10 +687,38 @@ String? resolveCreateWindowInPlaceTarget(
   };
   if (target == null || target.isEmpty) return null;
   final lowered = target.toLowerCase();
-  if (lowered == 'about:blank' || lowered.startsWith('blob:')) {
+  if (_isSafeAboutDocumentUrl(lowered, viewerLocked: false) ||
+      lowered.startsWith('blob:')) {
     return null;
   }
   return target;
+}
+
+/// Validates a file download URL emitted by `onDownloadStartRequest` for
+/// delegation to `external_url`, allowing only public `https://` URLs when
+/// [viewerLocked] is false.
+String? resolveDownloadExternalUrl(
+  String? rawUrl, {
+  required bool viewerLocked,
+}) {
+  if (viewerLocked || rawUrl == null) return null;
+  final trimmed = rawUrl.trim();
+  if (!_isValidHttpsBrowserUrl(trimmed)) return null;
+  return trimmed;
+}
+
+/// Determines whether a `didUpdateWidget` / property sync should navigate the
+/// live `InAppWebViewController`, suppressing echoes of the already-loaded URL.
+bool shouldNavigateOnWidgetUrlSync({
+  required String nextUrl,
+  required String previousInitialUrl,
+  required String currentLoadedUrl,
+}) {
+  final trimmed = nextUrl.trim();
+  if (trimmed.isEmpty) return false;
+  if (trimmed == previousInitialUrl.trim()) return false;
+  if (trimmed == currentLoadedUrl.trim()) return false;
+  return true;
 }
 
 /// Forwards `__UTH_MSG__:` console bridge events only in locked document viewers
