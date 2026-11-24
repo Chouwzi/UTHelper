@@ -375,7 +375,7 @@ class AppController:
             self._update_coordinator.start()
 
         if (
-            platform_utils.IS_ANDROID
+            (platform_utils.IS_ANDROID or platform_utils.IS_IOS)
             and self._android_background
             and self._android_background.available
         ):
@@ -458,10 +458,14 @@ class AppController:
             return False
         prev_dismiss = getattr(dlg, "on_dismiss", None)
 
-        def _on_dismiss(event=None):
-            _set_webview_occlusion("modal_dialog", False)
-            if callable(prev_dismiss):
-                prev_dismiss(event)
+        async def _on_dismiss(event=None):
+            try:
+                if callable(prev_dismiss):
+                    res = prev_dismiss(event)
+                    if inspect.isawaitable(res):
+                        await res
+            finally:
+                _set_webview_occlusion("modal_dialog", False)
 
         try:
             dlg.on_dismiss = _on_dismiss
@@ -3937,7 +3941,7 @@ class AppController:
         has_cached_snapshot: bool = False,
         needs_initial_sync: bool = True,
     ) -> None:
-        """Hydrate AndroidKeyStore secrets, migrate legacy JSON, and start sync."""
+        """Hydrate mobile secret vault (AndroidKeyStore/iOS Keychain), migrate legacy JSON, and start sync."""
         bridge = getattr(self, "_android_background", None)
         if bridge and bridge.available:
             vault_secrets: dict[str, str] = {}
@@ -3956,7 +3960,7 @@ class AppController:
                 except Exception as exc:
                     if attempt == len(retry_delays):
                         logger.warning(
-                            "Failed to read Android secret vault: %s",
+                            "Failed to read mobile secret vault: %s",
                             type(exc).__name__,
                         )
 
@@ -3985,11 +3989,12 @@ class AppController:
                         await asyncio.to_thread(save_settings)
                     else:
                         logger.warning(
-                            "Android secret migration did not confirm; preserving legacy JSON"
+                            "Mobile secret migration did not confirm; preserving legacy JSON"
                         )
 
             self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
-            await self._initialize_android_background()
+            if not platform_utils.IS_IOS:
+                await self._initialize_android_background()
 
         if not needs_initial_sync:
             hydration_started = self._schedule_cached_detail_hydration(

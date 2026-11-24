@@ -2860,3 +2860,231 @@ def test_show_course_grades_discards_stale_account_epoch():
 
     assert shown == ["loading"]
     controller._notify_grade_changes.assert_not_awaited()
+
+
+def test_ios_startup_hydrates_keychain_registers_backend_and_allows_save_settings(
+    monkeypatch, tmp_path
+):
+    import json
+    import config
+    import gui.app_controller as app_controller_module
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120099",
+                "UTH_PASSWORD": "legacy-ios-password",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+    monkeypatch.setattr(config.sys, "_IOS_", True, raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", False)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_IOS", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_MOBILE", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", False)
+    config.register_secret_backend(None)
+    config.register_secret_backend_factory(None)
+
+    loaded = config.load_settings()
+    monkeypatch.setattr(config, "settings", loaded)
+    monkeypatch.setattr(app_controller_module, "settings", loaded)
+
+    # Fail-closed before iOS startup registers the native Keychain backend.
+    assert config.save_settings() is False
+
+    events = []
+    keychain_store = {
+        "ws_token": "ios-keychain-ws",
+        "ws_token_origin": "https://courses.ut.edu.vn",
+    }
+
+    class _FakeIosBridge:
+        available = True
+
+        async def read_app_secrets(self):
+            events.append("read_keychain")
+            return dict(keychain_store)
+
+        async def write_app_secrets(self, secrets_map):
+            events.append(("write_keychain", dict(secrets_map)))
+            keychain_store.clear()
+            keychain_store.update(secrets_map)
+            return True
+
+        async def clear_app_secrets(self):
+            keychain_store.clear()
+            return True
+
+    bridge = _FakeIosBridge()
+
+    # 1. Verify AppController.__init__ schedules _startup_android_sequence on iOS.
+    scheduled_in_init = []
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            app_controller_module.AppController,
+            "_init_window",
+            lambda self: setattr(self, "_android_background", bridge),
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_create_update_coordinator",
+            lambda self: None,
+        )
+        mp.setattr(
+            app_controller_module.AppController, "_init_ui", lambda self: None
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_load_cached_snapshot",
+            lambda self: False,
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_configure_mobile_back_navigation",
+            lambda self: None,
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_safe_run_task",
+            lambda self, fn, *args, **kwargs: scheduled_in_init.append(
+                getattr(fn, "__name__", str(fn))
+            ),
+        )
+        fake_init_page = SimpleNamespace(
+            session=SimpleNamespace(connection=object()),
+            on_disconnect=None,
+            on_keyboard_event=None,
+            on_resize=None,
+            update=lambda: None,
+        )
+        init_ctrl = AppController(fake_init_page)
+        del init_ctrl
+    assert "_startup_android_sequence" in scheduled_in_init
+    assert "_initialize_android_background" not in scheduled_in_init
+
+    # 2. Verify _startup_android_sequence hydrates Keychain, registers backend,
+    #    skips Android-only background init, and makes save_settings() succeed.
+    scheduled_tasks = []
+
+    def fake_run_task(handler, *args, **kwargs):
+        task = asyncio.create_task(handler(*args, **kwargs))
+        scheduled_tasks.append(task)
+        return task
+
+    controller = AppController.__new__(AppController)
+    controller._android_background = bridge
+    controller._page_alive = app_controller_module.threading.Event()
+    controller._page_alive.set()
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=fake_run_task,
+    )
+    controller._today_schedule_coordinator = SimpleNamespace(
+        run=AsyncMock(side_effect=lambda: events.append("schedule"))
+    )
+    controller._initialize_android_background = AsyncMock(
+        side_effect=lambda: events.append("android_bg_init")
+    )
+    controller._load_data_async = AsyncMock(
+        side_effect=lambda trigger="manual": events.append(("load_data", trigger))
+    )
+    controller._show_login_dialog = AsyncMock(
+        side_effect=lambda: events.append("login")
+    )
+    controller._schedule_cached_detail_hydration = lambda _has_cache: False
+    controller._schedule_card_detail_warmup = lambda: False
+
+    async def _run():
+        await controller._startup_android_sequence(True, False)
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+        loaded.UTH_PASSWORD = "updated-ios-password"
+        return await asyncio.to_thread(config.save_settings)
+
+    try:
+        saved_ok = asyncio.run(_run())
+        assert saved_ok is True
+        assert events[0] == "read_keychain"
+        assert ("load_data", "startup") in events
+        assert "login" not in events
+        controller._initialize_android_background.assert_not_awaited()
+        assert loaded.MOODLE_WS_TOKEN == "ios-keychain-ws"
+        assert keychain_store["password"] == "updated-ios-password"
+        persisted = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "UTH_PASSWORD" not in persisted
+        assert "MOODLE_WS_TOKEN" not in persisted
+    finally:
+        config.register_secret_backend(None)
+        config.register_secret_backend_factory(None)
+
+
+def test_attach_modal_occlusion_release_awaits_async_flet_dismiss_and_clears_occlusion(
+    monkeypatch,
+):
+    import inspect
+    import warnings
+    import gui.app_controller as app_controller_module
+
+    occlusions = []
+    monkeypatch.setattr(
+        app_controller_module,
+        "_set_webview_occlusion",
+        lambda reason, occ: occlusions.append((reason, occ)),
+    )
+
+    dismissed = []
+    dlg = SimpleNamespace(open=True, on_dismiss=None)
+    dialogs_controls = [dlg]
+
+    async def wrapped_on_dismiss(event=None):
+        await asyncio.sleep(0)
+        dismissed.append(event)
+        if dlg in dialogs_controls:
+            dialogs_controls.remove(dlg)
+
+    dlg.on_dismiss = wrapped_on_dismiss
+
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(
+        _dialogs=SimpleNamespace(controls=dialogs_controls),
+        overlay=[],
+        dialog=None,
+    )
+
+    assert controller._attach_modal_occlusion_release() is True
+    assert inspect.iscoroutinefunction(dlg.on_dismiss)
+
+    sentinel_event = SimpleNamespace(data=None)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        asyncio.run(dlg.on_dismiss(sentinel_event))
+
+    assert dismissed == [sentinel_event]
+    assert dialogs_controls == []
+    assert occlusions == [("modal_dialog", False)]
+    unawaited = [w for w in caught if "was never awaited" in str(w.message)]
+    assert unawaited == []
+
+    # Even if the wrapped dismiss handler raises, modal occlusion must still release.
+    occlusions.clear()
+    failing_dlg = SimpleNamespace(open=True, on_dismiss=None)
+
+    async def failing_dismiss(_event=None):
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+    failing_dlg.on_dismiss = failing_dismiss
+    controller.page = SimpleNamespace(
+        _dialogs=SimpleNamespace(controls=[failing_dlg]),
+        overlay=[],
+        dialog=None,
+    )
+    assert controller._attach_modal_occlusion_release() is True
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(failing_dlg.on_dismiss(sentinel_event))
+    assert occlusions == [("modal_dialog", False)]
