@@ -422,3 +422,185 @@ def test_switching_away_from_demo_account_restores_normal_routing(demo_env, monk
     assert snap_after_switch.ok is False
     assert snap_after_switch.issue is not None
     assert snap_after_switch.issue.code is not SubmissionErrorCode.DEMO_READ_ONLY
+
+
+@pytest.mark.parametrize("bad_password", ["wrong-password", ""])
+def test_demo_account_with_invalid_or_empty_password_fails_closed_offline(
+    demo_env, monkeypatch, tmp_path, bad_password
+):
+    monkeypatch.setattr(settings, "UTH_USERNAME", "uthelper_demo")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", bad_password)
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "")
+
+    client = MoodleClient()
+    thnn_client = MoodleClient("https://thnn.ut.edu.vn")
+
+    assert client.has_site_credentials is False
+    assert thnn_client.has_site_credentials is False
+    assert client.call_ws_api("core_webservice_get_site_info") is None
+    assert thnn_client.call_ajax_api("core_courseformat_get_state", courseid=201) is None
+    assert client.get_user_id() is None
+    assert client.fetch_grade_report_html(101) is None
+    assert client.last_grade_report_error == "login_session:invalid_credentials"
+
+    with pytest.raises(RuntimeError, match="Moodle session login failed"):
+        client.open_session_url("/mod/attendance/view.php?id=106")
+    with pytest.raises(RuntimeError, match="Moodle session login failed"):
+        client.open_session_raw("/mod/attendance/view.php?id=106")
+
+    assert (
+        client.download_file(
+            "https://courses.ut.edu.vn/webservice/pluginfile.php/990101/mod_resource/content/1/Bai_giang_Chuong_01_Socket_TCP_UDP.pdf"
+        )
+        is None
+    )
+    assert (
+        thnn_client.download_session_file(
+            "https://thnn.ut.edu.vn/pluginfile.php/992001/mod_resource/content/1/IT_English_Unit_03_Cloud_Architecture.pdf"
+        )
+        is None
+    )
+
+    opener_resp = thnn_client._ensure_html_opener().open("/calendar/export.php")
+    assert opener_resp.geturl() == "https://thnn.ut.edu.vn/login/index.php"
+
+    orch = DataOrchestrator()
+    outcome = asyncio.run(orch.fetch_activity_outcome_async())
+    assert outcome.success is False
+    assert outcome.activities == []
+
+    sample_card = {
+        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=101",
+        "course_id": 101,
+        "type": "assignment",
+        "details": {},
+    }
+    unchanged = orch.fetch_full_details(sample_card, force_refresh=True)
+    assert not unchanged.get("details", {}).get("description_html")
+
+    moodle_service = MoodleService(client.call_ws_api)
+    catalog_service = CourseCatalogService(
+        cache_store=CourseCacheStore(
+            cache_dir=tmp_path / f"cat_{len(bad_password)}", namespace="uthelper_demo"
+        ),
+        preview_cache=PreviewFileCache(cache_dir=tmp_path / f"prev_{len(bad_password)}"),
+        courses_provider=CoursesWsProvider(service=moodle_service, client=client),
+        thnn_provider=ThnnCourseProvider(client=thnn_client),
+    )
+    assert catalog_service.refresh_catalog(include_thnn=True) == []
+
+    workflow = SubmissionWorkflow(client)
+    target = SubmissionTarget("https://courses.ut.edu.vn/mod/assign/view.php?id=101", 101)
+    assert workflow.load_snapshot(target).ok is False
+    assert (
+        workflow.mutate_files(
+            target,
+            FileMutationIntent(
+                operation=MutationOperation.ADD,
+                selected_files=(SelectedFile("a.pdf", 4, source_path=""),),
+            ),
+            selected_files=(SelectedSubmissionFile("a.pdf", b"%PDF"),),
+        ).ok
+        is False
+    )
+    assert (
+        workflow.finalize_submission(
+            target, FinalizeSubmissionIntent(accept_statement=True)
+        ).ok
+        is False
+    )
+
+
+def test_account_switch_clears_orchestrator_thnn_and_client_caches(
+    demo_env, monkeypatch
+):
+    settings.MOODLE_WS_TOKEN = ""
+    settings.MOODLE_WS_TOKEN_ORIGIN = ""
+
+    orch = DataOrchestrator()
+    demo_outcome = asyncio.run(orch.fetch_activity_outcome_async())
+    assert demo_outcome.success is True
+    assert any(a.get("site_identity") == "thnn" for a in demo_outcome.activities)
+
+    demo_assign = next(
+        a
+        for a in demo_outcome.activities
+        if a.get("type") == "assignment" and a.get("site_identity") != "thnn"
+    )
+    orch.fetch_full_details(demo_assign, force_refresh=True)
+    assert orch.get_cached_details_snapshot() != {}
+    assert orch._userid_cache == DEMO_USER_ID
+    assert len(orch._thnn_activities_cache) >= 2
+
+    # Populate client-level cached identity/portal token and verify clear_session & login reset them
+    orch.client._cached_user_id = 777
+    orch.client._portal_token = "stale-portal-jwt"
+    orch.client.clear_session()
+    assert orch.client._cached_user_id is None
+    assert orch.client._portal_token == ""
+
+    orch.client._cached_user_id = 888
+    orch.client._portal_token = "stale-portal-jwt-2"
+    assert orch.client.login("uthelper_demo", demo_env, force=True) is True
+    assert orch.client._cached_user_id is None
+    assert orch.client._portal_token == ""
+
+    # Switch to real student MSSV within the same 6h window; THNN login fails offline
+    monkeypatch.setattr(settings, "UTH_USERNAME", "2251120001")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "student-secret")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "student-ws-token")
+    monkeypatch.setattr(
+        settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn"
+    )
+
+    def _student_post(_url: str, data: dict, **_kwargs):
+        fn = data.get("wsfunction", "")
+        if fn == "core_webservice_get_site_info":
+            return 200, {"userid": 42, "fullname": "Real Student"}
+        if fn == "core_calendar_get_action_events_by_timesort":
+            return 200, {"events": [], "moreevents": False}
+        if fn == "core_enrol_get_users_courses":
+            return 200, [{"id": 301, "fullname": "Môn thật", "shortname": "REAL301"}]
+        if fn == "mod_assign_get_assignments":
+            return 200, {"courses": [], "warnings": []}
+        if fn == "core_calendar_get_calendar_events":
+            return 200, {"events": [], "warnings": []}
+        return 200, {}
+
+    monkeypatch.setattr(orch.client, "_post", _student_post)
+    monkeypatch.setattr(orch.thnn_client, "login_session", lambda *_a, **_k: False)
+
+    switched_outcome = asyncio.run(orch.fetch_activity_outcome_async())
+    assert switched_outcome.success is True
+    assert switched_outcome.activities == []
+    assert orch._userid_cache == 42
+    assert orch._thnn_activities_cache == []
+    assert orch.get_cached_details_snapshot() == {}
+
+
+def test_academic_grade_service_empty_string_fallback_vs_explicit_empty_demo_password(
+    demo_env, tmp_path
+):
+    from core.portal_client import PortalAuthError
+
+    portal = PortalClient(settings.PORTAL_API_BASE)
+    grade_service = AcademicGradeService(
+        portal_client=portal, cache_dir=tmp_path / "grades_fallback"
+    )
+
+    # Default `""` arguments must fall back to `settings.UTH_USERNAME` / `settings.UTH_PASSWORD`
+    assert len(grade_service.load_academic_data()) == 3
+    assert len(grade_service.load_academic_data("", "")) == 3
+    assert grade_service.load_credit_progress() == CreditProgress(
+        required_credits=132.0, earned_credits=78.0
+    )
+    assert grade_service.load_credit_progress("", "") == CreditProgress(
+        required_credits=132.0, earned_credits=78.0
+    )
+
+    # Explicit demo username with empty password `""` must NOT fall back to `settings.UTH_PASSWORD`
+    with pytest.raises(PortalAuthError):
+        grade_service.load_academic_data("uthelper_demo", "")
+    with pytest.raises(PortalAuthError):
+        grade_service.load_credit_progress("uthelper_demo", "")

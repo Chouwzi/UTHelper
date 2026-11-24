@@ -18,6 +18,22 @@ from core.safe_file_io import SafeFileIO
 logger = logging.getLogger(__name__)
 
 
+def _resolve_credentials(
+    username: str | None = "", password: str | None = None
+) -> tuple[str, str]:
+    explicit_username = bool(username and username.strip())
+    resolved_user = (
+        username
+        if explicit_username and username is not None
+        else (settings.UTH_USERNAME or settings.MOODLE_USERNAME or "")
+    )
+    if password is None or (not explicit_username and password == ""):
+        resolved_pwd = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD or ""
+    else:
+        resolved_pwd = password
+    return resolved_user, resolved_pwd
+
+
 def _namespace_digest(username: str) -> str:
     base = str(getattr(settings, "PORTAL_API_BASE", "") or "").strip()
     owner = normalize_demo_username(username) or "anonymous"
@@ -72,7 +88,7 @@ class AcademicGradeService:
 
     def load_academic_data(
         self,
-        username: str | None = None,
+        username: str = "",
         password: str | None = None,
         force_refresh: bool = False,
     ) -> list[SemesterGradeData]:
@@ -80,17 +96,7 @@ class AcademicGradeService:
 
         Uses daily cache if available (fetched once per day) unless force_refresh is True.
         """
-        if username is None and password is None:
-            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
-            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
-        else:
-            username = (
-                username
-                if username is not None
-                else (settings.UTH_USERNAME or settings.MOODLE_USERNAME)
-            )
-            if password is None:
-                password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        username, password = _resolve_credentials(username, password)
 
         if is_demo_account(username):
             raw_transcript = self._portal_client.fetch_full_transcript(
@@ -132,22 +138,12 @@ class AcademicGradeService:
 
     def load_credit_progress(
         self,
-        username: str | None = None,
+        username: str = "",
         password: str | None = None,
         force_refresh: bool = False,
     ) -> CreditProgress | None:
         """Loads graduation credit progress (canDat/hienTai); daily cache, stale fallback."""
-        if username is None and password is None:
-            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
-            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
-        else:
-            username = (
-                username
-                if username is not None
-                else (settings.UTH_USERNAME or settings.MOODLE_USERNAME)
-            )
-            if password is None:
-                password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        username, password = _resolve_credentials(username, password)
 
         if is_demo_account(username):
             body = self._portal_client.fetch_credit_progress(username, password)

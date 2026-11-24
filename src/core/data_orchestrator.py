@@ -11,7 +11,7 @@ from core.activity_status import (
     normalize_submission_status,
     prefer_known_submission_status,
 )
-from core.demo_sandbox import is_demo_account
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.grade_monitor import GradeMonitor
 from core.moodle_service import MoodleService
 from config import settings
@@ -60,6 +60,53 @@ class DataOrchestrator:
         self.course_grade_monitor = CourseGradeMonitor()
         self._course_grades_lock = threading.Lock()
         self.latest_course_grades: list = []
+        self._account_state_lock = threading.RLock()
+        self._active_account_key: str = self._current_account_key()
+
+    @staticmethod
+    def _current_account_key() -> str:
+        raw = getattr(settings, "UTH_USERNAME", "")
+        if is_demo_account(raw):
+            return normalize_demo_username(raw)
+        return str(raw or "").strip()
+
+    def _sync_account_scope(self) -> None:
+        """Reset account-scoped caches when `settings.UTH_USERNAME` changes."""
+        current_key = self._current_account_key()
+        lock = getattr(self, "_account_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._account_state_lock = lock
+        with lock:
+            if not hasattr(self, "_active_account_key"):
+                self._active_account_key = current_key
+                return
+            if current_key == self._active_account_key:
+                return
+            self._active_account_key = current_key
+            self.is_logged_in = False
+            self._userid_cache = None
+            self._courses_cache = None
+            self._thnn_activities_cache = []
+            self._last_thnn_fetch_ts = 0.0
+            self._last_fetch_ts = 0
+            self.latest_course_grades = []
+        if hasattr(self, "_detail_lock"):
+            self.clear_detail_cache()
+        client = getattr(self, "client", None)
+        if client is not None and hasattr(client, "clear_session"):
+            client.clear_session()
+        thnn_client = getattr(self, "thnn_client", None)
+        if thnn_client is not None and hasattr(thnn_client, "clear_session"):
+            thnn_client.clear_session()
+        for svc_attr in ("moodle_service", "thnn_service"):
+            svc = getattr(self, svc_attr, None)
+            clear_fn = getattr(svc, "clear_all_caches", None)
+            if callable(clear_fn):
+                try:
+                    clear_fn()
+                except Exception:
+                    pass
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -134,6 +181,7 @@ class DataOrchestrator:
 
     def _get_userid(self) -> Optional[int]:
         """Get cached userid or fetch from site_info."""
+        self._sync_account_scope()
         if self._userid_cache is not None:
             return self._userid_cache
         try:
@@ -153,6 +201,7 @@ class DataOrchestrator:
             Danh sách rỗng nếu không có thay đổi nào,
             None nếu xảy ra lỗi (bên gọi nên chuyển sang tải toàn bộ dữ liệu).
         """
+        self._sync_account_scope()
         if timestamp <= 0:
             return None  # Chưa có dữ liệu của lần tải trước, bắt buộc tải đầy đủ
         try:
@@ -179,6 +228,7 @@ class DataOrchestrator:
 
     def login(self) -> bool:
         """Đăng nhập bằng WS token (stateless, không kick browser)."""
+        self._sync_account_scope()
         if self.is_logged_in:
             return True
         
@@ -196,6 +246,7 @@ class DataOrchestrator:
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
         """Đăng nhập và lấy danh sách hoạt động mới nhất qua WS API."""
+        self._sync_account_scope()
         ws_result = self._fetch_via_ws_api()
         if ws_result is not None:
             return ws_result
@@ -208,6 +259,7 @@ class DataOrchestrator:
         Được gọi trong chu kỳ cập nhật Tổng quan và khi bấm làm mới ở tab Môn học.
         Khoá để hai luồng không báo trùng cùng một thay đổi.
         """
+        self._sync_account_scope()
         from core.course_grades_service import fetch_current_courses_with_grades
         with self._course_grades_lock:
             courses = fetch_current_courses_with_grades(self)
@@ -221,6 +273,7 @@ class DataOrchestrator:
         Returns:
             List of GradeChange objects if changes detected, empty list otherwise.
         """
+        self._sync_account_scope()
         userid = self._get_userid()
         if userid is None:
             return []
@@ -283,6 +336,7 @@ class DataOrchestrator:
 
 
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
+        self._sync_account_scope()
         last_known_good = list(self._thnn_activities_cache)
         try:
             if not self.thnn_client._sesskey:
@@ -472,6 +526,7 @@ class DataOrchestrator:
         3. calendar events + catalog quiz có chọn lọc (quiz đã làm)
         Merge lại để hoạt động đã hoàn thành không bị mất khỏi danh sách.
         """
+        self._sync_account_scope()
         try:
             from datetime import datetime
             now_ts = int(datetime.now().timestamp())
@@ -957,6 +1012,7 @@ class DataOrchestrator:
     
     async def get_latest_activities_async(self) -> List[Dict[str, Any]]:
         """Phiên bản async của get_latest_activities - dùng trực tiếp trong event loop."""
+        self._sync_account_scope()
         ws_result = await self._fetch_via_ws_api_async()
         if ws_result is not None:
             return ws_result
@@ -967,6 +1023,7 @@ class DataOrchestrator:
         """Return a typed result so failure cannot masquerade as an empty feed."""
         from core.sync_coordinator import FetchOutcome
 
+        self._sync_account_scope()
         try:
             ws_result = await self._fetch_via_ws_api_async()
         except Exception as exc:
@@ -1041,6 +1098,7 @@ class DataOrchestrator:
         cache_generation: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Tải toàn bộ chi tiết (mô tả, trạng thái nộp bài) qua WS API."""
+        self._sync_account_scope()
         url = activity_data.get("url")
         if not url:
             return activity_data
@@ -1075,8 +1133,15 @@ class DataOrchestrator:
 
         try:
             # WS API (stateless, không kick browser)
-            if settings.MOODLE_WS_TOKEN or is_demo_account(
-                getattr(settings, "UTH_USERNAME", "")
+            if settings.MOODLE_WS_TOKEN or (
+                is_demo_account(getattr(settings, "UTH_USERNAME", ""))
+                and bool(
+                    getattr(
+                        getattr(self, "client", None),
+                        "has_site_credentials",
+                        False,
+                    )
+                )
             ):
                 ws_result = self._fetch_detail_via_ws(activity_data)
                 if ws_result:
@@ -1265,6 +1330,7 @@ class DataOrchestrator:
         cancel_flag=None,
     ) -> Dict[str, Dict[str, Any]]:
         """Hydrate status only, avoiding per-card assignment/quiz catalog calls."""
+        self._sync_account_scope()
         pending = [activity for activity in activities if activity.get("url")]
         if not pending or (cancel_flag and cancel_flag()):
             return {}
@@ -1316,6 +1382,7 @@ class DataOrchestrator:
         Prefetch chi tiết một hoạt động vào cache. Trả về True nếu đã cache sẵn hoặc fetch thành công.
         Dùng cho background prefetch - không raise exception.
         """
+        self._sync_account_scope()
         url = activity_data.get("url")
         if not url:
             return True
@@ -1335,6 +1402,7 @@ class DataOrchestrator:
         force_refresh: bỏ qua cache, load lại từ đầu
         Trả về số lượng đã fetch thành công.
         """
+        self._sync_account_scope()
         if force_refresh:
             pending = [a for a in activities if a.get("url")]
         else:

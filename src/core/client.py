@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import http.client
 import io
 import json
@@ -6,6 +7,7 @@ import os
 import threading
 import time
 import zlib
+from collections import OrderedDict
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 import urllib.parse
@@ -434,6 +436,34 @@ def _urlopen(req, timeout=15):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+_DEMO_CRED_CACHE_LOCK = threading.Lock()
+_DEMO_CRED_CACHE: OrderedDict[tuple[str, bytes], bool] = OrderedDict()
+_DEMO_CRED_CACHE_MAX = 4
+
+
+def _verify_demo_credentials_cached(
+    username: str | None, password: str | None
+) -> bool:
+    """Memoize PBKDF2 demo credential checks by `(normalized_user, sha256(pwd))` (no plaintext)."""
+    if not is_demo_account(username) or not isinstance(password, str) or not password:
+        return False
+    norm_user = normalize_demo_username(username)
+    pwd_digest = hashlib.sha256(password.encode("utf-8")).digest()
+    key = (norm_user, pwd_digest)
+    with _DEMO_CRED_CACHE_LOCK:
+        cached = _DEMO_CRED_CACHE.get(key)
+        if cached is not None:
+            _DEMO_CRED_CACHE.move_to_end(key)
+            return cached
+    valid = is_demo_credentials(norm_user, password)
+    with _DEMO_CRED_CACHE_LOCK:
+        _DEMO_CRED_CACHE[key] = valid
+        _DEMO_CRED_CACHE.move_to_end(key)
+        while len(_DEMO_CRED_CACHE) > _DEMO_CRED_CACHE_MAX:
+            _DEMO_CRED_CACHE.popitem(last=False)
+    return valid
+
+
 def _demo_mime_for_path(path: str) -> str:
     lower_path = (path or "").lower()
     if lower_path == "/calendar/export.php" or lower_path.endswith(".ics"):
@@ -513,6 +543,10 @@ class _DemoHtmlOpener:
                 f"{self.origin}/", raw_url.lstrip("/")
             )
 
+        if not MoodleClient._has_valid_demo_credentials():
+            login_url = f"{self.origin}/login/index.php" if self.origin else resolved_url
+            return _DemoHttpResponse(login_url, b"", "text/html; charset=utf-8")
+
         resolved_path = urllib.parse.urlsplit(resolved_url).path or "/"
         file_bytes = get_demo_file_bytes(resolved_url)
         if file_bytes is not None:
@@ -573,12 +607,15 @@ class MoodleClient:
         return value
 
     def clear_session(self) -> None:
-        """Clear the HTML session cookies, sesskey, and owning username."""
+        """Clear the HTML session cookies, sesskey, cached user/portal state, and owning username."""
         with self._session_lock:
             self._cookie_jar.clear()
             self._sesskey = ""
             self._session_owner = ""
             self._session_generation += 1
+            self._portal_token = ""
+            if hasattr(self, "_cached_user_id"):
+                self._cached_user_id = None
 
     def _reset_session_if_account_changed(self, username: str | None = None) -> None:
         """Drop stale HTML session cookies/sesskey when the active account changes."""
@@ -591,10 +628,20 @@ class MoodleClient:
                 self._sesskey = ""
                 self._session_owner = ""
                 self._session_generation += 1
+                self._portal_token = ""
+                if hasattr(self, "_cached_user_id"):
+                    self._cached_user_id = None
 
     @staticmethod
     def _is_demo_mode() -> bool:
         return is_demo_account(getattr(settings, "UTH_USERNAME", ""))
+
+    @staticmethod
+    def _has_valid_demo_credentials() -> bool:
+        return _verify_demo_credentials_cached(
+            getattr(settings, "UTH_USERNAME", ""),
+            getattr(settings, "UTH_PASSWORD", ""),
+        )
 
     @property
     def moodle_site_origin(self) -> str:
@@ -605,7 +652,7 @@ class MoodleClient:
     def has_site_credentials(self) -> bool:
         """Whether this client can authenticate only to its configured site."""
         if self._is_demo_mode():
-            return self._moodle_site is not None
+            return self._moodle_site is not None and self._has_valid_demo_credentials()
         return bool(
             (
                 settings.MOODLE_WS_TOKEN
@@ -790,6 +837,9 @@ class MoodleClient:
         if self._is_demo_mode():
             meta = self._get_open_session_meta_local()
             meta.has_set_cookie = False
+            if not self._has_valid_demo_credentials():
+                self._last_login_error = "invalid_credentials"
+                raise RuntimeError("Moodle session login failed")
             if req_method not in {"GET", "HEAD"}:
                 return (
                     403,
@@ -938,6 +988,9 @@ class MoodleClient:
             path = f"{rp.path}?{rp.query}" if rp.query else (rp.path or "/")
 
         if self._is_demo_mode():
+            if not self._has_valid_demo_credentials():
+                self._last_login_error = "invalid_credentials"
+                raise RuntimeError("Moodle session login failed")
             resolved_url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
             return render_demo_session_html(resolved_url)
 
@@ -1007,7 +1060,7 @@ class MoodleClient:
             with self._session_lock:
                 canonical = normalize_demo_username(eff_user)
                 self._reset_session_if_account_changed(canonical)
-                if not self.moodle_site_origin or not is_demo_credentials(
+                if not self.moodle_site_origin or not _verify_demo_credentials_cached(
                     eff_user, eff_pwd
                 ):
                     self._cookie_jar.clear()
@@ -1128,6 +1181,10 @@ class MoodleClient:
         """Gọi Moodle AJAX service. Trả về None nếu lỗi hoặc HTTP fail."""
         if self._is_demo_mode():
             if not self.moodle_site_origin:
+                self._last_login_error = "untrusted_site"
+                return None
+            if not self._has_valid_demo_credentials():
+                self._last_login_error = "invalid_credentials"
                 return None
             return handle_demo_ajax_call(
                 function, params, site_origin=self.moodle_site_origin
@@ -1194,6 +1251,10 @@ class MoodleClient:
             self.last_grade_report_error = ""
             if not self.moodle_site_origin:
                 self.last_grade_report_error = "untrusted_site"
+                return None
+            if not self._has_valid_demo_credentials():
+                self._last_login_error = "invalid_credentials"
+                self.last_grade_report_error = "login_session:invalid_credentials"
                 return None
             return render_demo_grade_report_html(
                 int(course_id), site_origin=self.moodle_site_origin
@@ -1486,6 +1547,10 @@ class MoodleClient:
         Đây là phương thức login duy nhất. Sử dụng Moodle WS API,
         hoạt động trên mọi nền tảng (iOS, Android, Desktop).
         """
+        self._portal_token = ""
+        if hasattr(self, "_cached_user_id"):
+            self._cached_user_id = None
+
         credentials_are_explicit = username is not None or password is not None
         eff_user = (
             username
@@ -1501,7 +1566,7 @@ class MoodleClient:
             if not self.moodle_site_origin:
                 self._last_login_error = "untrusted_site"
                 return False
-            if not is_demo_credentials(eff_user, eff_pwd):
+            if not _verify_demo_credentials_cached(eff_user, eff_pwd):
                 self._last_login_error = "invalid_credentials"
                 return False
             if credentials_are_explicit:
@@ -1531,6 +1596,10 @@ class MoodleClient:
         """
         if self._is_demo_mode():
             if not self.moodle_site_origin:
+                self._last_login_error = "untrusted_site"
+                return None
+            if not self._has_valid_demo_credentials():
+                self._last_login_error = "invalid_credentials"
                 return None
             result = handle_demo_ws_call(
                 function,
@@ -1619,7 +1688,9 @@ class MoodleClient:
         Cần cho core_files_upload (instanceid) và các API khác cần userid.
         """
         if self._is_demo_mode():
-            return DEMO_USER_ID if self.moodle_site_origin else None
+            if not self.moodle_site_origin or not self._has_valid_demo_credentials():
+                return None
+            return DEMO_USER_ID
         if not refresh and hasattr(self, '_cached_user_id') and self._cached_user_id:
             return self._cached_user_id
         try:
@@ -1732,6 +1803,8 @@ class MoodleClient:
         origin = self.moodle_site_origin
         if not _is_same_moodle_origin_url(url, origin):
             logger.warning("Blocked off-origin or unsafe demo download URL")
+            return False
+        if not self._has_valid_demo_credentials():
             return False
         payload = get_demo_file_bytes(url.strip())
         if payload is None:
