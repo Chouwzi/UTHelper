@@ -217,6 +217,53 @@ def _is_flet_webview_platform(page: Optional[ft.Page]) -> bool:
     return False
 
 
+def _load_uth_app_webview_cls() -> Optional[type]:
+    """Lazily resolve UthAppWebView from packaged site-packages or local checkout."""
+    try:
+        from flet_uth_quiz import UthAppWebView
+
+        return UthAppWebView
+    except ImportError:
+        try:
+            from platform_utils.quiz_client_bootstrap import (
+                add_source_quiz_package_to_path,
+            )
+
+            repo_root = Path(__file__).resolve().parents[4]
+            add_source_quiz_package_to_path(repo_root)
+            from flet_uth_quiz import UthAppWebView
+
+            return UthAppWebView
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _is_inappwebview_mobile_platform(page: Optional[ft.Page]) -> bool:
+    """Return True on live Android/iOS Flet pages where UthAppWebView is available."""
+    if not isinstance(page, ft.Page) or bool(getattr(page, "web", False)):
+        return False
+    platform_val = str(getattr(page, "platform", "") or "").lower()
+    if "android" not in platform_val and "ios" not in platform_val:
+        return False
+    return _load_uth_app_webview_cls() is not None
+
+
+def _is_viewer_locked_url(url: str) -> bool:
+    """Return True when ``url`` targets an isolated local Office, PDF, or HTML item viewer."""
+    if _extract_loopback_port(url) is None:
+        return False
+    try:
+        path = urlsplit(url).path
+        if _LOOPBACK_ITEM_PATH_RE.fullmatch(path):
+            return True
+        segs = [s for s in path.split("/") if s]
+        return len(segs) >= 2 and segs[0] in ("viewer", "pdf-viewer")
+    except ValueError:
+        return False
+
+
 def _is_windows_webview2_platform(page: Optional[ft.Page]) -> bool:
     """Return True on Windows when a non-web target Page can host WebView2."""
     if sys.platform != "win32" or page is None or bool(getattr(page, "web", False)):
@@ -1382,7 +1429,7 @@ class _FletWebViewSlot(ft.Container):
 
 
 class EmbeddedWebViewHost:
-    """Unified inline WebView adapter across mobile/macOS (flet_webview) and Windows (WebView2)."""
+    """Unified inline WebView adapter across mobile (inappwebview/flet_webview) and Windows (WebView2)."""
 
     def __init__(
         self,
@@ -1393,6 +1440,8 @@ class EmbeddedWebViewHost:
         html: Optional[str] = None,
         webview_control: Any = None,
         dock: Optional[WindowsWebView2Dock] = None,
+        cookies: Optional[list[dict[str, Any]]] = None,
+        cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_ready: Optional[Callable[[], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_message: Optional[Callable[[str], None]] = None,
@@ -1400,6 +1449,7 @@ class EmbeddedWebViewHost:
         on_title_changed: Optional[Callable[[str], None]] = None,
         on_loading_changed: Optional[Callable[[bool], None]] = None,
         on_history_changed: Optional[Callable[[bool, bool], None]] = None,
+        on_external_url: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._backend = backend
         self._page = page
@@ -1410,6 +1460,8 @@ class EmbeddedWebViewHost:
             self._allowed_loopback_ports.add(init_loop_port)
         self._wv = webview_control
         self._dock = dock
+        self._cookies: list[dict[str, Any]] = list(cookies or ())
+        self._cookie_provider = cookie_provider
         self._on_ready = on_ready
         self._on_error = on_error
         self._on_message = on_message
@@ -1417,6 +1469,7 @@ class EmbeddedWebViewHost:
         self._on_title_changed = on_title_changed
         self._on_loading_changed = on_loading_changed
         self._on_history_changed = on_history_changed
+        self._on_external_url = on_external_url
 
         self._pending_html: Optional[tuple[str, Optional[str]]] = (
             (html, None) if (backend == "flet_webview" and html is not None) else None
@@ -1430,7 +1483,7 @@ class EmbeddedWebViewHost:
         self._loading_ring: Optional[ft.ProgressRing] = None
         self._loading_text: Optional[ft.Text] = None
         self._slot: ft.Container
-        if backend == "flet_webview":
+        if backend in ("flet_webview", "inappwebview"):
             self._slot = _FletWebViewSlot(
                 webview=webview_control,
                 on_mount=self._on_flet_mount,
@@ -1500,19 +1553,84 @@ class EmbeddedWebViewHost:
     def _on_flet_mount(self) -> None:
         if self._disposed:
             return
-        if self._pending_html is not None:
-            html, base_url = self._pending_html
-            self._pending_html = None
+        if self._backend == "inappwebview":
+            has_cookie_bootstrap = bool(
+                self._wv is not None
+                and (
+                    self._cookies
+                    or callable(self._cookie_provider)
+                    or getattr(self._wv, "require_initial_cookies", False)
+                )
+            )
+            if has_cookie_bootstrap:
 
-            async def _flush_html() -> None:
-                if self._wv is not None and not self._disposed:
-                    try:
-                        await self._wv.load_html(html, base_url=base_url)
-                    except Exception:
-                        pass
+                async def _bootstrap_inapp_cookies() -> None:
+                    if self._wv is None or self._disposed:
+                        return
+                    resolved_cookies = list(self._cookies or ())
+                    if not resolved_cookies and callable(self._cookie_provider):
+                        try:
+                            resolved_cookies = (
+                                await asyncio.to_thread(self._cookie_provider) or []
+                            )
+                        except Exception as exc:
+                            logger.debug("InAppWebView cookie provider failed: %s", exc)
+                            resolved_cookies = []
+                    if self._wv is not None and not self._disposed:
+                        try:
+                            await self._wv.bootstrap_cookies(
+                                list(resolved_cookies),
+                                target_url=self._url,
+                            )
+                        except Exception:
+                            pass
 
-            self._schedule_task(_flush_html)
-        self._schedule_history_refresh()
+                self._schedule_task(_bootstrap_inapp_cookies)
+            if self._pending_html is not None:
+                html, base_url = self._pending_html
+                self._pending_html = None
+
+                async def _flush_inapp_html() -> None:
+                    if self._wv is not None and not self._disposed:
+                        try:
+                            await self._wv.load_html(html, base_url=base_url)
+                        except Exception:
+                            pass
+
+                self._schedule_task(_flush_inapp_html)
+            return
+
+        pending = self._pending_html
+        self._pending_html = None
+
+        async def _init_flet_webview() -> None:
+            if self._wv is None or self._disposed:
+                return
+            try:
+                import flet_webview as fwv
+
+                set_js = getattr(self._wv, "set_javascript_mode", None)
+                js_enum = getattr(fwv, "JavaScriptMode", None)
+                if callable(set_js) and js_enum is not None:
+                    await set_js(js_enum.UNRESTRICTED)
+            except Exception:
+                pass
+            if self._wv is None or self._disposed:
+                return
+            if pending is not None:
+                html, base_url = pending
+                try:
+                    await self._wv.load_html(html, base_url=base_url)
+                except Exception:
+                    pass
+            elif self._url and _safe_control_page(self._wv) is not None:
+                try:
+                    await self._wv.reload()
+                except Exception:
+                    pass
+            await self._refresh_history_async()
+
+        self._schedule_task(_init_flet_webview)
 
     async def _refresh_history_async(self) -> None:
         if self._wv is None or self._disposed:
@@ -1532,14 +1650,38 @@ class EmbeddedWebViewHost:
             return
         self._schedule_task(self._refresh_history_async)
 
+    def _is_allowed_event_url(self, url: str) -> bool:
+        cleaned = str(url or "").strip()
+        if not cleaned:
+            return True
+        lowered = cleaned.lower()
+        if lowered == "about:blank":
+            return True
+        if lowered.startswith("blob:"):
+            inner = cleaned[5:]
+            return bool(
+                _validate_webview_url(
+                    inner,
+                    allowed_loopback_ports=self._allowed_loopback_ports,
+                )
+            )
+        return bool(
+            _validate_webview_url(
+                cleaned,
+                allowed_loopback_ports=self._allowed_loopback_ports,
+            )
+        )
+
+    @staticmethod
+    def _is_transient_event_url(url: str) -> bool:
+        lowered = str(url or "").strip().lower()
+        return lowered == "about:blank" or lowered.startswith("blob:")
+
     def _handle_flet_page_started(self, e: Any) -> None:
         if self._disposed:
             return
         url = str(getattr(e, "data", "") or "")
-        if url and not _validate_webview_url(
-            url,
-            allowed_loopback_ports=self._allowed_loopback_ports,
-        ):
+        if url and not self._is_allowed_event_url(url):
             if self._on_loading_changed is not None:
                 self._on_loading_changed(False)
             if self._on_error is not None:
@@ -1547,7 +1689,7 @@ class EmbeddedWebViewHost:
             return
         if self._on_loading_changed is not None:
             self._on_loading_changed(True)
-        if url and self._on_url_changed is not None:
+        if url and not self._is_transient_event_url(url) and self._on_url_changed is not None:
             self._on_url_changed(url)
         self._schedule_history_refresh()
 
@@ -1558,6 +1700,8 @@ class EmbeddedWebViewHost:
             self._on_loading_changed(False)
         if self._on_ready is not None:
             self._on_ready()
+        if self._backend != "flet_webview":
+            return
         self._schedule_history_refresh()
         if self._on_title_changed is not None and self._wv is not None:
 
@@ -1576,34 +1720,74 @@ class EmbeddedWebViewHost:
     def _handle_flet_error(self, e: Any) -> None:
         if self._disposed:
             return
+        if getattr(e, "is_for_main_frame", None) is False:
+            return
+        err_text = str(
+            getattr(e, "data", "")
+            or getattr(e, "description", "")
+            or "WebView load error"
+        )
+        upper_err = err_text.upper()
+        if "ERR_ABORTED" in upper_err or "USER_CANCELLED" in upper_err:
+            return
         if self._on_loading_changed is not None:
             self._on_loading_changed(False)
         if self._on_error is not None:
-            self._on_error(str(getattr(e, "data", "") or "WebView load error"))
+            self._on_error(err_text)
 
     def _handle_flet_url_change(self, e: Any) -> None:
         if self._disposed:
             return
         url = str(getattr(e, "data", "") or "")
-        if url and not _validate_webview_url(
-            url,
-            allowed_loopback_ports=self._allowed_loopback_ports,
-        ):
+        if url and not self._is_allowed_event_url(url):
             if self._on_error is not None:
                 self._on_error(f"Blocked disallowed WebView URL: {url}")
             return
-        if url:
+        if url and not self._is_transient_event_url(url):
             self._url = url
-        if url and self._on_url_changed is not None:
-            self._on_url_changed(url)
+            if self._on_url_changed is not None:
+                self._on_url_changed(url)
         self._schedule_history_refresh()
 
     def _handle_flet_console_message(self, e: Any) -> None:
         if self._disposed or self._on_message is None:
             return
-        msg = str(getattr(e, "message", "") or "")
+        msg = str(
+            getattr(e, "message", None) or getattr(e, "data", "") or ""
+        )
         if msg.startswith(_UTH_MSG_PREFIX):
             self._on_message(msg[len(_UTH_MSG_PREFIX) :])
+
+    def _handle_inapp_title_change(self, e: Any) -> None:
+        if self._disposed or self._on_title_changed is None:
+            return
+        title = str(getattr(e, "data", "") or "").strip()
+        if title:
+            self._on_title_changed(title)
+
+    def _handle_inapp_history_change(self, e: Any) -> None:
+        if self._disposed:
+            return
+        raw = str(getattr(e, "data", "") or "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        self._can_go_back = bool(payload.get("can_go_back", False))
+        self._can_go_forward = bool(payload.get("can_go_forward", False))
+        if self._on_history_changed is not None:
+            self._on_history_changed(self._can_go_back, self._can_go_forward)
+
+    def _handle_inapp_external_url(self, e: Any) -> None:
+        if self._disposed or self._on_external_url is None:
+            return
+        ext = safe_http_url(str(getattr(e, "data", "") or ""))
+        if ext:
+            self._on_external_url(ext)
 
     def _handle_webview2_loading(self, loading: bool) -> None:
         if self._disposed:
@@ -1634,7 +1818,7 @@ class EmbeddedWebViewHost:
     async def eval_js(self, script: str) -> None:
         if self._disposed or not script:
             return
-        if self._backend == "flet_webview" and self._wv is not None:
+        if self._backend in ("flet_webview", "inappwebview") and self._wv is not None:
             try:
                 await self._wv.run_javascript(script)
             except Exception:
@@ -1653,7 +1837,7 @@ class EmbeddedWebViewHost:
         if not safe_url:
             return
         self._url = safe_url
-        if self._backend == "flet_webview" and self._wv is not None:
+        if self._backend in ("flet_webview", "inappwebview") and self._wv is not None:
             self._pending_html = None
             self._wv.url = safe_url
             if _safe_control_page(self._wv) is not None or self._page is not None:
@@ -1673,7 +1857,7 @@ class EmbeddedWebViewHost:
     def load_html(self, html: str, *, base_url: Optional[str] = None) -> None:
         if self._disposed:
             return
-        if self._backend == "flet_webview" and self._wv is not None:
+        if self._backend in ("flet_webview", "inappwebview") and self._wv is not None:
             if _safe_control_page(self._wv) is None:
                 self._pending_html = (html, base_url)
                 return
@@ -1693,7 +1877,7 @@ class EmbeddedWebViewHost:
     def go_back(self) -> None:
         if self._disposed:
             return
-        if self._backend == "flet_webview" and self._wv is not None:
+        if self._backend in ("flet_webview", "inappwebview") and self._wv is not None:
 
             async def _back() -> None:
                 if self._wv is not None and not self._disposed:
@@ -1701,7 +1885,8 @@ class EmbeddedWebViewHost:
                         await self._wv.go_back()
                     except Exception:
                         pass
-                    await self._refresh_history_async()
+                    if self._backend == "flet_webview":
+                        await self._refresh_history_async()
 
             self._schedule_task(_back)
             return
@@ -1711,7 +1896,7 @@ class EmbeddedWebViewHost:
     def go_forward(self) -> None:
         if self._disposed:
             return
-        if self._backend == "flet_webview" and self._wv is not None:
+        if self._backend in ("flet_webview", "inappwebview") and self._wv is not None:
 
             async def _fwd() -> None:
                 if self._wv is not None and not self._disposed:
@@ -1719,7 +1904,8 @@ class EmbeddedWebViewHost:
                         await self._wv.go_forward()
                     except Exception:
                         pass
-                    await self._refresh_history_async()
+                    if self._backend == "flet_webview":
+                        await self._refresh_history_async()
 
             self._schedule_task(_fwd)
             return
@@ -1729,7 +1915,7 @@ class EmbeddedWebViewHost:
     def reload(self) -> None:
         if self._disposed:
             return
-        if self._backend == "flet_webview" and self._wv is not None:
+        if self._backend in ("flet_webview", "inappwebview") and self._wv is not None:
 
             async def _reload() -> None:
                 if self._wv is not None and not self._disposed:
@@ -1755,7 +1941,7 @@ class EmbeddedWebViewHost:
 
     def suspend(self) -> None:
         self._suspended = True
-        if self._backend == "flet_webview":
+        if self._backend in ("flet_webview", "inappwebview"):
             self._slot.visible = False
             safe_control_update(self._slot)
         elif self._dock is not None:
@@ -1765,7 +1951,7 @@ class EmbeddedWebViewHost:
         self._suspended = False
         if self._disposed:
             return
-        if self._backend == "flet_webview":
+        if self._backend in ("flet_webview", "inappwebview"):
             self._slot.visible = True
             safe_control_update(self._slot)
         elif self._dock is not None:
@@ -1848,6 +2034,75 @@ def build_embedded_webview_host(
             return None
     if not safe_url and html is None:
         return None
+
+    if _is_inappwebview_mobile_platform(page):
+        app_wv_cls = _load_uth_app_webview_cls()
+        if app_wv_cls is not None:
+            try:
+                loop_port = _extract_loopback_port(safe_url)
+                is_viewer_locked = bool(
+                    html is not None or _is_viewer_locked_url(safe_url)
+                )
+                require_cookies = bool(
+                    not is_viewer_locked
+                    and safe_url.lower().startswith("https://")
+                    and (cookies or callable(cookie_provider))
+                )
+                holder_inapp: dict[str, EmbeddedWebViewHost] = {}
+                wv_inapp = app_wv_cls(
+                    url=safe_url,
+                    html=html,
+                    bgcolor=bgcolor or C.BG,
+                    viewer_locked=is_viewer_locked,
+                    allowed_loopback_ports=[loop_port] if loop_port is not None else [],
+                    require_initial_cookies=require_cookies,
+                    expand=True,
+                    on_page_started=lambda e: holder_inapp["host"]._handle_flet_page_started(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_page_ended=lambda e: holder_inapp["host"]._handle_flet_page_ended(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_url_change=lambda e: holder_inapp["host"]._handle_flet_url_change(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_title_change=lambda e: holder_inapp["host"]._handle_inapp_title_change(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_history_change=lambda e: holder_inapp["host"]._handle_inapp_history_change(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_web_error=lambda e: holder_inapp["host"]._handle_flet_error(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_console_message=lambda e: holder_inapp["host"]._handle_flet_console_message(e)
+                    if "host" in holder_inapp
+                    else None,
+                    on_external_url=lambda e: holder_inapp["host"]._handle_inapp_external_url(e)
+                    if "host" in holder_inapp
+                    else None,
+                )
+                host_inapp = EmbeddedWebViewHost(
+                    backend="inappwebview",
+                    page=page,
+                    url=safe_url,
+                    html=html,
+                    webview_control=wv_inapp,
+                    cookies=cookies,
+                    cookie_provider=cookie_provider,
+                    on_ready=on_ready,
+                    on_error=on_error,
+                    on_message=on_message,
+                    on_url_changed=on_url_changed,
+                    on_title_changed=on_title_changed,
+                    on_loading_changed=on_loading_changed,
+                    on_history_changed=on_history_changed,
+                    on_external_url=on_external_url,
+                )
+                holder_inapp["host"] = host_inapp
+                return host_inapp
+            except Exception as exc:
+                logger.debug("UthAppWebView host initialization failed: %s", exc)
 
     if _is_flet_webview_platform(page):
         try:

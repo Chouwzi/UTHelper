@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Optional
+from typing import Any, Optional
 
 import flet as ft
 from bs4 import BeautifulSoup
@@ -88,6 +88,42 @@ def _fetch_https_preview(url: str) -> tuple[str, str]:
     main_node = soup.find("main") or soup.find("article") or soup.body or soup
     markdown = html_to_markdown(str(main_node)).strip()
     return page_title, markdown[:8000]
+
+
+class _NativeWebViewHost(ft.Container):
+    """Enables JavaScript on fallback flet_webview once mounted on a Page."""
+
+    def __init__(self, webview: Any, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._webview = webview
+
+    def did_mount(self) -> None:
+        wv = self._webview
+        js_enum = getattr(flet_webview, "JavaScriptMode", None)
+        set_js = getattr(wv, "set_javascript_mode", None)
+        if wv is None or js_enum is None or not callable(set_js):
+            return
+        try:
+            page = self.page
+        except RuntimeError:
+            return
+        run_task = getattr(page, "run_task", None)
+        if not callable(run_task):
+            return
+
+        async def _enable_js() -> None:
+            try:
+                await set_js(js_enum.UNRESTRICTED)
+                reload_fn = getattr(wv, "reload", None)
+                if callable(reload_fn):
+                    await reload_fn()
+            except Exception:
+                pass
+
+        try:
+            run_task(_enable_js)
+        except Exception:
+            pass
 
 
 class InAppWebViewDialog:
@@ -279,10 +315,16 @@ class InAppWebViewDialog:
                 on_url_change=_on_url_change,
                 on_page_ended=_on_ended,
             )
-            body_host.content = ft.Column(
-                controls=[status_bar, self._webview],
-                spacing=0,
+            body_host = _NativeWebViewHost(
+                self._webview,
                 expand=True,
+                bgcolor=C.BG,
+                border_radius=10,
+                content=ft.Column(
+                    controls=[status_bar, self._webview],
+                    spacing=0,
+                    expand=True,
+                ),
             )
         else:
             loading_row = ft.Row(

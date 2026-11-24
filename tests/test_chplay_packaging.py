@@ -917,6 +917,25 @@ def test_verifier_requires_office_viewer_assets_when_app_zip_present(tmp_path):
         )
 
 
+def test_background_sync_gradle_and_android_workflow_guard_against_maven_central_429():
+    mirror_url = "https://maven-central.storage-download.googleapis.com/maven2/"
+    settings_gradle = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/settings.gradle"
+    )
+    build_gradle = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/build.gradle"
+    )
+    workflow = _read(".github/workflows/build-android.yml")
+
+    assert settings_gradle.count(mirror_url) >= 2
+    assert settings_gradle.index(mirror_url) < settings_gradle.index("mavenCentral()")
+    assert mirror_url in build_gradle
+    assert build_gradle.index(mirror_url) < build_gradle.index("mavenCentral()")
+    assert "-Dorg.gradle.internal.http.retry.max.attempts=" in workflow
+    assert workflow.count("run_gradle_with_retry") >= 2
+    assert "~/.gradle/init.d" not in workflow
+
+
 def test_verifier_enforces_quiz_and_webview_packages_when_required(tmp_path):
     # 1. Missing flutter_inappwebview in DEX -> rejected
     no_dex_plugin = _aab(tmp_path / "no-inappwebview.aab")
