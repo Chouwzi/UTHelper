@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-11-24  
 **Nhánh làm việc:** `feature/chplay-package-and-demo` (tách từ `origin/develop` `5b96c28`)  
-**Phạm vi nền tảng:** Android (`chplay` `.aab` & `apk_lts` `.apk`), kèm tầng Core/GUI dùng chung cho chế độ Reviewer Demo trên mọi nền tảng  
+**Phạm vi nền tảng:** Android (`chplay` `.aab` & `apk_lts` `.apk`) + iOS (`ipa`) cho định danh gói `io.github.chouwzi.uthelper`; kèm tầng Core/GUI dùng chung cho chế độ Reviewer Demo trên mọi nền tảng  
 **Tài liệu kiến trúc liên quan:** [`ADR 0003`](../adr/0003-signed-release-update-channel.md), [`ADR 0004`](../adr/0004-multi-channel-store-and-lts-distribution.md), [`store-distribution-submission.md`](../guides/store-distribution-submission.md)
 
 ---
@@ -11,11 +11,11 @@
 
 UTHelper là ứng dụng đồng hành độc lập dành riêng cho sinh viên Trường Đại học Giao thông vận tải TP.HCM (UTH), kết nối trực tiếp tới các cổng `courses.ut.edu.vn`, `thnn.ut.edu.vn` và `portal-publicapp.ut.edu.vn` mà không vận hành máy chủ trung gian.
 
-Để đưa ứng dụng lên **Google Play Store (CH Play)** an toàn, bền vững và vượt qua quy trình xét duyệt ngay từ bản nộp đầu tiên, dự án cần giải quyết hai bài toán cốt lõi:
+Để đưa ứng dụng lên **Google Play Store (CH Play)** an toàn, bền vững và đồng bộ cho toàn bộ nền tảng di động, dự án cần giải quyết hai bài toán cốt lõi:
 
-1. **Định danh gói ứng dụng (`applicationId` / `bundle_id`) chuẩn mực & đồng bộ trên Android**:
-   - Trường UTH đã có ứng dụng chính thức mang mã `vn.edu.ut.app`. Việc dùng tiền tố trường học có nguy cơ vi phạm *Chính sách Chống Mạo Danh (Impersonation Policy)* của Google Play; trong khi mã cũ `com.uthelper.uthelper` lại dựa trên tên miền `uthelper.com` mà dự án không sở hữu và bị lặp từ.
-   - Đổi đồng bộ cả hai kênh Android (**`chplay`** và **`apk_lts`**) sang **`io.github.chouwzi.uthelper`** (khớp với định danh nhà phát triển mở `github.com/Chouwzi/UTHelper` và tên miền `chouwzi.github.io` thuộc toàn quyền kiểm soát để xác minh Google Search Console / host `PRIVACY.md`).
+1. **Định danh gói ứng dụng (`applicationId` / `bundle_id`) chuẩn mực & đồng bộ trên Mobile (Android & iOS)**:
+   - Trường UTH đã có ứng dụng chính thức mang mã `vn.edu.ut.app`. Việc dùng tiền tố trường học có nguy cơ vi phạm *Chính sách Chống Mạo Danh (Impersonation Policy)* của Google Play; trong khi mã cũ `com.uthelper.uthelper` / `com.uthelper.UTHelper` lại dựa trên tên miền `uthelper.com` mà dự án không sở hữu.
+   - Đổi đồng bộ `[tool.flet] org = "io.github.chouwzi"` cùng cả hai kênh Android (**`chplay`** và **`apk_lts`**) và gói **iOS (`ipa`)** sang **`io.github.chouwzi.uthelper`** (khớp với định danh nhà phát triển mở `github.com/Chouwzi/UTHelper` và tên miền `chouwzi.github.io` thuộc toàn quyền kiểm soát để xác minh Google Search Console / host `PRIVACY.md`).
 
 2. **Tài khoản kiểm duyệt tích hợp sẵn (Reviewer Demo Sandbox) cho mục *App access* trên Play Console**:
    - Nhân viên và bot tự động (*Pre-launch Report / Robo test*) của Google không có mã số sinh viên UTH; việc cung cấp tài khoản sinh viên thật gây lộ dữ liệu cá nhân, có nguy cơ bị bot nộp/xóa nhầm bài thật và phụ thuộc trạng thái bảo trì/chặn IP quốc tế của máy chủ trường.
@@ -26,13 +26,13 @@ UTHelper là ứng dụng đồng hành độc lập dành riêng cho sinh viên
 ## 2. Goals, Non-Goals & Anti-Goals
 
 ### Goals (Mục tiêu đạt được)
-- Chuyển đổi đồng bộ `applicationId` / `bundle_id` mặc định của Android sang **`io.github.chouwzi.uthelper`** trên cả `chplay` (`.aab`) và `apk_lts` (`.apk`), bao gồm cấu hình Flet, runtime distribution profile, bộ tự cập nhật Android, script đóng gói/kiểm định, GitHub Actions workflows, tài liệu phát hành và bộ test.
+- Chuyển đổi đồng bộ `applicationId` / `bundle_id` mặc định của Android (`chplay` `.aab`, `apk_lts` `.apk`) và iOS (`.ipa`) sang **`io.github.chouwzi.uthelper`** (cùng `[tool.flet] org = "io.github.chouwzi"`), bao gồm cấu hình Flet, runtime distribution profile, bộ tự cập nhật Android, script đóng gói/kiểm định APK/AAB/IPA, GitHub Actions workflows, tài liệu phát hành và bộ test.
 - Cung cấp tài khoản Reviewer Demo xác thực cục bộ qua hộp thoại đăng nhập chuẩn (`login_dialog.py`), cho phép nhân viên duyệt app và bot kiểm thử trải nghiệm đầy đủ 5 tab chính với dữ liệu mẫu luôn tươi mới theo thời gian thực (`today`-relative).
 - Khóa an toàn mọi thao tác ghi/đẩy dữ liệu lên máy chủ trường hoặc mở phiên WebView đăng nhập thật khi đang ở phiên Demo, kèm thông báo giải thích rõ ràng.
 - Cập nhật hướng dẫn khai báo *App access* (tiếng Anh chuẩn) và quy trình chuyển đổi cho người dùng `apk_lts` cũ trong `docs/guides/store-distribution-submission.md` và `ADR 0004`.
 
 ### Non-Goals (Không thuộc phạm vi)
-- Không đổi định danh gói của Windows MSIX (`com.uthelper.UTHelper`), iOS IPA (`com.uthelper.UTHelper`), hoặc các gói kiểm thử cô lập (`com.uthelper.qa`, `com.uthelper.benchmark`).
+- Không đổi `UpgradeCode` GUID của bộ cài Windows MSI/Burn EXE (`Package.wxs` / `Bundle.wxs`), khóa nội bộ `single_instance.py` (`com.uthelper.UTHelper`), cơ chế cấp phát `MSSTORE_IDENTITY_NAME` của Microsoft Partner Center, hoặc các gói kiểm thử cô lập (`com.uthelper.qa`, `com.uthelper.benchmark`).
 - Không đổi Kotlin `namespace` nội bộ của plugin native (`com.uthelper.backgroundsync` và `com.uthelper.quiz`), vì Android tách biệt hoàn toàn `namespace` biên dịch mã nguồn với `applicationId` phát hành.
 - Không thêm nút *"Xem thử ứng dụng"* công khai trên màn hình đăng nhập ban đầu (giữ nguyên giao diện đăng nhập tối giản cho sinh viên UTH theo quyết định của chủ dự án).
 - Không dựng máy chủ giả lập bên ngoài (mock HTTP server trên Internet).
@@ -79,25 +79,26 @@ UTHelper là ứng dụng đồng hành độc lập dành riêng cho sinh viên
 
 ## 5. Thiết kế chi tiết (Detailed Design)
 
-### Phần 1: Đồng bộ Android Package ID sang `io.github.chouwzi.uthelper`
+### Phần 1: Đồng bộ Mobile Package / Bundle ID sang `io.github.chouwzi.uthelper`
 
-Cập nhật hằng số định danh Android mặc định từ `com.uthelper.uthelper` sang **`io.github.chouwzi.uthelper`** tại các điểm nguồn sự thật:
+Cập nhật hằng số định danh Mobile mặc định sang **`io.github.chouwzi.uthelper`** tại các điểm nguồn sự thật:
 
 1. **Cấu hình dự án & Runtime Python**:
-   - `pyproject.toml`: `[tool.flet.android] bundle_id = "io.github.chouwzi.uthelper"` (giữ nguyên `[tool.flet] org = "com.uthelper"` và `[tool.flet.ios] bundle_id = "com.uthelper.UTHelper"`).
+   - `pyproject.toml`: `[tool.flet] org = "io.github.chouwzi"`, `[tool.flet.android] bundle_id = "io.github.chouwzi.uthelper"`, và `[tool.flet.ios] bundle_id = "io.github.chouwzi.uthelper"`.
    - `src/core/distribution.py`: `DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"` (tự động cập nhật deep link `market://details?id=io.github.chouwzi.uthelper` và fallback `https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper`).
    - `src/platform_utils/android_updates.py`: `PACKAGE_ID = "io.github.chouwzi.uthelper"`.
 2. **Script Build, Kiểm định & Release Inventory**:
    - `scripts/release_metadata.py`: `DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"`.
    - `scripts/verify_android_release.py`: kiểm tra canonical `package_id == "io.github.chouwzi.uthelper"`.
-   - `scripts/release_inventory.py`: khóa package `.apk` trong Schema 3 manifest là `"io.github.chouwzi.uthelper"`.
+   - `scripts/verify_ipa_release.sh`: kiểm tra `BUNDLE_ID == "io.github.chouwzi.uthelper"`.
+   - `scripts/release_inventory.py`: khóa package `.apk` và `.ipa` trong Schema 3 manifest là `"io.github.chouwzi.uthelper"`.
    - `scripts/build_android.ps1` & `scripts/package_msix.ps1`: truyền `--android-package-id "io.github.chouwzi.uthelper"` / giá trị tương ứng trong `distribution-channel.json`.
 3. **GitHub Actions Workflows**:
    - `.github/workflows/build-android.yml`: đổi `APK_PACKAGE_ID` gốc (`original`) và `--package-id` của bước verify `chplay` sang `io.github.chouwzi.uthelper`; giữ nguyên tùy chọn `isolated` (`com.uthelper.qa`) cho manual QA APK.
-   - `.github/workflows/release.yml`: đổi `--android-package-id`, `apkanalyzer manifest application-id` và `--package-id` sang `io.github.chouwzi.uthelper`.
-   - `.github/workflows/package-benchmark.yml`: nhánh không cô lập dùng `io.github.chouwzi.uthelper`, nhánh `isolated` giữ `com.uthelper.benchmark`.
+   - `.github/workflows/release.yml`: đổi `--android-package-id`, `apkanalyzer manifest application-id`, `--package-id` (Android) và `--bundle-id` (iOS) sang `io.github.chouwzi.uthelper`.
+   - `.github/workflows/package-benchmark.yml`: nhánh không cô lập Android và `--bundle-id` iOS dùng `io.github.chouwzi.uthelper`, nhánh `isolated` Android giữ `com.uthelper.benchmark`.
 4. **Plugin Native & Bộ Test / Tài liệu**:
-   - Các class Kotlin sản xuất trong `extensions/flet_uth_background_sync` vốn đã dùng `context.packageName` và `${applicationId}.uthupdates` động, không cần đổi tên gói Kotlin. Chỉ cập nhật các fixture kiểm thử trong `ApkUpdateInstallerTest.kt`, `extensions/flet_uth_background_sync/tests/test_package_contract.py` và các file `tests/test_*.py` / `tests/e2e_store_distribution/*`.
+   - Các class Kotlin sản xuất trong `extensions/flet_uth_background_sync` vốn đã dùng `context.packageName` và `${applicationId}.uthupdates` động, không cần đổi tên gói Kotlin. Chỉ cập nhật các fixture kiểm thử trong `ApkUpdateInstallerTest.kt`, `extensions/flet_uth_background_sync/tests/test_package_contract.py` và các file `tests/test_*.py` / `tests/e2e_store_distribution/*` (bao gồm `test_package_unsigned_ipa.py`).
    - Cập nhật `docs/adr/0004-multi-channel-store-and-lts-distribution.md`, `docs/guides/store-distribution-submission.md`, `docs/testing/android-device-performance.md` (không sửa các file lịch sử trong `docs/archive/`).
 
 ---
