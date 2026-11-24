@@ -239,6 +239,7 @@ class WindowsWebView2Dock:
         self._account_namespace = account_namespace
         self._profile_name = webview2_account_profile_name(account_namespace)
         self._url = url
+        self._committed_url: str = ""
         self._html: Optional[str] = initial_html
         self._cookies = list(cookies or ())
         self._cookie_provider = cookie_provider
@@ -416,6 +417,15 @@ class WindowsWebView2Dock:
 
     def can_go_forward(self) -> bool:
         return self._can_go_forward
+
+    @property
+    def current_url(self) -> str:
+        core = self._core
+        if core is not None:
+            src = getattr(core, "source", None)
+            if isinstance(src, str) and src.strip():
+                return src.strip()
+        return self._committed_url
 
     def set_visible(self, visible: bool) -> None:
         self._visible = bool(visible)
@@ -863,7 +873,13 @@ class WindowsWebView2Dock:
             logger.debug("WebView2 init script completion failed: %s", exc)
 
         core = self._core
-        if self._stop_event.is_set() or core is None or nav_seq != self._nav_seq:
+        if (
+            self._stop_event.is_set()
+            or core is None
+            or nav_seq != self._nav_seq
+            or not url
+            or not self._is_navigation_uri_allowed(url)
+        ):
             if (
                 script_id
                 and core is not None
@@ -880,8 +896,7 @@ class WindowsWebView2Dock:
             self._active_init_script_origin = self._url_origin(url)
             self._init_script_awaiting_nav_start = True
             self._init_script_nav_id = None
-        if url and self._is_navigation_uri_allowed(url):
-            core.navigate(url)
+        core.navigate(url)
 
     def _inject_cookies(
         self,
@@ -959,11 +974,18 @@ class WindowsWebView2Dock:
                 if self._on_title_changed
                 else None
             )
-            core.add_source_changed(
-                lambda _s, _a: self._on_url_changed(str(core.source or ""))
-                if self._on_url_changed
-                else None
-            )
+            def _on_source_changed(_s: Any, _a: Any) -> None:
+                raw_src = getattr(core, "source", None)
+                if isinstance(raw_src, str):
+                    src_str = raw_src.strip()
+                    if src_str:
+                        self._committed_url = src_str
+                else:
+                    src_str = str(raw_src or "")
+                if self._on_url_changed is not None:
+                    self._on_url_changed(src_str)
+
+            core.add_source_changed(_on_source_changed)
 
             def _on_nav_starting(_sender: Any, args: Any) -> None:
                 uri = str(getattr(args, "uri", "") or "")
@@ -1519,6 +1541,13 @@ class EmbeddedWebViewHost:
     def dock(self) -> Optional[WindowsWebView2Dock]:
         return self._dock
 
+    @property
+    def current_url(self) -> str:
+        if self._backend == "webview2" and self._dock is not None:
+            dock_cur = getattr(self._dock, "current_url", "")
+            return dock_cur if isinstance(dock_cur, str) else ""
+        return self._current_url
+
     def control(self) -> ft.Control:
         return self._slot
 
@@ -1706,11 +1735,15 @@ class EmbeddedWebViewHost:
         self._flet_loading = False
         self._flet_has_ended_once = True
         raw_ended = str(getattr(e, "data", "") or "")
+        prev_current = self._current_url
         if raw_ended and _validate_webview_url(
             raw_ended,
             allowed_loopback_ports=self._allowed_loopback_ports,
         ):
             self._current_url = raw_ended
+            self._url = raw_ended
+            if raw_ended != prev_current and self._on_url_changed is not None:
+                self._on_url_changed(raw_ended)
         ended_url = raw_ended or self._current_url or self._url
         ended_origin = WindowsWebView2Dock._url_origin(ended_url)
         if self._on_loading_changed is not None:
@@ -1788,8 +1821,6 @@ class EmbeddedWebViewHost:
                         self._pending_init_script_origin = ""
                         self._pending_init_script_nav_started = False
                         self._pending_init_script_requires_start = False
-                    elif changed_origin == self._pending_init_script_origin:
-                        self._pending_init_script_nav_started = True
         if url and self._on_url_changed is not None:
             self._on_url_changed(url)
         self._schedule_history_refresh()
@@ -1926,6 +1957,7 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         if self._backend == "flet_webview" and self._wv is not None:
+            self._clear_pending_flet_init_script()
             if _safe_control_page(self._wv) is None:
                 self._pending_html = (html, base_url)
                 return
@@ -1946,6 +1978,7 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         if self._backend == "flet_webview" and self._wv is not None:
+            self._clear_pending_flet_init_script()
 
             async def _back() -> None:
                 if self._wv is not None and not self._disposed:
@@ -1964,6 +1997,7 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         if self._backend == "flet_webview" and self._wv is not None:
+            self._clear_pending_flet_init_script()
 
             async def _fwd() -> None:
                 if self._wv is not None and not self._disposed:
@@ -1982,6 +2016,7 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         if self._backend == "flet_webview" and self._wv is not None:
+            self._clear_pending_flet_init_script()
 
             async def _reload() -> None:
                 if self._wv is not None and not self._disposed:

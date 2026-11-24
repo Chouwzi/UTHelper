@@ -94,6 +94,21 @@ def _is_loopback_url(url: str) -> bool:
     return host in _LOOPBACK_HOSTS
 
 
+def _extract_bridged_uth_url(url: str) -> str:
+    """Map a local ``/session/<token>/<site>/<path>`` URL back to its canonical HTTPS UTH URL."""
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    parts = [seg for seg in parsed.path.split("/") if seg]
+    if len(parts) >= 3 and parts[0] == "session" and parts[2] in ("courses", "thnn"):
+        site = parts[2]
+        rest = "/".join(parts[3:])
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"https://{site}.ut.edu.vn/{rest}{query}"
+    return ""
+
+
 def _call_with_supported_kwargs(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Invoke ``fn`` passing only kwargs it accepts (preserves test double compatibility)."""
     try:
@@ -209,8 +224,10 @@ class CoursesWebViewPane(ft.Container):
         self._recovery_tracker = WebViewRecoveryTracker()
         self._recovery_lock = threading.Lock()
         self._recovery_in_flight = False
+        self._recovery_awaiting_commit: set[str] = set()
         self._portal_rearm_grace_seconds: float = 5.0
         self._portal_recovery_pending_rearm = False
+        self._portal_rearm_generation: int = 0
         self._portal_rearm_timer: Optional[threading.Timer] = None
         self._portal_mobile_lock = threading.Lock()
         self._portal_mobile_bootstrap_started = False
@@ -672,12 +689,26 @@ class CoursesWebViewPane(ft.Container):
         except Exception:
             pass
 
+    def _resolved_current_url(self) -> str:
+        host = self._host
+        if host is not None:
+            host_url = getattr(host, "current_url", "")
+            if isinstance(host_url, str) and host_url:
+                if "/session/" in host_url:
+                    bridged = _extract_bridged_uth_url(host_url)
+                    if bridged:
+                        return bridged
+                else:
+                    return host_url
+        return self._current_url
+
     def _clear_pending_flet_portal_script(self) -> None:
         with self._portal_mobile_lock:
             self._pending_flet_portal_script = ""
             self._deferred_portal_login_url = ""
 
     def _cancel_portal_rearm_timer_locked(self) -> None:
+        self._portal_rearm_generation += 1
         timer = self._portal_rearm_timer
         self._portal_rearm_timer = None
         if timer is not None:
@@ -690,12 +721,18 @@ class CoursesWebViewPane(ft.Container):
         with self._recovery_lock:
             self._cancel_portal_rearm_timer_locked()
 
-    def _complete_portal_rearm_if_stable(self) -> None:
+    def _complete_portal_rearm_if_stable(self, expected_gen: int) -> None:
         with self._recovery_lock:
-            self._portal_rearm_timer = None
-            if self._disposed or not self._portal_recovery_pending_rearm:
+            if expected_gen != self._portal_rearm_generation:
                 return
-            current = self._current_url
+            self._portal_rearm_timer = None
+            if (
+                self._disposed
+                or not self._portal_recovery_pending_rearm
+                or "portal" in self._recovery_awaiting_commit
+            ):
+                return
+            current = self._resolved_current_url()
             if (
                 classify_uth_webview_url(current) == "portal"
                 and is_uth_login_url(current) is None
@@ -731,7 +768,7 @@ class CoursesWebViewPane(ft.Container):
             deferred_login_url = ""
             with self._portal_mobile_lock:
                 self._flet_portal_bootstrap_in_flight = False
-                current_url = self._current_url
+                current_url = self._resolved_current_url()
                 current_is_portal = classify_uth_webview_url(current_url) == "portal"
                 if mobile_script and not self._disposed:
                     self._deferred_portal_login_url = ""
@@ -746,13 +783,22 @@ class CoursesWebViewPane(ft.Container):
                     self._deferred_portal_login_url = ""
 
             if should_eval_now:
-                self._marshal_ui(
-                    lambda js=mobile_script: self._schedule_host_eval_js(js)
-                )
+
+                def _eval_if_still_portal(js: str = mobile_script) -> None:
+                    cur = self._resolved_current_url()
+                    if (
+                        not self._disposed
+                        and classify_uth_webview_url(cur) == "portal"
+                        and WindowsWebView2Dock._url_origin(cur)
+                        == "https://portal.ut.edu.vn"
+                    ):
+                        self._schedule_host_eval_js(js)
+
+                self._marshal_ui(_eval_if_still_portal)
             elif (
                 deferred_login_url
                 and not self._disposed
-                and is_uth_login_url(self._current_url) == "portal"
+                and is_uth_login_url(self._resolved_current_url()) == "portal"
             ):
                 self._trigger_login_recovery(deferred_login_url)
 
@@ -779,7 +825,7 @@ class CoursesWebViewPane(ft.Container):
     def _on_host_ready(self) -> None:
         if self._disposed:
             return
-        current = self._current_url
+        current = self._resolved_current_url()
         site = classify_uth_webview_url(current)
         is_login = is_uth_login_url(current) is not None
 
@@ -804,9 +850,14 @@ class CoursesWebViewPane(ft.Container):
             self._marshal_ui(lambda js=script_to_eval: self._schedule_host_eval_js(js))
 
         if site in {"courses", "thnn"} and not is_login:
+            with self._recovery_lock:
+                if site in self._recovery_awaiting_commit:
+                    return
             self._recovery_tracker.note_authenticated_landing(current)
         elif site == "portal" and not is_login:
             with self._recovery_lock:
+                if "portal" in self._recovery_awaiting_commit:
+                    return
                 if not self._portal_recovery_pending_rearm:
                     self._recovery_tracker.note_authenticated_landing(current)
                 else:
@@ -816,8 +867,11 @@ class CoursesWebViewPane(ft.Container):
                         self._portal_recovery_pending_rearm = False
                         self._recovery_tracker.note_authenticated_landing(current)
                     else:
+                        gen = self._portal_rearm_generation
                         timer = threading.Timer(
-                            grace, self._complete_portal_rearm_if_stable
+                            grace,
+                            self._complete_portal_rearm_if_stable,
+                            args=(gen,),
                         )
                         timer.daemon = True
                         self._portal_rearm_timer = timer
@@ -883,6 +937,13 @@ class CoursesWebViewPane(ft.Container):
             return
         if "/session/" in url:
             self._last_rewritten_bridge_target = ""
+            bridged_uth = _extract_bridged_uth_url(url)
+            if bridged_uth:
+                self._current_url = bridged_uth
+                if is_uth_login_url(bridged_uth) is None:
+                    bridged_site = classify_uth_webview_url(bridged_uth)
+                    with self._recovery_lock:
+                        self._recovery_awaiting_commit.discard(bridged_site)
             return
 
         self._current_url = url
@@ -897,6 +958,8 @@ class CoursesWebViewPane(ft.Container):
                 self._clear_pending_flet_portal_script()
                 self._cancel_portal_rearm_timer()
             if site in {"courses", "thnn", "portal"}:
+                with self._recovery_lock:
+                    self._recovery_awaiting_commit.discard(site)
                 self._recovery_tracker.record_navigation(url)
                 if (
                     site in {"courses", "thnn"}
@@ -969,8 +1032,9 @@ class CoursesWebViewPane(ft.Container):
         target_url = bootstrap.target_url
         if not target_url:
             return
-        if bootstrap.site == "portal":
-            with self._recovery_lock:
+        with self._recovery_lock:
+            self._recovery_awaiting_commit.add(bootstrap.site)
+            if bootstrap.site == "portal":
                 self._cancel_portal_rearm_timer_locked()
                 self._portal_recovery_pending_rearm = True
         nav_url = target_url
@@ -988,7 +1052,6 @@ class CoursesWebViewPane(ft.Container):
                 init_script = _build_flet_portal_eval_script(init_script, target_url)
 
         self._url = target_url
-        self._current_url = target_url
         self._subtitle_text.value = self._short_subtitle(target_url)
         self._sync_external_visibility()
         safe_control_update(self._subtitle_text)
@@ -1048,6 +1111,8 @@ class CoursesWebViewPane(ft.Container):
         safe_control_update(self._body_host)
 
     def _on_host_error(self, reason: str) -> None:
+        self._cancel_portal_rearm_timer()
+
         def _apply() -> None:
             self._set_nav_loading(False)
             host = self._host

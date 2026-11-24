@@ -1539,3 +1539,298 @@ def test_important4_mobile_portal_bootstrap_suppresses_concurrent_recovery_and_c
         pane_b.dispose()
 
 
+# ---------------------------------------------------------------------------
+# 6. Review round 2 regressions (prior login completion & flet url_change race)
+# ---------------------------------------------------------------------------
+
+
+def test_round2_prior_login_completion_racing_after_recovery_does_not_rearm_on_webview2_or_flet_webview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Subtest A: WebView2 — prior /login/index.php NavigationCompleted(is_success=True) fires
+    # AFTER _apply_recovery_bootstrap enqueues auth_navigate but BEFORE target commits.
+    courses_client_wv2 = _FakeMoodleSessionClient(
+        origin="https://courses.ut.edu.vn",
+        initial_cookie="old_wv2",
+        fresh_cookie="fresh_wv2",
+    )
+    auth_wv2 = UthWebViewAuthService(
+        courses_client=courses_client_wv2,
+        credentials_provider=lambda: ("2251120001", "pw"),
+    )
+    core = _FakeWebView2Core()
+    dock_holder: dict[str, WindowsWebView2Dock] = {}
+    recovery_enqueued = threading.Event()
+
+    def _fake_build_wv2(url: str, **kwargs: Any) -> EmbeddedWebViewHost:
+        dock = WindowsWebView2Dock(
+            page_title="UTHelper",
+            url=url,
+            cookie_provider=kwargs.get("cookie_provider"),
+            init_script_provider=kwargs.get("init_script_provider"),
+            on_ready=kwargs.get("on_ready"),
+            on_url_changed=kwargs.get("on_url_changed"),
+            on_navigation_starting=kwargs.get("on_navigation_starting"),
+        )
+        orig_apply = dock.apply_auth_and_navigate
+
+        def _spy_apply(cookies: list[dict[str, Any]], nav_url: str, *, init_script: str = "") -> None:
+            orig_apply(cookies, nav_url, init_script=init_script)
+            recovery_enqueued.set()
+
+        dock.apply_auth_and_navigate = _spy_apply  # type: ignore[method-assign]
+        dock._core = core
+        dock._ready = True
+        dock._bind_events(core)
+        dock_holder["dock"] = dock
+        return EmbeddedWebViewHost(
+            backend="webview2",
+            url=url,
+            dock=dock,
+            on_ready=kwargs.get("on_ready"),
+            on_url_changed=kwargs.get("on_url_changed"),
+            on_navigation_starting=kwargs.get("on_navigation_starting"),
+        )
+
+    monkeypatch.setattr(pane_mod, "build_embedded_webview_host", _fake_build_wv2)
+
+    pane_wv2 = CoursesWebViewPane(
+        page=None,
+        source="courses",
+        title="Course WV2",
+        url="https://courses.ut.edu.vn/course/view.php?id=121137",
+        session_client=courses_client_wv2,
+        webview_auth_service=auth_wv2,
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    try:
+        # WebView2 commits /login/index.php via SourceChanged -> triggers recovery
+        core.source = "https://courses.ut.edu.vn/login/index.php"
+        core.callbacks["source"](core, SimpleNamespace())
+        assert recovery_enqueued.wait(timeout=2.0)
+
+        deadline = time.monotonic() + 1.0
+        while pane_wv2._recovery_in_flight and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        # Prior /login/index.php finishes (NavigationCompleted is_success=True) BEFORE auth_navigate drains!
+        core.callbacks["nav_completed"](core, SimpleNamespace(is_success=True))
+
+        # Recovery budget MUST remain exhausted (False) — no premature re-arm!
+        assert pane_wv2._recovery_tracker.can_attempt_recovery("courses") is False
+
+        # Re-emitting login SourceChanged must NOT trigger a 2nd forced relogin
+        recovery_enqueued.clear()
+        core.callbacks["source"](core, SimpleNamespace())
+        assert recovery_enqueued.wait(timeout=0.2) is False
+        assert [c for c in courses_client_wv2.calls if c["force_relogin"]] == [
+            {"ensure_login": True, "verify_live": False, "force_relogin": True}
+        ]
+    finally:
+        pane_wv2.dispose()
+
+    # Subtests B & C: flet_webview — (B) prior on_page_ended("/login/index.php") after recovery,
+    # and (C) on_page_started(target) -> direct on_page_ended("/login/index.php") with NO url_change!
+    monkeypatch.undo()
+    created_flet: list[Any] = []
+    flet_nav_event = threading.Event()
+
+    class _FakeFletWv(ft.Container):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(expand=True)
+            self.url = kwargs.get("url")
+            self.prevent_links = list(kwargs.get("prevent_links") or [])
+            self.on_page_started = kwargs.get("on_page_started")
+            self.on_page_ended = kwargs.get("on_page_ended")
+            self.on_web_resource_error = kwargs.get("on_web_resource_error")
+            self.on_url_change = kwargs.get("on_url_change")
+            self.on_console_message = kwargs.get("on_console_message")
+            self.loaded_requests: list[str] = []
+            created_flet.append(self)
+
+        async def load_request(self, url: str) -> None:
+            self.loaded_requests.append(url)
+            flet_nav_event.set()
+
+        async def can_go_back(self) -> bool:
+            return False
+
+        async def can_go_forward(self) -> bool:
+            return False
+
+    fake_fwv_mod = types.ModuleType("flet_webview")
+    fake_fwv_mod.WebView = _FakeFletWv  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "flet_webview", fake_fwv_mod)
+
+    android_page = SimpleNamespace(
+        overlay=[],
+        web=False,
+        platform=ft.PagePlatform.ANDROID,
+        title="UTHelper",
+        width=390,
+        height=844,
+        update=lambda: None,
+        run_task=lambda fn, *a: asyncio.run(fn(*a)),
+    )
+    courses_client_flet = _FakeMoodleSessionClient(
+        origin="https://courses.ut.edu.vn",
+        initial_cookie="old_flet",
+        fresh_cookie="fresh_flet",
+    )
+    auth_flet = UthWebViewAuthService(
+        courses_client=courses_client_flet,
+        credentials_provider=lambda: ("2251120001", "pw"),
+    )
+    pane_flet = CoursesWebViewPane(
+        page=android_page,  # type: ignore[arg-type]
+        source="courses",
+        title="Course Mobile",
+        url="https://courses.ut.edu.vn/course/view.php?id=121137",
+        preview_server=None,
+        session_client=courses_client_flet,
+        webview_auth_service=auth_flet,
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    try:
+        wv = created_flet[-1]
+        wv.on_url_change(
+            SimpleNamespace(data="https://courses.ut.edu.vn/login/index.php")
+        )
+        assert flet_nav_event.wait(timeout=2.0)
+
+        deadline = time.monotonic() + 1.0
+        while pane_flet._recovery_in_flight and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        # (B) Prior login page finishes after _apply_recovery_bootstrap -> MUST NOT re-arm!
+        wv.on_page_ended(
+            SimpleNamespace(data="https://courses.ut.edu.vn/login/index.php")
+        )
+        assert pane_flet._recovery_tracker.can_attempt_recovery("courses") is False
+
+        # (C) Target starts, server 303s directly to on_page_ended("/login/index.php") WITHOUT on_url_change!
+        wv.on_page_started(
+            SimpleNamespace(data="https://courses.ut.edu.vn/course/view.php?id=121137")
+        )
+        wv.on_page_ended(
+            SimpleNamespace(data="https://courses.ut.edu.vn/login/index.php")
+        )
+        time.sleep(0.2)
+        assert pane_flet._current_url == "https://courses.ut.edu.vn/login/index.php"
+        assert pane_flet._recovery_tracker.can_attempt_recovery("courses") is False
+        assert len(wv.loaded_requests) == 1
+        assert [c for c in courses_client_flet.calls if c["force_relogin"]] == [
+            {"ensure_login": True, "verify_live": False, "force_relogin": True}
+        ]
+    finally:
+        pane_flet.dispose()
+
+    # Subtest D: _on_host_error cancels active Portal re-arm grace timer
+    portal_client = _FakePortalClient(token="jwt.err.cancel", role="sv")
+    auth_portal = UthWebViewAuthService(
+        portal_client=portal_client,
+        credentials_provider=lambda: ("2251120001", "pw"),
+    )
+    pane_portal = CoursesWebViewPane(
+        page=android_page,  # type: ignore[arg-type]
+        source="courses",
+        title="Portal Err",
+        url="https://portal.ut.edu.vn/dashboard",
+        webview_auth_service=auth_portal,
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    pane_portal._portal_rearm_grace_seconds = 0.08
+    try:
+        assert pane_portal._recovery_tracker.consume_recovery_attempt("portal") is True
+        pane_portal._portal_recovery_pending_rearm = True
+        pane_portal._on_host_ready()
+        assert pane_portal._portal_rearm_timer is not None
+        pane_portal._on_host_error("Navigation failed: timeout")
+        assert pane_portal._portal_rearm_timer is None
+        time.sleep(0.15)
+        assert pane_portal._recovery_tracker.can_attempt_recovery("portal") is False
+    finally:
+        pane_portal.dispose()
+
+
+def test_round2_flet_webview_prior_same_origin_url_change_does_not_bypass_requires_start() -> None:
+    ran_scripts: list[str] = []
+
+    class _MinimalFletWv(ft.Container):
+        def __init__(self) -> None:
+            super().__init__(expand=True)
+            self.url = "https://portal.ut.edu.vn/login"
+
+        async def load_request(self, url: str) -> None:
+            self.url = url
+
+        async def run_javascript(self, script: str) -> None:
+            ran_scripts.append(script)
+
+        async def can_go_back(self) -> bool:
+            return False
+
+        async def can_go_forward(self) -> bool:
+            return False
+
+        async def reload(self) -> None:
+            return None
+
+    fake_page = SimpleNamespace(run_task=lambda fn, *a: asyncio.run(fn(*a)))
+    fwv_host = EmbeddedWebViewHost(
+        backend="flet_webview",
+        page=fake_page,  # type: ignore[arg-type]
+        url="https://portal.ut.edu.vn/login",
+        webview_control=_MinimalFletWv(),
+    )
+    portal_js = build_portal_local_storage_script("jwt.round2.strict", "sv")
+
+    # Prior same-origin login page is actively loading
+    fwv_host._handle_flet_page_started(
+        SimpleNamespace(data="https://portal.ut.edu.vn/login")
+    )
+    fwv_host.apply_auth_and_navigate(
+        [],
+        "https://portal.ut.edu.vn/dashboard",
+        init_script=portal_js,
+    )
+    # Prior in-flight same-origin login page emits url_change("/login") -> page_ended("/login")
+    # BEFORE load_request("/dashboard") starts — MUST NOT bypass requires_start or consume portal_js!
+    fwv_host._handle_flet_url_change(
+        SimpleNamespace(data="https://portal.ut.edu.vn/login")
+    )
+    fwv_host._handle_flet_page_ended(
+        SimpleNamespace(data="https://portal.ut.edu.vn/login")
+    )
+    assert ran_scripts == []
+
+    # Target /dashboard starts and finishes -> runs portal_js once!
+    fwv_host._handle_flet_page_started(
+        SimpleNamespace(data="https://portal.ut.edu.vn/dashboard")
+    )
+    fwv_host._handle_flet_page_ended(
+        SimpleNamespace(data="https://portal.ut.edu.vn/dashboard")
+    )
+    assert ran_scripts == [portal_js]
+
+    # reload() clears any pending init_script on flet_webview
+    fwv_host.apply_auth_and_navigate(
+        [],
+        "https://portal.ut.edu.vn/dashboard",
+        init_script=portal_js,
+    )
+    fwv_host.reload()
+    fwv_host._handle_flet_page_started(
+        SimpleNamespace(data="https://portal.ut.edu.vn/dashboard")
+    )
+    fwv_host._handle_flet_page_ended(
+        SimpleNamespace(data="https://portal.ut.edu.vn/dashboard")
+    )
+    assert ran_scripts == [portal_js]
+    fwv_host.dispose()
+
+
+
