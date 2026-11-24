@@ -1331,3 +1331,105 @@ def test_course_detail_pane_segment_semantics_exclude_duplicate_children():
     pane = CourseDetailPane()
     assert len(pane._segment_semantics) == 3
     assert all(sem.exclude_semantics is True for sem in pane._segment_semantics)
+
+
+def test_html_to_readable_markdown_preserves_tables_divs_and_avoids_li_p_duplication():
+    from core.courses.activity_service import _html_to_readable_markdown
+
+    sample_html = """
+    <div>
+      Bare intro text
+      <div><span>Nested div note</span></div>
+      <ul><li><p>Single bullet item</p></li></ul>
+      <table>
+        <tr><th>Cột A</th><th>Cột B</th></tr>
+        <tr><td>Giá trị 1</td><td>Giá trị 2</td></tr>
+      </table>
+    </div>
+    """
+    md = _html_to_readable_markdown(sample_html)
+    assert "Bare intro text" in md
+    assert "Nested div note" in md
+    assert md.count("Single bullet item") == 1
+    assert "| Cột A | Cột B |" in md
+    assert "| Giá trị 1 | Giá trị 2 |" in md
+
+
+def test_gift_prefix_with_colon_and_heading_wrapped_question_stem():
+    from core.courses.activity_service import (
+        clean_moodle_question_text,
+        parse_quiz_review_html_page,
+    )
+
+    text, code = clean_moodle_question_text("::Ch1: Q5::[html] Nội dung câu hỏi có dấu hai chấm?")
+    assert code == "Ch1: Q5"
+    assert text == "Nội dung câu hỏi có dấu hai chấm?"
+
+    review_html = """
+    <div class="que multichoice deferredfeedback correct">
+      <div class="info"><h3 class="no">Question <span class="qno">1</span></h3></div>
+      <div class="content">
+        <div class="qtext"><h4>::Ch2: Mục 1:: Câu hỏi nằm trong thẻ tiêu đề?</h4></div>
+        <div class="answer">
+          <div class="r0 correct"><input type="radio" checked="checked" /><label>a. Đúng</label></div>
+        </div>
+      </div>
+    </div>
+    """
+    report = parse_quiz_review_html_page(review_html, attempt_id=12)
+    assert len(report.questions) == 1
+    assert report.questions[0].question_code == "Ch2: Mục 1"
+    assert "::Ch2" not in report.questions[0].question_text
+    assert "Câu hỏi nằm trong thẻ tiêu đề?" in report.questions[0].question_text
+
+
+def test_local_preview_server_isolates_courses_and_thnn_session_bridges_and_resets_on_switch():
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    srv = LocalPreviewServer()
+    try:
+        c_client = SimpleNamespace(
+            moodle_site_origin="https://courses.ut.edu.vn",
+            open_session_raw=lambda u, **_kw: (200, u, "text/plain; charset=utf-8", b"courses-ok"),
+        )
+        t_client = SimpleNamespace(
+            moodle_site_origin="https://thnn.ut.edu.vn",
+            open_session_raw=lambda u, **_kw: (200, u, "text/plain; charset=utf-8", b"thnn-ok"),
+        )
+        srv.register_session_provider("courses", c_client)
+        srv.register_session_provider("thnn", t_client)
+        c_url = srv.build_session_bridge_url("courses", "https://courses.ut.edu.vn/course/view.php?id=1")
+        t_url = srv.build_session_bridge_url("thnn", "https://thnn.ut.edu.vn/course/view.php?id=2")
+        assert c_url and t_url
+        c_parts = urlsplit(c_url)
+        t_parts = urlsplit(t_url)
+
+        # Distinct loopback ports AND distinct bridge tokens isolate WebView origin storage
+        assert c_parts.port != t_parts.port
+        c_tok = [s for s in c_parts.path.split("/") if s][1]
+        t_tok = [s for s in t_parts.path.split("/") if s][1]
+        assert c_tok != t_tok
+
+        with urllib.request.urlopen(c_url, timeout=5) as resp:
+            assert resp.read() == b"courses-ok"
+        with urllib.request.urlopen(t_url, timeout=5) as resp:
+            assert resp.read() == b"thnn-ok"
+
+        # Cross-replaying courses token against thnn port must fail with 403
+        cross_url = f"http://127.0.0.1:{t_parts.port}{c_parts.path}?{c_parts.query}"
+        try:
+            urllib.request.urlopen(cross_url, timeout=5)
+            raise AssertionError("Expected 403 on cross-source bridge token replay")
+        except urllib.error.HTTPError as err:
+            assert err.code == 403
+
+        # Account switch rotates tokens and drops prior blobs
+        blob_url = srv.register_html("<html>old-account</html>")
+        assert srv.has_active_url(blob_url) is True
+        srv.reset_for_account_switch()
+        assert srv.has_active_url(blob_url) is False
+    finally:
+        srv.stop()
+

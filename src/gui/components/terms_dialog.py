@@ -79,11 +79,40 @@ def get_terms_sections(
     return tuple(sections)
 
 
+def _numeric_dim(obj: object, attr: str) -> float:
+    raw = getattr(obj, attr, None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0.0
+    val = float(raw)
+    return val if val > 0 else 0.0
+
+
 def build_terms_dialog(
     page: ft.Page,
     profile: DistributionProfile | None = None,
 ) -> ft.AlertDialog:
     sections = get_terms_sections(profile)
+    page_w = _numeric_dim(page, "width") or _numeric_dim(
+        getattr(page, "window", None), "width"
+    )
+    page_h = _numeric_dim(page, "height") or _numeric_dim(
+        getattr(page, "window", None), "height"
+    )
+    plat = getattr(page, "platform", None)
+    is_mobile = bool(
+        platform_utils.UI_IS_MOBILE
+        or plat in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
+        or str(plat or "").lower() in ("android", "ios")
+    )
+    is_compact = bool(is_mobile or (0 < page_w < 600))
+    content_width = (
+        None
+        if is_mobile
+        else (min(520.0, max(240.0, page_w - 80.0)) if page_w > 0 else 520.0)
+    )
+    content_height = (
+        min(460.0, max(220.0, page_h - 190.0)) if page_h > 0 else 460.0
+    )
     content = ft.Column(
         [
             ft.Text(
@@ -112,8 +141,16 @@ def build_terms_dialog(
         title=ft.Text("Điều khoản sử dụng & quyền riêng tư"),
         content=ft.Container(
             content=content,
-            width=None if platform_utils.UI_IS_MOBILE else 520,
-            height=460,
+            width=content_width,
+            height=content_height,
+        ),
+        inset_padding=ft.Padding.symmetric(
+            horizontal=16 if is_compact else 28,
+            vertical=20,
+        ),
+        content_padding=ft.Padding.symmetric(
+            horizontal=16 if is_compact else 24,
+            vertical=12,
         ),
         actions=[
             ft.TextButton("Đóng", on_click=lambda _event: page.pop_dialog()),

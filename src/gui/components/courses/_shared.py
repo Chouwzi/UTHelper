@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any, Callable, Literal, Optional
 
 import flet as ft
@@ -10,13 +11,33 @@ import flet as ft
 from gui.core.theme import C
 
 
+def marshal_to_ui(control: ft.BaseControl, fn: Callable[[], None]) -> None:
+    """Run ``fn`` on the control's Flet asyncio loop when invoked from a worker thread."""
+    if threading.current_thread() is not threading.main_thread():
+        try:
+            page = control.page
+        except Exception:
+            page = None
+        loop = getattr(page, "loop", None) if page is not None else None
+        if isinstance(loop, asyncio.AbstractEventLoop) and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(fn)
+                return
+            except RuntimeError:
+                pass
+    fn()
+
+
 def safe_control_update(control: ft.BaseControl) -> None:
     """Update a Flet control only if it is currently attached to a Page."""
-    try:
-        if control.page is not None:
-            control.update()
-    except Exception:
-        pass
+    def _do_update() -> None:
+        try:
+            if control.page is not None:
+                control.update()
+        except Exception:
+            pass
+
+    marshal_to_ui(control, _do_update)
 
 
 def build_filter_chip(

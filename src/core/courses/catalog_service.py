@@ -298,6 +298,7 @@ def _mark_new_modules(
 class _InflightDownload:
     event: threading.Event
     data: Optional[bytes] = None
+    path: Optional[Path] = None
     error: Optional[BaseException] = None
 
 
@@ -327,7 +328,7 @@ class CourseCatalogService:
         self._catalog_lock = threading.Lock()
         self._error_lock = threading.Lock()
         self._inflight_lock = threading.Lock()
-        self._inflight_downloads: dict[tuple[str, str], _InflightDownload] = {}
+        self._inflight_downloads: dict[tuple[Any, ...], _InflightDownload] = {}
         self._last_delta_check: dict[str, int] = {}
         self._last_thnn_error: str = ""
         self._last_courses_error: str = ""
@@ -893,7 +894,14 @@ class CourseCatalogService:
                 is_leader = False
 
         if not is_leader:
-            flight.event.wait(timeout=65.0)
+            completed = flight.event.wait(timeout=65.0)
+            if not completed:
+                if raise_on_empty:
+                    self._raise_download_error(
+                        valid_source,
+                        f"Timed out waiting for inflight download from {valid_source}",
+                    )
+                return None
             if flight.error is not None:
                 if raise_on_empty or isinstance(flight.error, CourseProviderError):
                     raise flight.error
@@ -943,9 +951,10 @@ class CourseCatalogService:
             flight.error = exc
             raise
         finally:
-            flight.event.set()
             with self._inflight_lock:
-                self._inflight_downloads.pop(inflight_key, None)
+                if self._inflight_downloads.get(inflight_key) is flight:
+                    self._inflight_downloads.pop(inflight_key, None)
+            flight.event.set()
 
     def fetch_attachment_bytes(
         self,
@@ -977,7 +986,7 @@ class CourseCatalogService:
         *,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Optional[Path]:
-        """Return a cached preview file path or stream/persist it on miss."""
+        """Return a cached preview file path or stream/persist it under SingleFlight."""
         valid_source = _validate_source(source)
         safe_url = _safe_http_url(file_url)
         if not safe_url or not isinstance(file_name, str) or not file_name.strip():
@@ -988,65 +997,116 @@ class CourseCatalogService:
         if cached_path is not None:
             return cached_path
 
-        provider = self._provider_for(valid_source)
-        stream_fn = (
-            getattr(provider, "download_file_to_path", None)
-            if provider is not None
-            else None
-        )
-        if callable(stream_fn):
-            def _stream_into_cache() -> Optional[Path]:
-                def _write(handle: Any) -> bool:
-                    if progress_callback is not None:
-                        try:
-                            return bool(
-                                stream_fn(
-                                    safe_url,
-                                    handle,
-                                    progress_callback=progress_callback,
-                                )
-                            )
-                        except TypeError:
-                            pass
-                    return bool(stream_fn(safe_url, handle))
+        safe_mtime = _safe_finite_int(time_modified, fallback=0)
+        inflight_key = ("preview_file", valid_source, safe_url, safe_mtime, file_name.strip())
+        with self._inflight_lock:
+            existing_flight = self._inflight_downloads.get(inflight_key)
+            if existing_flight is None:
+                flight = _InflightDownload(event=threading.Event())
+                self._inflight_downloads[inflight_key] = flight
+                is_leader = True
+            else:
+                flight = existing_flight
+                is_leader = False
 
-                return self._preview_cache.stage_and_commit(
-                    safe_url, time_modified, file_name, _write
-                )
+        if not is_leader:
+            completed = flight.event.wait(timeout=65.0)
+            if not completed or flight.error is not None:
+                return None
+            if flight.path is not None and flight.path.is_file():
+                if callable(progress_callback):
+                    try:
+                        sz = int(flight.path.stat().st_size)
+                        progress_callback(sz, sz)
+                    except Exception:
+                        pass
+                return flight.path
+            return self._preview_cache.get_cached_path(
+                safe_url, time_modified, file_name
+            )
+
+        try:
+            cached_again = self._preview_cache.get_cached_path(
+                safe_url, time_modified, file_name
+            )
+            if cached_again is not None:
+                flight.path = cached_again
+                return cached_again
+
+            provider = self._provider_for(valid_source)
+            stream_fn = (
+                getattr(provider, "download_file_to_path", None)
+                if provider is not None
+                else None
+            )
+            if callable(stream_fn):
+                def _stream_into_cache() -> Optional[Path]:
+                    def _write(handle: Any) -> bool:
+                        if progress_callback is not None:
+                            try:
+                                return bool(
+                                    stream_fn(
+                                        safe_url,
+                                        handle,
+                                        progress_callback=progress_callback,
+                                    )
+                                )
+                            except TypeError:
+                                pass
+                        return bool(stream_fn(safe_url, handle))
+
+                    return self._preview_cache.stage_and_commit(
+                        safe_url, time_modified, file_name, _write
+                    )
+
+                try:
+                    out_path = self._call_provider(
+                        valid_source, _stream_into_cache, context="download_file"
+                    )
+                    flight.path = out_path
+                    return out_path
+                except (CourseProviderError, OSError) as exc:
+                    flight.error = exc
+                    logger.warning(
+                        "Failed to stream preview file %r for %s: %s",
+                        file_name,
+                        valid_source,
+                        _format_error(exc),
+                    )
+                    return None
 
             try:
-                return self._call_provider(
-                    valid_source, _stream_into_cache, context="download_file"
+                raw = self._download_bytes(
+                    valid_source, safe_url, progress_callback=progress_callback
                 )
-            except (CourseProviderError, OSError) as exc:
+            except CourseProviderError as exc:
+                flight.error = exc
+                return None
+            if not raw:
+                return None
+            try:
+                out_path = self._preview_cache.put_bytes(
+                    safe_url, time_modified, file_name, raw
+                )
+                flight.path = out_path
+                return out_path
+            except OSError as exc:
+                flight.error = exc
                 logger.warning(
-                    "Failed to stream preview file %r for %s: %s",
+                    "Failed to cache preview file %r for %s: %s",
                     file_name,
                     valid_source,
                     _format_error(exc),
                 )
                 return None
-
-        try:
-            raw = self._download_bytes(
-                valid_source, safe_url, progress_callback=progress_callback
-            )
-        except CourseProviderError:
-            return None
-        if not raw:
-            return None
-        try:
-            return self._preview_cache.put_bytes(
-                safe_url, time_modified, file_name, raw
-            )
-        except OSError as exc:
-            logger.warning(
-                "Failed to cache preview file %r for %s: %s",
-                file_name,
-                valid_source,
-                _format_error(exc),
-            )
-            return None
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._inflight_lock:
+                if self._inflight_downloads.get(inflight_key) is flight:
+                    self._inflight_downloads.pop(inflight_key, None)
+            flight.event.set()
 
     def resolve_module_url(self, source: CourseSource, module: CourseModuleItem) -> str:
         """Resolve an external target URL for a module, using THNN lazy resolution when needed."""

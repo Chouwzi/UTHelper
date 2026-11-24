@@ -12,12 +12,14 @@ import logging
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import sys
 import threading
 import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
+import weakref
 
 import flet as ft
 
@@ -30,6 +32,52 @@ logger = logging.getLogger(__name__)
 
 _UTH_MSG_PREFIX = "__UTH_MSG__:"
 _DANGEROUS_WEBVIEW_SCHEMES = frozenset({"file", "javascript", "data", "intent", "vbscript", "ms-appx"})
+_LOOPBACK_ITEM_PATH_RE = re.compile(r"^/[0-9a-f]{16}$")
+
+_OCCLUSION_LOCK = threading.Lock()
+_ACTIVE_OCCLUSION_REASONS: set[str] = set()
+_ACTIVE_DOCKS: "weakref.WeakSet[WindowsWebView2Dock]" = weakref.WeakSet()
+
+
+def is_globally_occluded() -> bool:
+    """Return True when any modal/overlay surface requires native WebView2 HWNDs to hide."""
+    with _OCCLUSION_LOCK:
+        return bool(_ACTIVE_OCCLUSION_REASONS)
+
+
+def set_global_webview_occlusion(reason: str, occluded: bool) -> None:
+    """Register or clear a global occlusion reason and hide/restore active WebView2 HWNDs."""
+    key = str(reason or "").strip()
+    if not key:
+        return
+    changed = False
+    with _OCCLUSION_LOCK:
+        was_occluded = bool(_ACTIVE_OCCLUSION_REASONS)
+        if occluded:
+            _ACTIVE_OCCLUSION_REASONS.add(key)
+        else:
+            _ACTIVE_OCCLUSION_REASONS.discard(key)
+        now_occluded = bool(_ACTIVE_OCCLUSION_REASONS)
+        changed = was_occluded != now_occluded
+        docks = list(_ACTIVE_DOCKS) if changed else []
+    for dock in docks:
+        try:
+            dock._notify_occlusion_changed()
+        except Exception:
+            pass
+
+
+def clear_global_webview_occlusion() -> None:
+    """Clear all active WebView2 occlusion reasons and restore visible docks."""
+    with _OCCLUSION_LOCK:
+        had_any = bool(_ACTIVE_OCCLUSION_REASONS)
+        _ACTIVE_OCCLUSION_REASONS.clear()
+        docks = list(_ACTIVE_DOCKS) if had_any else []
+    for dock in docks:
+        try:
+            dock._notify_occlusion_changed()
+        except Exception:
+            pass
 
 
 def _extract_loopback_port(url: str) -> Optional[int]:
@@ -265,18 +313,62 @@ class WindowsWebView2Dock:
         if init_loop_port is not None:
             self._allowed_loopback_ports.add(init_loop_port)
         self._bounds_dip: tuple[float, float, float, float] = (410.0, 90.0, 640.0, 480.0)
+        self._explicit_bounds_set: bool = False
         self._bottom_inset_dip: float = 0.0
         self._hwnd: int = 0
         self._parent_hwnd: int = 0
         self._controller: Any = None
         self._core: Any = None
+        self._pending_cookie_ctrl: Any = None
+        self._cookie_prefetch_started: bool = False
+        self._prefetched_cookies: Optional[tuple[Optional[list[dict[str, Any]]], Optional[BaseException]]] = None
         self._thread: Optional[threading.Thread] = None
         self._thread_id: int = 0
         self._hwnd_retries: int = 15
+        with _OCCLUSION_LOCK:
+            _ACTIVE_DOCKS.add(self)
+
+    def _effective_visible(self) -> bool:
+        return bool(self._visible and not is_globally_occluded())
+
+    def _notify_occlusion_changed(self) -> None:
+        if not self._stop_event.is_set():
+            self._enqueue("occlusion", None)
+
+    def _start_cookie_prefetch(self) -> None:
+        with self._lock:
+            if (
+                self._cookie_prefetch_started
+                or self._cookies
+                or not callable(self._cookie_provider)
+            ):
+                return
+            self._cookie_prefetch_started = True
+        provider = self._cookie_provider
+
+        def _worker() -> None:
+            result: Optional[list[dict[str, Any]]] = None
+            err: Optional[BaseException] = None
+            try:
+                result = list(provider() or ())
+            except BaseException as exc:
+                err = exc
+            with self._lock:
+                self._prefetched_cookies = (result, err)
+                has_waiting_ctrl = self._pending_cookie_ctrl is not None
+            if has_waiting_ctrl and not self._stop_event.is_set():
+                self._enqueue("_cookies_ready", None)
+
+        threading.Thread(
+            target=_worker,
+            name="CoursesWebView2CookiePrefetch",
+            daemon=True,
+        ).start()
 
     def start(self) -> None:
         if self._thread is not None or sys.platform != "win32":
             return
+        self._start_cookie_prefetch()
         self._thread = threading.Thread(
             target=self._run_sta_thread,
             name="CoursesWebView2STA",
@@ -291,7 +383,11 @@ class WindowsWebView2Dock:
             return False
         try:
             path = urlsplit(self._url).path
-            return path.startswith("/viewer/") or path.startswith("/pdf-viewer/")
+            if path.startswith("/viewer/") or path.startswith("/pdf-viewer/"):
+                return True
+            if _extract_loopback_port(self._url) is not None and _LOOPBACK_ITEM_PATH_RE.fullmatch(path):
+                return True
+            return False
         except ValueError:
             return False
 
@@ -303,6 +399,8 @@ class WindowsWebView2Dock:
             segs = [s for s in parts.path.split("/") if s]
             if len(segs) >= 2 and segs[0] in ("viewer", "pdf-viewer"):
                 return f"{parts.scheme.lower()}://{parts.netloc.lower()}/{segs[0]}/{segs[1]}/"
+            if _extract_loopback_port(self._url) is not None and _LOOPBACK_ITEM_PATH_RE.fullmatch(parts.path):
+                return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
         except ValueError:
             pass
         return ""
@@ -402,10 +500,13 @@ class WindowsWebView2Dock:
             max(120.0, float(width)),
             max(120.0, float(height)),
         )
+        self._explicit_bounds_set = True
         self._bottom_inset_dip = max(0.0, float(bottom_inset))
         self._enqueue("bounds", self._bounds_dip)
 
     def dispose(self) -> None:
+        with _OCCLUSION_LOCK:
+            _ACTIVE_DOCKS.discard(self)
         with self._lock:
             if self._stop_event.is_set():
                 return
@@ -711,46 +812,99 @@ class WindowsWebView2Dock:
             except Exception:
                 pass
             if not self._cookies and callable(self._cookie_provider):
-                try:
-                    self._cookies = list(self._cookie_provider() or ())
-                except Exception as exc:
-                    logger.debug("WebView2 async cookie provider failed: %s", exc)
-                    self._fail("Không thể khôi phục phiên đăng nhập. Hãy đăng nhập lại.")
-                    return
-            if self._stop_event.is_set():
-                try:
-                    ctrl.close()
-                except Exception:
-                    pass
-                self._controller = None
-                self._core = None
-                return
-            self._inject_cookies(core)
-            if self._stop_event.is_set():
-                try:
-                    ctrl.close()
-                except Exception:
-                    pass
-                self._controller = None
-                self._core = None
-                return
-            self._ready = True
-            self._paint_ready = False
-            self._paint_deadline = 0.0
-            self._bind_events(core)
-            self._apply_window_bounds()
-            ctrl.is_visible = self._visible
-            if self._html is not None:
-                core.navigate_to_string(self._html)
-            elif self._url:
-                core.navigate(self._url)
-            with self._lock:
-                queued = list(self._pending_scripts)
-                self._pending_scripts.clear()
-            for script, loop, fut in queued:
-                self._exec_js_on_core(script, loop, fut)
+                if self._thread is not None and self._thread.is_alive():
+                    with self._lock:
+                        prefetched = self._prefetched_cookies
+                        if prefetched is None:
+                            self._pending_cookie_ctrl = ctrl
+                    if prefetched is None:
+                        self._start_cookie_prefetch()
+                        with self._lock:
+                            prefetched = self._prefetched_cookies
+                            if prefetched is not None:
+                                self._pending_cookie_ctrl = None
+                        if prefetched is None:
+                            return
+                    cookies_val, cookie_err = prefetched
+                    if cookie_err is not None:
+                        logger.debug("WebView2 async cookie provider failed: %s", cookie_err)
+                        self._fail("Không thể khôi phục phiên đăng nhập. Hãy đăng nhập lại.")
+                        return
+                    self._cookies = list(cookies_val or ())
+                else:
+                    try:
+                        self._cookies = list(self._cookie_provider() or ())
+                    except Exception as exc:
+                        logger.debug("WebView2 async cookie provider failed: %s", exc)
+                        self._fail("Không thể khôi phục phiên đăng nhập. Hãy đăng nhập lại.")
+                        return
+            self._complete_ctrl_setup(ctrl, core)
         except Exception as exc:
             self._fail(str(exc))
+
+    def _handle_cookies_ready(self) -> None:
+        with self._lock:
+            ctrl = self._pending_cookie_ctrl
+            self._pending_cookie_ctrl = None
+            prefetched = self._prefetched_cookies
+        if ctrl is None:
+            return
+        if self._stop_event.is_set() or not self._hwnd:
+            try:
+                ctrl.close()
+            except Exception:
+                pass
+            self._controller = None
+            self._core = None
+            return
+        if prefetched is not None:
+            cookies_val, cookie_err = prefetched
+            if cookie_err is not None:
+                logger.debug("WebView2 async cookie provider failed: %s", cookie_err)
+                self._fail("Không thể khôi phục phiên đăng nhập. Hãy đăng nhập lại.")
+                return
+            self._cookies = list(cookies_val or ())
+        core = self._core
+        if core is None:
+            return
+        try:
+            self._complete_ctrl_setup(ctrl, core)
+        except Exception as exc:
+            self._fail(str(exc))
+
+    def _complete_ctrl_setup(self, ctrl: Any, core: Any) -> None:
+        if self._stop_event.is_set():
+            try:
+                ctrl.close()
+            except Exception:
+                pass
+            self._controller = None
+            self._core = None
+            return
+        self._inject_cookies(core)
+        if self._stop_event.is_set():
+            try:
+                ctrl.close()
+            except Exception:
+                pass
+            self._controller = None
+            self._core = None
+            return
+        self._ready = True
+        self._paint_ready = False
+        self._paint_deadline = 0.0
+        self._bind_events(core)
+        self._apply_window_bounds()
+        ctrl.is_visible = self._effective_visible()
+        if self._html is not None:
+            core.navigate_to_string(self._html)
+        elif self._url:
+            core.navigate(self._url)
+        with self._lock:
+            queued = list(self._pending_scripts)
+            self._pending_scripts.clear()
+        for script, loop, fut in queued:
+            self._exec_js_on_core(script, loop, fut)
 
     def _inject_cookies(self, core: Any) -> None:
         cm = getattr(core, "cookie_manager", None)
@@ -927,10 +1081,11 @@ class WindowsWebView2Dock:
         parent = self._parent_hwnd
         if parent and win32gui.IsWindow(parent):
             user32 = ctypes.windll.user32
+            eff_visible = self._effective_visible()
             if (
                 win32gui.IsIconic(parent)
                 or not win32gui.IsWindowVisible(parent)
-                or not self._visible
+                or not eff_visible
             ):
                 win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
                 if self._controller is not None:
@@ -959,8 +1114,16 @@ class WindowsWebView2Dock:
             left_px = max(0, int(round(self._bounds_dip[0] * scale)))
             top_px = max(0, int(round(self._bounds_dip[1] * scale)))
             bot_px = max(0, int(round(self._bottom_inset_dip * scale)))
-            w_px = max(160, max_w - left_px)
-            h_px = max(160, max_h - top_px - bot_px)
+            avail_w = max(160, max_w - left_px)
+            avail_h = max(160, max_h - top_px - bot_px)
+            if self._explicit_bounds_set:
+                req_w = max(160, int(round(self._bounds_dip[2] * scale)))
+                req_h = max(160, int(round(self._bounds_dip[3] * scale)))
+                w_px = min(avail_w, req_w)
+                h_px = min(avail_h, req_h)
+            else:
+                w_px = avail_w
+                h_px = avail_h
             fg_hwnd = 0
             fg_root_owner = 0
             try:
@@ -1019,13 +1182,13 @@ class WindowsWebView2Dock:
                 h_px,
                 flags,
             )
-            if self._visible and self._paint_ready:
+            if eff_visible and self._paint_ready:
                 win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNOACTIVATE)
             else:
                 win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
             if self._controller is not None:
                 self._controller.bounds = Rect(0.0, 0.0, float(w_px), float(h_px))
-                self._controller.is_visible = self._visible
+                self._controller.is_visible = eff_visible
                 self._controller.notify_parent_window_position_changed()
 
     def _fail(self, reason: str) -> None:
@@ -1054,11 +1217,13 @@ class WindowsWebView2Dock:
                 and time.monotonic() >= self._paint_deadline
             ):
                 self._mark_paint_ready()
+            parent_inactive = False
             if self._parent_hwnd and win32gui.IsWindow(self._parent_hwnd):
                 try:
                     cur_rect = win32gui.GetWindowRect(self._parent_hwnd)
                     is_min = bool(win32gui.IsIconic(self._parent_hwnd))
                     is_vis = bool(win32gui.IsWindowVisible(self._parent_hwnd))
+                    parent_inactive = is_min or not is_vis
                     parent_topmost = bool(
                         int(ctypes.windll.user32.GetWindowLongW(int(self._parent_hwnd), -20))
                         & win32con.WS_EX_TOPMOST
@@ -1089,7 +1254,13 @@ class WindowsWebView2Dock:
                     return
                 ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
                 ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
-            ctypes.windll.user32.MsgWaitForMultipleObjects(0, None, False, 16, 0x04FF)
+            awaiting_paint = not self._paint_ready and self._paint_deadline > 0.0
+            wait_ms = (
+                16
+                if (awaiting_paint or (self._effective_visible() and not parent_inactive))
+                else 250
+            )
+            ctypes.windll.user32.MsgWaitForMultipleObjects(0, None, False, wait_ms, 0x04FF)
 
     def _drain_commands(self) -> None:
         import win32con
@@ -1104,6 +1275,8 @@ class WindowsWebView2Dock:
                 self._handle_env_done(payload[0])
             elif action == "_ctrl_done":
                 self._handle_ctrl_done(payload[0])
+            elif action == "_cookies_ready":
+                self._handle_cookies_ready()
             elif action == "navigate" and self._core is not None and payload:
                 nav_url = str(payload)
                 if self._is_navigation_uri_allowed(nav_url):
@@ -1142,9 +1315,17 @@ class WindowsWebView2Dock:
             elif action == "reload" and self._core is not None:
                 self._core.reload()
             elif action == "visible":
+                eff_vis = self._effective_visible()
                 if self._controller is not None:
-                    self._controller.is_visible = bool(payload)
-                if self._hwnd and not payload:
+                    self._controller.is_visible = eff_vis
+                if self._hwnd and not eff_vis:
+                    win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
+                self._apply_window_bounds()
+            elif action == "occlusion":
+                eff_vis = self._effective_visible()
+                if self._controller is not None:
+                    self._controller.is_visible = eff_vis
+                if self._hwnd and not eff_vis:
                     win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
                 self._apply_window_bounds()
             elif action == "bounds":
@@ -1154,7 +1335,17 @@ class WindowsWebView2Dock:
                 break
 
     def _cleanup_native(self) -> None:
+        with _OCCLUSION_LOCK:
+            _ACTIVE_DOCKS.discard(self)
         self._resolve_pending_scripts()
+        with self._lock:
+            pending_ctrl = self._pending_cookie_ctrl
+            self._pending_cookie_ctrl = None
+        if pending_ctrl is not None and pending_ctrl is not self._controller:
+            try:
+                pending_ctrl.close()
+            except Exception:
+                pass
         if self._controller is not None:
             try:
                 self._controller.close()

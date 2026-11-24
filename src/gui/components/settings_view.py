@@ -43,9 +43,9 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import ClassScheduleLeadHoursError, SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None, on_logout=None, on_account_login=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url, on_logout, on_account_login)
         self._init_controls()
         self._init_layout()
         self._rendered_palette = semantic_palette()
@@ -56,11 +56,14 @@ class SettingsView(ft.Container):
             return profile
         return resolve_distribution_channel()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None, on_logout=None, on_account_login=None):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
         self._on_saved = on_saved
+        self.on_save = on_saved
+        self.on_logout = on_logout
+        self.on_account_login = on_account_login
         self._on_test_tray = on_test_tray
         self._on_test_mobile = on_test_mobile
         self._on_test_tele = on_test_tele
@@ -716,7 +719,6 @@ class SettingsView(ft.Container):
             title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
             subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
             leading=leading_icon,
-            affinity=ft.Theme.color_scheme,
             controls=[body] if default_open else [],
             collapsed_text_color=C.TEXT_PRIMARY,
             text_color=C.ACCENT,
@@ -1581,6 +1583,8 @@ class SettingsView(ft.Container):
         self.update()
 
     async def _handle_test_login(self, e):
+        import inspect
+
         user = self._username_field.value.strip()
         pwd = self._password_field.value.strip()
         if not user or not pwd:
@@ -1594,6 +1598,8 @@ class SettingsView(ft.Container):
             return
 
         self._test_login_btn.disabled = True
+        if hasattr(self, "_logout_btn"):
+            self._logout_btn.disabled = True
         self._username_field.disabled = True
         self._password_field.disabled = True
         self._test_login_btn.text = "Đang kiểm tra..."
@@ -1605,8 +1611,60 @@ class SettingsView(ft.Container):
         self.update()
 
         try:
-            success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
+            login_fn = self._orchestrator.client.login
+            supports_persist = False
+            try:
+                sig = inspect.signature(login_fn)
+                supports_persist = "persist" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+            except (TypeError, ValueError):
+                supports_persist = False
+
+            if supports_persist:
+                success = await asyncio.to_thread(
+                    login_fn,
+                    username=user,
+                    password=pwd,
+                    force=True,
+                    persist=False,
+                )
+            else:
+                success = await asyncio.to_thread(
+                    login_fn,
+                    username=user,
+                    password=pwd,
+                    force=True,
+                )
+
             if success:
+                if self._baseline_snapshot is not None:
+                    self._baseline_snapshot = replace(
+                        self._baseline_snapshot,
+                        uth_username=user,
+                        uth_password=pwd,
+                    )
+                account_cb = getattr(self, "on_account_login", None)
+                if callable(account_cb):
+                    cb_res = account_cb(user, pwd)
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
+                else:
+                    if supports_persist:
+                        settings.UTH_USERNAME = user
+                        settings.UTH_PASSWORD = pwd
+                        settings.UTH_CREDENTIALS_ORIGIN = ""
+                        await asyncio.to_thread(save_settings)
+                    legacy_cb = getattr(self, "on_save", None) or getattr(
+                        self, "_on_saved", None
+                    )
+                    if callable(legacy_cb):
+                        cb_res = legacy_cb()
+                        if inspect.isawaitable(cb_res):
+                            await cb_res
+                if hasattr(self, "_unsaved_dot"):
+                    self._unsaved_dot.visible = self.has_changes()
                 self._test_login_status.value = "Đã kết nối với hệ thống UTH"
                 self._test_login_status.color = C.SAFE
                 if hasattr(self, "_test_login_status_icon"):
@@ -1629,12 +1687,94 @@ class SettingsView(ft.Container):
                 self._test_login_status_icon.visible = True
         finally:
             self._test_login_btn.disabled = False
+            if hasattr(self, "_logout_btn"):
+                self._logout_btn.disabled = False
             self._username_field.disabled = False
             self._password_field.disabled = False
             self._test_login_btn.text = "Kiểm tra kết nối"
             self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
             self._test_loading_bar.visible = False
             self.update()
+
+    async def _handle_logout(self, _e=None):
+        import inspect
+
+        if hasattr(self, "_logout_btn"):
+            self._logout_btn.disabled = True
+        self._test_login_btn.disabled = True
+        try:
+            self._username_field.value = ""
+            self._password_field.value = ""
+            if self._baseline_snapshot is not None:
+                self._baseline_snapshot = replace(
+                    self._baseline_snapshot,
+                    uth_username="",
+                    uth_password="",
+                )
+            logout_cb = getattr(self, "on_logout", None)
+            if callable(logout_cb):
+                cb_res = logout_cb()
+                if inspect.isawaitable(cb_res):
+                    await cb_res
+            else:
+                settings.UTH_USERNAME = ""
+                settings.UTH_PASSWORD = ""
+                settings.UTH_CREDENTIALS_ORIGIN = ""
+                settings.MOODLE_WS_TOKEN = ""
+                settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                settings.MOODLE_SESSION = ""
+                client = getattr(self._orchestrator, "client", None)
+                clear_fn = getattr(client, "clear_session", None)
+                if callable(clear_fn):
+                    clear_fn()
+                if self._orchestrator is not None:
+                    self._orchestrator.is_logged_in = False
+                await asyncio.to_thread(save_settings)
+                legacy_cb = getattr(self, "on_save", None) or getattr(
+                    self, "_on_saved", None
+                )
+                if callable(legacy_cb):
+                    cb_res = legacy_cb()
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
+            if hasattr(self, "_unsaved_dot"):
+                self._unsaved_dot.visible = self.has_changes()
+            self._test_login_status.value = "Đã đăng xuất và xóa thông tin đăng nhập."
+            self._test_login_status.color = C.SAFE
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.name = ft.Icons.CHECK_CIRCLE_ROUNDED
+                self._test_login_status_icon.color = C.SAFE
+                self._test_login_status_icon.visible = True
+        except Exception as ex:
+            self._test_login_status.value = f"Lỗi đăng xuất: {ex}"
+            self._test_login_status.color = C.CRITICAL
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                self._test_login_status_icon.color = C.CRITICAL
+                self._test_login_status_icon.visible = True
+        finally:
+            if hasattr(self, "_logout_btn"):
+                self._logout_btn.disabled = False
+            self._test_login_btn.disabled = False
+            self.update()
+
+    def _marshal_ui(self, fn):
+        """Marshal worker-thread control mutations onto the Flet event loop when active."""
+        import threading
+
+        page = getattr(self, "_page", None)
+        loop = getattr(page, "loop", None)
+        if (
+            threading.current_thread() is not threading.main_thread()
+            and isinstance(loop, asyncio.AbstractEventLoop)
+            and loop.is_running()
+        ):
+            try:
+                loop.call_soon_threadsafe(fn)
+                return
+            except RuntimeError:
+                pass
+        fn()
 
 
 
@@ -1761,13 +1901,16 @@ class SettingsView(ft.Container):
                 result = f"Lỗi kết nối: {ex}"
                 color = C.CRITICAL
 
-            self._debug_info_text.value = result
-            self._debug_info_text.color = color
-            try:
-                self._debug_info_text.update()
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            def _apply():
+                self._debug_info_text.value = result
+                self._debug_info_text.color = color
+                try:
+                    self._debug_info_text.update()
+                except Exception:
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+            self._marshal_ui(_apply)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2177,13 +2320,16 @@ class SettingsView(ft.Container):
                 result = f"Lỗi kiểm tra: {ex}"
                 color = C.CRITICAL
 
-            self._debug_update_text.value = result
-            self._debug_update_text.color = color
-            try:
-                self._debug_update_text.update()
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            def _apply_upd():
+                self._debug_update_text.value = result
+                self._debug_update_text.color = color
+                try:
+                    self._debug_update_text.update()
+                except Exception:
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+            self._marshal_ui(_apply_upd)
 
         threading.Thread(target=_worker, daemon=True, name="debug-update").start()
 
@@ -2247,10 +2393,15 @@ class SettingsView(ft.Container):
             else:
                 result = f"Không thể kết nối {url}"
                 color = C.CRITICAL
-            self._debug_info_text.value = result
-            self._debug_info_text.color = color
-            try: self._debug_info_text.update()
-            except Exception: pass
+            def _apply_ping():
+                self._debug_info_text.value = result
+                self._debug_info_text.color = color
+                try:
+                    self._debug_info_text.update()
+                except Exception:
+                    pass
+
+            self._marshal_ui(_apply_ping)
 
         threading.Thread(target=_ping, daemon=True, name="debug-ping").start()
 
@@ -2837,7 +2988,14 @@ class SettingsView(ft.Container):
     async def _handle_back(self, e, on_closed=None):
         import logging
         _log = logging.getLogger("settings.dialog")
-        _log.debug("Settings Back requested; has_changes=%s", self.has_changes())
+        _log.debug(
+            "Settings Back requested; screen=%s has_changes=%s",
+            getattr(self, "_current_screen", "hub"),
+            self.has_changes(),
+        )
+        if on_closed is None and getattr(self, "_current_screen", "hub") != "hub":
+            self._navigate_to_hub()
+            return
         close_cb = on_closed if callable(on_closed) else self._on_close_cb
         if self._loading and not self.has_changes():
             self.cancel_pending_load()

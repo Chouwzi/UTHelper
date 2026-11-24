@@ -28,6 +28,7 @@ from gui.components.courses.embedded_webview_host import (
     _safe_control_page,
     _webview2_runtime_available,
     build_embedded_webview_host,
+    set_global_webview_occlusion,
 )
 from gui.core.theme import C
 from gui.view_models.courses_state import safe_http_url
@@ -221,12 +222,18 @@ class CoursesWebViewPane(ft.Container):
         self._more_menu_item_reload = ft.PopupMenuItem(
             content="Tải lại trang",
             icon=ft.Icons.REFRESH_ROUNDED,
-            on_click=self._on_webview_reload,
+            on_click=lambda e: (
+                set_global_webview_occlusion("webview_menu", False),
+                self._on_webview_reload(e),
+            ),
         )
         self._more_menu_item_ext = ft.PopupMenuItem(
             content="Mở bằng trình duyệt ngoài",
             icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-            on_click=lambda _e: self._on_open_external(self._url),
+            on_click=lambda _e: (
+                set_global_webview_occlusion("webview_menu", False),
+                self._on_open_external(self._url),
+            ),
         )
         self._more_menu_btn = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT_ROUNDED,
@@ -235,6 +242,9 @@ class CoursesWebViewPane(ft.Container):
             tooltip="Tùy chọn",
             size_constraints=touch_constraints,
             items=[self._more_menu_item_reload, self._more_menu_item_ext],
+            on_open=lambda _e: set_global_webview_occlusion("webview_menu", True),
+            on_cancel=lambda _e: set_global_webview_occlusion("webview_menu", False),
+            on_select=lambda _e: set_global_webview_occlusion("webview_menu", False),
         )
 
         self._header_container, self._back_btn, self._title_text, self._subtitle_text = (
@@ -417,24 +427,22 @@ class CoursesWebViewPane(ft.Container):
         if self._disposed:
             return
         page = _safe_control_page(self)
-        if page is None or not callable(getattr(page, "run_task", None)):
-            fn()
-            return
-        try:
-            asyncio.get_running_loop()
-            fn()
-            return
-        except RuntimeError:
-            pass
+        loop = getattr(page, "loop", None) if page is not None else None
+        if (
+            threading.current_thread() is not threading.main_thread()
+            and isinstance(loop, asyncio.AbstractEventLoop)
+            and loop.is_running()
+        ):
+            def _guarded() -> None:
+                if not self._disposed:
+                    fn()
 
-        async def _apply() -> None:
-            if not self._disposed:
-                fn()
-
-        try:
-            page.run_task(_apply)
-        except Exception:
-            fn()
+            try:
+                loop.call_soon_threadsafe(_guarded)
+                return
+            except RuntimeError:
+                pass
+        fn()
 
     def _set_nav_loading(self, loading: bool) -> None:
         if self._disposed:
@@ -630,6 +638,8 @@ class CoursesWebViewPane(ft.Container):
                 )
 
             if html_text and not error_text:
+                from core.courses.activity_service import _html_to_readable_markdown
+
                 raw_soup = BeautifulSoup(html_text, BS4_PARSER)
                 for junk_tag in list(raw_soup.find_all(_NON_READABLE_HTML_TAGS)):
                     if not getattr(junk_tag, "decomposed", False):
@@ -641,17 +651,7 @@ class CoursesWebViewPane(ft.Container):
                     or raw_soup.body
                     or raw_soup
                 )
-                lines: list[str] = []
-                for el in main.find_all(["h1", "h2", "h3", "p", "li"]):
-                    txt = " ".join(el.get_text(" ", strip=True).split())
-                    if txt:
-                        prefix = (
-                            "## "
-                            if el.name in ("h1", "h2", "h3")
-                            else ("- " if el.name == "li" else "")
-                        )
-                        lines.append(f"{prefix}{txt}")
-                markdown_text = "\n\n".join(lines[:140])
+                markdown_text = _html_to_readable_markdown(str(main))
                 for anchor in main.select("a[href]"):
                     href = str(anchor.get("href") or "").strip()
                     label = " ".join(anchor.get_text(" ", strip=True).split())
@@ -667,89 +667,94 @@ class CoursesWebViewPane(ft.Container):
         if self._disposed:
             return
 
-        self._nav_progress.visible = False
-        safe_control_update(self._nav_progress)
+        def _apply_fallback() -> None:
+            if self._disposed:
+                return
+            self._nav_progress.visible = False
+            safe_control_update(self._nav_progress)
 
-        if error_text or not markdown_text:
-            card_controls: list[ft.Control] = [
-                ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
-                ft.Text(
-                    self._title,
-                    size=16,
-                    weight=ft.FontWeight.W_600,
-                    color=C.TEXT_PRIMARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Text(
-                    error_text
-                    or "Hoạt động này yêu cầu trình duyệt tương tác trực tiếp trên thiết bị.",
-                    size=13,
-                    color=C.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
+            if error_text or not markdown_text:
+                card_controls: list[ft.Control] = [
+                    ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
+                    ft.Text(
+                        self._title,
+                        size=16,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        error_text
+                        or "Hoạt động này yêu cầu trình duyệt tương tác trực tiếp trên thiết bị.",
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ]
+                if safe_http_url(self._url) and not _is_loopback_url(self._url):
+                    card_controls.append(
+                        ft.FilledButton(
+                            "Mở bằng trình duyệt ngoài",
+                            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                            on_click=lambda _e: self._on_open_external(self._url),
+                        )
+                    )
+                self._body_host.content = ft.Container(
+                    expand=True,
+                    alignment=ft.Alignment.CENTER,
+                    padding=24,
+                    content=ft.Column(
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=12,
+                        controls=card_controls,
+                    ),
+                )
+                safe_control_update(self._body_host)
+                return
+
+            controls: list[ft.Control] = [
+                ft.Markdown(
+                    value=markdown_text,
+                    selectable=True,
+                    extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                    on_tap_link=lambda e: self._navigate_link(
+                        str(getattr(e, "data", "") or "")
+                    ),
+                )
             ]
-            if safe_http_url(self._url) and not _is_loopback_url(self._url):
-                card_controls.append(
-                    ft.FilledButton(
-                        "Mở bằng trình duyệt ngoài",
-                        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                        on_click=lambda _e: self._on_open_external(self._url),
+            if extracted_links:
+                controls.append(ft.Divider(height=16, color=C.BORDER))
+                controls.append(
+                    ft.Text(
+                        "Liên kết nhanh trong trang",
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_SECONDARY,
+                    )
+                )
+                controls.append(
+                    ft.Row(
+                        wrap=True,
+                        spacing=8,
+                        run_spacing=8,
+                        controls=[
+                            ft.OutlinedButton(
+                                label[:40],
+                                on_click=lambda _e, target=href: self._navigate_link(target),
+                            )
+                            for label, href in extracted_links
+                        ],
                     )
                 )
             self._body_host.content = ft.Container(
                 expand=True,
-                alignment=ft.Alignment.CENTER,
-                padding=24,
-                content=ft.Column(
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=12,
-                    controls=card_controls,
-                ),
+                padding=ft.Padding.symmetric(horizontal=20, vertical=16),
+                content=ft.ListView(expand=True, spacing=8, controls=controls),
             )
             safe_control_update(self._body_host)
-            return
 
-        controls: list[ft.Control] = [
-            ft.Markdown(
-                value=markdown_text,
-                selectable=True,
-                extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                on_tap_link=lambda e: self._navigate_link(
-                    str(getattr(e, "data", "") or "")
-                ),
-            )
-        ]
-        if extracted_links:
-            controls.append(ft.Divider(height=16, color=C.BORDER))
-            controls.append(
-                ft.Text(
-                    "Liên kết nhanh trong trang",
-                    size=11,
-                    weight=ft.FontWeight.W_600,
-                    color=C.TEXT_SECONDARY,
-                )
-            )
-            controls.append(
-                ft.Row(
-                    wrap=True,
-                    spacing=8,
-                    run_spacing=8,
-                    controls=[
-                        ft.OutlinedButton(
-                            label[:40],
-                            on_click=lambda _e, target=href: self._navigate_link(target),
-                        )
-                        for label, href in extracted_links
-                    ],
-                )
-            )
-        self._body_host.content = ft.Container(
-            expand=True,
-            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
-            content=ft.ListView(expand=True, spacing=8, controls=controls),
-        )
-        safe_control_update(self._body_host)
+        self._marshal_ui(_apply_fallback)
 
     def _navigate_link(self, target_url: str) -> None:
         clean = str(target_url or "").strip()
@@ -865,6 +870,7 @@ class CoursesWebViewPane(ft.Container):
             )
 
     def suspend(self) -> None:
+        set_global_webview_occlusion("webview_menu", False)
         if self._host is not None:
             self._host.suspend()
         elif self._dock is not None:
@@ -880,6 +886,7 @@ class CoursesWebViewPane(ft.Container):
 
     def dispose(self) -> None:
         self._disposed = True
+        set_global_webview_occlusion("webview_menu", False)
         if self._host is not None:
             self._host.dispose()
             self._host = None
