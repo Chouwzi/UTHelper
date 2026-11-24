@@ -1109,7 +1109,12 @@ def resolve_relaunch_executable(
 
 
 def _start_process(argv: list[str]) -> _Process:
-    return subprocess.Popen(argv)
+    return subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 class WindowsPackageLauncher:

@@ -56,7 +56,16 @@ _APPROVED_GITHUB_REDIRECT_HOSTS = frozenset(
     }
 )
 _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
-_DEFAULT_URLOPEN = urllib.request.urlopen
+
+
+def _is_native_urlopen(fn: object) -> bool:
+    """Return True only when urllib.request.urlopen is the unpatched stdlib function."""
+    return (
+        callable(fn)
+        and getattr(fn, "__module__", None) == "urllib.request"
+        and getattr(fn, "__qualname__", None) == "urlopen"
+        and not hasattr(fn, "__wrapped__")
+    )
 
 
 def _is_approved_github_url(url: str) -> bool:
@@ -101,7 +110,7 @@ class _ApprovedGitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def _open_github_url(request: urllib.request.Request, *, timeout: float):
     """Open an update request with strict GitHub HTTPS redirect pinning."""
-    if urllib.request.urlopen is not _DEFAULT_URLOPEN:
+    if not _is_native_urlopen(urllib.request.urlopen):
         return urllib.request.urlopen(request, timeout=timeout)
     opener = urllib.request.build_opener(_ApprovedGitHubRedirectHandler())
     response = opener.open(request, timeout=timeout)

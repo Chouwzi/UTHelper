@@ -428,7 +428,7 @@ def test_f2_build_embedded_webview_host_rejects_unsafe_and_headless_platforms(
 
 
 def test_f2_embedded_webview_host_flet_webview_backend(monkeypatch: pytest.MonkeyPatch):
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
 
     ran_tasks: list[str] = []
 

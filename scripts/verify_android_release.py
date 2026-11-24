@@ -148,6 +148,7 @@ def _run(command: Sequence[str | Path]) -> str:
             [str(part) for part in command],
             timeout=60,
             check=True,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
         )

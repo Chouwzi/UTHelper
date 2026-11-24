@@ -1585,7 +1585,12 @@ class WindowsShimEnv:
         effective = list(argv)
         if effective and effective[0].lower() == "msiexec.exe":
             effective[0] = str(self.msiexec_exe)
-        proc = subprocess.Popen(effective, stdin=subprocess.DEVNULL)
+        proc = subprocess.Popen(
+            effective,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         self._spawned_processes.append(proc)
         return proc
 
