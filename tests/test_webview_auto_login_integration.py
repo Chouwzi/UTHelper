@@ -2066,3 +2066,203 @@ def test_round3_flet_page_ended_does_not_consume_init_script_queued_by_on_url_ch
     assert ran_scripts == [portal_js]
     fwv_host.dispose()
 
+
+# ---------------------------------------------------------------------------
+# 8. Final review regressions (pre-ready navigate/load_html, fallback client, external preview_server)
+# ---------------------------------------------------------------------------
+
+
+def test_final_review_pre_ready_navigate_and_load_html_cancel_portal_init_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    portal_script = build_portal_local_storage_script("jwt.portal.secret", "sv")
+
+    def _run_ready(dock: WindowsWebView2Dock) -> _FakeWebView2Core:
+        dock._hwnd = 1
+        dock._visible = False
+        monkeypatch.setattr(dock, "_apply_window_bounds", lambda **_kw: None)
+        core = _FakeWebView2Core()
+        ctrl = SimpleNamespace(core_webview2=core, is_visible=False, close=lambda: None)
+        ctrl_op = SimpleNamespace(get_results=lambda: ctrl)
+        dock._handle_ctrl_done(ctrl_op)
+        return core
+
+    # 1. Pre-ready navigate() + _drain_commands() before _handle_ctrl_done cancels init_script_provider
+    provider_calls_1: list[str] = []
+    dock1 = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://portal.ut.edu.vn/dashboard",
+        init_script_provider=lambda: provider_calls_1.append("called") or portal_script,
+    )
+    dock1.navigate("https://docs.example.com")
+    dock1._drain_commands()
+    core1 = _run_ready(dock1)
+    assert provider_calls_1 == []
+    assert core1.events == [("navigate", "https://docs.example.com")]
+    assert not any(ev[0] == "add_script" for ev in core1.events)
+
+    # 2. Pre-ready navigate() when _handle_ctrl_done runs before _drain_commands() also cancels provider
+    provider_calls_2: list[str] = []
+    dock2 = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://portal.ut.edu.vn/dashboard",
+        init_script_provider=lambda: provider_calls_2.append("called") or portal_script,
+    )
+    dock2.navigate("https://docs.example.com")
+    core2 = _run_ready(dock2)
+    assert provider_calls_2 == []
+    assert core2.events == [("navigate", "https://docs.example.com")]
+    assert not any(ev[0] == "add_script" for ev in core2.events)
+
+    # 3. Pre-ready auth_navigate(portal_script) superseded by navigate(external) before _core is ready
+    provider_calls_3: list[str] = []
+    dock3 = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://portal.ut.edu.vn/dashboard",
+        init_script_provider=lambda: provider_calls_3.append("called") or portal_script,
+    )
+    dock3.apply_auth_and_navigate(
+        [],
+        "https://portal.ut.edu.vn/dashboard",
+        init_script=portal_script,
+    )
+    dock3.navigate("https://docs.example.com")
+    dock3._drain_commands()
+    core3 = _run_ready(dock3)
+    assert provider_calls_3 == []
+    assert core3.events == [("navigate", "https://docs.example.com")]
+    assert not any(ev[0] == "add_script" for ev in core3.events)
+
+    # 4. Pre-ready load_html() cancels init_script_provider (both drained and undrained)
+    for drain_first in (True, False):
+        provider_calls_html: list[str] = []
+        dock_html = WindowsWebView2Dock(
+            page_title="UTHelper",
+            url="https://portal.ut.edu.vn/dashboard",
+            init_script_provider=lambda calls=provider_calls_html: calls.append("called")
+            or portal_script,
+        )
+        dock_html.load_html("<h1>Offline</h1>")
+        if drain_first:
+            dock_html._drain_commands()
+        core_html = _run_ready(dock_html)
+        assert provider_calls_html == []
+        assert core_html.events == [("navigate_to_string", "<h1>Offline</h1>")]
+        assert not any(ev[0] == "add_script" for ev in core_html.events)
+
+    # 5. Pre-ready navigate() also cancels static init_script passed to __init__
+    dock_static = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://portal.ut.edu.vn/dashboard",
+        init_script=portal_script,
+    )
+    dock_static.navigate("https://docs.example.com")
+    dock_static._drain_commands()
+    core_static = _run_ready(dock_static)
+    assert core_static.events == [("navigate", "https://docs.example.com")]
+    assert not any(ev[0] == "add_script" for ev in core_static.events)
+
+
+def test_final_review_html_fallback_uses_site_specific_client_for_thnn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    courses_calls: list[str] = []
+    thnn_calls: list[str] = []
+
+    courses_client = SimpleNamespace(
+        moodle_site_origin="https://courses.ut.edu.vn",
+        open_session_url=lambda u: (
+            courses_calls.append(u) or (u, "<main><p>Courses</p></main>", False)
+        ),
+    )
+    thnn_client = SimpleNamespace(
+        moodle_site_origin="https://thnn.ut.edu.vn",
+        open_session_url=lambda u: (
+            thnn_calls.append(u) or (u, "<main><p>THNN OK</p></main>", False)
+        ),
+    )
+    auth_service = UthWebViewAuthService(
+        courses_client=courses_client,
+        thnn_client=thnn_client,
+    )
+
+    monkeypatch.setattr(pane_mod, "build_embedded_webview_host", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        pane_mod.threading,
+        "Thread",
+        lambda *_a, **_kw: SimpleNamespace(start=lambda: None),
+    )
+    pane = CoursesWebViewPane(
+        page=None,
+        source="courses",
+        title="THNN Link",
+        url="https://thnn.ut.edu.vn/course/view.php?id=9",
+        session_client=courses_client,
+        webview_auth_service=auth_service,
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    try:
+        pane._load_authenticated_html_fallback()
+        assert thnn_calls == ["https://thnn.ut.edu.vn/course/view.php?id=9"]
+        assert courses_calls == []
+    finally:
+        pane.dispose()
+
+
+def test_final_review_open_url_in_app_attaches_preview_server_for_external_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gui.app_controller import AppController
+
+    mounted_panes: list[Any] = []
+
+    class _FakeWebViewPane(ft.Container):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__()
+            self.kwargs = kwargs
+            mounted_panes.append(self)
+
+        def sync_bounds(self, *_a: Any, **_kw: Any) -> None:
+            return None
+
+        def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "gui.components.courses.embedded_webview_host._is_flet_webview_platform",
+        lambda _page: True,
+    )
+    monkeypatch.setattr(
+        "gui.components.courses.webview_pane.CoursesWebViewPane",
+        _FakeWebViewPane,
+    )
+
+    preview_srv = object()
+    ensure_calls: list[str] = []
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(
+        width=400,
+        height=800,
+        web=False,
+        platform=ft.PagePlatform.ANDROID,
+        pop_dialog=lambda: None,
+        update=lambda: None,
+    )
+    controller._nav_shell = SimpleNamespace(rail_visible=False)
+    controller._app_webview_host = ft.Container(visible=False)
+    controller._app_webview_pane = None
+    controller.orchestrator = None
+    controller._portal_client = None
+    controller._webview_auth_service = None
+    controller._courses_coordinator = SimpleNamespace(
+        ensure_preview_server=lambda: ensure_calls.append("called") or preview_srv,
+    )
+
+    controller._open_url_in_app("https://docs.example.com/guide", "Docs")
+    assert len(mounted_panes) == 1
+    assert ensure_calls == ["called"]
+    assert mounted_panes[0].kwargs["preview_server"] is preview_srv
+    assert mounted_panes[0].kwargs["session_client"] is None
+
+

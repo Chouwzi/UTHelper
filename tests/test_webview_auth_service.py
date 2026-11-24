@@ -725,7 +725,7 @@ def test_integration_with_real_moodle_client_quiz_lease_and_real_portal_client(m
     courses_client = MoodleClient("https://courses.ut.edu.vn")
     courses_client._sesskey = "sk_active"
     courses_client._session_owner = "2251120001"
-    courses_client._session_authenticated_at = time.monotonic() - 3600.0
+    courses_client._session_authenticated_at = 0.0
     courses_client._cookie_jar.set_cookie(
         Cookie(
             version=0,

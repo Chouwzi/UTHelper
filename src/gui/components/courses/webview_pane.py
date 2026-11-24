@@ -1203,14 +1203,18 @@ class CoursesWebViewPane(ft.Container):
         is_local_preview = self._is_allowed_preview_url(self._url)
         html_text = ""
         try:
+            fallback_client = (
+                self._session_client_for_site(classify_uth_webview_url(self._url))
+                or self._session_client
+            )
             if not self._is_allowed_navigation_url(self._url):
                 error_text = "Liên kết không hợp lệ hoặc không được phép mở."
             elif (
                 is_uth_site
-                and self._session_client is not None
-                and hasattr(self._session_client, "open_session_url")
+                and fallback_client is not None
+                and hasattr(fallback_client, "open_session_url")
             ):
-                _final_url, html_text, redirected = self._session_client.open_session_url(
+                _final_url, html_text, redirected = fallback_client.open_session_url(
                     self._url
                 )
                 if redirected:

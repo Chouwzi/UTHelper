@@ -2375,15 +2375,14 @@ class AppController:
             preview_server = None
             session_client = None
             coord = getattr(self, "_courses_coordinator", None)
-            if site_kind in {"courses", "thnn", "portal"}:
-                if coord is not None:
-                    ensure_srv = getattr(coord, "ensure_preview_server", None)
-                    if callable(ensure_srv):
-                        preview_server = ensure_srv()
-                    else:
-                        preview_server = getattr(coord, "preview_server", None)
-                if preview_server is None:
-                    preview_server = getattr(self, "_preview_server", None)
+            if coord is not None:
+                ensure_srv = getattr(coord, "ensure_preview_server", None)
+                if callable(ensure_srv):
+                    preview_server = ensure_srv()
+                else:
+                    preview_server = getattr(coord, "preview_server", None)
+            if preview_server is None:
+                preview_server = getattr(self, "_preview_server", None)
             if site_kind in {"courses", "thnn"}:
                 if coord is not None:
                     client_for = getattr(coord, "_client_for", None)

@@ -357,6 +357,8 @@ class WindowsWebView2Dock:
             return
         self._html = None
         self._url = safe_url
+        self._init_script = ""
+        self._init_script_explicit = True
         self._paint_ready = False
         self._paint_deadline = 0.0
         self._enqueue("navigate", safe_url)
@@ -376,6 +378,8 @@ class WindowsWebView2Dock:
             return
         self._html = None
         self._url = safe_url
+        self._init_script = str(init_script or "")
+        self._init_script_explicit = True
         self._paint_ready = False
         self._paint_deadline = 0.0
         self._enqueue(
@@ -386,6 +390,8 @@ class WindowsWebView2Dock:
     def load_html(self, html: str) -> None:
         self._html = html
         self._url = ""
+        self._init_script = ""
+        self._init_script_explicit = True
         self._paint_ready = False
         self._paint_deadline = 0.0
         self._enqueue("load_html", html)
@@ -1328,7 +1334,18 @@ class WindowsWebView2Dock:
             elif action == "auth_navigate":
                 ck_list, nav_url, nav_script = payload
                 nav_url_str = str(nav_url or "")
-                if nav_url_str and self._is_navigation_uri_allowed(nav_url_str):
+                allowed = (
+                    bool(
+                        _validate_webview_url(
+                            nav_url_str,
+                            allowed_loopback_ports=self._allowed_loopback_ports,
+                        )
+                    )
+                    if self._core is None
+                    else self._is_navigation_uri_allowed(nav_url_str)
+                )
+                if nav_url_str and allowed:
+                    self._html = None
                     self._url = nav_url_str
                     if ck_list:
                         self._cookies = list(ck_list)
@@ -1343,14 +1360,30 @@ class WindowsWebView2Dock:
                         self._navigate_with_optional_init_script(
                             self._core, nav_url_str, str(nav_script or "")
                         )
-            elif action == "navigate" and self._core is not None and payload:
+            elif action == "navigate" and payload:
                 nav_url = str(payload)
-                if self._is_navigation_uri_allowed(nav_url):
+                if self._core is None:
+                    if _validate_webview_url(
+                        nav_url,
+                        allowed_loopback_ports=self._allowed_loopback_ports,
+                    ):
+                        self._html = None
+                        self._url = nav_url
+                        self._init_script = ""
+                        self._init_script_explicit = True
+                elif self._is_navigation_uri_allowed(nav_url):
                     self._navigate_with_optional_init_script(self._core, nav_url, "")
-            elif action == "load_html" and self._core is not None:
-                self._nav_seq += 1
-                self._clear_active_init_script(self._core)
-                self._core.navigate_to_string(str(payload or ""))
+            elif action == "load_html":
+                html_str = str(payload or "")
+                if self._core is None:
+                    self._html = html_str
+                    self._url = ""
+                    self._init_script = ""
+                    self._init_script_explicit = True
+                else:
+                    self._nav_seq += 1
+                    self._clear_active_init_script(self._core)
+                    self._core.navigate_to_string(html_str)
             elif action == "eval_js":
                 script, loop, fut = payload
                 if self._core is None:
