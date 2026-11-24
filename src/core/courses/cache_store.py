@@ -284,6 +284,7 @@ class CourseCacheStore:
 
             cache_dir = _USER_DATA_DIR
         self._state_lock = threading.RLock()
+        self._generation: int = 0
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         normalized = (str(namespace).strip().lower() if namespace else "") or "default"
@@ -292,9 +293,16 @@ class CourseCacheStore:
         self._mem_catalog: Optional[tuple[Path, tuple[int, int, int], CatalogCacheSnapshot]] = None
         self._mem_details: OrderedDict[Path, tuple[tuple[int, int, int], CourseDetailSnapshot]] = OrderedDict()
 
+    @property
+    def generation(self) -> int:
+        """Monotonic namespace generation bumped atomically on every account switch."""
+        with self._state_lock:
+            return self._generation
+
     def set_namespace(self, namespace: Optional[str]) -> None:
         """Switch active cache namespace on account change and drop RAM caches."""
         with self._state_lock:
+            self._generation += 1
             normalized = (str(namespace).strip().lower() if namespace else "") or "default"
             self._digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
             self._catalog_path = self._dir / f"courses_catalog_{self._digest}.json"
@@ -394,13 +402,25 @@ class CourseCacheStore:
         synced_at: int,
         current_term_label: Optional[str] = None,
         portal_course_specs: Optional[list[dict[str, Any]]] = None,
-    ) -> None:
+        expected_generation: Optional[int] = None,
+    ) -> bool:
         """Persist the latest course catalog while preserving pins/unseen/recent/Portal metadata."""
         with self._state_lock:
+            if expected_generation is not None and self._generation != expected_generation:
+                return False
             catalog_path = self._catalog_path
         with get_memory_lock(catalog_path):
+            with self._state_lock:
+                if expected_generation is not None and self._generation != expected_generation:
+                    return False
             self._dir.mkdir(parents=True, exist_ok=True)
             with SafeFileIO.transaction(catalog_path):
+                with self._state_lock:
+                    if (
+                        expected_generation is not None
+                        and self._generation != expected_generation
+                    ):
+                        return False
                 existing = self._read_catalog_dict(catalog_path)
                 existing["courses"] = [asdict(course) for course in courses]
                 existing["catalog_synced_at"] = int(synced_at)
@@ -408,7 +428,7 @@ class CourseCacheStore:
                     existing["current_term_label"] = str(current_term_label)
                 if portal_course_specs is not None:
                     existing["portal_course_specs"] = list(portal_course_specs)
-                self._write_catalog_payload(existing, catalog_path)
+                return self._write_catalog_payload(existing, catalog_path)
 
     def _update_catalog_string_list(
         self,
@@ -539,11 +559,19 @@ class CourseCacheStore:
         *,
         synced_at: int,
         known_cmids: Optional[list[int]] = None,
-    ) -> None:
+        expected_generation: Optional[int] = None,
+    ) -> bool:
         """Persist sections, grades, and known cmids for a single course."""
-        detail_path = self._detail_path(source, course_id)
+        valid_source = _validate_source(source)
+        valid_id = _validate_course_id(course_id)
+        with self._state_lock:
+            if expected_generation is not None and self._generation != expected_generation:
+                return False
+            detail_path = self._dir / f"course_tree_{valid_source}_{valid_id}_{self._digest}.json"
         with get_memory_lock(detail_path):
             with self._state_lock:
+                if expected_generation is not None and self._generation != expected_generation:
+                    return False
                 self._mem_details.pop(detail_path, None)
             self._dir.mkdir(parents=True, exist_ok=True)
             resolved_cmids = (
@@ -562,16 +590,21 @@ class CourseCacheStore:
                 "last_synced_at": int(synced_at),
                 "known_cmids": resolved_cmids,
             }
+            with self._state_lock:
+                if expected_generation is not None and self._generation != expected_generation:
+                    return False
             if not SafeFileIO.write_json_atomic(detail_path, payload):
                 logger.warning("Failed to persist course detail cache: %s", detail_path)
-            else:
-                post_sig = self._stat_sig(detail_path)
-                if post_sig is not None:
-                    snap = CourseDetailSnapshot(
-                        sections=list(sections),
-                        grades=list(grades),
-                        last_synced_at=int(synced_at),
-                        known_cmids=resolved_cmids,
-                    )
-                    with self._state_lock:
+                return False
+            post_sig = self._stat_sig(detail_path)
+            if post_sig is not None:
+                snap = CourseDetailSnapshot(
+                    sections=list(sections),
+                    grades=list(grades),
+                    last_synced_at=int(synced_at),
+                    known_cmids=resolved_cmids,
+                )
+                with self._state_lock:
+                    if expected_generation is None or self._generation == expected_generation:
                         self._put_mem_detail_locked(detail_path, post_sig, snap)
+            return True

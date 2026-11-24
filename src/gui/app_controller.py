@@ -351,6 +351,7 @@ class AppController:
             self._perform_data_sync,
             interval_provider=get_sync_interval_minutes,
             last_success_provider=lambda: self._last_successful_sync_at,
+            can_sync_provider=self._has_sync_credentials,
         )
         
         # Events
@@ -4052,8 +4053,17 @@ class AppController:
                 trigger, force=trigger in ("manual", "startup")
             )
 
+    @staticmethod
+    def _has_sync_credentials() -> bool:
+        username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        password = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        ws_token = str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
+        return bool((username and password) or ws_token)
+
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading:
+            return
+        if not self._has_sync_credentials():
             return
         account_epoch = getattr(self, "_account_epoch", 0)
         data_cache = self._data_cache

@@ -1433,3 +1433,251 @@ def test_local_preview_server_isolates_courses_and_thnn_session_bridges_and_rese
     finally:
         srv.stop()
 
+
+def test_marshal_to_ui_and_webview_pane_handle_destroyed_flet_session_and_closed_loop():
+    import asyncio
+    import threading
+    from gui.components.courses._shared import marshal_to_ui, safe_control_update
+
+    class _DestroyedSessionPage:
+        @property
+        def loop(self):
+            raise RuntimeError("An attempt to fetch destroyed session.")
+
+    class _ControlWithPage:
+        def __init__(self, page):
+            self.page = page
+            self.updated = False
+
+        def update(self):
+            self.updated = True
+
+    # 1. Destroyed session from worker thread: must NOT raise and must NOT run fn() off-thread
+    destroyed_ctrl = _ControlWithPage(_DestroyedSessionPage())
+    called = []
+    worker_errors = []
+
+    def _worker():
+        try:
+            marshal_to_ui(destroyed_ctrl, lambda: called.append("ran"))
+            safe_control_update(destroyed_ctrl)
+        except Exception as exc:
+            worker_errors.append(exc)
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join(timeout=2.0)
+    assert worker_errors == []
+    assert called == []
+    assert destroyed_ctrl.updated is False
+
+    # 2. Closed asyncio event loop: must NOT fall through and invoke fn() off-thread
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    closed_ctrl = _ControlWithPage(SimpleNamespace(loop=closed_loop))
+    closed_called = []
+    marshal_to_ui(closed_ctrl, lambda: closed_called.append("ran"))
+    assert closed_called == []
+
+    # 3. Event loop running on a non-main thread: calling from main thread must marshal onto that loop
+    bg_loop = asyncio.new_event_loop()
+    bg_ready = threading.Event()
+    bg_thread_id = []
+
+    def _run_bg_loop():
+        asyncio.set_event_loop(bg_loop)
+        bg_thread_id.append(threading.get_ident())
+        bg_ready.set()
+        bg_loop.run_forever()
+
+    bg_thread = threading.Thread(target=_run_bg_loop)
+    bg_thread.start()
+    assert bg_ready.wait(1.0)
+    ran_on_thread = []
+    ran_evt = threading.Event()
+    try:
+        live_ctrl = _ControlWithPage(SimpleNamespace(loop=bg_loop))
+        marshal_to_ui(
+            live_ctrl,
+            lambda: (ran_on_thread.append(threading.get_ident()), ran_evt.set()),
+        )
+        assert ran_evt.wait(1.0)
+        assert ran_on_thread == bg_thread_id
+    finally:
+        bg_loop.call_soon_threadsafe(bg_loop.stop)
+        bg_thread.join(timeout=2.0)
+        bg_loop.close()
+
+    # 4. CoursesWebViewPane._marshal_ui with destroyed session: must NOT raise or invoke fn()
+    pane_stub = SimpleNamespace(_disposed=False, page=_DestroyedSessionPage())
+    pane_called = []
+    pane_err = []
+
+    def _pane_worker():
+        try:
+            CoursesWebViewPane._marshal_ui(pane_stub, lambda: pane_called.append("ran"))
+        except Exception as exc:
+            pane_err.append(exc)
+
+    t2 = threading.Thread(target=_pane_worker)
+    t2.start()
+    t2.join(timeout=2.0)
+    assert pane_err == []
+    assert pane_called == []
+
+
+def test_document_reader_pdf_search_handles_destroyed_flet_session():
+    from gui.components.courses.document_reader_view import DocumentReaderView
+
+    class _DestroyedSessionPage:
+        @property
+        def loop(self):
+            raise RuntimeError("An attempt to fetch destroyed session.")
+
+    fake_session = SimpleNamespace(
+        supported=True,
+        can_render_images=True,
+        page_count=1,
+        outline=[],
+        search=lambda q, max_hits=60: [],
+        peek_cached_page_png=lambda *a, **kw: None,
+        render_page_png=lambda *a, **kw: SimpleNamespace(png_bytes=b"", width=600, height=800),
+        render_page=lambda idx, **kw: SimpleNamespace(png_bytes=b"", width=600, height=800),
+        extract_page_text=lambda _idx: "Sample text",
+        close=lambda: None,
+    )
+    reader = DocumentReaderView(
+        file_name="demo.pdf",
+        data=b"%PDF-1.4",
+        kind="pdf",
+        preview_server=None,
+        on_close=lambda: None,
+        on_save=lambda: None,
+        on_open_external=lambda: None,
+        preopened_pdf=fake_session,
+        pane_width=900.0,
+    )
+    reader._get_page = lambda: _DestroyedSessionPage()
+    body = reader._build_native_pdf_body(fake_session)
+    search_fields = [
+        c
+        for c in _iter_controls(body)
+        if isinstance(c, ft.TextField) and c.hint_text == "Tìm trong PDF..."
+    ]
+    assert search_fields, "Expected PDF search TextField in native PDF toolbar"
+    # Submitting search when session is destroyed must not raise RuntimeError
+    search_fields[0].on_submit(SimpleNamespace(control=SimpleNamespace(value="query")))
+    reader.dispose()
+
+
+def test_proxy_session_request_rejects_3xx_redirect_and_cache_write_after_account_switch():
+    import threading
+    from http import HTTPStatus
+    from urllib.parse import urlsplit
+
+    srv = LocalPreviewServer()
+    try:
+        # 1. Stale 3xx redirect after reset_for_account_switch + generation bump must return 403 and NEVER leak rotated token
+        redirect_started = threading.Event()
+        redirect_release = threading.Event()
+
+        class _RedirectClient:
+            moodle_site_origin = "https://courses.ut.edu.vn"
+            _session_generation = 1
+
+            def open_session_raw(self, url, **_kw):
+                redirect_started.set()
+                assert redirect_release.wait(2.0)
+                return (302, "https://courses.ut.edu.vn/my/", "text/html", b"")
+
+        client1 = _RedirectClient()
+        srv.register_session_provider("courses", client1)
+        url_a = srv.build_session_bridge_url("courses", "https://courses.ut.edu.vn/course/view.php?id=1")
+        assert url_a
+        token_a = [s for s in urlsplit(url_a).path.split("/") if s][1]
+
+        res_box: list = []
+        t1 = threading.Thread(
+            target=lambda: res_box.append(
+                srv._proxy_session_request(
+                    token=token_a,
+                    source="courses",
+                    remote_path="course/view.php",
+                    query="id=1",
+                    method="GET",
+                    body=None,
+                    content_type="",
+                )
+            )
+        )
+        t1.start()
+        assert redirect_started.wait(1.0)
+
+        client1._session_generation = 2
+        srv.reset_for_account_switch()
+        url_b = srv.build_session_bridge_url("courses", "https://courses.ut.edu.vn/my/")
+        assert url_b
+        token_b = [s for s in urlsplit(url_b).path.split("/") if s][1]
+        assert token_a != token_b
+
+        redirect_release.set()
+        t1.join(timeout=2.0)
+        assert not t1.is_alive()
+
+        status, _ct, _body, location, _cacheable = res_box[0]
+        assert status == HTTPStatus.FORBIDDEN
+        assert location == ""
+        assert token_b not in location
+
+        # 2. Stale cacheable static asset after reset_for_account_switch (even before generation bumps)
+        # must return 403 and NOT populate _session_asset_cache
+        asset_started = threading.Event()
+        asset_release = threading.Event()
+
+        class _AssetClient:
+            moodle_site_origin = "https://courses.ut.edu.vn"
+            _session_generation = 5
+
+            def open_session_raw(self, url, **_kw):
+                asset_started.set()
+                assert asset_release.wait(2.0)
+                return (200, url, "text/css", b"body{color:alice;}")
+
+        client2 = _AssetClient()
+        srv.register_session_provider("courses", client2)
+        css_url = srv.build_session_bridge_url("courses", "https://courses.ut.edu.vn/theme/styles.css")
+        assert css_url
+        token_css = [s for s in urlsplit(css_url).path.split("/") if s][1]
+
+        css_box: list = []
+        t2 = threading.Thread(
+            target=lambda: css_box.append(
+                srv._proxy_session_request(
+                    token=token_css,
+                    source="courses",
+                    remote_path="theme/styles.css",
+                    query="",
+                    method="GET",
+                    body=None,
+                    content_type="",
+                )
+            )
+        )
+        t2.start()
+        assert asset_started.wait(1.0)
+
+        srv.reset_for_account_switch()
+        asset_release.set()
+        t2.join(timeout=2.0)
+        assert not t2.is_alive()
+
+        css_status, _ct2, css_body, _loc2, css_cacheable = css_box[0]
+        assert css_status == HTTPStatus.FORBIDDEN
+        assert css_body == b""
+        assert css_cacheable is False
+        assert srv._session_asset_cache == {}
+    finally:
+        srv.stop()
+
+
+

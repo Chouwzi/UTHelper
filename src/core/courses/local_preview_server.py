@@ -853,7 +853,13 @@ class LocalPreviewServer:
                         0, self._session_asset_cache_bytes - len(removed[1])
                     )
 
-    def build_session_bridge_url(self, source: str, target_url: str) -> Optional[str]:
+    def build_session_bridge_url(
+        self,
+        source: str,
+        target_url: str,
+        *,
+        expected_token: Optional[str] = None,
+    ) -> Optional[str]:
         """Return a loopback reverse-proxy URL for a same-origin Moodle web page."""
         if source not in ("courses", "thnn"):
             return None
@@ -883,8 +889,17 @@ class LocalPreviewServer:
             query = jp.query
 
         with self._lock:
+            current_token = self._bridge_tokens.get(source, "")
+            if expected_token is not None:
+                if not current_token or not secrets.compare_digest(
+                    current_token.encode("utf-8"),
+                    expected_token.encode("utf-8"),
+                ):
+                    return None
+                token = expected_token
+            else:
+                token = current_token
             port = self._ensure_session_started_locked(source)
-            token = self._bridge_tokens[source]
         suffix = f"?{query}" if query else ""
         return f"http://127.0.0.1:{port}/session/{token}/{source}/{rel_path}{suffix}"
 
@@ -951,9 +966,26 @@ class LocalPreviewServer:
         except Exception:
             return HTTPStatus.BAD_GATEWAY, "text/plain", b"", "", False
 
+        with self._lock:
+            current_token = self._bridge_tokens.get(source, "")
+            token_current = bool(
+                current_token
+                and secrets.compare_digest(
+                    current_token.encode("utf-8"),
+                    expected_token.encode("utf-8"),
+                )
+            )
+            provider_current = self._session_providers.get(source) is client
+            post_gen = int(getattr(client, "_session_generation", 0) or 0)
+            gen_current = post_gen == session_gen
+        if not (token_current and provider_current and gen_current):
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
+
         if 300 <= status_code < 400 and final_url:
             if _is_same_moodle_origin_url(final_url, origin):
-                proxied = self.build_session_bridge_url(source, final_url)
+                proxied = self.build_session_bridge_url(
+                    source, final_url, expected_token=expected_token
+                )
                 if proxied:
                     return HTTPStatus.FOUND, "text/plain", b"", proxied, False
             return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
@@ -972,7 +1004,6 @@ class LocalPreviewServer:
             return status_code, resp_ct or "text/html; charset=utf-8", rewritten.encode("utf-8"), "", False
 
         final_ct = resp_ct or "application/octet-stream"
-        post_gen = int(getattr(client, "_session_generation", 0) or 0)
         allow_http_cache = (
             cacheable_path
             and method.upper() == "GET"
@@ -982,11 +1013,19 @@ class LocalPreviewServer:
         )
         if (
             allow_http_cache
-            and post_gen == session_gen
             and len(raw_bytes) <= _MAX_SINGLE_SESSION_ASSET_BYTES
         ):
             with self._lock:
-                if self._session_providers.get(source) is client:
+                cur_tok = self._bridge_tokens.get(source, "")
+                cur_gen = int(getattr(client, "_session_generation", 0) or 0)
+                if (
+                    self._session_providers.get(source) is client
+                    and cur_gen == session_gen
+                    and cur_tok
+                    and secrets.compare_digest(
+                        cur_tok.encode("utf-8"), expected_token.encode("utf-8")
+                    )
+                ):
                     old = self._session_asset_cache.pop(cache_key, None)
                     if old is not None:
                         self._session_asset_cache_bytes = max(

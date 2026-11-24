@@ -2513,7 +2513,10 @@ class DocumentReaderView(ft.Container):
             self._pdf_search_seq += 1
             search_seq = self._pdf_search_seq
             page = self._get_page()
-            loop = getattr(page, "loop", None) if page is not None else None
+            try:
+                loop = getattr(page, "loop", None) if page is not None else None
+            except Exception:
+                return
             if (
                 isinstance(loop, asyncio.AbstractEventLoop)
                 and loop.is_running()
@@ -2530,7 +2533,10 @@ class DocumentReaderView(ft.Container):
                     self._set_body_content(self._build_native_pdf_body(session))
                     safe_control_update(self)
 
-                page.run_task(_search_async)
+                try:
+                    page.run_task(_search_async)
+                except Exception:
+                    return
                 return
 
             self._pdf_search_hits = session.search(clean_q, max_hits=60)

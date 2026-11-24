@@ -80,6 +80,7 @@ class ActivitySyncCoordinator:
         interval_provider: Callable[[], int],
         last_success_provider: Callable[[], Optional[float]],
         *,
+        can_sync_provider: Optional[Callable[[], bool]] = None,
         startup_grace_seconds: int = 60,
         retry_delay_seconds: int = 60,
         clock: Callable[[], float] = time.time,
@@ -87,6 +88,7 @@ class ActivitySyncCoordinator:
         self._sync_once = sync_once
         self._interval_provider = interval_provider
         self._last_success_provider = last_success_provider
+        self._can_sync_provider = can_sync_provider
         self._startup_grace_seconds = startup_grace_seconds
         self._retry_delay_seconds = max(1, retry_delay_seconds)
         self._clock = clock
@@ -167,7 +169,17 @@ class ActivitySyncCoordinator:
                 task.cancel()
         self._signal_wake()
 
+    def _can_sync(self) -> bool:
+        if self._can_sync_provider is None:
+            return True
+        try:
+            return bool(self._can_sync_provider())
+        except Exception:
+            return False
+
     def due_at(self) -> Optional[float]:
+        if not self._can_sync():
+            return None
         due_at = next_sync_at(
             opened_at=self._opened_at,
             last_successful_sync_at=self._last_success_provider(),

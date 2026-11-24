@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from typing import Any, Callable, Literal, Optional
 
 import flet as ft
@@ -12,19 +11,37 @@ from gui.core.theme import C
 
 
 def marshal_to_ui(control: ft.BaseControl, fn: Callable[[], None]) -> None:
-    """Run ``fn`` on the control's Flet asyncio loop when invoked from a worker thread."""
-    if threading.current_thread() is not threading.main_thread():
+    """Run ``fn`` on the control's Flet asyncio loop when invoked off-loop."""
+    try:
+        page = control.page
+    except Exception:
+        page = None
+
+    if page is not None:
         try:
-            page = control.page
+            loop = getattr(page, "loop", None)
         except Exception:
-            page = None
-        loop = getattr(page, "loop", None) if page is not None else None
-        if isinstance(loop, asyncio.AbstractEventLoop) and loop.is_running():
-            try:
-                loop.call_soon_threadsafe(fn)
+            # Flet 0.86+ raises RuntimeError("An attempt to fetch destroyed session.")
+            # once the Page session weakref expires; drop stale callbacks safely.
+            return
+
+        if isinstance(loop, asyncio.AbstractEventLoop):
+            if loop.is_closed():
                 return
+            try:
+                running_loop = asyncio.get_running_loop()
             except RuntimeError:
-                pass
+                running_loop = None
+            if running_loop is loop:
+                fn()
+                return
+            if loop.is_running():
+                try:
+                    loop.call_soon_threadsafe(fn)
+                except RuntimeError:
+                    pass
+            return
+
     fn()
 
 

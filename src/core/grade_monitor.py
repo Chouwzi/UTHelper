@@ -54,6 +54,7 @@ class GradeMonitor:
     ):
         self._explicit_path = snapshot_path is not None
         self._lock = threading.RLock()
+        self._generation: int = 0
         if snapshot_path is None:
             from config import _USER_DATA_DIR
 
@@ -74,12 +75,14 @@ class GradeMonitor:
         resolved = namespace if (namespace and namespace.strip()) else _default_grade_namespace()
         digest = _grade_namespace_digest(resolved)
         with self._lock:
+            self._generation += 1
             self._snapshot_path = str(self._base_dir / f"grade_snapshot_{digest}.json")
             self._snapshot = self._load_snapshot()
 
     def reset(self) -> None:
         """Clear in-memory snapshot state (and detach from active account on logout)."""
         with self._lock:
+            self._generation += 1
             self._snapshot = {}
             if self._explicit_path:
                 self._save_snapshot()
@@ -130,28 +133,68 @@ class GradeMonitor:
         service = self._grade_service(grade_source)
 
         with self._lock:
-            try:
-                # Get grade overview for all courses
-                courses_grades = service.get_course_grades(userid)
-                if not courses_grades:
-                    return changes
+            start_gen = self._generation
+            baseline_snapshot = {
+                cid: dict(items) for cid, items in self._snapshot.items()
+            }
 
-                for course_grade in courses_grades:
+        try:
+            # Perform network I/O outside self._lock so reset()/set_namespace() never block UI teardown.
+            courses_grades = service.get_course_grades(userid)
+            if not courses_grades:
+                return changes
+
+            with self._lock:
+                if self._generation != start_gen:
+                    return []
+
+            valid_courses: List[tuple[str, str, str]] = []
+            fetched_items: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+
+            for course_grade in courses_grades:
+                try:
+                    course_id = int(course_grade.get('courseid', 0))
+                except (ValueError, TypeError):
+                    continue
+                if not course_id:
+                    continue
+                course_id_str = str(course_id)  # JSON keys are strings
+                course_name = course_grade.get('coursename', f'Course {course_id}')
+                grade_str = course_grade.get('grade', '')
+
+                if not grade_str or grade_str == '-':
+                    continue
+
+                valid_courses.append((course_id_str, course_name, grade_str))
+
+                old_course = baseline_snapshot.get(course_id_str, {})
+                old_overall = old_course.get('_overall', '')
+                is_initial_baseline = old_overall == ''
+                overall_changed = grade_str != old_overall and not is_initial_baseline
+
+                # Baseline grade_items on initial snapshot AND re-fetch when overall grade changes
+                # so the first component grade update is never missed.
+                if is_initial_baseline or overall_changed:
+                    with self._lock:
+                        if self._generation != start_gen:
+                            return []
                     try:
-                        course_id = int(course_grade.get('courseid', 0))
-                    except (ValueError, TypeError):
-                        continue
-                    if not course_id:
-                        continue
-                    course_id_str = str(course_id)  # JSON keys are strings
-                    course_name = course_grade.get('coursename', f'Course {course_id}')
-                    grade_str = course_grade.get('grade', '')
+                        fetched_items[course_id_str] = service.get_grade_items(
+                            course_id, userid
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "Grade items fetch failed for course %s: %s",
+                            course_id,
+                            e,
+                        )
 
-                    if not grade_str or grade_str == '-':
-                        continue
+            with self._lock:
+                if self._generation != start_gen:
+                    return []
 
-                    # Check if course-level grade changed
-                    old_course = self._snapshot.get(course_id_str, {})
+                for course_id_str, course_name, grade_str in valid_courses:
+                    old_course = dict(self._snapshot.get(course_id_str, {}))
                     old_overall = old_course.get('_overall', '')
                     is_initial_baseline = old_overall == ''
                     overall_changed = grade_str != old_overall and not is_initial_baseline
@@ -165,36 +208,31 @@ class GradeMonitor:
                             timestamp=datetime.now().isoformat(),
                         ))
 
-                    # Baseline grade_items on initial snapshot AND re-fetch when overall grade changes
-                    # so the first component grade update is never missed.
-                    if is_initial_baseline or overall_changed:
-                        try:
-                            items = service.get_grade_items(course_id, userid)
-                            items_were_baselined = old_course.get("_items_baselined") == "1"
-                            if course_id_str not in self._snapshot:
-                                self._snapshot[course_id_str] = {}
-                            if items is not None:
-                                for item in items:
-                                    item_name = item.get('itemname', '')
-                                    item_grade = item.get('gradeformatted', '')
-                                    if not item_name or not item_grade or item_grade == '-':
-                                        continue
+                    if course_id_str in fetched_items:
+                        items = fetched_items[course_id_str]
+                        items_were_baselined = old_course.get("_items_baselined") == "1"
+                        if course_id_str not in self._snapshot:
+                            self._snapshot[course_id_str] = {}
+                        if items is not None:
+                            for item in items:
+                                item_name = item.get('itemname', '')
+                                item_grade = item.get('gradeformatted', '')
+                                if not item_name or not item_grade or item_grade == '-':
+                                    continue
 
-                                    old_item_grade = old_course.get(item_name, '')
-                                    if overall_changed and item_grade != old_item_grade:
-                                        if old_item_grade != '' or items_were_baselined:
-                                            changes.append(GradeChange(
-                                                course_name=course_name,
-                                                item_name=item_name,
-                                                old_grade=old_item_grade if old_item_grade else None,
-                                                new_grade=item_grade,
-                                                timestamp=datetime.now().isoformat(),
-                                            ))
+                                old_item_grade = old_course.get(item_name, '')
+                                if overall_changed and item_grade != old_item_grade:
+                                    if old_item_grade != '' or items_were_baselined:
+                                        changes.append(GradeChange(
+                                            course_name=course_name,
+                                            item_name=item_name,
+                                            old_grade=old_item_grade if old_item_grade else None,
+                                            new_grade=item_grade,
+                                            timestamp=datetime.now().isoformat(),
+                                        ))
 
-                                    self._snapshot[course_id_str][item_name] = item_grade
-                                self._snapshot[course_id_str]["_items_baselined"] = "1"
-                        except Exception as e:
-                            logger.debug("Grade items fetch failed for course %s: %s", course_id, e)
+                                self._snapshot[course_id_str][item_name] = item_grade
+                            self._snapshot[course_id_str]["_items_baselined"] = "1"
 
                     # Update overall course grade in snapshot (only valid grades)
                     if grade_str and grade_str != '-':
@@ -205,8 +243,8 @@ class GradeMonitor:
                 # Persist updated snapshot
                 self._save_snapshot()
 
-            except Exception as e:
-                logger.error("Grade check failed: %s", e)
+        except Exception as e:
+            logger.error("Grade check failed: %s", e)
 
         if changes:
             logger.info("Detected %d grade changes", len(changes))

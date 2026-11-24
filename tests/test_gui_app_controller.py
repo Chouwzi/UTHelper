@@ -2356,9 +2356,13 @@ def test_match_portal_course_to_summary_rejects_short_summary_course_code_prefix
     )
 
 
-def test_perform_data_sync_discards_stale_account_result_on_account_switch(tmp_path):
+def test_perform_data_sync_discards_stale_account_result_on_account_switch(tmp_path, monkeypatch):
     from core.data_cache import DataCache
     from core.sync_coordinator import FetchOutcome
+    import gui.app_controller as app_controller_module
+
+    monkeypatch.setattr(app_controller_module.settings, "UTH_USERNAME", "userA")
+    monkeypatch.setattr(app_controller_module.settings, "UTH_PASSWORD", "pwA")
 
     in_fetch = asyncio.Event()
     release_fetch = asyncio.Event()
@@ -3088,3 +3092,41 @@ def test_attach_modal_occlusion_release_awaits_async_flet_dismiss_and_clears_occ
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(failing_dlg.on_dismiss(sentinel_event))
     assert occlusions == [("modal_dialog", False)]
+
+
+def test_perform_data_sync_skips_when_logged_out_without_error_state_or_fetch(monkeypatch):
+    from unittest.mock import Mock
+    import gui.app_controller as app_controller_module
+
+    monkeypatch.setattr(app_controller_module.settings, "UTH_USERNAME", "")
+    monkeypatch.setattr(app_controller_module.settings, "UTH_PASSWORD", "")
+    monkeypatch.setattr(app_controller_module.settings, "MOODLE_WS_TOKEN", "")
+
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 1
+    controller._active_sync_epoch = None
+    controller._is_loading = False
+    controller.all_data = []
+    controller._data_cache = SimpleNamespace(load=Mock(return_value=([], None)))
+    controller.refresh_btn = SimpleNamespace(disabled=False)
+    controller.empty_state = SimpleNamespace(visible=False)
+    controller.error_state = SimpleNamespace(visible=False)
+    controller.error_text = SimpleNamespace(value="")
+    controller.page = SimpleNamespace(update=Mock(), overlay=[])
+    controller.orchestrator = SimpleNamespace(
+        fetch_activity_outcome_async=AsyncMock(side_effect=RuntimeError("no credentials")),
+        moodle_service=SimpleNamespace(clear_all_caches=Mock()),
+        clear_detail_cache=Mock(),
+    )
+    controller._diag_breadcrumb = Mock()
+    controller._set_sync_status = Mock()
+    controller._update_footer = Mock()
+
+    asyncio.run(controller._perform_data_sync("timer"))
+
+    controller.orchestrator.fetch_activity_outcome_async.assert_not_awaited()
+    assert controller._is_loading is False
+    assert controller.refresh_btn.disabled is False
+    assert controller.error_state.visible is False
+    controller._set_sync_status.assert_not_called()
+

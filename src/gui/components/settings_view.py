@@ -1760,20 +1760,33 @@ class SettingsView(ft.Container):
 
     def _marshal_ui(self, fn):
         """Marshal worker-thread control mutations onto the Flet event loop when active."""
-        import threading
-
         page = getattr(self, "_page", None)
-        loop = getattr(page, "loop", None)
-        if (
-            threading.current_thread() is not threading.main_thread()
-            and isinstance(loop, asyncio.AbstractEventLoop)
-            and loop.is_running()
-        ):
+        if page is None:
             try:
-                loop.call_soon_threadsafe(fn)
+                page = self.page
+            except Exception:
+                page = None
+        if page is not None:
+            try:
+                loop = getattr(page, "loop", None)
+            except Exception:
                 return
-            except RuntimeError:
-                pass
+            if isinstance(loop, asyncio.AbstractEventLoop):
+                if loop.is_closed():
+                    return
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
+                if running_loop is loop:
+                    fn()
+                    return
+                if loop.is_running():
+                    try:
+                        loop.call_soon_threadsafe(fn)
+                    except RuntimeError:
+                        pass
+                return
         fn()
 
 

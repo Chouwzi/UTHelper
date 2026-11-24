@@ -202,3 +202,49 @@ def test_close_from_independent_background_thread_wakes_run_loop():
         t.join(timeout=1.0)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.anyio
+async def test_can_sync_provider_pauses_timer_loop_on_logout_and_resumes_on_login():
+    now = [0.0]
+    logged_in = [True]
+    last_success: list = [100.0]
+    triggers: list[str] = []
+
+    async def sync_once(trigger: str):
+        triggers.append(trigger)
+        last_success[0] = now[0]
+        return trigger
+
+    coordinator = ActivitySyncCoordinator(
+        sync_once,
+        interval_provider=lambda: 60,
+        last_success_provider=lambda: last_success[0],
+        can_sync_provider=lambda: logged_in[0],
+        startup_grace_seconds=60,
+        clock=lambda: now[0],
+    )
+    run_task = asyncio.create_task(coordinator.run())
+    try:
+        # Advance uptime past startup_grace_seconds (120s > 60s), then log out.
+        now[0] = 120.0
+        logged_in[0] = False
+        last_success[0] = None
+        coordinator.invalidate(account_key=("", ""))
+        await asyncio.sleep(0.06)
+
+        assert coordinator.due_at() is None
+        assert triggers == []
+        res = await coordinator.request("timer")
+        assert res.skipped_not_due is True
+        assert triggers == []
+
+        # Logging back in resumes timer scheduling cleanly.
+        logged_in[0] = True
+        coordinator.invalidate(account_key=("bob", "pw"))
+        await asyncio.sleep(0.06)
+        assert triggers == ["timer"]
+    finally:
+        coordinator.close()
+        await asyncio.wait_for(run_task, timeout=1.0)
+

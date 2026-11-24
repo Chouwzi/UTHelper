@@ -257,3 +257,52 @@ def test_grade_monitor_baselines_grade_items_on_initial_snapshot_and_detects_fir
     assert by_item["GK"].new_grade == "8.0"
     assert by_item["CK"].old_grade is None
     assert by_item["CK"].new_grade == "9.0"
+
+
+def test_reset_and_set_namespace_do_not_block_during_network_io_and_discard_stale_grades(
+    tmp_path, monkeypatch
+):
+    import threading
+    import time
+    import config
+
+    monkeypatch.setattr(config, "_USER_DATA_DIR", tmp_path)
+    monitor = GradeMonitor(namespace="https://courses.ut.edu.vn|studentA")
+    # Seed baseline for studentA so overall change would normally trigger alerts & item fetch
+    svc_seed = Mock()
+    svc_seed.get_course_grades.return_value = [{"courseid": 10, "coursename": "OS", "grade": "7.0"}]
+    svc_seed.get_grade_items.return_value = [{"itemname": "GK", "gradeformatted": "7.0"}]
+    assert monitor.check_for_changes(svc_seed, userid=1) == []
+
+    started = threading.Event()
+    release = threading.Event()
+    svc_slow = Mock()
+
+    def slow_course_grades(_userid):
+        started.set()
+        assert release.wait(2.0)
+        return [{"courseid": 10, "coursename": "OS", "grade": "9.5"}]
+
+    svc_slow.get_course_grades.side_effect = slow_course_grades
+    svc_slow.get_grade_items.return_value = [{"itemname": "GK", "gradeformatted": "9.5"}]
+
+    out: list = []
+    worker = threading.Thread(target=lambda: out.append(monitor.check_for_changes(svc_slow, userid=1)))
+    worker.start()
+    assert started.wait(1.0)
+
+    # Account teardown + switch to studentB must return immediately without blocking on HTTP
+    t0 = time.perf_counter()
+    monitor.reset()
+    monitor.set_namespace("https://courses.ut.edu.vn|studentB")
+    elapsed = time.perf_counter() - t0
+
+    release.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+
+    assert elapsed < 0.15
+    assert out == [[]]
+    assert monitor._snapshot == {}
+    assert not os.path.exists(monitor._snapshot_path)
+    svc_slow.get_grade_items.assert_not_called()

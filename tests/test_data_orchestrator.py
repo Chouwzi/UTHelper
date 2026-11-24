@@ -971,3 +971,148 @@ def test_merge_all_assignments_cutoff_zero_is_late_allowed_and_uses_time_policy(
         assert by_id[2]["urgency"] == "critical"
         assert by_id[3]["late_status"] == "closed"
         assert by_id[3]["urgency"] == "overdue"
+
+
+def test_fetch_thnn_activities_discards_result_when_account_switches_mid_flight(monkeypatch):
+    from config import settings
+    from core.data_orchestrator import DataOrchestrator
+
+    with patch("core.data_orchestrator.MoodleClient"), patch("core.data_orchestrator.GradeMonitor"):
+        orch = DataOrchestrator()
+        orch.thnn_client.moodle_site_origin = "https://thnn.ut.edu.vn"
+        orch.thnn_client._sesskey = "alice-sesskey"
+
+    started = threading.Event()
+    release = threading.Event()
+    ics_payload = (
+        "BEGIN:VCALENDAR\n"
+        "BEGIN:VEVENT\n"
+        "UID:101@thnn.ut.edu.vn\n"
+        "SUMMARY:Alice Secret THNN\n"
+        "DTEND:20261201T120000Z\n"
+        "CATEGORIES:THNN Course\n"
+        "END:VEVENT\n"
+        "END:VCALENDAR\n"
+    )
+    month_html = (
+        b'<a data-action="view-event" data-event-id="101" '
+        b'href="https://thnn.ut.edu.vn/mod/assign/view.php?id=555">Open</a>'
+    )
+
+    class _FakeResp:
+        def read(self):
+            return month_html
+
+    class _FakeOpener:
+        def open(self, _url, timeout=10):
+            return _FakeResp()
+
+    orch.thnn_client._ensure_html_opener = Mock(return_value=_FakeOpener())
+
+    def slow_download(_opener, _data):
+        started.set()
+        assert release.wait(2.0)
+        return ics_payload
+
+    orch._download_thnn_calendar = slow_download
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "alice")
+    out: list = []
+    worker = threading.Thread(target=lambda: out.append(orch._fetch_thnn_activities(1_700_000_000)))
+    worker.start()
+    assert started.wait(1.0)
+
+    # Account teardown & switch to Bob while Alice's THNN fetch is in flight
+    monkeypatch.setattr(settings, "UTH_USERNAME", "bob")
+    orch.clear_caches()
+    release.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+
+    assert out == [[]]
+    assert orch._thnn_activities_cache == []
+    assert orch._last_thnn_fetch_ts == 0.0
+    assert "bob" not in orch._thnn_cache_by_account
+
+
+def test_fetch_thnn_auth_failure_after_account_switch_does_not_wipe_new_account_cache(monkeypatch):
+    from config import settings
+    from core.data_orchestrator import DataOrchestrator
+
+    with patch("core.data_orchestrator.MoodleClient"), patch("core.data_orchestrator.GradeMonitor"):
+        orch = DataOrchestrator()
+        orch.thnn_client.moodle_site_origin = "https://thnn.ut.edu.vn"
+        orch.thnn_client._sesskey = ""
+        orch.thnn_client._last_login_error = "invalid_credentials"
+        orch.thnn_client.last_login_error = "invalid_credentials"
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_failed_login(*_args, **_kwargs):
+        started.set()
+        assert release.wait(2.0)
+        return False
+
+    orch.thnn_client.login_session = slow_failed_login
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "alice")
+    out: list = []
+    worker = threading.Thread(target=lambda: out.append(orch._fetch_thnn_activities(1_700_000_000)))
+    worker.start()
+    assert started.wait(1.0)
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "bob")
+    orch.clear_caches()
+    orch._thnn_activities_cache = [{"id": "bob-thnn"}]
+    orch._last_thnn_fetch_ts = 1_700_000_123.0
+    release.set()
+    worker.join(timeout=2.0)
+
+    assert out == [[]]
+    assert orch._thnn_activities_cache == [{"id": "bob-thnn"}]
+    assert orch._last_thnn_fetch_ts == 1_700_000_123.0
+
+
+def test_clear_caches_does_not_block_on_refresh_course_grades_network_io():
+    from core.data_orchestrator import DataOrchestrator
+
+    with patch("core.data_orchestrator.MoodleClient"), patch("core.data_orchestrator.GradeMonitor"):
+        orch = DataOrchestrator()
+
+    orch.course_grade_monitor = Mock()
+    orch.course_grade_monitor.update.return_value = [{"changed": True}]
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_fetch(_orch):
+        started.set()
+        assert release.wait(2.0)
+        return [{"course_id": 10, "name": "Alice Course"}]
+
+    result_box: list = []
+
+    def run_refresh():
+        with patch(
+            "core.course_grades_service.fetch_current_courses_with_grades",
+            side_effect=slow_fetch,
+        ):
+            result_box.append(orch.refresh_course_grades())
+
+    worker = threading.Thread(target=run_refresh)
+    worker.start()
+    assert started.wait(1.0)
+
+    t0 = time.perf_counter()
+    orch.clear_caches()
+    clear_elapsed = time.perf_counter() - t0
+
+    release.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+
+    assert clear_elapsed < 0.15
+    assert result_box == [([], [])]
+    assert orch.latest_course_grades == []
+    orch.course_grade_monitor.update.assert_not_called()

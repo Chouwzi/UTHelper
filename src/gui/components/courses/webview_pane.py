@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 from typing import Any, Callable, Optional
@@ -18,6 +17,7 @@ from core.html_compat import BS4_PARSER
 from core.security import HTMLSanitizer
 from gui.components.courses._shared import (
     build_viewer_header,
+    marshal_to_ui,
     refresh_viewer_header,
     safe_control_update,
 )
@@ -25,7 +25,6 @@ from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     WindowsWebView2Dock,
     _is_flet_webview_platform,
-    _safe_control_page,
     _webview2_runtime_available,
     build_embedded_webview_host,
     set_global_webview_occlusion,
@@ -426,23 +425,12 @@ class CoursesWebViewPane(ft.Container):
     def _marshal_ui(self, fn: Callable[[], None]) -> None:
         if self._disposed:
             return
-        page = _safe_control_page(self)
-        loop = getattr(page, "loop", None) if page is not None else None
-        if (
-            threading.current_thread() is not threading.main_thread()
-            and isinstance(loop, asyncio.AbstractEventLoop)
-            and loop.is_running()
-        ):
-            def _guarded() -> None:
-                if not self._disposed:
-                    fn()
 
-            try:
-                loop.call_soon_threadsafe(_guarded)
-                return
-            except RuntimeError:
-                pass
-        fn()
+        def _guarded() -> None:
+            if not self._disposed:
+                fn()
+
+        marshal_to_ui(self, _guarded)
 
     def _set_nav_loading(self, loading: bool) -> None:
         if self._disposed:

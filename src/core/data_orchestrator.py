@@ -40,6 +40,7 @@ class DataOrchestrator:
             client=self.thnn_client,
         )
         self._thnn_lock = threading.RLock()
+        self._thnn_generation: int = 0
         self._thnn_cache_by_account: dict[str, List[Dict[str, Any]]] = {}
         self._last_thnn_fetch_ts_by_account: dict[str, float] = {}
         self._ws_parallel_timeout: float = 25.0
@@ -64,6 +65,7 @@ class DataOrchestrator:
         from core.course_grade_monitor import CourseGradeMonitor
         self.course_grade_monitor = CourseGradeMonitor()
         self._course_grades_lock = threading.Lock()
+        self._course_grades_generation: int = 0
         self.latest_course_grades: list = []
 
     def _get_cached_detail(self, url: str):
@@ -130,6 +132,12 @@ class DataOrchestrator:
         with self._thnn_lock:
             self._last_thnn_fetch_ts_by_account[self._thnn_account_key()] = float(value or 0.0)
 
+    def _thnn_state_matches_locked(self, start_key: str, start_gen: int) -> bool:
+        return (
+            self._thnn_generation == start_gen
+            and self._thnn_account_key() == start_key
+        )
+
     def clear_detail_cache(self):
         """Xóa sạch bộ nhớ đệm chi tiết (dùng khi refresh thủ công)."""
         with self._detail_lock:
@@ -142,6 +150,7 @@ class DataOrchestrator:
     def clear_caches(self) -> None:
         """Clear all account-scoped in-memory caches on login/logout/account switch."""
         with self._thnn_lock:
+            self._thnn_generation += 1
             self._thnn_cache_by_account.clear()
             self._last_thnn_fetch_ts_by_account.clear()
         self.clear_detail_cache()
@@ -150,6 +159,7 @@ class DataOrchestrator:
         self._last_fetch_ts = 0
         self.is_logged_in = False
         with self._course_grades_lock:
+            self._course_grades_generation += 1
             self.latest_course_grades = []
         try:
             self.moodle_service.clear_all_caches()
@@ -308,11 +318,16 @@ class DataOrchestrator:
         """Tải điểm các môn đang học, lưu snapshot và trả (danh sách môn, thay đổi).
 
         Được gọi trong chu kỳ cập nhật Tổng quan và khi bấm làm mới ở tab Môn học.
-        Khoá để hai luồng không báo trùng cùng một thay đổi.
+        Khoá chỉ bảo vệ phần cập nhật snapshot/trạng thái để không chặn teardown
+        khi đang chờ mạng, đồng thời loại bỏ kết quả cũ nếu tài khoản đã đổi.
         """
         from core.course_grades_service import fetch_current_courses_with_grades
         with self._course_grades_lock:
-            courses = fetch_current_courses_with_grades(self)
+            start_gen = self._course_grades_generation
+        courses = fetch_current_courses_with_grades(self)
+        with self._course_grades_lock:
+            if self._course_grades_generation != start_gen:
+                return [], []
             changes = self.course_grade_monitor.update(courses) if courses else []
             self.latest_course_grades = courses
             return courses, changes
@@ -393,15 +408,30 @@ class DataOrchestrator:
         return login_err == "quiz_session_active"
 
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
-        last_known_good = list(self._thnn_activities_cache)
+        with self._thnn_lock:
+            start_key = self._thnn_account_key()
+            start_gen = self._thnn_generation
+            last_known_good = list(self._thnn_cache_by_account.get(start_key, []))
+
+        def _return_fallback() -> List[Dict[str, Any]]:
+            with self._thnn_lock:
+                if self._thnn_state_matches_locked(start_key, start_gen):
+                    return list(last_known_good)
+            return []
+
+        def _clear_if_current() -> None:
+            with self._thnn_lock:
+                if self._thnn_state_matches_locked(start_key, start_gen):
+                    self._thnn_cache_by_account[start_key] = []
+                    self._last_thnn_fetch_ts_by_account[start_key] = 0.0
+
         try:
             if not self.thnn_client._sesskey:
                 success = self.thnn_client.login_session()
                 if not success:
                     if self._thnn_login_was_deferred():
-                        return last_known_good
-                    self._thnn_activities_cache = []
-                    self._last_thnn_fetch_ts = 0.0
+                        return _return_fallback()
+                    _clear_if_current()
                     return []
                     
             opener = self.thnn_client._ensure_html_opener()
@@ -423,9 +453,8 @@ class DataOrchestrator:
             if ics_data is None:
                 if not self.thnn_client.login_session(force=True):
                     if self._thnn_login_was_deferred():
-                        return last_known_good
-                    self._thnn_activities_cache = []
-                    self._last_thnn_fetch_ts = 0.0
+                        return _return_fallback()
+                    _clear_if_current()
                     return []
                 opener = self.thnn_client._ensure_html_opener()
                 data = urllib.parse.urlencode({
@@ -437,8 +466,12 @@ class DataOrchestrator:
                 }).encode('utf-8')
                 ics_data = self._download_thnn_calendar(opener, data)
                 if ics_data is None:
-                    return last_known_good
+                    return _return_fallback()
                 
+            with self._thnn_lock:
+                if not self._thnn_state_matches_locked(start_key, start_gen):
+                    return []
+
             events_ics = {}
             current_event = {}
             for line in ics_data.split('\n'):
@@ -543,12 +576,15 @@ class DataOrchestrator:
                     act_dict['urgency'] = policy.evaluate(act_dict).urgency
                     results.append(act_dict)
                     
-            self._last_thnn_fetch_ts = float(now_ts)
-            self._thnn_activities_cache = results
+            with self._thnn_lock:
+                if not self._thnn_state_matches_locked(start_key, start_gen):
+                    return []
+                self._last_thnn_fetch_ts_by_account[start_key] = float(now_ts)
+                self._thnn_cache_by_account[start_key] = list(results)
             return results
         except Exception as e:
             logger.error(f"Lỗi khi tải THNN activities: {e}")
-            return last_known_good
+            return _return_fallback()
 
     def _format_assignment_from_ws(self, a: dict, url: str, identity: str) -> dict:
         import html
