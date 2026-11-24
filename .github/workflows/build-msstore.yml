@@ -1,6 +1,8 @@
 name: Build Microsoft Store MSIX
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       identity_name:
@@ -135,7 +137,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
           python scripts/prepare_windows_bundle.py build/windows
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
-          python scripts/verify_windows_bundle.py build/windows --expected-version "$version"
+          python scripts/verify_windows_bundle.py build/windows --expected-version "$version" --strict-site-packages
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
 
       - name: Package and verify Microsoft Store MSIX
@@ -250,13 +252,14 @@ jobs:
               }
 
               $wackVerifyArgs = @{
-                MsixPath       = $wackMsix
-                Channel        = "msstore"
-                IdentityName   = $identityName
-                Publisher      = $publisher
-                Version        = $msixVersion
-                RunWack        = $true
-                WackReportPath = "evidence/UTHelper-$version-msstore.wack-report.xml"
+                MsixPath            = $wackMsix
+                Channel             = "msstore"
+                IdentityName        = $identityName
+                Publisher           = $publisher
+                Version             = $msixVersion
+                RequireOfficeViewer = $true
+                RunWack             = $true
+                WackReportPath      = "evidence/UTHelper-$version-msstore.wack-report.xml"
               }
               if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
                 $wackVerifyArgs.StoreProductId = $storeProductId

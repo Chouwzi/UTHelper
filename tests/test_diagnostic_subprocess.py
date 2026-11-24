@@ -98,6 +98,7 @@ def _run_child(mode: str, root: Path) -> _ChildResult:
             capture_output=True,
             timeout=10,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         # subprocess.run() kills and waits for the exact child it created before

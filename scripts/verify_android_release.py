@@ -580,6 +580,74 @@ def _verify_office_viewer_assets_in_app_zip(
     return verified_any
 
 
+def _verify_quiz_and_webview_packages(
+    archive: zipfile.ZipFile,
+    *,
+    require: bool,
+) -> bool:
+    """Verify ``flutter_inappwebview`` DEX classes plus ``flet_uth_quiz`` & ``flet_webview`` Python packages."""
+    archive_names = archive.namelist()
+    has_sitepackages_archive = any(
+        name.rsplit("/", 1)[-1] in {"sitepackages.zip", "site-packages.zip"}
+        for name in archive_names
+    )
+    if not require and not has_sitepackages_archive:
+        return False
+
+    dex_entries = [name for name in archive_names if name.endswith(".dex")]
+    has_inappwebview_dex = False
+    for dex_name in sorted(dex_entries):
+        dex_strings = extract_dex_strings(archive.read(dex_name), dex_name=dex_name)
+        if any("flutter_inappwebview" in item.lower() for item in dex_strings):
+            has_inappwebview_dex = True
+            break
+    if not has_inappwebview_dex:
+        raise AndroidVerificationError(
+            "Android artifact DEX is missing flutter_inappwebview plugin classes"
+        )
+
+    has_flet_uth_quiz = False
+    has_flet_webview = False
+
+    def _scan_paths(paths: Sequence[str]) -> None:
+        nonlocal has_flet_uth_quiz, has_flet_webview
+        for raw_name in paths:
+            if not raw_name.endswith((".py", ".pyc")):
+                continue
+            parts = raw_name.replace("\\", "/").split("/")
+            parents = parts[:-1]
+            if "flet_uth_quiz" in parents:
+                has_flet_uth_quiz = True
+            if "flet_webview" in parents:
+                has_flet_webview = True
+
+    _scan_paths(archive_names)
+    nested_zips = [name for name in archive_names if name.endswith(".zip")]
+    for nested_name in sorted(nested_zips):
+        info = archive.getinfo(nested_name)
+        if info.file_size > 256 * 1024 * 1024:
+            raise AndroidVerificationError(
+                f"Nested Python archive exceeds size limit: {nested_name}"
+            )
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive.read(nested_name))) as nested:
+                _scan_paths(nested.namelist())
+        except zipfile.BadZipFile as exc:
+            raise AndroidVerificationError(
+                f"Failed to inspect nested Python archive {nested_name}"
+            ) from exc
+
+    if not has_flet_uth_quiz:
+        raise AndroidVerificationError(
+            "Android artifact is missing packaged flet_uth_quiz Python extension"
+        )
+    if not has_flet_webview:
+        raise AndroidVerificationError(
+            "Android artifact is missing packaged flet_webview Python extension"
+        )
+    return True
+
+
 def _verify_chplay_manifest_policy(manifest_root: ET.Element) -> None:
     """Enforce Google Play Store manifest compliance policy."""
     target_sdks: list[int] = []
@@ -857,6 +925,7 @@ def verify_android_release(
     architecture: str = "universal",
     allow_unsigned: bool = False,
     require_office_viewer: bool = False,
+    require_quiz_webview: bool = False,
 ) -> dict[str, object]:
     if (apk is None) == (aab is None):
         raise AndroidVerificationError("Provide exactly one of apk or aab")
@@ -1024,6 +1093,10 @@ def verify_android_release(
                 archive,
                 require=require_office_viewer,
             )
+            quiz_webview_verified = _verify_quiz_and_webview_packages(
+                archive,
+                require=require_quiz_webview,
+            )
     except zipfile.BadZipFile as exc:
         raise AndroidVerificationError(
             f"{'AAB' if is_aab else 'APK'} native library archive is invalid"
@@ -1081,6 +1154,8 @@ def verify_android_release(
             checks.append("aab_signature" if is_aab else "apk_signature")
         if office_viewer_verified:
             checks.append("office_viewer_assets")
+        if quiz_webview_verified:
+            checks.append("quiz_webview_packages")
         evidence = {
             "schema_version": 2,
             "platform": "android",
@@ -1142,6 +1217,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Require office_viewer static assets inside nested Flet app.zip",
     )
+    parser.add_argument(
+        "--require-quiz-webview",
+        action="store_true",
+        help="Require flutter_inappwebview DEX classes plus flet_uth_quiz and flet_webview packages",
+    )
     return parser
 
 
@@ -1161,6 +1241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         architecture=args.architecture,
         allow_unsigned=args.allow_unsigned,
         require_office_viewer=args.require_office_viewer,
+        require_quiz_webview=args.require_quiz_webview,
     )
     return 0
 
