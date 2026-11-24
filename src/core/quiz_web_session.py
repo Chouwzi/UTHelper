@@ -216,6 +216,9 @@ def clone_quiz_client_from(
             cloned._cookie_jar.set_cookie(copy.deepcopy(cookie))
         cloned._session_owner = owner
         cloned._sesskey = str(getattr(existing_client, "_sesskey", "") or "")
+        cloned._session_authenticated_at = float(
+            getattr(existing_client, "_session_authenticated_at", 0.0) or 0.0
+        )
         snapshot_gen = int(getattr(existing_client, "_session_generation", 0))
         return cloned, snapshot_gen
 

@@ -569,6 +569,27 @@ class MoodleClient:
             self._reset_session_if_account_changed()
             return self._sesskey or ""
 
+    @staticmethod
+    def _is_ajax_session_error(resp: Any) -> bool:
+        """Return whether a Moodle AJAX response dict signals an expired/invalid session."""
+        if not isinstance(resp, dict) or not resp.get("error"):
+            return False
+        exc_info = resp.get("exception")
+        exc_text = ""
+        if isinstance(exc_info, dict):
+            exc_text = (
+                f"{exc_info.get('errorcode') or ''} {exc_info.get('message') or ''}"
+            )
+        elif exc_info:
+            exc_text = str(exc_info)
+        err_text = (
+            f"{resp.get('errorcode') or ''} {resp.get('message') or ''} {exc_text}"
+        ).lower()
+        return any(
+            marker in err_text
+            for marker in ("requirelogin", "requireslogin", "invalidsesskey", "sesskey")
+        )
+
     def ensure_live_session(self, *, max_idle_seconds: float = 900.0) -> bool:
         """Verify the Moodle HTML cookie session is still alive, relogging if stale."""
         with self._session_lock:
@@ -591,9 +612,13 @@ class MoodleClient:
 
             if isinstance(resp, dict) and not resp.get("error"):
                 data = resp.get("data")
-                if isinstance(data, dict):
+                if (
+                    isinstance(data, dict)
+                    and "userid" in data
+                    and data.get("userid") is not None
+                ):
                     try:
-                        userid = int(data.get("userid") or 0)
+                        userid = int(data["userid"])
                         remaining = int(data.get("timeremaining") or 0)
                     except (TypeError, ValueError):
                         userid = -1
@@ -603,26 +628,20 @@ class MoodleClient:
                         return True
                     if userid == 0 or (userid > 0 and remaining <= 60):
                         return bool(self.login_session(force=True))
-            elif isinstance(resp, dict) and resp.get("error"):
-                exc_info = resp.get("exception")
-                exc_text = ""
-                if isinstance(exc_info, dict):
-                    exc_text = (
-                        f"{exc_info.get('errorcode') or ''} {exc_info.get('message') or ''}"
-                    )
-                elif exc_info:
-                    exc_text = str(exc_info)
-                err_text = (
-                    f"{resp.get('errorcode') or ''} {resp.get('message') or ''} {exc_text}"
-                ).lower()
-                if any(
-                    marker in err_text
-                    for marker in ("requirelogin", "requireslogin", "invalidsesskey", "sesskey")
-                ):
-                    return bool(self.login_session(force=True))
+            elif self._is_ajax_session_error(resp):
+                return bool(self.login_session(force=True))
 
             try:
                 final_url, _ = self._open_html("/my/")
+            except urllib.error.HTTPError as exc:
+                try:
+                    logger.debug(
+                        "Session liveness HTML probe failed (HTTPError %s)",
+                        getattr(exc, "code", "?"),
+                    )
+                finally:
+                    exc.close()
+                return self._has_moodle_session_cookie()
             except Exception as exc:
                 logger.debug("Session liveness HTML probe failed (%s)", type(exc).__name__)
                 return self._has_moodle_session_cookie()
@@ -643,6 +662,7 @@ class MoodleClient:
         with self._session_lock:
             self._reset_session_if_account_changed()
             if force_relogin:
+                self._last_login_error = ""
                 try:
                     logged_in = bool(self.login_session(force=True))
                 except Exception as exc:
@@ -651,9 +671,13 @@ class MoodleClient:
                         type(exc).__name__,
                     )
                     return []
-                if not logged_in and self._last_login_error != "quiz_session_active":
+                if not logged_in and not (
+                    self._last_login_error == "quiz_session_active"
+                    and self._has_moodle_session_cookie()
+                ):
                     return []
             elif ensure_login and verify_live:
+                self._last_login_error = ""
                 try:
                     live_ok = bool(self.ensure_live_session())
                 except Exception as exc:
@@ -662,11 +686,15 @@ class MoodleClient:
                         type(exc).__name__,
                     )
                     live_ok = False
-                if not live_ok and not self._has_moodle_session_cookie():
+                if not live_ok and not (
+                    self._last_login_error == "quiz_session_active"
+                    and self._has_moodle_session_cookie()
+                ):
                     return []
             elif ensure_login and (
                 not self._sesskey or not self._has_moodle_session_cookie()
             ):
+                self._last_login_error = ""
                 try:
                     login_ok = bool(
                         self.login_session(force=True)
@@ -679,7 +707,10 @@ class MoodleClient:
                         type(exc).__name__,
                     )
                     login_ok = False
-                if not login_ok and not self._has_moodle_session_cookie():
+                if not login_ok and not (
+                    self._last_login_error == "quiz_session_active"
+                    and self._has_moodle_session_cookie()
+                ):
                     return []
 
             fallback_host = urllib.parse.urlsplit(self.moodle_site_origin).hostname or ""
@@ -764,14 +795,14 @@ class MoodleClient:
                         raise
                     finally:
                         exc.close()
-                if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                    self._session_authenticated_at = 0.0
                     if attempt == 0:
                         if not self.login_session(force=True):
                             raise RuntimeError("Moodle session re-login failed")
                         continue
                     raise RuntimeError("Moodle session expired")
-                if not urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
-                    self._session_authenticated_at = time.monotonic()
+                self._session_authenticated_at = time.monotonic()
                 return final_url, html_text, False
             raise RuntimeError("Moodle session expired")
 
@@ -865,11 +896,13 @@ class MoodleClient:
             final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
             if final_origin != origin:
                 raise ValueError("Moodle response changed origin")
-            if parsed.path == "/login/index.php" and not path.startswith("/login/index.php"):
-                if attempt == 0:
-                    with self._session_lock:
-                        current_gen = int(getattr(self, "_session_generation", 0))
-                        current_owner = str(getattr(self, "_session_owner", "") or "")
+            if parsed.path.endswith("/login/index.php") and not path.startswith("/login/index.php"):
+                with self._session_lock:
+                    current_gen = int(getattr(self, "_session_generation", 0))
+                    current_owner = str(getattr(self, "_session_owner", "") or "")
+                    if current_gen == gen:
+                        self._session_authenticated_at = 0.0
+                    if attempt == 0:
                         if current_gen != gen:
                             if not self._sesskey or (owner and current_owner != owner):
                                 raise RuntimeError("Moodle session expired")
@@ -892,7 +925,7 @@ class MoodleClient:
                     not self._sesskey or (owner and current_owner != owner)
                 ):
                     raise RuntimeError("Moodle session expired")
-                if not parsed.path.endswith("/login/index.php"):
+                if self._sesskey and not parsed.path.endswith("/login/index.php"):
                     self._session_authenticated_at = time.monotonic()
             meta.has_set_cookie = attempt_has_set_cookie
             return status, final_url, resp_ct, raw
@@ -937,14 +970,14 @@ class MoodleClient:
                         raise
                     finally:
                         exc.close()
-                if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                    self._session_authenticated_at = 0.0
                     if attempt == 0:
                         if not self.login_session(force=True):
                             raise RuntimeError("Moodle session re-login failed")
                         continue
                     raise RuntimeError("Moodle session expired")
-                if not urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
-                    self._session_authenticated_at = time.monotonic()
+                self._session_authenticated_at = time.monotonic()
                 return final_url, html_text, False
             raise RuntimeError("Moodle session expired")
 
@@ -1012,6 +1045,7 @@ class MoodleClient:
                 self._last_login_error = "quiz_session_active"
                 return False
 
+            authenticated = False
             try:
                 self._cookie_jar.clear()
                 self._sesskey = ""
@@ -1054,6 +1088,7 @@ class MoodleClient:
                     self._session_authenticated_at = time.monotonic()
                     self._last_login_error = ""
                     self._session_generation += 1
+                    authenticated = True
                     return True
 
                 if not require_sesskey and self._has_moodle_session_cookie():
@@ -1062,6 +1097,7 @@ class MoodleClient:
                     self._session_authenticated_at = time.monotonic()
                     self._last_login_error = ""
                     self._session_generation += 1
+                    authenticated = True
                     return True
 
                 if not require_sesskey:
@@ -1082,6 +1118,11 @@ class MoodleClient:
                 self._last_login_error = "network_error"
                 return False
             finally:
+                if not authenticated:
+                    self._cookie_jar.clear()
+                    self._sesskey = ""
+                    self._session_owner = ""
+                    self._session_authenticated_at = 0.0
                 _end_quiz_session_login(session_key)
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
@@ -1092,6 +1133,7 @@ class MoodleClient:
                 if not self.login_session():
                     return None
             sesskey = self._sesskey
+            gen = int(getattr(self, "_session_generation", 0))
 
         origin = self.moodle_site_origin
         url = f"{origin}/lib/ajax/service.php?sesskey={sesskey}&info={function}"
@@ -1127,12 +1169,23 @@ class MoodleClient:
                 
                 if isinstance(data, list) and len(data) > 0:
                     resp = data[0]
-                    if resp.get("error"):
-                        logger.error(f"AJAX API error: {resp.get('exception')} - {resp.get('message')}")
-                        # Xóa sesskey nếu lỗi liên quan tới session
-                        if "requireloginerror" in resp.get("errorcode", "") or "sesskey" in resp.get("message", "").lower():
-                            self._sesskey = ""
-                            self._session_authenticated_at = 0.0
+                    if isinstance(resp, dict) and resp.get("error"):
+                        if self._is_ajax_session_error(resp):
+                            logger.debug(
+                                "AJAX API session error (%s): %s - %s",
+                                function,
+                                resp.get("exception"),
+                                resp.get("message"),
+                            )
+                            # Xóa sesskey nếu lỗi liên quan tới session (chỉ khi đúng generation)
+                            with self._session_lock:
+                                if int(getattr(self, "_session_generation", 0)) == gen:
+                                    self._sesskey = ""
+                                    self._session_authenticated_at = 0.0
+                        else:
+                            logger.error(
+                                f"AJAX API error: {resp.get('exception')} - {resp.get('message')}"
+                            )
                     return resp
                 return None
         except Exception as e:
@@ -1746,17 +1799,18 @@ class MoodleClient:
                     if not _is_same_moodle_origin_url(final_url, origin):
                         logger.warning("Session download response changed origin")
                         return False
-                    if urllib.parse.urlsplit(final_url).path == "/login/index.php":
-                        if attempt == 0:
-                            with self._session_lock:
-                                if int(getattr(self, "_session_generation", 0)) != gen:
-                                    return False
-                                if not self.login_session(force=True):
-                                    return False
-                                opener = self._ensure_html_opener()
-                                gen = int(getattr(self, "_session_generation", 0))
-                            continue
-                        return False
+                    if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                        with self._session_lock:
+                            same_gen = int(getattr(self, "_session_generation", 0)) == gen
+                            if same_gen:
+                                self._session_authenticated_at = 0.0
+                            if attempt != 0 or not same_gen:
+                                return False
+                            if not self.login_session(force=True):
+                                return False
+                            opener = self._ensure_html_opener()
+                            gen = int(getattr(self, "_session_generation", 0))
+                        continue
                     status = getattr(response, "status", 200)
                     if status != 200:
                         logger.error("Session download failed (HTTP %d): %s", status, url)
