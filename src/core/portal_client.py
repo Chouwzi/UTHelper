@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import inspect
 import json
+import math
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -78,6 +81,50 @@ def _decompress_gzip_bounded(compressed: bytes, max_bytes: int) -> bytes:
     except zlib.error as exc:
         raise PortalProtocolError("Portal response was not valid gzip") from exc
     return b"".join(chunks)
+
+
+def _decode_jwt_payload(token: str) -> dict[str, Any]:
+    """Decode the payload section of a JWT without verifying its signature."""
+    if not isinstance(token, str):
+        return {}
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1]:
+        return {}
+    segment = parts[1]
+    padded = segment + ("=" * (-len(segment) % 4))
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeEncodeError, UnicodeDecodeError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_jwt_expired(token: str, *, skew_seconds: int = 300) -> bool:
+    """Return True when ``token`` is a JWT whose ``exp`` claim is within ``skew_seconds``.
+
+    Opaque tokens or JWTs without a numeric ``exp`` claim return ``False`` so
+    non-JWT test tokens remain usable.
+    """
+    payload = _decode_jwt_payload(token)
+    exp = payload.get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return False
+    if not math.isfinite(exp):
+        return False
+    return int(exp) <= time.time() + skew_seconds
+
+
+def _extract_token_role(token: str, response_body: Any = None) -> str:
+    """Resolve the Portal web role from login ``body``, JWT ``data.role``, or ``'sv'``."""
+    if isinstance(response_body, str) and response_body.strip():
+        return response_body.strip()
+    jwt_data = _decode_jwt_payload(token).get("data")
+    if isinstance(jwt_data, dict):
+        jwt_role = jwt_data.get("role")
+        if isinstance(jwt_role, str) and jwt_role.strip():
+            return jwt_role.strip()
+    return "sv"
 
 
 class _SamePortalOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -165,6 +212,7 @@ class PortalClient:
         # The cached token belongs to exactly one account: after an account
         # switch a stale token must never be replayed for the new username.
         self._token_owner = ""
+        self._token_role = ""
         # Invalidations are versioned: a fetch that started before
         # clear_token() must not re-store the token it obtained moments
         # earlier and resurrect the credential the caller just dropped.
@@ -193,6 +241,7 @@ class PortalClient:
                 return
             self._token = ""
             self._token_owner = ""
+            self._token_role = ""
             self._token_generation += 1
 
     def _cached_token(self, username: str) -> str:
@@ -203,15 +252,26 @@ class PortalClient:
             return ""
 
     def _store_token(
-        self, token: str, username: str, generation: int | None = None
+        self,
+        token: str,
+        username: str,
+        generation: int | None = None,
+        *,
+        role: str = "",
     ) -> None:
+        normalized_role = role.strip() if isinstance(role, str) else ""
         with self._token_lock:
             if generation is not None and generation != self._token_generation:
                 # clear_token() ran while this request was in flight: the
                 # caller no longer wants this session to exist.
                 return
+            same_owner = self._token_owner == username
             self._token = token
             self._token_owner = username
+            if normalized_role:
+                self._token_role = normalized_role
+            elif not same_owner:
+                self._token_role = ""
 
     def _request_json(
         self,
@@ -301,7 +361,12 @@ class PortalClient:
     def _login(
         self, username: str, password: str, generation: int | None = None
     ) -> str:
-        if not username or not password:
+        if (
+            not isinstance(username, str)
+            or not username.strip()
+            or not isinstance(password, str)
+            or not password
+        ):
             raise PortalAuthenticationError("Portal credentials are unavailable")
         payload = self._request_json(
             "POST",
@@ -312,8 +377,47 @@ class PortalClient:
         if not isinstance(token, str) or not token:
             self._discard_token(generation)
             raise PortalAuthenticationError("Portal login was rejected")
-        self._store_token(token, username, generation)
+        role = _extract_token_role(token, payload.get("body"))
+        self._store_token(token, username, generation, role=role)
         return token
+
+    def ensure_web_session(
+        self, username: str, password: str, *, force: bool = False
+    ) -> tuple[str, str]:
+        """Return a valid ``(jwt_token, role)`` pair for Portal web sessions.
+
+        Reuses the cached token for ``username`` unless ``force=True`` or the
+        JWT ``exp`` claim is expired (or within the default skew window).
+        """
+        if (
+            not isinstance(username, str)
+            or not username.strip()
+            or not isinstance(password, str)
+            or not password
+        ):
+            raise PortalAuthenticationError("Portal credentials are unavailable")
+        with self._token_lock:
+            generation = self._token_generation
+            if not force and self._token and self._token_owner == username:
+                cached_token = self._token
+                cached_role = self._token_role
+            else:
+                cached_token = ""
+                cached_role = ""
+        if cached_token and not _is_jwt_expired(cached_token):
+            return cached_token, cached_role or _extract_token_role(cached_token)
+        token = self._login(username, password, generation)
+        with self._token_lock:
+            role = (
+                self._token_role
+                if self._token == token
+                and self._token_owner == username
+                and self._token_role
+                else ""
+            )
+        if not role:
+            role = _extract_token_role(token)
+        return token, role
 
     def fetch_day(
         self, target_date: date, username: str, password: str
