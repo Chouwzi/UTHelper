@@ -420,11 +420,6 @@ class WindowsWebView2Dock:
 
     @property
     def current_url(self) -> str:
-        core = self._core
-        if core is not None:
-            src = getattr(core, "source", None)
-            if isinstance(src, str) and src.strip():
-                return src.strip()
         return self._committed_url
 
     def set_visible(self, visible: bool) -> None:
@@ -967,6 +962,19 @@ class WindowsWebView2Dock:
         if self._on_loading_changed is not None:
             self._on_loading_changed(False)
 
+    def _sync_committed_url_from_core(self, core: Any) -> str:
+        """Read ``core.source`` on the STA thread and cache the last committed URL."""
+        try:
+            raw_src = getattr(core, "source", None)
+        except Exception:
+            return self._committed_url
+        if isinstance(raw_src, str):
+            src_str = raw_src.strip()
+            if src_str:
+                self._committed_url = src_str
+            return src_str
+        return str(raw_src or "")
+
     def _bind_events(self, core: Any) -> None:
         try:
             core.add_document_title_changed(
@@ -974,14 +982,9 @@ class WindowsWebView2Dock:
                 if self._on_title_changed
                 else None
             )
+
             def _on_source_changed(_s: Any, _a: Any) -> None:
-                raw_src = getattr(core, "source", None)
-                if isinstance(raw_src, str):
-                    src_str = raw_src.strip()
-                    if src_str:
-                        self._committed_url = src_str
-                else:
-                    src_str = str(raw_src or "")
+                src_str = self._sync_committed_url_from_core(core)
                 if self._on_url_changed is not None:
                     self._on_url_changed(src_str)
 
@@ -1025,6 +1028,7 @@ class WindowsWebView2Dock:
             core.add_navigation_starting(_on_nav_starting)
 
             def _on_nav_completed(_sender: Any, args: Any) -> None:
+                self._sync_committed_url_from_core(core)
                 if self._active_init_script_id:
                     raw_nav_id = getattr(args, "navigation_id", None)
                     completed_nav_id = (
@@ -1736,18 +1740,16 @@ class EmbeddedWebViewHost:
         self._flet_has_ended_once = True
         raw_ended = str(getattr(e, "data", "") or "")
         prev_current = self._current_url
+        valid_ended = ""
         if raw_ended and _validate_webview_url(
             raw_ended,
             allowed_loopback_ports=self._allowed_loopback_ports,
         ):
-            self._current_url = raw_ended
-            self._url = raw_ended
-            if raw_ended != prev_current and self._on_url_changed is not None:
-                self._on_url_changed(raw_ended)
-        ended_url = raw_ended or self._current_url or self._url
+            valid_ended = raw_ended
+            self._current_url = valid_ended
+            self._url = valid_ended
+        ended_url = valid_ended or raw_ended or self._current_url or self._url
         ended_origin = WindowsWebView2Dock._url_origin(ended_url)
-        if self._on_loading_changed is not None:
-            self._on_loading_changed(False)
         script_to_run = ""
         with self._init_script_lock:
             pending_script = self._pending_init_script
@@ -1771,6 +1773,10 @@ class EmbeddedWebViewHost:
                     self._pending_init_script_origin = ""
                     self._pending_init_script_nav_started = False
                     self._pending_init_script_requires_start = False
+        if valid_ended and valid_ended != prev_current and self._on_url_changed is not None:
+            self._on_url_changed(valid_ended)
+        if not self._flet_loading and self._on_loading_changed is not None:
+            self._on_loading_changed(False)
         if script_to_run:
             self._schedule_flet_init_script(script_to_run)
         if self._on_ready is not None:

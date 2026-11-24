@@ -1833,4 +1833,236 @@ def test_round2_flet_webview_prior_same_origin_url_change_does_not_bypass_requir
     fwv_host.dispose()
 
 
+# ---------------------------------------------------------------------------
+# 7. Review round 3 regressions (STA COM safety, /session/ spoof guard, page_ended order)
+# ---------------------------------------------------------------------------
+
+
+def test_round3_webview2_current_url_and_portal_rearm_timer_never_touch_core_source_off_sta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sta_tid = threading.get_ident()
+    off_sta_reads: list[int] = []
+
+    class _StaEnforcingCore(_FakeWebView2Core):
+        def __init__(self) -> None:
+            super().__init__()
+            self._sta_source = ""
+
+        @property
+        def source(self) -> str:
+            cur_tid = threading.get_ident()
+            if cur_tid != sta_tid:
+                off_sta_reads.append(cur_tid)
+                raise OSError("RPC_E_WRONG_THREAD")
+            return self._sta_source
+
+        @source.setter
+        def source(self, val: str) -> None:
+            self._sta_source = val
+
+    core = _StaEnforcingCore()
+    dock_holder: dict[str, WindowsWebView2Dock] = {}
+
+    def _fake_build_wv2(url: str, **kwargs: Any) -> EmbeddedWebViewHost:
+        dock = WindowsWebView2Dock(
+            page_title="UTHelper",
+            url=url,
+            on_ready=kwargs.get("on_ready"),
+            on_url_changed=kwargs.get("on_url_changed"),
+            on_navigation_starting=kwargs.get("on_navigation_starting"),
+        )
+        dock._core = core
+        dock._ready = True
+        dock._bind_events(core)
+        dock_holder["dock"] = dock
+        return EmbeddedWebViewHost(
+            backend="webview2",
+            url=url,
+            dock=dock,
+            on_ready=kwargs.get("on_ready"),
+            on_url_changed=kwargs.get("on_url_changed"),
+            on_navigation_starting=kwargs.get("on_navigation_starting"),
+        )
+
+    monkeypatch.setattr(pane_mod, "build_embedded_webview_host", _fake_build_wv2)
+
+    portal_client = _FakePortalClient(token="jwt.sta.safe", role="sv")
+    auth_portal = UthWebViewAuthService(
+        portal_client=portal_client,
+        credentials_provider=lambda: ("2251120001", "pw"),
+    )
+    pane = CoursesWebViewPane(
+        page=None,
+        source="courses",
+        title="Portal STA",
+        url="https://portal.ut.edu.vn/dashboard",
+        webview_auth_service=auth_portal,
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    pane._portal_rearm_grace_seconds = 0.05
+    try:
+        dock = dock_holder["dock"]
+        # Commit /dashboard on STA thread
+        core.source = "https://portal.ut.edu.vn/dashboard"
+        core.callbacks["source"](core, SimpleNamespace())
+
+        # Off-STA worker thread reading dock.current_url MUST NOT touch core.source
+        worker_urls: list[str] = []
+        worker_errors: list[BaseException] = []
+
+        def _off_sta_read() -> None:
+            try:
+                worker_urls.append(dock.current_url)
+            except BaseException as exc:  # pragma: no cover - regression guard
+                worker_errors.append(exc)
+
+        t = threading.Thread(target=_off_sta_read)
+        t.start()
+        t.join(timeout=2.0)
+        assert worker_errors == []
+        assert worker_urls == ["https://portal.ut.edu.vn/dashboard"]
+        assert off_sta_reads == []
+
+        # Portal re-arm Timer runs on a non-STA thread and must re-arm cleanly without touching core.source
+        assert pane._recovery_tracker.consume_recovery_attempt("portal") is True
+        pane._portal_recovery_pending_rearm = True
+        core.callbacks["nav_completed"](core, SimpleNamespace(is_success=True))
+
+        time.sleep(0.15)
+        assert off_sta_reads == []
+        assert pane._recovery_tracker.can_attempt_recovery("portal") is True
+    finally:
+        pane.dispose()
+
+
+def test_round3_external_session_url_cannot_spoof_bridge_or_return_stale_current_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert (
+        pane_mod._extract_bridged_uth_url(
+            "https://evil.example/session/tok123/courses/course/view.php?id=9"
+        )
+        == ""
+    )
+    assert (
+        pane_mod._extract_bridged_uth_url(
+            "http://127.0.0.1:54321/session/tok123/courses/course/view.php?id=9"
+        )
+        == "https://courses.ut.edu.vn/course/view.php?id=9"
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _FakeHost:
+        backend = "flet_webview"
+        dock = None
+        current_url = "https://courses.ut.edu.vn/course/view.php?id=10"
+
+        def control(self) -> ft.Control:
+            return ft.Container(expand=True)
+
+        def navigate(self, _url: str) -> None:
+            return None
+
+        def sync_bounds(self, *_a: Any, **_kw: Any) -> None:
+            return None
+
+        def dispose(self) -> None:
+            return None
+
+    fake_host = _FakeHost()
+    monkeypatch.setattr(
+        pane_mod,
+        "build_embedded_webview_host",
+        lambda url, **kw: captured.update(kw) or fake_host,
+    )
+
+    pane = CoursesWebViewPane(
+        page=None,
+        source="courses",
+        title="Course",
+        url="https://courses.ut.edu.vn/course/view.php?id=10",
+        on_back=lambda: None,
+        on_open_external=lambda _u: None,
+    )
+    try:
+        assert pane._recovery_tracker.consume_recovery_attempt("courses") is True
+        pane._recovery_awaiting_commit.add("courses")
+
+        spoof_url = "https://evil.example/session/tok123/courses/course/view.php?id=9"
+        fake_host.current_url = spoof_url
+        captured["on_url_changed"](spoof_url)
+        captured["on_ready"]()
+
+        assert pane._resolved_current_url() == spoof_url
+        assert pane._recovery_tracker.can_attempt_recovery("courses") is False
+        assert "courses" in pane._recovery_awaiting_commit
+
+        # External /session/foo must return host_url, NOT fall through to stale self._current_url
+        pane._current_url = "https://courses.ut.edu.vn/course/view.php?id=10"
+        fake_host.current_url = "https://evil.example/session/foo"
+        assert pane._resolved_current_url() == "https://evil.example/session/foo"
+    finally:
+        pane.dispose()
+
+
+def test_round3_flet_page_ended_does_not_consume_init_script_queued_by_on_url_changed() -> None:
+    ran_scripts: list[str] = []
+
+    class _MinimalFletWv(ft.Container):
+        def __init__(self) -> None:
+            super().__init__(expand=True)
+            self.url = "https://portal.ut.edu.vn/dashboard"
+
+        async def load_request(self, url: str) -> None:
+            self.url = url
+
+        async def run_javascript(self, script: str) -> None:
+            ran_scripts.append(script)
+
+        async def can_go_back(self) -> bool:
+            return False
+
+        async def can_go_forward(self) -> bool:
+            return False
+
+    fake_page = SimpleNamespace(run_task=lambda fn, *a: asyncio.run(fn(*a)))
+    portal_js = build_portal_local_storage_script("jwt.sync.callback", "sv")
+    host_holder: dict[str, EmbeddedWebViewHost] = {}
+
+    def _on_url_changed(u: str) -> None:
+        if u == "https://portal.ut.edu.vn/login":
+            host_holder["host"].apply_auth_and_navigate(
+                [],
+                "https://portal.ut.edu.vn/dashboard",
+                init_script=portal_js,
+            )
+
+    fwv_host = EmbeddedWebViewHost(
+        backend="flet_webview",
+        page=fake_page,  # type: ignore[arg-type]
+        url="https://portal.ut.edu.vn/dashboard",
+        webview_control=_MinimalFletWv(),
+        on_url_changed=_on_url_changed,
+    )
+    host_holder["host"] = fwv_host
+
+    # Finishing page reports raw_ended=/login -> on_url_changed queues portal_js for /dashboard;
+    # the finishing /login page_ended handler MUST NOT consume portal_js immediately!
+    fwv_host._handle_flet_page_ended(
+        SimpleNamespace(data="https://portal.ut.edu.vn/login")
+    )
+    assert ran_scripts == []
+
+    # When /dashboard actually starts & finishes, portal_js runs once!
+    fwv_host._handle_flet_page_started(
+        SimpleNamespace(data="https://portal.ut.edu.vn/dashboard")
+    )
+    fwv_host._handle_flet_page_ended(
+        SimpleNamespace(data="https://portal.ut.edu.vn/dashboard")
+    )
+    assert ran_scripts == [portal_js]
+    fwv_host.dispose()
 

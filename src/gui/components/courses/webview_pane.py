@@ -90,15 +90,22 @@ def is_external_meeting_url(url: str) -> bool:
 
 def _is_loopback_url(url: str) -> bool:
     """Return True for ephemeral local loopback URLs that should not open externally."""
-    host = (urlsplit(str(url or "").strip()).hostname or "").lower()
+    try:
+        host = (urlsplit(str(url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return False
     return host in _LOOPBACK_HOSTS
 
 
 def _extract_bridged_uth_url(url: str) -> str:
-    """Map a local ``/session/<token>/<site>/<path>`` URL back to its canonical HTTPS UTH URL."""
+    """Map a local loopback ``/session/<token>/<site>/<path>`` URL back to its canonical HTTPS UTH URL."""
+    if not _is_loopback_url(url):
+        return ""
     try:
         parsed = urlsplit(str(url or ""))
     except ValueError:
+        return ""
+    if parsed.scheme.lower() != "http":
         return ""
     parts = [seg for seg in parsed.path.split("/") if seg]
     if len(parts) >= 3 and parts[0] == "session" and parts[2] in ("courses", "thnn"):
@@ -689,17 +696,28 @@ class CoursesWebViewPane(ft.Container):
         except Exception:
             pass
 
+    def _is_bridge_session_url(self, url: str) -> bool:
+        if "/session/" not in url or not _is_loopback_url(url):
+            return False
+        if self._preview_server is not None and callable(
+            getattr(self._preview_server, "is_active_loopback_origin", None)
+        ):
+            return self._is_allowed_preview_url(url)
+        try:
+            return urlsplit(str(url or "")).scheme.lower() == "http"
+        except ValueError:
+            return False
+
     def _resolved_current_url(self) -> str:
         host = self._host
         if host is not None:
             host_url = getattr(host, "current_url", "")
             if isinstance(host_url, str) and host_url:
-                if "/session/" in host_url:
+                if self._is_bridge_session_url(host_url):
                     bridged = _extract_bridged_uth_url(host_url)
                     if bridged:
                         return bridged
-                else:
-                    return host_url
+                return host_url
         return self._current_url
 
     def _clear_pending_flet_portal_script(self) -> None:
@@ -813,7 +831,11 @@ class CoursesWebViewPane(ft.Container):
                 self._flet_portal_bootstrap_in_flight = False
 
     def _on_host_navigation_starting(self, url: str) -> None:
-        if not url or "/session/" in url or self._disposed:
+        if not url or self._disposed:
+            return
+        if self._is_bridge_session_url(url):
+            self._clear_pending_flet_portal_script()
+            self._cancel_portal_rearm_timer()
             return
         site = classify_uth_webview_url(url)
         if site != "portal":
@@ -935,7 +957,7 @@ class CoursesWebViewPane(ft.Container):
     def _on_native_url_or_bridge(self, url: str) -> None:
         if not url:
             return
-        if "/session/" in url:
+        if self._is_bridge_session_url(url):
             self._last_rewritten_bridge_target = ""
             bridged_uth = _extract_bridged_uth_url(url)
             if bridged_uth:
