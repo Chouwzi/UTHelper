@@ -794,5 +794,227 @@ def test_integration_with_real_moodle_client_quiz_lease_and_real_portal_client(m
             "https://courses.ut.edu.vn/login/index.php", tracker
         )
         assert recovered is None
-        assert courses_client._last_login_error == "quiz_session_active"
+        assert tracker.can_attempt_recovery("courses") is True
+        assert courses_client.last_login_error == "quiz_session_active"
+
+
+def test_path_normalization_catches_obfuscated_login_urls_and_wantsurl_loops():
+    for obfuscated_courses in (
+        "https://courses.ut.edu.vn/a/../login/index.php",
+        "https://courses.ut.edu.vn//login/index.php",
+        "https://courses.ut.edu.vn/%6cogin/index.php",
+        "https://courses.ut.edu.vn/login/./index.php",
+        "https://elearning.ut.edu.vn//login/",
+    ):
+        assert is_uth_login_url(obfuscated_courses) == "courses"
+
+    for obfuscated_portal in (
+        "https://portal.ut.edu.vn//",
+        "https://portal.ut.edu.vn/./",
+        "https://portal.ut.edu.vn/a/..",
+        "https://portal.ut.edu.vn/%6cogin/",
+    ):
+        assert is_uth_login_url(obfuscated_portal) == "portal"
+
+    # Obfuscated login targets inside wantsurl are rejected -> fallback to /my/
+    for bad_wants in (
+        "https%3A%2F%2Fcourses.ut.edu.vn%2Fa%2F..%2Flogin%2Findex.php",
+        "https%3A%2F%2Fcourses.ut.edu.vn%2F%2Flogin%2Findex.php",
+        "https%3A%2F%2Fcourses.ut.edu.vn%2F%256cogin%2Findex.php",
+    ):
+        url = f"https://courses.ut.edu.vn/login/index.php?wantsurl={bad_wants}"
+        assert normalize_uth_webview_target_url(url) == "https://courses.ut.edu.vn/my/"
+
+    # Obfuscated login URLs must never reset an exhausted recovery budget
+    tracker = WebViewRecoveryTracker()
+    assert tracker.consume_recovery_attempt("courses") is True
+    assert tracker.consume_recovery_attempt("portal") is True
+    tracker.note_authenticated_landing("https://courses.ut.edu.vn/a/../login/index.php")
+    tracker.note_authenticated_landing("https://courses.ut.edu.vn//login/index.php")
+    tracker.note_authenticated_landing("https://courses.ut.edu.vn/%6cogin/index.php")
+    tracker.note_authenticated_landing("https://portal.ut.edu.vn//")
+    assert tracker.can_attempt_recovery("courses") is False
+    assert tracker.can_attempt_recovery("portal") is False
+
+
+def test_auth_flow_subpaths_never_reset_budget_or_become_recovery_targets():
+    # Moodle logout / forgot_password are not login triggers, yet are auth-flow URLs
+    assert is_uth_login_url("https://courses.ut.edu.vn/login/logout.php") is None
+    assert is_uth_login_url("https://courses.ut.edu.vn/login/forgot_password.php") is None
+    assert is_uth_login_url("https://courses.ut.edu.vn/login/change_password.php") is None
+
+    # Rejected inside wantsurl -> fallback to /my/
+    for auth_subpath in (
+        "https%3A%2F%2Fcourses.ut.edu.vn%2Flogin%2Flogout.php",
+        "https%3A%2F%2Fcourses.ut.edu.vn%2Flogin%2Fforgot_password.php",
+        "https%3A%2F%2Fcourses.ut.edu.vn%2Fa%2F..%2Flogin%2Flogout.php",
+        "https%3A%2F%2Fcourses.ut.edu.vn%2F%256cogin%2Ftoken.php",
+    ):
+        url = f"https://courses.ut.edu.vn/login/index.php?wantsurl={auth_subpath}"
+        assert normalize_uth_webview_target_url(url) == "https://courses.ut.edu.vn/my/"
+
+    # Never recorded as intended_url and never reset recovery budget
+    tracker = WebViewRecoveryTracker()
+    tracker.record_navigation("https://courses.ut.edu.vn/course/view.php?id=42")
+    assert tracker.consume_recovery_attempt("courses") is True
+    tracker.record_navigation("https://courses.ut.edu.vn/login/logout.php")
+    tracker.record_navigation("https://courses.ut.edu.vn/login/forgot_password.php")
+    tracker.note_authenticated_landing("https://courses.ut.edu.vn/login/logout.php")
+    tracker.note_authenticated_landing("https://courses.ut.edu.vn/login/forgot_password.php")
+    tracker.note_authenticated_landing("https://courses.ut.edu.vn/a/../login/logout.php")
+    assert tracker.intended_url_for("courses") == "https://courses.ut.edu.vn/course/view.php?id=42"
+    assert tracker.can_attempt_recovery("courses") is False
+
+    # Portal logout also never resets budget or overwrites intended URL
+    tracker.record_navigation("https://portal.ut.edu.vn/tuition")
+    assert tracker.consume_recovery_attempt("portal") is True
+    tracker.record_navigation("https://portal.ut.edu.vn/logout")
+    tracker.note_authenticated_landing("https://portal.ut.edu.vn/logout")
+    assert tracker.intended_url_for("portal") == "https://portal.ut.edu.vn/tuition"
+    assert tracker.can_attempt_recovery("portal") is False
+
+
+def test_quiz_session_active_uses_public_last_login_error_holds_lock_and_preserves_budget():
+    lock = threading.RLock()
+    lock_held_during_read: list[bool] = []
+
+    class _LockedQuizClient:
+        def __init__(self) -> None:
+            self._session_lock = lock
+            self._err = ""
+
+        @property
+        def last_login_error(self) -> str:
+            # Verify lock is held by current thread (another thread cannot acquire non-blocking)
+            other_acquired: list[bool] = []
+            t = threading.Thread(
+                target=lambda: other_acquired.append(lock.acquire(blocking=False))
+            )
+            t.start()
+            t.join()
+            lock_held_during_read.append(other_acquired == [False])
+            return self._err
+
+        def get_session_cookies(
+            self,
+            *,
+            ensure_login: bool = True,
+            verify_live: bool = False,
+            force_relogin: bool = False,
+        ) -> list[dict[str, Any]]:
+            self._err = "quiz_session_active"
+            return [_moodle_cookie("quiz_cookie", "courses.ut.edu.vn")]
+
+    client = _LockedQuizClient()
+    service = UthWebViewAuthService(courses_client=client)
+    tracker = WebViewRecoveryTracker()
+    assert (
+        service.recover_from_login_redirect(
+            "https://courses.ut.edu.vn/login/index.php", tracker
+        )
+        is None
+    )
+    assert lock_held_during_read == [True]
+    # Budget must NOT be burned when recovery was skipped solely due to quiz_session_active
+    assert tracker.can_attempt_recovery("courses") is True
+
+
+def test_prepare_initial_auth_does_not_rewrite_login_url_with_non_session_cookies():
+    non_session_client = _FakeMoodleClient(
+        cookies=[_moodle_cookie("remember_me", "courses.ut.edu.vn", name="MOODLEID1_")]
+    )
+    service = UthWebViewAuthService(courses_client=non_session_client)
+
+    boot = service.prepare_initial_auth("https://courses.ut.edu.vn/login/index.php")
+    assert boot.target_url == "https://courses.ut.edu.vn/login/index.php"
+
+
+def test_wantsurl_hpp_mixed_case_cookie_dedupe_sibling_zero_arg_and_script_html_escape():
+    # Duplicate wantsurl HPP is rejected -> fallback to /my/
+    hpp_url = (
+        "https://courses.ut.edu.vn/login/index.php"
+        "?wantsurl=https%3A%2F%2Fcourses.ut.edu.vn%2Fcourse%2Fview.php%3Fid%3D1"
+        "&wantsurl=https%3A%2F%2Fevil.example%2Fphish"
+    )
+    assert normalize_uth_webview_target_url(hpp_url) == "https://courses.ut.edu.vn/my/"
+
+    # Mixed-case WantsUrl= is unwrapped cleanly
+    mixed_case_url = (
+        "https://courses.ut.edu.vn/login/index.php"
+        "?WantsUrl=https%3A%2F%2Fcourses.ut.edu.vn%2Fcourse%2Fview.php%3Fid%3D12"
+    )
+    assert (
+        normalize_uth_webview_target_url(mixed_case_url)
+        == "https://courses.ut.edu.vn/course/view.php?id=12"
+    )
+
+    # Zero-arg sibling getter is skipped during cache-only warming (no unsolicited login)
+    sibling_calls: list[str] = []
+
+    class _ZeroArgSibling:
+        def get_session_cookies(self) -> list[dict[str, Any]]:
+            sibling_calls.append("called")
+            return [_moodle_cookie("should_not_warm", "thnn.ut.edu.vn")]
+
+    # Primary cookie collision with leading-dot sibling + blank domain + non-str value coercion
+    primary_client = _FakeMoodleClient(
+        cookies=[
+            {"name": "MoodleSession", "value": 12345, "domain": "   ", "path": ""},
+        ]
+    )
+    service_zero = UthWebViewAuthService(
+        courses_client=primary_client,
+        thnn_client=_ZeroArgSibling(),
+    )
+    boot_zero = service_zero.prepare_initial_auth("https://courses.ut.edu.vn/my/")
+    assert sibling_calls == []
+    assert len(boot_zero.cookies) == 1
+    assert boot_zero.cookies[0]["value"] == "12345"
+    assert boot_zero.cookies[0]["domain"] == "courses.ut.edu.vn"
+    assert boot_zero.cookies[0]["path"] == "/"
+
+    # Primary-over-sibling dedupe normalizes leading dot on domain
+    dup_sibling = _FakeMoodleClient(
+        cached_cookies=[
+            _moodle_cookie("stale_dot_domain", ".courses.ut.edu.vn"),
+            _moodle_cookie("thnn_ok", "thnn.ut.edu.vn"),
+        ]
+    )
+    service_dup = UthWebViewAuthService(
+        courses_client=_FakeMoodleClient(
+            cookies=[_moodle_cookie("fresh_primary", "courses.ut.edu.vn")]
+        ),
+        thnn_client=dup_sibling,
+    )
+    boot_dup = service_dup.prepare_initial_auth("https://courses.ut.edu.vn/my/")
+    values_by_domain = {c["domain"]: c["value"] for c in boot_dup.cookies}
+    assert values_by_domain == {
+        "courses.ut.edu.vn": "fresh_primary",
+        "thnn.ut.edu.vn": "thnn_ok",
+    }
+
+    # Legacy 2-arg PortalClient.ensure_web_session(u, p) works on force recovery
+    portal_calls: list[tuple[str, str]] = []
+
+    class _LegacyTwoArgPortal:
+        def ensure_web_session(self, username: str, password: str) -> tuple[str, str]:
+            portal_calls.append((username, password))
+            return "legacy.portal.jwt", "sv"
+
+    portal_svc = UthWebViewAuthService(
+        portal_client=_LegacyTwoArgPortal(),
+        credentials_provider=lambda: ("2251120001", "pw"),
+    )
+    recovered = portal_svc.recover_from_login_redirect(
+        "https://portal.ut.edu.vn/", WebViewRecoveryTracker()
+    )
+    assert recovered is not None
+    assert portal_calls == [("2251120001", "pw")]
+    assert json.dumps("legacy.portal.jwt") in recovered.portal_init_script
+
+    # HTML-context escaping defense-in-depth for </script> and &
+    script = build_portal_local_storage_script("tok</script>&x", "sv<1>")
+    assert "</script>" not in script
+    assert "\\u003c/script\\u003e\\u0026x" in script
+    assert "\\u003c1\\u003e" in script
 

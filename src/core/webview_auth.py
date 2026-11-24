@@ -5,12 +5,16 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import posixpath
+import re
 import threading
 import urllib.parse
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
+from core.quiz_player import _is_quiz_session_leased, quiz_session_key
 from core.url_validation import validate_https_url
 
 logger = logging.getLogger(__name__)
@@ -42,8 +46,8 @@ _DEFAULT_URL_FOR_SITE: dict[_AuthSite, str] = {
     "thnn": f"https://{_THNN_HOST}/my/",
     "portal": f"{_PORTAL_ORIGIN}/dashboard",
 }
-_MOODLE_LOGIN_PATHS: frozenset[str] = frozenset({"/login/index.php", "/login", "/login/"})
-_PORTAL_LOGIN_PATHS: frozenset[str] = frozenset({"", "/", "/login", "/login/"})
+_MOODLE_LOGIN_PATHS: frozenset[str] = frozenset({"/login/index.php", "/login"})
+_PORTAL_LOGIN_PATHS: frozenset[str] = frozenset({"", "/", "/login"})
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,20 @@ def _canonicalize_uth_url(site: _AuthSite, parsed: urllib.parse.SplitResult) -> 
     )
 
 
+def _normalize_url_path(path: str) -> str:
+    """Unquote, collapse repeated slashes, resolve dot segments, and lowercase a URL path."""
+    unquoted = urllib.parse.unquote(path or "")
+    if not unquoted:
+        return ""
+    collapsed = re.sub(r"/+", "/", unquoted)
+    if not collapsed.startswith("/"):
+        collapsed = f"/{collapsed}"
+    normalized = posixpath.normpath(collapsed)
+    if normalized.startswith("//"):
+        normalized = "/" + normalized.lstrip("/")
+    return normalized.lower()
+
+
 def classify_uth_webview_url(url: str) -> UthWebSite:
     """Classify a WebView URL as ``courses``, ``thnn``, ``portal``, or ``external``."""
     site, _ = _parse_uth_url(url)
@@ -97,19 +115,39 @@ def is_uth_login_url(url: str) -> Optional[Literal["courses", "thnn", "portal"]]
     site, parsed = _parse_uth_url(url)
     if site is None or parsed is None:
         return None
-    path = (parsed.path or "").lower()
+    norm_path = _normalize_url_path(parsed.path)
     if site in ("courses", "thnn"):
-        return site if path in _MOODLE_LOGIN_PATHS else None
+        return site if norm_path in _MOODLE_LOGIN_PATHS else None
     if site == "portal":
-        return "portal" if path in _PORTAL_LOGIN_PATHS else None
+        return "portal" if norm_path in _PORTAL_LOGIN_PATHS else None
     return None
+
+
+def _is_uth_auth_flow_url(url: str) -> bool:
+    """Return True for UTH login entry URLs and auth-flow subpaths (logout, password reset)."""
+    if is_uth_login_url(url) is not None:
+        return True
+    site, parsed = _parse_uth_url(url)
+    if site is None or parsed is None:
+        return False
+    norm_path = _normalize_url_path(parsed.path)
+    if site in ("courses", "thnn"):
+        return norm_path == "/login" or norm_path.startswith("/login/")
+    if site == "portal":
+        return (
+            norm_path in _PORTAL_LOGIN_PATHS
+            or norm_path.startswith("/login/")
+            or norm_path == "/logout"
+            or norm_path.startswith("/logout/")
+        )
+    return False
 
 
 def _extract_safe_wantsurl(
     parsed: urllib.parse.SplitResult,
     expected_site: _MoodleSite,
 ) -> tuple[bool, Optional[str]]:
-    """Extract and validate a same-site non-login ``wantsurl`` query parameter.
+    """Extract and validate a same-site non-auth-flow ``wantsurl`` query parameter.
 
     Returns ``(has_wantsurl_param, safe_canonical_url)``.
     """
@@ -129,7 +167,7 @@ def _extract_safe_wantsurl(
     if target_site != expected_site or target_parsed is None:
         return True, None
     canonical_target = _canonicalize_uth_url(target_site, target_parsed)
-    if is_uth_login_url(canonical_target) is not None:
+    if _is_uth_auth_flow_url(canonical_target):
         return True, None
     return True, canonical_target
 
@@ -161,14 +199,24 @@ def normalize_uth_webview_target_url(url: str, *, has_credentials: bool = True) 
     return canonical
 
 
+def _js_string_literal(value: str) -> str:
+    """Serialize ``value`` as a JS/JSON string literal safe even in HTML contexts."""
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def build_portal_local_storage_script(token: str, role: str = "sv") -> str:
     """Return an origin-gated JS snippet injecting Portal JWT and role into ``localStorage``."""
     if not isinstance(token, str) or not token.strip():
         return ""
     clean_token = token.strip()
     clean_role = role.strip() if isinstance(role, str) and role.strip() else "sv"
-    token_json = json.dumps(clean_token)
-    role_json = json.dumps(clean_role)
+    token_json = _js_string_literal(clean_token)
+    role_json = _js_string_literal(clean_role)
     return (
         "(function () {"
         "try {"
@@ -223,10 +271,11 @@ def _normalize_cookie_dicts(
             continue
         cookie_copy = dict(item)
         cookie_copy["name"] = name
-        if not cookie_copy.get("domain") and default_domain:
-            cookie_copy["domain"] = default_domain
-        if not cookie_copy.get("path"):
-            cookie_copy["path"] = "/"
+        cookie_copy["value"] = str(value)
+        domain = str(cookie_copy.get("domain") or "").strip()
+        cookie_copy["domain"] = domain or default_domain
+        path = str(cookie_copy.get("path") or "").strip()
+        cookie_copy["path"] = path or "/"
         normalized.append(cookie_copy)
     return normalized
 
@@ -238,9 +287,7 @@ def _has_moodle_session_cookie(cookies: Iterable[dict[str, Any]]) -> bool:
             continue
         name = str(cookie.get("name") or "").strip().casefold()
         value = cookie.get("value")
-        if (name == "moodlesession" or name.startswith("moodlesession")) and bool(
-            str(value or "").strip()
-        ):
+        if name.startswith("moodlesession") and bool(str(value or "").strip()):
             return True
     return False
 
@@ -256,14 +303,52 @@ def _merge_cookies(
         for cookie in group:
             key = (
                 str(cookie.get("name") or ""),
-                str(cookie.get("domain") or "").casefold(),
-                str(cookie.get("path") or "/"),
+                str(cookie.get("domain") or "").strip().lstrip(".").casefold(),
+                str(cookie.get("path") or "/").strip() or "/",
             )
             if key in seen:
                 continue
             seen.add(key)
             merged.append(cookie)
     return tuple(merged)
+
+
+def _filter_supported_kwargs(
+    fn: Callable[..., Any],
+    requested: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Filter ``requested`` kwargs to those accepted by ``fn``.
+
+    Returns ``(supported_kwargs, accepts_arbitrary_kwargs)``.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return dict(requested), True
+    if any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in sig.parameters.values()
+    ):
+        return dict(requested), True
+    supported = {
+        key: val
+        for key, val in requested.items()
+        if key in sig.parameters
+        and sig.parameters[key].kind
+        in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    return supported, False
+
+
+def _client_last_login_error(client: Any) -> str:
+    """Read public ``last_login_error`` (falling back to ``_last_login_error`` for fakes)."""
+    value = getattr(client, "last_login_error", None)
+    if not isinstance(value, str):
+        value = getattr(client, "_last_login_error", "")
+    return value if isinstance(value, str) else ""
 
 
 class WebViewRecoveryTracker:
@@ -276,23 +361,23 @@ class WebViewRecoveryTracker:
         self._intended_urls: dict[str, str] = {}
 
     def record_navigation(self, url: str) -> None:
-        """Record a canonicalized non-login UTH URL as the latest intended destination."""
+        """Record a canonicalized non-auth-flow UTH URL as the latest intended destination."""
         site, parsed = _parse_uth_url(url)
         if site is None or parsed is None:
             return
         canonical = _canonicalize_uth_url(site, parsed)
-        if is_uth_login_url(canonical) is not None:
+        if _is_uth_auth_flow_url(canonical):
             return
         with self._lock:
             self._intended_urls[site] = canonical
 
     def note_authenticated_landing(self, url: str) -> None:
-        """Reset recovery budget for ``url``'s site upon landing on a non-login UTH page."""
+        """Reset recovery budget for ``url``'s site upon landing on an authenticated UTH page."""
         site, parsed = _parse_uth_url(url)
         if site is None or parsed is None:
             return
         canonical = _canonicalize_uth_url(site, parsed)
-        if is_uth_login_url(canonical) is not None:
+        if _is_uth_auth_flow_url(canonical):
             return
         with self._lock:
             self._attempts[site] = 0
@@ -315,6 +400,15 @@ class WebViewRecoveryTracker:
                 return False
             self._attempts[site] = used + 1
             return True
+
+    def _refund_recovery_attempt(self, site: str) -> None:
+        """Restore one recovery attempt when recovery was deferred without attempting reload."""
+        if site not in _AUTH_SITES:
+            return
+        with self._lock:
+            used = self._attempts.get(site, 0)
+            if used > 0:
+                self._attempts[site] = used - 1
 
     def intended_url_for(self, site: str) -> str:
         """Return the last recorded non-login URL for ``site``, or its default dashboard."""
@@ -384,6 +478,23 @@ class UthWebViewAuthService:
             return self._courses_client is not None or self._thnn_client is not None
         return False
 
+    def _has_active_quiz_lease(self, site: _MoodleSite, client: Any) -> bool:
+        candidates: list[str] = []
+        username, _ = self._read_credentials()
+        if username:
+            candidates.append(username)
+        owner = getattr(client, "_session_owner", "")
+        if isinstance(owner, str) and owner.strip() and owner.strip() not in candidates:
+            candidates.append(owner.strip())
+        for account_id in candidates:
+            try:
+                session_key = quiz_session_key(site, account_id)
+            except ValueError:
+                continue
+            if _is_quiz_session_leased(session_key):
+                return True
+        return False
+
     @staticmethod
     def _invoke_cookies(
         client: Any,
@@ -402,33 +513,16 @@ class UthWebViewAuthService:
             "verify_live": verify_live,
             "force_relogin": force_relogin,
         }
+        supported, accepts_varkw = _filter_supported_kwargs(getter, requested)
+        if (
+            not ensure_login
+            and not force_relogin
+            and not accepts_varkw
+            and "ensure_login" not in supported
+        ):
+            return []
         try:
-            sig = inspect.signature(getter)
-        except (TypeError, ValueError):
-            sig = None
-
-        try:
-            if sig is None:
-                raw = getter(**requested)
-            else:
-                has_varkw = any(
-                    param.kind == inspect.Parameter.VAR_KEYWORD
-                    for param in sig.parameters.values()
-                )
-                if has_varkw:
-                    raw = getter(**requested)
-                else:
-                    accepted = {
-                        key: val
-                        for key, val in requested.items()
-                        if key in sig.parameters
-                        and sig.parameters[key].kind
-                        in (
-                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                            inspect.Parameter.KEYWORD_ONLY,
-                        )
-                    }
-                    raw = getter(**accepted)
+            raw = getter(**supported)
         except Exception as exc:
             logger.warning(
                 "Failed to fetch Moodle session cookies (%s)",
@@ -436,6 +530,19 @@ class UthWebViewAuthService:
             )
             return []
         return _normalize_cookie_dicts(raw, default_domain=default_domain)
+
+    def _warm_sibling_cookies(self, site: _MoodleSite) -> list[dict[str, Any]]:
+        sibling_site: _MoodleSite = "thnn" if site == "courses" else "courses"
+        sibling = self.client_for_site(sibling_site)
+        if sibling is None:
+            return []
+        return self._invoke_cookies(
+            sibling,
+            ensure_login=False,
+            verify_live=False,
+            force_relogin=False,
+            default_domain=_CANONICAL_HOST_FOR_SITE[sibling_site],
+        )
 
     @staticmethod
     def _invoke_portal_session(
@@ -451,29 +558,8 @@ class UthWebViewAuthService:
             return "", ""
         try:
             if force:
-                try:
-                    sig = inspect.signature(ensure_fn)
-                except (TypeError, ValueError):
-                    sig = None
-                if sig is None:
-                    result = ensure_fn(username, password, force=True)
-                else:
-                    has_varkw = any(
-                        param.kind == inspect.Parameter.VAR_KEYWORD
-                        for param in sig.parameters.values()
-                    )
-                    accepts_force = has_varkw or (
-                        "force" in sig.parameters
-                        and sig.parameters["force"].kind
-                        in (
-                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                            inspect.Parameter.KEYWORD_ONLY,
-                        )
-                    )
-                    if accepts_force:
-                        result = ensure_fn(username, password, force=True)
-                    else:
-                        result = ensure_fn(username, password)
+                supported, _ = _filter_supported_kwargs(ensure_fn, {"force": True})
+                result = ensure_fn(username, password, **supported)
             else:
                 result = ensure_fn(username, password)
         except Exception as exc:
@@ -504,8 +590,6 @@ class UthWebViewAuthService:
 
         if site in ("courses", "thnn"):
             primary = self.client_for_site(site)
-            sibling_site: _MoodleSite = "thnn" if site == "courses" else "courses"
-            sibling = self.client_for_site(sibling_site)
             has_creds = self._has_credentials(site)
 
             primary_cookies: list[dict[str, Any]] = []
@@ -518,18 +602,12 @@ class UthWebViewAuthService:
                     force_relogin=False,
                     default_domain=_CANONICAL_HOST_FOR_SITE[site],
                 )
-            if has_creds and sibling is not None:
-                sibling_cookies = self._invoke_cookies(
-                    sibling,
-                    ensure_login=False,
-                    verify_live=False,
-                    force_relogin=False,
-                    default_domain=_CANONICAL_HOST_FOR_SITE[sibling_site],
-                )
+            if has_creds:
+                sibling_cookies = self._warm_sibling_cookies(site)
             merged_cookies = _merge_cookies(primary_cookies, sibling_cookies)
             target_url = normalize_uth_webview_target_url(
                 url,
-                has_credentials=bool(primary_cookies),
+                has_credentials=_has_moodle_session_cookie(primary_cookies),
             )
             return WebViewAuthBootstrap(
                 target_url=target_url,
@@ -575,6 +653,12 @@ class UthWebViewAuthService:
             client = self.client_for_site(site)
             if client is None or not self._has_credentials(site):
                 return None
+            if self._has_active_quiz_lease(site, client):
+                logger.info(
+                    "Skipping WebView login recovery for %s while quiz session lease is active",
+                    site,
+                )
+                return None
             if not tracker.consume_recovery_attempt(site):
                 return None
 
@@ -584,14 +668,25 @@ class UthWebViewAuthService:
                 _, safe_wantsurl = _extract_safe_wantsurl(parsed, site)
             target_url = safe_wantsurl or tracker.intended_url_for(site)
 
-            primary_cookies = self._invoke_cookies(
-                client,
-                ensure_login=True,
-                verify_live=False,
-                force_relogin=True,
-                default_domain=_CANONICAL_HOST_FOR_SITE[site],
+            client_lock = getattr(client, "_session_lock", None)
+            lock_ctx = (
+                client_lock
+                if client_lock is not None
+                and hasattr(client_lock, "__enter__")
+                and hasattr(client_lock, "__exit__")
+                else nullcontext()
             )
-            if getattr(client, "_last_login_error", "") == "quiz_session_active":
+            with lock_ctx:
+                primary_cookies = self._invoke_cookies(
+                    client,
+                    ensure_login=True,
+                    verify_live=False,
+                    force_relogin=True,
+                    default_domain=_CANONICAL_HOST_FOR_SITE[site],
+                )
+                login_error = _client_last_login_error(client)
+            if login_error == "quiz_session_active":
+                tracker._refund_recovery_attempt(site)
                 logger.info(
                     "Skipping WebView login recovery for %s while quiz session is active",
                     site,
@@ -600,19 +695,7 @@ class UthWebViewAuthService:
             if not _has_moodle_session_cookie(primary_cookies):
                 return None
 
-            sibling_site: _MoodleSite = "thnn" if site == "courses" else "courses"
-            sibling = self.client_for_site(sibling_site)
-            sibling_cookies = (
-                self._invoke_cookies(
-                    sibling,
-                    ensure_login=False,
-                    verify_live=False,
-                    force_relogin=False,
-                    default_domain=_CANONICAL_HOST_FOR_SITE[sibling_site],
-                )
-                if sibling is not None
-                else []
-            )
+            sibling_cookies = self._warm_sibling_cookies(site)
             return WebViewAuthBootstrap(
                 target_url=target_url,
                 site=site,
