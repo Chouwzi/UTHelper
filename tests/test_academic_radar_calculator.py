@@ -576,3 +576,61 @@ def test_calculate_radar_profile_handles_none_summary_and_nonfinite_or_comma_gpa
     assert comma_profile.metrics["total_power"].coverage == pytest.approx(1.0)
     assert comma_profile.gpa_4 == pytest.approx(3.25)
     assert comma_profile.credits_earned == pytest.approx(3.0)
+
+
+def test_eligibility_resolver_checks_mahocphan_behind_section_code_and_truthy_transferred():
+    from core.academic_radar.eligibility_resolver import CourseEligibilityResolver
+
+    resolver = CourseEligibilityResolver()
+    gdtc = resolver.resolve(
+        {"maLopHocPhan": "0101GDTC101", "maHocPhan": "GDTC1", "soTinChi": 2}
+    )
+    assert gdtc.status == "conditional"
+
+    english = resolver.resolve(
+        {"maLopHocPhan": "202601TT0105", "maHocPhan": "TT01", "soTinChi": 3}
+    )
+    assert english.status == "conditional"
+
+    transferred_int = resolver.resolve(
+        {"maHocPhan": "CS201", "soTinChi": 3, "isChuyenDiem": 1}
+    )
+    transferred_str = resolver.resolve(
+        {"maHocPhan": "CS202", "soTinChi": 3, "isChuyenDiem": "true"}
+    )
+    assert transferred_int.status == "transferred"
+    assert transferred_str.status == "transferred"
+
+
+def test_total_power_excludes_transferred_and_parse_credit_progress_rejects_nan_inf_bool():
+    from core.academic_radar.gpa_planner import (
+        CreditProgress,
+        calculate_gpa_target,
+        calculate_graduation_target,
+        parse_credit_progress,
+    )
+
+    courses = [
+        CourseGradeItem("1", "CS1", "Core", 3.0, final_grade=7.0, is_transferred=False),
+        CourseGradeItem("2", "TR1", "Transfer", 3.0, final_grade=10.0, is_transferred=True),
+    ]
+    tp_score, tp_cov = calculate_total_power({}, courses)
+    assert tp_score == pytest.approx(70.0)
+    assert tp_cov == pytest.approx(1.0)
+
+    for bad_body in (
+        {"canDat": "nan", "hienTai": 60},
+        {"canDat": float("inf"), "hienTai": 60},
+        {"canDat": 120, "hienTai": float("nan")},
+        {"canDat": True, "hienTai": False},
+    ):
+        assert parse_credit_progress(bad_body) is None
+
+    valid_prog = parse_credit_progress({"canDat": "120,5", "hienTai": "60"})
+    assert valid_prog == CreditProgress(required_credits=120.5, earned_credits=60.0)
+
+    sem = SemesterGradeData(id=1, name="HK1", summary={"diemTBTinChiTichLuy": 3.2}, courses=courses)
+    assert calculate_gpa_target(sem, float("nan")).status == "invalid"
+    assert calculate_graduation_target([sem], valid_prog, float("nan")).status == "invalid"
+    bad_prog = CreditProgress(required_credits=float("nan"), earned_credits=60.0)
+    assert calculate_graduation_target([sem], bad_prog, 3.5).status == "no_progress"

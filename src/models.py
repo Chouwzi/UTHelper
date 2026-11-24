@@ -2,12 +2,15 @@ from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 from typing import Optional
 from enum import Enum
-from config import settings
+
+DEFAULT_URGENCY_CRITICAL_HOURS = 24.0
+DEFAULT_URGENCY_WARNING_HOURS = 72.0
 
 # Sentinel date: dùng cho bài tập không có deadline, các nơi khác kiểm tra year >= 2099
 NO_DEADLINE_DATE = datetime(2099, 12, 31, 23, 59, 59)
 
 class UrgencyLevel(str, Enum):
+    OVERDUE = "overdue"   # Đã quá hạn
     CRITICAL = "critical" # Gấp lắm rồi (dưới 24h)
     WARNING = "warning"   # Sắp đến hạn (dưới 3 ngày)
     SAFE = "safe"         # Vẫn còn thong dong (trên 3 ngày)
@@ -46,11 +49,18 @@ class Assignment(BaseModel):
         delta = self.deadline - datetime.now()
         return delta.total_seconds() / 3600.0
 
-    @property
-    def urgency(self) -> UrgencyLevel:
+    def urgency_for(
+        self,
+        critical_hours: float = DEFAULT_URGENCY_CRITICAL_HOURS,
+        warning_hours: float = DEFAULT_URGENCY_WARNING_HOURS,
+    ) -> UrgencyLevel:
         hours = self.hours_remaining
-        if hours < settings.URGENCY_CRITICAL_HOURS:
+        if hours < critical_hours:
             return UrgencyLevel.CRITICAL
-        elif hours < settings.URGENCY_WARNING_HOURS:
+        if hours < warning_hours:
             return UrgencyLevel.WARNING
         return UrgencyLevel.SAFE
+
+    @property
+    def urgency(self) -> UrgencyLevel:
+        return self.urgency_for()

@@ -403,7 +403,7 @@ class TestAssignmentMerge:
             "course_id": 456,
             "assignment_id": 7,
             "cutoff_date": 0,
-            "late_status": "closed",
+            "late_status": "late_allowed",
         }
 
     def test_supplemental_assignment_without_action_event_has_unknown_status(self):
@@ -840,3 +840,134 @@ class TestStatusPrefetch:
         result = orch.prefetch_activity_statuses([activity], workers=1)
 
         assert result == {}
+
+
+def test_thnn_cache_isolated_by_account_and_cleared_on_auth_failure_or_clear_caches(monkeypatch):
+    from config import settings
+    from core.data_orchestrator import DataOrchestrator
+
+    with patch("core.data_orchestrator.MoodleClient"), patch("core.data_orchestrator.GradeMonitor"):
+        orch = DataOrchestrator()
+        orch.thnn_client.moodle_site_origin = "https://thnn.ut.edu.vn"
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-a")
+    orch._thnn_activities_cache = [{"id": "thnn-a", "site_identity": "thnn"}]
+    orch._last_thnn_fetch_ts = 5000.0
+
+    # Switching active account must NOT expose student-a's THNN cache
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-b")
+    assert orch._thnn_activities_cache == []
+    assert orch._last_thnn_fetch_ts == 0.0
+    assert orch._should_sync_thnn(5001.0) is True
+
+    # Switching back sees student-a's bucket until auth failure or clear_caches()
+    monkeypatch.setattr(settings, "UTH_USERNAME", "student-a")
+    assert len(orch._thnn_activities_cache) == 1
+
+    # THNN login failure (non-quiz-lease) clears active account's THNN cache
+    orch.thnn_client._sesskey = ""
+    orch.thnn_client._last_login_error = "invalid_credentials"
+    orch.thnn_client.last_login_error = "invalid_credentials"
+    orch.thnn_client.login_session.return_value = False
+    assert orch._fetch_thnn_activities(6000) == []
+    assert orch._thnn_activities_cache == []
+    assert orch._last_thnn_fetch_ts == 0.0
+
+    # clear_caches() wipes all account buckets, detail caches, and userid/login flags
+    orch._thnn_activities_cache = [{"id": "thnn-a2"}]
+    orch._set_cached_detail("https://courses.ut.edu.vn/mod/assign/view.php?id=1", {"title": "T"})
+    orch._userid_cache = 77
+    orch.is_logged_in = True
+    orch.clear_caches()
+    assert orch._thnn_activities_cache == []
+    assert orch.get_cached_details_snapshot() == {}
+    assert orch._userid_cache is None
+    assert orch.is_logged_in is False
+
+
+def test_fetch_via_ws_api_timeout_does_not_wait_for_hung_worker():
+    import time as _time
+    from core.data_orchestrator import DataOrchestrator
+
+    with patch("core.data_orchestrator.MoodleClient"), patch("core.data_orchestrator.GradeMonitor"):
+        orch = DataOrchestrator()
+
+    orch._ws_parallel_timeout = 0.05
+    orch._get_userid = Mock(return_value=42)
+    orch.moodle_service = Mock()
+
+    def hung_calendar(*_args, **_kwargs):
+        _time.sleep(1.0)
+        return {"events": [], "moreevents": False}
+
+    orch.moodle_service.get_action_events_by_timesort.side_effect = hung_calendar
+    orch.moodle_service.get_user_courses.return_value = []
+
+    t0 = _time.perf_counter()
+    result = orch._fetch_via_ws_api()
+    elapsed = _time.perf_counter() - t0
+
+    assert result is None
+    assert elapsed < 0.4
+
+
+def test_merge_all_assignments_cutoff_zero_is_late_allowed_and_uses_time_policy(monkeypatch):
+    from datetime import timedelta
+    from config import settings
+    from core.data_orchestrator import DataOrchestrator
+
+    with patch("core.data_orchestrator.MoodleClient"), patch("core.data_orchestrator.GradeMonitor"):
+        orch = DataOrchestrator()
+
+    monkeypatch.setattr(settings, "URGENCY_CRITICAL_HOURS", 48)
+    monkeypatch.setattr(settings, "URGENCY_WARNING_HOURS", 120)
+    monkeypatch.setattr(settings, "FETCH_MONTHS", 3)
+
+    now = datetime.now()
+    due_in_36h = int((now + timedelta(hours=36)).timestamp())
+    past_due_this_month = int(datetime(now.year, now.month, 1, 0, 1).timestamp())
+    if past_due_this_month >= int(now.timestamp()):
+        past_due_this_month = int((now - timedelta(seconds=60)).timestamp())
+
+    orch.moodle_service = Mock()
+    orch.moodle_service.get_assignments.return_value = [
+        {
+            "id": 101,
+            "fullname": "CS",
+            "assignments": [
+                {
+                    "id": 1,
+                    "cmid": 11,
+                    "name": "Custom Critical Threshold 36h",
+                    "duedate": due_in_36h,
+                    "cutoffdate": 0,
+                },
+                {
+                    "id": 2,
+                    "cmid": 12,
+                    "name": "Past Due Open Cutoff",
+                    "duedate": past_due_this_month,
+                    "cutoffdate": 0,
+                },
+                {
+                    "id": 3,
+                    "cmid": 13,
+                    "name": "Past Due Prevent Late",
+                    "duedate": past_due_this_month,
+                    "cutoffdate": 0,
+                    "configs": [{"name": "preventlatesubmissions", "value": "1"}],
+                },
+            ],
+        }
+    ]
+
+    merged = orch._merge_all_assignments([], course_ids=[101])
+    by_id = {item["assignment_id"]: item for item in merged}
+
+    assert by_id[1]["urgency"] == "critical"
+    assert by_id[1]["late_status"] == "open"
+    if past_due_this_month >= int(datetime(now.year, now.month, 1).timestamp()):
+        assert by_id[2]["late_status"] == "late_allowed"
+        assert by_id[2]["urgency"] == "critical"
+        assert by_id[3]["late_status"] == "closed"
+        assert by_id[3]["urgency"] == "overdue"
