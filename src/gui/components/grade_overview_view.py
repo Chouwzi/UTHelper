@@ -417,8 +417,27 @@ class GradeOverviewView(ft.Container):
     def _notify(self, page: Optional[ft.Page], message: str) -> None:
         if page is None:
             return
+        sb = ft.SnackBar(
+            content=ft.Text(message, size=13, color=C.TEXT_PRIMARY),
+            bgcolor=C.SURFACE,
+            duration=3000,
+        )
+        overlay = getattr(page, "overlay", None)
+        if isinstance(overlay, list):
+            overlay[:] = [
+                item
+                for item in overlay
+                if not (isinstance(item, ft.SnackBar) and not getattr(item, "open", False))
+            ]
+            overlay.append(sb)
+            sb.open = True
+            try:
+                page.update()
+            except Exception:
+                logger.debug("Snackbar overlay update failed", exc_info=True)
+            return
         try:
-            page.show_dialog(ft.SnackBar(ft.Text(message)))
+            page.show_dialog(sb)
         except Exception:
             logger.debug("Snackbar failed", exc_info=True)
 

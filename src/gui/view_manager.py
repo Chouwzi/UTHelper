@@ -93,6 +93,14 @@ class ViewManager:
             clear_fn()
 
     def _clear_detail_layer(self) -> None:
+        try:
+            from gui.components.courses.embedded_webview_host import (
+                set_global_webview_occlusion,
+            )
+
+            set_global_webview_occlusion("detail_view", False)
+        except Exception:
+            pass
         self.detail_view.visible = False
         self._detail_origin = None
         self._clear_selected_card()
@@ -471,6 +479,14 @@ class ViewManager:
     def show_detail_loading(self, data):
         """Chuyển sang màn hình chi tiết bài tập ở trạng thái tải dữ liệu."""
         self._dismiss_menu_if_open()
+        try:
+            from gui.components.courses.embedded_webview_host import (
+                set_global_webview_occlusion,
+            )
+
+            set_global_webview_occlusion("detail_view", True)
+        except Exception:
+            pass
         # Retain origin view mounted behind opaque Detail to preserve native ScrollPosition.
         if getattr(self.calendar_view, "visible", False):
             origin = self.calendar_view
@@ -515,6 +531,14 @@ class ViewManager:
 
     async def close_detail(self, detail_from_calendar: bool):
         """Đóng màn hình chi tiết và quay lại nơi xuất phát (Lịch, Môn học, hoặc Dashboard)."""
+        try:
+            from gui.components.courses.embedded_webview_host import (
+                set_global_webview_occlusion,
+            )
+
+            set_global_webview_occlusion("detail_view", False)
+        except Exception:
+            pass
         if detail_from_calendar:
             destination = self.calendar_view
         elif self._detail_origin is not None:

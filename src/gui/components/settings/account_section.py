@@ -39,6 +39,19 @@ def init_account_controls(view):
         ),
         height=44
     )
+    # Nút đăng xuất & xóa thông tin đăng nhập đã lưu
+    view._logout_btn = ft.OutlinedButton(
+        "Đăng xuất",
+        icon=ft.Icons.LOGOUT_ROUNDED,
+        on_click=view._handle_logout,
+        style=ft.ButtonStyle(
+            color=C.CRITICAL,
+            side=ft.BorderSide(1, C.CRITICAL),
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=12,
+        ),
+        height=44,
+    )
     # Thanh ProgressBar hiển thị trạng thái đang kiểm tra (mặc định ẩn)
     view._test_loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)
     # Văn bản & icon thông báo kết quả kiểm tra đăng nhập
@@ -62,6 +75,7 @@ def build_account_section(view) -> ft.Control:
             view._test_loading_bar,
             view._test_login_status_row,
             view._test_login_btn,
+            view._logout_btn,
         ],
         spacing=12,
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
