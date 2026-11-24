@@ -466,6 +466,12 @@ class UthWebViewAuthService:
             return "", ""
         return username, password
 
+    def has_credentials(self, site: Optional[UthWebSite] = None) -> bool:
+        """Return True when usable credentials and a matching site client exist."""
+        if site in _AUTH_SITES and self.client_for_site(site) is None:
+            return False
+        return self._has_credentials(site)
+
     def _has_credentials(self, site: Optional[UthWebSite] = None) -> bool:
         if self._credentials_provider is not None:
             username, password = self._read_credentials()

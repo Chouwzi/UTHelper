@@ -423,18 +423,33 @@ class CoursesCoordinator:
             on_history_changed=on_history_changed,
         )
 
+    def ensure_preview_server(self) -> LocalPreviewServer:
+        """Return the active LocalPreviewServer, ensuring Moodle session providers are registered."""
+        register_fn = getattr(self.preview_server, "register_session_provider", None)
+        if callable(register_fn):
+            providers = getattr(self.preview_server, "_session_providers", None)
+            if self._courses_client is not None and (
+                not isinstance(providers, dict) or "courses" not in providers
+            ):
+                register_fn("courses", self._courses_client)
+            if self._thnn_client is not None and (
+                not isinstance(providers, dict) or "thnn" not in providers
+            ):
+                register_fn("thnn", self._thnn_client)
+        return self.preview_server
+
     def _has_webview_credentials(self, site_kind: str) -> bool:
         svc = self._webview_auth_service
         if svc is not None:
+            public_has_fn = getattr(svc, "has_credentials", None)
+            if callable(public_has_fn):
+                try:
+                    return bool(public_has_fn(site_kind))
+                except TypeError:
+                    return bool(public_has_fn())
             client_for_site = getattr(svc, "client_for_site", None)
             if callable(client_for_site) and client_for_site(site_kind) is None:
                 return False
-            has_fn = getattr(svc, "_has_credentials", None)
-            if callable(has_fn):
-                try:
-                    return bool(has_fn(site_kind))
-                except TypeError:
-                    return bool(has_fn())
             return True
         if site_kind == "thnn":
             return self._thnn_client is not None
