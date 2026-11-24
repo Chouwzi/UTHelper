@@ -253,7 +253,7 @@ def test_f9_forum_activity_view_back_steps_from_posts_to_discussions_then_closes
 def test_f9_webview_pane_handle_back_navigates_browser_history_before_closing(
     fake_page: FakePage, platform_profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
 
     fake_page.resize(360, 780)
     platform_profile("android", page=fake_page)
@@ -393,7 +393,10 @@ def test_f9_app_controller_navigate_back_propagates_through_courses_view_handle_
     ctrl.settings_view = SimpleNamespace(visible=False)
     ctrl.calendar_view = SimpleNamespace(visible=False)
     ctrl.grade_overview_view = SimpleNamespace(visible=False)
-    ctrl.view_manager = SimpleNamespace(_detail_origin=None)
+    ctrl.view_manager = SimpleNamespace(
+        _detail_origin=None,
+        show_dashboard=lambda: setattr(tab, "visible", False),
+    )
 
     # 1. System Back pops dirA inside ArchiveExplorer -> confirm_pop(False)
     asyncio.run(ctrl._on_root_view_confirm_pop(SimpleNamespace(control=fake_view)))
@@ -405,7 +408,12 @@ def test_f9_app_controller_navigate_back_propagates_through_courses_view_handle_
     assert fake_view.confirmed_pops[-1] is False
     assert len(tab._overlays) == 0
 
-    # 3. System Back at Courses root -> confirm_pop(True) allows platform pop
+    # 3. System Back at Courses root closes Courses -> Dashboard -> confirm_pop(False)
+    asyncio.run(ctrl._on_root_view_confirm_pop(SimpleNamespace(control=fake_view)))
+    assert fake_view.confirmed_pops[-1] is False
+    assert tab.visible is False
+
+    # 4. System Back at Dashboard root -> confirm_pop(True) allows platform pop
     asyncio.run(ctrl._on_root_view_confirm_pop(SimpleNamespace(control=fake_view)))
     assert fake_view.confirmed_pops[-1] is True
 

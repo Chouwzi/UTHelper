@@ -312,9 +312,11 @@ class _PreviewThreadingHTTPServer(ThreadingHTTPServer):
         owner: "LocalPreviewServer",
         *,
         session_only: bool = False,
+        bound_source: Optional[str] = None,
     ) -> None:
         self.owner = owner
         self.session_only = session_only
+        self.bound_source = bound_source
         super().__init__(server_address, handler_cls)
 
     def handle_error(self, request: object, client_address: object) -> None:
@@ -390,6 +392,12 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
             self._send_empty_status(HTTPStatus.NOT_FOUND, close_connection=(method == "POST"))
             return
         token, source, remote_path = match.group(1), match.group(2), match.group(3)
+        bound_src = getattr(self.server, "bound_source", None)
+        if bound_src is not None and source != bound_src:
+            self._send_empty_status(
+                HTTPStatus.FORBIDDEN, close_connection=(method == "POST")
+            )
+            return
         req_body: Optional[bytes] = None
         req_ct = str(self.headers.get("Content-Type", "") or "")
         if method == "POST":
@@ -686,18 +694,40 @@ class LocalPreviewServer:
         self._server: Optional[_PreviewThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._port: int = 0
-        self._session_server: Optional[_PreviewThreadingHTTPServer] = None
-        self._session_thread: Optional[threading.Thread] = None
-        self._session_port: int = 0
+        self._session_servers: dict[str, tuple[_PreviewThreadingHTTPServer, threading.Thread, int]] = {}
         self._items: OrderedDict[str, _PreviewEntry] = OrderedDict()
         self._total_bytes: int = 0
-        self._bridge_token: str = secrets.token_urlsafe(24)
+        self._bridge_tokens: dict[str, str] = {
+            "courses": secrets.token_urlsafe(24),
+            "thnn": secrets.token_urlsafe(24),
+        }
         self._viewer_token: str = secrets.token_urlsafe(24)
         self._session_providers: dict[str, Any] = {}
         self._session_asset_cache: OrderedDict[tuple[str, int, str], tuple[str, bytes]] = OrderedDict()
         self._session_asset_cache_bytes: int = 0
         self._viewer_asset_cache: OrderedDict[tuple[str, str], tuple[int, int, str, bytes, str]] = OrderedDict()
         self._viewer_asset_cache_bytes: int = 0
+
+    @property
+    def _bridge_token(self) -> str:
+        return self._bridge_tokens["courses"]
+
+    @_bridge_token.setter
+    def _bridge_token(self, value: str) -> None:
+        self._bridge_tokens["courses"] = str(value)
+
+    def reset_for_account_switch(self) -> None:
+        """Invalidate all registered preview blobs, session caches, and tokens on account switch."""
+        with self._lock:
+            self._items.clear()
+            self._total_bytes = 0
+            self._session_asset_cache.clear()
+            self._session_asset_cache_bytes = 0
+            self._viewer_token = secrets.token_urlsafe(24)
+            self._bridge_tokens = {
+                "courses": secrets.token_urlsafe(24),
+                "thnn": secrets.token_urlsafe(24),
+            }
 
     def viewer_base_url(self) -> str:
         """Return the authenticated loopback base URL for offline viewer assets."""
@@ -823,7 +853,13 @@ class LocalPreviewServer:
                         0, self._session_asset_cache_bytes - len(removed[1])
                     )
 
-    def build_session_bridge_url(self, source: str, target_url: str) -> Optional[str]:
+    def build_session_bridge_url(
+        self,
+        source: str,
+        target_url: str,
+        *,
+        expected_token: Optional[str] = None,
+    ) -> Optional[str]:
         """Return a loopback reverse-proxy URL for a same-origin Moodle web page."""
         if source not in ("courses", "thnn"):
             return None
@@ -853,8 +889,17 @@ class LocalPreviewServer:
             query = jp.query
 
         with self._lock:
-            port = self._ensure_session_started_locked()
-            token = self._bridge_token
+            current_token = self._bridge_tokens.get(source, "")
+            if expected_token is not None:
+                if not current_token or not secrets.compare_digest(
+                    current_token.encode("utf-8"),
+                    expected_token.encode("utf-8"),
+                ):
+                    return None
+                token = expected_token
+            else:
+                token = current_token
+            port = self._ensure_session_started_locked(source)
         suffix = f"?{query}" if query else ""
         return f"http://127.0.0.1:{port}/session/{token}/{source}/{rel_path}{suffix}"
 
@@ -869,16 +914,19 @@ class LocalPreviewServer:
         body: Optional[bytes],
         content_type: str,
     ) -> tuple[int, str, bytes, str, bool]:
+        if source not in ("courses", "thnn"):
+            return HTTPStatus.NOT_FOUND, "text/plain", b"", "", False
         with self._lock:
-            expected_token = self._bridge_token
+            expected_token = self._bridge_tokens.get(source, "")
             client = self._session_providers.get(source)
-            port = self._session_port or self._port
+            srv_info = self._session_servers.get(source)
+            port = srv_info[2] if srv_info is not None else self._port
 
-        if not secrets.compare_digest(
+        if not expected_token or not secrets.compare_digest(
             token.encode("utf-8"), expected_token.encode("utf-8")
         ):
             return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
-        if source not in ("courses", "thnn") or client is None:
+        if client is None:
             return HTTPStatus.NOT_FOUND, "text/plain", b"", "", False
 
         origin = str(getattr(client, "moodle_site_origin", "") or "").rstrip("/")
@@ -918,9 +966,26 @@ class LocalPreviewServer:
         except Exception:
             return HTTPStatus.BAD_GATEWAY, "text/plain", b"", "", False
 
+        with self._lock:
+            current_token = self._bridge_tokens.get(source, "")
+            token_current = bool(
+                current_token
+                and secrets.compare_digest(
+                    current_token.encode("utf-8"),
+                    expected_token.encode("utf-8"),
+                )
+            )
+            provider_current = self._session_providers.get(source) is client
+            post_gen = int(getattr(client, "_session_generation", 0) or 0)
+            gen_current = post_gen == session_gen
+        if not (token_current and provider_current and gen_current):
+            return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
+
         if 300 <= status_code < 400 and final_url:
             if _is_same_moodle_origin_url(final_url, origin):
-                proxied = self.build_session_bridge_url(source, final_url)
+                proxied = self.build_session_bridge_url(
+                    source, final_url, expected_token=expected_token
+                )
                 if proxied:
                     return HTTPStatus.FOUND, "text/plain", b"", proxied, False
             return HTTPStatus.FORBIDDEN, "text/plain", b"", "", False
@@ -939,7 +1004,6 @@ class LocalPreviewServer:
             return status_code, resp_ct or "text/html; charset=utf-8", rewritten.encode("utf-8"), "", False
 
         final_ct = resp_ct or "application/octet-stream"
-        post_gen = int(getattr(client, "_session_generation", 0) or 0)
         allow_http_cache = (
             cacheable_path
             and method.upper() == "GET"
@@ -949,11 +1013,19 @@ class LocalPreviewServer:
         )
         if (
             allow_http_cache
-            and post_gen == session_gen
             and len(raw_bytes) <= _MAX_SINGLE_SESSION_ASSET_BYTES
         ):
             with self._lock:
-                if self._session_providers.get(source) is client:
+                cur_tok = self._bridge_tokens.get(source, "")
+                cur_gen = int(getattr(client, "_session_generation", 0) or 0)
+                if (
+                    self._session_providers.get(source) is client
+                    and cur_gen == session_gen
+                    and cur_tok
+                    and secrets.compare_digest(
+                        cur_tok.encode("utf-8"), expected_token.encode("utf-8")
+                    )
+                ):
                     old = self._session_asset_cache.pop(cache_key, None)
                     if old is not None:
                         self._session_asset_cache_bytes = max(
@@ -1015,22 +1087,15 @@ class LocalPreviewServer:
         self._port = port
         return port
 
-    def _ensure_session_started_locked(self) -> int:
-        if (
-            self._session_server is not None
-            and self._session_thread is not None
-            and self._session_thread.is_alive()
-            and self._session_port > 0
-        ):
-            return self._session_port
-
-        if self._session_server is not None:
-            dead_server = self._session_server
-            self._session_server = None
-            self._session_thread = None
-            self._session_port = 0
+    def _ensure_session_started_locked(self, source: str = "courses") -> int:
+        existing = self._session_servers.get(source)
+        if existing is not None:
+            srv, thr, port = existing
+            if thr.is_alive() and port > 0:
+                return port
+            self._session_servers.pop(source, None)
             try:
-                dead_server.server_close()
+                srv.server_close()
             except Exception:
                 pass
 
@@ -1039,17 +1104,16 @@ class LocalPreviewServer:
             _PreviewRequestHandler,
             self,
             session_only=True,
+            bound_source=source,
         )
         port = int(server.server_address[1])
         thread = threading.Thread(
             target=server.serve_forever,
-            name="UTHelper-LocalSessionBridgeServer",
+            name=f"UTHelper-LocalSessionBridge-{source}",
             daemon=True,
         )
         thread.start()
-        self._session_server = server
-        self._session_thread = thread
-        self._session_port = port
+        self._session_servers[source] = (server, thread, port)
         return port
 
     def is_active_loopback_origin(self, url: str) -> bool:
@@ -1071,12 +1135,9 @@ class LocalPreviewServer:
                 and self._port > 0
                 and url_port == self._port
             )
-            session_live = (
-                self._session_server is not None
-                and self._session_thread is not None
-                and self._session_thread.is_alive()
-                and self._session_port > 0
-                and url_port == self._session_port
+            session_live = any(
+                thr.is_alive() and port > 0 and url_port == port
+                for _srv, thr, port in self._session_servers.values()
             )
         return main_live or session_live
 
@@ -1218,14 +1279,11 @@ class LocalPreviewServer:
         with self._lock:
             server = self._server
             thread = self._thread
-            session_server = self._session_server
-            session_thread = self._session_thread
+            session_pairs = [(srv, thr) for srv, thr, _port in self._session_servers.values()]
             self._server = None
             self._thread = None
             self._port = 0
-            self._session_server = None
-            self._session_thread = None
-            self._session_port = 0
+            self._session_servers.clear()
             self._items.clear()
             self._total_bytes = 0
             self._session_asset_cache.clear()
@@ -1233,7 +1291,7 @@ class LocalPreviewServer:
             self._viewer_asset_cache.clear()
             self._viewer_asset_cache_bytes = 0
 
-        for srv, thr in ((server, thread), (session_server, session_thread)):
+        for srv, thr in ((server, thread), *session_pairs):
             if srv is not None:
                 if thr is not None and thr.is_alive():
                     try:

@@ -91,7 +91,7 @@ jobs:
         run: pip install ruff
 
       - name: Ruff check
-        run: ruff check src/ --output-format=github
+        run: ruff check src tests scripts extensions --output-format=github
 
   test:
     name: 🧪 Test (Python ${{ matrix.python-version }})
@@ -227,6 +227,9 @@ jobs:
         run: |
           pip install pip-audit
           pip install -e "${{ matrix.extras }}"
+          if [ "${{ matrix.surface }}" = "android" ]; then
+            pip install "flet-webview==0.86.5"
+          fi
           pip freeze --exclude-editable > audit-requirements.txt
           audit_status=1
           for attempt in 1 2 3; do
