@@ -251,3 +251,68 @@ def test_document_reader_docx_watchdog_direct_platform_mount_and_popup_resize_st
             pdf_reader.dispose()
     finally:
         server.stop()
+
+
+def test_embedded_webview_host_preserves_pane_on_about_blank_and_origin_blob_events():
+    """WV-04: about:blank and validated blob: events must not destroy CoursesWebViewPane."""
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    server = LocalPreviewServer()
+    try:
+        moodle_url = "https://courses.ut.edu.vn/mod/url/view.php?id=99"
+        pane = CoursesWebViewPane(
+            page=page,
+            source="courses",
+            title="SharePoint",
+            url=moodle_url,
+            preview_server=server,
+            on_back=lambda: None,
+            on_open_external=lambda _u: None,
+        )
+        try:
+            assert pane._host is not None
+            wv = pane._host.control().content
+
+            wv.on_page_started(SimpleNamespace(data="about:blank"))
+            assert pane._host is not None
+            assert pane._url == moodle_url
+
+            wv.on_url_change(
+                SimpleNamespace(data="blob:https://courses.ut.edu.vn/550e8400-e29b")
+            )
+            assert pane._host is not None
+            assert pane._url == moodle_url
+
+            # Disallowed blob origin (private IP) must still trigger block!
+            wv.on_url_change(SimpleNamespace(data="blob:https://127.0.0.1/evil"))
+            assert pane._host is None
+        finally:
+            pane.dispose()
+    finally:
+        server.stop()
+
+
+def test_mobile_inappwebview_locks_register_html_16hex_and_inline_html_previews():
+    """INT-02: /<16-hex> register_html previews and inline html= must run viewer_locked=True."""
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    server = LocalPreviewServer()
+    try:
+        html_url = server.register_html("<html><body><a href='https://evil.example'>x</a></body></html>")
+        host_item = build_embedded_webview_host(html_url, page=page)
+        assert host_item is not None
+        assert host_item.backend == "inappwebview"
+        assert host_item.control().content.viewer_locked is True
+        assert host_item.control().content.require_initial_cookies is False
+        host_item.dispose()
+
+        host_inline = build_embedded_webview_host(
+            "",
+            html="<html><body>Inline</body></html>",
+            page=page,
+        )
+        assert host_inline is not None
+        assert host_inline.backend == "inappwebview"
+        assert host_inline.control().content.viewer_locked is True
+        assert host_inline.control().content.require_initial_cookies is False
+        host_inline.dispose()
+    finally:
+        server.stop()

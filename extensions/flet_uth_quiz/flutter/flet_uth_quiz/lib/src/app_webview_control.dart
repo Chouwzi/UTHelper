@@ -7,12 +7,80 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import 'app_webview_settings.dart';
+import 'mobile_session_queue.dart';
 
 const _cookiePayloadLimit = 32 * 1024;
 const _maxInjectedCookies = 64;
-const _cookieWaitTimeout = Duration(seconds: 4);
+const appWebViewCookieWaitTimeout = Duration(seconds: 10);
+const _cookieQueueTimeout = Duration(seconds: 5);
 const _popupSinkLifetime = Duration(seconds: 4);
-const _uthMsgPrefix = '__UTH_MSG__:';
+
+/// Serializes host-only cookie installation through [MobileSessionQueue] so
+/// writes never interleave with logout cleanup or quiz origin purges, and pins
+/// cookie targets strictly to [initialUri]'s exact HTTPS host and port.
+Future<int> installAppWebViewCookies({
+  required List<dynamic> rawCookies,
+  required Uri? targetUri,
+  required Uri? initialUri,
+  required bool Function() isDisposed,
+  required Future<void> disposeSignal,
+  required Future<void> Function(WebUri url, ValidatedAppCookie cookie)
+      setCookie,
+  MobileSessionQueue? queue,
+  Duration queueTimeout = _cookieQueueTimeout,
+}) async {
+  if (isDisposed() ||
+      rawCookies.isEmpty ||
+      rawCookies.length > _maxInjectedCookies ||
+      initialUri == null ||
+      initialUri.scheme.toLowerCase() != 'https' ||
+      initialUri.host.isEmpty ||
+      targetUri == null ||
+      targetUri.scheme.toLowerCase() != 'https' ||
+      targetUri.host.toLowerCase() != initialUri.host.toLowerCase() ||
+      targetUri.port != initialUri.port) {
+    return 0;
+  }
+
+  final validated = <ValidatedAppCookie>[];
+  for (final raw in rawCookies) {
+    final cookie = validateAppWebViewCookie(raw, targetUri);
+    if (cookie != null) {
+      validated.add(cookie);
+    }
+  }
+  if (validated.isEmpty || isDisposed()) {
+    return 0;
+  }
+
+  final sessionQueue = queue ?? sharedMobileSessionQueue;
+  final timeout = Completer<void>();
+  final timer = Timer(queueTimeout, timeout.complete);
+  MobileSessionLease? lease;
+  var applied = 0;
+  try {
+    lease = await sessionQueue.acquire(
+      cancelled: Future.any<void>([disposeSignal, timeout.future]),
+    );
+    if (lease == null || isDisposed()) {
+      return 0;
+    }
+    final webTarget = WebUri('${targetUri.scheme}://${targetUri.host}/');
+    for (final cookie in validated) {
+      if (isDisposed()) return applied;
+      try {
+        await setCookie(webTarget, cookie);
+        applied++;
+      } catch (_) {
+        // Continue setting remaining cookies cleanly.
+      }
+    }
+    return applied;
+  } finally {
+    timer.cancel();
+    lease?.release();
+  }
+}
 
 class _PopupSinkEntry {
   const _PopupSinkEntry({required this.windowId, required this.key});
@@ -43,6 +111,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   String? _normalizedUserAgent;
   bool _prepared = false;
   bool _disposed = false;
+  bool _cookieBootstrapStarted = false;
+  bool _initialNavDispatched = false;
+  bool _lateCookieReloaded = false;
+  final Completer<void> _disposeSignal = Completer<void>();
 
   DataChannel? _cookieChannel;
   StreamSubscription<Uint8List>? _cookieSubscription;
@@ -95,7 +167,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (!_requireInitialCookies || _cookieChannel != null) return;
+    if (_viewerLocked || !_requireInitialCookies || _cookieChannel != null) return;
     final channel = FletBackend.of(context).openDataChannel();
     _cookieChannel = channel;
     _cookieSubscription = channel.messages.listen(_onCookiePayload);
@@ -142,7 +214,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     final waiter = Completer<Uint8List>();
     _cookiePayloadWaiter = waiter;
     try {
-      return await waiter.future.timeout(_cookieWaitTimeout);
+      return await waiter.future.timeout(appWebViewCookieWaitTimeout);
     } finally {
       if (identical(_cookiePayloadWaiter, waiter)) {
         _cookiePayloadWaiter = null;
@@ -152,6 +224,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
 
   Future<bool> _applyCookiesFromChannel() async {
     Uint8List? payload;
+    var appliedCount = 0;
     try {
       payload = await _takeCookiePayload();
       final decoded = jsonDecode(utf8.decode(payload));
@@ -160,34 +233,28 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           ? (decoded['target_url'] as String).trim()
           : _initialUrl;
       final targetUri = Uri.tryParse(targetStr);
+      final initialUri = Uri.tryParse(_initialUrl);
       final rawCookies = decoded['cookies'];
-      if (rawCookies is List &&
-          rawCookies.isNotEmpty &&
-          rawCookies.length <= _maxInjectedCookies &&
-          targetUri != null &&
-          targetUri.scheme.toLowerCase() == 'https') {
+      if (rawCookies is List && rawCookies.isNotEmpty) {
         final cm = CookieManager.instance();
-        final webTarget = WebUri('${targetUri.scheme}://${targetUri.host}/');
-        for (final raw in rawCookies) {
-          if (_disposed) return false;
-          final cookie = validateAppWebViewCookie(raw, targetUri);
-          if (cookie == null) continue;
-          try {
-            await cm.setCookie(
-              url: webTarget,
-              name: cookie.name,
-              value: cookie.value,
-              domain: cookie.domain,
-              path: cookie.path,
-              expiresDate: cookie.expiresDate,
-              isSecure: cookie.isSecure,
-              isHttpOnly: cookie.isHttpOnly,
-              sameSite: cookie.sameSite,
-            );
-          } catch (_) {
-            // Continue setting remaining cookies cleanly.
-          }
-        }
+        appliedCount = await installAppWebViewCookies(
+          rawCookies: rawCookies,
+          targetUri: targetUri,
+          initialUri: initialUri,
+          isDisposed: () => _disposed,
+          disposeSignal: _disposeSignal.future,
+          setCookie: (webTarget, cookie) => cm.setCookie(
+            url: webTarget,
+            name: cookie.name,
+            value: cookie.value,
+            domain: cookie.domain,
+            path: cookie.path,
+            expiresDate: cookie.expiresDate,
+            isSecure: cookie.isSecure,
+            isHttpOnly: cookie.isHttpOnly,
+            sameSite: cookie.sameSite,
+          ),
+        );
       }
       return true;
     } catch (_) {
@@ -196,6 +263,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       payload?.fillRange(0, payload.length, 0);
       if (!_cookieBootstrapDone.isCompleted) {
         _cookieBootstrapDone.complete();
+      }
+      if (shouldReloadAfterLateCookies(
+        appliedCount: appliedCount,
+        initialNavDispatched: _initialNavDispatched,
+        alreadyReloaded: _lateCookieReloaded,
+        disposed: _disposed,
+        hasController: _controller != null,
+        initialUrl: _initialUrl,
+      )) {
+        _lateCookieReloaded = true;
+        unawaited(_navigateInternal(_controller!, _initialUrl));
       }
     }
   }
@@ -211,15 +289,16 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       );
       return;
     }
-    if (_requireInitialCookies && !_cookieBootstrapDone.isCompleted) {
+    if (_requireInitialCookies && !_viewerLocked && !_cookieBootstrapDone.isCompleted) {
       try {
-        await _cookieBootstrapDone.future.timeout(_cookieWaitTimeout);
+        await _cookieBootstrapDone.future.timeout(appWebViewCookieWaitTimeout);
       } catch (_) {
         // Proceed with navigation even if cookie channel timed out.
       }
     }
     if (_disposed) return;
     if (_initialUrl.isNotEmpty) {
+      _initialNavDispatched = true;
       await _navigateInternal(controller, _initialUrl);
     }
   }
@@ -288,7 +367,18 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     if (_disposed) return false;
     switch (name) {
       case 'bootstrap_cookies':
-        if (args is! Map || args['channel_id'] != _cookieChannel?.id) {
+        if (_viewerLocked ||
+            !_requireInitialCookies ||
+            _cookieBootstrapStarted ||
+            args is! Map ||
+            args['channel_id'] != _cookieChannel?.id) {
+          if (!_cookieBootstrapDone.isCompleted) {
+            _cookieBootstrapDone.complete();
+          }
+          return false;
+        }
+        _cookieBootstrapStarted = true;
+        if (args['abort'] == true) {
           if (!_cookieBootstrapDone.isCompleted) {
             _cookieBootstrapDone.complete();
           }
@@ -386,26 +476,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     CreateWindowAction action,
   ) async {
     if (_disposed) return false;
-    final rawTarget = action.request.url?.toString();
-    if (!_viewerLocked && rawTarget != null && rawTarget.isNotEmpty) {
-      final decision = decideAppWebViewNavigation(
-        rawTarget,
-        isForMainFrame: true,
-        viewerLocked: false,
-        allowedLoopbackPorts: _allowedLoopbackPorts,
+    final target = resolveCreateWindowInPlaceTarget(
+      action.request.url?.toString(),
+      viewerLocked: _viewerLocked,
+      allowedLoopbackPorts: _allowedLoopbackPorts,
+    );
+    if (target != null) {
+      unawaited(
+        controller
+            .loadUrl(urlRequest: URLRequest(url: WebUri(target)))
+            .catchError((_) {}),
       );
-      final target = switch (decision.kind) {
-        AppNavigationKind.allow => rawTarget.trim(),
-        AppNavigationKind.redirectInPlace => decision.targetUrl,
-        AppNavigationKind.cancel => null,
-      };
-      if (target != null && target.isNotEmpty) {
-        unawaited(
-          controller
-              .loadUrl(urlRequest: URLRequest(url: WebUri(target)))
-              .catchError((_) {}),
-        );
-      }
     }
     // On iOS/Windows returning false from onCreateWindow would otherwise navigate
     // the main frame to even blocked URLs; sink the child windowId cleanly.
@@ -418,6 +499,11 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         () => _removePopupSink(sinkKey),
       );
       setState(() {
+        trimPopupSinksToCap(
+          _popupSinks,
+          maxCount: maxAppPopupSinks,
+          onEvict: (oldest) => _popupSinkTimers.remove(oldest.key)?.cancel(),
+        );
         _popupSinks.add(
           _PopupSinkEntry(windowId: action.windowId, key: sinkKey),
         );
@@ -442,7 +528,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         child: InAppWebView(
           key: ValueKey('app-wv-sink-${sink.key}'),
           windowId: sink.windowId,
-          initialSettings: createAppWebViewSettings(viewerLocked: true),
+          initialSettings: createAppWebViewSettings(
+            viewerLocked: true,
+            javaScriptEnabled: false,
+          ),
           onWebViewCreated: (ctrl) {
             unawaited(ctrl.stopLoading().catchError((_) {}));
             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -477,6 +566,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             key: _webViewKey,
             initialSettings: createAppWebViewSettings(
               viewerLocked: _viewerLocked,
+              viewerPrefix: _viewerPrefix,
               userAgent: _normalizedUserAgent,
             ),
             onWebViewCreated: _onWebViewCreated,
@@ -508,6 +598,19 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             onLoadStart: (controller, url) {
               if (_disposed) return;
               final urlStr = url?.toString() ?? '';
+              if (urlStr.isNotEmpty && urlStr.toLowerCase() != 'about:blank') {
+                final decision = decideAppWebViewNavigation(
+                  urlStr,
+                  isForMainFrame: true,
+                  viewerLocked: _viewerLocked,
+                  viewerPrefix: _viewerPrefix,
+                  allowedLoopbackPorts: _allowedLoopbackPorts,
+                );
+                if (decision.kind != AppNavigationKind.allow) {
+                  unawaited(controller.stopLoading().catchError((_) {}));
+                  return;
+                }
+              }
               widget.control.triggerEvent('page_started', urlStr);
               unawaited(_emitHistoryState(controller));
             },
@@ -553,7 +656,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             onConsoleMessage: (_controller, consoleMessage) {
               if (_disposed) return;
               final msg = consoleMessage.message;
-              if (msg.startsWith(_uthMsgPrefix)) {
+              if (shouldForwardAppConsoleMessage(
+                msg,
+                viewerLocked: _viewerLocked,
+              )) {
                 widget.control.triggerEvent('console_message', msg);
               }
             },
@@ -567,6 +673,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   @override
   void dispose() {
     _disposed = true;
+    if (!_disposeSignal.isCompleted) {
+      _disposeSignal.complete();
+    }
     widget.control.removeInvokeMethodListener(_invokeMethod);
     _cookieSubscription?.cancel();
     _cookieSubscription = null;

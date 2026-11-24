@@ -2,8 +2,10 @@
 
 import asyncio
 from dataclasses import field
+import ipaddress
 import json
 import re
+import socket
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
@@ -15,6 +17,104 @@ _UNSAFE_URL_RE = re.compile(r"[\x00-\x20\x7f\\]")
 _RAW_AUTHORITY_RE = re.compile(r"^[a-z][a-z0-9+.-]*://([^/?#]+)", re.IGNORECASE)
 _COOKIE_PAYLOAD_LIMIT = 32 * 1024
 _MAX_COOKIES = 64
+
+
+def _is_unsafe_ip(ip_str: str) -> bool:
+    raw = ip_str.split("%", 1)[0].strip("[]")
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or ip.is_reserved
+        or not ip.is_global
+    )
+
+
+def _parse_posix_inet_aton(host: str) -> Optional[str]:
+    if not host or "." in (host[0], host[-1]):
+        return None
+    parts = host.split(".")
+    if not (1 <= len(parts) <= 4):
+        return None
+    values: list[int] = []
+    for part in parts:
+        if not part:
+            return None
+        lower = part.lower()
+        if lower.startswith("0x"):
+            digits = lower[2:]
+            if not digits or any(ch not in "0123456789abcdef" for ch in digits):
+                return None
+            val = int(digits, 16)
+        elif len(lower) > 1 and lower.startswith("0"):
+            if any(ch not in "01234567" for ch in lower):
+                return None
+            val = int(lower, 8)
+        else:
+            if any(ch not in "0123456789" for ch in lower):
+                return None
+            val = int(lower, 10)
+        values.append(val)
+    if len(values) == 1:
+        if values[0] > 0xFFFFFFFF:
+            return None
+        addr_int = values[0]
+    elif len(values) == 2:
+        if values[0] > 0xFF or values[1] > 0xFFFFFF:
+            return None
+        addr_int = (values[0] << 24) | values[1]
+    elif len(values) == 3:
+        if values[0] > 0xFF or values[1] > 0xFF or values[2] > 0xFFFF:
+            return None
+        addr_int = (values[0] << 24) | (values[1] << 16) | values[2]
+    else:
+        if any(val > 0xFF for val in values):
+            return None
+        addr_int = (
+            (values[0] << 24) | (values[1] << 16) | (values[2] << 8) | values[3]
+        )
+    return str(ipaddress.IPv4Address(addr_int))
+
+
+def _parse_literal_ip(host: str) -> Optional[str]:
+    candidate = host.split("%", 1)[0].strip("[]")
+    try:
+        ipaddress.ip_address(candidate)
+        return candidate
+    except ValueError:
+        pass
+    host_no_dot = host.rstrip(".")
+    if not host_no_dot:
+        return None
+    try:
+        return socket.inet_ntoa(socket.inet_aton(host_no_dot))
+    except OSError:
+        return _parse_posix_inet_aton(host_no_dot)
+
+
+def _is_public_https_host(hostname: str) -> bool:
+    host = (hostname or "").strip()
+    if not host:
+        return False
+    host_cf = host.rstrip(".").casefold()
+    if (
+        host_cf == "localhost"
+        or host_cf.endswith(".localhost")
+        or host_cf.endswith(".local")
+    ):
+        return False
+    literal_ip = _parse_literal_ip(host)
+    if literal_ip is not None:
+        return not _is_unsafe_ip(literal_ip)
+    return True
 
 
 def _validate_app_webview_url(url: str) -> str:
@@ -41,6 +141,8 @@ def _validate_app_webview_url(url: str) -> str:
 
     scheme = parsed.scheme.lower()
     if scheme == "https":
+        if not _is_public_https_host(parsed.hostname):
+            raise ValueError("url must target a public HTTPS host")
         return trimmed
     if scheme == "http":
         host = parsed.hostname.rstrip(".").casefold()
@@ -128,6 +230,17 @@ class UthAppWebView(LayoutControl):
             ensure_ascii=True,
         ).encode("utf-8")
         if len(payload) > _COOKIE_PAYLOAD_LIMIT:
+            try:
+                await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=2.0)
+                channel_id = self._cookie_channel_id
+                if channel_id is not None:
+                    await self._invoke_method(
+                        "bootstrap_cookies",
+                        {"channel_id": channel_id, "abort": True},
+                        timeout=5,
+                    )
+            except Exception:
+                pass
             return False
         try:
             await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=5.0)

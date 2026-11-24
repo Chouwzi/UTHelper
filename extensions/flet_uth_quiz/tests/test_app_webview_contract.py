@@ -25,7 +25,8 @@ def test_app_webview_exported_and_registered_without_altering_quiz_player_privac
     assert "evaluateJavascript" not in quiz_widget
     assert "onConsoleMessage" not in quiz_widget
     assert "openDataChannel()" in app_widget
-    assert "if (!_requireInitialCookies || _cookieChannel != null) return;" in app_widget
+    assert "if (_viewerLocked || !_requireInitialCookies || _cookieChannel != null) return;" in app_widget
+    assert "sharedMobileSessionQueue" in app_widget
     assert "app_webview_cookies" in app_widget
     assert "onConsoleMessage" in app_widget
 
@@ -39,6 +40,18 @@ def test_app_webview_exported_and_registered_without_altering_quiz_player_privac
         "http://evil.example/phish",
         "https://user:pass@courses.ut.edu.vn/",
         "https://courses.ut.edu.vn/\n",
+        "https://127.0.0.1/admin",
+        "https://localhost:8443/",
+        "https://foo.localhost/",
+        "https://printer.local/",
+        "https://10.0.0.1/internal",
+        "https://192.168.1.1/",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/admin",
+        "https://[::ffff:127.0.0.1]/",
+        "https://2130706433/",
+        "https://0177.0.0.1/",
+        "https://0x7f000001/",
     ],
 )
 def test_app_webview_rejects_unsafe_initial_urls(bad_url: str):
@@ -175,4 +188,36 @@ def test_app_webview_flet_session_event_dispatch_resolves_all_event_types(
     assert isinstance(received["page_started"][0], Event)
     assert received["page_started"][0].control is wv
     assert received["page_started"][0].data == "https://courses.ut.edu.vn/"
+
+
+def test_app_webview_oversized_cookie_payload_signals_abort_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flet_uth_quiz import UthAppWebView
+
+    wv = UthAppWebView(
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=42",
+        require_initial_cookies=True,
+    )
+    sent: list[bytes] = []
+    invoked: list[tuple[str, object]] = []
+    fake_channel = SimpleNamespace(send=sent.append)
+    monkeypatch.setattr(wv, "get_data_channel", lambda cid: fake_channel if cid == 7 else None)
+
+    async def _invoke(name: str, arguments=None, timeout=None):
+        invoked.append((name, arguments))
+        return False
+
+    monkeypatch.setattr(wv, "_invoke_method", _invoke)
+    wv.on_data_channel_open(
+        SimpleNamespace(channel_name="app_webview_cookies", channel_id=7)
+    )
+
+    huge_cookies = [
+        {"name": f"c{i}", "value": "x" * 1024, "domain": "courses.ut.edu.vn"}
+        for i in range(40)
+    ]
+    assert asyncio.run(wv.bootstrap_cookies(huge_cookies)) is False
+    assert sent == []
+    assert invoked == [("bootstrap_cookies", {"channel_id": 7, "abort": True})]
 

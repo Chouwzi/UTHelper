@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _UTH_MSG_PREFIX = "__UTH_MSG__:"
 _DANGEROUS_WEBVIEW_SCHEMES = frozenset({"file", "javascript", "data", "intent", "vbscript", "ms-appx"})
+_LOOPBACK_ITEM_PATH_RE = re.compile(r"^/[0-9a-f]{16}$")
 
 
 def _extract_loopback_port(url: str) -> Optional[int]:
@@ -203,11 +205,14 @@ def _is_inappwebview_mobile_platform(page: Optional[ft.Page]) -> bool:
 
 
 def _is_viewer_locked_url(url: str) -> bool:
-    """Return True when ``url`` targets an isolated local Office or PDF viewer."""
+    """Return True when ``url`` targets an isolated local Office, PDF, or HTML item viewer."""
     if _extract_loopback_port(url) is None:
         return False
     try:
-        segs = [s for s in urlsplit(url).path.split("/") if s]
+        path = urlsplit(url).path
+        if _LOOPBACK_ITEM_PATH_RE.fullmatch(path):
+            return True
+        segs = [s for s in path.split("/") if s]
         return len(segs) >= 2 and segs[0] in ("viewer", "pdf-viewer")
     except ValueError:
         return False
@@ -1456,14 +1461,38 @@ class EmbeddedWebViewHost:
             return
         self._schedule_task(self._refresh_history_async)
 
+    def _is_allowed_event_url(self, url: str) -> bool:
+        cleaned = str(url or "").strip()
+        if not cleaned:
+            return True
+        lowered = cleaned.lower()
+        if lowered == "about:blank":
+            return True
+        if lowered.startswith("blob:"):
+            inner = cleaned[5:]
+            return bool(
+                _validate_webview_url(
+                    inner,
+                    allowed_loopback_ports=self._allowed_loopback_ports,
+                )
+            )
+        return bool(
+            _validate_webview_url(
+                cleaned,
+                allowed_loopback_ports=self._allowed_loopback_ports,
+            )
+        )
+
+    @staticmethod
+    def _is_transient_event_url(url: str) -> bool:
+        lowered = str(url or "").strip().lower()
+        return lowered == "about:blank" or lowered.startswith("blob:")
+
     def _handle_flet_page_started(self, e: Any) -> None:
         if self._disposed:
             return
         url = str(getattr(e, "data", "") or "")
-        if url and not _validate_webview_url(
-            url,
-            allowed_loopback_ports=self._allowed_loopback_ports,
-        ):
+        if url and not self._is_allowed_event_url(url):
             if self._on_loading_changed is not None:
                 self._on_loading_changed(False)
             if self._on_error is not None:
@@ -1471,7 +1500,7 @@ class EmbeddedWebViewHost:
             return
         if self._on_loading_changed is not None:
             self._on_loading_changed(True)
-        if url and self._on_url_changed is not None:
+        if url and not self._is_transient_event_url(url) and self._on_url_changed is not None:
             self._on_url_changed(url)
         self._schedule_history_refresh()
 
@@ -1521,17 +1550,14 @@ class EmbeddedWebViewHost:
         if self._disposed:
             return
         url = str(getattr(e, "data", "") or "")
-        if url and not _validate_webview_url(
-            url,
-            allowed_loopback_ports=self._allowed_loopback_ports,
-        ):
+        if url and not self._is_allowed_event_url(url):
             if self._on_error is not None:
                 self._on_error(f"Blocked disallowed WebView URL: {url}")
             return
-        if url:
+        if url and not self._is_transient_event_url(url):
             self._url = url
-        if url and self._on_url_changed is not None:
-            self._on_url_changed(url)
+            if self._on_url_changed is not None:
+                self._on_url_changed(url)
         self._schedule_history_refresh()
 
     def _handle_flet_console_message(self, e: Any) -> None:
@@ -1825,8 +1851,12 @@ def build_embedded_webview_host(
         if app_wv_cls is not None:
             try:
                 loop_port = _extract_loopback_port(safe_url)
+                is_viewer_locked = bool(
+                    html is not None or _is_viewer_locked_url(safe_url)
+                )
                 require_cookies = bool(
-                    safe_url.lower().startswith("https://")
+                    not is_viewer_locked
+                    and safe_url.lower().startswith("https://")
                     and (cookies or callable(cookie_provider))
                 )
                 holder_inapp: dict[str, EmbeddedWebViewHost] = {}
@@ -1834,7 +1864,7 @@ def build_embedded_webview_host(
                     url=safe_url,
                     html=html,
                     bgcolor=bgcolor or C.BG,
-                    viewer_locked=_is_viewer_locked_url(safe_url),
+                    viewer_locked=is_viewer_locked,
                     allowed_loopback_ports=[loop_port] if loop_port is not None else [],
                     require_initial_cookies=require_cookies,
                     expand=True,
