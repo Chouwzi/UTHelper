@@ -203,3 +203,57 @@ class TestGradeMonitorCheckForChanges:
         with open(path, "r", encoding="utf-8") as f:
             saved = json.load(f)
         assert saved["42"]["_overall"] == "9.0"
+
+
+def test_grade_monitor_namespaces_by_account_and_reset_detaches(tmp_path, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "_USER_DATA_DIR", tmp_path)
+    monitor = GradeMonitor(namespace="https://courses.ut.edu.vn|studentA")
+
+    svc_a = Mock()
+    svc_a.get_course_grades.return_value = [{"courseid": 10, "coursename": "OS", "grade": "9.50"}]
+    svc_a.get_grade_items.return_value = [{"itemname": "GK", "gradeformatted": "9.00"}]
+    assert monitor.check_for_changes(svc_a, userid=1) == []
+
+    # Switch to studentB on same shared courseid=10 -> must NOT emit studentA's 9.50 as old_grade
+    monitor.set_namespace("https://courses.ut.edu.vn|studentB")
+    svc_b = Mock()
+    svc_b.get_course_grades.return_value = [{"courseid": 10, "coursename": "OS", "grade": "6.00"}]
+    svc_b.get_grade_items.return_value = [{"itemname": "GK", "gradeformatted": "6.00"}]
+    assert monitor.check_for_changes(svc_b, userid=2) == []
+
+    # Logout reset clears memory without deleting studentA's persisted baseline
+    monitor.reset()
+    assert monitor._snapshot == {}
+    monitor.set_namespace("https://courses.ut.edu.vn|studentA")
+    assert monitor._snapshot["10"]["_overall"] == "9.50"
+
+
+def test_grade_monitor_baselines_grade_items_on_initial_snapshot_and_detects_first_component_change(tmp_path):
+    monitor = GradeMonitor(snapshot_path=str(tmp_path / "grades.json"))
+    svc = Mock()
+
+    # Run 1: Initial baseline captures GK=7.0 and marks course items as baselined (CK is '-')
+    svc.get_course_grades.return_value = [{"courseid": 5, "coursename": "DB", "grade": "7.0"}]
+    svc.get_grade_items.return_value = [
+        {"itemname": "GK", "gradeformatted": "7.0"},
+        {"itemname": "CK", "gradeformatted": "-"},
+    ]
+    assert monitor.check_for_changes(svc, userid=10) == []
+
+    # Run 2: GK updates 7.0 -> 8.0 and CK is newly graded '-' -> 9.0
+    svc.get_course_grades.return_value = [{"courseid": 5, "coursename": "DB", "grade": "8.6"}]
+    svc.get_grade_items.return_value = [
+        {"itemname": "GK", "gradeformatted": "8.0"},
+        {"itemname": "CK", "gradeformatted": "9.0"},
+    ]
+    changes = monitor.check_for_changes(svc, userid=10)
+    by_item = {c.item_name: c for c in changes}
+
+    assert by_item["Tổng kết"].old_grade == "7.0"
+    assert by_item["Tổng kết"].new_grade == "8.6"
+    assert by_item["GK"].old_grade == "7.0"
+    assert by_item["GK"].new_grade == "8.0"
+    assert by_item["CK"].old_grade is None
+    assert by_item["CK"].new_grade == "9.0"

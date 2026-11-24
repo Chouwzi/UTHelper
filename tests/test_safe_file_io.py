@@ -112,3 +112,64 @@ def test_read_json_safe_waits_for_memory_lock_during_atomic_write(tmp_path):
     assert errors == []
     assert read_snapshots
     assert all(isinstance(snap, dict) and snap.get("seeded") == 1 for snap in read_snapshots)
+
+
+def test_safe_file_io_releases_mem_lock_during_retry_sleep_and_keeps_lock_file(tmp_path):
+    target = tmp_path / "contended.json"
+    SafeFileIO.write_json_atomic(target, {"initial": True})
+    lock_file = target.with_suffix(".lock")
+    lock_file.write_text("", encoding="utf-8")
+    os.utime(lock_file, (time.time() - 60.0, time.time() - 60.0))
+
+    class FailingLock:
+        def acquire(self, timeout=None):
+            raise TimeoutError("simulated external process holding file lock")
+
+    from unittest.mock import patch
+
+    reader_latencies: list[float] = []
+    writer_started = Barrier(2)
+
+    def slow_failing_writer():
+        writer_started.wait()
+        return SafeFileIO.write_json_atomic(
+            target, {"initial": False}, max_retries=3, initial_delay=0.25
+        )
+
+    def concurrent_reader():
+        writer_started.wait()
+        time.sleep(0.05)  # Land right inside writer's retry backoff sleep
+        t0 = time.perf_counter()
+        snap = SafeFileIO.read_json_safe(target, dict)
+        reader_latencies.append(time.perf_counter() - t0)
+        return snap
+
+    with patch.object(SafeFileIO, "get_file_lock", return_value=FailingLock()):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_write = pool.submit(slow_failing_writer)
+            f_read = pool.submit(concurrent_reader)
+            assert f_read.result() == {"initial": True}
+            assert f_write.result() is False
+
+    # Reader must NOT stall across the 0.25s + 0.50s writer backoff sleeps
+    assert reader_latencies and reader_latencies[0] < 0.15
+    assert lock_file.exists()
+
+
+def test_safe_file_io_pid_scoped_tmp_and_no_trash_gap(tmp_path, monkeypatch):
+    target = tmp_path / "atomic_replace.json"
+    SafeFileIO.write_json_atomic(target, {"v": 1})
+
+    seen_src_names: list[str] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        assert Path(dst).exists(), "Target file must remain present right up to os.replace"
+        seen_src_names.append(Path(src).name)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    assert SafeFileIO.write_json_atomic(target, {"v": 2}) is True
+    assert seen_src_names
+    assert f".{os.getpid()}." in seen_src_names[0]
+    assert SafeFileIO.read_json_safe(target, dict) == {"v": 2}

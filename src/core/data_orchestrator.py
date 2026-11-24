@@ -32,11 +32,17 @@ class DataOrchestrator:
             grade_report_error_getter=lambda: getattr(
                 self.client, "last_grade_report_error", ""
             ),
+            client=self.client,
         )
         self.thnn_client = MoodleClient("https://thnn.ut.edu.vn")
-        self.thnn_service = MoodleService(self.thnn_client.call_ajax_api)
-        self._last_thnn_fetch_ts = 0.0
-        self._thnn_activities_cache = []
+        self.thnn_service = MoodleService(
+            self.thnn_client.call_ajax_api,
+            client=self.thnn_client,
+        )
+        self._thnn_lock = threading.RLock()
+        self._thnn_cache_by_account: dict[str, List[Dict[str, Any]]] = {}
+        self._last_thnn_fetch_ts_by_account: dict[str, float] = {}
+        self._ws_parallel_timeout: float = 25.0
         self._courses_cache = None
         self.is_logged_in = False
         self._detail_cache: dict = {}  # url → từ điển chi tiết đầy đủ của hoạt động
@@ -99,6 +105,31 @@ class DataOrchestrator:
         with self._detail_lock:
             return dict(self._detail_cache)
 
+    @staticmethod
+    def _thnn_account_key() -> str:
+        raw = getattr(settings, "UTH_USERNAME", "") or ""
+        return str(raw).strip().lower() or "__default__"
+
+    @property
+    def _thnn_activities_cache(self) -> List[Dict[str, Any]]:
+        with self._thnn_lock:
+            return list(self._thnn_cache_by_account.get(self._thnn_account_key(), []))
+
+    @_thnn_activities_cache.setter
+    def _thnn_activities_cache(self, value: List[Dict[str, Any]]) -> None:
+        with self._thnn_lock:
+            self._thnn_cache_by_account[self._thnn_account_key()] = list(value or [])
+
+    @property
+    def _last_thnn_fetch_ts(self) -> float:
+        with self._thnn_lock:
+            return float(self._last_thnn_fetch_ts_by_account.get(self._thnn_account_key(), 0.0))
+
+    @_last_thnn_fetch_ts.setter
+    def _last_thnn_fetch_ts(self, value: float) -> None:
+        with self._thnn_lock:
+            self._last_thnn_fetch_ts_by_account[self._thnn_account_key()] = float(value or 0.0)
+
     def clear_detail_cache(self):
         """Xóa sạch bộ nhớ đệm chi tiết (dùng khi refresh thủ công)."""
         with self._detail_lock:
@@ -107,6 +138,78 @@ class DataOrchestrator:
             self._detail_cache_saved_at.clear()
             self._detail_cache_lru.clear()
         logger.debug("Đã xóa sạch bộ nhớ đệm chi tiết bài tập/quiz.")
+
+    def clear_caches(self) -> None:
+        """Clear all account-scoped in-memory caches on login/logout/account switch."""
+        with self._thnn_lock:
+            self._thnn_cache_by_account.clear()
+            self._last_thnn_fetch_ts_by_account.clear()
+        self.clear_detail_cache()
+        self._courses_cache = None
+        self._userid_cache = None
+        self._last_fetch_ts = 0
+        self.is_logged_in = False
+        with self._course_grades_lock:
+            self.latest_course_grades = []
+        try:
+            self.moodle_service.clear_all_caches()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _build_time_policy():
+        from core.activity_time_policy import ActivityTimePolicy
+
+        crit = int(getattr(settings, "URGENCY_CRITICAL_HOURS", 24) or 24)
+        warn = int(getattr(settings, "URGENCY_WARNING_HOURS", 72) or 72)
+        return ActivityTimePolicy(critical_hours=crit, warning_hours=warn)
+
+    @staticmethod
+    def _assignment_prevents_late(assign: Dict[str, Any]) -> bool:
+        if bool(assign.get("nosubmissions")):
+            return True
+        configs = assign.get("configs")
+        if isinstance(configs, list):
+            for cfg in configs:
+                if (
+                    isinstance(cfg, dict)
+                    and cfg.get("name") == "preventlatesubmissions"
+                    and str(cfg.get("value", "")).strip() in {"1", "true", "True"}
+                ):
+                    return True
+        return False
+
+    @classmethod
+    def _compute_late_status(cls, assign: Dict[str, Any], now_ts: int) -> str:
+        try:
+            duedate = int(assign.get("duedate") or 0)
+        except (TypeError, ValueError):
+            duedate = 0
+        try:
+            cutoffdate = int(assign.get("cutoffdate") or 0)
+        except (TypeError, ValueError):
+            cutoffdate = 0
+        if duedate <= 0 or now_ts < duedate:
+            return "open"
+        if cutoffdate > 0:
+            return "late_allowed" if now_ts < cutoffdate else "closed"
+        return "closed" if cls._assignment_prevents_late(assign) else "late_allowed"
+
+    @staticmethod
+    def _run_parallel_bounded(callables: List[Any], timeout: float = 25.0) -> List[Any]:
+        deadline = time.monotonic() + max(0.01, float(timeout))
+        pool = ThreadPoolExecutor(max_workers=max(1, len(callables)))
+        futures = [pool.submit(fn) for fn in callables]
+        try:
+            outputs = []
+            for fut in futures:
+                remaining = max(0.0, deadline - time.monotonic())
+                outputs.append(fut.result(timeout=remaining))
+            return outputs
+        finally:
+            for fut in futures:
+                fut.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def update_cached_submission_status(self, url: str, new_status: str):
         """Cập nhật trạng thái nộp bài trực tiếp trong cache để đồng bộ giao diện."""
@@ -281,13 +384,25 @@ class DataOrchestrator:
         return decoded
 
 
+    def _thnn_login_was_deferred(self) -> bool:
+        login_err = str(
+            getattr(self.thnn_client, "last_login_error", "")
+            or getattr(self.thnn_client, "_last_login_error", "")
+            or ""
+        )
+        return login_err == "quiz_session_active"
+
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
         last_known_good = list(self._thnn_activities_cache)
         try:
             if not self.thnn_client._sesskey:
                 success = self.thnn_client.login_session()
                 if not success:
-                    return last_known_good
+                    if self._thnn_login_was_deferred():
+                        return last_known_good
+                    self._thnn_activities_cache = []
+                    self._last_thnn_fetch_ts = 0.0
+                    return []
                     
             opener = self.thnn_client._ensure_html_opener()
             import urllib.parse
@@ -307,7 +422,11 @@ class DataOrchestrator:
             ics_data = self._download_thnn_calendar(opener, data)
             if ics_data is None:
                 if not self.thnn_client.login_session(force=True):
-                    return last_known_good
+                    if self._thnn_login_was_deferred():
+                        return last_known_good
+                    self._thnn_activities_cache = []
+                    self._last_thnn_fetch_ts = 0.0
+                    return []
                 opener = self.thnn_client._ensure_html_opener()
                 data = urllib.parse.urlencode({
                     'sesskey': self.thnn_client._sesskey,
@@ -374,7 +493,7 @@ class DataOrchestrator:
             results = []
             import html
             from datetime import datetime
-            from config import settings
+            policy = self._build_time_policy()
             
             for ev in events_ics.values():
                 url = ev.get('url', '')
@@ -394,19 +513,11 @@ class DataOrchestrator:
                         
                     timestart = ev.get('timestamp', 0)
                     deadline = ''
-                    urgency = 'safe'
                     if timestart:
                         try:
                             deadline = datetime.fromtimestamp(timestart).strftime('%Y-%m-%d %H:%M:%S')
-                            hours_left = (timestart - now_ts) / 3600
-                            if hours_left < 0:
-                                urgency = 'overdue'
-                            elif hours_left < getattr(settings, 'URGENCY_CRITICAL_HOURS', 12):
-                                urgency = 'critical'
-                            elif hours_left < getattr(settings, 'URGENCY_WARNING_HOURS', 24):
-                                urgency = 'warning'
                         except Exception:
-                            pass
+                            deadline = ''
                             
                     event_type = modulename
                     if event_type == 'assign':
@@ -422,13 +533,14 @@ class DataOrchestrator:
                         'deadline_str': deadline,
                         'url': url,
                         'type': event_type,
-                        'urgency': urgency,
+                        'urgency': 'safe',
                         'source': 'thnn_sync',
                         'submission_status': 'unknown',
                         'details': {},
                         'is_open': False,
                         'site_identity': 'thnn'
                     }
+                    act_dict['urgency'] = policy.evaluate(act_dict).urgency
                     results.append(act_dict)
                     
             self._last_thnn_fetch_ts = float(now_ts)
@@ -526,11 +638,10 @@ class DataOrchestrator:
                     return None
                 return self.moodle_service.get_user_courses(userid)
             
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                f_cal = pool.submit(_fetch_calendar)
-                f_courses = pool.submit(_fetch_courses)
-                calendar_result = f_cal.result(timeout=25)
-                courses_result = f_courses.result(timeout=25)
+            calendar_result, courses_result = self._run_parallel_bounded(
+                [_fetch_calendar, _fetch_courses],
+                timeout=self._ws_parallel_timeout,
+            )
 
             if not isinstance(calendar_result, dict) or not isinstance(courses_result, list):
                 logger.warning("Moodle trả snapshot calendar/course không đầy đủ.")
@@ -585,23 +696,23 @@ class DataOrchestrator:
                 window_start = int(month_start.timestamp())
                 window_end = int(datetime(future_year, future_month, 1).timestamp())
 
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    assignments_future = pool.submit(
-                        self._merge_all_assignments,
-                        results,
-                        userid=userid,
-                        course_ids=course_ids,
-                    )
-                    quizzes_future = pool.submit(
-                        self._fetch_calendar_quizzes,
-                        course_ids,
-                        window_start,
-                        window_end,
-                        action_quiz_course_ids,
-                        action_quiz_urls,
-                    )
-                    results = assignments_future.result(timeout=25)
-                    quiz_results = quizzes_future.result(timeout=25)
+                results, quiz_results = self._run_parallel_bounded(
+                    [
+                        lambda: self._merge_all_assignments(
+                            results,
+                            userid=userid,
+                            course_ids=course_ids,
+                        ),
+                        lambda: self._fetch_calendar_quizzes(
+                            course_ids,
+                            window_start,
+                            window_end,
+                            action_quiz_course_ids,
+                            action_quiz_urls,
+                        ),
+                    ],
+                    timeout=self._ws_parallel_timeout,
+                )
                 if quiz_results is None:
                     raise RuntimeError("Calendar quiz snapshot is incomplete")
 
@@ -687,7 +798,7 @@ class DataOrchestrator:
             for course in (self._courses_cache or [])
             if isinstance(course, dict) and course.get("id")
         }
-        now_ts = int(datetime.now().timestamp())
+        policy = self._build_time_policy()
         results: List[Dict[str, Any]] = []
         seen_cmids: set[int] = set()
         action_quiz_urls = set(action_quiz_urls or ())
@@ -730,15 +841,6 @@ class DataOrchestrator:
                         catalog_item["quiz_security"] = quiz_security
                     results.append(catalog_item)
                 continue
-            remaining = deadline_ts - now_ts
-            if remaining < 0:
-                urgency = "overdue"
-            elif remaining < settings.URGENCY_CRITICAL_HOURS * 3600:
-                urgency = "critical"
-            elif remaining < settings.URGENCY_WARNING_HOURS * 3600:
-                urgency = "warning"
-            else:
-                urgency = "safe"
             deadline = datetime.fromtimestamp(deadline_ts).strftime("%Y-%m-%d %H:%M:%S")
             course_name = course_names.get(course_id, "")
             quiz_item = {
@@ -752,13 +854,14 @@ class DataOrchestrator:
                 "deadline_str": deadline,
                 "url": quiz_url,
                 "type": "quiz",
-                "urgency": urgency,
+                "urgency": "safe",
                 "source": "ws_quiz_calendar_api",
                 "submission_status": "unknown",
                 "details": {},
                 "is_open": False,
                 "site_identity": "courses",
             }
+            quiz_item["urgency"] = policy.evaluate(quiz_item).urgency
             if quiz_security:
                 quiz_item["quiz_security"] = quiz_security
             results.append(quiz_item)
@@ -861,6 +964,7 @@ class DataOrchestrator:
         
         # Merge bài tập thiếu (chỉ trong khoảng thời gian)
         now_ts = int(now.timestamp())
+        policy = self._build_time_policy()
         merged_count = 0
         
         for course_data in all_assigns:
@@ -882,16 +986,7 @@ class DataOrchestrator:
                         if assign.get('id'):
                             _existing['assignment_id'] = assign['id']
                         _cutoff = assign.get('cutoffdate', 0)
-                        _due = assign.get('duedate', 0)
-                        if _cutoff > 0 and _cutoff != _due:
-                            if now_ts > _due and now_ts < _cutoff:
-                                _existing['late_status'] = 'late_allowed'
-                            elif now_ts >= _cutoff:
-                                _existing['late_status'] = 'closed'
-                            else:
-                                _existing['late_status'] = 'open'
-                        else:
-                            _existing['late_status'] = 'open' if now_ts < _due else 'closed'
+                        _existing['late_status'] = self._compute_late_status(assign, now_ts)
                         _existing['cutoff_date'] = _cutoff
                     continue
                 
@@ -900,33 +995,10 @@ class DataOrchestrator:
                     continue
                 
                 cutoffdate = assign.get('cutoffdate', 0)
-                
-                # Tính toán trạng thái nộp trễ (late_status) dựa trên ngày cutoff và ngày đến hạn duedate
-                if cutoffdate > 0 and cutoffdate != duedate:
-                    if now_ts > duedate and now_ts < cutoffdate:
-                        late_status = 'late_allowed'
-                    elif now_ts >= cutoffdate:
-                        late_status = 'closed'
-                    else:
-                        late_status = 'open'
-                else:
-                    late_status = 'open' if now_ts < duedate else 'closed'
-                
+                late_status = self._compute_late_status(assign, now_ts)
                 assign_url = f"{settings.MOODLE_BASE_URL}/mod/assign/view.php?id={cmid}" if cmid else ''
-                
-                # Sửa lỗi BUG-12: Chuẩn hóa sang định dạng ISO để phục vụ việc sắp xếp nhất quán
                 deadline_str = datetime.fromtimestamp(duedate).strftime('%Y-%m-%d %H:%M:%S')
-                remaining = duedate - now_ts
-                if remaining < 0:
-                    urgency = 'overdue'
-                elif remaining < 86400:
-                    urgency = 'critical'
-                elif remaining < 3 * 86400:
-                    urgency = 'warning'
-                else:
-                    urgency = 'safe'
-                
-                calendar_results.append({
+                assign_item = {
                     'id': f"assign_{assign.get('id', cmid)}",
                     'title': html.unescape(assign.get('name', 'Không tên')),
                     'course_name': course_name,
@@ -937,7 +1009,7 @@ class DataOrchestrator:
                     'deadline_str': deadline_str,
                     'url': assign_url,
                     'type': 'assignment',
-                    'urgency': urgency,
+                    'urgency': 'safe',
                     'source': 'ws_assign_api',
                     'submission_status': 'unknown',
                     'details': {},
@@ -945,7 +1017,9 @@ class DataOrchestrator:
                     'site_identity': 'courses',
                     'cutoff_date': cutoffdate,
                     'late_status': late_status,
-                })
+                }
+                assign_item['urgency'] = policy.evaluate(assign_item).urgency
+                calendar_results.append(assign_item)
                 merged_count += 1
         
         if merged_count > 0:
@@ -1393,6 +1467,8 @@ class DataOrchestrator:
         is_open  = raw_type.endswith("_open")
         act_type = raw_type.removesuffix("_open") if is_open else raw_type
 
+        crit = float(getattr(settings, "URGENCY_CRITICAL_HOURS", 24) or 24)
+        warn = float(getattr(settings, "URGENCY_WARNING_HOURS", 72) or 72)
         data = {
             "id": assign.id,
             "type": act_type,       # module type: quiz/assignment/attendance/deadline/other
@@ -1401,7 +1477,7 @@ class DataOrchestrator:
             "course": assign.course_name,
             "course_id": assign.course_id,
             "deadline": assign.deadline.isoformat(),
-            "urgency": assign.urgency,
+            "urgency": assign.urgency_for(crit, warn),
             "url": assign.url,
             "submission_status": normalize_submission_status(
                 assign.submission_status

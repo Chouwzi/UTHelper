@@ -73,75 +73,76 @@ class SafeFileIO:
 
     @staticmethod
     def _write_unlocked_impl(filepath: Path, data: Any) -> bool:
-        """Ghi tệp tạm thời và đổi tên (không có lock, chỉ dùng nội bộ)."""
+        """Ghi tệp tạm thời và đổi tên nguyên tử (không có lock, chỉ dùng nội bộ)."""
         payload = data() if callable(data) else data
-        tmp_file = filepath.with_suffix(f".{threading.get_ident()}.tmp")
+        tmp_file = filepath.with_name(
+            f"{filepath.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-            
-        if sys.platform == 'win32' and filepath.exists():
-            trash_file = filepath.with_suffix(f".{threading.get_ident()}.trash")
-            try:
-                os.rename(str(filepath), str(trash_file))
-                os.rename(str(tmp_file), str(filepath))
-                try:
-                    os.remove(str(trash_file))
-                except Exception:
-                    pass
-            except Exception:
-                os.replace(str(tmp_file), str(filepath))
-        else:
+
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+
             os.replace(str(tmp_file), str(filepath))
+        except BaseException:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return True
 
     @staticmethod
     def write_json_atomic(filepath: Path, data: Any, max_retries: int = 10, initial_delay: float = 0.1) -> bool:
         """
         Ghi dữ liệu JSON nguyên tử và an toàn tuyệt đối.
-        Sử dụng Memory Lock + File Lock + Robust Retry Loop với Backoff + Dọn dẹp stale lock toàn cầu.
+        Sử dụng Memory Lock + File Lock + Retry Loop giải phóng mem_lock trước khi sleep.
         """
         canonical = _canonical_lock_path(filepath)
         is_in_transaction = canonical in getattr(_thread_local, "_safe_io_transactions", set())
 
         mem_lock = get_memory_lock(canonical)
-        with mem_lock:
-            if is_in_transaction:
-                return SafeFileIO._write_unlocked_impl(filepath, data)
-
-            # Dọn dẹp stale SoftFileLock trên mọi nền tảng nếu lock bị kẹt quá 10 giây
-            lock_path = filepath.with_suffix(".lock")
-            if lock_path.exists():
-                try:
-                    mtime = os.path.getmtime(lock_path)
-                    if time.time() - mtime > 10.0:  # Lock bị treo hơn 10 giây
-                        os.remove(lock_path)
-                        logger.info(f"Đã dọn dẹp stale SoftFileLock: {lock_path.name}")
-                except Exception as le:
-                    logger.warning(f"Không thể kiểm tra/dọn dẹp stale lock: {le}")
-
-            file_lock = SafeFileIO.get_file_lock(filepath)
+        if is_in_transaction:
             delay = initial_delay
-            
             for attempt in range(max_retries):
                 try:
-                    with file_lock.acquire(timeout=2):
+                    with mem_lock:
                         return SafeFileIO._write_unlocked_impl(filepath, data)
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(
-                            f"Lỗi truy cập file {filepath.name} (lần thử {attempt+1}): {e}. "
-                            f"Thử lại sau {delay}s..."
-                        )
-                        time.sleep(delay)
-                        delay *= 2
+                        time.sleep(min(delay, 0.05))
+                        delay = min(delay * 2, 0.05)
                     else:
-                        logger.error(f"Ghi file {filepath.name} thất bại hoàn toàn sau {max_retries} lần thử: {e}")
-                        break
+                        logger.error(
+                            f"Ghi file {filepath.name} trong transaction thất bại sau {max_retries} lần thử: {e}"
+                        )
+                        return False
             return False
+
+        file_lock = SafeFileIO.get_file_lock(filepath)
+        delay = initial_delay
+        acquire_timeout = min(max(initial_delay * 2.0, 0.05), 0.25)
+
+        for attempt in range(max_retries):
+            try:
+                with mem_lock:
+                    with file_lock.acquire(timeout=acquire_timeout):
+                        return SafeFileIO._write_unlocked_impl(filepath, data)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Lỗi truy cập file {filepath.name} (lần thử {attempt+1}): {e}. "
+                        f"Thử lại sau {delay}s..."
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 1.0)
+                else:
+                    logger.error(f"Ghi file {filepath.name} thất bại hoàn toàn sau {max_retries} lần thử: {e}")
+                    break
+        return False
 
     @staticmethod
     def read_json_safe(filepath: Path, default_factory: Callable[[], Any] = dict) -> Any:
@@ -174,14 +175,6 @@ class SafeFileIO:
             canonical = _canonical_lock_path(filepath)
             mem_lock = get_memory_lock(canonical)
             with mem_lock:
-                lock_path = filepath.with_suffix(".lock")
-                if lock_path.exists():
-                    try:
-                        if time.time() - os.path.getmtime(lock_path) > 10.0:
-                            os.remove(lock_path)
-                    except Exception:
-                        pass
-
                 file_lock = SafeFileIO.get_file_lock(filepath)
                 with file_lock.acquire(timeout=timeout):
                     if not hasattr(_thread_local, "_safe_io_transactions"):

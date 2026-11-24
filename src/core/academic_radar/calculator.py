@@ -50,9 +50,17 @@ METRIC_CALCULATION_TEXTS = {
 }
 
 
+def _is_eligible_academic(course: CourseGradeItem) -> bool:
+    return (
+        course.credits > 0
+        and not course.is_transferred
+        and course.eligibility.status in ("academic", "unknown")
+    )
+
+
 def weighted_mean(grades_and_credits: list[tuple[float, float]]) -> float | None:
     """Calculates credit-weighted mean. Returns None if total credits is 0."""
-    valid = [(g, c) for g, c in grades_and_credits if g is not None and c > 0]
+    valid = [(g, c) for g, c in grades_and_credits if g is not None and math.isfinite(g) and math.isfinite(c) and c > 0]
     if not valid:
         return None
     total_credits = sum(c for _, c in valid)
@@ -73,7 +81,7 @@ def weighted_tail_mean(
     """
     eligible = [
         c for c in courses
-        if c.final_grade is not None and c.credits > 0 and c.eligibility.status in ("academic", "unknown")
+        if c.final_grade is not None and math.isfinite(c.final_grade) and _is_eligible_academic(c)
     ]
     if not eligible:
         return None, []
@@ -134,7 +142,7 @@ def calculate_total_power(
         return max(0.0, min(100.0, score)), 1.0
 
     # Fallback to credit-weighted final grades if summary GPA is absent
-    academic_courses = [c for c in courses if c.eligibility.status in ("academic", "unknown") and c.credits > 0]
+    academic_courses = [c for c in courses if _is_eligible_academic(c)]
     if not academic_courses:
         return None, 0.0
 
@@ -462,10 +470,9 @@ def calculate_radar_profile(
     eligible_graded = [
         c
         for c in courses
-        if c.credits > 0
-        and not c.is_transferred
-        and c.eligibility.status == "academic"
+        if _is_eligible_academic(c)
         and c.final_grade is not None
+        and math.isfinite(c.final_grade)
     ]
     if eligible_graded:
         if gpa_10 is None:
