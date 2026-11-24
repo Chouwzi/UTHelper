@@ -12,8 +12,20 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
+from email.message import Message
 from typing import Any, Callable, Optional
 from config import settings
+from core.demo_sandbox import (
+    DEMO_USER_ID,
+    get_demo_file_bytes,
+    handle_demo_ajax_call,
+    handle_demo_ws_call,
+    is_demo_account,
+    is_demo_credentials,
+    normalize_demo_username,
+    render_demo_grade_report_html,
+    render_demo_session_html,
+)
 from core.moodle_sites import (
     COURSES_MOODLE_SITE,
     MoodleSite,
@@ -422,6 +434,104 @@ def _urlopen(req, timeout=15):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _demo_mime_for_path(path: str) -> str:
+    lower_path = (path or "").lower()
+    if lower_path == "/calendar/export.php" or lower_path.endswith(".ics"):
+        return "text/calendar; charset=utf-8"
+    if lower_path.endswith(".pdf"):
+        return "application/pdf"
+    if lower_path.endswith(".zip"):
+        return "application/zip"
+    if lower_path.endswith(".md"):
+        return "text/markdown; charset=utf-8"
+    return "application/octet-stream"
+
+
+class _DemoHttpResponse:
+    """In-memory stdlib response double for offline Demo Mode HTML/ICS/file reads."""
+
+    def __init__(
+        self, final_url: str, body: bytes, content_type: str, status: int = 200
+    ) -> None:
+        self._final_url = final_url
+        self._stream = io.BytesIO(body)
+        self.status = status
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+        self.headers["Content-Length"] = str(len(body))
+
+    def geturl(self) -> str:
+        return self._final_url
+
+    def info(self) -> Message:
+        return self.headers
+
+    def read(self, amt: int = -1) -> bytes:
+        return (
+            self._stream.read()
+            if amt is None or amt < 0
+            else self._stream.read(amt)
+        )
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def __enter__(self) -> "_DemoHttpResponse":
+        return self
+
+    def __exit__(self, *_args: Any) -> bool:
+        self.close()
+        return False
+
+
+class _DemoHtmlOpener:
+    """Offline session opener resolving relative URLs against `origin` without network calls."""
+
+    def __init__(self, origin: str) -> None:
+        self.origin = origin.rstrip("/")
+
+    def open(
+        self, fullurl: Any, data: bytes | None = None, timeout: float = 20
+    ) -> _DemoHttpResponse:
+        del data, timeout
+        raw_url = (
+            fullurl.full_url
+            if isinstance(fullurl, urllib.request.Request)
+            else str(fullurl or "").strip()
+        )
+        parsed = urllib.parse.urlsplit(raw_url)
+        if parsed.scheme or parsed.netloc:
+            if self.origin and not _is_same_moodle_origin_url(raw_url, self.origin):
+                raise urllib.error.HTTPError(
+                    raw_url, 302, "Untrusted Moodle redirect", Message(), None
+                )
+            resolved_url = raw_url
+        else:
+            if not self.origin:
+                raise ValueError("Moodle site origin is not configured")
+            resolved_url = urllib.parse.urljoin(
+                f"{self.origin}/", raw_url.lstrip("/")
+            )
+
+        resolved_path = urllib.parse.urlsplit(resolved_url).path or "/"
+        file_bytes = get_demo_file_bytes(resolved_url)
+        if file_bytes is not None:
+            return _DemoHttpResponse(
+                resolved_url, file_bytes, _demo_mime_for_path(resolved_path)
+            )
+        final_url, html_or_ics, redirected = render_demo_session_html(resolved_url)
+        if redirected:
+            raise urllib.error.HTTPError(
+                final_url, 302, "Untrusted Moodle redirect", Message(), None
+            )
+        ct = (
+            "text/calendar; charset=utf-8"
+            if urllib.parse.urlsplit(final_url).path == "/calendar/export.php"
+            else "text/html; charset=utf-8"
+        )
+        return _DemoHttpResponse(final_url, html_or_ics.encode("utf-8"), ct)
+
+
 class MoodleClient:
     """HTTP client dùng urllib.request (stdlib) - zero dependency, mọi platform.
     
@@ -482,6 +592,10 @@ class MoodleClient:
                 self._session_owner = ""
                 self._session_generation += 1
 
+    @staticmethod
+    def _is_demo_mode() -> bool:
+        return is_demo_account(getattr(settings, "UTH_USERNAME", ""))
+
     @property
     def moodle_site_origin(self) -> str:
         """The immutable trusted origin this client was configured to use."""
@@ -490,6 +604,8 @@ class MoodleClient:
     @property
     def has_site_credentials(self) -> bool:
         """Whether this client can authenticate only to its configured site."""
+        if self._is_demo_mode():
+            return self._moodle_site is not None
         return bool(
             (
                 settings.MOODLE_WS_TOKEN
@@ -525,6 +641,8 @@ class MoodleClient:
         self._last_call_time = time.monotonic()
 
     def _ensure_html_opener(self):
+        if self._is_demo_mode():
+            return _DemoHtmlOpener(self.moodle_site_origin)
         if self._html_opener is None:
             self._html_opener = urllib.request.build_opener(
                 urllib.request.HTTPCookieProcessor(self._cookie_jar),
@@ -618,6 +736,8 @@ class MoodleClient:
     ) -> tuple[str, str, bool]:
         """Submit a same-origin Moodle web form over authenticated session with retry."""
         path = self._resolve_same_origin_path(url)
+        if self._is_demo_mode():
+            raise RuntimeError("Demo mode is read-only")
         with self._session_lock:
             self._reset_session_if_account_changed()
             if not self._sesskey and not self.login_session():
@@ -667,6 +787,31 @@ class MoodleClient:
         origin = self.moodle_site_origin
         req_method = (method or "GET").upper()
         target_url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+        if self._is_demo_mode():
+            meta = self._get_open_session_meta_local()
+            meta.has_set_cookie = False
+            if req_method not in {"GET", "HEAD"}:
+                return (
+                    403,
+                    target_url,
+                    "text/plain; charset=utf-8",
+                    b"Demo mode is read-only",
+                )
+            demo_bytes = get_demo_file_bytes(target_url)
+            if demo_bytes is not None:
+                ct = _demo_mime_for_path(urllib.parse.urlsplit(target_url).path)
+                payload = b"" if req_method == "HEAD" else demo_bytes[:max_bytes]
+                return 200, target_url, ct, payload
+            final_url, html_text, redirected = render_demo_session_html(target_url)
+            if redirected:
+                return 302, final_url, "text/plain", b""
+            ct = (
+                "text/calendar; charset=utf-8"
+                if urllib.parse.urlsplit(final_url).path == "/calendar/export.php"
+                else "text/html; charset=utf-8"
+            )
+            raw = html_text.encode("utf-8")[:max_bytes]
+            return 200, final_url, ct, (b"" if req_method == "HEAD" else raw)
         headers: dict[str, str] = {
             "User-Agent": _DEFAULT_UA,
             "Accept": accept,
@@ -792,6 +937,10 @@ class MoodleClient:
             rp = urllib.parse.urlsplit(resolved)
             path = f"{rp.path}?{rp.query}" if rp.query else (rp.path or "/")
 
+        if self._is_demo_mode():
+            resolved_url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+            return render_demo_session_html(resolved_url)
+
         with self._session_lock:
             self._reset_session_if_account_changed()
             if not self._sesskey and not self.login_session():
@@ -852,6 +1001,30 @@ class MoodleClient:
         require_sesskey: bool = True,
     ) -> bool:
         """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey."""
+        eff_user = settings.UTH_USERNAME if username is None else username
+        eff_pwd = settings.UTH_PASSWORD if password is None else password
+        if is_demo_account(eff_user):
+            with self._session_lock:
+                canonical = normalize_demo_username(eff_user)
+                self._reset_session_if_account_changed(canonical)
+                if not self.moodle_site_origin or not is_demo_credentials(
+                    eff_user, eff_pwd
+                ):
+                    self._cookie_jar.clear()
+                    self._sesskey = ""
+                    self._session_owner = ""
+                    self._session_generation += 1
+                    self._last_login_error = "invalid_credentials"
+                    return False
+                settings.MOODLE_WS_TOKEN = ""
+                settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                self._cookie_jar.clear()
+                self._sesskey = "demoSessKey2026"
+                self._session_owner = canonical
+                self._session_generation += 1
+                self._last_login_error = ""
+                return True
+
         if not username:
             username = settings.UTH_USERNAME
         if not password:
@@ -953,6 +1126,12 @@ class MoodleClient:
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
         """Gọi Moodle AJAX service. Trả về None nếu lỗi hoặc HTTP fail."""
+        if self._is_demo_mode():
+            if not self.moodle_site_origin:
+                return None
+            return handle_demo_ajax_call(
+                function, params, site_origin=self.moodle_site_origin
+            )
         with self._session_lock:
             self._reset_session_if_account_changed()
             if not self._sesskey:
@@ -1011,6 +1190,14 @@ class MoodleClient:
 
         Trả None nếu lỗi; lý do nằm ở ``last_grade_report_error``.
         """
+        if self._is_demo_mode():
+            self.last_grade_report_error = ""
+            if not self.moodle_site_origin:
+                self.last_grade_report_error = "untrusted_site"
+                return None
+            return render_demo_grade_report_html(
+                int(course_id), site_origin=self.moodle_site_origin
+            )
         path = f"/grade/report/user/index.php?id={int(course_id)}"
         self.last_grade_report_error = ""
         for attempt in range(2):
@@ -1299,6 +1486,33 @@ class MoodleClient:
         Đây là phương thức login duy nhất. Sử dụng Moodle WS API,
         hoạt động trên mọi nền tảng (iOS, Android, Desktop).
         """
+        credentials_are_explicit = username is not None or password is not None
+        eff_user = (
+            username
+            if credentials_are_explicit
+            else getattr(settings, "UTH_USERNAME", "")
+        )
+        eff_pwd = (
+            password
+            if credentials_are_explicit
+            else getattr(settings, "UTH_PASSWORD", "")
+        )
+        if is_demo_account(eff_user):
+            if not self.moodle_site_origin:
+                self._last_login_error = "untrusted_site"
+                return False
+            if not is_demo_credentials(eff_user, eff_pwd):
+                self._last_login_error = "invalid_credentials"
+                return False
+            if credentials_are_explicit:
+                settings.UTH_USERNAME = normalize_demo_username(eff_user)
+                settings.UTH_PASSWORD = str(eff_pwd)
+                settings.UTH_CREDENTIALS_ORIGIN = self.moodle_site_origin
+            settings.MOODLE_WS_TOKEN = ""
+            settings.MOODLE_WS_TOKEN_ORIGIN = ""
+            self._last_login_error = ""
+            return True
+
         if force:
             settings.MOODLE_WS_TOKEN = ""
             settings.MOODLE_WS_TOKEN_ORIGIN = ""
@@ -1315,6 +1529,18 @@ class MoodleClient:
         Returns:
             JSON response dict, hoặc None nếu lỗi.
         """
+        if self._is_demo_mode():
+            if not self.moodle_site_origin:
+                return None
+            result = handle_demo_ws_call(
+                function,
+                params,
+                site_origin=self.moodle_site_origin,
+            )
+            if isinstance(result, dict) and "exception" in result:
+                return None
+            return result
+
         token = self._get_ws_token()
         if not token:
             return None
@@ -1392,6 +1618,8 @@ class MoodleClient:
         
         Cần cho core_files_upload (instanceid) và các API khác cần userid.
         """
+        if self._is_demo_mode():
+            return DEMO_USER_ID if self.moodle_site_origin else None
         if not refresh and hasattr(self, '_cached_user_id') and self._cached_user_id:
             return self._cached_user_id
         try:
@@ -1411,6 +1639,8 @@ class MoodleClient:
         filepath: str = "/",
     ) -> DraftUploadResult:
         """Upload a file and return its identity or a sanitized Moodle error code."""
+        if self._is_demo_mode():
+            return DraftUploadResult(error_code="demo_read_only")
         token = self._get_ws_token()
         if not token:
             logger.error("Không có WS token để upload file.")
@@ -1491,6 +1721,33 @@ class MoodleClient:
         record = self.upload_draft_file_record(filename, file_bytes, itemid, "/")
         return record.itemid if record else None
 
+    def _download_demo_stream(
+        self,
+        url: str,
+        write_fn: Callable[[bytes], Any],
+        *,
+        max_bytes: int = 100 * 1024 * 1024,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        origin = self.moodle_site_origin
+        if not _is_same_moodle_origin_url(url, origin):
+            logger.warning("Blocked off-origin or unsafe demo download URL")
+            return False
+        payload = get_demo_file_bytes(url.strip())
+        if payload is None:
+            return False
+        if max_bytes is not None and len(payload) > max_bytes:
+            logger.warning("Demo download exceeded max_bytes (%d)", max_bytes)
+            return False
+        if payload:
+            write_fn(payload)
+        if callable(progress_callback):
+            try:
+                progress_callback(len(payload), len(payload))
+            except Exception:
+                pass
+        return True
+
     def _download_ws_stream(
         self,
         url: str,
@@ -1499,6 +1756,13 @@ class MoodleClient:
         max_bytes: int = 100 * 1024 * 1024,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> bool:
+        if self._is_demo_mode():
+            return self._download_demo_stream(
+                url,
+                write_fn,
+                max_bytes=max_bytes,
+                progress_callback=progress_callback,
+            )
         origin = self.moodle_site_origin
         if not _is_same_moodle_origin_url(url, origin):
             logger.warning("Blocked off-origin or unsafe WS download URL")
@@ -1586,6 +1850,13 @@ class MoodleClient:
         max_bytes: int = 100 * 1024 * 1024,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> bool:
+        if self._is_demo_mode():
+            return self._download_demo_stream(
+                url,
+                write_fn,
+                max_bytes=max_bytes,
+                progress_callback=progress_callback,
+            )
         origin = self.moodle_site_origin
         if not _is_same_moodle_origin_url(url, origin):
             logger.warning("Blocked off-origin or unsafe session download URL")
@@ -1687,6 +1958,8 @@ class MoodleClient:
         before_commit: Callable[[], bool] | None = None,
     ) -> bool:
         """Remove all submission-plugin data through Moodle's confirmed web action."""
+        if self._is_demo_mode():
+            return False
         if (
             isinstance(cmid, bool)
             or not isinstance(cmid, int)
@@ -1776,6 +2049,8 @@ class MoodleClient:
 
     def delete_draft_file(self, draftitemid: int, filepath: str, filename: str) -> bool:
         """Xóa một file cụ thể từ draft area."""
+        if self._is_demo_mode():
+            return False
         try:
             result = self.call_ws_api(
                 'core_files_delete_draft_files',
@@ -1799,9 +2074,11 @@ class MoodleClient:
 
     def get_portal_token(self, username: str = None, password: str = None) -> str:
         """Lấy JWT token từ Portal UTH (dùng cho autologin deep-link)."""
+        user = username or settings.UTH_USERNAME
+        if is_demo_account(user):
+            return ""
         if self._portal_token:
             return self._portal_token
-        user = username or settings.UTH_USERNAME
         pwd  = password or settings.UTH_PASSWORD
         try:
             status, data = self._post_json(

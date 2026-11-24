@@ -11,6 +11,7 @@ from core.activity_status import (
     normalize_submission_status,
     prefer_known_submission_status,
 )
+from core.demo_sandbox import is_demo_account
 from core.grade_monitor import GradeMonitor
 from core.moodle_service import MoodleService
 from config import settings
@@ -1074,7 +1075,9 @@ class DataOrchestrator:
 
         try:
             # WS API (stateless, không kick browser)
-            if settings.MOODLE_WS_TOKEN:
+            if settings.MOODLE_WS_TOKEN or is_demo_account(
+                getattr(settings, "UTH_USERNAME", "")
+            ):
                 ws_result = self._fetch_detail_via_ws(activity_data)
                 if ws_result:
                     self._set_cached_detail(url, ws_result, cache_generation)

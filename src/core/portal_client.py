@@ -11,6 +11,15 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any
 
+from core.demo_sandbox import (
+    get_demo_credit_progress,
+    get_demo_current_semester_courses,
+    get_demo_day_schedule,
+    get_demo_full_transcript,
+    get_demo_week_schedule,
+    is_demo_account,
+    is_demo_credentials,
+)
 from core.today_schedule import (
     ClassSession,
     ScheduleAuthenticationError,
@@ -112,6 +121,22 @@ class PortalError(RuntimeError):
 class PortalAuthenticationError(PortalError, ScheduleAuthenticationError):
     """Portal rejected the supplied student identity or returned no token."""
 
+    def __init__(
+        self,
+        message: object = "Portal login was rejected",
+        *,
+        status: int | None = None,
+    ) -> None:
+        if isinstance(message, int) and status is None:
+            status = message
+            super().__init__(f"Portal HTTP {message}")
+        else:
+            super().__init__(message)
+        self.status = status
+
+
+PortalAuthError = PortalAuthenticationError
+
 
 class PortalProtocolError(PortalError):
     """Portal returned a response outside the verified JSON contract."""
@@ -154,13 +179,7 @@ class PortalClient:
         self._origin = f"https://{parsed.netloc.lower()}"
         self._base_url = raw_base.rstrip("/")
         self._timeout = max(1.0, float(timeout))
-        if opener is None:
-            default_opener = urllib.request.build_opener(
-                _SamePortalOriginRedirectHandler(self._origin)
-            )
-            self._opener = default_opener.open
-        else:
-            self._opener = opener
+        self._opener: Callable[..., Any] | None = opener
         self._token = ""
         # The cached token belongs to exactly one account: after an account
         # switch a stale token must never be replayed for the new username.
@@ -213,6 +232,19 @@ class PortalClient:
             self._token = token
             self._token_owner = username
 
+    def _ensure_opener(self) -> Callable[..., Any]:
+        if self._opener is None:
+            default_opener = urllib.request.build_opener(
+                _SamePortalOriginRedirectHandler(self._origin)
+            )
+            self._opener = default_opener.open
+        return self._opener
+
+    @staticmethod
+    def _verify_demo_credentials(username: str, password: str) -> None:
+        if not is_demo_credentials(username, password):
+            raise PortalAuthError(401)
+
     def _request_json(
         self,
         method: str,
@@ -241,8 +273,9 @@ class PortalClient:
             headers=headers,
             method=method,
         )
+        opener = self._ensure_opener()
         try:
-            with self._opener(request, timeout=self._timeout) as response:
+            with opener(request, timeout=self._timeout) as response:
                 geturl = getattr(response, "geturl", None)
                 if callable(geturl):
                     final_url = str(geturl() or "")
@@ -318,6 +351,9 @@ class PortalClient:
     def fetch_day(
         self, target_date: date, username: str, password: str
     ) -> tuple[ClassSession, ...]:
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return get_demo_day_schedule(target_date).sessions
         generation = self._current_generation()
         token = self._cached_token(username) or self._login(
             username, password, generation
@@ -352,6 +388,9 @@ class PortalClient:
     ) -> dict[date, tuple[ClassSession, ...]]:
         """Fetch the Monday-based week containing ``target_date`` in one call
         (``lichhoc/lichTuan``) and group the sessions by calendar date."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return dict(get_demo_week_schedule(target_date).days)
         generation = self._current_generation()
         token = self._cached_token(username) or self._login(
             username, password, generation
@@ -380,6 +419,9 @@ class PortalClient:
         self, username: str, password: str
     ) -> dict[str, Any] | None:
         """Fetches graduation credit progress (``canDat`` / ``hienTai``) from Portal."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return get_demo_credit_progress()
         generation = self._current_generation()
         token = self._cached_token(username) or self._login(
             username, password, generation
@@ -401,6 +443,9 @@ class PortalClient:
         self, username: str, password: str
     ) -> list[dict[str, Any]]:
         """Fetches full academic transcript containing all semester grades from Portal."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return get_demo_full_transcript()
         generation = self._current_generation()
         token = self._cached_token(username) or self._login(
             username, password, generation
@@ -472,6 +517,9 @@ class PortalClient:
         self, username: str, password: str
     ) -> tuple[str, list[dict[str, Any]]]:
         """Fetch registered courses for the student's active semester via `/hoctap/hocky` & `/hoctap/montheoky/{idDot}`."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return get_demo_current_semester_courses()
         generation = self._current_generation()
         token = self._cached_token(username) or self._login(
             username, password, generation

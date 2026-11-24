@@ -11,6 +11,7 @@ from core.academic_radar.calculator import calculate_radar_profile
 from core.academic_radar.gpa_planner import CreditProgress, parse_credit_progress
 from core.academic_radar.models import CourseGradeItem, RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.portal_client import PortalClient
 from core.safe_file_io import SafeFileIO
 
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def _namespace_digest(username: str) -> str:
     base = str(getattr(settings, "PORTAL_API_BASE", "") or "").strip()
-    owner = username.strip() or "anonymous"
+    owner = normalize_demo_username(username) or "anonymous"
     return hashlib.sha256(f"{base}|{owner}".casefold().encode("utf-8")).hexdigest()[:12]
 
 
@@ -71,16 +72,35 @@ class AcademicGradeService:
 
     def load_academic_data(
         self,
-        username: str = "",
-        password: str = "",
+        username: str | None = None,
+        password: str | None = None,
         force_refresh: bool = False,
     ) -> list[SemesterGradeData]:
         """Loads all semesters.
 
         Uses daily cache if available (fetched once per day) unless force_refresh is True.
         """
-        username = username or settings.UTH_USERNAME or settings.MOODLE_USERNAME
-        password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        if username is None and password is None:
+            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
+            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        else:
+            username = (
+                username
+                if username is not None
+                else (settings.UTH_USERNAME or settings.MOODLE_USERNAME)
+            )
+            if password is None:
+                password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+
+        if is_demo_account(username):
+            raw_transcript = self._portal_client.fetch_full_transcript(
+                username, password
+            )
+            return (
+                self._normalizer.normalize_transcript(raw_transcript)
+                if raw_transcript
+                else []
+            )
 
         today_str = date.today().isoformat()
         cache = self._read_cache(username)
@@ -112,13 +132,27 @@ class AcademicGradeService:
 
     def load_credit_progress(
         self,
-        username: str = "",
-        password: str = "",
+        username: str | None = None,
+        password: str | None = None,
         force_refresh: bool = False,
     ) -> CreditProgress | None:
         """Loads graduation credit progress (canDat/hienTai); daily cache, stale fallback."""
-        username = username or settings.UTH_USERNAME or settings.MOODLE_USERNAME
-        password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        if username is None and password is None:
+            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
+            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+        else:
+            username = (
+                username
+                if username is not None
+                else (settings.UTH_USERNAME or settings.MOODLE_USERNAME)
+            )
+            if password is None:
+                password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+
+        if is_demo_account(username):
+            body = self._portal_client.fetch_credit_progress(username, password)
+            return parse_credit_progress(body)
+
         _, progress_cache_file = self._cache_paths(username)
 
         cache: dict[str, Any] | None = None

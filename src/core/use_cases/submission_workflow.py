@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlsplit
 
+from config import settings
+from core.demo_sandbox import is_demo_account
 from core.moodle_service import MoodleService
 from core.moodle_sites import MoodleSite, moodle_site_from_origin, moodle_site_from_url
 from core.submission_models import (
@@ -100,6 +102,7 @@ class SubmissionErrorCode(str, Enum):
     FINALIZE_REJECTED = "finalize_rejected"
     STATEMENT_NOT_ACCEPTED = "statement_not_accepted"
     VERIFICATION_FAILED = "verification_failed"
+    DEMO_READ_ONLY = "demo_read_only"
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,7 @@ _ERROR_MESSAGES = {
     SubmissionErrorCode.FINALIZE_REJECTED: "The draft was saved, but Moodle did not finalize it.",
     SubmissionErrorCode.STATEMENT_NOT_ACCEPTED: "The submission statement must be accepted explicitly.",
     SubmissionErrorCode.VERIFICATION_FAILED: "Moodle's refreshed submission does not match the requested files.",
+    SubmissionErrorCode.DEMO_READ_ONLY: "Demo mode is read-only and does not submit changes to UTH servers.",
 }
 
 
@@ -279,6 +283,10 @@ class SubmissionWorkflow:
         if isinstance(loaded, SubmissionError):
             return SubmissionMutationResult.failure(loaded, None)
         snapshot = loaded.snapshot
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.DEMO_READ_ONLY), snapshot
+            )
 
         issue = self._finalize_issue(snapshot, intent)
         if issue is not None:
@@ -351,6 +359,10 @@ class SubmissionWorkflow:
         if isinstance(loaded, SubmissionError):
             return SubmissionMutationResult.failure(loaded, None)
         snapshot = loaded.snapshot
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return SubmissionMutationResult.failure(
+                _error(SubmissionErrorCode.DEMO_READ_ONLY), snapshot
+            )
 
         issue = self._permission_issue(snapshot)
         if issue is not None:
