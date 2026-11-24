@@ -680,13 +680,11 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         }
         guard let data = item as? Data,
               let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return .failure(
-                NSError(
-                    domain: "com.uthelper.keychain",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Keychain secret payload is unreadable"]
-                )
-            )
+            // Item exists and Keychain unlocked (errSecSuccess), but payload is corrupt/unreadable.
+            // Self-heal by deleting the corrupt entry directly while holding keychainLock so the
+            // user is never permanently locked out across app reinstalls.
+            SecItemDelete(baseKeychainQuery() as CFDictionary)
+            return .success([:])
         }
         var secrets: [String: String] = [:]
         for (key, value) in decoded {

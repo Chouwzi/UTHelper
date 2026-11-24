@@ -228,14 +228,13 @@ def _seal_handoff_readonly_dacl(handoff_dir: Path, files: tuple[Path, ...]) -> N
         inherit_flags = (
             win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE
         )
-        # Allow Medium-IL user_sid read/execute + cleanup unlink only; forbid
-        # GENERIC_ALL, FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_ADD_FILE, and
-        # FILE_ADD_SUBDIRECTORY so scripts/config cannot be modified or recreated.
+        # Allow Medium-IL user_sid read/execute ONLY; forbid GENERIC_ALL,
+        # write/create, and DELETE/FILE_DELETE_CHILD so scripts/config/handoff_dir
+        # cannot be modified or rename-swapped without WRITE_DAC (and the elevated
+        # inline bootstrapper pins install_helper.ps1 + config.json by SHA-256).
         user_readonly_mask = (
             ntsecuritycon.FILE_GENERIC_READ
             | ntsecuritycon.FILE_GENERIC_EXECUTE
-            | ntsecuritycon.DELETE
-            | ntsecuritycon.FILE_DELETE_CHILD
         )
         sealed_dacl = win32security.ACL()
         seen_sids: set[str] = set()
@@ -275,7 +274,52 @@ def _seal_handoff_readonly_dacl(handoff_dir: Path, files: tuple[Path, ...]) -> N
 
 
 def _unseal_and_remove_handoff_dir(handoff_dir: Path) -> None:
-    if os.name != "nt":
+    if os.name == "nt":
+        try:
+            import win32api
+            import win32con
+            import win32security
+
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+            )
+            try:
+                user_sid = win32security.GetTokenInformation(
+                    token, win32security.TokenUser
+                )[0]
+            finally:
+                win32api.CloseHandle(token)
+
+            cleanup_dacl = win32security.ACL()
+            cleanup_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE,
+                win32con.GENERIC_ALL,
+                user_sid,
+            )
+            targets: list[Path] = [handoff_dir]
+            try:
+                targets.extend(handoff_dir.iterdir())
+            except OSError:
+                pass
+            for target in targets:
+                if _is_reparse_or_symlink(target):
+                    continue
+                try:
+                    win32security.SetNamedSecurityInfo(
+                        str(target),
+                        win32security.SE_FILE_OBJECT,
+                        win32security.DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        cleanup_dacl,
+                        None,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    else:
         try:
             os.chmod(handoff_dir, 0o700)
             for child in handoff_dir.iterdir():
@@ -832,15 +876,63 @@ param(
   [string]$ExpectedConfigSha256 = ''
 )
 $ErrorActionPreference = 'Stop'
+foreach ($cfgCandidate in @($ConfigPath, (Split-Path -Parent $ConfigPath))) {
+  if ((Get-Item -LiteralPath $cfgCandidate -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point in handoff config path'
+  }
+}
+$cfgStream = [System.IO.File]::Open(
+  $ConfigPath,
+  [System.IO.FileMode]::Open,
+  [System.IO.FileAccess]::Read,
+  [System.IO.FileShare]::Read
+)
+try {
+  $cfgMem = New-Object System.IO.MemoryStream
+  try {
+    $cfgStream.CopyTo($cfgMem)
+    $cfgBytes = $cfgMem.ToArray()
+  } finally {
+    $cfgMem.Dispose()
+  }
+} finally {
+  $cfgStream.Dispose()
+}
 if ($ExpectedConfigSha256) {
-  $cfgHash = (Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $cfgShaAlg = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $cfgHash = ([System.BitConverter]::ToString($cfgShaAlg.ComputeHash($cfgBytes))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $cfgShaAlg.Dispose()
+  }
   if ($cfgHash -ne $ExpectedConfigSha256.ToLowerInvariant()) {
     throw 'Handoff config SHA-256 verification failed'
   }
 }
-$config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$config = [System.Text.Encoding]::UTF8.GetString($cfgBytes) | ConvertFrom-Json
 $exitCode = 1
 $stageDir = $null
+$statusParent = $null
+$trustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18')
+function Assert-TrustedAdminDir([string]$Path, [System.Security.AccessControl.DirectorySecurity]$Acl) {
+  if (Test-Path -LiteralPath $Path) {
+    $existing = Get-Item -LiteralPath $Path -Force
+    if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+      throw ('Refusing reparse point in ' + $Path)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $Acl
+  } else {
+    [void][System.IO.Directory]::CreateDirectory($Path, $Acl)
+  }
+  $verifiedItem = Get-Item -LiteralPath $Path -Force
+  if ($verifiedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw ('Refusing reparse point after lock in ' + $Path)
+  }
+  $verifiedOwner = (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+  if ($trustedOwnerSids -notcontains $verifiedOwner) {
+    throw ('Untrusted directory owner in ' + $Path)
+  }
+}
 try {
   $pinnedSha256 = ([string]$config.expected_sha256).ToLowerInvariant()
   if ($ExpectedSha256 -and ($pinnedSha256 -ne $ExpectedSha256.ToLowerInvariant())) {
@@ -862,23 +954,23 @@ try {
   Start-Sleep -Milliseconds 300
 
   $packagePath = [string]$config.package_path
+  if ((Get-Item -LiteralPath $packagePath -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point installer package'
+  }
   $programDataBase = [Environment]::GetFolderPath('CommonApplicationData')
   if (-not $programDataBase) { $programDataBase = $env:ProgramData }
   if (-not $programDataBase) { throw 'ProgramData directory unavailable' }
   $uthelperProgramData = Join-Path $programDataBase 'UTHelper'
   $stageParent = Join-Path $uthelperProgramData 'update_stage'
-  foreach ($candidateDir in @($uthelperProgramData, $stageParent)) {
-    if (Test-Path -LiteralPath $candidateDir) {
-      $item = Get-Item -LiteralPath $candidateDir -Force
-      if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-        throw 'Refusing reparse point in ProgramData update_stage'
-      }
-    }
-  }
-  $adminAcl = New-Object System.Security.AccessControl.DirectorySecurity
-  $adminAcl.SetAccessRuleProtection($true, $false)
+  $statusParent = Join-Path $uthelperProgramData 'update_status'
+
+  $adminOwnerSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
   $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
   $prop = [System.Security.AccessControl.PropagationFlags]::None
+
+  $adminAcl = New-Object System.Security.AccessControl.DirectorySecurity
+  $adminAcl.SetOwner($adminOwnerSid)
+  $adminAcl.SetAccessRuleProtection($true, $false)
   foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
     $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -890,25 +982,45 @@ try {
     )
     $adminAcl.AddAccessRule($rule)
   }
-  if (-not (Test-Path -LiteralPath $uthelperProgramData)) {
-    [void][System.IO.Directory]::CreateDirectory($uthelperProgramData)
+
+  $readOnlyStatusAcl = New-Object System.Security.AccessControl.DirectorySecurity
+  $readOnlyStatusAcl.SetOwner($adminOwnerSid)
+  $readOnlyStatusAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+    $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,
+      $inherit,
+      $prop,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $readOnlyStatusAcl.AddAccessRule($rule)
   }
-  if (-not (Test-Path -LiteralPath $stageParent)) {
-    [void][System.IO.Directory]::CreateDirectory($stageParent, $adminAcl)
-  } else {
-    Set-Acl -LiteralPath $stageParent -AclObject $adminAcl
-  }
+  $usersSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')
+  $usersReadRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $usersSid,
+    [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+    $inherit,
+    $prop,
+    [System.Security.AccessControl.AccessControlType]::Allow
+  )
+  $readOnlyStatusAcl.AddAccessRule($usersReadRule)
+
+  Assert-TrustedAdminDir $uthelperProgramData $readOnlyStatusAcl
+  Assert-TrustedAdminDir $stageParent $adminAcl
+  Assert-TrustedAdminDir $statusParent $readOnlyStatusAcl
+
   $stageDir = Join-Path $stageParent ('stage-' + [guid]::NewGuid().ToString('N'))
-  [void][System.IO.Directory]::CreateDirectory($stageDir, $adminAcl)
-  $stageItem = Get-Item -LiteralPath $stageDir -Force
-  if ($stageItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-    throw 'Refusing reparse point in stage directory'
-  }
+  Assert-TrustedAdminDir $stageDir $adminAcl
 
   $fileName = [System.IO.Path]::GetFileName($packagePath)
   if (-not $fileName) { throw 'Invalid installer filename' }
   $stagedPackage = Join-Path $stageDir $fileName
   Copy-Item -LiteralPath $packagePath -Destination $stagedPackage -Force
+  if ((Get-Item -LiteralPath $stagedPackage -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point in staged installer'
+  }
 
   $lockStream = [System.IO.File]::Open(
     $stagedPackage,
@@ -953,12 +1065,21 @@ try {
     Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   }
   $statusPath = [string]$config.status_path
-  if ($statusPath) {
-    $statusTmp = $statusPath + '.tmp'
-    $statusJson = @{ exit_code = $exitCode } | ConvertTo-Json -Compress
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($statusTmp, $statusJson, $utf8NoBom)
-    Move-Item -LiteralPath $statusTmp -Destination $statusPath -Force
+  if ($statusPath -and $statusParent -and (Test-Path -LiteralPath $statusParent)) {
+    $resolvedStatusDir = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($statusPath))
+    $resolvedStatusParent = [System.IO.Path]::GetFullPath($statusParent)
+    $statusFileName = [System.IO.Path]::GetFileName($statusPath)
+    if (
+      ($resolvedStatusDir.Equals($resolvedStatusParent, [System.StringComparison]::OrdinalIgnoreCase)) -and
+      ($statusFileName -match '^handoff-[0-9a-f]+\.status\.json$')
+    ) {
+      $safeStatusPath = Join-Path $resolvedStatusParent $statusFileName
+      $statusTmp = Join-Path $resolvedStatusParent ($statusFileName + '.tmp')
+      $statusJson = @{ exit_code = $exitCode } | ConvertTo-Json -Compress
+      $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+      [System.IO.File]::WriteAllText($statusTmp, $statusJson, $utf8NoBom)
+      Move-Item -LiteralPath $statusTmp -Destination $safeStatusPath -Force
+    }
   }
 }
 """
@@ -1324,7 +1445,13 @@ class WindowsPackageLauncher:
             )
 
         config_path = handoff_dir / "config.json"
-        status_path = handoff_dir / "status.json"
+        program_data_raw = os.environ.get("ProgramData", "").strip() or r"C:\ProgramData"
+        status_path = (
+            Path(program_data_raw)
+            / "UTHelper"
+            / "update_status"
+            / f"{handoff_dir.name}.status.json"
+        )
         install_ps1 = handoff_dir / "install_helper.ps1"
         relaunch_ps1 = handoff_dir / "relaunch_helper.ps1"
         config_data = {
@@ -1348,11 +1475,55 @@ class WindowsPackageLauncher:
             _write_exclusive_utf8(config_path, config_json)
             _write_exclusive_utf8(install_ps1, _INSTALL_HELPER_SCRIPT)
             _write_exclusive_utf8(relaunch_ps1, _RELAUNCH_HELPER_SCRIPT)
+            script_sha256 = hashlib.sha256(install_ps1.read_bytes()).hexdigest().lower()
             _seal_handoff_readonly_dacl(
                 handoff_dir,
                 (config_path, install_ps1, relaunch_ps1),
             )
         except OSError:
+            _unseal_and_remove_handoff_dir(handoff_dir)
+            return LaunchResult(
+                False,
+                "installer launch failed",
+                status="launch_failed",
+            )
+
+        def _ps_single_quote(value: str) -> str:
+            if any(ch in value for ch in ("\x00", "\r", "\n")):
+                raise ValueError("Invalid control character in PowerShell argument")
+            return "'" + value.replace("'", "''") + "'"
+
+        try:
+            bootstrap_command = (
+                "& { param([string]$ScriptPath,[string]$ExpectedScriptSha256,"
+                "[string]$ConfigPath,[string]$ExpectedSha256,[string]$ExpectedKind,"
+                "[string]$ExpectedConfigSha256) $ErrorActionPreference='Stop'; "
+                "foreach ($p in @($ScriptPath,(Split-Path -Parent $ScriptPath))) { "
+                "if ((Get-Item -LiteralPath $p -Force).Attributes -band "
+                "[System.IO.FileAttributes]::ReparsePoint) { "
+                "throw 'Refusing reparse point in install script path' } }; "
+                "$fs=[System.IO.File]::Open($ScriptPath,[System.IO.FileMode]::Open,"
+                "[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read); "
+                "try { $ms=New-Object System.IO.MemoryStream; try { "
+                "$fs.CopyTo($ms); $bytes=$ms.ToArray() } finally { $ms.Dispose() } } "
+                "finally { $fs.Dispose() }; "
+                "$sha=[System.Security.Cryptography.SHA256]::Create(); "
+                "try { $actual=([System.BitConverter]::ToString("
+                "$sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } "
+                "finally { $sha.Dispose() }; "
+                "if ($actual -ne $ExpectedScriptSha256.ToLowerInvariant()) { "
+                "throw 'Install helper script SHA-256 verification failed' }; "
+                "$sb=[scriptblock]::Create([System.Text.Encoding]::UTF8.GetString($bytes)); "
+                "& $sb -ConfigPath $ConfigPath -ExpectedSha256 $ExpectedSha256 "
+                "-ExpectedKind $ExpectedKind -ExpectedConfigSha256 $ExpectedConfigSha256 } "
+                f"-ScriptPath {_ps_single_quote(str(install_ps1))} "
+                f"-ExpectedScriptSha256 {_ps_single_quote(script_sha256)} "
+                f"-ConfigPath {_ps_single_quote(str(config_path))} "
+                f"-ExpectedSha256 {_ps_single_quote(package.sha256.lower())} "
+                f"-ExpectedKind {_ps_single_quote(kind)} "
+                f"-ExpectedConfigSha256 {_ps_single_quote(config_sha256)}"
+            )
+        except ValueError:
             _unseal_and_remove_handoff_dir(handoff_dir)
             return LaunchResult(
                 False,
@@ -1391,16 +1562,8 @@ class WindowsPackageLauncher:
             "Hidden",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            str(install_ps1),
-            "-ConfigPath",
-            str(config_path),
-            "-ExpectedSha256",
-            package.sha256.lower(),
-            "-ExpectedKind",
-            kind,
-            "-ExpectedConfigSha256",
-            config_sha256,
+            "-Command",
+            bootstrap_command,
         ]
         if _is_user_admin():
             try:

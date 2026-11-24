@@ -54,28 +54,32 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "configure" -> execute(result) {
-                val raw = call.argument<Map<*, *>>("settings") ?: emptyMap<Any, Any>()
-                SettingsStore(context).update(raw)
-                val settings = SettingsStore(context).read()
-                if (settings.enabled) {
-                    BackgroundSyncScheduler(context).schedulePeriodic(settings.intervalMinutes)
-                } else {
-                    BackgroundSyncScheduler(context).cancelPeriodic()
+                MoodleSyncWorker.syncMutex.withLock {
+                    val raw = call.argument<Map<*, *>>("settings") ?: emptyMap<Any, Any>()
+                    SettingsStore(context).update(raw)
+                    val settings = SettingsStore(context).read()
+                    if (settings.enabled) {
+                        BackgroundSyncScheduler(context).schedulePeriodic(settings.intervalMinutes)
+                    } else {
+                        BackgroundSyncScheduler(context).cancelPeriodic()
+                    }
+                    val reconciled = NotificationReconciler(context).reconcile(allowImmediate = false)
+                    mapOf(
+                        "interval_minutes" to settings.intervalMinutes,
+                        "enabled" to settings.enabled,
+                        "scheduled" to reconciled.scheduled,
+                        "cancelled" to reconciled.cancelled,
+                    )
                 }
-                val reconciled = NotificationReconciler(context).reconcile(allowImmediate = false)
-                mapOf(
-                    "interval_minutes" to settings.intervalMinutes,
-                    "enabled" to settings.enabled,
-                    "scheduled" to reconciled.scheduled,
-                    "cancelled" to reconciled.cancelled,
-                )
             }
             "set_credentials" -> execute(result) {
-                CredentialVault(context).write(
-                    call.argument<String>("base_url").orEmpty(),
-                    call.argument<String>("token").orEmpty(),
-                )
-                null
+                MoodleSyncWorker.syncMutex.withLock {
+                    CredentialVault(context).write(
+                        call.argument<String>("base_url").orEmpty(),
+                        call.argument<String>("token").orEmpty(),
+                    )
+                    null
+                }
             }
             "read_app_secrets" -> execute(result) {
                 AppSecretVault(context).readAll()
@@ -180,13 +184,15 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
             "reconcile_cached" -> execute(result) {
-                val reconciled = NotificationReconciler(context).reconcile(allowImmediate = false)
-                mapOf(
-                    "desired" to reconciled.desired,
-                    "scheduled" to reconciled.scheduled,
-                    "cancelled" to reconciled.cancelled,
-                    "delivered" to reconciled.delivered,
-                )
+                MoodleSyncWorker.syncMutex.withLock {
+                    val reconciled = NotificationReconciler(context).reconcile(allowImmediate = false)
+                    mapOf(
+                        "desired" to reconciled.desired,
+                        "scheduled" to reconciled.scheduled,
+                        "cancelled" to reconciled.cancelled,
+                        "delivered" to reconciled.delivered,
+                    )
+                }
             }
             "request_exact_alarm_access" -> execute(result) {
                 val scheduler = AlarmScheduler(context)

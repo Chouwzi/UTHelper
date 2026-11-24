@@ -475,7 +475,7 @@ class MoodleClient:
         self._portal_token: str = ""   # JWT lấy từ portal API - thời hạn khoảng 30 ngày
         self._portal_token_username: str = ""
         self._cached_user_id: Optional[int] = None
-        self._cached_user_id_username: str = ""
+        self._cached_user_id_username: Optional[str] = None
         self._last_call_time: float = 0.0  # Nhãn thời gian đơn điệu (monotonic)
         self._cookie_jar = CookieJar()
         self._sesskey = ""
@@ -525,7 +525,7 @@ class MoodleClient:
             self._portal_token = ""
             self._portal_token_username = ""
             self._cached_user_id = None
-            self._cached_user_id_username = ""
+            self._cached_user_id_username = None
 
     def _reset_session_if_account_changed(self, username: str | None = None) -> None:
         """Drop stale HTML session cookies/sesskey/identity when the active account changes."""
@@ -536,7 +536,7 @@ class MoodleClient:
         with self._get_lock("_session_lock", reentrant=True):
             owner_changed = bool(self._session_owner and active_user != self._session_owner)
             portal_owner = getattr(self, "_portal_token_username", "")
-            uid_owner = getattr(self, "_cached_user_id_username", "")
+            uid_owner = getattr(self, "_cached_user_id_username", None)
             if owner_changed:
                 self._cookie_jar = CookieJar()
                 self._html_opener = None
@@ -546,9 +546,9 @@ class MoodleClient:
             if portal_owner and portal_owner != active_norm:
                 self._portal_token = ""
                 self._portal_token_username = ""
-            if uid_owner and uid_owner != active_norm:
+            if uid_owner is not None and uid_owner != active_norm:
                 self._cached_user_id = None
-                self._cached_user_id_username = ""
+                self._cached_user_id_username = None
 
     @property
     def moodle_site_origin(self) -> str:
@@ -615,7 +615,8 @@ class MoodleClient:
         data: dict[str, str] | None = None,
         timeout: int = 20,
     ) -> tuple[str, str]:
-        opener = self._ensure_html_opener()
+        tls_opener = getattr(self._get_open_session_meta_local(), "html_opener", None)
+        opener = tls_opener if tls_opener is not None else self._ensure_html_opener()
         origin = self.moodle_site_origin
         url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
         encoded = urllib.parse.urlencode(data).encode() if data is not None else None
@@ -991,6 +992,14 @@ class MoodleClient:
                 self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
                 start_gen = self._session_generation
 
+            login_jar = CookieJar()
+            login_opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(login_jar),
+                _SameMoodleOriginRedirectHandler(self.moodle_site_origin),
+            )
+            meta = self._get_open_session_meta_local()
+            prev_tls_opener = getattr(meta, "html_opener", None)
+            meta.html_opener = login_opener
             try:
                 _, login_page = self._open_html("/login/index.php")
                 parsed_login = _MoodleHtmlFormParser()
@@ -1023,8 +1032,16 @@ class MoodleClient:
 
                 with self._get_lock("_session_lock", reentrant=True):
                     if int(getattr(self, "_session_generation", 0)) != start_gen:
+                        self._cookie_jar = CookieJar()
+                        self._html_opener = None
+                        self._sesskey = ""
+                        self._session_owner = ""
                         self._last_login_error = "session_invalidated"
                         return False
+
+                    if len(login_jar) > 0:
+                        self._cookie_jar = login_jar
+                        self._html_opener = login_opener
 
                     if sesskey:
                         self._sesskey = sesskey
@@ -1038,6 +1055,8 @@ class MoodleClient:
                         self._session_generation += 1
                         return True
 
+                    self._cookie_jar = CookieJar()
+                    self._html_opener = None
                     if not require_sesskey:
                         self._last_login_error = "session_cookie_missing"
                         return False
@@ -1056,6 +1075,7 @@ class MoodleClient:
                 self._last_login_error = "network_error"
                 return False
             finally:
+                meta.html_opener = prev_tls_opener
                 _end_quiz_session_login(session_key)
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
@@ -1568,9 +1588,9 @@ class MoodleClient:
         active_user = str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
         with self._get_lock("_session_lock", reentrant=True):
             cached_id = getattr(self, "_cached_user_id", None)
-            cached_owner = getattr(self, "_cached_user_id_username", "")
+            cached_owner = getattr(self, "_cached_user_id_username", None)
             gen = int(getattr(self, "_session_generation", 0))
-            if not refresh and cached_id and (not cached_owner or cached_owner == active_user):
+            if not refresh and cached_id and (cached_owner is None or cached_owner == active_user):
                 return cached_id
         try:
             result = self.call_ws_api('core_webservice_get_site_info')
@@ -1779,9 +1799,14 @@ class MoodleClient:
 
         target_url = url.strip()
         try:
-            with self._session_lock:
+            with self._get_lock("_session_lock", reentrant=True):
                 self._reset_session_if_account_changed()
-                if not self._sesskey and not self.login_session():
+                needs_login = not self._sesskey
+            if needs_login and not self.login_session():
+                return False
+            with self._get_lock("_session_lock", reentrant=True):
+                self._reset_session_if_account_changed()
+                if not self._sesskey:
                     return False
                 opener = self._ensure_html_opener()
                 gen = int(getattr(self, "_session_generation", 0))
@@ -1798,10 +1823,14 @@ class MoodleClient:
                         return False
                     if urllib.parse.urlsplit(final_url).path == "/login/index.php":
                         if attempt == 0:
-                            with self._session_lock:
+                            with self._get_lock("_session_lock", reentrant=True):
                                 if int(getattr(self, "_session_generation", 0)) != gen:
                                     return False
-                                if not self.login_session(force=True):
+                            if not self.login_session(force=True):
+                                return False
+                            with self._get_lock("_session_lock", reentrant=True):
+                                self._reset_session_if_account_changed()
+                                if not self._sesskey:
                                     return False
                                 opener = self._ensure_html_opener()
                                 gen = int(getattr(self, "_session_generation", 0))
@@ -1819,7 +1848,7 @@ class MoodleClient:
                     )
                     if not ok:
                         return False
-                    with self._session_lock:
+                    with self._get_lock("_session_lock", reentrant=True):
                         if int(getattr(self, "_session_generation", 0)) != gen:
                             return False
                     return True
@@ -1891,6 +1920,26 @@ class MoodleClient:
             return False
 
         try:
+            session_key = quiz_session_key(self._moodle_site, username)
+        except ValueError:
+            return False
+
+        with self._get_lock("_session_lock", reentrant=True):
+            self._reset_session_if_account_changed(username)
+            start_gen = int(getattr(self, "_session_generation", 0))
+
+        if not _begin_quiz_session_login(session_key):
+            return False
+
+        isolated_jar = CookieJar()
+        isolated_opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(isolated_jar),
+            _SameMoodleOriginRedirectHandler(origin),
+        )
+        meta = self._get_open_session_meta_local()
+        prev_tls_opener = getattr(meta, "html_opener", None)
+        meta.html_opener = isolated_opener
+        try:
             _, login_page = self._open_html("/login/index.php")
             parsed_login = _MoodleHtmlFormParser()
             parsed_login.feed(login_page)
@@ -1950,6 +1999,12 @@ class MoodleClient:
                 or parsed_action.fragment
             ):
                 return False
+            with self._get_lock("_session_lock", reentrant=True):
+                if (
+                    int(getattr(self, "_session_generation", 0)) != start_gen
+                    or settings.UTH_USERNAME != username
+                ):
+                    return False
             if before_commit is not None and not before_commit():
                 return False
             self._open_html(action_url, data=remove_fields)
@@ -1959,6 +2014,9 @@ class MoodleClient:
                 "Moodle web submission removal failed (%s)", type(exc).__name__
             )
             return False
+        finally:
+            meta.html_opener = prev_tls_opener
+            _end_quiz_session_login(session_key)
 
     def delete_draft_file(self, draftitemid: int, filepath: str, filename: str) -> bool:
         """Xóa một file cụ thể từ draft area."""

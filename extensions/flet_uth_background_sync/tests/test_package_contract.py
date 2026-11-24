@@ -409,3 +409,37 @@ def test_android_receivers_alarms_and_worker_handle_security_exceptions_and_logo
     import_block = plugin.split('"import_activities" ->', 1)[1].split('"get_diagnostics" ->', 1)[0]
     assert "MoodleSyncWorker.syncMutex.withLock" in logout_block
     assert "MoodleSyncWorker.syncMutex.withLock" in import_block
+
+
+def test_sec06_ios_keychain_self_heals_corrupt_payload_without_wiping_os_errors():
+    swift = (IOS / "Classes/UthBackgroundSyncPlugin.swift").read_text(encoding="utf-8")
+    read_block = swift.split("private func readKeychainSecrets()", 1)[1].split(
+        "private func writeKeychainSecrets(", 1
+    )[0]
+    # Genuine Keychain OS errors (e.g. errSecInteractionNotAllowed when locked) must still fail closed.
+    os_error_branch = read_block.split("guard status == errSecSuccess else {", 1)[1].split(
+        "guard let data = item as? Data", 1
+    )[0]
+    assert "return .failure(" in os_error_branch
+    assert "SecItemDelete" not in os_error_branch
+
+    # Corrupt/unreadable payload after errSecSuccess must self-heal via SecItemDelete + empty success
+    # (and must NOT call clearKeychainSecrets() which would re-enter non-reentrant NSLock).
+    decode_branch = read_block.split("guard let data = item as? Data", 1)[1].split(
+        "var secrets: [String: String] = [:]", 1
+    )[0]
+    assert "SecItemDelete(baseKeychainQuery() as CFDictionary)" in decode_branch
+    assert "clearKeychainSecrets()" not in decode_branch
+    assert "return .success([:])" in decode_branch
+
+
+def test_sec09_android_plugin_serializes_lifecycle_mutators_under_sync_mutex():
+    plugin = next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(encoding="utf-8")
+    configure_block = plugin.split('"configure" ->', 1)[1].split('"set_credentials" ->', 1)[0]
+    set_creds_block = plugin.split('"set_credentials" ->', 1)[1].split('"read_app_secrets" ->', 1)[0]
+    reconcile_block = plugin.split('"reconcile_cached" ->', 1)[1].split(
+        '"request_exact_alarm_access" ->', 1
+    )[0]
+    assert "MoodleSyncWorker.syncMutex.withLock" in configure_block
+    assert "MoodleSyncWorker.syncMutex.withLock" in set_creds_block
+    assert "MoodleSyncWorker.syncMutex.withLock" in reconcile_block

@@ -211,6 +211,9 @@ class AndroidBackgroundBridge:
                     )
                     if not backend.ensure_hydrated():
                         return None
+                    snap = backend.snapshot_secrets(config._SECRET_FIELDS.values())
+                    if snap:
+                        config.hydrate_secrets(snap, overwrite_non_empty=False)
                     return backend
 
                 config.register_secret_backend_factory(_lazy_factory)

@@ -22,7 +22,7 @@ dependencies = [
     "pypdf>=7.1.1",
     "pillow>=13.0.0",
     "xlrd>=2.0.2",
-    "filelock>=3.13.1",
+    "filelock>=3.25.0",
 ]
 
 [project.optional-dependencies]
@@ -86,7 +86,7 @@ dependencies = [
     "keyring>=25.0.0",
     "lxml>=6.1.0",
     "pypdfium2>=5.9.0",
-    "filelock>=3.13.1",
+    "filelock>=3.25.0",
     "flet-uth-quiz==0.1.0",
 ]
 
@@ -108,7 +108,7 @@ dependencies = [
     "flet-uth-background-sync==0.1.0",
     "flet-uth-quiz==0.1.0",
     "flet-webview==0.86.5",
-    "filelock>=3.13.1",
+    "filelock>=3.25.0",
 ]
 
 [tool.flet.android.dev_packages]
@@ -141,7 +141,7 @@ dependencies = [
     "flet-uth-background-sync==0.1.0",
     "flet-uth-quiz==0.1.0",
     "flet-webview==0.86.5",
-    "filelock>=3.13.1",
+    "filelock>=3.25.0",
 ]
 
 [tool.flet.ios.dev_packages]
@@ -157,7 +157,7 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 [dependency-groups]
 dev = [
     "flet-webview==0.86.5",
-    "filelock>=3.13.1",
+    "filelock>=3.25.0",
     "pytest>=9.0.3",
     "pytest-timeout>=2.3,<3",
     "ruff>=0.9.0",

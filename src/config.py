@@ -179,7 +179,11 @@ def _resolve_secret_backend() -> SecretStoreBackend | None:
         return _secret_backend
 
 
-def hydrate_secrets(values: Mapping[str, str]) -> None:
+def hydrate_secrets(
+    values: Mapping[str, str],
+    *,
+    overwrite_non_empty: bool = True,
+) -> None:
     """Populate in-memory settings secret attributes from a secure-store mapping."""
     with _settings_save_lock:
         for attr, key_suffix in _SECRET_FIELDS.items():
@@ -189,7 +193,10 @@ def hydrate_secrets(values: Mapping[str, str]) -> None:
                 raw = values[attr]
             else:
                 continue
-            setattr(settings, attr, str(raw) if raw else "")
+            new_val = str(raw) if raw else ""
+            if not overwrite_non_empty and (getattr(settings, attr, "") or not new_val):
+                continue
+            setattr(settings, attr, new_val)
 
 
 def pop_pending_plaintext_migration() -> dict[str, str]:

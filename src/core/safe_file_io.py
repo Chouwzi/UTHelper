@@ -1,4 +1,5 @@
 import os
+import stat
 import sys
 import time
 import json
@@ -8,6 +9,10 @@ from pathlib import Path
 from typing import Callable, Any, Dict
 
 logger = logging.getLogger(__name__)
+
+# Threshold (seconds) after which an orphaned mobile SoftFileLock file may be
+# broken even if POSIX PID reuse causes filelock to see EPERM / "alive" PID.
+_MOBILE_SOFT_LOCK_STALE_SECONDS = 60.0
 
 # Quản lý locks trong bộ nhớ theo từng tệp (Intra-process)
 _file_locks: Dict[Path, threading.RLock] = {}
@@ -72,6 +77,50 @@ class SafeFileIO:
             return SoftFileLock(lock_path)
 
     @staticmethod
+    def _maybe_break_stale_soft_lock(
+        file_lock: Any,
+        *,
+        stale_after_seconds: float = _MOBILE_SOFT_LOCK_STALE_SECONDS,
+    ) -> bool:
+        """Break an orphaned mobile ``SoftFileLock`` whose age exceeds ``stale_after_seconds``.
+
+        Never unlinks OS-level desktop ``FileLock`` files (``flock`` / ``LockFileEx``),
+        symlinks, or fresh lock files that may belong to an active writer.
+        """
+        try:
+            from filelock import SoftFileLock
+        except ImportError:
+            return False
+        if not isinstance(file_lock, SoftFileLock):
+            return False
+        lock_file = getattr(file_lock, "lock_file", None)
+        if not lock_file:
+            return False
+        lock_path = Path(lock_file)
+        try:
+            st = os.lstat(lock_path)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return False
+        if (time.time() - st.st_mtime) < stale_after_seconds:
+            return False
+        try:
+            # Re-verify identity right before unlink to avoid clobbering a freshly created lock.
+            st_check = os.lstat(lock_path)
+            if st_check.st_ino != st.st_ino or st_check.st_mtime_ns != st.st_mtime_ns:
+                return False
+            lock_path.unlink(missing_ok=True)
+            logger.warning(
+                "Broke stale mobile SoftFileLock %s (age=%.1fs)",
+                lock_path.name,
+                time.time() - st.st_mtime,
+            )
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
     def _write_unlocked_impl(filepath: Path, data: Any) -> bool:
         """Ghi tệp tạm thời và đổi tên nguyên tử (không có lock, chỉ dùng nội bộ)."""
         payload = data() if callable(data) else data
@@ -129,7 +178,13 @@ class SafeFileIO:
         for attempt in range(max_retries):
             try:
                 with mem_lock:
-                    with file_lock.acquire(timeout=acquire_timeout):
+                    try:
+                        acquired = file_lock.acquire(timeout=acquire_timeout)
+                    except Exception:
+                        if not SafeFileIO._maybe_break_stale_soft_lock(file_lock):
+                            raise
+                        acquired = file_lock.acquire(timeout=acquire_timeout)
+                    with acquired:
                         return SafeFileIO._write_unlocked_impl(filepath, data)
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -176,7 +231,13 @@ class SafeFileIO:
             mem_lock = get_memory_lock(canonical)
             with mem_lock:
                 file_lock = SafeFileIO.get_file_lock(filepath)
-                with file_lock.acquire(timeout=timeout):
+                try:
+                    acquired = file_lock.acquire(timeout=timeout)
+                except Exception:
+                    if not SafeFileIO._maybe_break_stale_soft_lock(file_lock):
+                        raise
+                    acquired = file_lock.acquire(timeout=timeout)
+                with acquired:
                     if not hasattr(_thread_local, "_safe_io_transactions"):
                         _thread_local._safe_io_transactions = set()
                     _thread_local._safe_io_transactions.add(canonical)
