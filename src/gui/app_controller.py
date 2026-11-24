@@ -49,6 +49,7 @@ from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_t
 from core.update_checker import GitHubReleaseClient, VerifiedDownloader
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
+from core.webview_auth import UthWebViewAuthService
 from platform_utils.android_updates import (
     AndroidPackageDownloader,
     AndroidPackageLauncher,
@@ -248,6 +249,15 @@ class AppController:
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
         self._portal_client = PortalClient(settings.PORTAL_API_BASE)
+        self._webview_auth_service = UthWebViewAuthService(
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+            portal_client=self._portal_client,
+            credentials_provider=lambda: (
+                settings.UTH_USERNAME,
+                settings.UTH_PASSWORD,
+            ),
+        )
         # The Portal web app (lichTuan) is served from its own host.
         self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
         self._portal_week_lock = threading.Lock()
@@ -1722,6 +1732,7 @@ class AppController:
             all_assignments_provider=self._snapshot_all_data,
             on_start_quiz=self._start_course_quiz,
             account_namespace=courses_namespace,
+            webview_auth_service=self._webview_auth_service,
         )
         if sys.platform == "win32" and not bool(getattr(self.page, "web", False)):
             from gui.components.courses.embedded_webview_host import (
@@ -2286,9 +2297,40 @@ class AppController:
                 pass
         return was_visible or pane is not None
 
+    def _get_webview_auth_service(self) -> UthWebViewAuthService:
+        svc = getattr(self, "_webview_auth_service", None)
+        if svc is not None:
+            return svc
+        coord = getattr(self, "_courses_coordinator", None)
+        orch = getattr(self, "orchestrator", None)
+        courses_client = getattr(orch, "client", None)
+        thnn_client = getattr(orch, "thnn_client", None)
+        if coord is not None:
+            client_for = getattr(coord, "_client_for", None)
+            if callable(client_for):
+                if courses_client is None:
+                    courses_client = client_for("courses")
+                if thnn_client is None:
+                    thnn_client = client_for("thnn")
+        portal_client = getattr(self, "_portal_client", None)
+        svc = UthWebViewAuthService(
+            courses_client=courses_client,
+            thnn_client=thnn_client,
+            portal_client=portal_client,
+            credentials_provider=lambda: (
+                settings.UTH_USERNAME,
+                settings.UTH_PASSWORD,
+            ),
+        )
+        self._webview_auth_service = svc
+        return svc
+
     def _open_url_in_app(self, url: str, title: str = "") -> None:
-        from core.moodle_sites import moodle_site_from_url
         from core.url_validation import validate_public_https_url
+        from core.webview_auth import (
+            classify_uth_webview_url,
+            normalize_uth_webview_target_url,
+        )
         from gui.components.courses.embedded_webview_host import (
             _is_flet_webview_platform,
             _is_windows_webview2_platform,
@@ -2301,6 +2343,16 @@ class AppController:
         if validated is None:
             logger.warning("Blocked invalid or non-HTTPS URL")
             return
+
+        site_kind = classify_uth_webview_url(validated)
+        has_creds = bool(
+            str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+            and str(getattr(settings, "UTH_PASSWORD", "") or "").strip()
+        )
+        if site_kind in {"courses", "thnn", "portal"}:
+            validated = normalize_uth_webview_target_url(
+                validated, has_credentials=has_creds
+            )
 
         host = getattr(self, "_app_webview_host", None)
         supports_embedded = host is not None and (
@@ -2319,23 +2371,24 @@ class AppController:
                 except Exception:
                     pass
 
-            moodle_site = moodle_site_from_url(validated)
-            moodle_site_id = moodle_site.identity if moodle_site is not None else None
-            source = "thnn" if moodle_site_id == "thnn" else "courses"
+            source = "thnn" if site_kind == "thnn" else "courses"
             preview_server = None
             session_client = None
-            if moodle_site_id in {"courses", "thnn"}:
+            if site_kind in {"courses", "thnn"}:
                 coord = getattr(self, "_courses_coordinator", None)
                 if coord is not None:
                     preview_server = getattr(coord, "preview_server", None)
                     client_for = getattr(coord, "_client_for", None)
                     if callable(client_for):
                         session_client = client_for(source)
-                if session_client is None and moodle_site_id == "courses":
-                    session_client = getattr(
-                        getattr(self, "orchestrator", None), "client", None
-                    )
+                if session_client is None:
+                    orch = getattr(self, "orchestrator", None)
+                    if site_kind == "thnn":
+                        session_client = getattr(orch, "thnn_client", None)
+                    else:
+                        session_client = getattr(orch, "client", None)
 
+            webview_auth_service = self._get_webview_auth_service()
             left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds()
             account_ns = (
                 f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
@@ -2347,6 +2400,7 @@ class AppController:
                 url=validated,
                 preview_server=preview_server,
                 session_client=session_client,
+                webview_auth_service=webview_auth_service,
                 on_back=self._close_app_webview,
                 on_open_external=self._open_url_external,
                 show_expand_toggle=False,

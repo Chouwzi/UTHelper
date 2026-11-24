@@ -37,6 +37,10 @@ from core.courses.office_viewer_service import (
 )
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.windows_office_bridge import render_office_pdf
+from core.webview_auth import (
+    classify_uth_webview_url,
+    normalize_uth_webview_target_url,
+)
 from gui.components.courses._shared import (
     PaneErrorOverlay,
     PaneLoadingOverlay,
@@ -179,10 +183,12 @@ class CoursesCoordinator:
         all_assignments_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_start_quiz: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         account_namespace: Optional[str] = None,
+        webview_auth_service: Any = None,
     ) -> None:
         self._page = page
         self._on_start_quiz = on_start_quiz
         self._account_namespace = account_namespace
+        self._webview_auth_service = webview_auth_service
         self.catalog_service = catalog_service
         self.preview_cache = preview_cache
         self.archive_service = archive_service
@@ -417,6 +423,25 @@ class CoursesCoordinator:
             on_history_changed=on_history_changed,
         )
 
+    def _has_webview_credentials(self, site_kind: str) -> bool:
+        svc = self._webview_auth_service
+        if svc is not None:
+            client_for_site = getattr(svc, "client_for_site", None)
+            if callable(client_for_site) and client_for_site(site_kind) is None:
+                return False
+            has_fn = getattr(svc, "_has_credentials", None)
+            if callable(has_fn):
+                try:
+                    return bool(has_fn(site_kind))
+                except TypeError:
+                    return bool(has_fn())
+            return True
+        if site_kind == "thnn":
+            return self._thnn_client is not None
+        if site_kind == "courses":
+            return self._courses_client is not None
+        return False
+
     def open_in_app_webview(
         self,
         source: CourseSource,
@@ -429,6 +454,17 @@ class CoursesCoordinator:
         safe_url = safe_http_url(url)
         if not safe_url:
             return
+        site_kind = classify_uth_webview_url(safe_url)
+        resolved_source: CourseSource = (
+            "thnn"
+            if site_kind == "thnn"
+            else ("courses" if site_kind == "courses" else source)
+        )
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         initial_pane_w: Optional[float] = None
         bounds_fn = getattr(self.courses_view, "_compute_pane3_bounds", None)
         if callable(bounds_fn):
@@ -438,11 +474,12 @@ class CoursesCoordinator:
                 initial_pane_w = None
         pane = CoursesWebViewPane(
             page=self._page,
-            source=source,
+            source=resolved_source,
             title=title or "Trình duyệt trong ứng dụng",
             url=safe_url,
             preview_server=self.preview_server,
-            session_client=self._client_for(source),
+            session_client=self._client_for(resolved_source),
+            webview_auth_service=self._webview_auth_service,
             on_back=self.courses_view.pop_overlay,
             on_open_external=self._launch_url_safe,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
@@ -458,11 +495,18 @@ class CoursesCoordinator:
         selected = None
         if hasattr(self.courses_view, "_state"):
             selected = self.courses_view._state.selected_course()
-        source: CourseSource = (
-            "thnn"
-            if "thnn.ut.edu.vn" in safe_url.lower()
-            else (selected.source if selected is not None else "courses")
-        )
+        site_kind = classify_uth_webview_url(safe_url)
+        if site_kind == "thnn":
+            source: CourseSource = "thnn"
+        elif site_kind == "courses":
+            source = "courses"
+        else:
+            source = selected.source if selected is not None else "courses"
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         pane_title = str(title or "").strip() or (
             (selected.display_name or selected.fullname) if selected is not None else "Moodle Web"
         )
