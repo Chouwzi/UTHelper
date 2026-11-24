@@ -29,6 +29,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import flet as ft
+import platform_utils
 from core.student_profile import (
     OtherFeeRow,
     ProfileSnapshot,
@@ -221,6 +222,10 @@ class ProfileView(ft.Container):
         # Populated by _render_data(); kept as fields for tests/theme refresh.
         self._avatar: ft.Container | None = None
         self._avatar_text: ft.Text | None = None
+        # Portal photo control is built once and reused: re-sending the ~200 KB
+        # base64 payload on every pill/tab re-render would lag the screen.
+        self._avatar_image: ft.Image | None = None
+        self._avatar_src: str = ""
         self._name_text: ft.Text | None = None
         self._sid_text: ft.Text | None = None
         self._info_column: ft.Column | None = None
@@ -234,6 +239,8 @@ class ProfileView(ft.Container):
         self._tab_other: ft.Container | None = None
         self._table: ft.DataTable | None = None
         self._table_host: ft.Container | None = None
+        # Opened fee-detail bottom sheet (mobile); None when closed.
+        self._detail_sheet: ft.BottomSheet | None = None
         self._updated_text: ft.Text | None = None
 
         self.content = ft.Column(
@@ -400,14 +407,32 @@ class ProfileView(ft.Container):
 
     def _build_student_card(self, snapshot: ProfileSnapshot) -> ft.Container:
         profile = snapshot.profile
-        self._avatar_text = ft.Text(
-            initials_of(profile.full_name, profile.student_id),
-            size=20,
-            weight=ft.FontWeight.W_700,
-            color=C.ON_ACCENT,
-        )
+        avatar_src = (snapshot.avatar or "").strip()
+        if avatar_src.startswith(("data:image/", "http://", "https://")):
+            if self._avatar_image is None or self._avatar_src != avatar_src:
+                self._avatar_image = ft.Image(
+                    src=avatar_src,
+                    width=56,
+                    height=56,
+                    fit=ft.BoxFit.COVER,
+                    border_radius=28,
+                    anti_alias=True,
+                )
+                self._avatar_src = avatar_src
+            avatar_content: ft.Control = self._avatar_image
+            self._avatar_text = None
+        else:
+            self._avatar_image = None
+            self._avatar_src = ""
+            self._avatar_text = ft.Text(
+                initials_of(profile.full_name, profile.student_id),
+                size=20,
+                weight=ft.FontWeight.W_700,
+                color=C.ON_ACCENT,
+            )
+            avatar_content = self._avatar_text
         self._avatar = ft.Container(
-            content=self._avatar_text,
+            content=avatar_content,
             width=56,
             height=56,
             border_radius=28,
@@ -670,7 +695,11 @@ class ProfileView(ft.Container):
             on_click=lambda _e, tab_key=key: self.select_tab(tab_key),
         )
 
-    def _build_table(self) -> ft.Container:
+    def _build_table(self) -> ft.Control:
+        if platform_utils.UI_IS_MOBILE:
+            # Phone: a vertical tappable list — one tap opens the fee detail
+            # sheet instead of swiping a wide table sideways like the Portal.
+            return self._build_mobile_list()
         if self._active_tab == TAB_OTHER:
             table = self._build_other_fee_table()
         else:
@@ -681,6 +710,9 @@ class ProfileView(ft.Container):
                 controls=[table],
                 scroll=ft.ScrollMode.AUTO,
                 tight=True,
+                # Center the table when it is narrower than the pane so the
+                # right side is not left with a big empty gap.
+                alignment=ft.MainAxisAlignment.CENTER,
             ),
             border_radius=12,
             border=ft.Border.all(1, C.BORDER),
@@ -688,6 +720,236 @@ class ProfileView(ft.Container):
             padding=8,
         )
         return self._table_host
+
+    # ------------------------------------------------------------------ #
+    # Mobile fee list + detail bottom sheet
+    # ------------------------------------------------------------------ #
+    def _build_mobile_list(self) -> ft.Container:
+        """Stacked fee cards for phones; no horizontal scrolling anywhere."""
+        rows: list = list(self._filtered_rows())
+        if self._active_tab == TAB_OTHER:
+            empty_label = "Không có khoản thu khác."
+        else:
+            empty_label = "Không có học phí trong lựa chọn này."
+
+        cards: list[ft.Control] = [self._mobile_fee_card(row) for row in rows]
+        if not cards:
+            cards = [
+                ft.Container(
+                    content=ft.Text(
+                        empty_label, size=12, color=C.TEXT_SECONDARY
+                    ),
+                    alignment=ft.Alignment(0, 0),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=14),
+                )
+            ]
+        # Desktop-only DataTable stays None on phones; the summary card above
+        # already shows the totals, so no extra totals row is needed here.
+        self._table = None
+        self._table_host = ft.Container(
+            content=ft.Column(controls=cards, spacing=8, tight=True),
+            border_radius=12,
+            border=ft.Border.all(1, C.BORDER),
+            bgcolor=C.SURFACE,
+            padding=8,
+        )
+        return self._table_host
+
+    def _mobile_fee_card(self, row: TuitionRow | OtherFeeRow) -> ft.Container:
+        """One fee as a tappable card: title + code on the left, money on the right."""
+        if isinstance(row, TuitionRow):
+            title = row.subject or "—"
+            subtitle = " · ".join(
+                part
+                for part in (
+                    row.course_code or "",
+                    f"{row.credits} TC" if row.credits else "",
+                )
+                if part
+            )
+            amount = row.tuition
+        else:
+            title = row.name or row.code or "—"
+            subtitle = row.year or ""
+            amount = row.amount
+        amount_text = ft.Text(
+            format_vnd(amount),
+            size=13,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            text_align=ft.TextAlign.RIGHT,
+        )
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Column(
+                        controls=[
+                            ft.Text(
+                                title,
+                                size=13.5,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_PRIMARY,
+                                max_lines=2,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            ft.Text(
+                                subtitle or " ",
+                                size=11.5,
+                                color=C.TEXT_SECONDARY,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                        ],
+                        spacing=2,
+                        tight=True,
+                        expand=True,
+                    ),
+                    ft.Column(
+                        controls=[amount_text, self._status_chip(row.status)],
+                        spacing=4,
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.END,
+                    ),
+                ],
+                spacing=10,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            border_radius=10,
+            border=ft.Border.all(1, C.BORDER),
+            bgcolor=C.SURFACE_ELEVATED,
+            ink=True,
+            on_click=lambda _event, fee=row: self._open_fee_detail(fee),
+        )
+
+    def _open_fee_detail(self, row: TuitionRow | OtherFeeRow) -> None:
+        """One-tap detail sheet: Số tiền · Đã nộp · Còn nợ · Trạng thái."""
+        page = self._page_ref
+        if page is None or not callable(getattr(page, "show_dialog", None)):
+            return
+        if self._detail_sheet is not None:
+            try:
+                page.pop_dialog()
+            except Exception:  # noqa: BLE001 - already dismissed by the user
+                logger.debug("Previous fee detail sheet was already closed")
+            self._detail_sheet = None
+        if isinstance(row, TuitionRow):
+            title = row.subject or "—"
+        else:
+            title = row.name or row.code or "—"
+        sheet = self._build_fee_detail_sheet(title, row)
+        self._detail_sheet = sheet
+        try:
+            page.show_dialog(sheet)
+        except Exception as exc:  # noqa: BLE001 - never break the tap
+            logger.warning("Cannot open fee detail sheet: %s", exc)
+            self._detail_sheet = None
+
+    def _build_fee_detail_sheet(
+        self, title: str, row: TuitionRow | OtherFeeRow
+    ) -> ft.BottomSheet:
+        pairs: list[tuple[str, str, str | None]] = []
+        if isinstance(row, TuitionRow):
+            pairs.extend(
+                [
+                    ("Mã LHP", row.course_code or "—", None),
+                    ("Số tín chỉ", str(row.credits), None),
+                    ("Học kỳ", short_semester(row.semester), None),
+                    ("Số tiền", format_vnd(row.tuition), None),
+                    ("Đã nộp", format_vnd(row.paid_amount), C.SAFE),
+                    (
+                        "Còn nợ",
+                        format_vnd(row.debt),
+                        C.CRITICAL if row.debt > 0 else C.TEXT_SECONDARY,
+                    ),
+                ]
+            )
+        else:
+            pairs.extend(
+                [
+                    ("Năm học", row.year or "—", None),
+                    ("Số tiền", format_vnd(row.amount), None),
+                    ("Đã nộp", format_vnd(row.paid_amount), C.SAFE),
+                    (
+                        "Còn nợ",
+                        format_vnd(row.debt),
+                        C.CRITICAL if row.debt > 0 else C.TEXT_SECONDARY,
+                    ),
+                ]
+            )
+        controls: list[ft.Control] = [
+            ft.Row(
+                controls=[
+                    ft.Text(
+                        title,
+                        size=16,
+                        weight=ft.FontWeight.W_700,
+                        color=C.TEXT_PRIMARY,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        expand=True,
+                    ),
+                    self._status_chip(row.status),
+                ],
+                spacing=10,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        ]
+        controls.extend(
+            ft.Row(
+                controls=[
+                    ft.Text(
+                        label,
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        width=110,
+                    ),
+                    ft.Text(
+                        value,
+                        size=13.5,
+                        weight=ft.FontWeight.W_700,
+                        color=color or C.TEXT_PRIMARY,
+                        expand=True,
+                        text_align=ft.TextAlign.RIGHT,
+                    ),
+                ],
+                spacing=8,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            for label, value, color in pairs
+        )
+        return ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column(
+                    controls=controls,
+                    spacing=10,
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                bgcolor=C.BG,
+                padding=ft.Padding.only(left=16, right=16, top=8, bottom=20),
+            ),
+            bgcolor=C.BG,
+            dismissible=True,
+            draggable=True,
+            show_drag_handle=True,
+            use_safe_area=True,
+            scrollable=True,
+            maintain_bottom_view_insets_padding=True,
+            elevation=12,
+            barrier_color=C.SCRIM,
+            shape=ft.RoundedRectangleBorder(radius=18),
+            animation_style=ft.AnimationStyle(
+                duration=220,
+                reverse_duration=180,
+                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+                reverse_curve=ft.AnimationCurve.EASE_IN_CUBIC,
+            ),
+            on_dismiss=lambda _event: setattr(self, "_detail_sheet", None),
+        )
 
     @staticmethod
     def _header_cell(label: str, numeric: bool = False) -> ft.DataColumn:
@@ -712,6 +974,27 @@ class ProfileView(ft.Container):
                 weight=ft.FontWeight.W_700 if bold else ft.FontWeight.W_400,
                 selectable=True,
             )
+        )
+
+    @staticmethod
+    def _status_chip(status: str) -> ft.Container:
+        """Pill showing the fee status (shared by mobile cards and the sheet)."""
+        color = {
+            "paid": C.SAFE,
+            "debt": C.CRITICAL,
+            "unpaid": C.TEXT_SECONDARY,
+        }.get(status, C.TEXT_SECONDARY)
+        return ft.Container(
+            content=ft.Text(
+                _STATUS_LABELS.get(status, status),
+                size=11,
+                weight=ft.FontWeight.W_700,
+                color=color,
+            ),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+            border_radius=999,
+            border=ft.Border.all(1, color),
+            bgcolor=ft.Colors.with_opacity(0.10, color),
         )
 
     @staticmethod

@@ -320,6 +320,102 @@ def test_profile_view_theme_refresh_does_not_crash():
 
 
 # ---------------------------------------------------------------------------
+# 3b. Portal avatar + mobile card list / detail sheet
+# ---------------------------------------------------------------------------
+
+
+def test_profile_view_uses_portal_avatar_and_falls_back_to_initials():
+    view = _make_view()
+    snapshot = _make_snapshot()
+    view.update_snapshot(ProfileSnapshot(**{**snapshot.__dict__, "avatar": ""}))
+    # No photo -> initials letter inside the accent circle.
+    assert view._avatar_image is None
+    assert view._avatar_text is not None
+    assert view._avatar_text.value == "NA"
+
+    view.update_snapshot(
+        ProfileSnapshot(**{**snapshot.__dict__, "avatar": "data:image/png;base64,QUJD"})
+    )
+    # Photo replaces the letter, and re-rendering reuses the same control so
+    # the ~200 KB base64 payload is not re-sent to the client.
+    assert view._avatar_image is not None
+    assert view._avatar_image.src == "data:image/png;base64,QUJD"
+    first = view._avatar_image
+    view.update_snapshot(
+        ProfileSnapshot(**{**snapshot.__dict__, "avatar": "data:image/png;base64,QUJD"})
+    )
+    assert view._avatar_image is first
+
+
+def test_profile_view_mobile_renders_tappable_cards_instead_of_table(
+    monkeypatch,
+):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+
+    # No DataTable / no horizontal scroll on phones: one card per fee.
+    assert view._table is None
+    cards = view._table_host.content.controls
+    assert len(cards) == 1  # newest semester has a single tuition row
+    assert cards[0].on_click is not None
+
+    view.select_tab(TAB_OTHER)
+    other_cards = view._table_host.content.controls
+    assert len(other_cards) == 1
+    assert other_cards[0].on_click is not None
+
+
+def test_profile_view_mobile_detail_sheet_shows_money_and_status(monkeypatch):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    shown: list = []
+    page = SimpleNamespace(
+        show_dialog=lambda sheet: shown.append(sheet),
+        pop_dialog=lambda: None,
+    )
+    view = _make_view(page=page)
+    view.update_snapshot(_make_snapshot())
+
+    debt_row = next(
+        row
+        for row in view._snapshot.tuition_rows
+        if row.semester == SEMESTER_2
+    )
+    view._open_fee_detail(debt_row)
+
+    assert len(shown) == 1
+    sheet = shown[0]
+    assert view._detail_sheet is sheet
+    labels = [
+        control.controls[0].value
+        for control in sheet.content.content.controls[1:]
+    ]
+    assert "Số tiền" in labels
+    assert "Còn nợ" in labels
+    values = {
+        control.controls[0].value: control.controls[1].value
+        for control in sheet.content.content.controls[1:]
+    }
+    assert values["Còn nợ"] == format_vnd(3000000)
+    assert values["Số tiền"] == format_vnd(4500000)
+
+
+def test_profile_view_mobile_detail_sheet_is_skipped_without_a_page(monkeypatch):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    view = _make_view()  # no page wired
+    view.update_snapshot(_make_snapshot())
+
+    view._open_fee_detail(view._snapshot.tuition_rows[0])
+    assert view._detail_sheet is None
+
+
+# ---------------------------------------------------------------------------
 # 4. ViewManager wiring
 # ---------------------------------------------------------------------------
 
