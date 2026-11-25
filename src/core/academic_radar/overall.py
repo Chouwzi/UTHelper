@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
+from core.academic_radar.gpa_planner import course_point4
 from core.academic_radar.models import CourseGradeItem, SemesterGradeData
 
 
@@ -18,8 +20,10 @@ class OverallGpa:
 
 def _eligible(course: CourseGradeItem) -> bool:
     return (
-        course.credits > 0
+        math.isfinite(course.credits)
+        and course.credits > 0
         and course.final_grade is not None
+        and math.isfinite(course.final_grade)
         and not course.is_transferred
         and course.eligibility.status in ("academic", "unknown")
     )
@@ -57,7 +61,7 @@ def calculate_overall_gpa(semesters: list[SemesterGradeData]) -> OverallGpa:
     courses = _dedupe_best(courses)
 
     pairs_10 = [(c.final_grade, c.credits) for c in courses if c.final_grade is not None]
-    pairs_4 = [(c.credit_grade, c.credits) for c in courses if c.credit_grade is not None]
+    pairs_4 = [(pt4, c.credits) for c in courses if (pt4 := course_point4(c)) is not None]
 
     return OverallGpa(
         gpa_10=_weighted(pairs_10),

@@ -67,3 +67,28 @@ def test_privacy_controls_preserve_not_asked_consent_option(monkeypatch):
         "enabled",
         "disabled",
     ]
+
+
+def test_terms_dialog_clamps_dimensions_on_420x560_desktop_and_360x800_mobile():
+    from types import SimpleNamespace
+
+    desktop_min_page = SimpleNamespace(
+        width=420,
+        height=560,
+        platform=ft.PagePlatform.WINDOWS,
+        pop_dialog=Mock(),
+    )
+    dlg_desktop = build_terms_dialog(desktop_min_page)
+    assert dlg_desktop.content.width <= 340
+    assert dlg_desktop.content.height <= 370
+
+    mobile_page = SimpleNamespace(
+        width=360,
+        height=800,
+        platform=ft.PagePlatform.ANDROID,
+        pop_dialog=Mock(),
+    )
+    dlg_mobile = build_terms_dialog(mobile_page)
+    assert dlg_mobile.content.width is None
+    assert dlg_mobile.content.height <= 590
+

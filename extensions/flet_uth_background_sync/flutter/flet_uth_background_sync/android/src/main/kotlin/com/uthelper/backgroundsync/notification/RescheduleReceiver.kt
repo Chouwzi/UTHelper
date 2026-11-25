@@ -3,6 +3,8 @@ package com.uthelper.backgroundsync.notification
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -14,10 +16,17 @@ class RescheduleReceiver : BroadcastReceiver() {
         // an arbitrary broadcast must not touch persisted alarms.
         if (intent.action !in ALLOWED_ACTIONS) return
         val pending = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            Log.e(TAG, "Unhandled reschedule error: ${throwable.javaClass.simpleName}")
+        }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler).launch {
             try {
-                NotificationReconciler(context).reschedulePersisted()
-                ClassScheduleAlarmScheduler(context).reschedulePersisted()
+                runCatching { NotificationReconciler(context).reschedulePersisted() }
+                    .onFailure { Log.w(TAG, "Deadline reschedule failed: ${it.javaClass.simpleName}") }
+                runCatching { ClassScheduleAlarmScheduler(context).reschedulePersisted() }
+                    .onFailure { Log.w(TAG, "Class schedule reschedule failed: ${it.javaClass.simpleName}") }
+            } catch (throwable: Throwable) {
+                Log.w(TAG, "Reschedule receiver failed: ${throwable.javaClass.simpleName}")
             } finally {
                 pending.finish()
             }
@@ -25,6 +34,7 @@ class RescheduleReceiver : BroadcastReceiver() {
     }
 
     private companion object {
+        const val TAG = "RescheduleReceiver"
         val ALLOWED_ACTIONS = setOf(
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,

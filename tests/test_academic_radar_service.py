@@ -299,3 +299,59 @@ def test_normalizer_rejects_bool_nonfinite_supports_comma_and_guards_dash_credit
     assert course.exam_grade is None
     assert course.final_grade == pytest.approx(7.5)
     assert course.credit_grade is None
+
+
+def test_logged_out_load_does_not_raise_missing_moodle_username_and_clear_session_drops_token(
+    tmp_path, monkeypatch
+):
+    from config import settings
+    from core.portal_client import PortalClient
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "")
+
+    portal = PortalClient("https://portal.ut.edu.vn/api/v1")
+    portal._store_token("JWT_ACCOUNT_A", "studentA")
+    assert portal._cached_token("studentA") == "JWT_ACCOUNT_A"
+
+    service = AcademicGradeService(portal_client=portal, cache_dir=tmp_path)
+    assert service.load_academic_data() == []
+    assert service.load_credit_progress() is None
+
+    service.clear_session()
+    assert portal._cached_token("studentA") == ""
+
+
+def test_create_semester_from_moodle_grades_maps_schema_and_unknown_zero_credit_eligibility(tmp_path):
+    service = AcademicGradeService(portal_client=MagicMock(), cache_dir=tmp_path)
+    courses_grades = [
+        {"courseid": 101, "coursename": "Cấu trúc dữ liệu", "shortname": "CTDL01", "grade": "8,50"},
+        {"courseid": 202, "coursename": "Mạng máy tính", "grade": "-"},
+    ]
+    grade_items = {
+        "101": [
+            {"itemname": "Điểm quá trình", "gradeformatted": "8,00"},
+            {"itemname": "Thi cuối kỳ", "graderaw": 9.0},
+        ],
+        "202": [
+            {"itemname": "Chuyên cần", "gradeformatted": "9,5"},
+        ],
+    }
+
+    semesters = service.create_semester_from_moodle_grades(courses_grades, grade_items)
+    assert len(semesters) == 1
+    c1, c2 = semesters[0].courses
+
+    assert c1.course_id == "101"
+    assert c1.course_name == "Cấu trúc dữ liệu"
+    assert c1.course_code == "CTDL01"
+    assert c1.credits == 0.0
+    assert c1.eligibility.status == "unknown"
+    assert c1.process_grade == pytest.approx(8.0)
+    assert c1.exam_grade == pytest.approx(9.0)
+    assert c1.final_grade == pytest.approx(8.5)
+
+    assert c2.course_id == "202"
+    assert c2.course_name == "Mạng máy tính"
+    assert c2.process_grade == pytest.approx(9.5)
+    assert c2.final_grade is None

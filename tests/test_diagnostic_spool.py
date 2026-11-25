@@ -80,6 +80,7 @@ def _swap_root_for_junction_worker(
             text=True,
             timeout=5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         status = "swapped" if completed.returncode == 0 else "error"
         outcomes.put(("attacker", status, completed.returncode))
@@ -144,6 +145,7 @@ def _junction(source: Path, destination: Path) -> None:
         text=True,
         timeout=5,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     if completed.returncode != 0:
         pytest.skip(f"junction creation unavailable: {completed.stderr}")

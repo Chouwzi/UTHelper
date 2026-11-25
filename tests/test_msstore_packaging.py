@@ -154,6 +154,7 @@ def _run_ps_script(script_path: Path, args: list[str], *, timeout: int = 60) -> 
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -201,6 +202,7 @@ def test_generate_msix_assets_cli_runs_in_isolated_python_and_verifies(tmp_path:
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert gen_proc.returncode == 0, gen_proc.stderr
 
@@ -217,6 +219,7 @@ def test_generate_msix_assets_cli_runs_in_isolated_python_and_verifies(tmp_path:
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert verify_proc.returncode == 0, verify_proc.stderr
 
@@ -259,6 +262,7 @@ def test_msix_powershell_scripts_parse_cleanly_under_ps51() -> None:
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
 
@@ -314,6 +318,7 @@ def test_package_and_verify_msix_store_end_to_end_without_repo_mutation(tmp_path
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr
         root_xml = ET.fromstring((unpacked / "AppxManifest.xml").read_text(encoding="utf-8"))
@@ -580,6 +585,9 @@ def test_store_adrs_and_guides_document_all_channels_and_deferred_appstore() -> 
     assert "generate_msix_assets.py" in win_guide
 
     assert "Settings → Privacy" in privacy
+    assert "Settings → Account" in privacy and "Sign out" in privacy
+    assert "webview2_profile" in privacy and "quiz-webview" in privacy
+    assert "90 days" in privacy
     assert "FLET_APP_STORAGE_DATA" in privacy
     assert "Google Play" in privacy and "Data Safety" in privacy
     assert "Microsoft Store" in privacy

@@ -14,6 +14,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
@@ -114,5 +117,60 @@ class CredentialVaultTest {
         vault.clear()
         assertFalse(secretsFile.exists())
         assertEquals(emptyMap<String, String>(), vault.readAll())
+    }
+
+    @Test
+    fun appSecretVaultPreservesFileOnTransientIoException() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val keyProvider = InMemoryVaultKeyProvider()
+        val vault = AppSecretVault(context, keyProvider)
+        vault.clear()
+
+        val secretsFile = File(context.noBackupFilesDir, "uth_app_secrets.json")
+        // Replace target with a directory so readText() throws IOException without deleting it.
+        assertTrue(secretsFile.mkdirs())
+        try {
+            assertThrows(IOException::class.java) {
+                vault.readAll()
+            }
+            assertTrue(secretsFile.exists())
+        } finally {
+            secretsFile.delete()
+        }
+    }
+
+    @Test
+    fun multiInstanceVaultWritesAreSerializedProcessWideWithoutTempFileRaces() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val keyProvider = InMemoryVaultKeyProvider()
+        AppSecretVault(context, keyProvider).clear()
+        CredentialVault(context, keyProvider).clear()
+
+        val pool = Executors.newFixedThreadPool(6)
+        try {
+            val tasks = (1..24).map { idx ->
+                Callable {
+                    val secretVault = AppSecretVault(context, keyProvider)
+                    secretVault.writeAll(mapOf("UTH_PASSWORD" to "pw-$idx"))
+                    val readSecrets = secretVault.readAll()
+                    assertTrue(readSecrets["UTH_PASSWORD"]?.startsWith("pw-") == true)
+
+                    val credVault = CredentialVault(context, keyProvider)
+                    credVault.write("https://courses.ut.edu.vn", "tok-$idx")
+                    val readCred = credVault.read()
+                    assertNotNull(readCred)
+                    assertTrue(readCred!!.token.startsWith("tok-"))
+                }
+            }
+            pool.invokeAll(tasks).forEach { it.get() }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        val leftovers = context.noBackupFilesDir
+            .listFiles()
+            ?.filter { it.name.endsWith(".tmp") }
+            .orEmpty()
+        assertTrue(leftovers.isEmpty())
     }
 }

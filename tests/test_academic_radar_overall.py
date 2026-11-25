@@ -41,3 +41,18 @@ def test_required_average():
     assert required_average(3.0, 60, 3.2, 20) == pytest.approx(3.8)
     assert required_average(3.0, 60, 3.2, 0) is None
     assert required_average(3.5, 60, 2.5, 20) < 0
+
+
+def test_overall_gpa_derives_gpa4_via_course_point4_when_credit_grade_missing():
+    s1 = SemesterGradeData(
+        id=1,
+        name="HK1",
+        courses=[
+            CourseGradeItem("1", "C1", "Algo", 3.0, final_grade=8.5, credit_grade=None, letter_grade=""),
+            CourseGradeItem("2", "C2", "DB", 3.0, final_grade=7.2, credit_grade=None, letter_grade="B"),
+        ],
+    )
+    overall = calculate_overall_gpa([s1])
+    assert overall.gpa_10 == pytest.approx((8.5 * 3 + 7.2 * 3) / 6.0)
+    assert overall.gpa_4 == pytest.approx((4.0 * 3 + 3.0 * 3) / 6.0)
+    assert overall.total_credits == pytest.approx(6.0)

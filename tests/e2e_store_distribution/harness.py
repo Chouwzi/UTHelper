@@ -154,6 +154,7 @@ def run_isolated_python(
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
 
     if tmp_path is not None:
@@ -1418,6 +1419,7 @@ def _get_compiled_shim_exe() -> Path:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                stdin=subprocess.DEVNULL,
             )
             marker_path.write_text(src_hash, encoding="utf-8")
         _COMPILED_SHIM_DIR = cache_dir
@@ -1583,7 +1585,12 @@ class WindowsShimEnv:
         effective = list(argv)
         if effective and effective[0].lower() == "msiexec.exe":
             effective[0] = str(self.msiexec_exe)
-        proc = subprocess.Popen(effective)
+        proc = subprocess.Popen(
+            effective,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         self._spawned_processes.append(proc)
         return proc
 
