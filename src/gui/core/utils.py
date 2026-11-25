@@ -491,6 +491,58 @@ def cleanup_image_cache():
         logger.warning(f"Lỗi khi chạy dọn dẹp cache ảnh: {e}")
 
 
+def _clear_image_cache_directory(cache_dir: Path) -> int:
+    """Safely remove regular files directly inside ``cache_dir`` without following symlinks."""
+    removed = 0
+    try:
+        if cache_dir.is_symlink() or not cache_dir.exists() or not cache_dir.is_dir():
+            return 0
+        resolved_root = cache_dir.resolve()
+        entries = list(cache_dir.iterdir())
+    except OSError as exc:
+        logger.debug("Skipping description image cache clear for %s: %s", cache_dir, exc)
+        return 0
+
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                if entry.parent.resolve() == resolved_root:
+                    entry.unlink(missing_ok=True)
+                    removed += 1
+                continue
+            if not entry.is_file():
+                continue
+            if entry.resolve().parent != resolved_root:
+                continue
+            entry.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            logger.debug("Could not remove cached description image %s: %s", entry, exc)
+    return removed
+
+
+def clear_cached_description_images() -> int:
+    """Purge cached Moodle description images from user data and mirrored assets cache."""
+    from config import _USER_DATA_DIR
+
+    user_cache_dir = Path(_USER_DATA_DIR) / "cache" / "images"
+    removed = _clear_image_cache_directory(user_cache_dir)
+
+    try:
+        assets_cache_dir = get_active_assets_dir() / "cache" / "images"
+        if assets_cache_dir.exists() and not assets_cache_dir.is_symlink():
+            if (
+                user_cache_dir.is_symlink()
+                or not user_cache_dir.exists()
+                or assets_cache_dir.resolve() != user_cache_dir.resolve()
+            ):
+                removed += _clear_image_cache_directory(assets_cache_dir)
+    except OSError as exc:
+        logger.debug("Skipping mirrored assets image cache clear: %s", exc)
+
+    return removed
+
+
 _DEFAULT_URLLIB_URLOPEN = urllib.request.urlopen
 
 
@@ -545,11 +597,16 @@ def pre_cache_description_images(html_content: str) -> str:
     if not html_content:
         return html_content
 
+    from config import _USER_DATA_DIR, settings
+    from core.demo_sandbox import is_demo_account
+
+    if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+        return html_content
+
     img_tags = re.findall(r'<img[^>]+>', html_content)
     if not img_tags:
         return html_content
 
-    from config import _USER_DATA_DIR, settings
     from core.client import _SameMoodleOriginRedirectHandler, _is_same_moodle_origin_url
     from core.moodle_sites import moodle_site_from_origin
 
@@ -782,17 +839,45 @@ DEMO_LMS_WEBVIEW_GUARD_MESSAGE: str = (
 
 
 def is_uth_lms_url(url: object) -> bool:
-    """Return True when ``url`` targets a live UTH Moodle/Portal host (``*.ut.edu.vn``)."""
-    if not isinstance(url, str) or not url.strip():
+    """Return True when ``url`` is an HTTP(S) URL targeting a live UTH host (``*.ut.edu.vn``).
+
+    Used as a Demo Mode navigation guard (never as a credential/trust allowlist;
+    use ``core.url_validation.is_trusted_uth_lms_url`` for strict HTTPS trust).
+    """
+    if not isinstance(url, str):
         return False
+    candidate = url.strip()
+    if not candidate:
+        return False
+    if "\\" in candidate or any(
+        ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in candidate
+    ):
+        return False
+    try:
+        parsed = _urlparse.urlsplit(candidate)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+    if (
+        not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return False
+    if port is not None and not (1 <= port <= 65535):
+        return False
+    raw_host = (parsed.hostname or "").casefold()
+    host = raw_host[:-1] if raw_host.endswith(".") else raw_host
+    if not host:
+        return False
+    labels = host.split(".")
+    if any(not label for label in labels):
+        return False
+    if host == "ut.edu.vn" or host.endswith(".ut.edu.vn"):
+        return True
     from core.url_validation import is_trusted_uth_lms_url
 
-    candidate = url.strip()
-    if is_trusted_uth_lms_url(candidate):
-        return True
-    try:
-        host = (_urlparse.urlsplit(candidate).hostname or "").rstrip(".").casefold()
-    except ValueError:
-        return False
-    return host == "ut.edu.vn" or host.endswith(".ut.edu.vn")
+    return is_trusted_uth_lms_url(candidate)
 
